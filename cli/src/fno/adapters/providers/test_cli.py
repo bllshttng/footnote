@@ -1404,3 +1404,61 @@ def _pick_verdict(cwd: Path, exclude: tuple[str, ...] = ()):
     from fno.adapters.providers.cli import pick_account
 
     return pick_account(exclude=exclude)
+
+
+class TestPickOptInAndOverlay:
+    """The two halves a non-Python caller cannot get right on its own."""
+
+    def test_if_armed_declines_when_the_knob_is_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Without this the Rust loop would pick on a default-off install and
+        # change which account gets billed without being asked.
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": False}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick", "--if-armed"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 5, result.output
+        assert "not armed" in result.output
+
+    def test_if_armed_picks_normally_once_the_knob_is_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": True}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick", "--if-armed"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "readyrule" in result.stdout
+
+    def test_without_if_armed_the_knob_is_not_consulted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An operator running `fno providers pick` by hand asked for an answer.
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": False}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+
+    def test_print_env_emits_the_auth_vars_to_clear(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pinning CLAUDE_CONFIG_DIR alone is half an overlay.
+
+        An inherited ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / routed
+        ANTHROPIC_BASE_URL outranks it, so the worker would bill through a
+        different route while the receipt named the picked account.
+        """
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        result = _invoke(["pick", "--print-env"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        emitted = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        assert emitted["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-alt")
+        for var in SCRUB_AUTH_VARS:
+            assert var in emitted, f"{var} not carried for scrubbing"
+            assert emitted[var] == "", f"{var} should be cleared, not set"

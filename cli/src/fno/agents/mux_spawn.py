@@ -900,6 +900,17 @@ def dispatch_spawn_pane(
        names the mux session; never a daemon-PTY fallback (AC1-ERR).
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
+    # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
+    # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
+    # picker wired only there would cover bg/headless and leave every default
+    # interactive spawn on the exhausted account while the option read enabled.
+    # Same helper, same rules (explicit account wins, routed spawns are skipped).
+    if account_env is None and provider == "claude":
+        from fno.agents.dispatch import _pick_account_env
+
+        picked = _pick_account_env(role=role, route_env=route_env)
+        account_env = dict(picked) if picked is not None else None
+
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
     # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker

@@ -1750,14 +1750,26 @@ def _picked_headroom_note(account_id: str) -> str:
     return "headroom unknown"
 
 
-def _pick_account_env() -> Optional[Mapping[str, str]]:
+def _pick_account_env(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[Mapping[str, str]]:
     """Consult the picker for a spawn that named no account, or None.
 
     Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
     and any refusal or failure returns None so the spawn proceeds exactly as it
     does today. The receipt is always printed, because a launch silently landing
     on a different account than the operator expects is a billing surprise.
+
+    A ROUTED spawn is never picked for. `fno agents spawn` refuses `--account`
+    together with `--route` / `--role` because the route's ANTHROPIC_* overrides
+    the account's CLAUDE_CONFIG_DIR and silently mis-bills; auto-picking would
+    combine the two axes the CLI just refused, and would print an account
+    receipt for a worker the route intends to bill elsewhere.
     """
+    if route_env or role is not None:
+        return None
     try:
         from fno.adapters.providers.loader import load_quota_config
 
@@ -1884,12 +1896,16 @@ def dispatch_spawn(
     """
     # 0. Launch-time headroom picking (x-7d45). An explicit --account always
     # wins and is never second-guessed; this only fills the gap when none was
-    # given. Wired HERE rather than at agents/cli.py because cli.py is one of at
-    # least two reachable callers and a guard on one of N paths is decorative --
-    # every spawn crosses this function. It runs before the tier-remap check
-    # below so that check sees the overlay the worker will actually launch with.
+    # given. It runs before the tier-remap check below so that check sees the
+    # overlay the worker will actually launch with.
+    #
+    # This is ONE of the two Python spawn seams: `cmd_spawn` routes the default
+    # `pane` substrate to `dispatch_spawn_pane` and never reaches here, so the
+    # pane path calls the same helper itself. Two seams, one implementation -
+    # putting it in cli.py instead would miss every in-process caller that
+    # bypasses argument parsing.
     if account_env is None and provider == "claude":
-        account_env = _pick_account_env()
+        account_env = _pick_account_env(role=role, route_env=route_env)
 
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not

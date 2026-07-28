@@ -653,6 +653,7 @@ def register_provider(
 
 PICK_EXIT_NO_HEADROOM = 3
 PICK_EXIT_NO_CANDIDATE = 4
+PICK_EXIT_NOT_ARMED = 5
 
 
 class PickVerdict(NamedTuple):
@@ -695,6 +696,7 @@ def pick_account(
     *,
     combo_name: Optional[str] = None,
     exclude: tuple[str, ...] = (),
+    if_armed: bool = False,
 ) -> PickVerdict:
     """Choose an account with headroom that footnote can actually launch on.
 
@@ -714,6 +716,17 @@ def pick_account(
 
     config = _load()
     quota = load_quota_config(repo_root=_get_repo_root())
+    if if_armed and not quota.pick_on_launch:
+        # The caller wants the knob honored but cannot read config itself (the
+        # Rust loop). Keeping the check here means `pick_on_launch` has ONE
+        # implementation; a copy in Rust would let the two disagree about
+        # whether a run is allowed to change which account gets billed.
+        return PickVerdict(
+            None,
+            "launch picking is not armed (providers.quota.pick_on_launch = false)",
+            [],
+            PICK_EXIT_NOT_ARMED,
+        )
     excluded = set(exclude)
 
     ordered = _pick_candidate_ids(config, combo_name)
@@ -789,7 +802,20 @@ def pick_provider(
         False, "--json", "-J", help="Emit the full verdict as one JSON object."
     ),
     print_env: bool = typer.Option(
-        False, "--print-env", help="Emit CLAUDE_CONFIG_DIR=<path> instead of the bare id."
+        False,
+        "--print-env",
+        help=(
+            "Emit the picked account's full env overlay instead of the bare id: "
+            "the auth vars to clear as KEY= (empty), then CLAUDE_CONFIG_DIR=<path>."
+        ),
+    ),
+    if_armed: bool = typer.Option(
+        False,
+        "--if-armed",
+        help=(
+            "Decline with exit 5 unless providers.quota.pick_on_launch is true. "
+            "For callers that honor the opt-in but cannot read config themselves."
+        ),
     ),
 ) -> None:
     """Print the account to launch on: the first with headroom footnote can use.
@@ -797,11 +823,14 @@ def pick_provider(
     stdout is the bare account id (machine-readable); stderr always carries the
     reason and every candidate's headroom. Exit 0 chose one, 3 means every
     launchable candidate is exhausted, 4 means there is no launchable candidate
-    at all - a setup problem, not a quota one.
+    at all - a setup problem, not a quota one - and 5 (only with --if-armed)
+    means launch picking is switched off.
     """
     import json as _json
 
-    verdict = pick_account(combo_name=combo, exclude=tuple(exclude))
+    verdict = pick_account(
+        combo_name=combo, exclude=tuple(exclude), if_armed=if_armed
+    )
 
     for pid, state in verdict.candidates:
         typer.echo(f"  {pid}: {state}", err=True)
@@ -815,7 +844,8 @@ def pick_provider(
         }))
     elif verdict.account is not None:
         if print_env:
-            typer.echo(f"CLAUDE_CONFIG_DIR={_pick_config_dir(verdict.account)}")
+            for line in pick_env_lines(verdict.account):
+                typer.echo(line)
         else:
             typer.echo(verdict.account)
 
@@ -823,11 +853,23 @@ def pick_provider(
         raise typer.Exit(verdict.exit_code)
 
 
-def _pick_config_dir(account_id: str) -> str:
-    """The CLAUDE_CONFIG_DIR a picked account's overlay carries."""
-    from fno.agents.account_env import resolve_account_overlay
+def pick_env_lines(account_id: str) -> list[str]:
+    """The picked account's COMPLETE env overlay, as ``KEY=VALUE`` lines.
 
-    return resolve_account_overlay(account_id).env.get("CLAUDE_CONFIG_DIR", "")
+    An empty value means "clear this variable". Pinning only CLAUDE_CONFIG_DIR
+    is not enough: an inherited ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or
+    routed ANTHROPIC_BASE_URL outranks it, so the worker would authenticate or
+    bill through a different route while the receipt named the picked account.
+    Every Python spawn substrate already scrubs SCRUB_AUTH_VARS before applying
+    an overlay; emitting that same list here is what lets a non-Python caller
+    apply the whole overlay instead of half of it, from one source of truth.
+    """
+    from fno.agents.account_env import SCRUB_AUTH_VARS, resolve_account_overlay
+
+    overlay = resolve_account_overlay(account_id).env
+    lines = [f"{key}=" for key in SCRUB_AUTH_VARS if key not in overlay]
+    lines.extend(f"{key}={value}" for key, value in overlay.items())
+    return lines
 
 
 # ---------------------------------------------------------------------------

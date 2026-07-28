@@ -1,10 +1,12 @@
 """Launch-time headroom picking at the spawn seam (x-7d45, task 3.1).
 
 No in-session credential swap is possible, so the only moment footnote can
-choose an account is just before a process starts. These cover that seam:
-the pick happens in ``dispatch_spawn`` (which every spawn path crosses, not
-just the CLI), an explicit ``--account`` is never second-guessed, and a worker
-that dies on quota poisons the next pick before its snapshot would refresh.
+choose an account is just before a process starts. These cover both Python
+spawn seams - ``dispatch_spawn`` for bg/headless and ``dispatch_spawn_pane``
+for the default pane substrate, which never reaches the former - plus the two
+rules that keep picking honest: an explicit ``--account`` is never
+second-guessed, a routed spawn is never picked for, and a worker that dies on
+quota poisons the next pick before its snapshot would refresh.
 
 Run: cd cli && uv run pytest tests/unit/test_launch_pick.py -v
 """
@@ -118,7 +120,8 @@ class TestSpawnSeam:
     """AC8-CON: the picker is reached from every spawn path.
 
     A guard on one of N reachable paths is decorative. These call
-    ``dispatch_spawn`` directly, bypassing the CLI's argument parsing entirely.
+    ``dispatch_spawn`` directly, bypassing the CLI's argument parsing entirely;
+    ``TestPaneSeam`` below covers the other Python seam.
     """
 
     def _capture_create(self, monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -184,3 +187,95 @@ class TestQuotaDeath:
 
     def test_no_tail_is_a_no_op(self, armed: Path) -> None:
         dispatch_mod.note_quota_death({"CLAUDE_CONFIG_DIR": "/nope"}, None)
+
+
+class TestRoutedSpawnsAreNotPicked:
+    """`fno agents spawn` refuses --account together with --route/--role.
+
+    The route's ANTHROPIC_* overrides the account's CLAUDE_CONFIG_DIR and
+    silently mis-bills, which is exactly why the CLI refuses the combination.
+    Auto-picking must not reassemble it behind that refusal.
+    """
+
+    def test_an_explicit_route_skips_the_picker(self, armed: Path) -> None:
+        assert dispatch_mod._pick_account_env(
+            route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"}
+        ) is None
+
+    def test_a_role_skips_the_picker(self, armed: Path) -> None:
+        assert dispatch_mod._pick_account_env(role="code_reviewer") is None
+
+    def test_an_unrouted_spawn_still_picks(self, armed: Path) -> None:
+        assert dispatch_mod._pick_account_env(role=None, route_env=None) is not None
+
+    def test_spawn_does_not_pick_for_a_routed_worker(
+        self, armed: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        seen: dict = {}
+
+        class _Created:
+            short_id = "abc123"
+
+        monkeypatch.setattr(
+            dispatch_mod, "_claude_create_path",
+            lambda **kw: (seen.update(kw), _Created())[1],
+        )
+        monkeypatch.setattr(dispatch_mod, "_emit_ev", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "fno.agents.model_routing.resolve_spawn_route",
+            lambda role, route_env, notice=None: route_env,
+        )
+        dispatch_mod.dispatch_spawn(
+            name="w3", message="hi", provider="claude", cwd=armed,
+            route_env={"ANTHROPIC_BASE_URL": "https://example.invalid"},
+        )
+        assert seen["account_env"] is None
+
+
+class TestPaneSeam:
+    """`pane` is the DEFAULT substrate and `cmd_spawn` routes it straight to
+    `dispatch_spawn_pane`, never through `dispatch_spawn`. A picker wired only
+    at the latter would leave every default interactive spawn on the exhausted
+    account while the option read enabled."""
+
+    def test_the_pane_path_picks_too(
+        self, armed: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.agents import mux_spawn
+
+        seen: dict = {}
+
+        def _capture(provider, model, *, role=None, route_env=None, account_env=None):
+            seen["account_env"] = account_env
+            raise RuntimeError("stop after the seam")
+
+        monkeypatch.setattr(
+            "fno.agents.model_routing.check_spawn_tier_remap", _capture
+        )
+        with pytest.raises(RuntimeError, match="stop after the seam"):
+            mux_spawn.dispatch_spawn_pane(
+                name="p1", message="hi", provider="claude", cwd=armed
+            )
+        assert seen["account_env"]["CLAUDE_CONFIG_DIR"] == str(armed / "claude-main")
+
+    def test_the_pane_path_never_overrides_an_explicit_account(
+        self, armed: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.agents import mux_spawn
+
+        seen: dict = {}
+        explicit = {"CLAUDE_CONFIG_DIR": str(armed / "claude-alt")}
+
+        def _capture(provider, model, *, role=None, route_env=None, account_env=None):
+            seen["account_env"] = account_env
+            raise RuntimeError("stop after the seam")
+
+        monkeypatch.setattr(
+            "fno.agents.model_routing.check_spawn_tier_remap", _capture
+        )
+        with pytest.raises(RuntimeError, match="stop after the seam"):
+            mux_spawn.dispatch_spawn_pane(
+                name="p2", message="hi", provider="claude", cwd=armed,
+                account_env=explicit,
+            )
+        assert seen["account_env"] == explicit

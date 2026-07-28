@@ -205,14 +205,20 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
 /// The single env var a picked account contributes to the driver's environment.
 const PICKED_ENV_KEY: &str = "CLAUDE_CONFIG_DIR";
 
-/// Interpret a `fno providers pick --print-env` result.
+/// One picked account's complete env overlay: `(key, value)` pairs where an
+/// EMPTY value means "clear this variable in the child".
+type PickedEnv = Vec<(String, String)>;
+
+/// Interpret a `fno providers pick --if-armed --print-env` result.
 ///
-/// Pure, so the advisory contract is testable without a live `fno`: exit 0 with
-/// a parseable `CLAUDE_CONFIG_DIR=<path>` line is the only success, and every
-/// other shape yields the reason to log. The picker's non-zero exits (3 = every
-/// launchable candidate exhausted, 4 = no launchable candidate) are ordinary
-/// answers here, not errors.
-fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<String, String> {
+/// Pure, so the advisory contract is testable without a live `fno`. Success is
+/// exit 0 plus at least one `CLAUDE_CONFIG_DIR=<non-empty>` line; the verb also
+/// emits the auth vars to clear as `KEY=` and those are carried through, because
+/// applying half an overlay is what lets an inherited ANTHROPIC_API_KEY bill a
+/// different account than the receipt names. The verb's non-zero exits (3 = every
+/// launchable candidate exhausted, 4 = no launchable candidate, 5 = picking not
+/// armed) are ordinary answers here, not errors.
+fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, String> {
     if !ok {
         let reason = stderr
             .lines()
@@ -222,21 +228,39 @@ fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<String, String
             .unwrap_or("no reason given");
         return Err(reason.to_string());
     }
-    match stdout.trim().split_once('=') {
-        Some((k, v)) if k == PICKED_ENV_KEY && !v.is_empty() => Ok(v.to_string()),
-        _ => Err(format!("unparseable pick output: {:?}", stdout.trim())),
+    let mut env: PickedEnv = Vec::new();
+    let mut pinned = false;
+    for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.split_once('=') {
+            Some((k, v)) if !k.is_empty() => {
+                if k == PICKED_ENV_KEY && !v.is_empty() {
+                    pinned = true;
+                }
+                env.push((k.to_string(), v.to_string()));
+            }
+            _ => return Err(format!("unparseable pick output: {line:?}")),
+        }
     }
+    if !pinned {
+        // A drifted verb must never have its output half-applied: without the
+        // config dir there is no pinned account, only a scrubbed environment.
+        return Err(format!("pick output pinned no {PICKED_ENV_KEY}"));
+    }
+    Ok(env)
 }
 
 /// Ask `fno providers pick` which account the next iteration should launch on.
 ///
 /// Shells the verb rather than reimplementing the predicate: headroom, combo
-/// order and launchability have exactly one implementation, and it is not this
-/// one. Every failure mode - a stale `fno`, an absent `fno`, a refusal - is an
-/// `Err` the caller logs and ignores, so the loop cannot be wedged by it.
-fn pick_account_dir() -> Result<String, String> {
+/// order, launchability AND the `pick_on_launch` opt-in have exactly one
+/// implementation, and it is not this one - `--if-armed` is what lets the verb
+/// honor the knob on this caller's behalf, so a default-off install can never
+/// have the loop change which account it bills. Every failure mode - a stale
+/// `fno`, an absent `fno`, a refusal - is an `Err` the caller logs and ignores,
+/// so the loop cannot be wedged by it.
+fn pick_account_env() -> Result<PickedEnv, String> {
     let out = Command::new("fno")
-        .args(["providers", "pick", "--print-env"])
+        .args(["providers", "pick", "--if-armed", "--print-env"])
         .output()
         .map_err(|e| format!("could not run `fno providers pick`: {e}"))?;
     interpret_pick(
@@ -356,10 +380,22 @@ impl Dispatcher for ShelloutDispatcher {
         // refusal is advisory - the iteration proceeds on today's env.
         if !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
             let iter = ctx.iteration;
-            match pick_account_dir() {
-                Ok(dir) => {
-                    eprintln!("loop: iteration {iter} account picked -> {dir}");
-                    cmd.env(PICKED_ENV_KEY, dir);
+            match pick_account_env() {
+                Ok(picked) => {
+                    for (key, value) in &picked {
+                        // An empty value is the verb saying "clear this": an
+                        // inherited ANTHROPIC_API_KEY or routed base URL outranks
+                        // CLAUDE_CONFIG_DIR, so leaving one behind would bill an
+                        // account the receipt does not name.
+                        if value.is_empty() {
+                            cmd.env_remove(key);
+                        } else {
+                            cmd.env(key, value);
+                        }
+                        if key == PICKED_ENV_KEY {
+                            eprintln!("loop: iteration {iter} account picked -> {value}");
+                        }
+                    }
                 }
                 Err(reason) => {
                     eprintln!("loop: iteration {iter} account not picked ({reason})");
@@ -389,9 +425,45 @@ mod tests {
 
     #[test]
     fn a_picked_account_yields_its_config_dir() {
+        let env = interpret_pick(true, "CLAUDE_CONFIG_DIR=/Users/x/.claude-alt\n", "")
+            .expect("a pinned config dir is a successful pick");
         assert_eq!(
-            interpret_pick(true, "CLAUDE_CONFIG_DIR=/Users/x/.claude-alt\n", ""),
-            Ok("/Users/x/.claude-alt".to_string())
+            env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/Users/x/.claude-alt".to_string()
+            )]
+        );
+    }
+
+    // The scrub half of the overlay: an inherited ANTHROPIC_API_KEY or routed
+    // base URL outranks CLAUDE_CONFIG_DIR, so applying only the pin would let
+    // the worker bill an account the receipt does not name.
+    #[test]
+    fn auth_vars_to_clear_are_carried_as_empty_values() {
+        let stdout = "ANTHROPIC_API_KEY=\nANTHROPIC_BASE_URL=\nCLAUDE_CONFIG_DIR=/alt\n";
+        let env = interpret_pick(true, stdout, "").expect("overlay parses");
+        assert_eq!(env.len(), 3);
+        assert_eq!(env[0], ("ANTHROPIC_API_KEY".to_string(), String::new()));
+        assert_eq!(env[1], ("ANTHROPIC_BASE_URL".to_string(), String::new()));
+        assert_eq!(
+            env[2],
+            ("CLAUDE_CONFIG_DIR".to_string(), "/alt".to_string())
+        );
+    }
+
+    // AC: the opt-in is honored on this path too. Exit 5 is the verb declining
+    // because providers.quota.pick_on_launch is false, and it must read as an
+    // ordinary "not picked", never as a pick.
+    #[test]
+    fn a_disarmed_picker_declines_with_its_reason() {
+        let stderr = "pick: launch picking is not armed (providers.quota.pick_on_launch = false)\n";
+        assert_eq!(
+            interpret_pick(false, "", stderr),
+            Err(
+                "pick: launch picking is not armed (providers.quota.pick_on_launch = false)"
+                    .to_string()
+            )
         );
     }
 
@@ -409,10 +481,13 @@ mod tests {
 
     #[test]
     fn unparseable_output_is_declined_rather_than_guessed() {
-        // A drifted verb must not have its stdout half-read into an env var.
+        // A drifted verb must not have its output half-applied: with no pinned
+        // config dir there is no account, only a scrubbed environment.
         assert!(interpret_pick(true, "readyrule\n", "").is_err());
         assert!(interpret_pick(true, "CLAUDE_CONFIG_DIR=\n", "").is_err());
-        assert!(interpret_pick(true, "OTHER=/tmp\n", "").is_err());
+        assert!(interpret_pick(true, "ANTHROPIC_API_KEY=\n", "").is_err());
+        assert!(interpret_pick(true, "=/tmp\n", "").is_err());
+        assert!(interpret_pick(true, "", "").is_err());
     }
 
     // AC12-CON: one call site, all harnesses. A picker call inside any driver
