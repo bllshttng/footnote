@@ -35,6 +35,42 @@ fi
 unset TARGET_START
 rm -f "$STATE_DIR/.target-starting"
 
+# ── Review-capability gate on the unwrapped path (x-4a60) ────────────
+# `fno target init` runs both review refusals in-process and says so with
+# FNO_TARGET_INIT_GATED; the direct path SKILL.md documents never ran them, so
+# a typo'd config.review.github_apps login started a full run and surfaced only
+# at the stop gate. Delegates to the one implementation - the reviewer
+# descriptor table and the known-App login set are Python and are NOT restated
+# here, because a bash copy that drifts toward CLEARING a fail-closed gate is
+# worse than the gap. Placed above the location pre-flight so both paths refuse
+# in the same order.
+#
+# ONLY rc 9 refuses; any other non-zero is a BROKEN gate, not a failed one, and
+# must not brick the mandatory bootstrap (same fail-open idiom as the in_review
+# dispatch guard below). 9 is deliberately NOT 2: a stale installed `fno`
+# without this verb is a Click usage error, which exits 2 with "No such
+# command", so treating 2 as a refusal would hard-refuse every direct bootstrap
+# the moment the CLI fell behind source.
+if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
+  if command -v fno >/dev/null 2>&1; then
+    fno target check-review-gate && _RG_RC=0 || _RG_RC=$?
+    if [[ "$_RG_RC" -eq 9 ]]; then
+      echo "[init-target-state] REFUSED: review capability gate (see above). Refusing to write state file." >&2
+      exit 2
+    elif [[ "$_RG_RC" -ne 0 ]]; then
+      echo "[init-target-state] note: review capability gate unavailable (rc=$_RG_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-review-gate\`." >&2
+    fi
+  else
+    echo "[init-target-state] note: fno absent - config.review capability gate not checked" >&2
+  fi
+fi
+# Consume the marker like TARGET_START above: it means "the gate already ran for
+# THIS init", never "this shell may skip the gate forever". Leaving it set would
+# let one wrapper init suppress the gate in every child this script spawns, and
+# an ancestor-exported value is the inherited-env hazard TARGET_BEASTMODE is
+# scrubbed for.
+unset FNO_TARGET_INIT_GATED
+
 # ── Location pre-flight (shared verdict) ─────────────────────────────
 # Refuse to write target-state.md into the canonical checkout on a
 # protected branch (main, master, detached HEAD, or an undeterminable

@@ -24,7 +24,7 @@ from fno.review_capability import (
     refusal_message,
     resolve_reviewers,
 )
-from fno.target_cli import _refuse_unsatisfiable_reviewers
+from fno.target_cli import REVIEW_GATE_REFUSED, _refuse_unsatisfiable_reviewers
 
 CLAUDE_PANE = SessionCapability(harness="claude", substrate="interactive", attended=True)
 CODEX_HEADLESS = SessionCapability(harness="codex", substrate="headless", attended=False)
@@ -629,3 +629,177 @@ def test_init_command_allows_a_recognized_github_app(
     monkeypatch.setenv("CLAUDE_PLUGIN_ROOT", str(tmp_path / "empty-plugin-root"))
     r = _invoke_init_apps(tmp_path, monkeypatch, "[chatgpt-codex-connector]", {})
     assert "config.review.github_apps names a bot" not in r.output
+
+
+# --- x-4a60: the same gate, reachable from the direct bash path ---------------
+#
+# Both refusals above were called only from the Python `init` wrapper. The
+# script SKILL.md documents running directly (`TARGET_START=1 bash
+# hooks/helpers/init-target-state.sh`) never ran them, so a typo'd login started
+# a full run and surfaced at the stop gate. `check-review-gate` is how bash
+# reaches the one implementation; `FNO_TARGET_INIT_GATED` is how the wrapper
+# path says it already paid for it.
+
+
+def _invoke_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, review_block: str,
+                 env: dict | None = None):
+    cfg = tmp_path / "settings.yaml"
+    cfg.write_text(f"schema_version: 1\nconfig:\n  review:\n{review_block}")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in ("CLAUDE_CODE_SESSION_ID", "CLAUDE_SESSION_ID", "CODEX_THREAD_ID",
+                "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "TARGET_UNATTENDED",
+                "FNO_BG", "FNO_AGENT_SELF"):
+        monkeypatch.delenv(var, raising=False)
+    for k, v in (env or {}).items():
+        monkeypatch.setenv(k, v)
+    load_settings.cache_clear()
+    from fno.cli import app
+
+    return CliRunner().invoke(app, ["target", "check-review-gate"])
+
+
+def test_check_review_gate_is_silent_and_zero_on_an_empty_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC6-HP. Both refusals return early on an empty list, so a repo that
+    configures no review at all pays nothing and hears nothing."""
+    r = _invoke_gate(tmp_path, monkeypatch, "    reviewers: []\n    github_apps: []\n")
+    assert r.exit_code == 0
+    assert r.output.strip() == ""
+
+
+def test_check_review_gate_refuses_an_unsatisfiable_reviewer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The verb re-stamps the wrapper's exit 2 as its own refusal code, which is
+    the only code the shell caller treats as a refusal."""
+    r = _invoke_gate(
+        tmp_path, monkeypatch, "    reviewers: [sigma]\n",
+        {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"},
+    )
+    assert r.exit_code == REVIEW_GATE_REFUSED
+    assert "sigma" in r.output
+    assert "change config.review.reviewers" in r.output
+
+
+def test_check_review_gate_refuses_a_typo_github_app(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The App axis reaches the verb too - it is the axis PR #638 added and the
+    one the direct path never checked."""
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(rc, "_app_ever_acted", _NEVER)
+    r = _invoke_gate(tmp_path, monkeypatch, "    github_apps: [typo-bot-name]\n")
+    assert r.exit_code == REVIEW_GATE_REFUSED
+    assert "typo-bot-name" in r.output
+
+
+def test_check_review_gate_checks_apps_even_when_reviewers_pass(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """Ordering pin: a satisfiable reviewer must not short-circuit the App axis.
+    Returning after the first clean verdict would restore half the gap."""
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(rc, "_app_ever_acted", _NEVER)
+    r = _invoke_gate(
+        tmp_path, monkeypatch,
+        "    reviewers: [sigma]\n    github_apps: [typo-bot-name]\n",
+        {"CLAUDE_CODE_SESSION_ID": "s1"},
+    )
+    assert r.exit_code == REVIEW_GATE_REFUSED
+    assert "typo-bot-name" in r.output
+
+
+def test_init_marks_the_gate_as_already_run_for_the_script(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC3-CON, wrapper half: `init` hands the script FNO_TARGET_INIT_GATED=1,
+    so the script skips a gate pass that already happened. Without it the App
+    probe pays two 30s-timeout `gh` calls per unrecognized login twice."""
+    captured: dict = {}
+
+    class _Proc:
+        returncode = 0
+
+    def _fake_run(cmd, **kwargs):
+        captured["env"] = kwargs.get("env") or {}
+        return _Proc()
+
+    monkeypatch.setattr("fno.target_cli.subprocess.run", _fake_run)
+    monkeypatch.setattr("fno.target_cli._print_orientation_report", lambda *a, **k: None)
+    monkeypatch.setattr("fno.target_cli._maybe_dispatch_work_start", lambda *a, **k: None)
+    monkeypatch.setattr("fno.target_cli._maybe_reconcile_lane_slot", lambda *a, **k: None)
+    monkeypatch.setattr("fno.target_cli._maybe_check_resume_receipt", lambda *a, **k: None)
+
+    r = _invoke_init(tmp_path, monkeypatch, "[]", {"CLAUDE_CODE_SESSION_ID": "s1"})
+
+    assert r.exit_code == 0, r.output
+    assert captured["env"].get("FNO_TARGET_INIT_GATED") == "1"
+
+
+def test_the_script_reads_the_marker_this_module_writes():
+    """AC3-CON, cross-language half. The wrapper test above and the shell test in
+    tests/hooks/test_init_review_gate_direct.sh each assert their own side's
+    literal, so renaming ONE side leaves both green and silently restores the
+    double probe. This is the only assertion that sees both."""
+    import fno.target_cli as tc
+
+    repo_root = Path(tc.__file__).resolve().parents[3]
+    script = repo_root / "hooks" / "helpers" / "init-target-state.sh"
+    if not script.is_file():  # bare `pip install fno` ships no hooks/
+        pytest.skip("plugin hooks/ not present in this install")
+    text = script.read_text(encoding="utf-8")
+
+    # Anchored to the EXECUTABLE forms, not the bare names. Both names also
+    # occur in this block's comments and in its note string, so a whole-file
+    # grep for them stays green after the invocation is deleted outright -
+    # which is exactly what a mutation run proved.
+    assert '"${FNO_TARGET_INIT_GATED:-}" != "1"' in text, (
+        "init-target-state.sh must still READ the marker, not merely mention it"
+    )
+    assert "fno target check-review-gate && _RG_RC=0" in text, (
+        "init-target-state.sh must still INVOKE the gate, not merely name it"
+    )
+    # And the NUMERAL. Bash cannot import the constant, so it restates it as a
+    # literal; without this, changing REVIEW_GATE_REFUSED leaves both suites
+    # green (these tests use the symbol, the shell test stubs its own exit code)
+    # while every real refusal falls into the note-and-proceed branch instead.
+    assert f"-eq {REVIEW_GATE_REFUSED} ]]" in text, (
+        f"init-target-state.sh must test for -eq {REVIEW_GATE_REFUSED}; "
+        "the shell literal and REVIEW_GATE_REFUSED have drifted apart"
+    )
+
+
+def test_refusal_code_is_one_click_can_never_produce(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """The regression a real run found. Click exits 2 on UsageError, so an
+    installed `fno` predating this verb answers `No such command
+    'check-review-gate'` with exit 2. If the refusal spoke 2 as well, the shell
+    caller could not tell them apart and every direct bootstrap would hard-refuse
+    the moment the CLI fell behind source - a broken gate bricking the mandatory
+    path, which is exactly what the fail-open rule forbids."""
+    from fno.cli import app
+
+    assert REVIEW_GATE_REFUSED not in (0, 1, 2)
+
+    monkeypatch.setenv("FNO_CONFIG", str(tmp_path / "absent.yaml"))
+    load_settings.cache_clear()
+    stale = CliRunner().invoke(app, ["target", "no-such-verb-x4a60"])
+    assert stale.exit_code == 2
+    assert stale.exit_code != REVIEW_GATE_REFUSED
+
+
+def test_init_still_speaks_exit_2_on_a_refusal(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    """AC2-HP. The verb's private exit code must not leak into `fno target
+    init`, whose refusal contract is byte-for-byte unchanged."""
+    r = _invoke_init(
+        tmp_path, monkeypatch, "[sigma]",
+        {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"},
+    )
+    assert r.exit_code == 2
+

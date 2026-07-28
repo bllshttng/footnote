@@ -488,6 +488,23 @@ def _app_ever_acted(login: str, cwd: Optional[str] = None) -> Optional[bool]:
         ]
     )
     if total is None:
+        # KNOWN BLIND SPOT, deliberately left unverifiable. The search API
+        # answers 422 for a `commenter:` login with no account, so the likeliest
+        # typo shape reaches None and proceeds rather than refusing.
+        #
+        # Do NOT "fix" this by resolving the login against `gh api users/<login>`
+        # (with or without the `[bot]` suffix). A configured entry is matched by
+        # the completion gate with `author_login.contains(configured)`
+        # (login_matches_bot in crates/fno-agents/src/loopcheck.rs), so a short
+        # alias like "reviewer" for `acme-reviewer[bot]` is a SUPPORTED config
+        # and is not an account of its own: both exact lookups 404 and the run
+        # would be refused at init even though that bot reviews this repo
+        # normally. A false refusal blocks every run, which is worse than the
+        # late wedge this gate exists to shorten.
+        #
+        # Proving absence under substring semantics means enumerating the
+        # repository's participants, which is unbounded; until something does
+        # that, unverifiable is the honest answer (x-4a60).
         return None
     try:
         return int(total.strip()) > 0
@@ -573,8 +590,9 @@ def resolve_github_apps(
                 AppVerdict(
                     login,
                     "unverifiable",
-                    "could not check whether this App has acted here (no repo remote, "
-                    "token scope, or rate limit); proceeding",
+                    "could not check whether this App has acted here (no repo "
+                    "remote, token scope, rate limit, or a login GitHub does "
+                    "not resolve as an account); proceeding",
                 )
             )
     return out

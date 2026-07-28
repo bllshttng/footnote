@@ -190,3 +190,46 @@ def test_a_registry_entry_cannot_shadow_a_builtin_at_resolution(isolated: Path):
     v = resolve_reviewers(["sigma"], _claude(), {"sigma": SKILL})[0]
     assert v.descriptor is not None
     assert v.descriptor.asserts == "review-evidence"
+
+
+
+# --- the 422 blind spot, and why the obvious fix is wrong (x-4a60) -----------
+
+
+def test_a_login_with_no_account_stays_unverifiable_not_absent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    """A configured entry is matched by the completion gate with
+    `author_login.contains(configured)`, so a short alias like "reviewer" for
+    `acme-reviewer[bot]` is a supported config that owns no account of its own.
+    The search API 422s on it and both exact user lookups 404, so inferring
+    absence from those would refuse a bot that reviews this repo normally.
+
+    A false refusal blocks every run; the late wedge this gate shortens only
+    costs one. So the 422 stays unverifiable until something can prove absence
+    under substring semantics.
+    """
+    import subprocess as _sp
+
+    import fno.review_capability as rc
+
+    calls = []
+
+    class _R:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+    def _run(args, **kwargs):
+        joined = " ".join(args)
+        calls.append(joined)
+        if "nameWithOwner" in joined:
+            return _R(0, "owner/repo\n")
+        if "search/issues" in joined:
+            return _R(1, "", "gh: Validation Failed (HTTP 422)")
+        return _R(1, "", "gh: Not Found (HTTP 404)")
+
+    monkeypatch.setattr(_sp, "run", _run)
+
+    assert rc._app_ever_acted("reviewer") is None
+    # And it must not have gone looking for an exact account to decide that.
+    assert not any("users/" in c for c in calls)
