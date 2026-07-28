@@ -18,6 +18,7 @@ hook-events.sh
 blocked-taxonomy.sh
 checkpoint.sh
 graph-resolve.sh
+with-timeout.sh
 
 # CLI runtime driver adapters (invoked by the runtime layer, not by users)
 driver-claude-code.sh
