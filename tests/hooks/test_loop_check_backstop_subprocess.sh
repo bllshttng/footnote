@@ -12,6 +12,15 @@
 #   - Unattended manifest (attended: false) -> N=3 backstop threshold
 #   - no-PR gh stub -> pr_state=none for all fires (identical fingerprint)
 #   - fixed-sha git stub -> git_sha component stable
+#   - FNO_LOOPCHECK_MIN_FIRE_GAP_SECS=0 -> streak counts FIRES, not debounced
+#     observations. What this test proves is that the counter ACCUMULATES ACROSS
+#     PROCESSES via on-disk state; the three fires land within the same second,
+#     so under the production 300s gap they would collapse into a single
+#     observation and no backstop could ever trip here. Pinning the gap keeps
+#     the cross-process claim under test and leaves the timing rule to the
+#     read_prior_fires unit tests. This is a SEPARATE reachable path from the
+#     in-process Rust suite, which pins the same seam in isolate_settings - a
+#     seam set on only one of them is the decorative-guard shape.
 #
 # Protocol (all three pass ONLY --state/--transcript/--cwd; events path derives
 # from cwd, mirroring the real shim which also passes no --events flag):
@@ -118,6 +127,7 @@ fire_subprocess() {
         HOME="${HOME_DIR}" \
         FNO_LOOPCHECK_GH_BIN="${STUB_BIN}/gh" \
         FNO_LOOPCHECK_GIT_BIN="${STUB_BIN}/git" \
+        FNO_LOOPCHECK_MIN_FIRE_GAP_SECS=0 \
             "$REAL_BIN" loop-check \
             --state "$MANIFEST" \
             --transcript "$TRANSCRIPT" \
