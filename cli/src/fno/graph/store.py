@@ -391,7 +391,19 @@ def _create_backup(path: Path) -> None:
 
 
 def _apply_graph_defaults(entries: list[dict]) -> list[dict]:
-    """Apply lazy migration defaults to graph entries (ab- IDs)."""
+    """Apply lazy migration defaults to graph entries (ab- IDs).
+
+    The one migration seam: every reader routes through here, so a row whose
+    on-disk vocabulary predates a rename reads the same no matter which reader
+    a caller reached for.
+    """
+    # A junk row (scalar, list, null) in an otherwise parseable graph is dropped
+    # here rather than at each call site: every field access below assumes a
+    # dict, so a non-dict entry used to surface as a bare AttributeError, which
+    # breaks read_graph's "swallow corruption, never crash the terminal"
+    # contract. Nothing downstream -- read or write -- can do anything with such
+    # a row, and the write path has already taken its .bak by this point.
+    entries = [e for e in entries if isinstance(e, dict)]
     # In-memory legacy priority backfill so read-only commands (ready,
     # next, status, tree, triage context) sort correctly *before* the
     # first write triggers recompute_statuses' on-disk backfill. The

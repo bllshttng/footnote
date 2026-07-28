@@ -185,17 +185,19 @@ def read_jsonl_events(paths: list[Path], kinds: set[str]) -> list[dict]:
 
 def read_graph_nodes(path: Path) -> list[dict]:
     """Best-effort graph read for the optional survival signal. A missing or
-    unreadable graph is not fatal - survival just degrades to n/a."""
+    unreadable graph is not fatal - survival just degrades to n/a.
+
+    Delegates to the canonical read seam so the scoreboard speaks the same
+    migrated vocabulary as everything else (it used to parse raw, so a row still
+    on disk as ``claimed`` never matched an ``in_progress`` comparison here).
+    ``read_graph`` already swallows corruption to ``[]``; OSError is the one case
+    it lets through, so an unreadable file is caught to keep this contract."""
+    from fno.graph.store import read_graph
+
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):  # missing / unreadable / non-utf8 / bad json
+        return read_graph(Path(path))
+    except OSError:  # unreadable / non-utf8; corruption already degrades to []
         return []
-    nodes = data.get("entries", data.get("nodes", data)) if isinstance(data, dict) else data
-    if isinstance(nodes, dict):
-        nodes = list(nodes.values())
-    if not isinstance(nodes, list):  # valid JSON, junk shape (null / scalar / {"entries": null})
-        return []
-    return [n for n in nodes if isinstance(n, dict)]
 
 
 def _parse_ts(raw) -> datetime | None:
