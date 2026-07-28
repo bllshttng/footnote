@@ -652,6 +652,42 @@ def blast_check(
     typer.echo(result["verdict"] if quiet else json.dumps(result))
 
 
+# Exit code meaning "this gate refused", distinct from every code Click itself
+# can produce. Click uses 2 for UsageError, so a STALE installed `fno` without
+# this verb exits 2 with "No such command" - indistinguishable from a refusal if
+# the gate also spoke 2, which would turn every outdated CLI into a hard refusal
+# of the mandatory bootstrap. Anything Click can emit on its own must never mean
+# "refused" (x-4a60).
+REVIEW_GATE_REFUSED = 9
+
+
+@target_app.command("check-review-gate", hidden=True)
+def check_review_gate() -> None:
+    """Run both review-capability refusals for a non-Python caller (x-4a60).
+
+    Exists so `hooks/helpers/init-target-state.sh` can reach the ONE
+    implementation of these verdicts from bash. SKILL.md documents running that
+    script directly when `fno` is unavailable, and on that path a typo'd
+    `config.review.github_apps` login used to start a full run and surface only
+    at the stop gate - a guard on one of two reachable paths is decorative.
+
+    Read-only; writes no state and takes no arguments. Exit 0 = both axes clear
+    (or nothing configured); exit `REVIEW_GATE_REFUSED` = refused, message
+    already on stderr. The caller treats every OTHER non-zero as a broken gate
+    rather than a failed one, so the tables behind this stay Python and are
+    never restated in shell.
+    """
+    try:
+        _refuse_unsatisfiable_reviewers()
+        _refuse_unreachable_github_apps()
+    except typer.Exit as exc:
+        # The helpers speak `init`'s vocabulary (2). Re-stamp it as this verb's,
+        # so the shell caller can tell a refusal from a usage error.
+        if exc.exit_code == 0:
+            raise
+        raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
+
+
 @target_app.command("status")
 def status(
     node: Optional[str] = typer.Argument(
@@ -916,6 +952,10 @@ def init(
     # inherited one, so a stray flag omission cannot upgrade a run to mergeable.
     if no_merge:
         env["TARGET_NO_MERGE"] = "1"
+    # The review-capability gate already ran in-process above; say so, or the
+    # script runs it again (x-4a60). Not free to repeat: resolve_github_apps
+    # probes GitHub with two 30s-timeout `gh` calls per unrecognized login.
+    env["FNO_TARGET_INIT_GATED"] = "1"
 
     proc = subprocess.run(["bash", str(script_path)], check=False, env=env)
     if proc.returncode == 0:
