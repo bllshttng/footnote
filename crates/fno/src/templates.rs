@@ -244,7 +244,7 @@ pub fn validate_anchored_spec(spec: &AnchoredLayoutSpec) -> Result<(), SpecError
         if matches!(slot.binding, LayoutBinding::Anchor) {
             anchor_count += 1;
         }
-        if !defined.insert(slot.name.as_str(), ()).is_none() {
+        if defined.insert(slot.name.as_str(), ()).is_some() {
             // A duplicate definition would otherwise surface as a duplicate
             // reference below; surface it where the author wrote it.
             return Err(SpecError::DuplicateReference(slot.name.clone()));

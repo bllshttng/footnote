@@ -1108,12 +1108,22 @@ pub enum Command {
     /// cannot name a branch path. Sent once on drop rather than streamed like a
     /// resize, so the server validates against the tree the drop actually lands
     /// on and refuses a stale address out loud.
-    /// Both ids are `None` for the keyboard bind and `Some` for a drop, because
-    /// a pointer has a position and a keypress does not: a drag can pick up any
-    /// pane and name the exact slot it lands in, while the bind always moves
-    /// whatever is focused to whatever lies that way. `None` therefore means
+    /// The two ids are independently optional, and all three reachable pairings
+    /// mean different things. Both `None` is the keyboard bind, both `Some` is a
+    /// drop: a pointer has a position and a keypress does not, so a drag can
+    /// pick up any pane and name the exact slot it lands in, while the bind
+    /// always moves whatever is focused to whatever lies that way. `None` means
     /// "resolve it server-side" - `mover` from the tab's focus, `target` from
     /// the same `navigate` geometry [`Command::FocusDir`] uses.
+    ///
+    /// `mover: Some` with `target: None` is the third form and the one to be
+    /// careful with: it means "this pane, one place `dir`-ward of itself", and
+    /// the server resolves it by navigating from the mover WITHIN THE VIEWED
+    /// TAB. It is therefore only meaningful for a mover that is in that tab. A
+    /// caller naming a pane in some other tab has `navigate` bail on a pane the
+    /// viewed tree does not hold, so the move is refused with a "no pane in that
+    /// direction" notice and goes nowhere; such a caller must name a `target`.
+    /// The sideline row menu picks between the two forms on exactly that test.
     ///
     /// One verb rather than two: both forms end in the same relocation, and
     /// only the addressing differs.
@@ -1127,8 +1137,10 @@ pub enum Command {
     /// [`ControlVerb::PaneBreak`] script path sends (one tree-mutation site); the
     /// interactive path additionally repoints the acting client's focus to the
     /// new tab, which the script path never does (Locked Decision 3). `pane` is
-    /// named from the drag source, a leaf in the sender's current tab; a stale id
-    /// is refused fail-closed by the server, like `MovePane`.
+    /// named by the sender and resolved session-wide, so it need NOT live in the
+    /// sender's current tab - a sideline row menu breaks out a pane in a
+    /// background tab, and the focus repoint then pulls the viewer to it. A
+    /// stale id is refused fail-closed by the server, like `MovePane`.
     BreakPane {
         pane: u64,
     },
@@ -2646,8 +2658,10 @@ mod tests {
         let v43 = r#"{"target":"CurrentRoute"}"#;
         let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
         assert_eq!(legacy.fallback, PlacementFallback::NewTab);
-        let mut exact = PanePlacement::default();
-        exact.fallback = PlacementFallback::Refuse;
+        let exact = PanePlacement {
+            fallback: PlacementFallback::Refuse,
+            ..PanePlacement::default()
+        };
         let wire = serde_json::to_string(&exact).unwrap();
         assert_eq!(
             serde_json::from_str::<PanePlacement>(&wire)

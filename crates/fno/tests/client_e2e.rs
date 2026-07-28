@@ -23,6 +23,17 @@ fn client_e2e_prompt_appears_and_echo_roundtrips() {
     h.type_bytes(b"echo he\"ll\"o\r");
     // Only the OUTPUT line is bare "hello" (the typed line has quotes).
     h.wait_screen(15, |s| s.lines().any(|l| l.trim() == "hello"));
+    // The shell draws its NEXT prompt after that output line, so a frame taken
+    // the instant `hello` lands can sit between the two and find no prompt row
+    // at all. Wait for a `$` row BELOW the output; without this the assertions
+    // below race and fail only under parallel load.
+    h.wait_screen(15, |s| {
+        let lines: Vec<&str> = s.lines().collect();
+        lines
+            .iter()
+            .position(|l| l.trim() == "hello")
+            .is_some_and(|i| lines[i + 1..].iter().any(|l| l.trim_end().ends_with('$')))
+    });
     // AC1-UI: the cursor is visible and sits on the fresh prompt row, where
     // the shell put it. That row is the last screen line ending with `PS1`
     // (`$ `) - NOT necessarily the last screen line, since the always-on

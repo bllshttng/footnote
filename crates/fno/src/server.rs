@@ -2756,6 +2756,7 @@ impl Core {
             .iter()
             .position(|s| s.id == sid)
             .expect("squad live");
+        let src_name = self.session.squads[si].tabs[ti].name.clone();
         let outcome = {
             let tab = &mut self.session.squads[si].tabs[ti];
             tree::detach_leaf(tab, vp, pane).map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?
@@ -2765,7 +2766,16 @@ impl Core {
         // (for TabEmptied) drop the now-orphaned source tab that still holds
         // this pane - otherwise the pane would live in two tabs.
         self.session.squads[si].tabs.push(Tab {
-            name: clean_tab_name(name),
+            // An explicit name wins. Otherwise, when the break empties the
+            // source tab, carry its name over instead of dropping it: the tab
+            // is being rebuilt around the same single pane, and the operator
+            // named that tab rather than a tree shape. Breaking one pane out of
+            // several is a genuinely new tab and stays unnamed.
+            name: clean_tab_name(name).or_else(|| {
+                matches!(outcome, tree::DetachOutcome::TabEmptied)
+                    .then_some(src_name)
+                    .flatten()
+            }),
             id: new_tid,
             root: Node::Leaf(pane),
             focus: pane,
@@ -11817,6 +11827,53 @@ mod tests {
             core.client_view(7),
             Some((1, 10)),
             "the script break leaves the viewer on tab 10, unmoved"
+        );
+    }
+
+    #[test]
+    fn pane_break_carries_a_name_only_when_it_empties_the_source_tab() {
+        // Breaking out a pane that is ALONE in its tab rebuilds that tab around
+        // the same pane, so dropping the operator's name is data loss. Breaking
+        // one pane out of several is a genuinely new tab and stays unnamed.
+        let mut core = two_tab_core(); // tab 20 = "bee", a single leaf 3
+        let new_tid = core.pane_break(3, None).expect("break a solo pane");
+        let sq = core.session.squad(1).unwrap();
+        assert_eq!(
+            sq.tabs
+                .iter()
+                .find(|t| t.id == new_tid)
+                .unwrap()
+                .name
+                .as_deref(),
+            Some("bee"),
+            "the emptied tab's name carries to the tab rebuilt around its pane"
+        );
+        assert!(
+            sq.tabs.iter().all(|t| t.id != 20),
+            "the emptied source tab is gone, so no two tabs share the name"
+        );
+
+        // Tab 10 holds [1, 2]: breaking 1 out leaves 2 behind, so the source
+        // survives and keeps its name while the new tab gets none.
+        let mut core = two_tab_core();
+        core.session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == 10)
+            .unwrap()
+            .name = Some("keep".into());
+        let new_tid = core.pane_break(1, None).expect("break one of two panes");
+        let sq = core.session.squad(1).unwrap();
+        assert_eq!(
+            sq.tabs.iter().find(|t| t.id == new_tid).unwrap().name,
+            None,
+            "a surviving source tab keeps its name; the break-out is a new tab"
+        );
+        assert_eq!(
+            sq.tabs.iter().find(|t| t.id == 10).unwrap().name.as_deref(),
+            Some("keep")
         );
     }
 
