@@ -659,8 +659,9 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # GRAPH_JSON_PATH (config.sh's shell-stub) honors config.paths.graph_json; fall back to the default (as scripts/lib/graph-resolve.sh does).
   _GRAPH_FILE="${GRAPH_JSON_PATH:-${HOME}/.fno/graph.json}"
   _GUARD_NODE=""
-  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens found in the graph
+  _GUARD_MATCHES=""   # space-joined distinct id-shaped tokens that ARE graph nodes
   _GUARD_AMBIGUOUS=0
+  _GUARD_STATUS=""
   # Tokenize INITIAL_INPUT so a modifier-prefixed input ("beast mode <id>")
   # still resolves its node, the way _resolve_plan_for_blast tokenizes. Each
   # token keeps the same anchored id shape + graph presence, so free text still
@@ -668,15 +669,27 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # stays fail-safe to no node. Unquoted split is bash-3.2 set -u safe (empty
   # input => zero iterations, unlike an empty "${arr[@]}"); set -f keeps the
   # split from also glob-expanding a token like "5*" against the cwd.
+  #
+  # Presence comes from `fno backlog get --strict`, not from grepping the id out
+  # of graph.json. A quoted id also appears inside OTHER nodes -- as a blocked_by
+  # array member, and as a nested `"id":` in an embedded decomposition list -- so
+  # the grep counted merely-referenced ids as present. Two such hits set
+  # _GUARD_AMBIGUOUS and silently skipped the in_review refusal below. The verb
+  # was already being called two lines down for the same node, so resolving here
+  # and reusing the answer costs no extra process on the common single-id input.
   set -f
   for _tok in $INITIAL_INPUT; do
-    if [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] \
-       && grep -q "\"${_tok}\"" "$_GRAPH_FILE" 2>/dev/null; then
-      case " $_GUARD_MATCHES " in
-        *" $_tok "*) ;;  # already counted this distinct id
-        *) _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok" ;;
-      esac
-    fi
+    [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] || continue
+    case " $_GUARD_MATCHES " in
+      *" $_tok "*) continue ;;  # already counted this distinct id
+    esac
+    # Fail-open on a missing fno, matching this guard's stance everywhere else:
+    # an unresolvable token is simply not a node, and init proceeds.
+    command -v fno >/dev/null 2>&1 || continue
+    _tok_status="$(fno backlog get --strict "$_tok" --field status 2>/dev/null | tr -d '[:space:]' || true)"
+    [[ -n "$_tok_status" ]] || continue
+    _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok"
+    _GUARD_STATUS="$_tok_status"
   done
   set +f
   if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
@@ -685,7 +698,6 @@ if [[ ! -f "$STATE_FILE" ]]; then
     _GUARD_AMBIGUOUS=1
   fi
   if [[ -n "$_GUARD_NODE" && "${TARGET_ALLOW_IN_REVIEW:-}" != "1" ]]; then
-    _GUARD_STATUS="$(fno backlog get --strict "$_GUARD_NODE" --field status 2>/dev/null | tr -d '[:space:]' || true)"
     if [[ "$_GUARD_STATUS" == "in_review" ]]; then
       _GUARD_PR="$(fno backlog get --strict "$_GUARD_NODE" --field pr_number 2>/dev/null | tr -d '[:space:]' || true)"
       cat >&2 <<EOF
@@ -1100,11 +1112,16 @@ PYEOF
       fi
     fi
     # graph_node_id written exactly once: the node id when a claim layer won and
-    # the node actually exists in the graph, else null (a missing graph.json or an
-    # ab-id not present in the graph stays null - the modern claim is just a lock
-    # and does not prove the backlog row exists).
-    if [[ "$_NODE_OWNED" -eq 1 && -f "$_GRAPH_FILE" ]] \
-         && grep -q "\"${_NODE_ID}\"" "$_GRAPH_FILE" 2>/dev/null; then
+    # the node actually exists in the graph, else null (the modern claim is just
+    # a lock and does not prove the backlog row exists).
+    #
+    # Existence is established upstream, so there is no presence check here: both
+    # ways _NODE_ID gets set prove it. The id-input path resolved it through
+    # `fno backlog get --strict`, and the plan_path path read the id back out of
+    # the graph. The grep this replaced could not tell a real node from an id
+    # merely referenced in some other node's blocked_by, so it stamped
+    # graph_node_id for nodes that do not exist.
+    if [[ "$_NODE_OWNED" -eq 1 && -n "$_NODE_ID" ]]; then
       echo "graph_node_id: $_NODE_ID" >> "$STATE_FILE"
     else
       echo "graph_node_id: null" >> "$STATE_FILE"
