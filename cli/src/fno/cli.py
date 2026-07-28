@@ -69,11 +69,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "reality-check": ("fno.reality_check.cli:cli", "check external reality", {"hidden": True}),
-    "providers": (
-        "fno.adapters.providers.cli:cli",
-        "Manage provider records and active selection.",
-        {"hidden": True},
-    ),
     "mail": (
         "fno.mail.cli:mail_app",
         "Durable polled mailbox: send/unread/ack/reply/drain/status.",
@@ -363,7 +358,7 @@ command is about" and differs by family:
   fno backlog add/idea/update/intake    -p priority   (-c cwd, -d details, -t type/title)
   fno backlog next/ready/find           -p project    (find: -s status, -d domain)
   fno backlog capture add               -p priority   (-s source, -w where)
-  fno providers add                     -p priority   (-c cli, -a auth, -s scope)
+  fno config accounts add               -p priority   (-H harness, -a auth, -s scope)
   fno gate verify                       -p phase      (-s state, -x strict)
   fno event emit                        -t type       (-d data, -s source)
   fno mail send                         -k kind       (-b body; --to-project long-only)

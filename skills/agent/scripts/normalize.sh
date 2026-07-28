@@ -30,7 +30,7 @@
 #   message=<final message to pass verbatim to the spawn/host verb>
 #
 # Locked decisions honored:
-#   4. provider = explicit -> config.providers (resolve_dispatch_target) -> claude
+#   4. provider = explicit -> config.accounts (resolve_dispatch_target) -> claude
 #   8. the message is one unit; the SKILL builds `fno agents spawn <name> "<msg>"`
 #      with name POSITIONAL.
 
@@ -619,10 +619,17 @@ resolve_from_config() {
   local py_cmd=()
   read -r -a py_cmd <<< "$shebang"
   { [[ -x "${py_cmd[0]}" ]] || command -v "${py_cmd[0]}" >/dev/null 2>&1; } || return 0
-  # resolve_dispatch_target returns a provider RECORD id (e.g. "claude-anthropic"),
-  # not a CLI name; the CLI name lives at ProviderRecord.cli. Map id -> .cli so a
-  # configured non-claude provider resolves correctly instead of silently
-  # defaulting to claude. A combo / unresolved target prints nothing (-> claude).
+  # resolve_dispatch_target returns an account RECORD id (e.g. "claude-anthropic"),
+  # not a harness name; the harness lives at ProviderRecord.harness. Map
+  # id -> .harness so a configured non-claude account resolves correctly instead
+  # of silently defaulting to claude. A combo / unresolved target prints nothing
+  # (-> claude).
+  #
+  # The `or getattr(rec, "cli", "")` fallback is NOT dead: this file is bundled
+  # into skills and can run against an older deployed `fno` whose records still
+  # expose `.cli`. Without it the read yields "" and this silently routes every
+  # configured codex/gemini account back to claude - the exact failure the line
+  # above exists to prevent, and one no test would have caught.
   "${py_cmd[@]}" -c 'import sys
 try:
     from fno.sigma_dispatch import resolve_dispatch_target as r
@@ -630,7 +637,7 @@ try:
     pid = getattr(r(sys.argv[1]), "provider_id", None)
     if pid:
         rec = load_providers().by_id.get(pid)
-        print(getattr(rec, "cli", "") or "")
+        print(getattr(rec, "harness", "") or getattr(rec, "cli", "") or "")
 except Exception:
     pass' "$1" 2>/dev/null || true
 }

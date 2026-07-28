@@ -54,7 +54,7 @@ def _claude_record(creds: Path) -> ProviderRecord:
     return ProviderRecord(
         id="claude-primary",
         name="Claude Primary",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds,
     )
@@ -97,14 +97,14 @@ class TestUsageWindowClamp:
 class TestProbeFailOpen:
     def test_api_key_record_is_unknown(self) -> None:
         rec = ProviderRecord(
-            id="api", name="Api", cli="claude", auth="api_key",
+            id="api", name="Api", harness="claude", auth="api_key",
             env={"ANTHROPIC_API_KEY": "x"},
         )
         assert probe_usage(rec) is None
 
     def test_unknown_cli_is_unknown(self, tmp_path: Path) -> None:
         rec = ProviderRecord(
-            id="gem", name="Gem", cli="gemini", auth="oauth_dir",
+            id="gem", name="Gem", harness="gemini", auth="oauth_dir",
             credentials_source=tmp_path,
         )
         assert probe_usage(rec) is None
@@ -227,7 +227,7 @@ class TestProbeFailOpen:
             return _Resp()
 
         # No file token (empty dir) so only the two keychain tokens are tried.
-        rec = ProviderRecord(id="c", name="c", cli="claude", auth="oauth_dir", credentials_source=tmp_path)
+        rec = ProviderRecord(id="c", name="c", harness="claude", auth="oauth_dir", credentials_source=tmp_path)
         monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _fetch)
         snap = probe_usage(rec, now=1000.0)
         assert snap is not None
@@ -248,7 +248,7 @@ class TestProbeFailOpen:
                 "secondary": {"used_percent": 5.0, "window_minutes": 10080, "resets_at": 1784372823},
             }},
         }) + "\n")
-        rec = ProviderRecord(id="cx", name="cx", cli="codex", auth="oauth_dir", credentials_source=tmp_path)
+        rec = ProviderRecord(id="cx", name="cx", harness="codex", auth="oauth_dir", credentials_source=tmp_path)
         snap = probe_usage(rec, now=1000.0)
         assert snap is not None
         assert snap.source == "session-events"
@@ -520,7 +520,7 @@ class TestRequiredBotHeadroomCheck:
         # Config: one required bot backed by codex.
         review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)
         monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SimpleNamespace(review=review))
-        rec = ProviderRecord(id="codex-pro", name="Codex", cli="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
+        rec = ProviderRecord(id="codex-pro", name="Codex", harness="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
         monkeypatch.setattr(pcli, "load_providers", lambda *a, **k: ProvidersConfig(records=[rec]))
         monkeypatch.setattr(pcli, "_get_repo_root", lambda: tmp_path)
 
@@ -555,7 +555,7 @@ class TestRequiredBotHeadroomCheck:
         monkeypatch.chdir(tmp_path)
         review = SimpleNamespace(github_apps=["chatgpt-codex-connector"], required_bots=None)
         monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SimpleNamespace(review=review))
-        rec = ProviderRecord(id="codex-pro", name="Codex", cli="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
+        rec = ProviderRecord(id="codex-pro", name="Codex", harness="codex", auth="api_key", env={"OPENAI_API_KEY": "x"})
         monkeypatch.setattr(pcli, "load_providers", lambda *a, **k: ProvidersConfig(records=[rec]))
         monkeypatch.setattr(pcli, "_get_repo_root", lambda: tmp_path)
 

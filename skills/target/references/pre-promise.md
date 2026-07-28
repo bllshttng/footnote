@@ -122,7 +122,7 @@ The loop-check verb (`fno-agents loop-check`) will verify the world independentl
 **Required-bot quota early warning (x-5d3e, advisory).** When a review gate would wait on a `config.review` required bot, a cached-quota check surfaces a coming wedge now instead of letting the gate hang silently for hours. Run it just before the promise; it is read-only, fail-open, and never gates:
 
 ```bash
-fno providers required-bot-check
+fno config accounts required-bot-check
 ```
 
 It prints nothing when every required bot's provider has headroom (or none are configured), and emits one `quota_required_bot_exhausted` decision event per exhausted bot. If it prints a warning, in attended mode surface the same facts so the operator can act (swap accounts / wait for the reset) rather than discovering the wedge later:

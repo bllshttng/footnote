@@ -760,12 +760,17 @@ class ReviewBlock(BaseModel):
     # disabled (callers treat no entries / all-"none" as off). read by
     # skills/pr/scripts/list-reviewers.sh.
     external_reviewers: list[str] = Field(default_factory=list)
-    # Per-agent provider routing for the cross-model review panel (ab-6c8f4c61).
-    # Map of agent-name -> provider (claude | codex | gemini | alternate).
+    # Per-agent HARNESS routing for the cross-model review panel (ab-6c8f4c61).
+    # Map of agent-name -> harness (claude | codex | gemini | alternate).
     # Default empty: the curated correctness-subset default is computed in the
     # T2.1 resolver, NOT baked here, so an empty map stays a faithful empty map.
+    agent_harnesses: dict[str, str] = Field(default_factory=dict)
+    # Pre-rename spelling of `agent_harnesses`. The values are harnesses (which
+    # CLI binary the agent runs on), never the model vendor that `provider`
+    # names elsewhere, so the field carried the same conflation that was
+    # removed from `fno whoami`. Kept readable and synced by the validator below.
     agent_providers: dict[str, str] = Field(default_factory=dict)
-    # Full route tuple. Unlike agent_providers, each configured entry spends a
+    # Full route tuple. Unlike agent_harnesses, each configured entry spends a
     # separate named SessionStart and therefore remains explicit and opt-in.
     agent_routes: dict[str, AgentRouteBlock] = Field(default_factory=dict)
     cross_model: CrossModelBlock = Field(default_factory=CrossModelBlock)
@@ -1000,7 +1005,7 @@ class ReviewBlock(BaseModel):
         )
         return []
 
-    @field_validator("agent_providers", mode="before")
+    @field_validator("agent_harnesses", "agent_providers", mode="before")
     @classmethod
     def coerce_agent_providers(cls, v: object) -> object:
         """Fail-safe to an empty map on a non-mapping value.
@@ -1008,7 +1013,7 @@ class ReviewBlock(BaseModel):
         A scalar or list here is operator error; degrading to {} keeps the
         rest of the settings load succeeding and leaves cross-model OFF (no
         map = no opt-in signal), rather than raising out of the whole load.
-        Values are NOT validated here (an unknown provider literal is handled
+        Values are NOT validated here (an unknown harness literal is handled
         at resolution time with a warn+claude fallback, per Failure Modes).
         """
         if v is None:
@@ -1016,11 +1021,39 @@ class ReviewBlock(BaseModel):
         if isinstance(v, dict):
             return v
         _LOG.warning(
-            "settings.yaml: config.review.agent_providers is not a mapping "
+            "settings.yaml: config.review.agent_harnesses is not a mapping "
             "(%r); ignoring it (cross-model stays off)",
             v,
         )
         return {}
+
+    @model_validator(mode="after")
+    def resolve_agent_harnesses_alias(self) -> "ReviewBlock":
+        """`agent_providers` is the pre-rename alias for `agent_harnesses`.
+
+        Same contract as :meth:`resolve_github_apps_alias`: the canonical field
+        wins, a conflict warns rather than merging, and both stay readable and
+        equal afterwards so a reader of either spelling sees one map.
+
+        An empty map and an unset field are the same state here (both mean "no
+        opt-in signal"), so truthiness is the right test for "was this set" and
+        no None sentinel is needed.
+        """
+        if (
+            self.agent_harnesses
+            and self.agent_providers
+            and self.agent_harnesses != self.agent_providers
+        ):
+            _LOG.warning(
+                "settings.yaml: both config.review.agent_harnesses and the "
+                "pre-rename config.review.agent_providers are set and differ; "
+                "using agent_harnesses",
+            )
+        elif not self.agent_harnesses and self.agent_providers:
+            self.agent_harnesses = self.agent_providers
+        # Keep the alias readable and consistent with the canonical field.
+        self.agent_providers = self.agent_harnesses
+        return self
 
     @field_validator("agent_routes", mode="before")
     @classmethod

@@ -19,6 +19,12 @@ setup_tmp_home() {
     # PWD-based local settings: clear any inherited override
     export PWD="$TMP_HOME"
     cd "$TMP_HOME" || exit 1
+    # config.sh assigns these with `${VAR:-default}`, so a value set by an
+    # earlier setup_tmp_home SURVIVES the re-source and keeps pointing at the
+    # previous (now deleted) temp HOME. Clear them first or the re-source is a
+    # no-op: every test after the first then reads a nonexistent file, which
+    # fails the tests that expect a value and passes the rc=1 tests VACUOUSLY.
+    unset LOCAL_SETTINGS GLOBAL_SETTINGS CONFIG_FILE
     # Re-source config.sh so PATH-derived vars pick up the new HOME.
     source "$SCRIPT_DIR/../lib/config.sh"
 }
@@ -167,6 +173,50 @@ YAML
 else
     echo "  SKIP: yq not installed - tests 5 and 6 (non-canonical YAML) skipped"
 fi
+
+# ---- Test 7: the canonical [accounts] block reads the same as [providers] ----
+# This reader parses config.toml directly and never reaches the Python loader's
+# rename choke point, so both spellings need coverage here. A miss is silent
+# (empty + rc=1), which is indistinguishable from "no pricing configured".
+setup_tmp_home
+cat > "$TMP_HOME/.fno/config.toml" <<'TOML'
+[accounts]
+active = "readyrule"
+
+[[accounts.records]]
+id = "readyrule"
+name = "readyrule"
+harness = "claude"
+auth = "oauth_dir"
+credentials_source = "~/.claude"
+[accounts.records.pricing]
+input_per_million_usd = 15.0
+TOML
+val=$(get_provider_pricing readyrule input)
+[[ "$val" == "15.0" ]] && pass "canonical accounts block" || fail "canonical accounts block (got '$val')"
+teardown_tmp_home
+
+# ---- Test 8: a shadowed legacy block must not leak pricing ----
+# The yq and awk paths must agree on WHICH block is authoritative. An awk
+# alternation matching both scans the shadowed legacy block too, so a record
+# living only there returns a price no reader can see.
+setup_tmp_home
+cat > "$TMP_HOME/.fno/config.toml" <<'TOML'
+[[accounts.records]]
+id = "real"
+[accounts.records.pricing]
+input_per_million_usd = 1.0
+
+[[providers.records]]
+id = "ghost"
+[providers.records.pricing]
+input_per_million_usd = 99.0
+TOML
+val=$(get_provider_pricing real input)
+[[ "$val" == "1.0" ]] && pass "canonical block resolves" || fail "canonical block (got '$val')"
+val=$(get_provider_pricing ghost input)
+[[ -z "$val" ]] && pass "shadowed legacy block does not leak" || fail "shadowed leak (got '$val')"
+teardown_tmp_home
 
 echo ""
 echo "Result: ${PASS} pass, ${FAIL} fail"

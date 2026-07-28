@@ -88,7 +88,9 @@ def test_cmd_ask_provider_tombstone_teaches_and_exits_2(
     err = (result.stderr or "") + (result.stdout or "")
     assert "split at the axis rename" in err
     assert "--harness/-H" in err
-    assert "0.4.0" in err
+    # No removal date: 0.3.x is the long-term home, and this tombstone is a
+    # permanent refusal that teaches the axis, not an alias awaiting an expiry.
+    assert "0.4.0" not in err
 
 
 def test_cmd_ask_off_spawn_minus_p_is_unknown(
