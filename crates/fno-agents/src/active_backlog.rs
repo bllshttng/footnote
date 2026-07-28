@@ -164,11 +164,18 @@ pub enum MissionDispatch {
 /// Best-effort `fno backlog defer <node>` for the circuit-breaker park. Graph
 /// state, recoverable via `fno backlog undefer`. Node ids are global, so the
 /// epic's cwd is a valid working dir for the child-node defer.
+/// `retry_etxtbsy` like every other shellout here - this was the one that
+/// skipped it. A transient busy binary (a concurrent `fno update`, or under
+/// `cargo test` a sibling thread's freshly-written stub) makes the spawn fail,
+/// and `let _ =` swallows it, so a tripped breaker silently never defers its
+/// node and re-dispatches it into the same crash loop.
 fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) {
-    let _ = fno_cmd(fno_bin)
-        .current_dir(cwd)
-        .args(["backlog", "defer", node, "--reason", reason])
-        .output();
+    let _ = retry_etxtbsy(|| {
+        fno_cmd(fno_bin)
+            .current_dir(cwd)
+            .args(["backlog", "defer", node, "--reason", reason])
+            .output()
+    });
 }
 
 /// Does the node carry a PR reference in graph state? Read through `fno backlog
