@@ -1108,12 +1108,21 @@ pub enum Command {
     /// cannot name a branch path. Sent once on drop rather than streamed like a
     /// resize, so the server validates against the tree the drop actually lands
     /// on and refuses a stale address out loud.
-    /// Both ids are `None` for the keyboard bind and `Some` for a drop, because
-    /// a pointer has a position and a keypress does not: a drag can pick up any
-    /// pane and name the exact slot it lands in, while the bind always moves
-    /// whatever is focused to whatever lies that way. `None` therefore means
+    /// The two ids are independently optional, and all three reachable pairings
+    /// mean different things. Both `None` is the keyboard bind, both `Some` is a
+    /// drop: a pointer has a position and a keypress does not, so a drag can
+    /// pick up any pane and name the exact slot it lands in, while the bind
+    /// always moves whatever is focused to whatever lies that way. `None` means
     /// "resolve it server-side" - `mover` from the tab's focus, `target` from
     /// the same `navigate` geometry [`Command::FocusDir`] uses.
+    ///
+    /// `mover: Some` with `target: None` is the third form and the one to be
+    /// careful with: it means "this pane, one place `dir`-ward OF ITSELF", and
+    /// the server resolves it by navigating from the mover. It is therefore only
+    /// meaningful when the mover is in the tab the resolution runs against. A
+    /// caller naming a pane in some OTHER tab must supply a `target`, or the
+    /// move silently reshapes a tab nobody is looking at. The sideline row menu
+    /// picks between the two forms on exactly that test.
     ///
     /// One verb rather than two: both forms end in the same relocation, and
     /// only the addressing differs.

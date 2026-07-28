@@ -3063,10 +3063,26 @@ impl View {
     /// does NOT gate on `pane_rect(mover)`: a pane-hosted row names a pane living
     /// in ANOTHER tab, off the current layout by design (the server resolves it).
     fn row_drag_to(&mut self, row: u16, col: u16, now: Instant) -> bool {
-        if self.row_drag.is_none() {
-            return false;
-        }
-        let zone = self.drop_zone_at(row, col);
+        let mover = match self.row_drag.as_ref().map(|d| &d.src) {
+            None => return false,
+            Some(RowSource::Pane(pid)) => Some(*pid),
+            Some(RowSource::Attach(_)) => None,
+        };
+        // Suppress an origin drop the same way `pane_drag_to` does, but only for
+        // a mover that is ON this layout: the server discards an origin move in
+        // silence (it reads as a deliberate cancel), so a zone that lights up
+        // and then moves nothing is the whole defect. An off-layout mover cannot
+        // be an origin - it is not in this tree at all - and must keep every
+        // zone, which is why the `pane_rect` gate stays out of this path.
+        let zone = match mover.filter(|m| self.pane_rect(*m).is_some()) {
+            Some(mover) => {
+                let abuts = |s: Seam| s.a == mover || s.b == mover;
+                self.drop_zone_at(row, col)
+                    .filter(|z| z.target != mover)
+                    .filter(|_| !self.seam_at(row, col).is_some_and(abuts))
+            }
+            None => self.drop_zone_at(row, col),
+        };
         let drag = self.row_drag.as_mut().expect("checked above");
         drag.last_at = now;
         let changed = drag.zone != zone;
@@ -16092,6 +16108,16 @@ mod tests {
         }
     }
 
+    /// A paneless bg row that is still attachable here - the branch carrying the
+    /// Split grid, the Move grid's twin.
+    fn attachable_row(name: &str, attach_id: &str) -> AgentRow {
+        AgentRow {
+            pane_id: None,
+            attach_id: Some(attach_id.into()),
+            ..pane_hosted_row(name, 0)
+        }
+    }
+
     /// Pick `action` out of a live row menu and run it, returning what went on
     /// the wire.
     async fn menu_command_for(v: &mut View, action: super::MenuAction) -> Command {
@@ -16176,17 +16202,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn row_menu_move_cells_send_the_direction_on_their_label() {
-        // The rows and the actions are two parallel lists joined only by
-        // position, so a transposed pair would put "Move Left" over Dir::Right
-        // and every other test would still pass - they all locate an entry BY
-        // action, never by what the operator reads. Walk the menu's targets in
-        // the order `popup.sel` indexes them and pin label to Dir.
-        let row = pane_hosted_row("p", 7);
-        let menu = build_row_menu(&row, Anchor::Center);
-        let labels: Vec<String> = menu
-            .popup
+    /// The selectable labels of a built menu, in the order `popup.sel` indexes
+    /// them - the same order `add` extends `actions`, so the two zip.
+    fn menu_labels(menu: &RowMenu) -> Vec<String> {
+        menu.popup
             .targets()
             .iter()
             .map(|(ri, ci)| match &menu.popup.rows[*ri] {
@@ -16195,28 +16214,60 @@ mod tests {
                 PopupRow::FullWidth(l) => l.clone(),
                 PopupRow::Header(_) | PopupRow::Rule => unreachable!("not a target"),
             })
-            .collect();
-        assert_eq!(
-            labels.len(),
-            menu.actions.len(),
-            "one action per selectable cell"
-        );
-        for (want_label, want_dir) in [
-            ("Move Left", Dir::Left),
-            ("Move Right", Dir::Right),
-            ("Move Up", Dir::Up),
-            ("Move Down", Dir::Down),
-        ] {
-            let i = labels
-                .iter()
-                .position(|l| l == want_label)
-                .unwrap_or_else(|| panic!("menu has a {want_label} cell"));
+            .collect()
+    }
+
+    #[test]
+    fn menu_grid_cells_send_the_direction_on_their_label() {
+        // Rows and actions are two parallel lists joined only by position, so a
+        // transposed pair puts "Move Left" over Dir::Right and every other test
+        // still passes - they all locate an entry BY action, never by what the
+        // operator reads. Both grids are covered: the pane-hosted Move grid and
+        // the paneless Split grid have the same construction and the same gap.
+        let cases: Vec<(RowMenu, Vec<(&str, super::MenuAction)>)> = vec![
+            (
+                build_row_menu(&pane_hosted_row("p", 7), Anchor::Center),
+                vec![
+                    ("Move Left", super::MenuAction::MoveDir(Dir::Left)),
+                    ("Move Right", super::MenuAction::MoveDir(Dir::Right)),
+                    ("Move Up", super::MenuAction::MoveDir(Dir::Up)),
+                    ("Move Down", super::MenuAction::MoveDir(Dir::Down)),
+                ],
+            ),
+            (
+                build_row_menu(&attachable_row("a", "att-1"), Anchor::Center),
+                vec![
+                    ("Split Left", super::MenuAction::Split(Dir::Left)),
+                    ("Split Right", super::MenuAction::Split(Dir::Right)),
+                    ("Split Up", super::MenuAction::Split(Dir::Up)),
+                    ("Split Down", super::MenuAction::Split(Dir::Down)),
+                ],
+            ),
+        ];
+        for (menu, want) in cases {
+            let labels = menu_labels(&menu);
             assert_eq!(
-                menu.actions[i],
-                super::MenuAction::MoveDir(want_dir),
-                "the cell reading {want_label:?} must send {want_dir:?}"
+                labels.len(),
+                menu.actions.len(),
+                "one action per selectable cell"
             );
+            for (want_label, want_action) in want {
+                let i = labels
+                    .iter()
+                    .position(|l| l == want_label)
+                    .unwrap_or_else(|| panic!("menu has a {want_label} cell: {labels:?}"));
+                assert_eq!(
+                    menu.actions[i], want_action,
+                    "the cell reading {want_label:?} must send {want_action:?}"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn pane_menu_new_tab_cell_breaks_out() {
+        let menu = build_row_menu(&pane_hosted_row("p", 7), Anchor::Center);
+        let labels = menu_labels(&menu);
         let i = labels
             .iter()
             .position(|l| l.contains("New Tab"))
@@ -16243,8 +16294,10 @@ mod tests {
         // just the command variant: an earlier cut of this agreed on MovePane
         // while the menu left `target` unset, which sent the pane wandering
         // inside its own background tab instead of into the current view. The
-        // exact target ids differ by construction (a drag names the pane its
-        // drop zone touched, a menu names the viewed focus), so what is pinned
+        // fixture row is OFF-SCREEN, which is the arm where the menu names a
+        // target at all; an on-screen row leaves it unset and is pinned
+        // separately. The exact target ids differ by construction (a drag names
+        // the pane its drop zone touched, a menu the viewed focus), so what is pinned
         // here is that BOTH name a concrete in-view destination.
         let row = pane_hosted_row("p", 99);
         let mut v = view_with_agents(vec![row.clone()]);
@@ -22046,6 +22099,41 @@ mod tests {
                 target: Some(11),
                 dir: Dir::Right
             })
+        );
+    }
+
+    #[test]
+    fn row_drag_of_an_onscreen_pane_suppresses_an_origin_zone() {
+        // The server discards an origin move in SILENCE (it reads the drop as a
+        // deliberate cancel), so a zone that lights up and then moves nothing is
+        // the defect. `pane_drag_to` already suppresses both origin shapes; the
+        // row drag of an on-layout pane must too, or the same gesture means two
+        // things depending on which grip you grabbed.
+        let mut view = three_pane_view();
+        assert!(
+            view.pane_rect(11).is_some(),
+            "precondition: 11 is ON this layout"
+        );
+        view.begin_row_drag(RowSource::Pane(11), Instant::now());
+        // The seam between 11 and 12 is one 11 already abuts: dropping there
+        // rebuilds the identical tree, which move_leaf reports as Origin.
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        view.row_drag_to(r, c, Instant::now());
+        assert_eq!(
+            view.commit_row_drag(),
+            None,
+            "an origin drop commits nothing rather than a command the server eats"
+        );
+
+        // The off-layout case is unchanged: that mover is in another tree, so it
+        // can never be an origin and must keep every zone.
+        let mut view = three_pane_view();
+        view.begin_row_drag(RowSource::Pane(99), Instant::now());
+        let (r, c) = seam_cell_between(&view, 11, 12);
+        assert!(view.row_drag_to(r, c, Instant::now()));
+        assert!(
+            view.commit_row_drag().is_some(),
+            "an off-layout row still commits a cross-tab move"
         );
     }
 

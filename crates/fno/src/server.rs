@@ -2756,6 +2756,7 @@ impl Core {
             .iter()
             .position(|s| s.id == sid)
             .expect("squad live");
+        let src_name = self.session.squads[si].tabs[ti].name.clone();
         let outcome = {
             let tab = &mut self.session.squads[si].tabs[ti];
             tree::detach_leaf(tab, vp, pane).map_err(|e| (err_code::BAD_REQUEST, e.to_string()))?
@@ -2765,7 +2766,16 @@ impl Core {
         // (for TabEmptied) drop the now-orphaned source tab that still holds
         // this pane - otherwise the pane would live in two tabs.
         self.session.squads[si].tabs.push(Tab {
-            name: clean_tab_name(name),
+            // An explicit name wins. Otherwise, when the break empties the
+            // source tab, carry its name over instead of dropping it: the tab
+            // is being rebuilt around the same single pane, and the operator
+            // named that tab rather than a tree shape. Breaking one pane out of
+            // several is a genuinely new tab and stays unnamed.
+            name: clean_tab_name(name).or_else(|| {
+                matches!(outcome, tree::DetachOutcome::TabEmptied)
+                    .then_some(src_name)
+                    .flatten()
+            }),
             id: new_tid,
             root: Node::Leaf(pane),
             focus: pane,
