@@ -874,21 +874,32 @@ class TestAtomicMutate:
             return d
 
         observed_states = []
+        write_done = threading.Event()
+
+        def observe():
+            try:
+                text = settings_path.read_text()
+                parsed = tomllib.loads(text)
+                observed_states.append(parsed["providers"]["active"])
+            except (tomllib.TOMLDecodeError, KeyError, TypeError):
+                observed_states.append("CORRUPT")
 
         def reader_loop():
-            for _ in range(20):
-                try:
-                    text = settings_path.read_text()
-                    parsed = tomllib.loads(text)
-                    observed_states.append(parsed["providers"]["active"])
-                except (tomllib.TOMLDecodeError, KeyError, TypeError):
-                    observed_states.append("CORRUPT")
-                time.sleep(0.005)
+            # Poll for the whole mutation, then take one GUARANTEED post-write
+            # read. A fixed iteration count raced the writer: 20 polls at 5ms is
+            # ~100ms of budget against an 80ms mutation, so on a loaded runner
+            # (xdist, shared CI box) the reader finished before the write landed
+            # and "bar" was never observed - a green-or-red coin flip that says
+            # nothing about the atomicity this test exists to check.
+            while not write_done.wait(timeout=0.005):
+                observe()
+            observe()
 
         reader_thread = threading.Thread(target=reader_loop)
         reader_thread.start()
 
         atomic_mutate_settings(slow_mutator, settings_path=settings_path)
+        write_done.set()
         reader_thread.join()
 
         # Every observation must be either "foo" (pre) or "bar" (post),
