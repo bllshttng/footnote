@@ -1077,3 +1077,391 @@ class TestCombosUpdate:
         )
         new_hash = compute_providers_hash(("gemini-backup", "claude-primary"))
         assert read_cursor("main", new_hash) is None
+
+
+# ---------------------------------------------------------------------------
+# AC5-CON: routing-active and slot-active resolve through ONE function
+# ---------------------------------------------------------------------------
+
+
+def _managed_pair_config(active: str) -> dict:
+    return {
+        "config": {
+            "providers": {
+                "active": active,
+                "records": [
+                    {"id": "readyrule", "name": "readyrule", "harness": "claude",
+                     "auth": "managed", "priority": 10},
+                    {"id": "makers", "name": "makers", "harness": "claude",
+                     "auth": "managed", "priority": 20},
+                ],
+            }
+        }
+    }
+
+
+class TestEffectiveActive:
+    """`config.providers.active` and the slot occupant can disagree.
+
+    Live on the machine that motivated this: config said `readyrule` while the
+    shared slot held `makers`, so the display path marked one account and the
+    dispatch path evaluated the other's headroom.
+    """
+
+    @pytest.fixture()
+    def diverged(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers import managed
+
+        managed.stamp_active_slot("claude", "makers")
+        return tmp_path
+
+    def test_resolver_returns_the_slot_occupant(self, diverged: Path) -> None:
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=diverged) == "makers"
+
+    def test_dispatch_path_agrees_with_the_display_path(self, diverged: Path) -> None:
+        # The two paths must not disagree: one resolver, called from both.
+        from fno.adapters.providers.loader import (
+            effective_active,
+            is_effective_active,
+            load_providers,
+        )
+        from fno.dispatch import _resolve_provider_id
+
+        config = load_providers(repo_root=diverged)
+        marked = [r.id for r in config.records if is_effective_active(r, config)]
+        assert marked == ["makers"]
+        assert _resolve_provider_id() == effective_active(repo_root=diverged) == "makers"
+
+    def test_list_marks_the_slot_occupant_not_the_config_pointer(
+        self, diverged: Path
+    ) -> None:
+        result = _invoke(["list"], cwd=diverged, home=diverged)
+        assert result.exit_code == 0, result.output
+        starred = [ln for ln in result.output.splitlines() if ln.lstrip().startswith("*")]
+        assert len(starred) == 1
+        assert "makers" in starred[0]
+
+    def test_non_managed_active_still_reads_routing_active(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A record whose credential does NOT come from the shared slot keeps
+        # routing-active as its authority.
+        _write_settings(tmp_path / ".fno" / "config.toml", _two_record_config())
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=tmp_path) == "claude-primary"
+
+    def test_managed_active_with_no_stamp_is_nobody(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # No stamp means nothing is known to occupy the slot. Guessing
+        # routing-active here is how a dispatch ends up billing an account whose
+        # credential is not actually loaded.
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers.loader import effective_active
+
+        assert effective_active(repo_root=tmp_path) is None
+
+
+# ---------------------------------------------------------------------------
+# AC4-HP: fno providers doctor reports the store's real condition
+# ---------------------------------------------------------------------------
+
+
+class TestDoctor:
+    """Reconstructs the live store defect: one credential under two ids, both
+    blobs expired, slot tainted. Each of those otherwise surfaces only as an
+    `unknown` somewhere downstream."""
+
+    @pytest.fixture()
+    def sick_store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        import json as _json
+
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        from fno.adapters.providers import managed
+
+        # expiresAt in MILLISECONDS (the shape Claude Code writes), already past.
+        blob = _json.dumps({
+            "claudeAiOauth": {
+                "accessToken": "one-shared-token",
+                "expiresAt": 1783352000000,
+            }
+        })
+        root = tmp_path / ".fno" / "providers"
+        for rid in ("readyrule", "makers"):
+            (root / rid).mkdir(parents=True)
+            (root / rid / "blob").write_text(blob)
+        managed._set_slot_taint("claude", root, True)
+        return tmp_path
+
+    def test_names_duplicate_expiry_and_taint_and_exits_nonzero(
+        self, sick_store: Path
+    ) -> None:
+        result = _invoke(["doctor"], cwd=sick_store, home=sick_store)
+        assert result.exit_code != 0, result.output
+        assert "duplicate-credential" in result.output
+        # The pair is named in both directions, so either row points at the other.
+        assert "readyrule" in result.output and "makers" in result.output
+        assert result.output.count("expired-credential") == 2
+        assert "tainted-slot" in result.output
+        assert "one-shared-token" not in result.output
+
+    def test_healthy_store_is_quiet_and_exits_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        root = tmp_path / ".fno" / "providers"
+        for rid, tok in (("readyrule", "tok-a"), ("makers", "tok-b")):
+            (root / rid).mkdir(parents=True)
+            (root / rid / "blob").write_text(
+                _json.dumps({
+                    "claudeAiOauth": {"accessToken": tok, "expiresAt": 4102444800000}
+                })
+            )
+        result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "no problems found" in result.output
+
+    def test_config_dir_without_a_login_is_reported(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A config_dir record whose dir holds no credential would spawn an
+        # auth-prompt zombie; doctor is where that becomes visible before then.
+        empty = tmp_path / "claude-alt"
+        empty.mkdir()
+        _write_settings(tmp_path / ".fno" / "config.toml", {
+            "config": {"providers": {"active": "alt", "records": [
+                {"id": "alt", "name": "alt", "harness": "claude", "auth": "managed",
+                 "config_dir": str(empty)},
+            ]}}
+        })
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        monkeypatch.setattr("fno.agents.account_env._login_present", lambda p: False)
+        result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code != 0, result.output
+        assert "no-login-in-config-dir" in result.output
+
+
+# ---------------------------------------------------------------------------
+# fno providers pick (launch-time headroom picking)
+# ---------------------------------------------------------------------------
+
+
+def _config_dir_pair(tmp_path: Path, active: str = "readyrule") -> dict:
+    for name in ("claude-alt", "claude-main"):
+        d = tmp_path / name
+        d.mkdir(exist_ok=True)
+        (d / ".credentials.json").write_text("{}")
+    return {
+        "config": {
+            "providers": {
+                "active": active,
+                "records": [
+                    {"id": "readyrule", "name": "readyrule", "harness": "claude",
+                     "auth": "managed", "config_dir": str(tmp_path / "claude-alt")},
+                    {"id": "makers", "name": "makers", "harness": "claude",
+                     "auth": "managed", "config_dir": str(tmp_path / "claude-main")},
+                ],
+            }
+        }
+    }
+
+
+def _pick_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cfg: dict) -> Path:
+    _write_settings(tmp_path / ".fno" / "config.toml", cfg)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+    return tmp_path
+
+
+class TestPick:
+    def test_no_launchable_candidate_exits_4_with_the_setup_instruction(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC9-EDGE: an invisible degradation becomes an actionable instruction.
+
+        Both accounts managed with no config_dir: the non-active one has no
+        correct overlay at all, and the active one only rides the shared slot,
+        so neither can be pinned to a worker.
+        """
+        _pick_env(tmp_path, monkeypatch, _managed_pair_config("readyrule"))
+        from fno.adapters.providers import managed
+
+        managed.stamp_active_slot("claude", "readyrule")
+
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 4, result.output
+        assert "readyrule" in result.output and "makers" in result.output
+        assert "--config-dir" in result.output
+
+    def test_picks_the_first_candidate_with_headroom(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        import time as _time
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        now = _time.time()  # headroom reads against the wall clock, not a fixture epoch
+        write_usage_snapshot(
+            UsageSnapshot("readyrule", (UsageWindow("5h", 100.0, now + 3600),), now, "t"),
+            now=now,
+        )
+        write_usage_snapshot(
+            UsageSnapshot("makers", (UsageWindow("5h", 4.0, now + 3600),), now, "t"),
+            now=now,
+        )
+        verdict = _pick_verdict(tmp_path)
+        assert verdict.account == "makers"
+        assert verdict.exit_code == 0
+
+    def test_every_launchable_candidate_exhausted_exits_3(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.runtime_state import write_usage_snapshot
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        import time as _time
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        now = _time.time()
+        for rid in ("readyrule", "makers"):
+            write_usage_snapshot(
+                UsageSnapshot(rid, (UsageWindow("5h", 100.0, now + 3600),), now, "t"),
+                now=now,
+            )
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 3, result.output
+        assert "exhausted" in result.output
+
+    def test_unprobeable_set_keeps_combo_order(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC14-EDGE: with no snapshots at all, ordering is unchanged.
+
+        UNKNOWN never reads as EXHAUSTED and never blocks a launch, so the
+        answer is the first launchable candidate in the operator's configured
+        order - byte-identical to what the pre-existing walk returns.
+        """
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        from fno.adapters.providers.rotation import Combo, next_healthy_provider
+
+        verdict = _pick_verdict(tmp_path)
+        expected = next_healthy_provider(
+            Combo(name="pick", providers=("readyrule", "makers"))
+        )
+        assert verdict.account == expected == "readyrule"
+        assert dict(verdict.candidates)["readyrule"] == "unknown"
+
+    def test_exclude_skips_a_known_dead_account(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        verdict = _pick_verdict(tmp_path, exclude=("readyrule",))
+        assert verdict.account == "makers"
+
+    def test_print_env_emits_the_picked_config_dir(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        result = _invoke(["pick", "--print-env"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert f"CLAUDE_CONFIG_DIR={tmp_path / 'claude-alt'}" in result.stdout
+
+    def test_stderr_carries_a_reason_even_on_success(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Fail-open must not become fail-silent: every verdict is explained.
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        verdict = _pick_verdict(tmp_path)
+        assert verdict.reason
+        assert len(verdict.candidates) == 2
+
+
+def _pick_verdict(cwd: Path, exclude: tuple[str, ...] = ()):
+    from fno.adapters.providers.cli import pick_account
+
+    return pick_account(exclude=exclude)
+
+
+class TestPickOptInAndOverlay:
+    """The two halves a non-Python caller cannot get right on its own."""
+
+    def test_if_armed_declines_when_the_knob_is_off(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Without this the Rust loop would pick on a default-off install and
+        # change which account gets billed without being asked.
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": False}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick", "--if-armed"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 5, result.output
+        assert "not armed" in result.output
+
+    def test_if_armed_picks_normally_once_the_knob_is_on(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": True}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick", "--if-armed"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "readyrule" in result.stdout
+
+    def test_without_if_armed_the_knob_is_not_consulted(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # An operator running `fno providers pick` by hand asked for an answer.
+        cfg = _config_dir_pair(tmp_path)
+        cfg["config"]["providers"]["quota"] = {"pick_on_launch": False}
+        _pick_env(tmp_path, monkeypatch, cfg)
+        result = _invoke(["pick"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+
+    def test_print_env_emits_the_auth_vars_to_clear(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Pinning CLAUDE_CONFIG_DIR alone is half an overlay.
+
+        An inherited ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN / routed
+        ANTHROPIC_BASE_URL outranks it, so the worker would bill through a
+        different route while the receipt named the picked account.
+        """
+        from fno.agents.account_env import SCRUB_AUTH_VARS
+
+        _pick_env(tmp_path, monkeypatch, _config_dir_pair(tmp_path))
+        result = _invoke(["pick", "--print-env"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        emitted = dict(
+            line.split("=", 1) for line in result.stdout.splitlines() if "=" in line
+        )
+        assert emitted["CLAUDE_CONFIG_DIR"] == str(tmp_path / "claude-alt")
+        for var in SCRUB_AUTH_VARS:
+            assert var in emitted, f"{var} not carried for scrubbing"
+            assert emitted[var] == "", f"{var} should be cleared, not set"

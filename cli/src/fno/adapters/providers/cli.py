@@ -7,17 +7,19 @@ Phase 03 will wire in staging.stage(record) inside the `add` command.
 """
 from __future__ import annotations
 
+import datetime as _dt
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, Optional, cast
+from typing import TYPE_CHECKING, NamedTuple, Optional, cast
 
 import typer
 
 from fno.adapters.providers import managed
 from fno.adapters.providers.dispatch import dispatch_env
 from fno.adapters.providers.loader import (
+    is_effective_active,
     load_providers,
     mutable_accounts_block,
     save_providers,
@@ -85,16 +87,12 @@ def list_providers(
 ) -> None:
     """List all configured accounts, marking the active one with *."""
     config = _load()
-    slot_active: dict[str, Optional[str]] = {}  # per-CLI slot occupant, read once
 
     def _is_active(record: ProviderRecord) -> bool:
-        # For managed accounts the meaningful "active" is which one is
-        # materialized in that CLI's slot; fall back to routing-active otherwise.
-        if record.auth == "managed":
-            if record.harness not in slot_active:
-                slot_active[record.harness] = managed.active_slot_id(record.harness)
-            return record.id == slot_active[record.harness]
-        return record.id == config.active
+        # One resolver, shared with the dispatch path: for a managed account the
+        # meaningful "active" is which one is materialized in that harness's
+        # slot, falling back to routing-active otherwise.
+        return is_effective_active(record, config)
 
     if json_output:
         import json as _json
@@ -590,6 +588,26 @@ def register_provider(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
+    # Refuse a credential another account already holds, BEFORE writing a blob.
+    # Two captures taken while the same account was signed in file one credential
+    # under two ids, and every later per-account decision is then arithmetic on a
+    # duplicate. Digests only - no token or fragment reaches stdout/stderr.
+    holder = managed.duplicate_credential_holder(
+        managed._read_slot_blob(record.harness), exclude_id=record.id
+    )
+    if holder is not None:
+        typer.echo(
+            f"error: the current {record.harness} login is already registered as "
+            f"'{holder}'; registering it again as '{record.id}' would store one "
+            f"credential under two ids.\n"
+            f"  sign into the {record.id} account first:  {record.harness} /logout && "
+            f"{record.harness} /login\n"
+            f"  or give it its own dir:  fno config accounts register {record.id} "
+            f"--config-dir ~/.claude-{record.id}",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
     try:
         adir = managed.snapshot_current(record)
@@ -624,6 +642,352 @@ def register_provider(
         typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
+
+
+# ---------------------------------------------------------------------------
+# pick (launch-time headroom picking, x-7d45)
+#
+# The ONE picker. No in-session credential swap is possible - a claude process
+# reads CLAUDE_CONFIG_DIR once at launch - so every switch has to happen at a
+# process boundary, and the only useful moment is just before one starts.
+#
+# Selection is the EXISTING `next_healthy_provider` walk over the active combo,
+# filtered to candidates footnote could actually launch on. No second ranking
+# function: combo order plus the existing EXHAUSTED skip is the policy, and the
+# operator expresses preference by combo order as they already do.
+# ---------------------------------------------------------------------------
+
+PICK_EXIT_NO_HEADROOM = 3
+PICK_EXIT_NO_CANDIDATE = 4
+PICK_EXIT_NOT_ARMED = 5
+
+
+class PickVerdict(NamedTuple):
+    """The picker's answer plus everything needed to explain it.
+
+    ``candidates`` is every considered id with its headroom or the reason it was
+    not launchable, so the receipt is readable whether or not the pick succeeded
+    - fail-open must not become fail-silent.
+    """
+
+    account: Optional[str]
+    reason: str
+    candidates: list[tuple[str, str]]
+    exit_code: int
+
+
+def _pick_candidate_ids(config: "ProvidersConfig", combo_name: Optional[str]) -> list[str]:
+    """Candidate ids in the operator's preferred order.
+
+    The active combo when one is configured, else the records in config order.
+    An unknown or empty combo degrades to config order rather than refusing: a
+    stale combo name must not wedge a launch.
+    """
+    from fno.adapters.providers.loader import load_active_combo, load_combos
+    from fno.adapters.providers.rotation import ComboNotFoundError
+
+    repo_root = _get_repo_root()
+    name = combo_name or load_active_combo(repo_root=repo_root)
+    if name:
+        try:
+            combo = load_combos(repo_root=repo_root).get(name)
+        except (ProviderConfigError, ComboNotFoundError):
+            combo = None
+        if combo is not None and combo.providers:
+            return list(combo.providers)
+    return [r.id for r in config.records]
+
+
+def pick_account(
+    *,
+    combo_name: Optional[str] = None,
+    exclude: tuple[str, ...] = (),
+    if_armed: bool = False,
+) -> PickVerdict:
+    """Choose an account with headroom that footnote can actually launch on.
+
+    The launchability filter is what keeps the verb honest: a managed account
+    that is not the slot occupant has no correct env overlay, so offering it as
+    a choice would promise a spawn that cannot happen. Filtering it out here is
+    also why exit 4 exists - "no launchable candidate" is a setup instruction,
+    not a quota condition, and collapsing the two would hide it.
+    """
+    from fno.adapters.providers.loader import load_quota_config
+    from fno.adapters.providers.rotation import Combo, next_healthy_provider
+    from fno.adapters.providers.runtime_state import headroom, refresh_usage
+    from fno.agents.account_env import (
+        AccountResolutionError,
+        resolve_account_overlay,
+    )
+
+    config = _load()
+    quota = load_quota_config(repo_root=_get_repo_root())
+    if if_armed and not quota.pick_on_launch:
+        # The caller wants the knob honored but cannot read config itself (the
+        # Rust loop). Keeping the check here means `pick_on_launch` has ONE
+        # implementation; a copy in Rust would let the two disagree about
+        # whether a run is allowed to change which account gets billed.
+        return PickVerdict(
+            None,
+            "launch picking is not armed (providers.quota.pick_on_launch = false)",
+            [],
+            PICK_EXIT_NOT_ARMED,
+        )
+    excluded = set(exclude)
+
+    ordered = _pick_candidate_ids(config, combo_name)
+    rows: list[tuple[str, str]] = []
+    launchable: list[str] = []
+    for pid in ordered:
+        if pid in excluded:
+            rows.append((pid, "excluded"))
+            continue
+        try:
+            overlay = resolve_account_overlay(pid)
+        except AccountResolutionError as exc:
+            rows.append((pid, f"not launchable: {str(exc).splitlines()[0]}"))
+            continue
+        if overlay.lane == "managed-active":
+            # A managed account reaches a worker only through the daemon-wide
+            # ~/.claude slot, so two workers can never run on two such accounts
+            # at once and "picking" it just names the default. Excluded on
+            # purpose: the exit-4 receipt below is the setup instruction that
+            # turns this invisible degradation into an actionable one.
+            rows.append((
+                pid,
+                "not a picker candidate: managed, rides the shared ~/.claude slot",
+            ))
+            continue
+        launchable.append(pid)
+
+    if not launchable:
+        named = ", ".join(pid for pid, _ in rows) or "(no records)"
+        return PickVerdict(
+            None,
+            f"no launchable candidate among {named}: only an account with its "
+            "own config dir can be pinned to a worker. Register one with "
+            "`fno config accounts register <id> --config-dir <path>` (a full second "
+            "login in its own dir)",
+            rows,
+            PICK_EXIT_NO_CANDIDATE,
+        )
+
+    # Fill the TTL cache once per candidate before reading headroom, so a pick
+    # acts on fresh numbers. refresh_usage is a no-op inside probe_ttl_seconds.
+    for pid in launchable:
+        refresh_usage(pid, ttl_seconds=quota.probe_ttl_seconds)
+    for pid in launchable:
+        rows.append((pid, headroom(
+            pid,
+            ttl_seconds=quota.probe_ttl_seconds,
+            threshold_pct=quota.defer_threshold_pct,
+        ).state.value))
+
+    chosen = next_healthy_provider(
+        Combo(name="pick", providers=tuple(launchable)), quota=quota
+    )
+    if chosen is None:
+        return PickVerdict(
+            None,
+            "every launchable candidate is exhausted",
+            rows,
+            PICK_EXIT_NO_HEADROOM,
+        )
+    return PickVerdict(chosen, "first launchable candidate with headroom", rows, 0)
+
+
+@cli.command("pick")
+def pick_provider(
+    combo: Optional[str] = typer.Option(
+        None, "--combo", help="Combo to pick from (default: config.providers.active_combo)."
+    ),
+    exclude: list[str] = typer.Option(
+        [], "--exclude", help="Account id to skip (repeatable, e.g. one just seen exhausted)."
+    ),
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit the full verdict as one JSON object."
+    ),
+    print_env: bool = typer.Option(
+        False,
+        "--print-env",
+        help=(
+            "Emit the picked account's full env overlay instead of the bare id: "
+            "the auth vars to clear as KEY= (empty), then CLAUDE_CONFIG_DIR=<path>."
+        ),
+    ),
+    if_armed: bool = typer.Option(
+        False,
+        "--if-armed",
+        help=(
+            "Decline with exit 5 unless providers.quota.pick_on_launch is true. "
+            "For callers that honor the opt-in but cannot read config themselves."
+        ),
+    ),
+) -> None:
+    """Print the account to launch on: the first with headroom footnote can use.
+
+    stdout is the bare account id (machine-readable); stderr always carries the
+    reason and every candidate's headroom. Exit 0 chose one, 3 means every
+    launchable candidate is exhausted, 4 means there is no launchable candidate
+    at all - a setup problem, not a quota one - and 5 (only with --if-armed)
+    means launch picking is switched off.
+    """
+    import json as _json
+
+    verdict = pick_account(
+        combo_name=combo, exclude=tuple(exclude), if_armed=if_armed
+    )
+
+    for pid, state in verdict.candidates:
+        typer.echo(f"  {pid}: {state}", err=True)
+    typer.echo(f"pick: {verdict.reason}", err=True)
+
+    if json_output:
+        typer.echo(_json.dumps({
+            "account": verdict.account,
+            "reason": verdict.reason,
+            "candidates": [{"id": p, "state": s} for p, s in verdict.candidates],
+        }))
+    elif verdict.account is not None:
+        if print_env:
+            for line in pick_env_lines(verdict.account):
+                typer.echo(line)
+        else:
+            typer.echo(verdict.account)
+
+    if verdict.exit_code:
+        raise typer.Exit(verdict.exit_code)
+
+
+def pick_env_lines(account_id: str) -> list[str]:
+    """The picked account's COMPLETE env overlay, as ``KEY=VALUE`` lines.
+
+    An empty value means "clear this variable". Pinning only CLAUDE_CONFIG_DIR
+    is not enough: an inherited ANTHROPIC_API_KEY, CLAUDE_CODE_OAUTH_TOKEN, or
+    routed ANTHROPIC_BASE_URL outranks it, so the worker would authenticate or
+    bill through a different route while the receipt named the picked account.
+    Every Python spawn substrate already scrubs SCRUB_AUTH_VARS before applying
+    an overlay; emitting that same list here is what lets a non-Python caller
+    apply the whole overlay instead of half of it, from one source of truth.
+    """
+    from fno.agents.account_env import SCRUB_AUTH_VARS, resolve_account_overlay
+
+    overlay = resolve_account_overlay(account_id).env
+    lines = [f"{key}=" for key in SCRUB_AUTH_VARS if key not in overlay]
+    lines.extend(f"{key}={value}" for key, value in overlay.items())
+    return lines
+
+
+# ---------------------------------------------------------------------------
+# doctor (store integrity)
+# ---------------------------------------------------------------------------
+
+
+def _doctor_findings() -> list[dict]:
+    """Per-record + per-slot problems in the managed store. Read-only.
+
+    A stale capture, an expired blob, a config dir with no login, and a tainted
+    slot are four separate silent degradations that each surface only as
+    ``unknown`` somewhere downstream. This collects them into one answerable
+    question so the operator sees the store's real condition instead of a
+    symptom. Never mutates; never prints a secret.
+    """
+    import time as _time
+
+    config = _load()
+    findings: list[dict] = []
+    now = _time.time()
+
+    for record in config.records:
+        blob = managed.read_blob(record.id)
+        if blob is not None:
+            holder = managed.duplicate_credential_holder(blob, exclude_id=record.id)
+            if holder is not None:
+                findings.append({
+                    "record": record.id,
+                    "problem": "duplicate-credential",
+                    "detail": (
+                        f"holds the same credential as '{holder}'; one of them "
+                        f"was captured while the other account was signed in"
+                    ),
+                })
+            expires_at = managed.credential_expiry(blob)
+            if expires_at is not None and expires_at <= now:
+                stamp = _dt.datetime.fromtimestamp(
+                    expires_at, _dt.timezone.utc
+                ).strftime("%Y-%m-%dT%H:%MZ")
+                findings.append({
+                    "record": record.id,
+                    "problem": "expired-credential",
+                    "detail": f"stored credential expired {stamp}",
+                })
+
+        if record.config_dir is not None:
+            from fno.agents.account_env import _login_present
+
+            if not record.config_dir.exists():
+                findings.append({
+                    "record": record.id,
+                    "problem": "missing-config-dir",
+                    "detail": f"config_dir {record.config_dir} does not exist",
+                })
+            elif not _login_present(record.config_dir):
+                findings.append({
+                    "record": record.id,
+                    "problem": "no-login-in-config-dir",
+                    "detail": (
+                        f"config_dir {record.config_dir} holds no claude login "
+                        f"(run: CLAUDE_CONFIG_DIR={record.config_dir} claude /login)"
+                    ),
+                })
+
+    for harness_kind in sorted({r.harness for r in config.records}):
+        try:
+            tainted = managed.slot_tainted(harness_kind, managed.store_root())
+        except OSError:
+            continue
+        if tainted:
+            findings.append({
+                "record": f"slot:{harness_kind}",
+                "problem": "tainted-slot",
+                "detail": (
+                    "the active stamp was written while sessions were pinned, so "
+                    "the slot may hold a credential the stamp does not describe"
+                ),
+            })
+
+    return findings
+
+
+@cli.command("doctor")
+def doctor_providers(
+    json_output: bool = typer.Option(
+        False, "--json", "-J", help="Emit a JSON array of findings."
+    ),
+) -> None:
+    """Report the managed store's real condition. Exits non-zero on any problem.
+
+    Read-only. Checks each record for a credential another account already
+    holds, an expired stored credential, and a config_dir that holds no login;
+    then checks each CLI's slot for taint. Usable as a check in a script.
+    """
+    import json as _json
+
+    findings = _doctor_findings()
+
+    if json_output:
+        typer.echo(_json.dumps(findings))
+    elif not findings:
+        typer.echo("providers doctor: no problems found.")
+    else:
+        for f in findings:
+            typer.echo(f"{f['record']}: {f['problem']}: {f['detail']}")
+        typer.echo("")
+        n = len(findings)
+        typer.echo(f"{n} problem{'' if n == 1 else 's'} found.")
+
+    if findings:
+        raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -866,7 +1230,11 @@ benchmarks_cli = typer.Typer(
     help="Cache + view the OpenRouter coding benchmark snapshot (routing source of truth).",
     no_args_is_help=True,
 )
-cli.add_typer(benchmarks_cli, name="benchmarks")
+# Hidden, not removed: a cache-refresh for OpenRouter's coding benchmarks is a
+# maintenance chore, not something an operator reaches for at the menu. It stays
+# fully invocable (`fno config accounts benchmarks refresh`, `fno help config --all`)
+# and yields its advertised slot to `pick` / `doctor`, which are.
+cli.add_typer(benchmarks_cli, name="benchmarks", hidden=True)
 
 
 @benchmarks_cli.command("refresh")

@@ -222,6 +222,12 @@ class QuotaConfig(BaseModel):
     defer_threshold_pct: float = Field(default=90.0, ge=0.0, le=100.0)
     probe_ttl_seconds: int = Field(default=300, ge=1)
     defer_horizon_minutes: int = Field(default=60, ge=0)
+    # Launch-time headroom picking (x-7d45). When true, a spawn with no explicit
+    # --account consults `fno providers pick` and launches on an account that
+    # still has quota. Opt-in for one release, matching defer_dispatch's posture:
+    # picking changes which account gets billed without the operator asking, so
+    # it is armed deliberately rather than inherited on upgrade.
+    pick_on_launch: bool = False
 
 
 class ProvidersConfig(BaseModel):

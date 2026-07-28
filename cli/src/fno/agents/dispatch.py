@@ -1736,6 +1736,152 @@ def _is_revival(
     return True
 
 
+def _picked_headroom_note(account_id: str) -> str:
+    """The picked account's worst window, for the receipt. Never raises."""
+    try:
+        from fno.adapters.providers.runtime_state import read_usage
+
+        snap = read_usage(account_id)
+        if snap is not None and snap.windows:
+            worst = max(snap.windows, key=lambda w: w.used_pct)
+            return f"{worst.label} {worst.used_pct:.0f}%"
+    except Exception:  # noqa: BLE001 - a receipt detail must never break a spawn
+        pass
+    return "headroom unknown"
+
+
+def _pick_account_env(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[Mapping[str, str]]:
+    """Consult the picker for a spawn that named no account, or None.
+
+    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    and any refusal or failure returns None so the spawn proceeds exactly as it
+    does today. The receipt is always printed, because a launch silently landing
+    on a different account than the operator expects is a billing surprise.
+
+    A ROUTED spawn is never picked for. `fno agents spawn` refuses `--account`
+    together with `--route` / `--role` because the route's ANTHROPIC_* overrides
+    the account's CLAUDE_CONFIG_DIR and silently mis-bills; auto-picking would
+    combine the two axes the CLI just refused, and would print an account
+    receipt for a worker the route intends to bill elsewhere.
+    """
+    picked = pick_account_id(role=role, route_env=route_env)
+    if picked is None:
+        return None
+    try:
+        from fno.agents.account_env import resolve_account_overlay
+
+        return resolve_account_overlay(picked).env
+    except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
+        print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
+        return None
+
+
+def pick_account_id(
+    *,
+    role: Optional[str] = None,
+    route_env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """The account id a spawn that named none should launch on, or None.
+
+    THE picking decision, with two consumers: the in-process spawn seams turn it
+    into an env overlay, and the runtime seam turns it into an injected
+    ``--account`` flag so the Rust client inherits the same choice. One decision,
+    so those two can never disagree about which account a worker is billing.
+
+    Advisory in every direction: opt-in via ``providers.quota.pick_on_launch``,
+    and any refusal or failure returns None so the spawn proceeds exactly as it
+    does today. A routed spawn is never picked for - `fno agents spawn` refuses
+    `--account` together with `--route` / `--role` because the route's ANTHROPIC_*
+    overrides the account's CLAUDE_CONFIG_DIR and silently mis-bills.
+    """
+    if route_env or role is not None:
+        return None
+    try:
+        from fno.adapters.providers.cli import PICK_EXIT_NOT_ARMED, pick_account
+
+        # `--if-armed` so the opt-in is read in exactly ONE place, the same call
+        # the Rust loop makes. Checking `pick_on_launch` here as well would be a
+        # second answer to one question, which is the shape this whole feature
+        # exists to remove.
+        verdict = pick_account(if_armed=True)
+        if verdict.exit_code == PICK_EXIT_NOT_ARMED:
+            return None  # off by default: say nothing, change nothing
+        if verdict.account is None:
+            print(
+                f"account: default (pick unavailable: {verdict.reason})",
+                file=sys.stderr,
+            )
+            return None
+        print(
+            f"account: {verdict.account} (picked, {_picked_headroom_note(verdict.account)})",
+            file=sys.stderr,
+        )
+        return verdict.account
+    except Exception as exc:  # noqa: BLE001 - picking is advisory; never block a spawn
+        print(f"account: default (pick unavailable: {exc})", file=sys.stderr)
+        return None
+
+
+def note_quota_death(account_env: Optional[Mapping[str, str]], tail: str | None) -> None:
+    """Record a cooldown when a worker died with a quota marker in its tail.
+
+    The reactive half of quota survival: a snapshot can be up to
+    ``probe_ttl_seconds`` stale, so without this the next pick would hand the
+    successor the account that just died. Reuses the existing error taxonomy and
+    health writer rather than adding a second classifier. Best-effort - a
+    telemetry write must never turn a worker's death into a dispatch failure.
+    """
+    if not tail:
+        return
+    try:
+        from fno.adapters.providers.error_taxonomy import classify_error
+        from fno.adapters.providers.loader import effective_active
+        from fno.adapters.providers.runtime_state import update_provider_health
+
+        rule = classify_error(None, tail)
+        if rule is None:
+            return
+        provider_id = _account_id_for_env(account_env) or effective_active()
+        if provider_id:
+            update_provider_health(provider_id, rule)
+    except Exception:  # noqa: BLE001 - never let a health write break teardown
+        pass
+
+
+def _account_id_for_env(account_env: Optional[Mapping[str, str]]) -> Optional[str]:
+    """Which record an overlay pinned, by asking each what its overlay would be.
+
+    Matching on ``config_dir`` alone missed two real shapes: an ``oauth_dir``
+    record's overlay names its STAGED dir, not a config_dir, and an api_key
+    record's overlay has no directory at all. Both would fall through to
+    ``effective_active()`` and record a quota death against the wrong account -
+    poisoning an account that is fine while leaving the dead one pickable.
+    Comparing the resolved overlay covers every lane, and only runs when a worker
+    has already died, so the extra resolutions are not on any hot path.
+    """
+    if not account_env:
+        return None
+    try:
+        from fno.adapters.providers.loader import load_providers
+        from fno.agents.account_env import resolve_account_overlay
+
+        for record in load_providers().records:
+            if record.harness != "claude":
+                continue
+            try:
+                if dict(resolve_account_overlay(record.id).env) == dict(account_env):
+                    return record.id
+            except Exception:  # noqa: BLE001 - an unresolvable record is not a match
+                continue
+    except Exception:  # noqa: BLE001
+        return None
+    return None
+
+
 def dispatch_spawn(
     name: str,
     message: str,
@@ -1789,6 +1935,19 @@ def dispatch_spawn(
     Raises:
         :class:`DispatchAskError`: every documented failure mode.
     """
+    # 0. Launch-time headroom picking (x-7d45). An explicit --account always
+    # wins and is never second-guessed; this only fills the gap when none was
+    # given. It runs before the tier-remap check below so that check sees the
+    # overlay the worker will actually launch with.
+    #
+    # This is ONE of the two Python spawn seams: `cmd_spawn` routes the default
+    # `pane` substrate to `dispatch_spawn_pane` and never reaches here, so the
+    # pane path calls the same helper itself. Two seams, one implementation -
+    # putting it in cli.py instead would miss every in-process caller that
+    # bypasses argument parsing.
+    if account_env is None and provider == "claude":
+        account_env = _pick_account_env(role=role, route_env=route_env)
+
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
@@ -1946,6 +2105,10 @@ def dispatch_spawn(
                                 name=name,
                             )
                         except claude_mod.ProviderSubprocessError as exc:
+                            # A quota death here is the freshest signal there is:
+                            # write the cooldown so the NEXT pick avoids this
+                            # account before its usage snapshot refreshes.
+                            note_quota_death(account_env, exc.stderr)
                             _emit_ev(
                                 "agent_ask_failed",
                                 stage="claude-headless",

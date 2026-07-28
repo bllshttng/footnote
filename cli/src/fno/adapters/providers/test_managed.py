@@ -89,6 +89,64 @@ class TestRegister:
         assert (tmp_path / "work-a" / "blob").read_text() == _blob("A1")
 
 
+class TestDuplicateCredential:
+    """The store must never describe one account as two (Evidence 2)."""
+
+    def test_finds_the_other_holder_of_the_same_credential(self, fake_slot, tmp_path):
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        assert (
+            managed.duplicate_credential_holder(
+                _blob("A0"), exclude_id="work-b", root=tmp_path
+            )
+            == "work-a"
+        )
+
+    def test_a_distinct_credential_is_not_a_duplicate(self, fake_slot, tmp_path):
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        assert (
+            managed.duplicate_credential_holder(
+                _blob("B0"), exclude_id="work-b", root=tmp_path
+            )
+            is None
+        )
+
+    def test_reregistering_the_same_id_is_not_a_duplicate(self, fake_slot, tmp_path):
+        # Refreshing one account's own snapshot must stay idempotent.
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        assert (
+            managed.duplicate_credential_holder(
+                _blob("A0"), exclude_id="work-a", root=tmp_path
+            )
+            is None
+        )
+
+    def test_digest_is_not_the_secret(self):
+        # The comparison must never carry token material anywhere it could be
+        # logged, printed, or persisted.
+        digest = managed.credential_digest(_blob("super-secret-token"))
+        assert digest is not None
+        assert "super-secret-token" not in digest
+        assert len(digest) == 64
+
+    def test_codex_blobs_compare_by_whole_payload(self, tmp_path):
+        # A codex auth.json carries no claudeAiOauth.accessToken; identical
+        # payloads are still the same credential.
+        a = managed.credential_digest(_codex_blob("T0"))
+        assert a == managed.credential_digest(_codex_blob("T0"))
+        assert a != managed.credential_digest(_codex_blob("T1"))
+
+    def test_empty_blob_has_nothing_to_compare(self, tmp_path):
+        assert managed.credential_digest(None) is None
+        assert managed.credential_digest("   ") is None
+        assert (
+            managed.duplicate_credential_holder(None, exclude_id="x", root=tmp_path)
+            is None
+        )
+
+
 # ---------------------------------------------------------------------------
 # US2: switch (materialize)
 # ---------------------------------------------------------------------------
@@ -1125,6 +1183,29 @@ class TestCliSurface:
         active = [ln for ln in rl.output.splitlines() if "work-b" in ln]
         assert active and active[0].lstrip().startswith("*")
         assert "snapshot=" in active[0]
+
+    def test_register_refuses_a_duplicate_credential(self, tmp_path, monkeypatch):
+        """AC3-ERR: capturing the SAME login under a second id is refused.
+
+        This is the guard that would have surfaced the live store defect on the
+        day it was created rather than ten days later.
+        """
+        slot = _cli_slot(monkeypatch)
+        env = {"HOME": str(tmp_path), "PWD": str(tmp_path)}
+        slot["claude"] = _blob("shared-secret-token")
+        r1 = runner.invoke(providers_app, ["register", "work-a"], env=env, catch_exceptions=False)
+        assert r1.exit_code == 0, r1.output
+
+        # The operator never signed into the second account: the slot still holds
+        # work-a's credential.
+        r2 = runner.invoke(providers_app, ["register", "work-b"], env=env, catch_exceptions=False)
+        assert r2.exit_code != 0
+        assert "work-a" in r2.output and "work-b" in r2.output
+        assert "--config-dir" in r2.output
+        # No blob was written under the refused id.
+        assert not (tmp_path / ".fno" / "providers" / "work-b" / "blob").exists()
+        # No token or fragment reaches the receipt.
+        assert "shared-secret-token" not in r2.output
 
     def test_register_no_login_errors(self, tmp_path, monkeypatch):
         _cli_slot(monkeypatch)  # slot empty

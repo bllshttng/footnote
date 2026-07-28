@@ -546,6 +546,98 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
     return adir
 
 
+def credential_digest(blob: Optional[str]) -> Optional[str]:
+    """Stable digest identifying the credential inside ``blob``, or None.
+
+    A DIGEST, never the secret: this is what makes "do two records hold the same
+    credential?" answerable without a token reaching a receipt, a log, or disk.
+    Prefers ``claudeAiOauth.accessToken`` (the claude shape) and falls back to
+    the whole normalized blob, which is the right identity for codex's
+    ``auth.json`` and for an opaque Keychain payload.
+    """
+    if not blob or not blob.strip():
+        return None
+    material = blob.strip()
+    try:
+        data = json.loads(material)
+    except (ValueError, TypeError):
+        data = None
+    if isinstance(data, dict):
+        oauth = data.get("claudeAiOauth")
+        if isinstance(oauth, dict):
+            token = oauth.get("accessToken")
+            if isinstance(token, str) and token:
+                material = token
+    return hashlib.sha256(material.encode("utf-8")).hexdigest()
+
+
+def credential_expiry(blob: Optional[str]) -> Optional[float]:
+    """``claudeAiOauth.expiresAt`` as epoch SECONDS, or None when absent.
+
+    Claude Code stores it in milliseconds; a value in that range is scaled here
+    so no caller has to guess the unit. A stored blob whose expiry has passed is
+    a dead credential: `fno config accounts use` would materialize it and the next
+    session would prompt for a login.
+    """
+    if not blob:
+        return None
+    try:
+        data = json.loads(blob)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    oauth = data.get("claudeAiOauth")
+    if not isinstance(oauth, dict):
+        return None
+    raw = oauth.get("expiresAt")
+    if not isinstance(raw, (int, float)):
+        return None
+    # Milliseconds since epoch is the shape Claude Code writes; anything past
+    # the year 33658 in seconds is really milliseconds.
+    return float(raw) / 1000.0 if raw > 1e12 else float(raw)
+
+
+def read_blob(record_id: str, root: Path | None = None) -> Optional[str]:
+    """The stored credential blob for ``record_id``, or None when unregistered."""
+    try:
+        return _blob_path(record_id, root).read_text(encoding="utf-8")
+    except OSError:
+        return None
+
+
+def duplicate_credential_holder(
+    blob: Optional[str], *, exclude_id: str, root: Path | None = None
+) -> Optional[str]:
+    """The id of an existing account whose stored blob holds the SAME credential.
+
+    ``fno config accounts register`` snapshots whatever the shared slot holds at
+    capture time. Two captures taken while the same account was signed in store
+    one credential under two ids, and every later per-account decision - usage
+    attribution, headroom, `fno config accounts use` - is then arithmetic on a
+    duplicate. Comparing digests at register time is what turns that into a
+    refusal instead of a silent records defect discovered days later.
+
+    Returns None when ``blob`` carries no identifiable credential (nothing to
+    compare) or when no other account matches. Also consumed by
+    ``fno config accounts doctor`` to report stores that predate this guard.
+    """
+    target = credential_digest(blob)
+    if target is None:
+        return None
+    base = root or store_root()
+    try:
+        entries = sorted(p for p in base.iterdir() if p.is_dir())
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name == exclude_id:
+            continue
+        if credential_digest(read_blob(entry.name, root)) == target:
+            return entry.name
+    return None
+
+
 def read_meta(record_id: str, root: Path | None = None) -> Optional[dict]:
     try:
         return json.loads(_meta_path(record_id, root).read_text(encoding="utf-8"))

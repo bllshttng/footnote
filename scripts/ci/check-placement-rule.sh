@@ -52,6 +52,14 @@
 #      Claude Code's OWN skill dirs; footnote stores nothing there, and an
 #      unreadable root resolves `unverifiable` rather than being reported
 #      absent.
+#      usage.py joins for the same reason account_env.py already is: its
+#      shared-slot probe resolves the CANONICAL ~/.claude to read Claude
+#      Code's own credential for the stamped active account. It must be the
+#      literal path rather than the CLAUDE_CONFIG_DIR-honoring helper,
+#      because a worker pinned to another account exports that variable and
+#      would otherwise make the probe read ITS credential and file the usage
+#      under the wrong account id. Read-only; footnote stores nothing there.
+#      test_usage.py is its test, which builds a fake slot under tmp_path.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
@@ -137,6 +145,8 @@ cli/src/fno/adapters/providers/test_loader.py
 cli/src/fno/adapters/providers/test_model.py
 cli/src/fno/adapters/providers/test_rotation.py
 cli/src/fno/adapters/providers/test_staging.py
+cli/src/fno/adapters/providers/test_usage.py
+cli/src/fno/adapters/providers/usage.py
 cli/src/fno/adapters/test_claude_code.py
 cli/src/fno/adapters/test_init.py
 cli/src/fno/adapters/test_shared.py

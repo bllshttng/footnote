@@ -200,6 +200,127 @@ pub fn which_binary(name: &str) -> Option<PathBuf> {
     None
 }
 
+// ── launch-time headroom picking (x-7d45) ─────────────────────────────────────
+
+/// The single env var a picked account contributes to the driver's environment.
+const PICKED_ENV_KEY: &str = "CLAUDE_CONFIG_DIR";
+
+/// The exact verb this file shells, as one named constant.
+///
+/// It is a constant so a cross-language test can assert this argv still resolves
+/// to a real command. That check is not ceremony: this verb was spelled
+/// `fno providers pick` until the surface was renamed to `fno config accounts`,
+/// and because every failure here is advisory the loop would have degraded
+/// silently forever rather than failing loudly once.
+pub const PICK_ARGV: [&str; 5] = ["config", "accounts", "pick", "--if-armed", "--print-env"];
+
+/// One picked account's complete env overlay: `(key, value)` pairs where an
+/// EMPTY value means "clear this variable in the child".
+type PickedEnv = Vec<(String, String)>;
+
+/// Interpret a `fno config accounts pick --if-armed --print-env` result.
+///
+/// Pure, so the advisory contract is testable without a live `fno`. Success is
+/// exit 0 plus at least one `CLAUDE_CONFIG_DIR=<non-empty>` line; the verb also
+/// emits the auth vars to clear as `KEY=` and those are carried through, because
+/// applying half an overlay is what lets an inherited ANTHROPIC_API_KEY bill a
+/// different account than the receipt names. The verb's non-zero exits (3 = every
+/// launchable candidate exhausted, 4 = no launchable candidate, 5 = picking not
+/// armed) are ordinary answers here, not errors.
+fn interpret_pick(ok: bool, stdout: &str, stderr: &str) -> Result<PickedEnv, String> {
+    if !ok {
+        let reason = stderr
+            .lines()
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .next_back()
+            .unwrap_or("no reason given");
+        return Err(reason.to_string());
+    }
+    let mut env: PickedEnv = Vec::new();
+    let mut pinned = false;
+    for line in stdout.lines().map(str::trim).filter(|l| !l.is_empty()) {
+        match line.split_once('=') {
+            Some((k, v)) if !k.is_empty() => {
+                if !v.is_empty() {
+                    pinned = true;
+                }
+                env.push((k.to_string(), v.to_string()));
+            }
+            _ => return Err(format!("unparseable pick output: {line:?}")),
+        }
+    }
+    if !pinned {
+        // A drifted verb must never have its output half-applied: with nothing
+        // but clear-lines there is no account, only a scrubbed environment.
+        // The pin is ANY value-carrying key, not CLAUDE_CONFIG_DIR specifically
+        // - a claude api_key record's overlay is an ANTHROPIC_API_KEY and is
+        // just as valid an account, and requiring the config dir would have the
+        // loop reject an overlay Python accepts.
+        return Err("pick output carried no account pin".to_string());
+    }
+    Ok(env)
+}
+
+/// True when this dispatcher drives `claude`, the only harness that reads
+/// `CLAUDE_CONFIG_DIR`.
+///
+/// An opencode / hermes / openclaw loop would gain nothing from a claude
+/// account pin, and applying the overlay would still CLEAR that run's inherited
+/// Anthropic credentials while logging "account picked" - a receipt describing
+/// something that did not happen, to a worker that cannot act on it.
+fn drives_claude(driver_lib: &Path) -> bool {
+    driver_lib
+        .file_name()
+        .and_then(|n| n.to_str())
+        .is_some_and(|n| n == "driver-claude-code.sh")
+}
+
+/// True when applying `picked` would silently undo a route this run pins.
+///
+/// A loop launched with an explicit provider route (an `ANTHROPIC_BASE_URL` +
+/// `ANTHROPIC_AUTH_TOKEN` pair for a non-Anthropic endpoint, or a pinned model
+/// tier) is already committed. The overlay's clear-list names exactly those
+/// vars, so a static env that sets one is a deliberate routing decision the pick
+/// would scrub mid-flight - moving the run to a claude account while its receipt
+/// claimed only to have picked one. Deriving the check FROM the clear-list is
+/// what keeps it from becoming a second, drifting copy of that list here.
+///
+/// The mirror of the Python seam declining to pick for a `--route`/`--role`
+/// spawn, for the same reason: endpoint, auth and model are one route, and
+/// half-composing it is what bills the wrong account.
+fn pick_would_undo_a_route(picked: &[(String, String)], static_env: &[(String, String)]) -> bool {
+    picked.iter().filter(|(_, v)| v.is_empty()).any(|(k, _)| {
+        // The static passthrough list is only half the picture: a loop started
+        // from a shell that already exported ANTHROPIC_BASE_URL inherits it
+        // through the process environment without it ever appearing here, and
+        // clearing it would move that run to a different provider just the same.
+        static_env.iter().any(|(ek, _)| ek == k)
+            || std::env::var_os(k).is_some_and(|v| !v.is_empty())
+    })
+}
+
+/// Ask `fno config accounts pick` which account the next iteration should launch on.
+///
+/// Shells the verb rather than reimplementing the predicate: headroom, combo
+/// order, launchability AND the `pick_on_launch` opt-in have exactly one
+/// implementation, and it is not this one - `--if-armed` is what lets the verb
+/// honor the knob on this caller's behalf, so a default-off install can never
+/// have the loop change which account it bills. Every failure mode - a stale
+/// `fno`, an absent `fno`, a refusal - is an `Err` the caller logs and ignores,
+/// so the loop cannot be wedged by it.
+fn pick_account_env() -> Result<PickedEnv, String> {
+    let out = Command::new("fno")
+        .args(PICK_ARGV)
+        .output()
+        .map_err(|e| format!("could not run `fno config accounts pick`: {e}"))?;
+    interpret_pick(
+        out.status.success(),
+        &String::from_utf8_lossy(&out.stdout),
+        &String::from_utf8_lossy(&out.stderr),
+    )
+}
+
 // ── ShelloutDispatcher ────────────────────────────────────────────────────────
 
 /// A live session wrapping a bash `driver_invoke` child process.
@@ -300,6 +421,66 @@ impl Dispatcher for ShelloutDispatcher {
             cmd.env(k, v);
         }
 
+        // Launch-time headroom picking. A fresh process is a fresh credential
+        // read, so the iteration boundary already IS the pre-emptive handoff
+        // moment - no threshold, watcher, or new trigger machinery needed. This
+        // is the ONE call site: every driver's harness process is a child of the
+        // bash spawned below, so all of them inherit the pick, whereas wiring it
+        // into `driver_invoke` would mean one copy per driver lib. An
+        // operator-pinned CLAUDE_CONFIG_DIR in the static env always wins, and a
+        // refusal is advisory - the iteration proceeds on today's env.
+        if drives_claude(&self.driver_lib) && !self.env.iter().any(|(k, _)| k == PICKED_ENV_KEY) {
+            let iter = ctx.iteration;
+            match pick_account_env() {
+                // A loop launched with an explicit route (ANTHROPIC_BASE_URL +
+                // ANTHROPIC_AUTH_TOKEN for a non-Anthropic endpoint, or a pinned
+                // model tier) is already committed to a provider. Applying a
+                // pick would scrub exactly those vars and silently move the run
+                // to a claude account mid-flight. The verb's own clear-list is
+                // what identifies them, so there is no second copy of it here -
+                // the mirror of the Python seam declining to pick for a --route
+                // or --role spawn.
+                Ok(picked) if pick_would_undo_a_route(&picked, &self.env) => {
+                    eprintln!(
+                        "loop: iteration {iter} account not picked \
+                         (this run pins its own provider route)"
+                    );
+                }
+                Ok(picked) => {
+                    // Name the pin whatever it is. Reporting only on
+                    // CLAUDE_CONFIG_DIR would let an api_key account's overlay
+                    // change which account is billed with no receipt at all,
+                    // and an unannounced billing change is the one thing this
+                    // feature must never do.
+                    if let Some((key, value)) = picked.iter().find(|(_, v)| !v.is_empty()) {
+                        // Announce every pick, but NEVER the pin's value unless
+                        // it is the config dir. An api_key account's pin IS its
+                        // ANTHROPIC_API_KEY, so echoing the value would write
+                        // the secret to the loop's log on every iteration.
+                        if key == PICKED_ENV_KEY {
+                            eprintln!("loop: iteration {iter} account picked -> {value}");
+                        } else {
+                            eprintln!("loop: iteration {iter} account picked -> pinned via {key}");
+                        }
+                    }
+                    for (key, value) in &picked {
+                        // An empty value is the verb saying "clear this": an
+                        // inherited ANTHROPIC_API_KEY or routed base URL outranks
+                        // CLAUDE_CONFIG_DIR, so leaving one behind would bill an
+                        // account the receipt does not name.
+                        if value.is_empty() {
+                            cmd.env_remove(key);
+                        } else {
+                            cmd.env(key, value);
+                        }
+                    }
+                }
+                Err(reason) => {
+                    eprintln!("loop: iteration {iter} account not picked ({reason})");
+                }
+            }
+        }
+
         let child = cmd
             .spawn()
             .map_err(|e| LoopError::Dispatch(format!("spawn bash driver_invoke: {e}")))?;
@@ -318,7 +499,163 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::resolve_driver_binary;
+    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary, PICKED_ENV_KEY};
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    // A GLM/zai loop pins ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. The pick
+    // would scrub both and pin a claude config dir, silently moving the run to a
+    // different provider mid-flight while claiming only to have picked an
+    // account.
+    #[test]
+    fn a_pick_that_would_scrub_a_pinned_route_is_declined() {
+        let picked = vec![
+            pair("ANTHROPIC_BASE_URL", ""),
+            pair("ANTHROPIC_AUTH_TOKEN", ""),
+            pair("CLAUDE_CONFIG_DIR", "/alt"),
+        ];
+        let routed = vec![
+            pair(
+                "ANTHROPIC_BASE_URL",
+                "https://open.bigmodel.cn/api/anthropic",
+            ),
+            pair("OUTPUT_FILE", "/tmp/out"),
+        ];
+        assert!(pick_would_undo_a_route(&picked, &routed));
+    }
+
+    #[test]
+    fn an_unrouted_loop_still_gets_its_pick() {
+        let picked = vec![
+            pair("ANTHROPIC_BASE_URL", ""),
+            pair("CLAUDE_CONFIG_DIR", "/alt"),
+        ];
+        let plain = vec![pair("OUTPUT_FILE", "/tmp/out"), pair("CLI", "claude")];
+        assert!(!pick_would_undo_a_route(&picked, &plain));
+    }
+
+    #[test]
+    fn only_the_clear_list_blocks_a_pick_not_the_pin_itself() {
+        // CLAUDE_CONFIG_DIR arrives with a VALUE, so it is not part of the
+        // clear-list and must not make every pick look like a route conflict.
+        let picked = vec![pair("CLAUDE_CONFIG_DIR", "/alt")];
+        let same_key = vec![pair("CLAUDE_CONFIG_DIR", "/other")];
+        assert!(!pick_would_undo_a_route(&picked, &same_key));
+    }
+
+    #[test]
+    fn a_picked_account_yields_its_config_dir() {
+        let env = interpret_pick(true, "CLAUDE_CONFIG_DIR=/Users/x/.claude-alt\n", "")
+            .expect("a pinned config dir is a successful pick");
+        assert_eq!(
+            env,
+            vec![(
+                "CLAUDE_CONFIG_DIR".to_string(),
+                "/Users/x/.claude-alt".to_string()
+            )]
+        );
+    }
+
+    // The scrub half of the overlay: an inherited ANTHROPIC_API_KEY or routed
+    // base URL outranks CLAUDE_CONFIG_DIR, so applying only the pin would let
+    // the worker bill an account the receipt does not name.
+    #[test]
+    fn auth_vars_to_clear_are_carried_as_empty_values() {
+        let stdout = "ANTHROPIC_API_KEY=\nANTHROPIC_BASE_URL=\nCLAUDE_CONFIG_DIR=/alt\n";
+        let env = interpret_pick(true, stdout, "").expect("overlay parses");
+        assert_eq!(env.len(), 3);
+        assert_eq!(env[0], ("ANTHROPIC_API_KEY".to_string(), String::new()));
+        assert_eq!(env[1], ("ANTHROPIC_BASE_URL".to_string(), String::new()));
+        assert_eq!(
+            env[2],
+            ("CLAUDE_CONFIG_DIR".to_string(), "/alt".to_string())
+        );
+    }
+
+    // AC: the opt-in is honored on this path too. Exit 5 is the verb declining
+    // because providers.quota.pick_on_launch is false, and it must read as an
+    // ordinary "not picked", never as a pick.
+    #[test]
+    fn a_disarmed_picker_declines_with_its_reason() {
+        let stderr = "pick: launch picking is not armed (providers.quota.pick_on_launch = false)\n";
+        assert_eq!(
+            interpret_pick(false, "", stderr),
+            Err(
+                "pick: launch picking is not armed (providers.quota.pick_on_launch = false)"
+                    .to_string()
+            )
+        );
+    }
+
+    // AC13-ERR: a refusing picker is an answer, not a wedge. The reason reaches
+    // the log so an operator can tell "exhausted" from "not set up".
+    #[test]
+    fn a_refusal_surfaces_its_reason_instead_of_erroring_out() {
+        let stderr = "  readyrule: exhausted\npick: every launchable candidate is exhausted\n";
+        assert_eq!(
+            interpret_pick(false, "", stderr),
+            Err("pick: every launchable candidate is exhausted".to_string())
+        );
+        assert!(interpret_pick(false, "", "").is_err());
+    }
+
+    // A receipt must never carry credential material. For an api_key account
+    // the pin IS the secret, so the announcement names the KEY and stops; only
+    // CLAUDE_CONFIG_DIR, a filesystem path, is safe to echo. This pins the
+    // decision the receipt code makes, so a later edit cannot re-introduce the
+    // value into the log.
+    #[test]
+    fn only_the_config_dir_pin_is_safe_to_echo() {
+        assert_eq!(PICKED_ENV_KEY, "CLAUDE_CONFIG_DIR");
+        for secret_key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            assert_ne!(
+                secret_key, PICKED_ENV_KEY,
+                "a secret-bearing pin must not take the echo-the-value branch"
+            );
+        }
+    }
+
+    #[test]
+    fn unparseable_output_is_declined_rather_than_guessed() {
+        // A drifted verb must not have its output half-applied: with no pinned
+        // config dir there is no account, only a scrubbed environment.
+        assert!(interpret_pick(true, "readyrule\n", "").is_err());
+        assert!(interpret_pick(true, "CLAUDE_CONFIG_DIR=\n", "").is_err());
+        assert!(interpret_pick(true, "ANTHROPIC_API_KEY=\n", "").is_err());
+        assert!(interpret_pick(true, "=/tmp\n", "").is_err());
+        assert!(interpret_pick(true, "", "").is_err());
+    }
+
+    // AC12-CON: one call site, all harnesses. A picker call inside any driver
+    // lib would be a second copy of one decision - the shape this wiring exists
+    // to avoid.
+    #[test]
+    fn no_driver_lib_calls_the_picker_itself() {
+        let lib_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/lib");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&lib_dir).expect("scripts/lib is readable") {
+            let path = entry.expect("dir entry").path();
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("")
+                .to_string();
+            if !name.starts_with("driver-") || !name.ends_with(".sh") {
+                continue;
+            }
+            let body = std::fs::read_to_string(&path).expect("driver lib is readable");
+            assert!(
+                !body.contains("providers pick"),
+                "{name} calls the picker itself; the loop dispatcher is the one call site"
+            );
+            checked += 1;
+        }
+        // Positive control: a glob that stops matching would otherwise pass
+        // vacuously and report coverage it does not have.
+        assert!(checked >= 4, "expected the driver libs, scanned {checked}");
+    }
 
     // AC1-EDGE: opencode resolves to the `opencode` binary (loop-wrapper path,
     // x-6007). The loop-wrapper drivers have fixed binary names (no env/alias

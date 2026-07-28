@@ -522,6 +522,69 @@ def load_providers(repo_root: Path | None = None) -> ProvidersConfig:
     return ProvidersConfig(records=[], active=None)
 
 
+# ---------------------------------------------------------------------------
+# "The active account" - ONE resolver.
+#
+# Two notions of active coexist and can disagree: `config.providers.active`
+# (routing-active, what the config points at) and the id stamped into a CLI's
+# shared slot (what a worker's credential actually comes from). For an
+# `auth: managed` record only the slot can supply the credential, so the slot
+# occupant is the truth and routing-active is a stale pointer.
+#
+# The display path had this right and the dispatch path did not, which meant a
+# quota decision was evaluated for one account while the worker spawned on
+# another. Both now route through `_active_id_for`, so there is one branch to be
+# right about rather than two that drift.
+# ---------------------------------------------------------------------------
+
+
+def _active_id_for(
+    record: ProviderRecord,
+    config: ProvidersConfig,
+    root: Path | None = None,
+) -> str | None:
+    """THE branch: the id in force on ``record``'s lane. Fail-open to None."""
+    if record.auth == "managed":
+        from fno.adapters.providers.managed import active_slot_id
+
+        try:
+            return active_slot_id(record.harness, root)
+        except Exception:  # noqa: BLE001 - an unreadable store must not break display
+            return None
+    return config.active
+
+
+def is_effective_active(
+    record: ProviderRecord,
+    config: ProvidersConfig,
+    root: Path | None = None,
+) -> bool:
+    """True when ``record`` is the account actually in force on its lane."""
+    return record.id == _active_id_for(record, config, root)
+
+
+def effective_active(
+    config: ProvidersConfig | None = None,
+    *,
+    repo_root: Path | None = None,
+    root: Path | None = None,
+) -> str | None:
+    """The record id a default dispatch actually runs on, or None.
+
+    Resolves the routing-active record and then asks its own lane who is in
+    force, so a managed routing-active pointer that the slot has since moved
+    past yields the slot occupant rather than the stale name.
+    """
+    if config is None:
+        config = load_providers(repo_root=repo_root)
+    if not config.active:
+        return None
+    record = config.by_id.get(config.active)
+    if record is None:
+        return config.active
+    return _active_id_for(record, config, root)
+
+
 def save_providers(
     config: ProvidersConfig,
     scope: Literal["project", "global"],

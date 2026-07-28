@@ -30,6 +30,13 @@ from fno.adapters.providers.usage import (
     probe_usage,
 )
 
+# Captured at import time, before the autouse keychain stub replaces the module
+# attribute: the one test that exercises the Keychain lookup itself needs the
+# real function, not the stub.
+from fno.adapters.providers.usage import (  # noqa: E402  isort:skip
+    _read_claude_keychain_blobs as _real_keychain_read,
+)
+
 
 @pytest.fixture
 def state_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -232,6 +239,129 @@ class TestProbeFailOpen:
         snap = probe_usage(rec, now=1000.0)
         assert snap is not None
         assert snap.windows[0].used_pct == 5.0
+
+    def test_config_dir_record_reads_only_its_own_scoped_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC6-HP: a config_dir record probes THAT dir's credential. The scoped
+        # Keychain lookup is keyed on the dir, so two config_dir accounts read
+        # independently rather than both returning the shared slot's numbers.
+        import fno.adapters.providers.usage as usage_mod
+
+        alt = tmp_path / "claude-alt"
+        alt.mkdir()
+        (alt / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "alt-token"}})
+        )
+        rec = ProviderRecord(
+            id="alt", name="alt", harness="claude", auth="managed", config_dir=alt
+        )
+        assert usage_mod._claude_bearer_candidates(rec) == ["alt-token"]
+
+    def test_own_dir_never_falls_back_to_the_unscoped_item(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Evidence 2b: the unscoped Keychain item belongs to whoever occupies the
+        # shared ~/.claude slot. A record with its own dir must never borrow it -
+        # that is how a per-account probe reports the ACTIVE account's usage.
+        import fno.adapters.providers.usage as usage_mod
+
+        seen: list[str] = []
+
+        def _fake_security(args: list[str], **kwargs: object):  # noqa: ANN001
+            seen.append(args[args.index("-s") + 1])
+
+            class _Out:
+                returncode = 1
+                stdout = ""
+
+            return _Out()
+
+        monkeypatch.setattr(usage_mod.sys, "platform", "darwin")
+        monkeypatch.setattr(usage_mod.subprocess, "run", _fake_security)
+        _real_keychain_read(tmp_path)
+        assert len(seen) == 1
+        assert seen[0].startswith("Claude Code-credentials-")
+
+    def test_managed_active_slot_occupant_is_probeable(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC1-HP: the whole defect. `auth: managed` used to short-circuit to None
+        # before any bearer lookup, so a live account read `unknown` forever.
+        import fno.adapters.providers.usage as usage_mod
+
+        # The slot is the CANONICAL ~/.claude, so HOME is what moves it - an
+        # ambient CLAUDE_CONFIG_DIR must NOT, or a worker pinned elsewhere would
+        # make this probe read its credential.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "slot-token"}})
+        )
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda rec: True)
+        rec = ProviderRecord(id="primary", name="primary", harness="claude", auth="managed")
+        assert usage_mod._claude_bearer_candidates(rec) == ["slot-token"]
+
+    def test_managed_non_occupant_refuses_rather_than_borrowing(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # AC2-ERR: a managed record that is NOT the slot occupant has no
+        # attributable credential, so it probes nothing and no snapshot is ever
+        # written under its id carrying another account's numbers.
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "slot-token"}})
+        )
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda rec: False)
+        rec = ProviderRecord(id="other", name="other", harness="claude", auth="managed")
+        assert usage_mod._claude_bearer_candidates(rec) == []
+        assert probe_usage(rec) is None
+
+    def test_an_ambient_config_dir_never_redirects_the_slot_read(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # A worker pinned to account B runs with B's dir exported. Honoring that
+        # here would read B's credential while the stamp names A, and file B's
+        # usage under A - the exact lie the attribution rule exists to prevent.
+        import fno.adapters.providers.usage as usage_mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "account-a"}})
+        )
+        other = tmp_path / "claude-b"
+        other.mkdir()
+        (other / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "account-b"}})
+        )
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(other))
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda rec: True)
+        rec = ProviderRecord(id="a", name="a", harness="claude", auth="managed")
+        assert usage_mod._claude_bearer_candidates(rec) == ["account-a"]
+
+    def test_managed_store_blob_is_not_a_probe_source(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The blob is a capture-time copy: it goes stale and it can duplicate
+        # across ids (Evidence 2). Reading it would report a dead token's window
+        # or another account's usage, so the probe must not reach for it.
+        import fno.adapters.providers.usage as usage_mod
+
+        root = tmp_path / "providers"
+        (root / "other").mkdir(parents=True)
+        (root / "other" / "blob").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "blob-token"}})
+        )
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda rec: False)
+        rec = ProviderRecord(id="other", name="other", harness="claude", auth="managed")
+        assert usage_mod._claude_bearer_candidates(rec) == []
 
     def test_codex_probe_parses_real_shape(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

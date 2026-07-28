@@ -186,6 +186,97 @@ bounded indeterminate-state receipt before exiting with the interrupt status.
 
 ---
 
+## Quota survival: `config_dir` accounts, `pick`, and `doctor`
+
+No in-session credential swap is possible.
+A `claude` process reads `CLAUDE_CONFIG_DIR` once at launch, so every account switch happens at a process boundary, and the only useful moment to choose is just before one starts.
+
+### The prerequisite: an account that participates in quota survival needs its own `config_dir`
+
+```bash
+fno config accounts register readyrule --config-dir ~/.claude-alt
+fno config accounts register makers    --config-dir ~/.claude
+```
+
+A `config_dir` record is the only shape where all three of these hold at once: the usage probe can read that account's own credentials, a worker can be pinned to it while a different account is active, and two workers can run on two accounts concurrently.
+A shared-slot `managed` account remains fully supported for single-account operation; it simply cannot be a picker candidate, because it reaches a worker only through the daemon-wide `~/.claude` slot.
+
+On a fresh machine this costs one `claude /login` per account, each in its own dir.
+It is an operator setup step, not configuration.
+
+### `fno config accounts pick`
+
+```
+fno config accounts pick [--combo <name>] [--exclude <id>...] [--json] [--print-env]
+```
+
+Prints the account to launch on: the first candidate in combo order that still has headroom and that footnote can actually pin a worker to.
+stdout is the bare account id (or the JSON verdict); stderr always carries the reason and every candidate's headroom, so the receipt is readable whether or not the pick succeeded.
+
+| exit | meaning |
+|------|---------|
+| 0 | an account was chosen; its id is on stdout |
+| 3 | every launchable candidate is `EXHAUSTED` |
+| 4 | there is no launchable candidate at all - a setup problem, not a quota one |
+| 5 | picking is switched off (only with `--if-armed`, see below) |
+
+The distinction between 3 and 4 is load-bearing.
+Exit 4 names each record and tells you to register one with `--config-dir`; collapsing it into 3 would report a setup gap as a quota condition.
+
+Selection introduces no new ranking: it is the existing headroom-ordered walk over the active combo, with `EXHAUSTED` skipped and `UNKNOWN` treated as healthy.
+Combo order is how you express preference, exactly as elsewhere.
+Probing goes through the standard TTL cache, so repeated calls inside `probe_ttl_seconds` cost nothing.
+
+`--print-env` emits the picked account's **complete** env overlay, one `KEY=VALUE` per line, for a shell alias or `claude --settings` wrapper you own:
+
+```
+ANTHROPIC_API_KEY=
+CLAUDE_CODE_OAUTH_TOKEN=
+ANTHROPIC_BASE_URL=
+...
+CLAUDE_CONFIG_DIR=/Users/you/.claude-alt
+```
+
+An empty value means **clear this variable**.
+Pinning `CLAUDE_CONFIG_DIR` alone is only half an overlay: an inherited `ANTHROPIC_API_KEY`, `CLAUDE_CODE_OAUTH_TOKEN`, or routed `ANTHROPIC_BASE_URL` outranks it, so the worker would authenticate or bill through a different route while the receipt named the picked account.
+Every Python spawn substrate already scrubs that list before applying an overlay; emitting it here is what lets a non-Python caller apply the whole thing from one source of truth.
+
+`--if-armed` makes the verb itself honor `pick_on_launch`, declining with exit 5 when it is false.
+It exists for callers that must respect the opt-in but cannot read config themselves (the Rust loop dispatcher), so the knob keeps exactly one implementation.
+A bare `fno config accounts pick` you type by hand always answers: you asked.
+
+Footnote does not own your interactive `claude` invocation and does not pretend to; you relaunch.
+
+### `providers.quota.pick_on_launch`
+
+```toml
+[providers.quota]
+pick_on_launch = true
+```
+
+When true, a spawn with no explicit `--account` consults the picker and launches on an account with headroom.
+Defaults **false**: picking changes which account gets billed without being asked, so it is armed deliberately.
+The external loop honors the same knob, via `pick --if-armed`.
+
+Two spawns are never picked for, whatever the knob says:
+
+- one that passed an explicit `--account` - it wins and is never second-guessed
+- one that passed `--route` or `--role` - `fno agents spawn` already refuses `--account` alongside either, because the route's `ANTHROPIC_*` overrides the account's `CLAUDE_CONFIG_DIR` and silently mis-bills. Auto-picking would reassemble exactly that combination behind the refusal.
+
+### `fno config accounts doctor`
+
+One read-only verb reporting the store's real condition, exiting non-zero when anything is wrong:
+
+- a record whose stored credential duplicates another's (two ids, one account)
+- a stored credential past its expiry
+- a `config_dir` that is missing or holds no login
+- a tainted slot
+
+`register` refuses a duplicate credential up front, but that guard is register-time only.
+`doctor` is the surface that reports stores predating it, and the verb that confirms a `--config-dir` conversion took.
+
+---
+
 ## env-value reference resolution
 
 Values in a record's `env` table support four syntaxes (shown here as the

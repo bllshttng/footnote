@@ -573,6 +573,43 @@ def inherited_tier_remap(
     return found
 
 
+def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
+    """Inject a headroom-picked ``--account`` for a spawn that named none.
+
+    Runs at the SAME seam as the auth scrub below, for the same reason: a
+    bg/headless spawn auto-routes to the Rust client through an ``exec``, so
+    neither Python spawn seam is ever reached. A picker wired only there would
+    leave every such worker on the ambient - possibly exhausted - account while
+    ``pick_on_launch`` read enabled, which is the decorative-guard shape this
+    repo's corpus names. Injecting the flag here is the one edit BOTH runtimes
+    see, and the scrub below then applies the account's overlay exactly as it
+    does for an explicit ``--account``.
+
+    Four spawns are left alone: one that already named an account (explicit
+    intent always wins), one carrying ``--role`` or ``--route``/``--provider``
+    (the CLI refuses ``--account`` alongside either, because the route's
+    ANTHROPIC_* would override the account's CLAUDE_CONFIG_DIR and mis-bill),
+    and one pinned to a non-claude harness (``--account`` is claude-only).
+    """
+    out = list(args)
+    if _spawn_flag_value(out, "--account") is not None:
+        return out
+    if _is_role_bearing_spawn("spawn", out) or _is_route_bearing_spawn("spawn", out):
+        return out
+    harness = _spawn_flag_value(out, "--harness", "-H")
+    if harness not in (None, "", "claude"):
+        return out
+    try:
+        from fno.agents.dispatch import pick_account_id
+
+        picked = pick_account_id()
+    except Exception:  # noqa: BLE001 - picking is advisory; never block a spawn
+        return out
+    if not picked:
+        return out
+    return [*out, "--account", picked]
+
+
 def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     """Drop inherited vendor auth/model vars from ``os.environ`` for an
     ``--account`` spawn, at the seam, so the Rust client inherits the scrub too.
@@ -865,7 +902,10 @@ def make_agents_group_cls() -> type:
                     args = inject_spawn_defaults(args)
                     # Same seam, same reason: these must see the post-defaults
                     # args and must cover BOTH runtimes, so they run here rather
-                    # than in either spawn implementation.
+                    # than in either spawn implementation. The pick runs FIRST so
+                    # the scrub below sees the account it chose and applies that
+                    # overlay, exactly as it would for an explicit --account.
+                    args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
                 mode = runtime_mode()
