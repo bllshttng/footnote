@@ -453,7 +453,15 @@ impl Dispatcher for ShelloutDispatcher {
                     // and an unannounced billing change is the one thing this
                     // feature must never do.
                     if let Some((key, value)) = picked.iter().find(|(_, v)| !v.is_empty()) {
-                        eprintln!("loop: iteration {iter} account picked -> {key}={value}");
+                        // Announce every pick, but NEVER the pin's value unless
+                        // it is the config dir. An api_key account's pin IS its
+                        // ANTHROPIC_API_KEY, so echoing the value would write
+                        // the secret to the loop's log on every iteration.
+                        if key == PICKED_ENV_KEY {
+                            eprintln!("loop: iteration {iter} account picked -> {value}");
+                        } else {
+                            eprintln!("loop: iteration {iter} account picked -> pinned via {key}");
+                        }
                     }
                     for (key, value) in &picked {
                         // An empty value is the verb saying "clear this": an
@@ -491,7 +499,7 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary};
+    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary, PICKED_ENV_KEY};
 
     fn pair(k: &str, v: &str) -> (String, String) {
         (k.to_string(), v.to_string())
@@ -591,6 +599,22 @@ mod tests {
             Err("pick: every launchable candidate is exhausted".to_string())
         );
         assert!(interpret_pick(false, "", "").is_err());
+    }
+
+    // A receipt must never carry credential material. For an api_key account
+    // the pin IS the secret, so the announcement names the KEY and stops; only
+    // CLAUDE_CONFIG_DIR, a filesystem path, is safe to echo. This pins the
+    // decision the receipt code makes, so a later edit cannot re-introduce the
+    // value into the log.
+    #[test]
+    fn only_the_config_dir_pin_is_safe_to_echo() {
+        assert_eq!(PICKED_ENV_KEY, "CLAUDE_CONFIG_DIR");
+        for secret_key in ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] {
+            assert_ne!(
+                secret_key, PICKED_ENV_KEY,
+                "a secret-bearing pin must not take the echo-the-value branch"
+            );
+        }
     }
 
     #[test]
