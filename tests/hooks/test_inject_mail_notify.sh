@@ -36,6 +36,19 @@ chmod +x "$TMP/bin/fno"
 
 run_hook() { PATH="$TMP/bin:$PATH" bash "$HOOK" </dev/null; }
 
+# A PATH carrying the stub plus only what the hook genuinely needs (jq, and bash
+# + sleep for the stub), and NO timeout(1)/gtimeout(1) on any host. /usr/bin
+# ships timeout on Linux, so "strip the PATH" alone would leave CI measuring the
+# coreutils path. Omitting jq instead would be worse than useless: the hook
+# exits 0 the moment jq is missing, so a hang case would pass in 5ms having
+# tested nothing.
+mkdir -p "$TMP/nocu"
+for b in bash sleep jq; do
+  p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$TMP/nocu/$b"
+done
+NOCU_PATH="$TMP/bin:$TMP/nocu"
+run_hook_nocoreutils() { PATH="$NOCU_PATH" bash "$HOOK" </dev/null; }
+
 # 1. Nonzero unread -> additionalContext carrying the notify-self line.
 OUT="$(FNO_STUB_OUT='2 unread fno mail from alice, bob: run `fno mail unread`' run_hook 2>/dev/null)"; RC=$?
 [[ $RC -eq 0 ]] && pass "unread: exit 0" || fail "unread rc=$RC"
@@ -59,16 +72,20 @@ OUT="$(PATH="/usr/bin:/bin" bash "$HOOK" </dev/null 2>/dev/null)"; RC=$?
 [[ $RC -eq 0 ]] && pass "no-fno: exit 0" || fail "no-fno rc=$RC"
 [[ -z "$OUT" ]] && pass "no-fno: injects nothing" || fail "no-fno: unexpected output: $OUT"
 
-# 4. Hung binary -> the 2s timeout bounds it; the hook still exits 0 quickly.
-#    (Only assert when a timeout mechanism exists; otherwise skip the bound.)
-if command -v timeout >/dev/null 2>&1 || command -v gtimeout >/dev/null 2>&1; then
+# 4. Hung binary -> the 2s cap bounds it; the hook still exits 0 quickly. Run on
+#    a PATH with no timeout(1) at all: this is a UserPromptSubmit hook, so an
+#    uncapped hang costs 10s on EVERY prompt, and stock macOS is that host.
+if ( PATH="$NOCU_PATH"; command -v timeout || command -v gtimeout ) >/dev/null 2>&1; then
+  fail "timeout: the coreutils-free PATH still resolves a timeout binary; the bound below asserts nothing"
+elif [[ ! -x "$TMP/nocu/jq" ]]; then
+  fail "timeout: jq missing from the coreutils-free PATH; the hook would exit 0 before reaching the cap"
+else
   START=$(date +%s)
-  OUT="$(FNO_STUB_SLEEP=10 FNO_STUB_OUT='late' run_hook 2>/dev/null)"; RC=$?
+  OUT="$(FNO_STUB_SLEEP=10 FNO_STUB_OUT='late' run_hook_nocoreutils 2>/dev/null)"; RC=$?
   END=$(date +%s)
   [[ $RC -eq 0 ]] && pass "timeout: exit 0" || fail "timeout rc=$RC"
-  (( END - START < 8 )) && pass "timeout: bounded (<8s, not 10s)" || fail "timeout: not bounded ($((END - START))s)"
-else
-  pass "timeout: skipped (no timeout/gtimeout on PATH)"
+  (( END - START < 8 )) && pass "timeout: bounded without coreutils (<8s, not 10s)" || fail "timeout: not bounded ($((END - START))s)"
+  [[ -z "$OUT" ]] && pass "timeout: injects nothing when capped" || fail "timeout: unexpected output: $OUT"
 fi
 
 echo ""
