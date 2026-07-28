@@ -82,7 +82,7 @@ def _is_sha256(s: str) -> bool:
     return True
 
 
-def load_graph(path: Path | None = None) -> list[dict]:
+def load_graph(path: Path | None = None, *, keep_malformed: bool = False) -> list[dict]:
     """Read and validate graph.json against its SHA256 sidecar.
 
     Behavior:
@@ -130,10 +130,10 @@ def load_graph(path: Path | None = None) -> list[dict]:
                     file=sys.stderr,
                 )
             sidecar.write_text(actual_hash + "\n")
-            return _entries(json.loads(raw_bytes))
+            return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
 
         if actual_hash == expected_hash:
-            return _entries(json.loads(raw_bytes))
+            return _entries(json.loads(raw_bytes), keep_malformed=keep_malformed)
 
         # Mismatch: likely the two-write window. Retry after a short sleep.
         if attempt < _RETRY_ATTEMPTS - 1:
@@ -147,7 +147,7 @@ def load_graph(path: Path | None = None) -> list[dict]:
     raise GraphCorruptionError(path, actual_hash, expected_hash)
 
 
-def _entries(data: object) -> list[dict]:
+def _entries(data: object, *, keep_malformed: bool = False) -> list[dict]:
     """Extract the entry list and run the canonical migration/defaults pass.
 
     One seam: this is the same ``_apply_graph_defaults`` ``read_graph`` uses, so
@@ -163,7 +163,7 @@ def _entries(data: object) -> list[dict]:
 
     return _apply_graph_defaults(
         data.get("entries", []) if isinstance(data, dict) else [],
-        keep_malformed=True,
+        keep_malformed=keep_malformed,
     )
 
 

@@ -362,15 +362,18 @@ def _write_sha256_sidecar(path: Path) -> None:
         raise
 
 
-def _create_backup(path: Path) -> None:
+def _create_backup(path: Path) -> Path | None:
     """Copy current graph.json to a timestamped backup, then prune old backups.
 
     Backups are named graph.json.bak.<ISO-timestamp-no-colons>.
     Keeps GRAPH_BACKUP_KEEP most-recent entries; prunes the rest.
     No-op if graph.json does not yet exist (first write).
+
+    Returns the backup path, or None when none was made -- a caller that tells
+    the user their data is recoverable has to be able to check that it is.
     """
     if not path.exists():
-        return
+        return None
 
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%f")
     backup = path.parent / f"{path.name}.bak.{ts}"
@@ -378,7 +381,7 @@ def _create_backup(path: Path) -> None:
         shutil.copy2(path, backup)
     except OSError as e:
         print(f"Warning: graph backup failed: {e}", file=sys.stderr)
-        return
+        return None
 
     # Prune: keep only the GRAPH_BACKUP_KEEP most-recent .bak.* files
     existing = sorted(path.parent.glob(f"{path.name}.bak.*"))
@@ -388,6 +391,7 @@ def _create_backup(path: Path) -> None:
             old.unlink()
         except OSError:
             pass
+    return backup
 
 
 def _apply_graph_defaults(entries: list[dict], *, keep_malformed: bool = False) -> list[dict]:
@@ -719,13 +723,6 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         # `backlog update` should do without a word. The prior content survives
         # in the .bak _create_backup takes just before the write.
         _dropped = len(raw) - len(entries)
-        if _dropped > 0:
-            print(
-                f"Warning: dropping {_dropped} malformed graph "
-                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
-                f"from {path}; prior content is preserved in the .bak sibling",
-                file=sys.stderr,
-            )
         entries = mutator(entries)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any
@@ -741,7 +738,23 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         entries = canonicalize_entries(entries)
         # Backup previous content BEFORE overwriting (so --revert has something
         # to fall back to).  No-op on first write when path does not yet exist.
-        _create_backup(path)
+        _backup = _create_backup(path)
+        # Announced AFTER the backup, and worded on what it actually returned:
+        # _create_backup swallows its own OSError, so promising a .bak before
+        # attempting one can tell a user their rows are recoverable on exactly
+        # the run where they are not.
+        if _dropped > 0:
+            _where = (
+                f"prior content is preserved in {_backup.name}"
+                if _backup is not None
+                else "NO backup was written, so this removal is not recoverable"
+            )
+            print(
+                f"Warning: dropping {_dropped} malformed graph "
+                f"{'entry' if _dropped == 1 else 'entries'} (not a JSON object) "
+                f"from {path}; {_where}",
+                file=sys.stderr,
+            )
         _write_json(entries, path)
         # Write SHA256 sidecar atomically after every successful mutation.
         _write_sha256_sidecar(path)
