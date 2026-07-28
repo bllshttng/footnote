@@ -387,13 +387,37 @@ def test_normalize_reads_the_same_merge_posture_key_as_harness_map():
     cover posture, which is how the pair went unpinned in the first place.
     """
     import re
+    import types
 
     text = _normalize_sh().read_text()
     m = re.search(r"fno config get ([\w.]+)", text)
     assert m, "normalize.sh no longer reads a config key for the merge posture"
-    assert m.group(1) == "dispatch.auto_merge", (
-        f"normalize.sh reads {m.group(1)!r} but harness_map._load_dispatch_cfg "
-        f"reads 'dispatch.auto_merge'"
+    key = m.group(1)
+
+    # The key must be a declared config key, not a plausible-looking typo.
+    from fno.config.registry import meta_for
+
+    assert meta_for(key) is not None, (
+        f"normalize.sh reads {key!r}, which the config registry does not declare"
+    )
+
+    # Then EXERCISE the Python reader with the key the shell actually reads,
+    # rather than comparing the shell to a literal spelled out here. A literal
+    # only pins the shell to this test file: repoint _load_dispatch_cfg at a
+    # renamed field and a string comparison stays green while the two readers
+    # have silently diverged - the same "guard that never touches the path it
+    # claims to cover" shape as the bug this node fixed (codex P2 on PR #640).
+    #
+    # Build the settings stub FROM the shell's key. If Python is repointed, this
+    # stub no longer grants and the assertion fails; if the shell is repointed,
+    # the registry check above fails. Neither side can move alone.
+    section, _, field = key.partition(".")
+    assert section and field, f"expected a dotted config key, got {key!r}"
+    stub = types.SimpleNamespace(**{section: types.SimpleNamespace(**{field: True})})
+    out = resolve_dispatch(harness="claude", node_id="x-1", settings=stub)
+    assert out["command"] == "/target x-1", (
+        f"normalize.sh reads {key!r}, but setting that field does not grant merge "
+        f"on the Python path (got {out['command']!r}) - the two readers have diverged"
     )
 
 
