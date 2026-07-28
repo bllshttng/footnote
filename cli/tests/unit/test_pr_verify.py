@@ -173,6 +173,29 @@ def test_bounded_remediation_stays_single_poll(tmp_path, gh_on, monkeypatch):
     assert len(merge_calls) == 1
 
 
+@pytest.mark.parametrize("delete_branch", [True, False])
+def test_bounded_remediation_honors_delete_branch(tmp_path, monkeypatch, delete_branch):
+    """This path honored merge_strategy but never passed --delete-branch, so a
+    PR merged here kept a branch the same PR merged via `fno pr merge` deleted.
+    """
+    sf = _state_file(tmp_path)
+    monkeypatch.setattr(_verify, "_gh_available", lambda: True)
+    monkeypatch.setattr(
+        _verify,
+        "_auto_merge",
+        lambda: AutoMergeBlock(enabled=True, delete_branch_on_merge=delete_branch),
+    )
+    fake = FakeGH(
+        toplevel=str(tmp_path),
+        pr_states=[{"state": "OPEN"}, {"state": "MERGED", "mergedAt": "2026-07-28T01:00:00Z"}],
+        gh_merge=Result(0, "", ""),
+    )
+    monkeypatch.setattr(_verify, "run", fake)
+    assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None) == 0
+    merge_cmd = [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]][0]
+    assert ("--delete-branch" in merge_cmd) is delete_branch, merge_cmd
+
+
 def test_unknown_state_degrades_open(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "WEIRD"}])
