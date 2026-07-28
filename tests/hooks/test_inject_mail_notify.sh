@@ -43,7 +43,7 @@ run_hook() { PATH="$TMP/bin:$PATH" bash "$HOOK" </dev/null; }
 # exits 0 the moment jq is missing, so a hang case would pass in 5ms having
 # tested nothing.
 mkdir -p "$TMP/nocu"
-for b in bash sleep jq; do
+for b in bash sleep jq dirname; do
   p="$(command -v "$b" 2>/dev/null)" && ln -sf "$p" "$TMP/nocu/$b"
 done
 NOCU_PATH="$TMP/bin:$TMP/nocu"

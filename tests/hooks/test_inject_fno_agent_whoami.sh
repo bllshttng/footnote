@@ -42,7 +42,11 @@ now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 make_nocoreutils_dir() {
     local d b p
     d=$(mktemp -d -t fno-nocoreutils-XXXXXX)
-    for b in bash sleep; do
+    # dirname is here because the hook resolves its own directory to source the
+    # shared helper, not because the cap needs it. This PATH controls for exactly
+    # one thing - no timeout(1)/gtimeout(1) - and should not accidentally test
+    # what a hook does on a host with no coreutils whatsoever.
+    for b in bash sleep dirname; do
         p="$(command -v "$b")" || fail "cannot build a coreutils-free PATH: $b not found"
         ln -s "$p" "$d/$b"
     done

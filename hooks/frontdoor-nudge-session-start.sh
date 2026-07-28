@@ -13,16 +13,13 @@ set -uo pipefail
 # The Rust front door answers a mux-only verb; the Python `fno-py` has no `mux`
 # subcommand and fails "No such command". This is the same probe `fno doctor`'s
 # `_probe_is_mux` uses. `fno mux ls --json` is read-only, returns `[]` with no
-# server, and does not need the daemon, so it is fast. Bound it anyway (via
-# timeout when available) so a wedged socket can never stall session start.
-_timeout=""
-if command -v timeout >/dev/null 2>&1; then
-  _timeout="timeout 3"
-elif command -v gtimeout >/dev/null 2>&1; then
-  _timeout="gtimeout 3"
-fi
+# server, and does not need the daemon, so it is fast. Bound it anyway so a
+# wedged socket can never stall session start.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
-if command -v fno >/dev/null 2>&1 && $_timeout fno mux ls --json >/dev/null 2>&1; then
+if command -v fno >/dev/null 2>&1 && with_timeout 3 fno mux ls --json >/dev/null 2>&1; then
   exit 0 # `fno` on PATH IS the Rust mux front door - nothing to remind
 fi
 
