@@ -75,10 +75,24 @@ const BYE_FLUSH: Duration = Duration::from_millis(250);
 /// The droppable outbound path: newest unsent frame per pane, per client.
 type DirtyMap = Arc<Mutex<HashMap<u64, Frame>>>;
 
-/// Lines a single wheel notch scrolls a mux-interpreted pane (brief Claude's
-/// discretion #4). Three matches the common terminal default; a mouse-mode app
-/// gets the raw wheel event and picks its own step.
-const MOUSE_WHEEL_LINES: i32 = 3;
+/// Lines a single wheel notch scrolls a mux-interpreted pane. ONE, because the
+/// host terminal already did the accumulation and a notch here IS one cell of
+/// finger travel - multiplying re-amplifies input that arrives pre-normalized.
+///
+/// Every precision-scroll host converts trackpad pixel deltas into whole cells
+/// by accumulating a float and keeping the sub-cell remainder, then emits one
+/// wheel notch per cell crossed: alacritty `input/mod.rs::scroll_terminal`
+/// (`accumulated_scroll.y %= height`, and it forces its user multiplier to 1
+/// while an app owns the mouse - which is us), ghostty `Surface.zig`
+/// (`pending_scroll_y`, `mouse-scroll-multiplier.precision` default 1).
+///
+/// Three is the right step for a DISCRETE wheel detent, where the host emits
+/// one notch per physical click and a 1:1 step feels sluggish. It is 3x too
+/// fast for a trackpad, and SGR reports both as button 64/65 with nothing to
+/// tell them apart - so this favors the trackpad, the common case. A wheel-mouse
+/// operator wanting a coarser step is the config knob this deliberately does not
+/// have yet; add it when someone asks, not on speculation.
+const MOUSE_WHEEL_LINES: i32 = 1;
 
 /// What the server does with a mouse event, decided purely from the pane's
 /// modes + the gesture so the routing (the brief's crux, Locked 2) is unit
