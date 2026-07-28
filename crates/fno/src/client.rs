@@ -1183,6 +1183,15 @@ enum MenuAction {
     NewTab,
     /// Attach a bg agent as a directional split of the current tab.
     Split(Dir),
+    /// Relocate a pane-hosted row's LIVE pane `dir`-ward (`Command::MovePane`,
+    /// PTY intact). Deliberately not reusing `Split`/`AttachAgent`: attaching an
+    /// already-attached session reaps and respawns its pane, so the menu emits
+    /// the same non-destructive command `commit_row_drag` already commits for a
+    /// `RowSource::Pane` - one gesture, one meaning.
+    MoveDir(Dir),
+    /// Break a pane-hosted row's live pane out into its own tab
+    /// (`Command::BreakPane`) - the menu twin of dragging its grip to the strip.
+    BreakOut,
     /// Focus an existing pane-hosted row.
     Focus,
     /// Open the read-only peek overlay.
@@ -1207,7 +1216,8 @@ enum MenuAction {
 /// anchored at `anchor`. `None` for a non-agent row (the menu is agent-only).
 /// Entry sets mirror the row's state so no dead item ever renders: a paneless
 /// bg row gets the new-tab + 2x2 split grid (its whole point); a pane row gets
-/// focus; an exited row gets remove; peek/stop apply where they make sense.
+/// focus plus the move/break-out grid that relocates its live pane; an exited
+/// row gets remove; peek/stop apply where they make sense.
 fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
     let mut rows: Vec<PopupRow> = Vec::new();
     let mut actions: Vec<MenuAction> = Vec::new();
@@ -1230,9 +1240,32 @@ fn build_row_menu(agent: &AgentRow, anchor: Anchor) -> RowMenu {
         add(entry("✕", "Remove"), &[MenuAction::Remove]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
     } else if agent.pane_id.is_some() {
-        // Live pane row: already placed, so focus/peek/stop (no splits).
+        // Live pane row: already placed, so re-placement is a MOVE of the live
+        // pane, never an attach. Same 2x2 grid geometry the paneless branch uses
+        // below, so the two menus read as one system; the verbs differ because
+        // the operations do (move a running pane vs. place a new one).
         add(entry("→", "Focus"), &[MenuAction::Focus]);
         add(entry("◉", "Peek"), &[MenuAction::Peek]);
+        add(PopupRow::Rule, &[]);
+        add(
+            PopupRow::FullWidth("▭ New Tab".into()),
+            &[MenuAction::BreakOut],
+        );
+        // In a single-pane tab every direction resolves to "no pane in that
+        // direction" server-side. Left live rather than gated on pane count:
+        // the fail-closed notice is the same feedback path the paneless branch
+        // already relies on for its own unresolvable case.
+        add(
+            PopupRow::Grid(vec![cell("◧", "Move Left"), cell("◨", "Move Right")]),
+            &[
+                MenuAction::MoveDir(Dir::Left),
+                MenuAction::MoveDir(Dir::Right),
+            ],
+        );
+        add(
+            PopupRow::Grid(vec![cell("⬒", "Move Up"), cell("⬓", "Move Down")]),
+            &[MenuAction::MoveDir(Dir::Up), MenuAction::MoveDir(Dir::Down)],
+        );
         add(PopupRow::Rule, &[]);
         add(entry("■", "Stop"), &[MenuAction::Stop]);
     } else if agent.attach_id.is_some() {
@@ -9088,6 +9121,33 @@ async fn execute_row_menu_action(
             .await
             .map_err(|e| format!("attach send failed: {e}"))?;
         }
+        // `target: None` is the "resolve it server-side" form MovePane already
+        // documents for the keyboard bind: a menu knows WHICH pane moves (the
+        // row carries it) but names no drop slot, so the server runs the same
+        // `navigate` geometry FocusDir uses. Identical command to the one
+        // `commit_row_drag` sends for a RowSource::Pane - see the parity test.
+        MenuAction::MoveDir(dir) => match a.pane_id {
+            Some(pid) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::MovePane {
+                    mover: Some(pid),
+                    target: None,
+                    dir,
+                }),
+            )
+            .await
+            .map_err(|e| format!("move send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
+        },
+        MenuAction::BreakOut => match a.pane_id {
+            Some(pid) => write_msg(
+                sock_w,
+                &ClientMsg::Command(Command::BreakPane { pane: pid }),
+            )
+            .await
+            .map_err(|e| format!("break send failed: {e}"))?,
+            None => view.set_notice("agent has no pane here".into()),
+        },
         MenuAction::Focus => match a.pane_id {
             Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
                 .await
@@ -15374,6 +15434,18 @@ mod tests {
                 .any(|a| matches!(a, super::MenuAction::Split(_))),
             "a placed pane row offers no splits"
         );
+        assert!(
+            !pane.actions.contains(&super::MenuAction::NewTab),
+            "a placed pane row breaks its pane out, it never re-attaches"
+        );
+        // Re-placement IS offered on a pane row - as a move of the live pane.
+        for d in [Dir::Left, Dir::Right, Dir::Up, Dir::Down] {
+            assert!(
+                pane.actions.contains(&super::MenuAction::MoveDir(d)),
+                "pane row offers Move {d:?}"
+            );
+        }
+        assert!(pane.actions.contains(&super::MenuAction::BreakOut));
         let dead = super::build_row_menu(&mk("d", None, None, true), Anchor::Center);
         assert!(dead.actions.contains(&super::MenuAction::Remove));
         assert!(!dead.actions.contains(&super::MenuAction::Stop));
@@ -15974,6 +16046,113 @@ mod tests {
                 );
             }
             other => panic!("expected FocusPane(9), got {other:?}"),
+        }
+    }
+
+    /// A pane-hosted sideline row, the shape the move/break-out menu acts on.
+    fn pane_hosted_row(name: &str, pane_id: u64) -> AgentRow {
+        AgentRow {
+            squad: Some(1),
+            name: name.into(),
+            pane_id: Some(pane_id),
+            badge: None,
+            reason: None,
+            exited: false,
+            answerable: None,
+            attach_id: None,
+            external: false,
+            seen: false,
+            cwd_base: None,
+            tombstone: false,
+            subline: None,
+            tab: None,
+            account: None,
+            updated_at: None,
+            pr: None,
+            tail: None,
+            crown_level: None,
+            crown_scope: None,
+        }
+    }
+
+    /// Pick `action` out of a live row menu and run it, returning what went on
+    /// the wire.
+    async fn menu_command_for(v: &mut View, action: super::MenuAction) -> Command {
+        let sel = v
+            .row_menu
+            .as_ref()
+            .unwrap()
+            .actions
+            .iter()
+            .position(|a| *a == action)
+            .unwrap_or_else(|| panic!("menu should offer {action:?}"));
+        v.row_menu.as_mut().unwrap().popup.sel = sel;
+        let mut buf: Vec<u8> = Vec::new();
+        row_menu_execute_selected(v, &mut buf).await.unwrap();
+        let mut cur = std::io::Cursor::new(buf);
+        match crate::proto::read_msg_sync::<_, ClientMsg>(&mut cur).unwrap() {
+            ClientMsg::Command(c) => c,
+            other => panic!("expected a Command, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_move_relocates_the_live_pane() {
+        // A Move cell sends MovePane naming the row's own pane as `mover` and NO
+        // target: a menu knows WHICH pane moves but names no drop slot, so the
+        // server resolves the neighbour with the same `navigate` geometry the
+        // keyboard bind uses. Notably NOT AttachAgent, which would reap and
+        // respawn the pane instead of relocating it.
+        let row = pane_hosted_row("p", 7);
+        let mut v = view_with_agents(vec![row.clone()]);
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        match menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Up)).await {
+            Command::MovePane { mover, target, dir } => {
+                assert_eq!(mover, Some(7), "moves the row's own pane");
+                assert_eq!(target, None, "no drop slot - the server resolves it");
+                assert_eq!(dir, Dir::Up);
+            }
+            other => panic!("expected MovePane, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn row_menu_break_out_breaks_the_pane_into_its_own_tab() {
+        let row = pane_hosted_row("p", 7);
+        let mut v = view_with_agents(vec![row.clone()]);
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        assert_eq!(
+            menu_command_for(&mut v, super::MenuAction::BreakOut).await,
+            Command::BreakPane { pane: 7 }
+        );
+    }
+
+    #[tokio::test]
+    async fn row_menu_move_is_the_same_operation_as_the_row_drag() {
+        // Invariant (AGENTS.md "a guard on one of N reachable paths is
+        // decorative"): re-placing a pane-hosted row is reachable by menu AND by
+        // drag, and the two must stay ONE operation. They agree today because
+        // both emit MovePane; this fails the moment one path grows a second
+        // semantic. Only the addressing differs - a drag has a drop point and
+        // names `target`, a menu has none and leaves the server to resolve it -
+        // so the assertion is on the variant, not the fields.
+        let row = pane_hosted_row("p", 99);
+        let mut v = view_with_agents(vec![row.clone()]);
+        v.row_menu = Some(build_row_menu(&row, Anchor::Center));
+        let via_menu = menu_command_for(&mut v, super::MenuAction::MoveDir(Dir::Right)).await;
+
+        let mut dragged = three_pane_view();
+        dragged.begin_row_drag(RowSource::Pane(99), Instant::now());
+        let (r, c) = seam_cell_between(&dragged, 11, 12);
+        assert!(dragged.row_drag_to(r, c, Instant::now()));
+        let via_drag = dragged.commit_row_drag().expect("a drop in a zone commits");
+
+        match (via_menu, via_drag) {
+            (Command::MovePane { mover: m, .. }, Command::MovePane { mover: d, .. }) => {
+                assert_eq!(m, Some(99));
+                assert_eq!(d, m, "both name the clicked/dragged pane as the mover");
+            }
+            (m, d) => panic!("both paths must relocate via MovePane: menu={m:?} drag={d:?}"),
         }
     }
 
