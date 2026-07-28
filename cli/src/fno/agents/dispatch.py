@@ -1771,15 +1771,16 @@ def _pick_account_env(
     if route_env or role is not None:
         return None
     try:
-        from fno.adapters.providers.loader import load_quota_config
-
-        if not load_quota_config().pick_on_launch:
-            return None
-
-        from fno.adapters.providers.cli import pick_account
+        from fno.adapters.providers.cli import PICK_EXIT_NOT_ARMED, pick_account
         from fno.agents.account_env import resolve_account_overlay
 
-        verdict = pick_account()
+        # `--if-armed` so the opt-in is read in exactly ONE place, the same call
+        # the Rust loop makes. Checking `pick_on_launch` here as well would be a
+        # second answer to one question, which is the shape this whole feature
+        # exists to remove.
+        verdict = pick_account(if_armed=True)
+        if verdict.exit_code == PICK_EXIT_NOT_ARMED:
+            return None  # off by default: say nothing, change nothing
         if verdict.account is None:
             print(
                 f"account: default (pick unavailable: {verdict.reason})",
