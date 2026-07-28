@@ -125,7 +125,7 @@ The matching writer lives in `/pr check`: it replies in-thread (`in_reply_to`) p
 | `DoneAdvisory` | Advisory mode: promise seen, no_ship or advisory flag set |
 | `NoWork` | No state file or no recognizable work in progress |
 | `Budget` | Budget cap reached (see Budget Resolution below) |
-| `NoProgress` | Backstop: fingerprint unchanged for N fires |
+| `NoProgress` | Backstop: fingerprint unchanged across N independent observations |
 | `Interrupted` | Cancel sentinel `.fno/.target-cancelled` detected |
 | `Aborted` | `<aborted reason="...">` tag seen in transcript |
 
@@ -137,9 +137,24 @@ The matching writer lives in `/pr check`: it replies in-thread (`in_reply_to`) p
 HEAD sha | PR state | CI conclusion | latest review/comment timestamp
 ```
 
-If the fingerprint is identical across N consecutive fires, terminate with `NoProgress`:
+If the fingerprint is identical across N consecutive **observations**, terminate with `NoProgress`:
 - Unattended: N = 3
 - Attended: N = 5
+
+An observation is not a fire.
+The streak is debounced: walking back from now, a matching fire closer than `MIN_FIRE_GAP_SECS` (300s, env `FNO_LOOPCHECK_MIN_FIRE_GAP_SECS`) to the last counted one is skipped transparently and does **not** advance the cursor, so a burst of fires collapses to a single observation.
+The effective floor is therefore `(N - 1) * gap`: 10 minutes unattended, 20 attended.
+
+This distinction is load-bearing.
+Counting fires meant counting *questions asked* while reading the number as *time spent without change*, and the stop hook fires every 15-20 seconds when the model takes short turns.
+One session was reaped after five fires in 109 seconds with an open PR and a CI run that still had seven minutes to go; 114 of the first 127 NoProgress terminations were decided inside five minutes.
+Nothing external this loop waits on - CI, a review bot, a merge queue - moves that fast.
+
+The asymmetry is deliberate: a **changed** fingerprint breaks the streak at any spacing.
+Real progress is real progress at any speed; only the *absence* of change needs time to be credible.
+
+Every `loop_check` event carries `streak_window_secs` (oldest counted fire to now) beside `consecutive_unchanged`, so a streak count is falsifiable from the events log rather than taken on faith.
+Setting the gap to `0` restores fire counting exactly, which is how the integration suite keeps its backstop assertions.
 
 A "done but mute" session resolves as `DonePRGreen` when the reads pass (rather than `NoProgress`) so a session that completed but never emitted a promise closes cleanly rather than being flagged as stuck.
 
