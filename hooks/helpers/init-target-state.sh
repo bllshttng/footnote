@@ -670,27 +670,29 @@ if [[ ! -f "$STATE_FILE" ]]; then
   # input => zero iterations, unlike an empty "${arr[@]}"); set -f keeps the
   # split from also glob-expanding a token like "5*" against the cwd.
   #
-  # Presence comes from `fno backlog get --strict`, not from grepping the id out
-  # of graph.json. A quoted id also appears inside OTHER nodes -- as a blocked_by
-  # array member, and as a nested `"id":` in an embedded decomposition list -- so
-  # the grep counted merely-referenced ids as present. Two such hits set
-  # _GUARD_AMBIGUOUS and silently skipped the in_review refusal below. The verb
-  # was already being called two lines down for the same node, so resolving here
-  # and reusing the answer costs no extra process on the common single-id input.
+  # Presence comes from the verb, not from grepping the id out of graph.json: a
+  # quoted id also appears inside OTHER nodes (a blocked_by member, a nested
+  # `"id":` in an embedded decomposition list), so the grep counted
+  # merely-referenced ids as present, and two such hits set _GUARD_AMBIGUOUS and
+  # silently skipped the in_review refusal below. The status read below wanted
+  # the same call, so the common single-id input costs no extra process.
+  # Missing fno fails open, this guard's stance everywhere else.
   set -f
+  # `if`, not `command -v fno && for ...`: an AND-OR list that short-circuits
+  # returns non-zero, and this script runs under `set -e`. An `if` condition is
+  # exempt; the one-liner would abort init on every host without fno.
+  if command -v fno >/dev/null 2>&1; then
   for _tok in $INITIAL_INPUT; do
     [[ "$_tok" =~ ^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$ ]] || continue
     case " $_GUARD_MATCHES " in
       *" $_tok "*) continue ;;  # already counted this distinct id
     esac
-    # Fail-open on a missing fno, matching this guard's stance everywhere else:
-    # an unresolvable token is simply not a node, and init proceeds.
-    command -v fno >/dev/null 2>&1 || continue
     _tok_status="$(fno backlog get --strict "$_tok" --field status 2>/dev/null | tr -d '[:space:]' || true)"
     [[ -n "$_tok_status" ]] || continue
     _GUARD_MATCHES="${_GUARD_MATCHES:+$_GUARD_MATCHES }$_tok"
     _GUARD_STATUS="$_tok_status"
   done
+  fi
   set +f
   if [[ -n "$_GUARD_MATCHES" && "$_GUARD_MATCHES" != *" "* ]]; then
     _GUARD_NODE="$_GUARD_MATCHES"
