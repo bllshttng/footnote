@@ -107,6 +107,10 @@ def test_bodies_are_flushed_before_the_cursor_advances(_drained) -> None:
     assert not observed["still_buffered_at_ack"], (
         f"unflushed output remained at ack time: {observed['still_buffered_at_ack']!r}"
     )
+    # The cursor must advance to the LAST drained id, or the drained tail
+    # re-surfaces on the next wake.
+    assert observed["msg_id"] == msg.id
+    assert observed["handle"] == "cl-abcd1234"
 
 
 def test_the_flush_is_what_delivers_it(_drained) -> None:

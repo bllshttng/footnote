@@ -53,7 +53,16 @@ cat > "$TMP/stubborn" <<'EOF'
 trap '' TERM
 while :; do sleep 0.2; done
 EOF
-chmod +x "$TMP/hang" "$TMP/wrapped" "$TMP/fast" "$TMP/stubborn"
+# The direct child dies on TERM, but leaves behind a TERM-immune group member
+# still holding the caller's capture pipe. `wait` therefore returns promptly
+# while the command substitution stays open, so only a group KILL issued AFTER
+# `wait` can release the caller.
+cat > "$TMP/pipeholder" <<'EOF'
+#!/usr/bin/env bash
+bash -c 'trap "" TERM; sleep 30' &
+sleep 30
+EOF
+chmod +x "$TMP/hang" "$TMP/wrapped" "$TMP/fast" "$TMP/stubborn" "$TMP/pipeholder"
 
 # Each case runs in its own /bin/bash so `set -m` state cannot leak between them.
 # stdout carries "elapsed|rc|output"; stderr is kept separate so an assertion can
@@ -118,11 +127,15 @@ rc=$?
 probe_bounded() {
     local bound="$1" cmd="$2" out="$TMP/probe-result" i=0 pid
     rm -f "$out"
+    # Runs under a command substitution, because every real caller does and it is
+    # the shape that exposes a pipe-holder: the capture stays open until every
+    # process holding it exits, so a surviving group member hangs the caller even
+    # after the direct child is reaped.
     /bin/bash -c '
         set -uo pipefail
         source "$1"; export PATH="$2:$PATH"
         s=$(python3 -c "import time; print(int(time.time()*1000))")
-        with_timeout "$3" "$4" >/dev/null 2>&1
+        out=$(with_timeout "$3" "$4" 2>/dev/null)
         rc=$?
         e=$(python3 -c "import time; print(int(time.time()*1000))")
         printf "%s %s\n" "$rc" "$((e - s))" > "$5"
@@ -173,6 +186,24 @@ fi
 [[ "$term_rc" == "124" && "$kill_rc" == "124" ]] \
     && pass "a fired bound reports 124 on both the TERM and the KILL path" \
     || fail "fired bound must report 124 on both paths, got TERM=${term_rc:-none} KILL=${kill_rc:-none}"
+
+# 2d. A group member that outlives the TERM while holding the capture pipe must
+#     not hang the caller. `wait` returns as soon as the DIRECT child dies, which
+#     cancels the watchdog and the escalation still pending inside it, so the
+#     release depends entirely on the group KILL issued after `wait`. Without
+#     that one line the caller blocks forever while every other case in this file
+#     still passes, which is the untested-load-bearing-guard shape this whole
+#     change exists to remove. It also pins the escalation's GROUP-ness: a
+#     regression to a single-pid kill leaves the immune member alive.
+if ! probe_bounded 2 pipeholder; then
+    fail "a TERM-immune group member held the capture pipe open and the caller never returned; the post-wait group KILL is not working"
+elif [[ "$probe_ms" -ge 1500 && "$probe_ms" -le 8000 ]]; then
+    pass "pipe-holding group member reaped after wait, caller released (${probe_ms}ms)"
+else
+    fail "pipe-holder case returned in ${probe_ms}ms, outside the 2s bound plus grace"
+fi
+pkill -KILL -f "$TMP/pipeholder" >/dev/null 2>&1
+pkill -KILL -f 'trap "" TERM; sleep 30' >/dev/null 2>&1
 
 # 3b. A non-integer bound is refused, not silently turned into a kill at t=0.
 #     GNU timeout accepted `30m`; `sleep` on stock macOS does not, and the one

@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
-# with-timeout.sh - the one wall-clock bound for shelling out to a binary.
+# with-timeout.sh - the one wall-clock bound for shelling out to a binary from
+# shell. (The Python side has its own in cli/src/fno/context_observation.py,
+# which agrees on the contract: 124, TERM then KILL, by process group.)
 #
 # Replaces six hand-rolled "portable timeout" helpers that all preferred GNU
 # coreutils `timeout` and then disagreed on the fallback. Measured against a hung
@@ -8,7 +10,8 @@
 #
 # Do NOT reintroduce a `timeout`/`gtimeout` preference in front of this. Two
 # reachable implementations of one bound is the defect this replaced, and the
-# bash path caps the hardest measured case in ~2.05s on bash 3.2.
+# bash path caps every measured case on bash 3.2: 2.04s for a plain hang, 3.05s
+# for a child that ignores TERM and has to be escalated.
 #
 # Every comment below names a failure that was measured, not reasoned about, and
 # several were caught only by a test going red after the code looked correct.
@@ -80,11 +83,15 @@ with_timeout() {
       # `wait` returned the moment the DIRECT child died, which cancels the
       # watchdog below and the escalation still pending inside it. A group member
       # that outlived the TERM while holding the capture pipe would keep
-      # `OUTPUT=$(...)` open forever. Finish the group here instead.
+      # `OUTPUT=$(...)` open forever, so finish the group off here. This line is
+      # the actual guarantee against that hang; the watchdog's own group kill
+      # above is belt-and-braces, and dropping it changes no observable behavior.
       #
-      # On this path only: an unconditional group kill would also reap a daemon
-      # the command legitimately started (`fno mux ls` autostarts one), turning a
-      # successful call into a side effect.
+      # Conditional on purpose. Signalling a group after a call we did NOT stop
+      # would reach whatever the command deliberately left running in it. No
+      # caller in this tree is affected either way (every intentional spawn
+      # detaches with setsid), but a shared helper should not signal a group on a
+      # path where its bound never fired.
       kill -KILL -"$pid" 2>/dev/null || true ;;
   esac
 

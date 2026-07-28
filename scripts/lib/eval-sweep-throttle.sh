@@ -63,12 +63,19 @@ _eval_sweep_canonical_root() {
     dirname "$common"  # <root>/.git -> <root>
 }
 
-# _eval_sweep_bounded <seconds> <cmd...>
-# Run <cmd...> with a hard time bound. Thin alias for the shared helper, kept so
-# this file's call sites read in its own vocabulary. The orphan-`sleep` reaping
-# this helper used to do with `pkill -P` is now done by group-killing the
-# watchdog, which needs no pkill (absent on a minimal image).
-_eval_sweep_bounded() { with_timeout "$@"; }
+# _eval_sweep_stage <log> <seconds> <cmd...>
+# One bounded stage, appended to <log>. A non-zero status is recorded rather than
+# swallowed: this file promises a wedge is "diagnosable instead of accumulating
+# as an orphan", and a stage killed at the bound writes nothing of its own, so
+# without this line the log shows a run header with nothing under it and an
+# operator cannot tell a quiet success from a kill. 124 means the bound fired.
+_eval_sweep_stage() {
+    local log="$1" secs="$2"; shift 2
+    local rc=0
+    with_timeout "$secs" "$@" >> "$log" 2>&1 || rc=$?
+    (( rc == 0 )) || printf '[eval-sweep] stage rc=%s: %s\n' "$rc" "$*" >> "$log" 2>/dev/null
+    return 0
+}
 
 # _eval_sweep_trim_log <log>
 # Cap the log at the byte limit, keeping the most RECENT half (the newest run is
@@ -98,10 +105,10 @@ _eval_sweep_run_stages() {
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     _eval_sweep_trim_log "$log"
     printf '=== eval-sweep run %s pid=%s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >> "$log" 2>/dev/null || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review    >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review    >> "$log" 2>&1 || true
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review
     [[ -n "$claim_key" ]] && "$fno_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }

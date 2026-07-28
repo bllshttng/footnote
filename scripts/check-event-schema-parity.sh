@@ -183,7 +183,9 @@ else
         cd "$REPO_ROOT"
         with_timeout 30 "$PYTHON3" -m fno.events --emit-schema 2>"$PYTHON_STDERR_TMP"
     )"; then
-        echo "ERROR: python -m fno.events --emit-schema failed" >&2
+        # An empty stderr here usually means the 30s bound fired rather than the
+        # emitter erroring: a SIGKILLed process writes nothing on its way out.
+        echo "ERROR: python -m fno.events --emit-schema failed (or exceeded its 30s bound)" >&2
         echo "  stderr: $(head -5 "$PYTHON_STDERR_TMP")" >&2
         rm -f "$PYTHON_STDERR_TMP"
         exit 1
