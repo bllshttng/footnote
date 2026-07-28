@@ -102,6 +102,43 @@ rc=$?
     && pass "command's own exit status propagates (rc=3)" \
     || fail "expected rc=3 from the command, got rc=$rc"
 
+# 2b. A child that IGNORES SIGTERM is still bounded. TERM alone is not a cap:
+#     `wait` has no remaining deadline after it, so such a child leaves the
+#     caller stuck forever, which is worse than no cap at all. This is the one
+#     case that must be bounded externally too, because a regression here hangs
+#     rather than fails, and a hanging test in CI is its own outage.
+cat > "$TMP/stubborn" <<'EOF'
+#!/usr/bin/env bash
+trap '' TERM
+while :; do sleep 0.2; done
+EOF
+chmod +x "$TMP/stubborn"
+
+/bin/bash -c '
+    set -uo pipefail
+    source "$1"
+    export PATH="$2:$PATH"
+    s=$(python3 -c "import time; print(int(time.time()*1000))")
+    with_timeout 2 stubborn >/dev/null 2>&1
+    e=$(python3 -c "import time; print(int(time.time()*1000))")
+    printf "%s\n" "$((e - s))" > "$3"
+' _ "$LIB" "$TMP" "$TMP/stubborn-ms" >/dev/null 2>&1 &
+probe_pid=$!
+( sleep 12; kill -KILL "$probe_pid" 2>/dev/null ) >/dev/null 2>&1 &
+guard_pid=$!
+wait "$probe_pid" 2>/dev/null; probe_rc=$?
+kill -TERM -"$guard_pid" 2>/dev/null; wait "$guard_pid" 2>/dev/null
+pkill -KILL -f "$TMP/stubborn" >/dev/null 2>&1
+
+stubborn_ms="$(cat "$TMP/stubborn-ms" 2>/dev/null || echo "")"
+if [[ -z "$stubborn_ms" ]]; then
+    fail "a SIGTERM-ignoring child was never bounded (rc=$probe_rc): with_timeout did not return and the external guard had to kill it"
+elif [[ "$stubborn_ms" -ge 1500 && "$stubborn_ms" -le 8000 ]]; then
+    pass "SIGTERM-ignoring child escalated to KILL and bounded (${stubborn_ms}ms)"
+else
+    fail "SIGTERM-ignoring child returned in ${stubborn_ms}ms, outside the 2s bound plus grace"
+fi
+
 # 3b. A non-integer bound is refused, not silently turned into a kill at t=0.
 #     GNU timeout accepted `30m`; `sleep` on stock macOS does not, and the one
 #     operator-settable bound in the tree (EVAL_SWEEP_STAGE_TIMEOUT) sits two

@@ -49,10 +49,23 @@ with_timeout() {
   # SECS waiting on the sleep to release the pipe.
   # `&&`, not `;`: a sleep that fails for any reason must not fall through to an
   # immediate kill, which would read as a fired bound at t=0.
-  # The `|| kill -TERM "$pid"` is a belt-and-braces fallback for a host where
-  # `set -m` did not take effect, so the group signal finds no such pgid: the
-  # direct child still gets signalled rather than the bound silently no-opping.
-  ( sleep "$secs" && { kill -TERM -"$pid" || kill -TERM "$pid"; } ) >/dev/null 2>&1 &
+  #
+  # TERM, then KILL one second later. TERM alone is not a bound: a child that
+  # ignores or traps it leaves `wait` below with no remaining deadline and
+  # with_timeout never returns, which is worse than having no cap at all because
+  # the caller is now stuck rather than merely slow. Verified: a stub that traps
+  # TERM and loops survived a 2s bound indefinitely before this escalation.
+  # A well-behaved child exits on TERM and the watchdog is reaped during the
+  # grace sleep, so the extra second is never actually paid.
+  #
+  # Each `|| kill ... "$pid"` is a fallback for a host where `set -m` did not
+  # take effect, so the group signal finds no such pgid: the direct child still
+  # gets signalled rather than the bound silently no-opping.
+  ( sleep "$secs" && {
+      kill -TERM -"$pid" || kill -TERM "$pid"
+      sleep 1
+      kill -KILL -"$pid" || kill -KILL "$pid"
+    } ) >/dev/null 2>&1 &
   local watchdog=$!
 
   set +m
