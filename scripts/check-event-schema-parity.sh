@@ -58,18 +58,13 @@ else
     PYTHON3="python3"
 fi
 
-# Portable timeout wrapper. Uses `timeout` (GNU coreutils, Linux + macOS
-# via brew) when available; falls back to `perl -e 'alarm N; exec ...'`.
-_timeout() {
-    local secs="$1"; shift
-    if command -v timeout &>/dev/null; then
-        timeout "$secs" "$@"
-    elif command -v gtimeout &>/dev/null; then
-        gtimeout "$secs" "$@"
-    else
-        # perl alarm fallback: runs in the same process, so exec replaces perl.
-        perl -e "alarm $secs; exec @ARGV or die \$!" -- "$@"
-    fi
+# Wall-clock bound for the two emitter invocations below. Unlike the hooks that
+# share this helper, this script is a gate: a missing lib must fail loudly here
+# rather than degrade into a silent pass.
+# shellcheck source=lib/with-timeout.sh
+source "$REPO_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || {
+    echo "ERROR: cannot source scripts/lib/with-timeout.sh" >&2
+    exit 1
 }
 
 # ---------------------------------------------------------------------------
@@ -186,9 +181,11 @@ else
     PYTHON_STDERR_TMP="$(mktemp)"
     if ! PYTHON_SCHEMA_JSON="$(
         cd "$REPO_ROOT"
-        _timeout 30 "$PYTHON3" -m fno.events --emit-schema 2>"$PYTHON_STDERR_TMP"
+        with_timeout 30 "$PYTHON3" -m fno.events --emit-schema 2>"$PYTHON_STDERR_TMP"
     )"; then
-        echo "ERROR: python -m fno.events --emit-schema failed" >&2
+        # An empty stderr here usually means the 30s bound fired rather than the
+        # emitter erroring: a SIGKILLed process writes nothing on its way out.
+        echo "ERROR: python -m fno.events --emit-schema failed (or exceeded its 30s bound)" >&2
         echo "  stderr: $(head -5 "$PYTHON_STDERR_TMP")" >&2
         rm -f "$PYTHON_STDERR_TMP"
         exit 1
@@ -238,7 +235,7 @@ else
     else
         RUST_STDERR_TMP="$(mktemp)"
         if ! RUST_SCHEMA_JSON="$(
-            _timeout 30 "$FNO_AGENTS_BIN" --emit-schema 2>"$RUST_STDERR_TMP"
+            with_timeout 30 "$FNO_AGENTS_BIN" --emit-schema 2>"$RUST_STDERR_TMP"
         )"; then
             echo "ERROR: fno-agents --emit-schema failed" >&2
             echo "  binary: $FNO_AGENTS_BIN" >&2

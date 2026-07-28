@@ -16,25 +16,14 @@ command -v fno >/dev/null 2>&1 || exit 0
 # Skip if no .fno/ in the project - nothing to introspect.
 [[ -d ".fno" ]] || exit 0
 
-# Portable timeout: macOS lacks timeout(1) by default; coreutils installs it
-# as gtimeout. When neither is present, fall back to bare invocation (fno
-# itself returns quickly under normal conditions; the cap only matters for
-# hung-binary edge cases).
-_with_timeout() {
-  local secs="$1"; shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$secs" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$secs" "$@"
-  else
-    "$@"
-  fi
-}
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
 # Run whoami; suppress stderr (warnings would otherwise leak into the
 # injection blob). Cap at 2s wall-clock so a hung fno never blocks
-# session start. `|| true` swallows rc=124 (timeout) cleanly.
-OUTPUT=$(_with_timeout 2 fno whoami 2>/dev/null || true)
+# session start. `|| true` swallows the timeout status cleanly.
+OUTPUT=$(with_timeout 2 fno whoami 2>/dev/null || true)
 [[ -z "$OUTPUT" ]] && exit 0
 
 # Emit as a fenced block so the formatting survives the injection.

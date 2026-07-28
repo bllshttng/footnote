@@ -1912,7 +1912,15 @@ def cmd_drain_self(
 
     # Inject-before-ack: advance the cursor to the last drained id only after
     # the bodies are out, so a crash re-surfaces rather than drops.
+    #
+    # "out" means flushed, not printed. The SessionStart drain hook reads this
+    # through a command substitution, so stdout is a pipe and block-buffered:
+    # without the flush, the bodies sit in this process's buffer while the cursor
+    # is already advanced, and a SIGTERM from the hook's wall-clock bound
+    # discards them with the mail marked consumed. Losing it permanently, which
+    # is the opposite of what the paragraph above promises.
     if msgs:
+        sys.stdout.flush()
         advance_cursor(handle, msgs[-1].id)
 
 

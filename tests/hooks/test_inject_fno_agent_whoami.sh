@@ -26,22 +26,37 @@ pass() { printf '[fno-agent-whoami-hook] PASS: %s\n' "$*"; }
 skip() { printf '[fno-agent-whoami-hook] SKIP: %s\n' "$*" >&2; exit 77; }
 
 command -v python3 &>/dev/null || skip "python3 not on PATH"
-# Scenario 4 (timeout-cap behavior) requires timeout(1) or gtimeout(1).
-# The hook degrades gracefully when neither is available, but then the cap
-# itself can't be observed. Detect once and skip scenario 4 specifically.
-#
-# Record the binary's DIRECTORY, not just its presence: scenario 4 runs the
-# hook under a constructed minimal PATH, and detecting here while the hook
-# looks there is how this check silently measured the uncapped fallback
-# instead of the cap. On Linux that is /usr/bin and the two agree by luck;
-# on a Mac with Homebrew coreutils it is /opt/homebrew/bin and they do not.
-TIMEOUT_AVAILABLE=0
+# Where a coreutils timeout(1)/gtimeout(1) lives, if this host has one. Used to
+# run the cap scenario a SECOND time with that dir visible to the hook. It never
+# gates a scenario: the cap is dependency-free, so both paths always assert.
 TIMEOUT_DIR=""
 _timeout_bin="$(command -v timeout || command -v gtimeout || true)"
-if [[ -n "$_timeout_bin" ]]; then
-    TIMEOUT_AVAILABLE=1
-    TIMEOUT_DIR="$(cd "$(dirname "$_timeout_bin")" && pwd)"
-fi
+[[ -n "$_timeout_bin" ]] && TIMEOUT_DIR="$(cd "$(dirname "$_timeout_bin")" && pwd)"
+
+now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+
+# A directory to hang a PATH off that resolves NO timeout(1)/gtimeout(1), on any
+# host. Stripping to /usr/bin:/bin is coreutils-free on macOS only - Linux ships
+# /usr/bin/timeout, so CI would silently measure the coreutils path while the
+# case claimed otherwise. Link in exactly what the hook and its stub need.
+make_nocoreutils_dir() {
+    local d b p
+    d=$(mktemp -d -t fno-nocoreutils-XXXXXX)
+    # dirname is here because the hook resolves its own directory to source the
+    # shared helper, not because the cap needs it. This PATH controls for exactly
+    # one thing - no timeout(1)/gtimeout(1) - and should not accidentally test
+    # what a hook does on a host with no coreutils whatsoever.
+    # `cat` is needed only on the SUCCESS path (the hook's heredoc), which the
+    # hang cases never reach because they exit early on empty output. The control
+    # below is what surfaced it: without cat the hook exits 127 while every
+    # hang assertion still reported a holding cap.
+    for b in bash sleep dirname cat; do
+        p="$(command -v "$b")" || fail "cannot build a coreutils-free PATH: $b not found"
+        ln -s "$p" "$d/$b"
+    done
+    printf '%s' "$d"
+}
+
 [[ -f "$HOOK"       ]] || fail "hook not found at $HOOK"
 [[ -x "$HOOK"       ]] || fail "hook not executable at $HOOK"
 [[ -f "$HOOKS_JSON" ]] || fail "hooks.json not found at $HOOKS_JSON"
@@ -53,11 +68,6 @@ grep -q 'command -v fno' "$HOOK" \
     || fail "hook does not graceful-skip when fno is missing"
 grep -q '\[\[ -d ".fno" \]\]' "$HOOK" \
     || fail "hook does not graceful-skip when .fno/ is missing"
-grep -q '_with_timeout 2 fno whoami' "$HOOK" \
-    || fail "hook does not cap fno whoami at 2s"
-grep -q '_with_timeout()' "$HOOK" \
-    || fail "hook does not define portable _with_timeout wrapper"
-
 # hooks.json validates as JSON and contains the new entry under SessionStart.
 python3 -c "import json,sys; json.load(open('$HOOKS_JSON'))" \
     || fail "hooks.json failed JSON parse"
@@ -71,7 +81,7 @@ for group in ss:
             sys.exit(0)
 sys.exit(1)
 PYEOF
-pass "structural: hook script, skip guards, timeout cap, hooks.json registration"
+pass "structural: hook script, skip guards, hooks.json registration"
 
 # ── Behavior checks ──────────────────────────────────────────────────
 
@@ -113,10 +123,12 @@ pass "scenario 2: silent skip when .fno/ dir absent"
 # on the presence of the stub's whoami line so we know wiring is end-to-end.
 TMP3=$(mktemp -d -t fno-agent-whoami-real-XXXXXX)
 mkdir -p "$TMP3/.fno"
+start_ms=$(now_ms)
 set +e
 OUT=$(cd "$TMP3" && PATH="$STUB_DIR:/usr/bin:/bin" bash "$HOOK" 2>&1)
 rc=$?
 set -e
+fast_ms=$(( $(now_ms) - start_ms ))
 [[ $rc -eq 0 ]] || fail "scenario 3: hook rc=$rc in stubbed project, expected 0"
 echo "$OUT" | grep -q "## Agent operating stack" \
     || fail "scenario 3: missing 'Agent operating stack' header in output: $OUT"
@@ -124,45 +136,89 @@ echo "$OUT" | grep -q "project: /stub" \
     || fail "scenario 3: stub whoami output not surfaced in injection: $OUT"
 echo "$OUT" | grep -q '```' \
     || fail "scenario 3: fenced block markers missing from output: $OUT"
+# The cap must not tax the happy path. A watchdog that keeps the command
+# substitution's pipe open would silently add the full 2s to every fast call.
+[[ $fast_ms -lt 1000 ]] \
+    || fail "scenario 3: fast path took ${fast_ms}ms, expected <1000ms (watchdog is delaying success)"
 rm -rf "$TMP3"
-pass "scenario 3: emits fenced block with whoami output when both conditions met"
+pass "scenario 3: emits fenced block with whoami output when both conditions met (elapsed=${fast_ms}ms)"
 
-# Scenario 4: hung fno must not delay session start beyond ~2s. Stub fno to
-# sleep 10s; assert wall-clock <= 5s (generous to account for shell startup).
-# Requires timeout(1) or gtimeout(1); the hook degrades gracefully on hosts
-# without either, but the cap itself only fires when one is available.
-if [[ $TIMEOUT_AVAILABLE -eq 1 ]]; then
-    HANG_DIR=$(mktemp -d -t fno-agent-whoami-hang-XXXXXX)
-    cat >"$HANG_DIR/fno" <<'HANGEOF'
+# Scenario 4: a hung fno must not delay session start beyond ~2s, on ANY host.
+# Runs twice against the same 10s stub, differing only in whether a coreutils
+# timeout(1) is visible to the hook. The stripped-PATH run is the load-bearing
+# one: stock macOS ships no timeout(1), so that is the path real users take, and
+# it is the path that measured 10s while this scenario was gated behind a probe
+# computed under the test's own (coreutils-bearing) PATH.
+HANG_DIR=$(mktemp -d -t fno-agent-whoami-hang-XXXXXX)
+cat >"$HANG_DIR/fno" <<'HANGEOF'
 #!/usr/bin/env bash
 sleep 10
 HANGEOF
-    chmod +x "$HANG_DIR/fno"
+chmod +x "$HANG_DIR/fno"
 
-    TMP4=$(mktemp -d -t fno-agent-whoami-hang-run-XXXXXX)
-    mkdir -p "$TMP4/.fno"
+hang_case() {
+    local label="$1" hook_path="$2"
+    local tmp start elapsed out rc
 
-    start_ms=$(python3 -c 'import time; print(int(time.time()*1000))')
+    tmp=$(mktemp -d -t fno-agent-whoami-hang-run-XXXXXX)
+    mkdir -p "$tmp/.fno"
+
+    start=$(now_ms)
     set +e
-    OUT=$(cd "$TMP4" && PATH="$HANG_DIR:${TIMEOUT_DIR}:/usr/bin:/bin" bash "$HOOK" 2>&1)
+    out=$(cd "$tmp" && PATH="$hook_path" bash "$HOOK" 2>&1)
     rc=$?
     set -e
-    end_ms=$(python3 -c 'import time; print(int(time.time()*1000))')
-    elapsed=$((end_ms - start_ms))
+    elapsed=$(( $(now_ms) - start ))
+    rm -rf "$tmp"
 
-    [[ $rc -eq 0 ]] || fail "scenario 4: hook rc=$rc with hung fno, expected 0"
+    [[ $rc -eq 0 ]] || fail "scenario 4 ($label): hook rc=$rc with hung fno, expected 0"
     [[ $elapsed -le 5000 ]] \
-        || fail "scenario 4: hook took ${elapsed}ms with hung fno, expected <=5000ms (timeout cap is 2s)"
+        || fail "scenario 4 ($label): hook took ${elapsed}ms with hung fno, expected <=5000ms (cap is 2s)"
+    # A FLOOR as well as a ceiling. An upper bound alone is satisfied by a hook
+    # that never reached the stub at all - a missing lib, an unresolvable
+    # HOOK_DIR, any early `exit 0` - which would report the cap holding in 30ms
+    # while proving nothing. That is the same shape of lie this node exists to
+    # remove, so the cap must be observed to actually WAIT.
+    [[ $elapsed -ge 1500 ]] \
+        || fail "scenario 4 ($label): hook returned in ${elapsed}ms, too fast to have run the 10s stub - it exited early and this case tested nothing"
     # Hung fno produces empty output; the hook short-circuits and emits nothing.
-    [[ -z "$OUT" ]] || fail "scenario 4: hook emitted output with hung fno: $OUT"
+    [[ -z "$out" ]] || fail "scenario 4 ($label): hook emitted output with hung fno: $out"
+    pass "scenario 4 ($label): 2s cap holds when fno hangs (elapsed=${elapsed}ms)"
+}
 
-    rm -rf "$TMP4" "$HANG_DIR"
-    pass "scenario 4: 2s timeout cap holds when fno hangs (elapsed=${elapsed}ms)"
-else
-    log "scenario 4: skipped (no timeout/gtimeout on PATH; cap not observable)"
+NOCU_DIR=$(make_nocoreutils_dir)
+# Positive control for the exclusion: an assertion about a binary being absent
+# is only worth anything if something checked that it is actually absent.
+if ( PATH="$HANG_DIR:$NOCU_DIR"; command -v timeout || command -v gtimeout ) >/dev/null 2>&1; then
+    fail "scenario 4: the coreutils-free PATH still resolves a timeout binary; that case would assert nothing"
 fi
 
-rm -rf "$STUB_DIR"
+# Positive control for the PATH itself: prove the hook still FUNCTIONS on it,
+# using the fast stub, before asking a timing assertion to interpret silence.
+# Without this, any dependency missing from the constructed dir makes the hook
+# bail early and the hang case reports a holding cap having run nothing.
+TMP_CTL=$(mktemp -d -t fno-agent-whoami-nocu-ctl-XXXXXX)
+mkdir -p "$TMP_CTL/.fno"
+set +e
+OUT=$(cd "$TMP_CTL" && PATH="$STUB_DIR:$NOCU_DIR" bash "$HOOK" 2>&1)
+rc=$?
+set -e
+rm -rf "$TMP_CTL"
+[[ $rc -eq 0 ]] || fail "scenario 4 control: hook rc=$rc on the coreutils-free PATH, expected 0"
+echo "$OUT" | grep -q "project: /stub" \
+    || fail "scenario 4 control: hook produced no injection on the coreutils-free PATH, so the hang cases below would prove nothing. Output: $OUT"
+pass "scenario 4 control: the hook works on the coreutils-free PATH (so silence there means the cap)"
+
+hang_case "no coreutils on PATH" "$HANG_DIR:$NOCU_DIR"
+if [[ -n "$TIMEOUT_DIR" ]]; then
+    hang_case "coreutils at $TIMEOUT_DIR" "$HANG_DIR:$TIMEOUT_DIR:/usr/bin:/bin"
+else
+    # Not a skip: the cap needs no external binary, so the run above already
+    # proved it. This host simply has no second PATH shape to prove it under.
+    log "scenario 4: host has no timeout(1)/gtimeout(1); coreutils-present variant not applicable"
+fi
+
+rm -rf "$HANG_DIR" "$NOCU_DIR" "$STUB_DIR"
 
 log "all scenarios passed"
 exit 0

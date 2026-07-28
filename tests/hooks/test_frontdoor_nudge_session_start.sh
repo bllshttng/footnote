@@ -27,8 +27,9 @@ trap 'rm -rf "$WORK"' EXIT
 FAKEBIN="$WORK/bin"
 mkdir -p "$FAKEBIN"
 
-# A minimal PATH that still resolves the coreutils the hook needs (timeout, etc.)
-# but never the real `fno`.
+# A minimal PATH that resolves the utilities the hook needs but never the real
+# `fno`. It no longer needs a coreutils timeout(1): the hook's bound comes from
+# scripts/lib/with-timeout.sh, which uses shell builtins plus sleep.
 BASE_PATH="/usr/bin:/bin:/usr/sbin:/sbin"
 
 # --- Case 1: Rust front door active (fno answers `mux ls --json`) -> SILENT ----
@@ -60,5 +61,28 @@ rm -f "$FAKEBIN/fno"
 out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
 grep -q "Install the .fno. front door" <<<"$out" || fail "missing fno must remind, got: $out"
 pass "no fno on PATH -> reminder"
+
+# --- Case 4: wedged mux socket -> BOUNDED and SILENT --------------------------
+# This hook probes a socket at SessionStart, so an unbounded probe stalls every
+# session start. On a host with no coreutils timeout(1) it had no bound at all.
+# A wedged socket also PROVES the Rust front door is present (fno-py has no
+# `mux` verb and fails fast), so the correct behavior is silence, not a reminder
+# telling the user to install what they already have.
+cat > "$FAKEBIN/fno" <<'FAKE'
+#!/usr/bin/env bash
+if [[ "${1:-}" == "mux" && "${2:-}" == "ls" ]]; then sleep 30; fi
+exit 0
+FAKE
+chmod +x "$FAKEBIN/fno"
+START=$(date +%s)
+out=$(PATH="$FAKEBIN:$BASE_PATH" bash "$HOOK" 2>/dev/null)
+END=$(date +%s)
+ELAPSED=$((END - START))
+(( ELAPSED < 8 )) || fail "wedged mux probe not bounded: ${ELAPSED}s (the 3s cap did not fire)"
+# Floor as well as ceiling: an early exit would satisfy the bound while proving
+# the cap never ran.
+(( ELAPSED >= 1 )) || fail "wedged mux probe returned in ${ELAPSED}s, too fast to have run the stub - it exited early and this case tested nothing"
+[[ -z "$out" ]] || fail "a wedged mux socket proves the front door exists, so the hook must stay silent, got: $out"
+pass "wedged mux socket -> bounded at the cap (${ELAPSED}s) and silent"
 
 log "all cases passed"

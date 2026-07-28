@@ -11,7 +11,7 @@
 # the CANONICAL repo root (not the session cwd), so one sweep fires per repo
 # per day regardless of how many worktrees start a session (x-dbdf). Its own
 # stamp (.fno/.eval-sweep-stamp) keeps the two cadences independent. The whole
-# run is detached (nohup), bounded per stage (timeout), and logged to
+# run is detached (nohup), bounded per stage, and logged to
 # .fno/logs/eval-sweep.log so a wedge dies and is diagnosable instead of
 # accumulating as an orphan. Best-effort throughout: a missing fno, missing
 # corpus, or a sweep/tick error never propagates to the calling hook.
@@ -26,10 +26,15 @@
 _EVAL_SWEEP_LIB_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/reconcile-throttle.sh
 source "$_EVAL_SWEEP_LIB_DIR/reconcile-throttle.sh" 2>/dev/null || return 0
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$_EVAL_SWEEP_LIB_DIR/with-timeout.sh" 2>/dev/null || return 0
 
 # Throttle window in seconds (default 24h). Overridable for tests.
 EVAL_SWEEP_THROTTLE_SECONDS="${EVAL_SWEEP_THROTTLE_SECONDS:-86400}"
 # Hard per-stage time bound (default 300s). A wedged sweep dies at this bound.
+# BARE INTEGER SECONDS ONLY. Unlike EVAL_SWEEP_CLAIM_TTL just below, a suffixed
+# value like `30m` is refused by with_timeout and every stage is skipped: the
+# bound is a `sleep`, not GNU timeout, and `sleep 30m` is not portable.
 EVAL_SWEEP_STAGE_TIMEOUT="${EVAL_SWEEP_STAGE_TIMEOUT:-300}"
 # Singleton claim TTL: self-frees a crashed run within this window.
 EVAL_SWEEP_CLAIM_TTL="${EVAL_SWEEP_CLAIM_TTL:-30m}"
@@ -58,25 +63,18 @@ _eval_sweep_canonical_root() {
     dirname "$common"  # <root>/.git -> <root>
 }
 
-# _eval_sweep_bounded <seconds> <cmd...>
-# Run <cmd...> with a hard time bound, portably. Prefers coreutils
-# gtimeout/timeout; falls back to a bash watchdog that kills the command and
-# reaps its own sleep so no orphan `sleep` survives (Domain Pitfall).
-_eval_sweep_bounded() {
-    local secs="$1"; shift
-    if command -v gtimeout >/dev/null 2>&1; then gtimeout "$secs" "$@"; return $?; fi
-    if command -v timeout  >/dev/null 2>&1; then  timeout "$secs" "$@"; return $?; fi
-    "$@" & local cmd_pid=$!
-    ( sleep "$secs"; kill -TERM "$cmd_pid" 2>/dev/null ) & local wd_pid=$!
-    wait "$cmd_pid" 2>/dev/null; local rc=$?
-    # Reap the watchdog's `sleep` child before its parent, then the subshell -
-    # otherwise the sleep reparents to pid 1 and becomes the orphan we are here
-    # to prevent (Domain Pitfall). ponytail: pkill absent (minimal Alpine) leaves
-    # the sleep, but it self-exits at $secs - a bounded orphan, and this whole
-    # branch only runs when BOTH gtimeout and timeout are missing (rare).
-    pkill -P "$wd_pid" 2>/dev/null
-    kill "$wd_pid" 2>/dev/null; wait "$wd_pid" 2>/dev/null
-    return $rc
+# _eval_sweep_stage <log> <seconds> <cmd...>
+# One bounded stage, appended to <log>. A non-zero status is recorded rather than
+# swallowed: this file promises a wedge is "diagnosable instead of accumulating
+# as an orphan", and a stage killed at the bound writes nothing of its own, so
+# without this line the log shows a run header with nothing under it and an
+# operator cannot tell a quiet success from a kill. 124 means the bound fired.
+_eval_sweep_stage() {
+    local log="$1" secs="$2"; shift 2
+    local rc=0
+    with_timeout "$secs" "$@" >> "$log" 2>&1 || rc=$?
+    (( rc == 0 )) || printf '[eval-sweep] stage rc=%s: %s\n' "$rc" "$*" >> "$log" 2>/dev/null
+    return 0
 }
 
 # _eval_sweep_trim_log <log>
@@ -107,10 +105,10 @@ _eval_sweep_run_stages() {
     mkdir -p "$(dirname "$log")" 2>/dev/null || true
     _eval_sweep_trim_log "$log"
     printf '=== eval-sweep run %s pid=%s ===\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$$" >> "$log" 2>/dev/null || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review    >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint >> "$log" 2>&1 || true
-    _eval_sweep_bounded "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review    >> "$log" 2>&1 || true
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" observer sweep  --skill review
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill blueprint
+    _eval_sweep_stage "$log" "$EVAL_SWEEP_STAGE_TIMEOUT" "$fno_cmd" skill-diff tick --skill review
     [[ -n "$claim_key" ]] && "$fno_cmd" claim release "$claim_key" --holder "$holder" >/dev/null 2>&1
     return 0
 }
