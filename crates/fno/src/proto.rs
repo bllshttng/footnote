@@ -2646,8 +2646,10 @@ mod tests {
         let v43 = r#"{"target":"CurrentRoute"}"#;
         let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
         assert_eq!(legacy.fallback, PlacementFallback::NewTab);
-        let mut exact = PanePlacement::default();
-        exact.fallback = PlacementFallback::Refuse;
+        let exact = PanePlacement {
+            fallback: PlacementFallback::Refuse,
+            ..PanePlacement::default()
+        };
         let wire = serde_json::to_string(&exact).unwrap();
         assert_eq!(
             serde_json::from_str::<PanePlacement>(&wire)
