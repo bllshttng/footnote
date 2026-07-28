@@ -88,6 +88,56 @@ def test_junk_rows_are_dropped_rather_than_crashing(tmp_path: Path) -> None:
         assert [e["id"] for e in rows] == ["x-0004"], f"{reader.__name__} mishandled junk"
 
 
+def test_unhashable_field_values_do_not_crash_the_readers(tmp_path: Path) -> None:
+    """A dict row whose `priority`/`status` is unhashable must not raise.
+
+    The migration tests `old_priority in PRIORITY_MIGRATION`, which HASHES the
+    value, so a hand-mangled `"priority": []` raised `TypeError: unhashable
+    type` out of the shared pass -- crashing `read_graph` and the scoreboard,
+    both documented as never-fatal. This is a different shape from a non-dict
+    ROW: the row here is a perfectly good dict.
+    """
+    p = tmp_path / "graph.json"
+    p.write_text(
+        json.dumps({"entries": [
+            {"id": "x-0006", "priority": [], "status": {"nope": 1}},
+            {"id": "x-0007", "priority": "p1", "status": "claimed"},
+        ]}),
+        encoding="utf-8",
+    )
+
+    for reader in (read_graph, load_graph, read_graph_nodes):
+        rows = _by_id(reader(p))
+        assert set(rows) == {"x-0006", "x-0007"}, f"{reader.__name__} dropped a valid row"
+        # The unmigratable values are left alone rather than guessed at; the
+        # point is that they do not raise.
+        assert rows["x-0006"]["priority"] == []
+        # A sibling row in the same file still migrates normally.
+        assert rows["x-0007"]["status"] == "in_progress"
+
+
+def test_strict_reader_reports_unreadable_rather_than_absent(tmp_path: Path) -> None:
+    """`read_graph_strict` must raise GraphUnreadableError for ANY unreadable graph.
+
+    Callers branch on that type to tell a wedged graph from a missing node, and
+    a `read_text()` outside the guard let a directory, a permission error, or
+    non-UTF-8 bytes escape as OSError/UnicodeDecodeError -- past the caller's
+    handler and out as a generic exit 1, the code meaning "read cleanly, node
+    absent". The init guard's warning path depends on that being impossible.
+    """
+    from fno.graph.store import GraphUnreadableError, read_graph_strict
+
+    a_directory = tmp_path / "graph.json"
+    a_directory.mkdir()
+    with pytest.raises(GraphUnreadableError):
+        read_graph_strict(a_directory)
+
+    not_utf8 = tmp_path / "binary.json"
+    not_utf8.write_bytes(b'{"entries": [\xff\xfe]}')
+    with pytest.raises(GraphUnreadableError):
+        read_graph_strict(not_utf8)
+
+
 def test_missing_graph_is_empty_not_an_error(tmp_path: Path) -> None:
     """An absent graph is empty for every reader -- not corruption, not a raise."""
     absent = tmp_path / "nope.json"

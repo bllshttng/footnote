@@ -140,6 +140,23 @@ if grep -qiE 'ambiguous|no backlog node resolved' "$ERRLOG"; then
 fi
 pass "AC3-ERR: empty input prints no guard-diagnostic line"
 
+# ── The same id twice is ONE match, not an ambiguous pair ─────────────────
+# The dedup arm is what keeps a repeated id from reading as two distinct
+# matches; without it "retry <id> now <id>" sets _GUARD_AMBIGUOUS, which claims
+# nothing and silently skips the in_review refusal for a plain single-node run.
+log "dedup: '<id> retry <id>' claims once, not ambiguous"
+
+make_repo TMP4b; _ALL_TMPS+=("$TMP4b")
+run_init "$TMP4b" "tst-aa00aa00 retry tst-aa00aa00"
+CK4b="$(claim_key_of "$STATE")"
+[[ "$CK4b" == "node:tst-aa00aa00" ]] \
+  || fail "dedup: a repeated id did not claim once (got '${CK4b}')"
+pass "dedup: a repeated id claims exactly once"
+if grep -qiE 'ambiguous' "$ERRLOG"; then
+  fail "dedup: a repeated id was reported ambiguous ($(cat "$ERRLOG"))"
+fi
+pass "dedup: a repeated id is not ambiguous"
+
 # ── An ARCHIVED node is not live work: no claim, no graph_node_id ──────────
 # `fno backlog get` has a read-through fallback to graph-archive.json that
 # --strict does not gate, so resolving the guard on `status` would count an
