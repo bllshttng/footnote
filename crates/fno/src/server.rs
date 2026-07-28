@@ -6370,21 +6370,30 @@ impl Core {
                 Flow::Continue
             }
             Command::MovePane { mover, target, dir } => {
-                // Resolve both ends against the VIEWED tab first: that owns the
-                // keyboard-bind defaults (mover = focus; target = the pane the
-                // same geometry FocusDir uses lies `dir`-ward). A drop names both
-                // and skips the navigate.
-                let (mover, target) = {
-                    let Some(tab) = self.viewed_tab(view) else {
-                        return Flow::Continue;
-                    };
-                    let mover = mover.unwrap_or(tab.focus);
-                    let Some(target) = target.or_else(|| tree::navigate(&tab.root, vp, mover, dir))
-                    else {
-                        self.notice(client_id, "no pane in that direction");
-                        return Flow::Continue;
-                    };
-                    (mover, target)
+                // An absent `mover` means the keyboard bind: it acts on the
+                // VIEWED tab's focus. A named `mover` can be any pane anywhere -
+                // a sideline row carries a pane id, not the rendered layout.
+                let mover = match mover {
+                    Some(m) => m,
+                    None => match self.viewed_tab(view) {
+                        Some(tab) => tab.focus,
+                        None => return Flow::Continue,
+                    },
+                };
+                // Resolve `dir` in the tab that OWNS the mover, NOT the viewed
+                // one. For the keyboard bind they are the same tab. For a row
+                // whose pane sits in a background tab they are not, and
+                // navigating the viewed tree - which does not contain the mover -
+                // returns None, so every direction would report "no pane in that
+                // direction". A drop names `target` outright and skips this.
+                let target = target.or_else(|| {
+                    let (sq, ti) = self.session.find_pane(mover)?;
+                    let tab = self.session.squad(sq)?.tabs.get(ti)?;
+                    tree::navigate(&tab.root, self.tab_rect(tab.id), mover, dir)
+                });
+                let Some(target) = target else {
+                    self.notice(client_id, "no pane in that direction");
+                    return Flow::Continue;
                 };
                 // A sideline-row drop can name a `mover` living in ANOTHER tab
                 // (the row carries the pane id, not the rendered layout). When the
@@ -6407,7 +6416,23 @@ impl Core {
                         }
                     }
                     _ => {
-                        let Some(tab) = self.viewed_tab_mut(view) else {
+                        // Same rule as the resolve above: reshape the tab that
+                        // OWNS the mover. For the keyboard bind and an in-view
+                        // drag that IS the viewed tab; for a row whose pane sits
+                        // in a background tab it is not, and move_leaf against
+                        // the viewed tree would not find the mover. Falls back to
+                        // the viewed tab so a stale mover still reports PaneGone.
+                        let home = src.and_then(|(sq, ti)| {
+                            Some((sq, ti, self.session.squad(sq)?.tabs.get(ti)?.id))
+                        });
+                        let (vp, tab) = match home {
+                            Some((sq, ti, tid)) => (
+                                self.tab_rect(tid),
+                                self.session.squad_mut(sq).and_then(|s| s.tabs.get_mut(ti)),
+                            ),
+                            None => (vp, self.viewed_tab_mut(view)),
+                        };
+                        let Some(tab) = tab else {
                             return Flow::Continue;
                         };
                         match tree::move_leaf(tab, vp, mover, target, dir) {
@@ -11853,6 +11878,64 @@ mod tests {
         );
         assert_eq!(a.focus, 3, "the moved pane is focused in its new home");
         crate::tree::check_invariants(a).unwrap();
+    }
+
+    #[test]
+    fn move_pane_resolves_direction_in_the_movers_own_tab() {
+        // codex P1 on the row-menu Move entries: the menu names a `mover` and
+        // leaves `target: None`, and a sideline row's pane usually lives in a
+        // BACKGROUND tab. Resolving `dir` against the viewed tab's tree - which
+        // does not contain that pane - made navigate return None, so every Move
+        // entry reported "no pane in that direction" and nothing moved. Resolve
+        // and reshape in the tab that owns the mover instead.
+        let mut core = two_tab_core();
+        // Give the background tab a neighbour to move toward: 20 = [3 | 4].
+        let bg = core
+            .session
+            .squad_mut(1)
+            .unwrap()
+            .tabs
+            .iter_mut()
+            .find(|t| t.id == 20)
+            .unwrap();
+        bg.root = Node::Branch {
+            axis: Axis::Horizontal,
+            children: vec![(0.5, Node::Leaf(3)), (0.5, Node::Leaf(4))],
+        };
+        let (c, _rx) = live_client(7, 10); // viewing tab 10 [1,2], NOT tab 20
+        core.clients.push(c);
+        core.command(
+            7,
+            Command::MovePane {
+                mover: Some(3),
+                target: None, // the menu's "resolve it server-side" form
+                dir: Dir::Right,
+            },
+        );
+        let t = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 20)
+            .unwrap();
+        assert_eq!(
+            tree::leaves(&t.root),
+            vec![4, 3],
+            "3 moved right of 4 inside its own tab; unfixed this stays [3, 4]"
+        );
+        crate::tree::check_invariants(t).unwrap();
+        // The viewed tab is untouched - the move happened elsewhere.
+        let viewed = core
+            .session
+            .squad(1)
+            .unwrap()
+            .tabs
+            .iter()
+            .find(|t| t.id == 10)
+            .unwrap();
+        assert_eq!(tree::leaves(&viewed.root), vec![1, 2]);
     }
 
     #[test]

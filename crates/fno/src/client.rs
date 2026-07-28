@@ -16135,7 +16135,10 @@ mod tests {
         // both emit MovePane; this fails the moment one path grows a second
         // semantic. Only the addressing differs - a drag has a drop point and
         // names `target`, a menu has none and leaves the server to resolve it -
-        // so the assertion is on the variant, not the fields.
+        // so the assertion is on the variant, not the fields. That the unnamed
+        // half resolves correctly is NOT covered here (a variant match cannot
+        // see it): server.rs::move_pane_resolves_direction_in_the_movers_own_tab
+        // owns it.
         let row = pane_hosted_row("p", 99);
         let mut v = view_with_agents(vec![row.clone()]);
         v.row_menu = Some(build_row_menu(&row, Anchor::Center));
