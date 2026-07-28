@@ -164,11 +164,38 @@ pub enum MissionDispatch {
 /// Best-effort `fno backlog defer <node>` for the circuit-breaker park. Graph
 /// state, recoverable via `fno backlog undefer`. Node ids are global, so the
 /// epic's cwd is a valid working dir for the child-node defer.
-fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) {
-    let _ = fno_cmd(fno_bin)
-        .current_dir(cwd)
-        .args(["backlog", "defer", node, "--reason", reason])
-        .output();
+/// `retry_etxtbsy` like every other shellout here - this was the one that
+/// skipped it. A transient busy binary (a concurrent `fno update`, or under
+/// `cargo test` a sibling thread's freshly-written stub) makes the spawn fail,
+/// and `let _ =` swallows it, so a tripped breaker silently never defers its
+/// node and re-dispatches it into the same crash loop.
+/// Returns whether the defer actually landed, so the caller's `parked` journal
+/// row states what happened rather than asserting it. Retrying the spawn is only
+/// half the fix: exhausted retries, any other spawn error, and a NON-ZERO exit
+/// from `fno backlog defer` (unresolvable id, graph lock contention) all still
+/// produce the silent re-dispatch loop described above, and `breaker.reset` runs
+/// either way.
+fn defer_node(fno_bin: &str, cwd: &Path, node: &str, reason: &str) -> bool {
+    match retry_etxtbsy(|| {
+        fno_cmd(fno_bin)
+            .current_dir(cwd)
+            .args(["backlog", "defer", node, "--reason", reason])
+            .output()
+    }) {
+        Ok(out) if out.status.success() => true,
+        Ok(out) => {
+            eprintln!(
+                "active-backlog: defer of {node} failed (exit {:?}): {}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim()
+            );
+            false
+        }
+        Err(e) => {
+            eprintln!("active-backlog: defer of {node} could not run: {e}");
+            false
+        }
+    }
 }
 
 /// Does the node carry a PR reference in graph state? Read through `fno backlog
@@ -310,11 +337,15 @@ fn map_outcome(
                     "auto-failure: {} consecutive failed drains",
                     cfg.failure_limit
                 );
-                defer_node(&cfg.fno_bin, &cfg.cwd, &node, &reason_str);
+                // Recorded, not asserted: `breaker.reset` below hands the node a
+                // fresh streak allowance either way, so a `parked` row claiming
+                // a defer that never landed is what an operator debugging a
+                // re-dispatch loop would be misled by.
+                let deferred = defer_node(&cfg.fno_bin, &cfg.cwd, &node, &reason_str);
                 breaker.reset(&node);
                 let _ = journal.append(
                     "active_backlog_parked",
-                    json!({"node_id": node, "consecutive_failures": cfg.failure_limit, "detail": detail}),
+                    json!({"node_id": node, "consecutive_failures": cfg.failure_limit, "detail": detail, "deferred": deferred}),
                 );
                 DrainOutcome::Parked {
                     node,
@@ -1138,6 +1169,27 @@ mod tests {
         p.display().to_string()
     }
 
+    /// Like [`stub_fno`], but `backlog defer` FAILS. `stub_fno` exits 0 for every
+    /// verb, so the defer failure branch - the one the retry/report exists for -
+    /// is unreachable with it, and the whole thing passes green when reverted.
+    fn stub_fno_defer_fails(dir: &std::path::Path, record: &std::path::Path) -> String {
+        std::fs::create_dir_all(dir).unwrap();
+        let p = dir.join("fno");
+        std::fs::write(
+            &p,
+            format!(
+                "#!/usr/bin/env bash\n\
+                 echo \"$@\" >> \"{}\"\n\
+                 if [ \"$2\" = \"defer\" ]; then echo 'node not found' >&2; exit 1; fi\n\
+                 exit 0\n",
+                record.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.display().to_string()
+    }
+
     /// Like [`stub_fno`], but `backlog get` answers with `node_json` on stdout so
     /// a test can control whether the node carries a PR ref. Every other verb
     /// records its argv and exits 0.
@@ -1499,9 +1551,42 @@ mod tests {
         assert_eq!(breaker.consecutive_failures("x-cra0001"), 0);
         let calls = std::fs::read_to_string(&record).unwrap_or_default();
         assert!(calls.contains("backlog defer x-cra0001"), "calls: {calls}");
-        assert!(journal_lines(&project_journal)
-            .iter()
-            .any(|l| l.contains("active_backlog_parked") && l.contains("x-cra0001")));
+        let parked = journal_lines(&project_journal)
+            .into_iter()
+            .find(|l| l.contains("active_backlog_parked") && l.contains("x-cra0001"))
+            .expect("parked event");
+        // A defer that landed is recorded as such, not assumed.
+        assert!(parked.contains("\"deferred\":true"), "parked: {parked}");
+    }
+
+    #[test]
+    fn park_records_a_defer_that_did_not_land() {
+        // `breaker.reset` runs whether or not the defer succeeded, so a `parked`
+        // row that ASSERTS the park misleads whoever debugs the resulting
+        // re-dispatch loop: the node is back with a fresh streak allowance and
+        // the journal says it was parked. Spawning the child is not evidence it
+        // worked - the stub every other test uses exits 0 for every verb, which
+        // is why reverting the report left the suite green.
+        let tmp = tempfile::TempDir::new().unwrap();
+        let record = tmp.path().join("fno-calls.txt");
+        let fno = stub_fno_defer_fails(&tmp.path().join("bin"), &record);
+        let cfg = test_cfg(tmp.path(), fno, 2);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(2);
+
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0002");
+        resolve_crash(&cfg, &mut breaker, &journal, "x-cra0002"); // trips
+
+        let calls = std::fs::read_to_string(&record).unwrap_or_default();
+        assert!(calls.contains("backlog defer x-cra0002"), "calls: {calls}");
+        let parked = journal_lines(&project_journal)
+            .into_iter()
+            .find(|l| l.contains("active_backlog_parked") && l.contains("x-cra0002"))
+            .expect("parked event still emitted on a failed defer");
+        assert!(
+            parked.contains("\"deferred\":false"),
+            "a defer that exited non-zero must be recorded as not landed: {parked}"
+        );
     }
 
     #[test]

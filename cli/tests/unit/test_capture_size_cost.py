@@ -191,7 +191,11 @@ def test_backlog_done_stamps_cost_from_ledger(tmp_path, monkeypatch):
     node = _entries(g)[0]
     assert node["completed_at"]
     assert node["cost_usd"] == pytest.approx(1.20)
-    assert len(node["cost_sessions"]) == 2
+    # One ledger row -> one cost row carrying its whole cost. The `sessions`
+    # list above is two ALIASES of one run, not two sessions, so it is not
+    # divided; genuine multi-session work arrives as two ledger rows.
+    assert len(node["cost_sessions"]) == 1
+    assert node["cost_sessions"][0]["cost_usd"] == pytest.approx(1.20)
 
 
 def test_backlog_done_does_not_overwrite_existing_cost(tmp_path, monkeypatch):

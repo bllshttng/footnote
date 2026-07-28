@@ -20,13 +20,13 @@ class TestProviderRecordValid:
         record = ProviderRecord(
             id="claude-max-primary",
             name="Claude Max (primary)",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
             priority=10,
         )
         assert record.id == "claude-max-primary"
-        assert record.cli == "claude"
+        assert record.harness == "claude"
         assert record.auth == "oauth_dir"
         assert record.priority == 10
         # account_id defaults to id when not set
@@ -43,7 +43,7 @@ class TestProviderRecordValid:
         record = ProviderRecord(
             id="anthropic-api",
             name="Anthropic API",
-            cli="openclaw",
+            harness="openclaw",
             auth="api_key",
             env={"ANTHROPIC_API_KEY": "${KEYCHAIN:anthropic-api-key}"},
             priority=30,
@@ -60,7 +60,7 @@ class TestProviderRecordValid:
         record = ProviderRecord(
             id="gemini-pro",
             name="Gemini Pro",
-            cli="gemini",
+            harness="gemini",
             auth="api_key",
             env={"GEMINI_API_KEY": "some-key"},
             account_id="secondary",
@@ -75,11 +75,11 @@ class TestProviderRecordValid:
             record = ProviderRecord(
                 id=f"test-{cli_val}",
                 name=f"Test {cli_val}",
-                cli=cli_val,
+                harness=cli_val,
                 auth="api_key",
                 env={"ANTHROPIC_API_KEY": "key"} if cli_val in ("claude", "codex", "openclaw", "hermes") else {"GEMINI_API_KEY": "key"},
             )
-            assert record.cli == cli_val
+            assert record.harness == cli_val
 
 
 class TestProviderRecordIdValidation:
@@ -93,7 +93,7 @@ class TestProviderRecordIdValidation:
             ProviderRecord(
                 id="UPPER",
                 name="Upper",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
             )
@@ -107,7 +107,7 @@ class TestProviderRecordIdValidation:
             ProviderRecord(
                 id="1bad-id",
                 name="Bad",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
             )
@@ -120,7 +120,7 @@ class TestProviderRecordIdValidation:
             ProviderRecord(
                 id="bad_id",
                 name="Bad",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
             )
@@ -137,7 +137,7 @@ class TestProviderRecordAuthValidation:
             ProviderRecord(
                 id="claude-no-creds",
                 name="Claude Missing Creds",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 # credentials_source intentionally omitted
             )
@@ -152,7 +152,7 @@ class TestProviderRecordAuthValidation:
             ProviderRecord(
                 id="api-empty",
                 name="Empty Env",
-                cli="claude",
+                harness="claude",
                 auth="api_key",
                 env={},
             )
@@ -167,7 +167,7 @@ class TestProviderRecordAuthValidation:
             ProviderRecord(
                 id="api-wrong-key",
                 name="Wrong Key",
-                cli="openclaw",
+                harness="openclaw",
                 auth="api_key",
                 env={"SOME_OTHER_KEY": "value"},
             )
@@ -181,7 +181,7 @@ class TestProviderRecordAuthValidation:
         record = ProviderRecord(
             id="gemini-api",
             name="Gemini API",
-            cli="gemini",
+            harness="gemini",
             auth="api_key",
             env={"GEMINI_API_KEY": "some-key"},
         )
@@ -194,7 +194,7 @@ class TestProviderRecordAuthValidation:
         record = ProviderRecord(
             id="codex-api",
             name="Codex API",
-            cli="codex",
+            harness="codex",
             auth="api_key",
             env={"OPENAI_API_KEY": "some-key"},
         )
@@ -212,7 +212,7 @@ class TestProviderRecordCliValidation:
             ProviderRecord(
                 id="test-invalid",
                 name="Test",
-                cli="invalid",
+                harness="invalid",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
             )
@@ -229,7 +229,7 @@ class TestProviderRecordPriorityValidation:
             ProviderRecord(
                 id="x",
                 name="X",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
                 priority=-1,
@@ -242,7 +242,7 @@ class TestProviderRecordPriorityValidation:
         record = ProviderRecord(
             id="highest-prio",
             name="Highest",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
             priority=0,
@@ -260,14 +260,14 @@ class TestProvidersConfig:
         r1 = ProviderRecord(
             id="claude-primary",
             name="Claude Primary",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
         r2 = ProviderRecord(
             id="gemini-backup",
             name="Gemini Backup",
-            cli="gemini",
+            harness="gemini",
             auth="api_key",
             env={"GEMINI_API_KEY": "k"},
         )
@@ -294,7 +294,7 @@ class TestProvidersConfig:
             ProviderRecord(
                 id="claude-extra",
                 name="Extra",
-                cli="claude",
+                harness="claude",
                 auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
                 unknown_field="bad",
@@ -313,7 +313,7 @@ class TestCredentialsSourceTildeExpansion:
         record = ProviderRecord(
             id="x",
             name="X",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source="~/.claude",
         )
@@ -327,7 +327,7 @@ class TestCredentialsSourceTildeExpansion:
         record = ProviderRecord(
             id="api-only",
             name="API Only",
-            cli="openclaw",
+            harness="openclaw",
             auth="api_key",
             env={"ANTHROPIC_API_KEY": "key"},
         )
@@ -340,7 +340,7 @@ class TestCredentialsSourceTildeExpansion:
         record = ProviderRecord(
             id="claude-abs",
             name="Claude Abs",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source="/opt/creds/.claude",
         )
@@ -359,14 +359,14 @@ class TestProvidersConfigDuplicateIds:
         r1 = ProviderRecord(
             id="claude-max-primary",
             name="Claude Max Primary",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path.home() / ".claude",
         )
         r2 = ProviderRecord(
             id="claude-max-primary",  # duplicate
             name="Claude Max Primary (copy)",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path.home() / ".claude",
         )
@@ -381,14 +381,14 @@ class TestProvidersConfigDuplicateIds:
         r1 = ProviderRecord(
             id="claude-primary",
             name="Claude Primary",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path.home() / ".claude",
         )
         r2 = ProviderRecord(
             id="gemini-backup",
             name="Gemini Backup",
-            cli="gemini",
+            harness="gemini",
             auth="api_key",
             env={"GEMINI_API_KEY": "key"},
         )
@@ -422,7 +422,7 @@ class TestPricing:
         record = ProviderRecord(
             id="claude-anthropic",
             name="Claude Anthropic Direct",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
             pricing=Pricing(
@@ -440,7 +440,7 @@ class TestPricing:
         record = ProviderRecord(
             id="claude-anthropic",
             name="No pricing set",
-            cli="claude",
+            harness="claude",
             auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
@@ -516,7 +516,7 @@ class TestPricing:
         record = ProviderRecord.model_validate({
             "id": "claude-anthropic",
             "name": "Claude Anthropic Direct",
-            "cli": "claude",
+            "harness": "claude",
             "auth": "oauth_dir",
             "credentials_source": "~/.claude",
             "pricing": {
@@ -531,7 +531,7 @@ class TestPricing:
             ProviderRecord.model_validate({
                 "id": "claude-anthropic",
                 "name": "Bad pricing",
-                "cli": "claude",
+                "harness": "claude",
                 "auth": "oauth_dir",
                 "credentials_source": "~/.claude",
                 "pricing": {
@@ -548,7 +548,7 @@ class TestCostCapPerSession:
         from fno.adapters.providers.model import ProviderRecord
 
         record = ProviderRecord(
-            id="x", name="X", cli="claude", auth="oauth_dir",
+            id="x", name="X", harness="claude", auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
         assert record.cost_cap_usd_per_session is None
@@ -557,7 +557,7 @@ class TestCostCapPerSession:
         from fno.adapters.providers.model import ProviderRecord
 
         record = ProviderRecord(
-            id="x", name="X", cli="claude", auth="oauth_dir",
+            id="x", name="X", harness="claude", auth="oauth_dir",
             credentials_source=Path("~/.claude"),
             cost_cap_usd_per_session=30.0,
         )
@@ -569,7 +569,7 @@ class TestCostCapPerSession:
 
         with pytest.raises(pydantic.ValidationError):
             ProviderRecord(
-                id="x", name="X", cli="claude", auth="oauth_dir",
+                id="x", name="X", harness="claude", auth="oauth_dir",
                 credentials_source=Path("~/.claude"),
                 cost_cap_usd_per_session=-5.0,
             )
@@ -582,7 +582,7 @@ class TestAccountSpawnFields:
         from fno.adapters.providers.model import ProviderRecord
 
         record = ProviderRecord(
-            id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+            id="readyrule", name="ReadyRule", harness="claude", auth="managed",
             config_dir=Path("~/.claude-alt"),
         )
         assert record.config_dir == Path.home() / ".claude-alt"
@@ -594,7 +594,7 @@ class TestAccountSpawnFields:
 
         with pytest.raises(pydantic.ValidationError, match="absolute"):
             ProviderRecord(
-                id="readyrule", name="ReadyRule", cli="claude", auth="managed",
+                id="readyrule", name="ReadyRule", harness="claude", auth="managed",
                 config_dir=Path("relative/dir"),
             )
 
@@ -602,7 +602,7 @@ class TestAccountSpawnFields:
         from fno.adapters.providers.model import ProviderRecord
 
         record = ProviderRecord(
-            id="x", name="X", cli="claude", auth="oauth_dir",
+            id="x", name="X", harness="claude", auth="oauth_dir",
             credentials_source=Path("~/.claude"),
         )
         assert record.config_dir is None

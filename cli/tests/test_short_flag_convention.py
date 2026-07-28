@@ -103,8 +103,10 @@ PHASE2_LOWERCASE_MAP: dict[tuple[str, str], dict[str, str]] = {
     ("mail/cli.py", "cmd_send"): {
         "--kind": "-k", "--body": "-b", "--harness": "-H", "--cwd": "-c",
     },
+    # --cli became --harness/-H at the accounts rename: the field names the
+    # harness axis, and -H is that axis's exclusive short codebase-wide.
     ("providers/cli.py", "add_provider"): {
-        "--cli": "-c", "--auth": "-a", "--scope": "-s", "--priority": "-p",
+        "--harness": "-H", "--auth": "-a", "--scope": "-s", "--priority": "-p",
     },
     # gates/cli.py entries removed: the `fno gate` sub-app was deleted by the
     # control-plane collapse wedge (ab-d0337fbc).

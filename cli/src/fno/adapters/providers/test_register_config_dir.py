@@ -25,7 +25,7 @@ def _invoke(args, home: Path):
 
 def _records(home: Path) -> dict:
     data = tomllib.loads((home / ".fno" / "config.toml").read_text())
-    return {r["id"]: r for r in data["providers"]["records"]}
+    return {r["id"]: r for r in data["accounts"]["records"]}
 
 
 def test_register_config_dir_writes_record(tmp_path):

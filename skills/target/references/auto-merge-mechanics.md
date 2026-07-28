@@ -57,7 +57,11 @@ When deciding whether to auto-merge, resolve in this order (first match wins):
 5. **Global `~/.fno/config.toml`** - `config.auto_merge.enabled`
 6. **Default** - false
 
-`init-target-state.sh` implements this chain and is the only place it lives. The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the signal the git-protection hook, `fno pr merge`, and `worker/ship.py` all read.
+`init-target-state.sh` implements this chain and is the only place it lives. The resolved value is recorded in `target-state.md` as `auto_merge_approved` and is the signal the git-protection hook, `fno pr merge`, and `fno-agents finalize` all read.
+
+**Arming happens at the gate, not at PR creation.** `worker/ship.py` used to arm GitHub's native auto-merge the moment the PR existed, gated only on this field. That pre-authorized a merge before anything had been verified: once `--auto` is set GitHub owns the timing and fires as soon as its own branch protections pass, so a reviewer posting a blocking finding after CI greens loses the race. `fno-agents finalize` arms it instead, on the `DonePRGreen` terminal only, so the merge authorizes a state loop-check just verified (PR up, CI green, no unaddressed blocking finding). A reviewer that has not posted yet gets the whole CI duration before the merge is armed at all.
+
+Note this reads the manifest field, and the manifest carries the run's raw `input` as a quoted scalar written *above* it. A multi-line argument spills newlines into the file, so finalize's parser treats lines inside that scalar as untrusted for this key specifically - the same "prose must never manufacture merge authority" rule the chain above enforces, applied at the read as well as the fold.
 
 FORBIDDEN: auto-merging based on any inference other than this chain.
 

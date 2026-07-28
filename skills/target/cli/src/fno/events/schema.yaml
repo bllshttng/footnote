@@ -2191,7 +2191,7 @@ event_types:
     consumers: [operator]
 
   - name: quota_deferred
-    description: "Emitted by an autonomous dispatcher (mux grab / active-backlog tick) when a ready node is NOT dispatched because its resolved provider has no quota headroom (EXHAUSTED, or LOW with a reset inside the defer horizon). Quota-aware dispatch (x-5d3e). The node is left untouched in ready; the first tick after retry_at dispatches it. Advisory + opt-in (config.providers.quota.defer_dispatch); p0 and explicit human verbs never defer."
+    description: "Emitted by an autonomous dispatcher (mux grab / active-backlog tick) when a ready node is NOT dispatched because its resolved provider has no quota headroom (EXHAUSTED, or LOW with a reset inside the defer horizon). Quota-aware dispatch (x-5d3e). The node is left untouched in ready; the first tick after retry_at dispatches it. Advisory + opt-in (config.accounts.quota.defer_dispatch); p0 and explicit human verbs never defer."
     sources: [backlog]
     data:
       required: [node_id, provider, headroom]

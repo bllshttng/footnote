@@ -92,7 +92,7 @@ class UsageSnapshot:
 
     ``windows`` may be empty (probe reached the source but it reported no
     windows); an empty tuple reads as UNKNOWN headroom, never OK. ``source``
-    records how the reading was obtained for the ``fno providers usage``
+    records how the reading was obtained for the ``fno config accounts usage``
     display and for debugging drift.
     """
 
@@ -104,7 +104,7 @@ class UsageSnapshot:
 
 # ---------------------------------------------------------------------------
 # Per-CLI probes. Each returns a snapshot or None (unknown). Registered by
-# record.cli, mirroring the runtime adapter dispatch. A CLI with no probe
+# record.harness, mirroring the runtime adapter dispatch. A CLI with no probe
 # (gemini, glm, openclaw, hermes, api_key records) is UNKNOWN in v1.
 # ---------------------------------------------------------------------------
 
@@ -426,7 +426,7 @@ _PROBES: dict[str, Callable[[ProviderRecord, float], "UsageSnapshot | None"]] = 
 def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
     """Return a fresh usage snapshot for ``record``, or None if unknown.
 
-    Dispatches by ``record.cli``. NEVER raises: any exception inside a per-CLI
+    Dispatches by ``record.harness``. NEVER raises: any exception inside a per-CLI
     probe is contained here (AC1-FR), logged once at debug, and mapped to None
     so a dispatch decision proceeds fail-open. api_key records and CLIs without
     a probe (gemini, glm, openclaw, hermes) return None in v1.
@@ -435,7 +435,7 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
         now = time.time()
     if record.auth != "oauth_dir":
         return None
-    probe = _PROBES.get(record.cli)
+    probe = _PROBES.get(record.harness)
     if probe is None:
         return None
     try:

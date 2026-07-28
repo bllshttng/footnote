@@ -718,7 +718,7 @@ def init(
         None,
         "--provider",
         hidden=True,
-        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
+        help="Retired: the harness axis is --harness/-H.",
     ),
     beastmode: bool = typer.Option(
         False,
@@ -1311,7 +1311,7 @@ def resolve_model(
     ),
     _provider_tombstone: Optional[str] = typer.Option(
         None, "--provider", hidden=True,
-        help="Retired: the harness axis is --harness. Removed at 0.4.0.",
+        help="Retired: the harness axis is --harness.",
     ),
 ) -> None:
     """Print the dispatch model a node resolves to (its ``model`` pin / ``model_tier``).
@@ -2035,7 +2035,7 @@ def start(
     ),
     _provider_tombstone: Optional[str] = typer.Option(
         None, "--provider", hidden=True,
-        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
+        help="Retired: the harness axis is --harness/-H.",
     ),
     beastmode: bool = typer.Option(
         False, "--beastmode", "--beast",

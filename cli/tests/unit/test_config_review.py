@@ -572,3 +572,70 @@ def test_reviewers_unresolvable_fails_loud(
             "schema_version: 1\nconfig:\n  review:\n    reviewers: [teleport]\n",
         )
     assert "teleport" in str(excinfo.value)
+
+
+# --- agent_harnesses rename + agent_providers alias ---
+
+
+def test_agent_harnesses_canonical_map(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """agent_harnesses is read verbatim and mirrored onto the legacy alias."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    agent_harnesses:\n"
+        "      code-reviewer: codex\n",
+    )
+    assert settings.review.agent_harnesses == {"code-reviewer": "codex"}
+    assert settings.review.agent_providers == {"code-reviewer": "codex"}
+
+
+def test_agent_providers_aliases_agent_harnesses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A legacy agent_providers-only config populates agent_harnesses (AC6-HP)."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    agent_providers:\n"
+        "      code-reviewer: codex\n",
+    )
+    assert settings.review.agent_harnesses == {"code-reviewer": "codex"}
+    assert settings.review.agent_providers == settings.review.agent_harnesses
+
+
+def test_agent_harnesses_wins_over_agent_providers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Both set: canonical wins and the two are never merged."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n"
+        "    agent_harnesses: {code-reviewer: codex}\n"
+        "    agent_providers: {silent-failure-hunter: gemini}\n",
+    )
+    assert settings.review.agent_harnesses == {"code-reviewer": "codex"}
+    assert "silent-failure-hunter" not in settings.review.agent_harnesses
+
+
+def test_agent_harnesses_absent_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Neither key set stays an empty map, so cross-model stays off."""
+    settings = _load(tmp_path, monkeypatch, "schema_version: 1\nconfig:\n  review: {}\n")
+    assert settings.review.agent_harnesses == {}
+    assert settings.review.agent_providers == {}
+
+
+def test_agent_harnesses_malformed_degrades_to_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A non-mapping value degrades to {} rather than raising out of the load."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    agent_harnesses: nonsense\n",
+    )
+    assert settings.review.agent_harnesses == {}

@@ -98,7 +98,7 @@ def resolve_env_value(value: str) -> str:
 def _env_for_oauth(record: ProviderRecord, root: Path) -> dict[str, str]:
     """Build the env dict for an oauth_dir provider."""
     account_dir = root / record.id
-    cli = record.cli
+    cli = record.harness
     if cli == "claude":
         return {"CLAUDE_CONFIG_DIR": str(account_dir / ".claude")}
     else:

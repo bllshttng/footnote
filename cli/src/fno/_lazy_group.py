@@ -32,7 +32,7 @@ Usage (via the factory)
 from __future__ import annotations
 
 import importlib
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Mapping
 
 import click
 import typer
@@ -267,7 +267,11 @@ class LazyTypeGroup(typer.core.TyperGroup):
 # ---------------------------------------------------------------------------
 
 def make_lazy_group_cls(
-    lazy_subcommands: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]],
+    # Mapping, not dict: dict is invariant in its value type, so a caller whose
+    # literal infers as `dict[str, tuple[str, str]]` (every entry a 2-tuple, no
+    # options) fails to type-check against the union. The map is copied below
+    # and never mutated, so the covariant read-only type is the honest one.
+    lazy_subcommands: Mapping[str, tuple[str, str] | tuple[str, str, dict[str, Any]]],
 ) -> type[LazyTypeGroup]:
     """Return a LazyTypeGroup subclass with the given lazy map baked in.
 

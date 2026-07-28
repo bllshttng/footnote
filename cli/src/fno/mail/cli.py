@@ -1356,7 +1356,7 @@ def cmd_send(
     ),
     _provider_tombstone: str | None = typer.Option(
         None, "--provider", hidden=True,
-        help="Retired: the harness axis is --harness/-H. Removed at 0.4.0.",
+        help="Retired: the harness axis is --harness/-H.",
     ),
     cwd: str | None = typer.Option(
         None, "--cwd", "-c", help="Working directory context."

@@ -29,7 +29,7 @@ def oauth_record(creds_source: Path) -> ProviderRecord:
     return ProviderRecord(
         id="claude-max-secondary",
         name="Claude Max Secondary",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -40,7 +40,7 @@ def gemini_record(creds_source: Path) -> ProviderRecord:
     return ProviderRecord(
         id="gemini-pro-a",
         name="Gemini Pro A",
-        cli="gemini",
+        harness="gemini",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
@@ -51,7 +51,7 @@ def api_key_record() -> ProviderRecord:
     return ProviderRecord(
         id="anthropic-api-via-openclaw",
         name="Anthropic API via OpenClaw",
-        cli="openclaw",
+        harness="openclaw",
         auth="api_key",
         env={"ANTHROPIC_API_KEY": "${KEYCHAIN:anthropic-api-key-default}"},
     )
@@ -149,7 +149,7 @@ def test_stage_missing_credentials_source_raises(
     record = ProviderRecord(
         id="bad-creds",
         name="Bad Creds",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=ghost_path,
     )
@@ -210,7 +210,7 @@ def test_stage_idempotent_with_relative_symlink(
     record = ProviderRecord(
         id="claude-relative-test",
         name="Claude Relative Test",
-        cli="claude",
+        harness="claude",
         auth="oauth_dir",
         credentials_source=creds_source,
     )
