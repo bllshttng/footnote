@@ -192,83 +192,44 @@ def test_a_registry_entry_cannot_shadow_a_builtin_at_resolution(isolated: Path):
     assert v.descriptor.asserts == "review-evidence"
 
 
-# --- the probe's own 422 blind spot (found running x-4a60 end to end) --------
-#
-# `search/issues` answers 422 for a `commenter:` login with no account, so the
-# probe read the single most likely typo - a login that simply does not exist -
-# as `unverifiable` and waved it through on BOTH paths. Extending the gate to a
-# second path would have extended a gate that could not catch its own main case.
+
+# --- the 422 blind spot, and why the obvious fix is wrong (x-4a60) -----------
 
 
-class _GhReply:
-    def __init__(self, returncode, stdout="", stderr=""):
-        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
-
-
-_NOT_FOUND = _GhReply(1, "", "gh: Not Found (HTTP 404)")
-_SEARCH_422 = _GhReply(1, "", "gh: Validation Failed (HTTP 422)")
-
-
-def _patch_gh(monkeypatch: pytest.MonkeyPatch, handler):
-    """`_app_ever_acted` imports subprocess inside the function, so the real
-    module is the only patch point."""
-    import subprocess as _sp
-
-    monkeypatch.setattr(_sp, "run", lambda args, **kw: handler(" ".join(args), args))
-
-
-def test_probe_reads_a_nonexistent_login_as_absent_not_unverifiable(
+def test_a_login_with_no_account_stays_unverifiable_not_absent(
     monkeypatch: pytest.MonkeyPatch,
 ):
-    """Both user forms 404 => the account does not exist => a typo, refuse.
-    This is the case the 422 used to hide."""
-    import fno.review_capability as rc
+    """A configured entry is matched by the completion gate with
+    `author_login.contains(configured)`, so a short alias like "reviewer" for
+    `acme-reviewer[bot]` is a supported config that owns no account of its own.
+    The search API 422s on it and both exact user lookups 404, so inferring
+    absence from those would refuse a bot that reviews this repo normally.
 
-    def _handler(joined, args):
-        if "nameWithOwner" in joined:
-            return _GhReply(0, "owner/repo\n")
-        if "search/issues" in joined:
-            return _SEARCH_422
-        return _NOT_FOUND
-
-    _patch_gh(monkeypatch, _handler)
-    assert rc._app_ever_acted("totally-not-real") is False
-
-
-def test_probe_keeps_a_bot_suffixed_account_unrefused(monkeypatch: pytest.MonkeyPatch):
-    """`github-actions` 404s but `github-actions[bot]` resolves. Checking one
-    form only would refuse a real App, and a false refusal is worse than the
-    late wedge this gate exists to prevent."""
-    import fno.review_capability as rc
-
-    def _handler(joined, args):
-        if "nameWithOwner" in joined:
-            return _GhReply(0, "owner/repo\n")
-        if "search/issues" in joined:
-            return _SEARCH_422
-        if args[-1].endswith("[bot]"):
-            return _GhReply(0, '{"login": "github-actions[bot]"}')
-        return _NOT_FOUND
-
-    _patch_gh(monkeypatch, _handler)
-    assert rc._login_exists("github-actions") is True
-    assert rc._app_ever_acted("github-actions") is None
-
-
-def test_probe_stays_unverifiable_when_the_doubt_is_not_a_404(
-    monkeypatch: pytest.MonkeyPatch,
-):
-    """Rate limit / scope / network must never harden into a refusal."""
+    A false refusal blocks every run; the late wedge this gate shortens only
+    costs one. So the 422 stays unverifiable until something can prove absence
+    under substring semantics.
+    """
     import subprocess as _sp
 
     import fno.review_capability as rc
+
+    calls = []
+
+    class _R:
+        def __init__(self, returncode, stdout="", stderr=""):
+            self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
 
     def _run(args, **kwargs):
-        class _R:
-            returncode, stdout, stderr = 1, "", "gh: API rate limit exceeded (HTTP 403)"
-
-        return _R()
+        joined = " ".join(args)
+        calls.append(joined)
+        if "nameWithOwner" in joined:
+            return _R(0, "owner/repo\n")
+        if "search/issues" in joined:
+            return _R(1, "", "gh: Validation Failed (HTTP 422)")
+        return _R(1, "", "gh: Not Found (HTTP 404)")
 
     monkeypatch.setattr(_sp, "run", _run)
-    assert rc._login_exists("some-bot") is None
 
+    assert rc._app_ever_acted("reviewer") is None
+    # And it must not have gone looking for an exact account to decide that.
+    assert not any("users/" in c for c in calls)

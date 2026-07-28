@@ -488,46 +488,28 @@ def _app_ever_acted(login: str, cwd: Optional[str] = None) -> Optional[bool]:
         ]
     )
     if total is None:
-        # The search API answers 422 "the listed users cannot be searched
-        # either because the users do not exist" for a `commenter:` login with
-        # no account - which is exactly the typo this probe exists to catch, so
-        # reading it as unverifiable made the gate decorative for its own main
-        # case. Resolve the login directly instead; every other search failure
-        # (rate limit, scope, network) still reaches None (x-4a60).
-        return False if _login_exists(login, cwd) is False else None
+        # KNOWN BLIND SPOT, deliberately left unverifiable. The search API
+        # answers 422 for a `commenter:` login with no account, so the likeliest
+        # typo shape reaches None and proceeds rather than refusing.
+        #
+        # Do NOT "fix" this by resolving the login against `gh api users/<login>`
+        # (with or without the `[bot]` suffix). A configured entry is matched by
+        # the completion gate with `author_login.contains(configured)`
+        # (login_matches_bot in crates/fno-agents/src/loopcheck.rs), so a short
+        # alias like "reviewer" for `acme-reviewer[bot]` is a SUPPORTED config
+        # and is not an account of its own: both exact lookups 404 and the run
+        # would be refused at init even though that bot reviews this repo
+        # normally. A false refusal blocks every run, which is worse than the
+        # late wedge this gate exists to shorten.
+        #
+        # Proving absence under substring semantics means enumerating the
+        # repository's participants, which is unbounded; until something does
+        # that, unverifiable is the honest answer (x-4a60).
+        return None
     try:
         return int(total.strip()) > 0
     except ValueError:
         return None
-
-
-def _login_exists(login: str, cwd: Optional[str] = None) -> Optional[bool]:
-    """False only when NEITHER `login` nor `login[bot]` names a real account.
-
-    Both forms are checked because a real App may be configured either way:
-    `github-actions` 404s on the users endpoint while `github-actions[bot]`
-    resolves, so testing one form alone would refuse a genuine App. Any failure
-    that is not a clean 404 is doubt, and doubt is None - the same fail-open
-    contract as the caller.
-    """
-    import subprocess
-
-    for candidate in (login, f"{login}[bot]"):
-        try:
-            r = subprocess.run(
-                ["gh", "api", f"users/{candidate}"],
-                cwd=cwd,
-                capture_output=True,
-                text=True,
-                timeout=30,
-            )
-        except Exception:  # noqa: BLE001 - a failed probe is doubt, not absence
-            return None
-        if r.returncode == 0:
-            return True
-        if "404" not in (r.stderr or ""):
-            return None
-    return False
 
 
 @dataclass(frozen=True)
