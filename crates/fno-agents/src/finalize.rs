@@ -1668,40 +1668,59 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
 /// Re-arming needs no per-head dedup: `--auto` sets a PR-level flag rather than
 /// appending anything, so a retried terminal fire is a no-op on GitHub's side.
 ///
-/// The `--merge` strategy is hardcoded, carried over verbatim from the call site
-/// this replaces. `config.auto_merge.merge_strategy` (default `merge`, also
-/// `squash`/`rebase`) is honored by `fno pr merge` and `fno pr verify` but was
-/// never read here, so a `squash` repo has always been armed as a merge commit.
-/// Fixing that means reading the key from Rust, or routing this through the
-/// `fno pr merge` primitive - which also merges immediately, deletes branches,
-/// and runs post-merge followups, none of which belong in a best-effort writer.
-/// Left as-is deliberately: this change is a relocation, and widening it here
-/// would change merge behavior under cover of a timing fix.
+/// `config.auto_merge.merge_strategy` and `.delete_branch_on_merge` shape the
+/// argv, matching `fno pr merge`. The strategy used to be hardcoded `--merge`,
+/// carried over verbatim from the PR-creation call site this replaced, so a
+/// squash-only repo was armed with a merge method it forbids - and because
+/// arming is log-only, GitHub's rejection was one stderr line inside a stop
+/// hook. The symptom was not a wrong commit shape but auto-merge silently never
+/// working, indistinguishable from nobody having opted in.
+///
+/// `require_checks_pass` is deliberately NOT read. On `fno pr merge` it decides
+/// whether `--auto` is passed at all (false meaning "merge now, do not wait");
+/// here `--auto` IS the operation and `loop-check` has already verified green,
+/// so honoring it would let a config value turn arming into a no-op.
 fn arm_auto_merge(cwd: &Path) -> bool {
     let Some((number, _url)) = gh_pr_ref(cwd) else {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
         return false;
     };
-    match Command::new("gh")
-        .args(["pr", "merge", &number.to_string(), "--auto", "--merge"])
-        .current_dir(cwd)
-        .output()
-    {
+    let strategy = crate::agents_config::auto_merge_strategy(cwd);
+    let mut args = vec![
+        "pr".to_string(),
+        "merge".to_string(),
+        number.to_string(),
+        "--auto".to_string(),
+        format!("--{strategy}"),
+    ];
+    if crate::agents_config::auto_merge_delete_branch(cwd) {
+        args.push("--delete-branch".to_string());
+    }
+    // The strategy is named in every failure line below: a repo that forbids the
+    // configured merge method fails here exactly like stale auth or an
+    // unmergeable state would, and the config key is the only way to tell them
+    // apart from a log nobody is watching live.
+    match Command::new("gh").args(&args).current_dir(cwd).output() {
         Ok(o) if o.status.success() => {
-            eprintln!("finalize: auto-merge armed for PR {number}");
+            eprintln!("finalize: auto-merge armed for PR {number} with --{strategy}");
             true
         }
         // Surface gh's own message so an operator can tell a repo with the
         // auto-merge feature disabled from stale auth or an unmergeable state.
         Ok(o) => {
             eprintln!(
-                "finalize: auto-merge arm failed for PR {number} (non-fatal): {}",
+                "finalize: auto-merge arm failed for PR {number} with --{strategy} \
+                 (from config.auto_merge.merge_strategy; check the repo allows that \
+                 merge method) (non-fatal): {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             );
             false
         }
         Err(e) => {
-            eprintln!("finalize: auto-merge arm failed for PR {number} (non-fatal): {e}");
+            eprintln!(
+                "finalize: auto-merge arm failed for PR {number} with --{strategy} \
+                 (from config.auto_merge.merge_strategy) (non-fatal): {e}"
+            );
             false
         }
     }

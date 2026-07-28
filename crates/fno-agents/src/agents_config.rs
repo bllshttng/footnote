@@ -187,6 +187,52 @@ pub fn dispatch_auto_merge(cwd: &Path) -> bool {
     .unwrap_or(false)
 }
 
+/// The `config.auto_merge.*` block, the knobs that shape the `gh pr merge`
+/// argv. Distinct from `dispatch.auto_merge` above, which is the per-project
+/// POSTURE (may we merge at all); these decide HOW, once something has already
+/// decided to.
+///
+/// Both mirror `fno.config.AutoMergeBlock`, which is the source of truth;
+/// `cli/tests/test_config_schema_drift.py` fails when the allowlist here drifts
+/// from the model's. Both degrade to the value `finalize` hardcoded before it
+/// read config at all, so a malformed file is never worse than the old behavior.
+///
+/// One known parity edge, shared with `dispatch_auto_merge`: a NON-STRING value
+/// (`merge_strategy = 3`) yields `None` from the extractor and so falls through
+/// to the next config candidate, where Python's merge-then-coerce loader would
+/// let the malformed project value mask the global one. A misspelled string (the
+/// realistic typo) is handled correctly, because the extractor takes any string
+/// and the allowlist filter runs after resolution.
+pub fn auto_merge_strategy(cwd: &Path) -> String {
+    resolve(cwd, |t| {
+        t.get("auto_merge")?
+            .as_table()?
+            .get("merge_strategy")?
+            .as_str()
+            .map(|s| s.trim().to_string())
+    })
+    .filter(|v| matches!(v.as_str(), "merge" | "squash" | "rebase"))
+    .unwrap_or_else(|| "merge".to_string())
+}
+
+/// Resolve `auto_merge.delete_branch_on_merge` (default `true`).
+///
+/// Mirrors `_coerce_affirmative`'s truth table rather than calling `as_bool()`:
+/// a PRESENT non-affirmative value reads as false, so `delete_branch_on_merge =
+/// "no"` (the shape a settings.yaml migration can leave behind) suppresses the
+/// flag. `as_bool()` would return `None` there and fall through to the `true`
+/// default, deleting a branch the config asked to keep.
+pub fn auto_merge_delete_branch(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("auto_merge")?
+            .as_table()?
+            .get("delete_branch_on_merge")
+            .and_then(scalar_to_string)
+    })
+    .map(|raw| matches!(raw.as_str(), "1" | "true" | "yes" | "on"))
+    .unwrap_or(true)
+}
+
 /// The normalized raw scalar for a direct child of `agents:` (the generalized
 /// `dead_row_grace_secs` chain), so each caller applies its own coercion.
 fn resolve_agents_value(cwd: &Path, key: &str) -> Option<String> {
@@ -540,6 +586,92 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("am-false", "[dispatch]\nauto_merge = false\n");
         assert!(!dispatch_auto_merge(&cwd));
+    }
+
+    // --- auto_merge.{merge_strategy,delete_branch_on_merge} readers ---
+    // `finalize` hardcoded `--merge` and never passed `--delete-branch`, so a
+    // squash-only repo was armed with a method it forbids and auto-merge
+    // silently never worked. Every default below is the old hardcode, so a
+    // malformed config lands exactly on the pre-fix behavior.
+
+    #[test]
+    fn auto_merge_strategy_absent_is_merge() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ams-absent", "schema_version = 1\n");
+        assert_eq!(auto_merge_strategy(&cwd), "merge");
+    }
+
+    #[test]
+    fn auto_merge_strategy_honors_squash_and_rebase() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for want in ["squash", "rebase", "merge"] {
+            clear_config_env();
+            let cwd = write_project_settings(
+                &format!("ams-{want}"),
+                &format!("[auto_merge]\nmerge_strategy = \"{want}\"\n"),
+            );
+            assert_eq!(auto_merge_strategy(&cwd), want);
+        }
+    }
+
+    #[test]
+    fn auto_merge_strategy_invalid_degrades_to_merge() {
+        // Mirrors the bash + Pydantic coercers, which both fall back to `merge`
+        // on an out-of-allowlist value. No FNO_CONFIG pin needed, unlike the
+        // absent case: the extractor takes ANY string, so a misspelled project
+        // value resolves and is then rejected by the filter, and the global tier
+        // is never consulted.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ams-bad", "[auto_merge]\nmerge_strategy = \"octopus\"\n");
+        assert_eq!(auto_merge_strategy(&cwd), "merge");
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_absent_is_true() {
+        // Matches AutoMergeBlock's `True` default, which `fno pr merge` honors.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amd-absent", "schema_version = 1\n");
+        assert!(auto_merge_delete_branch(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_present_non_affirmative_is_false() {
+        // The reason this reader is not `as_bool()`: a settings.yaml migration
+        // can leave a STRING behind, and `_coerce_affirmative` reads any present
+        // non-affirmative value as false. `as_bool()` would yield None on "no"
+        // and fall through to the `true` default, deleting a branch the config
+        // asked to keep.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for body in [
+            "[auto_merge]\ndelete_branch_on_merge = false\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"no\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"false\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = 0\n",
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings("amd-off", body);
+            assert!(
+                !auto_merge_delete_branch(&cwd),
+                "a present non-affirmative value must suppress --delete-branch: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_affirmative_forms_are_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for body in [
+            "[auto_merge]\ndelete_branch_on_merge = true\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"yes\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = 1\n",
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings("amd-on", body);
+            assert!(auto_merge_delete_branch(&cwd), "affirmative: {body}");
+        }
     }
 
     #[test]

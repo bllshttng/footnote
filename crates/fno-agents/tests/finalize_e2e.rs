@@ -630,6 +630,13 @@ fn run_finalize_shimmed(env: &Env, reason: &str, gh_body: &str) -> std::process:
         .arg(&env.postmortems)
         .env("PYTHONPATH", &env.pypath)
         .env("PATH", path)
+        // Pin the config chain to this temp project. `$FNO_CONFIG` is
+        // the SOLE source when set, so without this a developer who exports it
+        // gets a run that never reads the project config.toml a test just wrote,
+        // and one who does not gets the real `~/.fno/config.toml`. Either way the
+        // auto-merge argv assertions would pass or fail for the wrong reason. The
+        // file need not exist: an unreadable candidate yields the same defaults.
+        .env("FNO_CONFIG", env.cwd.join(".fno/config.toml"))
         .current_dir(&env.cwd)
         .output()
         .expect("run finalize")
@@ -732,6 +739,90 @@ fn finalize_arms_auto_merge_on_approved_green_terminal() {
         c.contains("gh pr merge 358 --auto --merge"),
         "approved DonePRGreen must arm auto-merge: {c}"
     );
+}
+
+/// Write a `config.auto_merge` block into the temp project. `run_finalize_shimmed`
+/// pins `$FNO_CONFIG` here, so this is the sole config the child reads.
+fn write_auto_merge_config(env: &Env, body: &str) {
+    fs::write(env.cwd.join(".fno/config.toml"), body).unwrap();
+}
+
+/// The configured merge strategy reaches the argv. Before this, `--merge`
+/// was hardcoded, so a squash-only repo was armed with a method it forbids -
+/// and since arming is log-only, GitHub's rejection was one stderr line and
+/// auto-merge simply never worked.
+#[test]
+fn finalize_arms_with_the_configured_merge_strategy() {
+    for strategy in ["squash", "rebase"] {
+        let env = setup("S-strategy", false);
+        set_posture(&env, "S-strategy", true);
+        write_auto_merge_config(
+            &env,
+            &format!("[auto_merge]\nmerge_strategy = \"{strategy}\"\n"),
+        );
+        let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+        assert!(out.status.success());
+        let c = calls(&env);
+        assert!(
+            c.contains(&format!("--{strategy}")),
+            "configured {strategy} must reach the argv: {c}"
+        );
+        assert!(
+            !c.contains("--merge"),
+            "the hardcoded --merge must not survive a {strategy} config: {c}"
+        );
+    }
+}
+
+/// An out-of-allowlist value degrades to `--merge` rather than reaching
+/// `gh` as an unknown flag. Mirrors the bash and Pydantic coercers.
+#[test]
+fn finalize_arms_with_merge_on_an_invalid_strategy() {
+    let env = setup("S-badstrategy", false);
+    set_posture(&env, "S-badstrategy", true);
+    write_auto_merge_config(&env, "[auto_merge]\nmerge_strategy = \"octopus\"\n");
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("--merge"), "invalid -> merge fallback: {c}");
+    assert!(!c.contains("--octopus"), "never pass through to gh: {c}");
+}
+
+/// `delete_branch_on_merge` defaults to true and is honored by
+/// `fno pr merge`, so an arm that ignored it left branches behind that the same
+/// PR merged through the CLI would have deleted.
+#[test]
+fn finalize_arms_with_delete_branch_by_default() {
+    let env = setup("S-delbr", false);
+    set_posture(&env, "S-delbr", true);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(
+        c.contains("--delete-branch"),
+        "absent config takes AutoMergeBlock's true default: {c}"
+    );
+}
+
+/// An opt-out suppresses it. A present non-affirmative value counts,
+/// which is why the reader mirrors `_coerce_affirmative` instead of `as_bool()`.
+#[test]
+fn finalize_omits_delete_branch_when_configured_off() {
+    for body in [
+        "[auto_merge]\ndelete_branch_on_merge = false\n",
+        "[auto_merge]\ndelete_branch_on_merge = \"no\"\n",
+    ] {
+        let env = setup("S-nodelbr", false);
+        set_posture(&env, "S-nodelbr", true);
+        write_auto_merge_config(&env, body);
+        let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
+        assert!(out.status.success());
+        let c = calls(&env);
+        assert!(
+            !c.contains("--delete-branch"),
+            "opt-out must suppress the flag ({body}): {c}"
+        );
+    }
 }
 
 /// AC6-EDGE: a refused posture is never overridden, so the human-merge path is
