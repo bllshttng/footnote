@@ -3366,6 +3366,7 @@ def cmd_next(
         detect_project, filter_by_project, make_selection_sort_key,
         descendants_of, _find_node,
     )
+    from fno.graph.ladder import is_cold_dispatchable
 
     result: list = [None]
     project_filter = project
@@ -3409,9 +3410,16 @@ def cmd_next(
         # completed_at while its persisted status is still "ready". Guard on
         # completed_at so advance / megawalk never dispatch a /target worker for
         # an already-done node.
+        # `allowed` covers the persisted-status gate (ready, plus idea/deferred
+        # only on explicit --include-ideas/--include-deferred). A plan-less idea
+        # (Rung.NONE) is ALSO admitted by default (x-e24a): `/target` authors its
+        # plan, so the autonomous drain dispatches it. A linked-but-undesigned
+        # decompose stub (Rung.IDEA) is NOT admitted here - it needs warm
+        # inline-fill and stays behind --include-ideas.
         candidates = [
             e for e in entries
-            if e.get("status") in allowed and not e.get("completed_at")
+            if (e.get("status") in allowed or is_cold_dispatchable(e))
+            and not e.get("completed_at")
         ]
         if roadmap_id:
             candidates = [e for e in candidates if e.get("roadmap_id") == roadmap_id]
@@ -3590,6 +3598,7 @@ def cmd_ready(
     from fno.graph._intake import (
         filter_by_project, make_selection_sort_key, descendants_of, _find_node,
     )
+    from fno.graph.ladder import is_cold_dispatchable
 
     entries = read_graph(_graph_path())
     allowed = {"ready"}
@@ -3601,9 +3610,13 @@ def cmd_ready(
     # carry completed_at while its persisted status is still "ready". Guard on
     # completed_at so a done node never lists as actionable work (the same guard
     # is in `next`'s _pick_ready, the dispatch path).
+    # Same plan-less idea admission as `next`'s _pick_ready (x-e24a): a Rung.NONE
+    # idea is cold-dispatchable and surfaces alongside ready work; a linked
+    # Rung.IDEA stub stays behind --include-ideas.
     ready = [
         e for e in entries
-        if e.get("status") in allowed and not e.get("completed_at")
+        if (e.get("status") in allowed or is_cold_dispatchable(e))
+        and not e.get("completed_at")
     ]
     ready = filter_by_project(ready, project, all_)
     if roadmap_id:

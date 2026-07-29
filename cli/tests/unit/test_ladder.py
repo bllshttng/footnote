@@ -528,6 +528,35 @@ def test_terminal_plans_are_not_dispatchable(tmp_path, status):
     assert is_dispatchable(_plan(tmp_path, f"---\nstatus: {status}\n---\n")) is False
 
 
+def test_a_plan_less_node_is_cold_dispatchable():
+    """x-e24a: Rung.NONE is cold-dispatchable - /target authors the plan."""
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+
+    entry = {"id": "x-noplan", "status": "idea"}  # no plan_path
+    assert plan_rung(entry) is Rung.NONE
+    assert is_dispatchable(entry) is True
+
+
+def test_is_cold_dispatchable_is_the_autonomous_drain_gate(tmp_path):
+    """Admit status 'idea' AND rung NONE only (x-e24a).
+
+    A linked-but-undesigned decompose stub (Rung.IDEA) stays excluded, and the
+    status conjunct drops blocked / in_progress / ready plan-less nodes.
+    """
+    from fno.graph.ladder import is_cold_dispatchable
+
+    # Plan-less idea -> admitted.
+    assert is_cold_dispatchable({"id": "a", "status": "idea"}) is True
+    # A linked undesigned doc (Rung.IDEA) is NOT admitted.
+    stub = _plan(tmp_path, "---\nstatus: idea\n---\n\n# Child\n")
+    stub["status"] = "idea"
+    assert is_cold_dispatchable(stub) is False
+    # The status conjunct excludes non-idea plan-less nodes.
+    assert is_cold_dispatchable({"id": "b", "status": "blocked"}) is False
+    assert is_cold_dispatchable({"id": "c", "status": "in_progress"}) is False
+    assert is_cold_dispatchable({"id": "d", "status": "ready"}) is False
+
+
 def test_plan_rung_never_raises_on_a_malformed_entry():
     from fno.graph.ladder import Rung, plan_rung
 
