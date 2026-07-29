@@ -219,6 +219,34 @@ def test_plan_less_idea_surfaces_in_ready_listing_by_default(tmp_graph):
     assert idea_id in ids, "plan-less idea should surface in `ready` by default"
 
 
+def test_mission_drain_enumerates_plan_less_idea_child(tmp_graph, tmp_path):
+    """x-e24a: the mission drain shells `fno backlog ready --parent <epic> --all`,
+    so its enumeration must return a plan-less idea child (Rung.NONE) and omit a
+    linked idea stub (Rung.IDEA). This is the composition seam between
+    cmd_ready's cold-idea admission and advance_epic's fan-out - the node's core
+    motivating journey, previously certified only via a mocked
+    _ready_leaf_children."""
+    stub = tmp_path / "idea-stub.md"
+    stub.write_text("---\nstatus: idea\n---\n# Unfilled\n")
+    entries = [
+        {"id": "ab-epic", "title": "Mission", "status": "ready", "project": "fno",
+         "plan_path": "e.md", "created_at": "2026-07-28"},
+        {"id": "ab-cold", "title": "Cold idea", "status": "idea", "project": "fno",
+         "parent": "ab-epic", "created_at": "2026-07-28"},            # plan-less -> Rung.NONE
+        {"id": "ab-stub", "title": "Stub", "status": "idea", "project": "fno",
+         "parent": "ab-epic", "plan_path": str(stub),
+         "created_at": "2026-07-28"},                                  # linked -> Rung.IDEA
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    r = _invoke("backlog", "ready", "--parent", "ab-epic", "--all")
+    assert r.exit_code == 0, r.output
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert "ab-cold" in ids, "plan-less idea child must surface to the mission drain"
+    assert "ab-stub" not in ids, "linked idea stub must stay behind --include-ideas"
+    assert "ab-epic" not in ids  # the container is never actionable work
+
+
 def test_idea_included_in_ready_with_flag(tmp_graph, tmp_path):
     """`backlog ready --include-ideas` surfaces both ready and idea rows."""
     idea_id, _ = _seed_one_idea_one_ready(tmp_path)

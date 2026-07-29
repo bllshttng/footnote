@@ -106,16 +106,17 @@ _STATUS_TO_RUNG: dict[str, Rung] = {
     "superseded": Rung.SUPERSEDED,
 }
 
-# Rungs a fresh-context worker may be launched against. The ready-family rungs
-# are exactly the set `handoff.sh` accepted before it delegated here, so the
-# verb is a drop-in for its `grep | sed | tr` block. NONE is the autonomous
-# cold-dispatch addition (x-e24a): a plan-less node has no plan to launch
-# against, but `/target` authors one (think -> blueprint), so the drain treats
-# it as dispatchable. :func:`is_cold_dispatchable` is the live gate that pairs
-# the rung with the ``status == "idea"`` requirement (a blocked/done plan-less
-# node is not admitted even though its rung is NONE).
+# Rungs a fresh-context worker may be launched against. Exactly the set
+# `handoff.sh` accepted before it delegated here, so the verb is a drop-in for
+# its `grep | sed | tr` block rather than a new policy. Rung.NONE is NOT here:
+# a plan-less node has no plan to launch "against". It is instead COLD-dispatched
+# (the worker authors the plan via think -> blueprint) through the separate
+# :func:`is_cold_dispatchable` gate, which adds the required ``status == "idea"``
+# conjunct so a blocked/done plan-less node is never admitted (x-e24a). Keeping
+# NONE out of this set preserves is_dispatchable's "has a launchable plan"
+# contract; the cold path is its own predicate, not an overload of this one.
 _DISPATCHABLE: frozenset[Rung] = frozenset(
-    {Rung.NONE, Rung.READY, Rung.IN_PROGRESS, Rung.IN_REVIEW}
+    {Rung.READY, Rung.IN_PROGRESS, Rung.IN_REVIEW}
 )
 
 # Rungs the daemon must NOT pick up on its own. Undesigned work needs a design
@@ -259,10 +260,12 @@ def is_selectable(entry: object) -> bool:
 def is_dispatchable(entry: object) -> bool:
     """May a fresh-context worker be launched against this plan? FAILS CLOSED.
 
-    True only for :data:`_DISPATCHABLE`: the ready-family rungs, plus ``NONE``
-    (cold-dispatchable - ``/target`` authors the plan). Everything else parks,
-    including an unreadable plan - the deliberate disagreement with
-    :func:`is_selectable`, which fails open on it.
+    True only for :data:`_DISPATCHABLE` (the plan-bearing rungs). A plan-less
+    idea (``Rung.NONE``) has no plan to launch against, so this returns False for
+    it - but it IS cold-dispatchable; see :func:`is_cold_dispatchable`, the
+    separate gate the autonomous drain uses. Everything else parks, including an
+    unreadable plan - the deliberate disagreement with :func:`is_selectable`,
+    which fails open on it.
     """
     return plan_rung(entry) in _DISPATCHABLE
 
@@ -270,8 +273,11 @@ def is_dispatchable(entry: object) -> bool:
 def is_cold_dispatchable(entry: object) -> bool:
     """A plan-less idea node the autonomous drain may dispatch without a plan.
 
-    The live gate for x-e24a: ``status == "idea"`` (so blocked / in_progress /
-    done plan-less nodes are excluded) AND ``plan_rung`` is ``NONE`` (so a linked
+    The SOLE admission path for ``Rung.NONE`` (x-e24a): ``is_dispatchable`` stays
+    False for plan-less nodes (no plan to launch against), so this predicate -
+    not ``_DISPATCHABLE`` - is what the four drain selectors OR into their status
+    gate. Requires ``status == "idea"`` (so blocked / in_progress / done
+    plan-less nodes are excluded) AND ``plan_rung`` is ``NONE`` (so a linked
     decompose stub, ``Rung.IDEA``, stays excluded). ``/target`` authors the plan
     (think -> blueprint -> do), so a plan-less idea is dispatchable as-is.
 

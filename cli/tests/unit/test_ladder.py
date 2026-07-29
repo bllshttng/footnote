@@ -529,12 +529,15 @@ def test_terminal_plans_are_not_dispatchable(tmp_path, status):
 
 
 def test_a_plan_less_node_is_cold_dispatchable():
-    """x-e24a: Rung.NONE is cold-dispatchable - /target authors the plan."""
-    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
+    """x-e24a: Rung.NONE is cold-dispatchable via is_cold_dispatchable - /target
+    authors the plan. is_dispatchable stays False (no plan to launch against);
+    the cold path is its own predicate, not an overload of _DISPATCHABLE."""
+    from fno.graph.ladder import Rung, is_cold_dispatchable, is_dispatchable, plan_rung
 
     entry = {"id": "x-noplan", "status": "idea"}  # no plan_path
     assert plan_rung(entry) is Rung.NONE
-    assert is_dispatchable(entry) is True
+    assert is_dispatchable(entry) is False
+    assert is_cold_dispatchable(entry) is True
 
 
 def test_is_cold_dispatchable_is_the_autonomous_drain_gate(tmp_path):
