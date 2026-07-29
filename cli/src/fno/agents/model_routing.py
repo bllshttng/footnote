@@ -571,13 +571,13 @@ def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
 
     Every ``SCRUB_AUTH_VARS`` entry is written as an empty string: claude reads
     an empty settings env value as UNSET (measured 2026-07-27), which is what
-    drops the inherited vendor endpoint and model tiers. The account's own
-    resolved ``ANTHROPIC_*`` values are then re-applied, so an api_key account
-    survives the fork too; a config_dir account has no such overlay and the bare
-    scrub leaves its own login (selected by CLAUDE_CONFIG_DIR) as the only live
-    credential. CLAUDE_CONFIG_DIR is excluded on purpose: it selects which
-    config the worker reads, so it cannot live in a file read FROM that config,
-    and it rides the spawn env (which selects the per-account daemon).
+    drops the inherited vendor endpoint and model tiers. The account's FULL
+    resolved overlay is then re-applied (not just the scrub vars), so an api_key
+    account survives the fork with every env its record pins, including extra
+    entries a scrub-var allowlist would drop (custom headers, proxy vars, ...).
+    CLAUDE_CONFIG_DIR is the one exclusion: it selects which config the worker
+    reads, so it cannot live in a file read FROM that config, and it rides the
+    spawn env (which selects the per-account daemon).
 
     Content-addressed and 0600 via the shared writer, so identical account
     overlays reuse one file rather than accumulating per spawn.
@@ -585,7 +585,7 @@ def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
     from fno.agents.account_env import SCRUB_AUTH_VARS
 
     scrub = {var: "" for var in SCRUB_AUTH_VARS}
-    overlay = {k: v for k, v in account_env.items() if k in scrub}
+    overlay = {k: v for k, v in account_env.items() if k != "CLAUDE_CONFIG_DIR"}
     return materialize_route_settings({**scrub, **overlay})
 
 

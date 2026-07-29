@@ -298,18 +298,24 @@ def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
         assert blob[var] == ""
 
     # An api_key account: its resolved ANTHROPIC_* is re-applied over the scrub
-    # so it survives the fork; CLAUDE_CONFIG_DIR is still excluded.
+    # so it survives the fork, AND every extra env the record pins (here a custom
+    # header, outside SCRUB_AUTH_VARS) is retained too, not just the scrub vars.
+    # CLAUDE_CONFIG_DIR is still excluded.
     overlay = {
         "CLAUDE_CONFIG_DIR": "/x/.claude",
         "ANTHROPIC_BASE_URL": "https://api.example/anthropic",
         "ANTHROPIC_AUTH_TOKEN": "acct-token",
         "ANTHROPIC_MODEL": "claude-opus-4-5",
+        "ANTHROPIC_CUSTOM_HEADERS": "X-Org: foo",
+        "HTTPS_PROXY": "http://proxy:8080",
     }
     path2 = materialize_account_scrub_settings(overlay)
     blob2 = json.load(open(path2))["env"]
     assert blob2["ANTHROPIC_BASE_URL"] == "https://api.example/anthropic"
     assert blob2["ANTHROPIC_AUTH_TOKEN"] == "acct-token"
     assert blob2["ANTHROPIC_MODEL"] == "claude-opus-4-5"
+    assert blob2["ANTHROPIC_CUSTOM_HEADERS"] == "X-Org: foo"  # extra overlay retained
+    assert blob2["HTTPS_PROXY"] == "http://proxy:8080"  # extra overlay retained
     assert "CLAUDE_CONFIG_DIR" not in blob2
     for var in SCRUB_AUTH_VARS:  # vars the overlay did not supply stay unset
         if var not in overlay:
