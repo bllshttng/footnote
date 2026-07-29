@@ -2858,25 +2858,14 @@ def cmd_update(
                 # of exactly one node. Refuse to arm a second node against a plan
                 # another node already owns; the ambiguous state is what armed
                 # two concurrent dispatches against one sequential-mode plan on
-                # 2026-07-28. Checked at this WRITE site (the only non-decompose
-                # plan_path writer) so it cannot be bypassed by a reader; the
-                # decompose repoint is scoped to a slug it owns and never lands
-                # here. Normalize both sides so an abs/rel mismatch cannot
-                # smuggle a second binding past the check. --force escapes a
-                # deliberate repoint and still names the other holder (AC2).
-                from fno.graph.store import normalize_plan_path
+                # 2026-07-28. Routed through the shared plan_path_owner_conflict
+                # so every write site (this one + intake's lanes) checks one way;
+                # the decompose repoint is scoped to a slug it owns and never
+                # lands here. --force escapes a deliberate repoint and still
+                # names the other holder (AC2).
+                from fno.graph.store import plan_path_owner_conflict
 
-                new_norm = normalize_plan_path(plan_path)
-                owner = next(
-                    (
-                        e["id"]
-                        for e in entries
-                        if e.get("id") != node["id"]
-                        and isinstance(e.get("id"), str)
-                        and normalize_plan_path(e.get("plan_path")) == new_norm
-                    ),
-                    None,
-                )
+                owner = plan_path_owner_conflict(entries, node["id"], plan_path)
                 if owner is not None and not force:
                     typer.echo(
                         f"error: plan {plan_path} is already the delivery unit of {owner}\n"

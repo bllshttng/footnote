@@ -114,6 +114,59 @@ def _write_quick_plan(
     return plan
 
 
+# -- cross-roadmap plan ownership (x-d9a4, codex P1) --
+
+
+def test_prepare_intake_refuses_a_plan_owned_under_another_roadmap(tmp_path):
+    """plan == PR == node is roadmap-agnostic: a plan owned under one roadmap must
+    not bind to a second node under another, or both dispatch concurrently.
+    _match_plan_in_graph only catches the same-roadmap "already intaked" case, so
+    the cross-roadmap refusal lives in _prepare_intake (the shared prep for the
+    claim, create, and multi lanes)."""
+    from fno.graph._intake import _prepare_intake
+
+    plan = _write_quick_plan(tmp_path)
+    owner = _node(
+        "ab-0wn0001",
+        title="Owner under roadmap A",
+        status="ready",
+        plan_path=str(plan),
+        roadmap_id="roadmap-a",
+    )
+
+    with pytest.raises(ValueError) as exc:
+        _prepare_intake(
+            str(plan), [owner],
+            roadmap_id="roadmap-B",  # different roadmap -> same-roadmap match misses
+            cli_title=None, cli_priority=None, cli_deps=[], cli_points=None,
+        )
+    assert "ab-0wn0001" in str(exc.value)
+    assert "one PR is one node" in str(exc.value)
+
+
+def test_prepare_intake_allows_a_plan_owned_under_the_same_roadmap(tmp_path):
+    """The same-roadmap 'already intaked' path is untouched: it returns the
+    existing node rather than refusing, so cross-roadmap guard must not fire."""
+    from fno.graph._intake import _prepare_intake
+
+    plan = _write_quick_plan(tmp_path)
+    owner = _node(
+        "ab-0wn0001",
+        title="Owner under roadmap A",
+        status="ready",
+        plan_path=str(plan),
+        roadmap_id="roadmap-a",
+    )
+
+    result = _prepare_intake(
+        str(plan), [owner],
+        roadmap_id="roadmap-a",  # same roadmap -> friendly 'already intaked'
+        cli_title=None, cli_priority=None, cli_deps=[], cli_points=None,
+    )
+    assert result["status"] == "already"
+    assert result["id"] == "ab-0wn0001"
+
+
 # -- _resolve_claim --
 
 

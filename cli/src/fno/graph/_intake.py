@@ -957,6 +957,25 @@ def _prepare_intake(
             )
 
     existing = _match_plan_in_graph(entries, plan_path, roadmap_id)
+    if existing is None:
+        # plan == PR == node (x-04b9): a plan file is one delivery unit regardless
+        # of which roadmap tracks it. _match_plan_in_graph only catches the
+        # same-roadmap "already intaked" case; a plan owned under a different
+        # roadmap still arms two concurrent dispatches, so refuse it here on the
+        # shared write-site check. Covers the claim, create, and multi lanes
+        # since they all route through _prepare_intake.
+        from fno.graph.store import plan_path_owner_conflict
+
+        owner = plan_path_owner_conflict(
+            entries, claim_node.get("id") if claim_node else None, plan_path
+        )
+        if owner is not None:
+            raise ValueError(
+                f"plan {plan_path} is already the delivery unit of {owner} "
+                f"(a plan is one PR is one node, tracked under another roadmap); "
+                f"point the work at {owner}, or repoint deliberately with "
+                f"`fno backlog update <id> --plan-path {plan_path} --force`"
+            )
     fm_raw, plan_dir = _collect_frontmatter_depends(plan_path)
     resolved_fm, unresolved_fm = _resolve_depends_on(fm_raw, entries, plan_dir)
     for u in unresolved_fm:
