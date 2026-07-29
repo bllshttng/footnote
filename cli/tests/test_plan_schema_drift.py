@@ -2,9 +2,10 @@
 
 Mirrors ``test_config_schema_drift.py``: ``fno.plan.schema.PlanFrontmatter`` is
 the single source of truth for plan frontmatter, and these tests fail CI the
-moment the model drifts from its two upstream sources - ``status.py`` (the
-status vocabulary the enum is derived from) and ``_stamp.py`` (the ship-time
-writer whose keys the model must cover).
+moment the model drifts from its three upstream sources - ``status.py`` (the
+status vocabulary the enum is derived from), ``_stamp.py`` (the ship-time
+writer whose keys the model must cover), and ``skills/think/references/
+think.md`` (the template every design document is written from).
 
 This is the one git-CI piece of the plan-schema feature (Locked Decision 4):
 plans themselves live in the untracked vault, so the model - which lives in the
@@ -78,3 +79,72 @@ def test_retired_status_spellings_still_validate() -> None:
     assert PlanFrontmatter(
         node="x-1", status="archived", created="2026-07-20"
     ).status.value == "superseded"
+
+
+# -- think.md, the third upstream source (x-b9d7 US4) --
+
+THINK_MD = (
+    Path(__file__).resolve().parents[2] / "skills/think/references/think.md"
+)
+
+
+def _think_output_contract() -> str:
+    """The ```markdown output-contract block from think.md's save step.
+
+    think.md carries several fenced markdown blocks; the contract block is the
+    one holding the frontmatter template, identified by its `status: design`.
+    """
+    blocks = re.findall(r"```markdown\n(.*?)```", THINK_MD.read_text(encoding="utf-8"), re.S)
+    contract = [b for b in blocks if "status: design" in b]
+    assert len(contract) == 1, (
+        f"expected exactly one output-contract block in {THINK_MD.name}, "
+        f"found {len(contract)} - the extractor has gone inert or the doc grew a twin"
+    )
+    return contract[0]
+
+
+def test_think_template_carries_every_required_plan_field() -> None:
+    """AC8: a design written to think's template validates with zero violations.
+
+    Fails the build the moment PlanFrontmatter gains a required field the
+    template does not show - the drift that made every think-authored design
+    report `Field required` from `fno plan validate`.
+    """
+    frontmatter = _think_output_contract().split("---")[1]
+    shown = set(re.findall(r"^([A-Za-z_][\w-]*):", frontmatter, re.M))
+    required = {
+        name for name, f in PlanFrontmatter.model_fields.items() if f.is_required()
+    }
+
+    # Guard against the introspection going inert: the identity triple is
+    # required by construction (plan == PR == node), so an empty set means the
+    # check stopped checking rather than the model getting looser.
+    assert {"node", "status", "created"} <= required, (
+        f"PlanFrontmatter lost a required identity field: {sorted(required)}"
+    )
+    assert required <= shown, (
+        f"{THINK_MD.name}'s frontmatter template omits required PlanFrontmatter "
+        f"field(s): {sorted(required - shown)}"
+    )
+
+
+def test_think_template_shows_claims_as_a_scalar() -> None:
+    """`claims: str | None` - a template showing a list teaches a violation."""
+    claims = re.search(r"^claims:(.*)$", _think_output_contract(), re.M)
+    assert claims, f"{THINK_MD.name}'s frontmatter template dropped `claims:`"
+    assert "[" not in claims.group(1), (
+        "the template shows `claims` as a list, but PlanFrontmatter types it "
+        f"`str | None`: {claims.group(0)!r}"
+    )
+
+
+def test_think_contract_carries_the_section_blueprint_builds_tasks_from() -> None:
+    """AC9: `/blueprint` compiles `## User Stories` into the task skeleton.
+
+    docs/architecture/lean-blueprint.md assigns the section to /think, so a
+    contract that omits it hands mutate_doc.py nothing to build tasks from.
+    """
+    assert "## User Stories" in _think_output_contract(), (
+        f"{THINK_MD.name}'s output contract omits `## User Stories`, the section "
+        "mutate_doc.py builds its wave and task skeleton from"
+    )
