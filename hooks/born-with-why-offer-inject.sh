@@ -97,7 +97,9 @@ offer_cmd="${parsed#*$'\t'}"
 # parsed, so a missing/garbled resolver never eats a real fresh offer. Run from
 # $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
 if command -v fno >/dev/null 2>&1; then
-    if node_json=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$node_id" 2>/dev/null ); then
+    node_json=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
+    _get_rc=$?
+    if [[ "$_get_rc" -eq 0 ]]; then
         # Resolved. Suppress only if the node is already underway; a parse
         # failure or unknown shape exits 1 -> surface (fail safe).
         if printf '%s' "$node_json" | python3 -c '
@@ -116,10 +118,13 @@ except Exception:
 ' 2>/dev/null; then
             exit 0
         fi
-    else
-        # Unresolvable -> phantom, suppress.
+    elif [[ "$_get_rc" -ne 124 ]]; then
+        # Authoritative not-found (nonzero, not a timeout) -> phantom, suppress.
         exit 0
     fi
+    # _get_rc == 124: resolution timed out, not an authoritative not-found. The
+    # cursor already advanced past this offer, so suppressing would discard a
+    # possibly-real offer permanently; degrade to surfacing.
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
