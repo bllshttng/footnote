@@ -20,7 +20,13 @@ from fno.agents.model_routing import (
     TierRemapConflict,
     check_spawn_tier_remap,
 )
-from fno.agents.rust_runtime import _scrub_account_auth_at_seam, inherited_tier_remap
+from fno.agents.rust_runtime import (
+    ENV_SCRUB_VAR,
+    _scrub_account_auth_at_seam,
+    _warn_env_scrub_spawn,
+    env_scrub_spawn_warning,
+    inherited_tier_remap,
+)
 
 ZAI_ENV = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
@@ -235,6 +241,66 @@ def test_an_api_key_record_with_no_recognized_credential_still_fails():
                 "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
             },
         )
+
+
+# ---- x-d532: warn (never refuse) when spawning under env scrub ----
+
+
+def test_env_scrub_warning_fires_when_var_set_and_a_mode_is_pinned():
+    # --yolo is a stated permission intent; the var silently overrides it, and
+    # the warning names both consequences plus the opt-out.
+    msg = env_scrub_spawn_warning([*BASE, "--yolo"], env={ENV_SCRUB_VAR: "1"})
+    assert msg is not None
+    assert ENV_SCRUB_VAR in msg
+    assert "ANTHROPIC_AUTH_TOKEN" in msg
+    assert "ANTHROPIC_BASE_URL" in msg
+    assert "--permission-mode" in msg
+    assert f"{ENV_SCRUB_VAR}=0" in msg
+
+
+def test_env_scrub_warning_fires_for_an_explicit_permission_mode_flag():
+    msg = env_scrub_spawn_warning(
+        [*BASE, "--permission-mode", "bypassPermissions"], env={ENV_SCRUB_VAR: "1"}
+    )
+    assert msg is not None
+
+
+def test_env_scrub_warning_is_absent_when_the_var_is_unset():
+    assert env_scrub_spawn_warning([*BASE, "--yolo"], env={}) is None
+
+
+@pytest.mark.parametrize("val", ["1", "true", "TRUE", "yes", "on", "scary"])
+def test_env_scrub_warning_treats_truthy_values_as_set(val):
+    assert env_scrub_spawn_warning([*BASE, "--yolo"], env={ENV_SCRUB_VAR: val}) is not None
+
+
+@pytest.mark.parametrize("val", ["", "0", "false", "FALSE", "off", "no"])
+def test_env_scrub_warning_treats_off_values_as_unset(val):
+    assert env_scrub_spawn_warning([*BASE, "--yolo"], env={ENV_SCRUB_VAR: val}) is None
+
+
+def test_env_scrub_warning_is_absent_when_no_permission_mode_is_named():
+    # Narrow, not unconditional: a spawn that pins no mode is left alone.
+    assert env_scrub_spawn_warning(BASE, env={ENV_SCRUB_VAR: "1"}) is None
+
+
+def test_env_scrub_warning_is_absent_for_a_non_claude_harness():
+    # The var is Claude Code specific; a codex spawn is unaffected.
+    assert (
+        env_scrub_spawn_warning(
+            [*BASE, "--yolo", "-H", "codex"], env={ENV_SCRUB_VAR: "1"}
+        )
+        is None
+    )
+
+
+def test_env_scrub_warning_is_not_a_refusal(monkeypatch, capsys):
+    # A warning, never a refusal: the seam prints and returns normally even when
+    # the message fires (unlike _refuse_inherited_tier_remap, which exits 2).
+    monkeypatch.setenv(ENV_SCRUB_VAR, "1")
+    _warn_env_scrub_spawn([*BASE, "--yolo"])  # must not raise
+    captured = capsys.readouterr()
+    assert ENV_SCRUB_VAR in captured.err
 
 
 if __name__ == "__main__":

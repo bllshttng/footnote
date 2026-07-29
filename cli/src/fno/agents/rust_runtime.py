@@ -665,6 +665,71 @@ def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
+# The env var Claude Code reads to strip inherited ANTHROPIC_* env from a
+# subprocess. Set by an operator or a hardened shell; read at the spawn seam so
+# the warning is decided from the same argv the tier-remap guard sees.
+ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+
+def _env_scrub_truthy(env: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set to a truthy value.
+
+    Claude Code honors ``=0`` as the opt-out, so empty / ``0`` / ``false`` and
+    the common off-words are falsy."""
+    if env is None:
+        env = os.environ
+    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def env_scrub_spawn_warning(
+    args: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[str]:
+    """The one stderr warning when a claude spawn pins a permission mode under
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
+
+    The var is the operator's security posture and is left in place: this is a
+    warning, never a refusal (a legitimate hardened setup must still spawn). It
+    is NARROW, not unconditional: the var's silent permission downgrade only
+    contradicts a stated intent, so a non-claude harness and a spawn naming no
+    permission mode are left alone. Reuses spawn_defaults._has_permission_mode
+    (the one knob the spawn parser treats as mutually exclusive) rather than a
+    parallel flag scan.
+    """
+    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
+    if harness != "claude":
+        return None
+    if not _env_scrub_truthy(env):
+        return None
+    from fno.agents.spawn_defaults import _has_permission_mode
+
+    if not _has_permission_mode(_args_before_argv(args)):
+        return None
+    return (
+        "fno agents spawn: CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set; it strips "
+        "ANTHROPIC_AUTH_TOKEN but leaves ANTHROPIC_BASE_URL and the tier model "
+        "vars (a half-composition), and silently forces --permission-mode to "
+        "default over the one pinned here, so this worker may stall on "
+        "approvals. Set CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 to keep the pinned "
+        "mode."
+    )
+
+
+def _warn_env_scrub_spawn(args: Sequence[str]) -> None:
+    """Surface the env-scrub warning at the spawn seam, never a refusal.
+
+    Pairs with _refuse_inherited_tier_remap at the same seam (both runtimes see
+    this one edit) and runs AFTER it, so a refused spawn stays quiet."""
+    msg = env_scrub_spawn_warning(args)
+    if msg is not None:
+        print(msg, file=sys.stderr)
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -908,6 +973,7 @@ def make_agents_group_cls() -> type:
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
+                    _warn_env_scrub_spawn(args)
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
