@@ -37,7 +37,28 @@ WORKTREE_PATH=""
 if command -v jq >/dev/null 2>&1; then
     WORKTREE_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.path // .worktree_path // empty' 2>/dev/null || true)
 fi
-[[ -z "$WORKTREE_PATH" ]] && WORKTREE_PATH="$(pwd)"
+if [[ -z "$WORKTREE_PATH" ]]; then
+    # No .path from CC is normal (the contract lists only `name`). $(pwd) is a
+    # safe fallback only in a linked worktree; on the canonical checkout emitting
+    # it would defeat isolation - edits land on main while every signal says
+    # isolated (x-ab78 WAVE 1). Refuse via exit 0 + empty stdout (the supported
+    # abort: non-zero falls back to CC's default flow and creates the very
+    # worktree refused). Detection mirrors hooks/helpers/check-impl-location.sh:
+    # equal absolute --git-dir/--git-common-dir (incl. both-empty) = canonical.
+    _gd="$(git rev-parse --git-dir 2>/dev/null || true)"
+    _gcd="$(git rev-parse --git-common-dir 2>/dev/null || true)"
+    _is_canonical=1
+    if [[ -n "$_gd" && -n "$_gcd" ]]; then
+        _gd="$(cd "$_gd" 2>/dev/null && pwd -P || true)"
+        _gcd="$(cd "$_gcd" 2>/dev/null && pwd -P || true)"
+        [[ -n "$_gd" && -n "$_gcd" && "$_gd" != "$_gcd" ]] && _is_canonical=0
+    fi
+    if [[ "$_is_canonical" == "1" ]]; then
+        echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
+        exit 0
+    fi
+    WORKTREE_PATH="$(pwd)"
+fi
 # Policy gate, BEFORE the cd below. Two things force it here rather than later:
 # the cd exits non-zero when CC has not pre-created the path, and per the
 # Contract above a non-zero exit FALLS BACK to CC's default worktree flow -

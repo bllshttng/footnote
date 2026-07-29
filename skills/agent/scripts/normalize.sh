@@ -298,7 +298,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
     esac
     case "$scan_cano" in
       -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
-        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the task text."
+        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Through a slash command the trailing grammar is dashless: write 'model opus', 'bg', 'yolo', 'merge', or 'as <name>' rather than a flag glued into the text. Calling the CLI directly, pass it as a real flag (-y / -m / -n N) separate from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash). If the token is genuinely part of the task text, quote or rephrase it."
         ;;
     esac
   done
@@ -392,14 +392,33 @@ resolve_project() {
     "$PROJECT_ROOT_RESOLVER" "$_proj" 2>/dev/null
     return 0
   fi
-  local fno_bin shebang
-  fno_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
-  # Strip a trailing CR: a CRLF-lined fno (WSL / git autocrlf) would leave \r on
-  # the shebang and break the interpreter exec.
-  shebang="$(head -1 "$fno_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
+  local py_entry shebang _uv_dir
+  # The shipped `fno` may be the Rust mux binary (no python shebang), in which
+  # case it cannot import the fno package. The Python CLI is the `fno-py` console
+  # script, which a cargo-only install does NOT put on PATH (only ~/.cargo/bin/fno
+  # is) - the mux resolves it at <uv tool dir>/fno/bin/fno-py
+  # (crates/fno/src/bootstrap.rs), so mirror that rather than requiring fno-py on
+  # PATH. Then fall back to `fno` itself when it is a python entrypoint (older
+  # single-binary installs). x-ab78 WAVE 2.
+  py_entry=""
+  if command -v fno-py >/dev/null 2>&1; then
+    py_entry="$(command -v fno-py)"
+  elif command -v uv >/dev/null 2>&1; then
+    _uv_dir="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null || true)"
+    _uv_dir="${_uv_dir%$'\r'}"
+    [[ -n "$_uv_dir" && -x "$_uv_dir/fno/bin/fno-py" ]] && py_entry="$_uv_dir/fno/bin/fno-py"
+  fi
+  if [[ -z "$py_entry" ]] && command -v fno >/dev/null 2>&1; then
+    py_entry="$(command -v fno)"
+  fi
+  [[ -n "$py_entry" ]] || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
+  # Strip a trailing CR: a CRLF-lined entrypoint (WSL / git autocrlf) would
+  # leave \r on the shebang and break the interpreter exec.
+  shebang="$(head -1 "$py_entry" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
   # Same interpreter guard as resolve_from_config: only a python entrypoint can
-  # import the fno package. A shell-wrapper fno means the resolver is unreachable.
-  [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (fno is not a python entrypoint)\n'; return 0; }
+  # import the fno package. A shell-wrapper / non-python entrypoint means the
+  # resolver is unreachable.
+  [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (%s is not a python entrypoint)\n' "$py_entry"; return 0; }
   local py_cmd=()
   read -r -a py_cmd <<< "$shebang"
   { [[ -x "${py_cmd[0]}" ]] || command -v "${py_cmd[0]}" >/dev/null 2>&1; } || { printf 'error\tproject resolver interpreter not executable\n'; return 0; }

@@ -10,8 +10,11 @@
 #   1. stdout is exactly one line.
 #   2. That line is an absolute path that exists on disk.
 #   3. stderr carries the setup log ("Worktree ready:") unchanged.
-#   4. Works whether CC passes a JSON {"path": ...} on stdin or nothing at all
-#      (the hook falls back to $(pwd)).
+#   4. With no path on stdin, the hook falls back to $(pwd) ONLY when cwd is a
+#      linked worktree (Case 2); when cwd is the canonical checkout it REFUSES
+#      - exit 0 with empty stdout - so it never designates the canonical root
+#      as a worktree (Case 4, x-ab78 WAVE 1 data-safety: edits would land on
+#      main while every signal says isolated).
 #   5. The hook cd's into the resolved worktree before running relative-path
 #      setup checks, even if the caller invoked it from a different cwd.
 #      (Regression guard for the gap Gemini flagged on PR #148.)
@@ -112,6 +115,40 @@ assert_contract() {
     pass "$label"
 }
 
+# Mirror of assert_contract for the refuse path (x-ab78 WAVE 1): the hook must
+# exit 0 with NOTHING on stdout - the supported abort per the contract ("no
+# successful output") - rather than emit the canonical checkout as the worktree.
+# A non-zero exit would fall back to CC's default worktree flow, so rc must be 0.
+assert_refusal() {
+    local label="$1"
+    local hook="$2"
+    local stdin_input="$3"
+    local invocation_cwd="$4"
+
+    local output rc stdout_file stderr_file stdout_line
+    output=$(run_hook "$invocation_cwd" "$hook" "$stdin_input")
+    rc=$(echo "$output" | sed -n '1p')
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    stdout_line=$(cat "$stdout_file")
+    # shellcheck disable=SC2064
+    trap "rm -f $stdout_file $stderr_file" RETURN
+
+    if [[ "$rc" -ne 0 ]]; then
+        fail "$label" "exit $rc (expected 0; non-zero falls back to CC default flow)"
+        return
+    fi
+    if [[ -n "$stdout_line" ]]; then
+        fail "$label" "stdout must be empty on refusal, got '$stdout_line'"
+        return
+    fi
+    if ! grep -q "refusing to designate it as a worktree" "$stderr_file"; then
+        fail "$label" "stderr missing refuse reason. stderr: $(cat "$stderr_file")"
+        return
+    fi
+    pass "$label"
+}
+
 for hook in "${HOOKS[@]}"; do
     name=$(basename "$(dirname "$(dirname "$hook")")")/$(basename "$(dirname "$hook")")/$(basename "$hook")
 
@@ -137,6 +174,14 @@ for hook in "${HOOKS[@]}"; do
     worktree="$sandbox/test-wt"
     stdin_json=$(printf '{"session_id":"s1","name":"test-wt","path":"%s","hook_event_name":"WorktreeCreate"}' "$worktree")
     assert_contract "$name :: JSON path, invoked from sandbox root (cd-gap guard)" "$hook" "$stdin_json" "$sandbox" "$worktree"
+    rm -rf "$sandbox"
+
+    # Case 4 (x-ab78 WAVE 1, data-safety): no path on stdin AND cwd is the
+    # canonical sandbox root (CC did not chdir into a worktree). The hook MUST
+    # refuse (exit 0, empty stdout) rather than fall back to $(pwd) and
+    # designate the canonical root as the worktree.
+    sandbox=$(setup_sandbox)
+    assert_refusal "$name :: empty stdin from canonical root refuses" "$hook" "__empty__" "$sandbox"
     rm -rf "$sandbox"
 done
 
