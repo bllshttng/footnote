@@ -695,6 +695,24 @@ if command -v python3 >/dev/null 2>&1; then
   rm -rf "$_fpy_stub"
 fi
 
+# --- WAVE 2 (codex P2): cargo-only install - fno-py is NOT on PATH (only the
+#     mux `fno` is); resolve it via `uv tool dir` the way the mux does
+#     (crates/fno/src/bootstrap.rs). Stage a fake `uv` that prints a tool dir
+#     holding fno-py, and run on a RESTRICTED PATH so the host's real fno-py
+#     (in ~/.local/bin) cannot short-circuit the uv-tool-dir branch.
+if command -v python3 >/dev/null 2>&1; then
+  _uvroot="$(mktemp -d)"            # the fake "uv tool dir"
+  _binp="$(mktemp -d)"              # PATH dir holding the fake uv + the mux fno
+  mkdir -p "$_uvroot/fno/bin"
+  printf '#!%s\n' "$(command -v python3)" > "$_uvroot/fno/bin/fno-py"   # off PATH
+  chmod +x "$_uvroot/fno/bin/fno-py"
+  printf '#!/usr/bin/env bash\necho "%s"\n' "$_uvroot" > "$_binp/uv"     # `uv tool dir` -> $_uvroot
+  chmod +x "$_binp/uv"
+  out="$(PATH="$_binp:$_de43_stub:/usr/bin:/bin" bash "$NORM" --input 'backend work' -C etl)"
+  check_not_contains 'fno-py resolved via uv tool dir (cargo-only)' "$(field "$out" error)" 'is not a python entrypoint'
+  rm -rf "$_uvroot" "$_binp"
+fi
+
 rm -f "$_proj_res"
 
 # --- the node-id shape is config-agnostic, not hardcoded to ab- ---------------

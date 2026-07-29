@@ -392,20 +392,26 @@ resolve_project() {
     "$PROJECT_ROOT_RESOLVER" "$_proj" 2>/dev/null
     return 0
   fi
-  local py_entry shebang
+  local py_entry shebang _uv_dir
   # The shipped `fno` may be the Rust mux binary (no python shebang), in which
-  # case it cannot import the fno package. The Python entrypoint is `fno-py`
-  # (a uv-tool console script) - prefer ITS interpreter so the resolver reaches
-  # the package the way other callers do, then fall back to `fno` itself when it
-  # is a python entrypoint (older single-binary installs). x-ab78 WAVE 2.
+  # case it cannot import the fno package. The Python CLI is the `fno-py` console
+  # script, which a cargo-only install does NOT put on PATH (only ~/.cargo/bin/fno
+  # is) - the mux resolves it at <uv tool dir>/fno/bin/fno-py
+  # (crates/fno/src/bootstrap.rs), so mirror that rather than requiring fno-py on
+  # PATH. Then fall back to `fno` itself when it is a python entrypoint (older
+  # single-binary installs). x-ab78 WAVE 2.
   py_entry=""
   if command -v fno-py >/dev/null 2>&1; then
     py_entry="$(command -v fno-py)"
-  elif command -v fno >/dev/null 2>&1; then
-    py_entry="$(command -v fno)"
-  else
-    printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0
+  elif command -v uv >/dev/null 2>&1; then
+    _uv_dir="$(NO_COLOR=1 UV_NO_COLOR=1 uv tool dir 2>/dev/null || true)"
+    _uv_dir="${_uv_dir%$'\r'}"
+    [[ -n "$_uv_dir" && -x "$_uv_dir/fno/bin/fno-py" ]] && py_entry="$_uv_dir/fno/bin/fno-py"
   fi
+  if [[ -z "$py_entry" ]] && command -v fno >/dev/null 2>&1; then
+    py_entry="$(command -v fno)"
+  fi
+  [[ -n "$py_entry" ]] || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
   # Strip a trailing CR: a CRLF-lined entrypoint (WSL / git autocrlf) would
   # leave \r on the shebang and break the interpreter exec.
   shebang="$(head -1 "$py_entry" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
