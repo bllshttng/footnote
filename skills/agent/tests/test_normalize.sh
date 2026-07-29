@@ -674,6 +674,23 @@ check_contains 'empty -C value message' "$(field "$out" error)" 'requires a proj
 out="$(bash "$NORM" --input 'backend work' -C)"
 check_eq       'bare trailing -C status' "$(field "$out" status)" 'error'
 
+# --- WAVE 2 (x-ab78): resolver prefers fno-py when `fno` is non-python --------
+# The shipped `fno` is the Rust mux binary (no python shebang); before the fix
+# -C died with "fno is not a python entrypoint". Stage a non-python `fno`
+# (run_nofno's _de43_stub) PLUS a python-shebang `fno-py` on PATH, with NO
+# injected PROJECT_ROOT_RESOLVER, and assert the resolver ran fno-py's
+# interpreter (so it never emits the dead-resolver "is not a python entrypoint"
+# error). Whether the host python can import fno decides import-vs-resolve, but
+# selection is the bug being fixed.
+if command -v python3 >/dev/null 2>&1; then
+  _fpy_stub="$(mktemp -d)"
+  printf '#!%s\n' "$(command -v python3)" > "$_fpy_stub/fno-py"
+  chmod +x "$_fpy_stub/fno-py"
+  out="$(PATH="$_de43_stub:$_fpy_stub:$PATH" bash "$NORM" --input 'backend work' -C etl)"
+  check_not_contains 'fno-py preferred over non-python fno' "$(field "$out" error)" 'is not a python entrypoint'
+  rm -rf "$_fpy_stub"
+fi
+
 rm -f "$_proj_res"
 
 # --- the node-id shape is config-agnostic, not hardcoded to ab- ---------------

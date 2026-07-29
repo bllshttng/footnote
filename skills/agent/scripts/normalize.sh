@@ -392,14 +392,27 @@ resolve_project() {
     "$PROJECT_ROOT_RESOLVER" "$_proj" 2>/dev/null
     return 0
   fi
-  local fno_bin shebang
-  fno_bin="$(command -v fno 2>/dev/null)" || { printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0; }
-  # Strip a trailing CR: a CRLF-lined fno (WSL / git autocrlf) would leave \r on
-  # the shebang and break the interpreter exec.
-  shebang="$(head -1 "$fno_bin" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
+  local py_entry shebang
+  # The shipped `fno` may be the Rust mux binary (no python shebang), in which
+  # case it cannot import the fno package. The Python entrypoint is `fno-py`
+  # (a uv-tool console script) - prefer ITS interpreter so the resolver reaches
+  # the package the way other callers do, then fall back to `fno` itself when it
+  # is a python entrypoint (older single-binary installs). x-ab78 WAVE 2.
+  py_entry=""
+  if command -v fno-py >/dev/null 2>&1; then
+    py_entry="$(command -v fno-py)"
+  elif command -v fno >/dev/null 2>&1; then
+    py_entry="$(command -v fno)"
+  else
+    printf 'error\tfno not on PATH (cannot resolve --project %s)\n' "$_proj"; return 0
+  fi
+  # Strip a trailing CR: a CRLF-lined entrypoint (WSL / git autocrlf) would
+  # leave \r on the shebang and break the interpreter exec.
+  shebang="$(head -1 "$py_entry" 2>/dev/null | sed 's/^#![[:space:]]*//' | tr -d '\r')"
   # Same interpreter guard as resolve_from_config: only a python entrypoint can
-  # import the fno package. A shell-wrapper fno means the resolver is unreachable.
-  [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (fno is not a python entrypoint)\n'; return 0; }
+  # import the fno package. A shell-wrapper / non-python entrypoint means the
+  # resolver is unreachable.
+  [[ -n "$shebang" && "$shebang" == *python* ]] || { printf 'error\tproject resolver unavailable (%s is not a python entrypoint)\n' "$py_entry"; return 0; }
   local py_cmd=()
   read -r -a py_cmd <<< "$shebang"
   { [[ -x "${py_cmd[0]}" ]] || command -v "${py_cmd[0]}" >/dev/null 2>&1; } || { printf 'error\tproject resolver interpreter not executable\n'; return 0; }
