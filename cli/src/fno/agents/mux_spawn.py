@@ -915,7 +915,7 @@ def dispatch_spawn_pane(
     # just the CLI seam -- an in-process caller passing model="opus" under a
     # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
     # that dies on its first turn. Fail closed before anything is created.
-    from fno.agents.model_routing import check_spawn_tier_remap
+    from fno.agents.model_routing import check_spawn_tier_remap, emit_env_scrub_warning
 
     check_spawn_tier_remap(
         provider,
@@ -924,6 +924,10 @@ def dispatch_spawn_pane(
         route_env=route_env,
         account_env=account_env,
     )
+    # Same seam, same reason as the tier-remap check above: a permission-pinned
+    # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
+    # approvals, so warn on every reachable path, not just the CLI seam.
+    emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
     validate_spawn_name(name)
     # x-8f7f: gate the PANE path on PANE_HOSTABLE_PROVIDERS, not KNOWN_PROVIDERS.
     # A pane host only needs an interactive argv (build_pane_argv) - not a full

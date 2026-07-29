@@ -665,58 +665,35 @@ def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
-# The env var Claude Code reads to strip inherited ANTHROPIC_* env from a
-# subprocess. Set by an operator or a hardened shell; read at the spawn seam so
-# the warning is decided from the same argv the tier-remap guard sees.
-ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
-
-
-def _env_scrub_truthy(env: Optional[Mapping[str, str]] = None) -> bool:
-    """Whether CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set to a truthy value.
-
-    Claude Code honors ``=0`` as the opt-out, so empty / ``0`` / ``false`` and
-    the common off-words are falsy."""
-    if env is None:
-        env = os.environ
-    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in (
-        "",
-        "0",
-        "false",
-        "no",
-        "off",
-    )
-
-
 def env_scrub_spawn_warning(
     args: Sequence[str], env: Optional[Mapping[str, str]] = None
 ) -> Optional[str]:
-    """The one stderr warning when a claude spawn pins a permission mode under
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
+    """Argv adapter over :func:`model_routing.env_scrub_warning` for the CLI
+    spawn seam, returning the warning when the spawn pins a permission mode
+    under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
 
-    The var is the operator's security posture and is left in place: this is a
-    warning, never a refusal (a legitimate hardened setup must still spawn). It
-    is NARROW, not unconditional: the var's silent permission downgrade only
-    contradicts a stated intent, so a non-claude harness and a spawn naming no
-    permission mode are left alone. Reuses spawn_defaults._has_permission_mode
-    (the one knob the spawn parser treats as mutually exclusive) rather than a
-    parallel flag scan.
+    Resolves the harness the way ``spawn`` does: an explicit ``-H`` wins, else
+    the invoking harness (``CODEX_THREAD_ID`` -> codex, ...), else claude. The
+    seam runs BEFORE Typer resolves the option default, so resolving it here
+    avoids a false positive on a non-claude invoking session. Reuses
+    ``spawn_defaults._has_permission_mode`` (the one knob the spawn parser
+    treats as mutually exclusive, including ``--yolo``) rather than a parallel
+    flag scan.
     """
-    harness = (_spawn_flag_value(args, "--harness", "-H") or "claude").strip().lower()
-    if harness != "claude":
-        return None
-    if not _env_scrub_truthy(env):
-        return None
+    explicit = _spawn_flag_value(args, "--harness", "-H")
+    if explicit:
+        provider = explicit
+    else:
+        from fno.harness_identity import resolve_harness_identity
+
+        provider = resolve_harness_identity(env).harness or "claude"
+    from fno.agents.model_routing import env_scrub_warning
     from fno.agents.spawn_defaults import _has_permission_mode
 
-    if not _has_permission_mode(_args_before_argv(args)):
-        return None
-    return (
-        "fno agents spawn: CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set; it strips "
-        "ANTHROPIC_AUTH_TOKEN but leaves ANTHROPIC_BASE_URL and the tier model "
-        "vars (a half-composition), and silently forces --permission-mode to "
-        "default over the one pinned here, so this worker may stall on "
-        "approvals. Set CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=0 to keep the pinned "
-        "mode."
+    return env_scrub_warning(
+        provider,
+        permission_pinned=_has_permission_mode(_args_before_argv(args)),
+        env=env,
     )
 
 

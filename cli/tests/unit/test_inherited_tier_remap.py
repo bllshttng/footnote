@@ -15,13 +15,15 @@ from pydantic import ValidationError
 from fno.adapters.providers.model import ProviderRecord
 from fno.agents.account_env import SCRUB_AUTH_VARS
 from fno.agents.model_routing import (
+    ENV_SCRUB_VAR,
     MODEL_ENV_KEYS,
     TIER_ALIASES,
     TierRemapConflict,
     check_spawn_tier_remap,
+    emit_env_scrub_warning,
+    env_scrub_warning,
 )
 from fno.agents.rust_runtime import (
-    ENV_SCRUB_VAR,
     _scrub_account_auth_at_seam,
     _warn_env_scrub_spawn,
     env_scrub_spawn_warning,
@@ -301,6 +303,48 @@ def test_env_scrub_warning_is_not_a_refusal(monkeypatch, capsys):
     _warn_env_scrub_spawn([*BASE, "--yolo"])  # must not raise
     captured = capsys.readouterr()
     assert ENV_SCRUB_VAR in captured.err
+
+
+def test_env_scrub_warning_structured_form_uses_the_resolved_provider():
+    # The in-process spawn APIs hand the detector the provider they resolved, so
+    # it judges the spawn on what it actually is, not a guessed claude.
+    msg = env_scrub_warning("claude", permission_pinned=True, env={ENV_SCRUB_VAR: "1"})
+    assert msg is not None
+    assert (
+        env_scrub_warning("codex", permission_pinned=True, env={ENV_SCRUB_VAR: "1"})
+        is None
+    )
+    assert env_scrub_warning("claude", permission_pinned=False, env={ENV_SCRUB_VAR: "1"}) is None
+    assert env_scrub_warning("claude", permission_pinned=True, env={}) is None
+
+
+def test_env_scrub_spawn_warning_resolves_the_invoking_harness():
+    # A bare spawn (no -H) defaults to the INVOKING harness, not claude: under a
+    # codex session the scrub var is irrelevant, so the claude-specific warning
+    # must not false-positive.
+    codex_env = {ENV_SCRUB_VAR: "1", "CODEX_THREAD_ID": "abc-123"}
+    assert env_scrub_spawn_warning([*BASE, "--yolo"], env=codex_env) is None
+    # An explicit -H codex wins over an invoking claude session too.
+    assert (
+        env_scrub_spawn_warning(
+            [*BASE, "--yolo", "-H", "codex"],
+            env={ENV_SCRUB_VAR: "1", "CLAUDE_CODE_SESSION_ID": "abc-123"},
+        )
+        is None
+    )
+    # Under a claude invoking session the warning still fires.
+    claude_env = {ENV_SCRUB_VAR: "1", "CLAUDE_CODE_SESSION_ID": "abc-123"}
+    assert env_scrub_spawn_warning([*BASE, "--yolo"], env=claude_env) is not None
+
+
+def test_emit_env_scrub_warning_prints_and_never_refuses(capsys):
+    # The in-process spawn APIs (dispatch_spawn / dispatch_spawn_pane) call this
+    # emitter, so the warning reaches every reachable path, not just the seam.
+    emit_env_scrub_warning("claude", permission_pinned=True, env={ENV_SCRUB_VAR: "1"})
+    assert ENV_SCRUB_VAR in capsys.readouterr().err
+    # A non-claude provider is silent, and neither case raises (never a refusal).
+    emit_env_scrub_warning("codex", permission_pinned=True, env={ENV_SCRUB_VAR: "1"})
+    assert capsys.readouterr().err == ""
 
 
 if __name__ == "__main__":
