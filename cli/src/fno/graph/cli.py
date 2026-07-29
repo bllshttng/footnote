@@ -1216,11 +1216,15 @@ def cmd_decompose(
         ...,
         "--groups",
         help=(
-            "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]} "
-            "group specs. Optional per-group project/cwd route a child into a "
-            "different repo (multi-repo decomposition): project resolves its cwd "
-            "from the settings work-map; an explicit cwd overrides; absent -> "
-            "inherit the epic's repo. "
+            "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]"
+            "[,adopt]} group specs. Optional per-group project/cwd route a child "
+            "into a different repo (multi-repo decomposition): project resolves "
+            "its cwd from the settings work-map; an explicit cwd overrides; "
+            "absent -> inherit the epic's repo. "
+            "Optional `adopt: [<node-id>...]` re-parents EXISTING nodes under the "
+            "group child instead of minting new ones - use it to package an epic "
+            "already populated by `fno backlog idea --parent` rather than "
+            "doubling it. Epic children no group adopts are named on stderr. "
             "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
         ),
     ),
@@ -1276,6 +1280,8 @@ def cmd_decompose(
         extract_contract_versions,
         extract_why_digest,
         find_orphans,
+        group_child_slug,
+        is_group_child,
         is_shipped,
         plan_base,
         resolve_effective_cap,
@@ -1373,7 +1379,7 @@ def cmd_decompose(
 
     # 3. Validate the spec entirely before touching the graph (atomicity).
     try:
-        norm = validate_groups(parsed, effective_cap, cap_source)
+        norm = validate_groups(parsed, effective_cap, cap_source, epic_id)
     except DecomposeError as e:
         emit_error(ctx, str(e))
         raise typer.Exit(code=e.exit_code)
@@ -1464,6 +1470,12 @@ def cmd_decompose(
 
         # Pass 1: resolve each group to an existing or new child node.
         slug_to_id: dict[str, str] = {}
+        # Resolved adopt claims, keyed on the node id `_find_node` returns
+        # rather than the spelling the spec used. validate_groups can only
+        # compare raw strings, and a 4-7 hex `ab-` prefix resolves to the same
+        # entry as the full id - so `ab-abcd` in one group and `ab-abcd0001` in
+        # another read as two claims there and are one node here.
+        adopt_claim: dict[str, str] = {}
         plan_to_group: list[tuple[dict, dict]] = []  # (node, normalized group)
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
@@ -1533,12 +1545,91 @@ def cmd_decompose(
                 graph_entries.append(node)
             slug_to_id[grp["slug"]] = node["id"]
             plan_to_group.append((node, grp))
+
+            # Adoption (x-b9d7 US2): re-parent each named node under this group
+            # child, inside the same locked mutation. Nothing is minted for it
+            # and nothing is deleted; its plan_path, details, priority, and
+            # evidence are untouched, because membership is carried by the
+            # `parent` pointer alone. Why adopted nodes never get `group_slug`
+            # is on the NormalizedGroup field in _decompose.py.
+            adopted: list[str] = []
+            for adopt_id in grp["adopt"]:
+                target = _find_node(graph_entries, adopt_id)
+                if target is None:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {adopt_id}, which resolves "
+                        "to no node",
+                        exit_code=3,
+                    )
+                if target["id"] == epic_resolved_id:
+                    # validate_groups makes the same check against the RAW epic
+                    # argument, so an aliasable `ab-` prefix of the epic slips
+                    # past it and would otherwise land on the generic cycle
+                    # refusal (exit 2) instead of this one (exit 1).
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopt names the epic "
+                        f"{epic_resolved_id} itself",
+                        exit_code=1,
+                    )
+                prior_slug = adopt_claim.get(target["id"])
+                if prior_slug is not None:
+                    raise DecomposeError(
+                        f"node {target['id']} is claimed by more than one adopt "
+                        f"entry (group {prior_slug!r} and group {grp['slug']!r}); "
+                        "two spellings of one id resolve to the same node",
+                        exit_code=1,
+                    )
+                adopt_claim[target["id"]] = grp["slug"]
+                # Unscoped on purpose: group_child_slug answers "group child of
+                # THIS doc", which misses a legacy child of ANOTHER epic and
+                # lets adoption steal it. Also covers self-adoption, since a
+                # group naming its own resolved id is a group child by
+                # construction.
+                if is_group_child(target):
+                    owner = group_child_slug(target, base)
+                    if owner:
+                        whose = f"already the group child for slug {owner!r}"
+                    elif target.get("parent") == epic_resolved_id:
+                        # This epic's own group child on a plan path that no
+                        # longer matches the doc (a rename). Saying "another
+                        # epic" here would be a plain lie about the operator's
+                        # own node.
+                        whose = (
+                            "already this epic's group child on a legacy plan "
+                            f"path ({target.get('plan_path')}) that no longer "
+                            "matches the epic doc"
+                        )
+                    else:
+                        whose = (
+                            "already a group child of another epic "
+                            f"({target.get('plan_path')})"
+                        )
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which is "
+                        f"{whose}; demoting a group into a task "
+                        "reshapes the epic",
+                        exit_code=2,
+                    )
+                if target.get("parent") == node["id"]:
+                    continue  # already adopted - re-running the spec is a no-op
+                # The re-parent path the existing minted-child guard was written
+                # for and could not reach (see the comment on that call).
+                if _would_create_cycle(graph_entries, target["id"], node["id"]):
+                    raise DecomposeError(
+                        f"adopting {target['id']} into group {grp['slug']!r} "
+                        "would create a cycle",
+                        exit_code=2,
+                    )
+                target["parent"] = node["id"]
+                adopted.append(target["id"])
+
             results.append(
                 {
                     "id": node["id"],
                     "slug": grp["slug"],
                     "waves": grp["waves"],
                     "action": action,
+                    "adopted": adopted,
                 }
             )
 
@@ -1577,9 +1668,29 @@ def cmd_decompose(
         # Surface any unshipped orphans (slug dropped from the spec). They are
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
+
+        # Epic children that no group adopted (x-b9d7 US3). Uses the SAME
+        # predicate as the adoption refusal above, deliberately: keying this on
+        # the base-scoped group_child_slug instead would list a group child
+        # whose plan path no longer matches a renamed epic doc, and the warning
+        # would then tell the operator to adopt a node the refusal blocks.
+        # Collected after the re-parenting above, so
+        # adopted nodes have already left the epic and exclude themselves; no
+        # cross-reference against the adopt lists is needed. Warning, not
+        # refusal: refusing deadlocks, because re-parenting needs the group
+        # nodes a refusal prevents creating, and a parked child is a legitimate
+        # steady state.
+        unadopted_box[0] = [
+            e.get("id")
+            for e in graph_entries
+            if e.get("id")
+            and e.get("parent") == epic_resolved_id
+            and not is_group_child(e)
+        ]
         return graph_entries
 
     orphan_box: list[list[str]] = [[]]
+    unadopted_box: list[list[str]] = [[]]
     base_box: list = [None]
     verbatim_base_box: list = [None]
     epic_cwd_box: list = [None]
@@ -1592,6 +1703,7 @@ def cmd_decompose(
 
     epic_resolved_id = epic_id_box[0]
     orphan_ids = orphan_box[0]
+    unadopted_ids = unadopted_box[0]
     downgrades = downgrade_box[0]
 
     # Shared post-mutation graph re-read: 3c reads each child's created_at +
@@ -1817,7 +1929,14 @@ def cmd_decompose(
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
             tier = " dep=contract" if r.get("dep") == "contract" else ""
             marker = r["slug"]
-            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
+            # Adoption re-parents PRE-EXISTING nodes, so it must reach the human
+            # receipt and not only `--json` - same reason the fan-out ownership
+            # line below does. Empty stays silent, so a spec with no adopt key
+            # prints byte-for-byte what it printed before.
+            adopted = f" adopted={r['adopted']}" if r.get("adopted") else ""
+            typer.echo(
+                f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}{adopted}"
+            )
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
         # Ownership must reach the HUMAN receipt, not just `--json`. The
@@ -1850,6 +1969,18 @@ def cmd_decompose(
             )
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
+
+    # 4c. Name the epic children no group adopted (x-b9d7 US3). Emitted on BOTH
+    #     report paths, not just the human one: a --json caller decomposing a
+    #     populated epic needs this as much as an operator does, and stderr
+    #     never pollutes the JSON on stdout.
+    if unadopted_ids:
+        typer.echo(
+            f"warning: {len(unadopted_ids)} epic child(ren) adopted by no group, "
+            f"left parented to the epic: {', '.join(unadopted_ids)}. "
+            "Add them to a group's `adopt` list to package them into that PR.",
+            err=True,
+        )
 
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation

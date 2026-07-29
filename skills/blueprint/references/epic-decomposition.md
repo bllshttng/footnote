@@ -117,13 +117,37 @@ is known):
    on confirmation. To mark a group, add `"dep": "contract"` to it; the CLI
    stamps `contract_version` (read from the doc) and `stub_against` on the child.
 
+5b. **Check whether the epic already has children, and adopt them.** An epic
+   populated during discovery by `fno backlog idea --parent` carries rich
+   children (verified line numbers, row counts, evidence) that have no
+   `group_slug`. Decompose owns only group children, so without this step it
+   mints a fresh empty child per group and leaves those alongside, silently
+   doubling the epic.
+
+   There is no epic-scoped child listing verb, so let decompose tell you. It is
+   idempotent, so running it and refining the spec is safe: any child no group
+   adopted is named on stderr as
+
+   ```
+   warning: N epic child(ren) adopted by no group, left parented to the epic: <ids>
+   ```
+
+   Assign each id it names to the group that will ship it, via that group's
+   `adopt` list, then re-run the same command. Adoption re-parents the node in
+   the same locked mutation: nothing is minted for it, nothing is deleted, and
+   its plan, details, priority, and evidence are untouched. A child you
+   deliberately leave parked is fine - the warning repeats and the run still
+   exits 0.
+
 6. Build the groups JSON and call the CLI (atomic + idempotent upsert). A
    `contract` group just carries `"dep": "contract"` (it must already
-   `blocked_by` its blocker); everything else is unchanged:
+   `blocked_by` its blocker); an `adopt` list names EXISTING node ids to
+   re-parent under that group rather than mint (step 5b). Everything else is
+   unchanged:
    ```bash
    cat > /tmp/groups-$$.json <<'JSON'
    [
-     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": []},
+     {"slug": "1", "title": "Group 1: backend API", "waves": "1-3", "blocked_by_groups": [], "adopt": ["ab-1a2b3c4d", "ab-5e6f7a8b"]},
      {"slug": "2", "title": "Group 2: frontend", "waves": "4-6", "blocked_by_groups": ["1"], "dep": "contract"},
      {"slug": "3", "title": "Group 3: novel index engine", "waves": "7", "blocked_by_groups": ["1"], "needs_think": true}
    ]
@@ -131,6 +155,11 @@ is known):
    fno backlog decompose "$EPIC_ID" --max-prs "$N" --groups "@/tmp/groups-$$.json"
    rm -f /tmp/groups-$$.json
    ```
+   Omit `adopt` entirely when the epic has no pre-existing children; an absent
+   key is the mint-only default, and a present-but-empty or null one is refused.
+   One node may appear in at most one group's `adopt` list, and a group child
+   (this epic's or another epic's) can never be adopted - demoting a group into
+   a task reshapes the epic.
    The verb creates one child node per group (`parent=$EPIC_ID`, its own
    self-contained quick-plan scaffold at the canonical `fno plan path` name in
    the child's own project plans dir - the path it prints as `scaffolded plan:`

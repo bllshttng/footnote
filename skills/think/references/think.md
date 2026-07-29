@@ -204,10 +204,12 @@ The design should contain, as applicable:
 ```markdown
 ---
 title: "<title>"
+node: <node id>
 status: design
+created: <YYYY-MM-DD>
 type: think
 think_depth: light|standard|deep
-claims: <node id, when seeded>
+claims: <node id; a scalar, never a list>
 sources: [<artifacts actually read>]
 ---
 
@@ -218,6 +220,11 @@ sources: [<artifacts actually read>]
 ## Evidence Gaps
 ## Non-Goals
 ## Recommended Design
+
+## User Stories
+
+**US1:** As a <role>, I can <capability>, so that <outcome>.
+
 ## Alternatives Considered
 ## User Experience
 ## Domain Pitfalls
@@ -225,6 +232,16 @@ sources: [<artifacts actually read>]
 ## Acceptance Criteria
 ## Open Questions
 ```
+
+`node`, `status`, and `created` are the three fields `fno.plan.schema` requires, so a design missing any of them fails `fno plan validate`.
+A prose-seeded design has no node yet and legitimately omits `node:` until Blueprint intakes it.
+`claims` duplicates `node` on a seeded design and must be a scalar id: the schema types it `str | None`, so `claims: [x-9999, x-8888]` is a validation error, not a list of claims.
+
+`## User Stories` is the section Blueprint compiles into the wave and task skeleton, one task per story.
+Omitting it does not fail loudly: Blueprint warns on stderr and emits a single default task titled `implement feature`, so the plan looks finished and silently under-scopes the build.
+Write the stories as `**US1:** description` or any other shape `_parse_user_stories` in `skills/blueprint/scripts/mutate_doc.py` documents; that docstring is the marker contract.
+A section that has content but matches none of those shapes is refused outright, which is the one case you find out about immediately.
+`## Acceptance Criteria` is a different consumer and does not substitute: Blueprint compiles it into the acceptance contract, never into tasks.
 
 Omit empty optional prose sections, but never omit `## Failure Modes`.
 List only sources actually inspected; a receipt path is not proof that every referenced artifact was read.
