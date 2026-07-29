@@ -52,7 +52,7 @@ from fno.graph._reconcile import (
     resolve_merge_evidence,
 )
 from fno.graph.fuzzy import resolve_id
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
 
 
 def _path_graph():
@@ -134,14 +134,9 @@ def _current_pr(announce_failure: bool = False) -> tuple[Optional[int], Optional
 
 
 # -- ledger rollup --
-
-
-def _norm(path: Optional[str]) -> Optional[str]:
-    """Normalize a plan_path for comparison across graph / ledger / different
-    trailing-slash / relative-vs-absolute conventions."""
-    if not path:
-        return None
-    return os.path.normpath(path).rstrip(os.sep)
+# plan_path normalization lives in fno.graph.store (normalize_plan_path) so the
+# ledger rollup, the second-binding refusal, and the maintain check all compare
+# one way.
 
 
 def _load_ledger_entries() -> list[dict]:
@@ -174,11 +169,11 @@ def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
     if not plan_path:
         return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
 
-    target = _norm(plan_path)
+    target = normalize_plan_path(plan_path)
     ledger_entries = _load_ledger_entries()
     matching = [
         le for le in ledger_entries
-        if isinstance(le, dict) and _norm(le.get("plan_path")) == target
+        if isinstance(le, dict) and normalize_plan_path(le.get("plan_path")) == target
     ]
     if not matching:
         return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}

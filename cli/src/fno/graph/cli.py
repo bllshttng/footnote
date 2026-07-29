@@ -1781,9 +1781,18 @@ def cmd_decompose(
                 continue
             try:
                 canonical.parent.mkdir(parents=True, exist_ok=True)
+                # Seed the folded nodes (discovery children adopted into this one
+                # PR) as a coverage checklist, so a fresh-context builder sees
+                # every commitment the plan must address (x-d9a4 task 1.7).
+                adopted_nodes = [
+                    (aid, (by_id.get(aid) or {}).get("title") or aid)
+                    for aid in (grp.get("adopt") or [])
+                ]
                 canonical.write_text(
                     scaffold_separate_plan(
-                        grp, epic_resolved_id, source_doc, why_digest=why_digest
+                        grp, epic_resolved_id, source_doc,
+                        why_digest=why_digest,
+                        adopted=adopted_nodes,
                     ),
                     encoding="utf-8",
                 )
@@ -2530,6 +2539,16 @@ def cmd_update(
     untag: Optional[List[str]] = typer.Option(
         None, "--untag", hidden=True, help="Remove a tag (repeatable, no-op if absent)."
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help=(
+            "Escape the one-plan-one-node refusal on --plan-path: bind this node to "
+            "a plan another node already owns (a deliberate repoint). The other "
+            "holder is still named on stderr."
+        ),
+    ),
 ) -> None:
     from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
     from fno.graph.store import locked_mutate_graph
@@ -2835,6 +2854,35 @@ def cmd_update(
             if plan_path.lower() == "null":
                 node["plan_path"] = None
             else:
+                # plan == PR == node (x-04b9): a plan file is the delivery unit
+                # of exactly one node. Refuse to arm a second node against a plan
+                # another node already owns; the ambiguous state is what armed
+                # two concurrent dispatches against one sequential-mode plan on
+                # 2026-07-28. Routed through the shared plan_path_owner_conflict
+                # so every write site (this one + intake's lanes) checks one way;
+                # the decompose repoint is scoped to a slug it owns and never
+                # lands here. --force escapes a deliberate repoint and still
+                # names the other holder (AC2).
+                from fno.graph.store import plan_path_owner_conflict
+
+                owner = plan_path_owner_conflict(entries, node["id"], plan_path)
+                if owner is not None and not force:
+                    typer.echo(
+                        f"error: plan {plan_path} is already the delivery unit of {owner}\n"
+                        f"  a plan is one PR is one node; binding it to {node['id']} would arm both\n"
+                        f"  to record that {node['id']} ships inside that PR: "
+                        f"fno backlog decompose ... \"adopt\": [\"{node['id']}\"]\n"
+                        f"  to repoint deliberately: --force",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+                if owner is not None:
+                    typer.echo(
+                        f"note: plan {plan_path} is also held by {owner}; "
+                        f"binding {node['id']} anyway (--force). Both will "
+                        f"dispatch and cost independently.",
+                        err=True,
+                    )
                 node["plan_path"] = plan_path
                 if linked_size and not node.get("size"):
                     node["size"] = linked_size
@@ -7489,6 +7537,7 @@ def cmd_maintain(
     pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
     pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
+    plan_cost_violations = _maintain.detect_shared_plan_cost_violations(entries)
     # Propose-only in v1 even under --apply: a bulk reparent has no human
     # reading a receipt the way intake's one-at-a-time auto-link does.
     try:
@@ -7758,6 +7807,7 @@ def cmd_maintain(
         "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
         "pr_url_unresolvable": len(pr_url_unresolvable),
         "dedup_groups": len(dup_groups),
+        "shared_plan_cost_violations": len(plan_cost_violations),
         "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
         "now_overflow": list(overflow) if overflow else None,
@@ -7812,6 +7862,9 @@ def cmd_maintain(
                 ],
             },
             "dedup_groups": dup_groups,
+            "shared_plan_cost_violations": [
+                {"plan_path": v.plan_path, "nodes": v.nodes} for v in plan_cost_violations
+            ],
             "rollup_candidates": [
                 {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
             ],
@@ -7935,6 +7988,13 @@ def cmd_maintain(
         )
     for group in dup_groups:
         typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
+    for v in plan_cost_violations:
+        typer.echo(
+            f"  shared-plan cost double-count {v.plan_path}: {', '.join(v.nodes)} "
+            f"all carry cost_usd (a plan is one PR is one node; one node is the "
+            f"delivery unit, the rest are contained). Read-only: pick the unit "
+            f"and `fno backlog update <other> --plan-path null` by hand."
+        )
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "

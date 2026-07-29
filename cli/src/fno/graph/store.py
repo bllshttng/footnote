@@ -147,6 +147,51 @@ CANONICAL_FIELD_ORDER: list[str] = [
 CHILD_SUMMARY_FIELDS: tuple[str, ...] = ("id", "title", "project", "status")
 
 
+def normalize_plan_path(path: str | None) -> str | None:
+    """Normalize a ``plan_path`` for comparison across graph / ledger and across
+    absolute-vs-relative + trailing-slash conventions.
+
+    A plan owned by two nodes is the delivery-unit violation (x-04b9): a plan is
+    one PR is one node. Comparing raw strings lets an abs/rel mismatch smuggle a
+    second binding past the refusal, so every comparison site routes through this
+    one normalizer rather than each writing its own.
+    """
+    if not path:
+        return None
+    return os.path.normpath(path).rstrip(os.sep)
+
+
+def plan_path_owner_conflict(
+    entries: list[dict], node_id: str | None, plan_path: str | None
+) -> str | None:
+    """Return the id of another node already bound to the same ``plan_path``.
+
+    The one-plan-one-node invariant (x-04b9): a plan file is the delivery unit of
+    exactly one node, regardless of which roadmap tracks it. Centralized so every
+    plan_path write site routes through one check rather than each reimplementing
+    it - the 2026-07-28 mislinking recurred because a guard landed on only one of
+    N reachable write sites (cmd_update, intake's claim/create lanes, multi).
+
+    ``node_id`` is the node being bound, excluded from the search so re-binding a
+    plan a node already owns is not a self-conflict. Returns ``None`` when no other
+    node holds the (normalized) plan. Roadmap-agnostic on purpose: intake's
+    same-roadmap match already handles the friendly "already intaked" case, but a
+    plan owned under a different roadmap still arms two concurrent dispatches.
+    """
+    new_norm = normalize_plan_path(plan_path)
+    if new_norm is None:
+        return None
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        eid = e.get("id")
+        if eid == node_id or not isinstance(eid, str):
+            continue
+        if normalize_plan_path(e.get("plan_path")) == new_norm:
+            return eid
+    return None
+
+
 def _mirror_related(
     by_id: dict, node_id: str, *, added: set, removed: set
 ) -> None:
