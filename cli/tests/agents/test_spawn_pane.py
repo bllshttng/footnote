@@ -174,6 +174,46 @@ def test_opencode_spawn_without_capture_stays_live_only(
     assert [r.harness_session_id for r in rows] == [None]
 
 
+def test_codex_spawn_without_capture_stays_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-CON: an id-less Codex pane is created but not yet addressable."""
+    from fno.agents.registry import load_registry
+
+    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
+
+    row = load_registry()[0]
+    assert row.harness_session_id is None
+    assert row.status == "spawning"
+    assert result.status == "spawning"
+    assert result.session_uuid is None
+    assert result.short_id == ""
+
+
+def test_codex_spawn_with_capture_returns_bound_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: the receipt and registry share the captured Codex thread ID."""
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    monkeypatch.setattr(
+        mux_spawn,
+        "_backfill_codex_session_id",
+        lambda *_args, **_kwargs: session_id,
+    )
+
+    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
+
+    row = load_registry()[0]
+    assert row.harness_session_id == session_id
+    assert row.status == "live"
+    assert result.status == "live"
+    assert result.session_uuid == session_id
+    assert result.short_id == session_id[:8]
+
+
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -749,13 +789,54 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "short_id": "",
         "provider": "codex",
         "provider_source": "explicit",  # dispatch-provider provenance
-        "status": "live",
+        "status": "spawning",
         "mux_session": "main",
         "pane_id": 9,
         "effective_message": "$fno:target x-81ad",
     }
     pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])
     assert "$fno:target x-81ad" in pane_run
+
+
+def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: a bound public receipt exposes the canonical full thread ID."""
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: MuxSpawnResult(
+            name=kwargs["name"],
+            provider="codex",
+            session="main",
+            pane_id=9,
+            child_pid=4242,
+            session_uuid=session_id,
+            short_id=session_id[:8],
+            status="live",
+        ),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "codex", "hello"],
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.strip().splitlines()[-1])
+    assert receipt["status"] == "live"
+    assert receipt["session_id"] == session_id
+    assert receipt["short_id"] == session_id[:8]
 
 
 def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(

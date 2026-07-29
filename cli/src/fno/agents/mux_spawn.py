@@ -83,6 +83,9 @@ class MuxSpawnResult:
     # Claude's 8-hex jobId (``session_uuid[:8]``), the addressable mail handle;
     # "" for providers whose transport key is not short_id (US8).
     short_id: str = ""
+    # A Codex pane whose rollout has not appeared yet is created but not
+    # addressable. Keep that transition explicit instead of calling it live.
+    status: str = "live"
     effective_message: Optional[str] = None
     # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
@@ -1162,22 +1165,17 @@ def dispatch_spawn_pane(
                     reason="no unique codex rollout for this cwd after spawn",
                 )
 
-        # Claude addresses a pane by its 8-hex jobId (the first block of the
-        # session UUID). The row does NOT store it in short_id - that field is
-        # the worker/bg transport slot, and a mux row must hold exactly one live
-        # ref (validate_single_live_ref). The jobId resolves back to this row via
-        # resolve_agent's derived_short rule (harness_session_id[:8]), so the
-        # receipt can hand the king a usable mail handle without touching the row
-        # (US8). Empty for providers that resume off harness_session_id.
-        short_id_val = session_uuid[:8] if provider == "claude" and session_uuid else ""
-
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
         # captured above), or "human" for a direct human spawn with no session
         # env - never a caller-supplied value. Only stamped when a crown was
         # actually requested (crown_level is not None).
         crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
+        stored_session_uuid: Optional[str] = None
+        row_status = "live"
+
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
+            nonlocal stored_session_uuid, row_status
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
             # candidate (the second pane's session may not exist yet when both
@@ -1187,14 +1185,20 @@ def dispatch_spawn_pane(
             claimed = session_uuid is not None and any(
                 r.harness_session_id == session_uuid for r in rows
             )
+            stored_session_uuid = None if claimed else session_uuid
+            row_status = (
+                "spawning"
+                if provider == "codex" and stored_session_uuid is None
+                else "live"
+            )
             rows.append(
                 AgentEntry(
                     name=name,
                     harness=provider,
                     cwd=str(cwd),
                     log_path="",
-                    harness_session_id=None if claimed else session_uuid,
-                    status="live",
+                    harness_session_id=stored_session_uuid,
+                    status=row_status,
                     pid=child_pid,
                     mux={"session": session, "pane_id": pane_id},
                     spawned_by_session=spawned_by_session,
@@ -1209,6 +1213,16 @@ def dispatch_spawn_pane(
 
         update_registry(_append, path=registry_path)
 
+        # Claude and Codex both resolve the canonical full harness id through
+        # its 8-hex prefix. The row keeps short_id empty because mux is its one
+        # live transport ref; the receipt may still hand out the derived handle.
+        session_uuid = stored_session_uuid
+        short_id_val = (
+            session_uuid[:8]
+            if provider in ("claude", "codex") and session_uuid
+            else ""
+        )
+
     return MuxSpawnResult(
         name=name,
         provider=provider,
@@ -1217,6 +1231,7 @@ def dispatch_spawn_pane(
         child_pid=child_pid,
         session_uuid=session_uuid,
         short_id=short_id_val,
+        status=row_status,
         effective_message=effective_message,
         placement=placement_receipt,
     )

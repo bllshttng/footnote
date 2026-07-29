@@ -1290,18 +1290,19 @@ def cmd_spawn(
             spawn_succeeded = True
             # Compact one-line receipt, superset of the daemon-spawn receipt shape
             # ({"name","short_id","provider","status"}) so line-parsing consumers
-            # keep working. short_id carries claude's 8-hex jobId so the caller can
-            # mail the pane straight from the receipt (US8); "" for providers that
-            # resume off harness_session_id instead.
+            # keep working. A Codex pane is `spawning` until its rollout identity
+            # is bound; a `live` Codex receipt always carries the full identity.
             receipt_obj = {
                 "name": pane_result.name,
                 "short_id": pane_result.short_id,
                 "provider": pane_result.provider,
                 "provider_source": provider_source,
-                "status": "live",
+                "status": pane_result.status,
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,
             }
+            if pane_result.session_uuid is not None:
+                receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
             if effective_message is not None:
                 receipt_obj["effective_message"] = effective_message

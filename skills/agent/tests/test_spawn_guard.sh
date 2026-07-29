@@ -53,7 +53,7 @@ case "$1 $2" in
     # mux coords; the name/provider are taken from env so they can MATCH the launch
     # (spawn.sh accepts a pane receipt only when every identity field matches).
     if [[ "${STUB_MUX:-0}" == "1" ]]; then
-      echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"\",\"provider\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"live\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
+      echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"\",\"provider\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
     fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"provider\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
@@ -187,6 +187,13 @@ ok  'pane launch -> launched'        "$(field "$out")" 'launched'
 has 'pane coords surfaced'           "$out" 'pane="main:1"'
 has 'pane hint is mux attach'        "$out" 'fno mux attach main'
 no  'pane hint is NOT agents logs'   "$out" 'fno agents logs'
+
+# AC2-CON: a created Codex pane without a thread ID is pending, not launched.
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneP STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=spawning \
+  STUB_MUX_SESSION=main run --name paneP --provider codex --message 'Implement x')"
+ok  'pane pending -> pending'         "$(field "$out")" 'pending'
+has 'pane pending coords surfaced'    "$out" 'pane="main:1"'
+no  'pane pending is not launched'    "$out" 'result=launched'
 
 # AC-EDGE: a session name with a space -> ref quoted so it can't split the line.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneS STUB_MUX_PROVIDER=codex STUB_MUX_SESSION='work 1' \
