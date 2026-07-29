@@ -560,13 +560,22 @@ def validate_groups(
         # already a group child, no cycle) need the locked snapshot and live in
         # the CLI's Pass 1, keeping the module's rule that a bad SPEC fails
         # before any graph read.
-        adopt = grp.get("adopt") or []
+        # `.get("adopt", _UNSET)` rather than `.get("adopt") or []`: the `or`
+        # form collapses every falsy value (null, false, 0, "", {}) into the
+        # mint-only default, so a malformed spec would proceed to the graph
+        # write and leave existing epic children unadopted while minting new
+        # group nodes - the exact outcome this key exists to prevent. Only an
+        # ABSENT key defaults; anything present must be a list. Same fail-closed
+        # rule `max_children` uses above.
+        adopt = grp.get("adopt", _UNSET)
+        if adopt is _UNSET:
+            adopt = []
         if not isinstance(adopt, list) or not all(
             isinstance(a, str) and a.strip() for a in adopt
         ):
             raise DecomposeError(
                 f"group {slug!r} adopt must be a list of non-empty node ids "
-                f"(got {adopt!r})",
+                f"(got {adopt!r}); remove the key to adopt nothing",
                 exit_code=1,
             )
         normalized.append(

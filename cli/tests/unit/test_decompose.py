@@ -2046,3 +2046,68 @@ def test_unadopted_warning_reaches_the_json_path_too(graph_env):
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["epic"] == "ab-epic0001"
     assert "ab-kid00001" in result.stderr
+
+
+# -- adopt: review findings (PR #655) --
+
+
+def test_adopt_aliased_ids_in_two_groups_are_refused(graph_env):
+    """Two spellings of one id must not slip past the dual-claim refusal.
+
+    `_find_node` resolves a 4-7 hex `ab-` prefix to the same entry as the full
+    id, so a string-equality check in validate_groups sees two distinct claims.
+    Without a resolved-id check the first group re-parents the node and the
+    second re-parents it again, exiting 0 with the node silently in group two.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-abcd0001", title="claimed twice"))
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-abcd"]},
+            {"slug": "two", "title": "Two", "waves": "2", "adopt": ["ab-abcd0001"]},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert "one" in result.output and "two" in result.output
+    assert read_entries() == before
+
+
+def test_adopt_aliased_ids_within_one_group_are_refused(graph_env):
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-abcd0001"))
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1",
+             "adopt": ["ab-abcd", "ab-abcd0001"]},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert read_entries() == before
+
+
+@pytest.mark.parametrize("falsy", [False, 0, "", {}, None])
+def test_adopt_present_but_falsy_non_list_is_refused(graph_env, falsy):
+    """A present-but-invalid `adopt` must fail closed, never read as absent.
+
+    `.get("adopt") or []` collapses every falsy value to the mint-only default,
+    so a malformed spec would proceed and leave existing epic children
+    unadopted while minting new group nodes - the exact outcome adoption
+    exists to prevent. Mirrors the module's `max_children` rule, where an
+    explicit null fails closed instead of masquerading as absent.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-abcd0001"))
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": falsy},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert "adopt" in result.output
+    assert read_entries() == before

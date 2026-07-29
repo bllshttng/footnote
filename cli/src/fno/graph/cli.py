@@ -1469,6 +1469,12 @@ def cmd_decompose(
 
         # Pass 1: resolve each group to an existing or new child node.
         slug_to_id: dict[str, str] = {}
+        # Resolved adopt claims, keyed on the node id `_find_node` returns
+        # rather than the spelling the spec used. validate_groups can only
+        # compare raw strings, and a 4-7 hex `ab-` prefix resolves to the same
+        # entry as the full id - so `ab-abcd` in one group and `ab-abcd0001` in
+        # another read as two claims there and are one node here.
+        adopt_claim: dict[str, str] = {}
         plan_to_group: list[tuple[dict, dict]] = []  # (node, normalized group)
         for grp in norm:
             frag_path = child_plan_path(base, grp["slug"])
@@ -1557,6 +1563,15 @@ def cmd_decompose(
                         "to no node",
                         exit_code=3,
                     )
+                prior_slug = adopt_claim.get(target["id"])
+                if prior_slug is not None:
+                    raise DecomposeError(
+                        f"node {target['id']} is claimed by more than one adopt "
+                        f"entry (group {prior_slug!r} and group {grp['slug']!r}); "
+                        "two spellings of one id resolve to the same node",
+                        exit_code=1,
+                    )
+                adopt_claim[target["id"]] = grp["slug"]
                 existing_slug = group_child_slug(target, base)
                 if existing_slug is not None:
                     # Also covers self-adoption: a group naming its own resolved
