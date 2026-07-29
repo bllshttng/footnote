@@ -2111,3 +2111,31 @@ def test_adopt_present_but_falsy_non_list_is_refused(graph_env, falsy):
     assert result.exit_code == 1, result.output
     assert "adopt" in result.output
     assert read_entries() == before
+
+
+def test_adopted_ids_reach_the_human_receipt(graph_env):
+    """Re-parenting pre-existing nodes must be visible without `--json`.
+
+    Same rule the fan-out ownership line follows: a contract carried only in
+    the JSON shape is a contract the default invocation never shows.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "adopted=" in result.stdout
+    for kid in ("ab-kid00001", "ab-kid00002", "ab-kid00003"):
+        assert kid in result.stdout
+
+
+def test_receipt_omits_adopted_when_nothing_was_adopted(graph_env):
+    """AC7: a spec with no adopt key prints exactly what it printed before."""
+    g, read_entries = graph_env
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "adopted=" not in result.stdout

@@ -1898,7 +1898,14 @@ def cmd_decompose(
             blk = f" blocked_by={r['blocked_by']}" if r["blocked_by"] else ""
             tier = " dep=contract" if r.get("dep") == "contract" else ""
             marker = r["slug"]
-            typer.echo(f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}")
+            # Adoption re-parents PRE-EXISTING nodes, so it must reach the human
+            # receipt and not only `--json` - same reason the fan-out ownership
+            # line below does. Empty stays silent, so a spec with no adopt key
+            # prints byte-for-byte what it printed before.
+            adopted = f" adopted={r['adopted']}" if r.get("adopted") else ""
+            typer.echo(
+                f"  {r['action']}: {r['id']} ({marker}){waves}{blk}{tier}{adopted}"
+            )
         for f in scaffolded:
             typer.echo(f"  scaffolded plan: {f}")
         # Ownership must reach the HUMAN receipt, not just `--json`. The
