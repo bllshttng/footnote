@@ -94,19 +94,28 @@ if ! git rev-parse --verify --quiet "$HEAD_SHA^{commit}" >/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
-# Did the PR's own diff touch the const line?
+# Did the PR's own commits touch the const line?
 #
-# Diffed from the merge-base so a branch cut before a parallel bump still shows
-# its own change. Match the const line in the diff body, not just the file: an
-# unrelated proto.rs edit (a doc comment, a new message type) must not force a
-# version bump.
+# Scanned PER COMMIT, not as one aggregate merge-base diff. An aggregate diff
+# loses the edit as soon as the branch merges the updated base into itself (the
+# ordinary "update my branch" move): merge-base advances to that base, both sides
+# then read the same value, and the branch's own bump vanishes from the diff
+# while its wire change is still in the PR. That is the collision this guard
+# exists for, reported as "untouched".
+#
+# Merge commits contribute no patch here by default, which is exactly right:
+# inheriting someone else's bump by pulling the base in is not this PR editing
+# the line. Only a commit whose own patch touches it counts.
+#
+# Matching the const line rather than the file keeps an unrelated proto.rs edit
+# (a doc comment, a new message type) from forcing a version bump.
 # ---------------------------------------------------------------------------
 MERGE_BASE="$(git merge-base "$BASE_TIP" "$HEAD_SHA" 2>/dev/null)" || {
     echo "ERROR: no merge-base between $REMOTE/$BASE_REF and $HEAD_SHA" >&2
     exit 2
 }
 
-if ! git diff "$MERGE_BASE" "$HEAD_SHA" -- "$PROTO_FILE" 2>/dev/null \
+if ! git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE" 2>/dev/null \
     | grep -qE '^[-+]pub const PROTO_VERSION'; then
     echo "proto-version-bump: PROTO_VERSION line untouched by this PR; nothing to check"
     exit 0

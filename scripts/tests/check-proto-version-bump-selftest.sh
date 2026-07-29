@@ -195,6 +195,52 @@ else
     fail "merge-ref collision case: rc=$rc out=$out"
 fi
 
+# --- case 8: the PR merged the updated base in afterwards -----------------
+# The branch bumps v10 -> v11, a parallel branch lands the same v11, and the
+# branch then merges the updated base into itself (the ordinary "update my
+# branch" move). merge-base is now that updated base, so the AGGREGATE diff no
+# longer contains the branch's own version-line edit even though the wire change
+# is still in the PR. Detection has to be per-commit or the guard reports
+# "untouched" and passes the exact collision it exists for.
+read -r dir sha <<< "$(make_repo 10 "$(version_line 11)" 11)"
+git -C "$dir" checkout --quiet feature
+git -C "$dir" merge --quiet --no-edit main >/dev/null 2>&1
+merged_sha="$(git -C "$dir" rev-parse HEAD)"
+out="$(run_guard "$dir" "$merged_sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"* ]]; then
+    pass "collision survives the branch merging the updated base in"
+else
+    fail "post-base-merge collision: rc=$rc out=$out"
+fi
+
+# --- case 9: merging the base in is not itself a bump ----------------------
+# The mirror of case 8: a branch that never touched the const line but merged a
+# base that did must stay a no-op. Per-commit detection must not count the merge
+# commit's inherited change as the PR's own edit.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m base
+git -C "$dir" checkout --quiet -b feature
+printf '\n// unrelated\n' >> "$dir/$PROTO_REL"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "comment only"
+git -C "$dir" checkout --quiet main
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "someone else bumped"
+git -C "$dir" checkout --quiet feature
+git -C "$dir" merge --quiet --no-edit main >/dev/null 2>&1
+merged_sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$merged_sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"untouched"* ]]; then
+    pass "inheriting someone else's bump via a base merge is not a touch"
+else
+    fail "inherited-bump case: rc=$rc out=$out"
+fi
+
 echo ""
 if [[ $failures -eq 0 ]]; then
     echo "proto-version-bump selftest: all cases passed"
