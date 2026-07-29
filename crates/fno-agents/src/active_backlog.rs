@@ -1487,6 +1487,7 @@ mod tests {
         // Parity with MegawalkQueue::close: if `fno backlog done` FAILS, the node
         // was not actually closed, so the dispatch must Park (a failure toward the
         // streak), never a false success. Regression guard for the review finding.
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1525,6 +1526,7 @@ mod tests {
         // exits 5 (awaiting merge). That is a SUCCESSFUL dispatch (the node
         // closes at the human merge via reconcile), so the breaker must NOT
         // record a failure - mirror of MegawalkQueue::close's exit-5 mapping.
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
