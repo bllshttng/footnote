@@ -361,6 +361,30 @@ def test_direct_dependents_carry_model_tier(monkeypatch):
     assert deps[0]["model_tier"] == "high"
 
 
+def test_direct_dependents_admit_plan_less_idea(monkeypatch):
+    """x-e24a: a plan-less idea dependent (Rung.NONE) is now-unblocked and
+    cold-dispatchable, so the edge-following path admits it alongside ready
+    work. A dependent with a plan_path (a linked stub, not Rung.NONE) and a
+    still-blocked plan-less dependent stay excluded."""
+    graph = [
+        {"id": "ab-closed11", "project": "fno"},
+        # plan-less idea dependent -> admitted (cold-dispatchable)
+        {"id": "ab-cold01", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "idea", "cwd": "/w"},
+        # idea with a plan_path -> excluded (Rung is not NONE)
+        {"id": "ab-stub001", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "idea", "plan_path": "stub.md", "cwd": "/w"},
+        # still-blocked plan-less dependent -> excluded by the status conjunct
+        {"id": "ab-block01", "project": "fno", "blocked_by": ["ab-closed11"],
+         "status": "blocked", "cwd": "/w"},
+    ]
+    monkeypatch.setattr("fno.graph.store.read_graph", lambda p: graph)
+    ids = [d["id"] for d in adv._direct_dependents("ab-closed11", "fno")]
+    assert "ab-cold01" in ids
+    assert "ab-stub001" not in ids
+    assert "ab-block01" not in ids
+
+
 def test_advance_resolves_node_tier_to_model(iso, monkeypatch):
     """AC3-HP wiring: a node's model_tier resolves to a concrete --model at the
     advance spawn (no snapshot -> the deterministic static table)."""
@@ -1289,29 +1313,32 @@ def test_dependents_zero_dependents_is_clean_noop(iso, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# _direct_dependents: the edge-following filter (ready dependents, both projects)
+# _direct_dependents: the edge-following filter (ready + cold-idea dependents)
 # ---------------------------------------------------------------------------
 
 
-def test_direct_dependents_filters_to_ready(monkeypatch):
+def test_direct_dependents_admits_ready_and_cold_idea(monkeypatch):
     entries = [
         {"id": "A", "project": "etl", "status": "done", "blocked_by": []},
         # ready cross-project direct dependent -> INCLUDED (cross_project True)
         {"id": "B", "project": "web", "status": "ready", "blocked_by": ["A"],
          "slug": "bee", "cwd": "/w"},
-        # ready same-project dependent -> NOW INCLUDED (RC1; cross_project False)
+        # ready same-project dependent -> INCLUDED (RC1; cross_project False)
         {"id": "C", "project": "etl", "status": "ready", "blocked_by": ["A"]},
         # cross-project but still blocked by another open node -> EXCLUDED
         {"id": "D", "project": "web", "status": "blocked", "blocked_by": ["A", "X"]},
-        # cross-project dependent with no plan (idea) -> EXCLUDED
-        {"id": "E", "project": "web", "status": "idea", "blocked_by": ["A"]},
+        # cross-project idea with a plan_path -> EXCLUDED (not Rung.NONE)
+        {"id": "E", "project": "web", "status": "idea", "blocked_by": ["A"],
+         "plan_path": "stub.md"},
+        # cross-project plan-less idea (Rung.NONE) -> INCLUDED (x-e24a cold-dispatch)
+        {"id": "G", "project": "web", "status": "idea", "blocked_by": ["A"]},
         # not a dependent of A -> EXCLUDED
         {"id": "F", "project": "web", "status": "ready", "blocked_by": []},
     ]
     monkeypatch.setattr("fno.graph.store.read_graph", lambda path=None: entries)
     deps = adv._direct_dependents("A", "etl")
     by_id = {d["id"]: d for d in deps}
-    assert set(by_id) == {"B", "C"}  # ready dependents in BOTH projects
+    assert set(by_id) == {"B", "C", "G"}  # ready + cold-idea dependents, both projects
     assert by_id["B"]["project"] == "web" and by_id["B"]["slug"] == "bee"
     assert by_id["B"]["cross_project"] is True
     assert by_id["C"]["cross_project"] is False

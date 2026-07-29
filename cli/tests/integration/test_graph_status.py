@@ -126,9 +126,28 @@ def _seed_one_idea_one_ready(tmp_path) -> tuple[str, str]:
     return idea_id, ready.stdout
 
 
-def test_idea_excluded_from_next_by_default(tmp_graph, tmp_path):
-    """`backlog next` returns only ready rows, ideas are filtered out."""
-    idea_id, _ = _seed_one_idea_one_ready(tmp_path)
+def _seed_linked_idea_stub(tmp_graph, tmp_path) -> str:
+    """A linked-but-undesigned decompose scaffold (Rung.IDEA): a plan doc that
+    declares ``status: idea``. This is the rung that stays gated behind
+    ``--include-ideas``; a plan-less idea (Rung.NONE) surfaces by default since
+    x-e24a and is covered by its own tests. Returns the stub node id."""
+    plan = tmp_path / "idea-stub.md"
+    plan.write_text("---\nstatus: idea\n---\n# Unfilled child\n")
+    assert _invoke("backlog", "intake", str(plan)).exit_code == 0, "intake failed"
+    stub = next(
+        e for e in _read_entries(tmp_graph)
+        if e.get("plan_path") and "idea-stub" in e["plan_path"]
+    )
+    return stub["id"]
+
+
+def test_linked_idea_stub_excluded_from_next_by_default(tmp_graph, tmp_path):
+    """`backlog next` returns ready rows (and plan-less ideas); a LINKED idea
+    stub (Rung.IDEA) stays gated behind --include-ideas (x-e24a)."""
+    stub_id = _seed_linked_idea_stub(tmp_graph, tmp_path)
+    ready = tmp_path / "ready-plan.md"
+    ready.write_text("---\ntitle: Ready Plan\n---\n# Body\n")
+    assert _invoke("backlog", "intake", str(ready)).exit_code == 0
 
     r = _invoke("backlog", "next", "--all")
     assert r.exit_code == 0, r.output
@@ -136,9 +155,22 @@ def test_idea_excluded_from_next_by_default(tmp_graph, tmp_path):
         pytest.fail("expected the ready node, got null")
     payload = json.loads(r.stdout)
     assert payload is not None
-    assert payload.get("id") != idea_id, (
-        "idea should be excluded from `next` by default"
+    assert payload.get("id") != stub_id, (
+        "a linked idea stub should stay excluded from `next` by default"
     )
+
+
+def test_plan_less_idea_surfaces_in_next_by_default(tmp_graph):
+    """x-e24a: a plan-less idea (Rung.NONE) is cold-dispatchable, so bare
+    `backlog next` returns it without --include-ideas."""
+    add = _invoke("--json", "backlog", "add", "Pure idea")
+    idea_id = json.loads(add.stdout)["id"]
+
+    r = _invoke("backlog", "next", "--all")
+    assert r.exit_code == 0, r.output
+    payload = json.loads(r.stdout)
+    assert payload is not None, "plan-less idea should surface in `next` by default"
+    assert payload.get("id") == idea_id
 
 
 def test_idea_included_with_flag(tmp_graph, tmp_path):
@@ -163,15 +195,56 @@ def test_idea_included_with_flag(tmp_graph, tmp_path):
     )
 
 
-def test_idea_excluded_from_ready_listing_by_default(tmp_graph, tmp_path):
-    """`backlog ready` listing omits ideas by default."""
-    idea_id, _ = _seed_one_idea_one_ready(tmp_path)
+def test_linked_idea_stub_excluded_from_ready_listing_by_default(tmp_graph, tmp_path):
+    """`backlog ready` omits a LINKED idea stub (Rung.IDEA) by default; a
+    plan-less idea (Rung.NONE) surfaces since x-e24a (its own test below)."""
+    stub_id = _seed_linked_idea_stub(tmp_graph, tmp_path)
 
     r = _invoke("backlog", "ready", "--all")
     assert r.exit_code == 0, r.output
-    listing = json.loads(r.stdout)
-    ids = [e["id"] for e in listing]
-    assert idea_id not in ids, "ideas should not appear in default `ready` listing"
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert stub_id not in ids, (
+        "a linked idea stub should stay out of the default `ready` listing"
+    )
+
+
+def test_plan_less_idea_surfaces_in_ready_listing_by_default(tmp_graph):
+    """x-e24a: a plan-less idea (Rung.NONE) appears in bare `backlog ready`."""
+    add = _invoke("--json", "backlog", "add", "Pure idea")
+    idea_id = json.loads(add.stdout)["id"]
+
+    r = _invoke("backlog", "ready", "--all")
+    assert r.exit_code == 0, r.output
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert idea_id in ids, "plan-less idea should surface in `ready` by default"
+
+
+def test_mission_drain_enumerates_plan_less_idea_child(tmp_graph, tmp_path):
+    """x-e24a: the mission drain shells `fno backlog ready --parent <epic> --all`,
+    so its enumeration must return a plan-less idea child (Rung.NONE) and omit a
+    linked idea stub (Rung.IDEA). This is the composition seam between
+    cmd_ready's cold-idea admission and advance_epic's fan-out - the node's core
+    motivating journey, previously certified only via a mocked
+    _ready_leaf_children."""
+    stub = tmp_path / "idea-stub.md"
+    stub.write_text("---\nstatus: idea\n---\n# Unfilled\n")
+    entries = [
+        {"id": "ab-epic", "title": "Mission", "status": "ready", "project": "fno",
+         "plan_path": "e.md", "created_at": "2026-07-28"},
+        {"id": "ab-cold", "title": "Cold idea", "status": "idea", "project": "fno",
+         "parent": "ab-epic", "created_at": "2026-07-28"},            # plan-less -> Rung.NONE
+        {"id": "ab-stub", "title": "Stub", "status": "idea", "project": "fno",
+         "parent": "ab-epic", "plan_path": str(stub),
+         "created_at": "2026-07-28"},                                  # linked -> Rung.IDEA
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    r = _invoke("backlog", "ready", "--parent", "ab-epic", "--all")
+    assert r.exit_code == 0, r.output
+    ids = [e["id"] for e in json.loads(r.stdout)]
+    assert "ab-cold" in ids, "plan-less idea child must surface to the mission drain"
+    assert "ab-stub" not in ids, "linked idea stub must stay behind --include-ideas"
+    assert "ab-epic" not in ids  # the container is never actionable work
 
 
 def test_idea_included_in_ready_with_flag(tmp_graph, tmp_path):
