@@ -240,6 +240,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
     # still be able to read its own files after that round-trip.
     lines = block.splitlines()
     i = 0
+    # Last top-level key seen, so the nested-line error below can name the key
+    # whose value ran on. The offending line is the continuation, which carries
+    # no key of its own; without this the reader is told a line number and has
+    # to go find the key itself.
+    last_key: str | None = None
     while i < len(lines):
         line = lines[i]
         lineno = i + 1
@@ -257,9 +262,12 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
         # the inner block-list reader below consumes its own children, so
         # anything that surfaces here is genuinely nested = error.
         if line.startswith(" ") or line.startswith("\t"):
+            whose = f" (continuation of {last_key!r})" if last_key else ""
             raise ValueError(
-                f"Malformed frontmatter at line {lineno}: nested structures are not "
-                f"supported - offending line: {line!r}"
+                f"Malformed frontmatter at line {lineno}{whose}: frontmatter scalars "
+                f"must be single-line - a wrapped or indented continuation line is "
+                f"not supported. Put the whole value on the key's own line. "
+                f"Offending line: {line!r}"
             )
         if ":" not in line:
             raise ValueError(
@@ -268,6 +276,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
         key, _, raw_val = line.partition(":")
         key = key.strip()
         raw_val = raw_val.strip()
+        last_key = key
 
         if raw_val.startswith("["):
             fields[key] = _parse_inline_list(raw_val)
