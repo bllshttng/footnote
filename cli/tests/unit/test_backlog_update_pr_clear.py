@@ -38,6 +38,13 @@ def _first(g: Path) -> dict:
     return json.loads(g.read_text())["entries"][0]
 
 
+def _node(g: Path, nid: str) -> dict:
+    for e in json.loads(g.read_text())["entries"]:
+        if e.get("id") == nid:
+            return e
+    raise AssertionError(f"node {nid} missing from graph")
+
+
 def test_pr_link_can_be_cleared(tmp_graph):
     _seed(tmp_graph, [{
         "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
@@ -152,6 +159,81 @@ def test_plan_path_still_binds_a_real_path(tmp_graph):
 
     assert result.exit_code == 0, result.output
     assert _first(tmp_graph)["plan_path"] == "/plans/new.md"
+
+
+def test_second_plan_path_binding_is_refused(tmp_graph):
+    """AC1: a plan is one PR is one node. A second node cannot bind an owned plan;
+    it exits non-zero naming the owner, the adopt alternative, and --force, and
+    leaves the graph unmodified."""
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "owner", "domain": "code", "project": "p",
+         "plan_path": "/plans/shared.md"},
+        {"id": "ab-00000002", "title": "contender", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000002", "--plan-path", "/plans/shared.md",
+    ])
+
+    assert result.exit_code != 0
+    assert "ab-00000001" in result.output  # names the owner
+    assert "adopt" in result.output         # names the legal alternative
+    assert "--force" in result.output       # names the escape
+    # Graph unmodified: contender stays unbound, owner untouched.
+    assert _node(tmp_graph, "ab-00000002").get("plan_path") is None
+    assert _node(tmp_graph, "ab-00000001")["plan_path"] == "/plans/shared.md"
+
+
+def test_abs_rel_mismatch_cannot_smuggle_a_second_binding(tmp_graph):
+    """The same plan reached two ways is still one plan: normalization closes the
+    abs/rel hole a naive string compare would leave open."""
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "owner", "domain": "code", "project": "p",
+         "plan_path": "/plans/shared.md"},
+        {"id": "ab-00000002", "title": "contender", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000002", "--plan-path", "/plans/./shared.md",
+    ])
+
+    assert result.exit_code != 0
+    assert "ab-00000001" in result.output
+    assert _node(tmp_graph, "ab-00000002").get("plan_path") is None
+
+
+def test_force_binds_a_second_holder_and_names_the_owner(tmp_graph):
+    """AC2: --force binds the contender AND tells the operator the owner still
+    holds the plan, so a deliberate repoint is never silent."""
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "owner", "domain": "code", "project": "p",
+         "plan_path": "/plans/shared.md"},
+        {"id": "ab-00000002", "title": "contender", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000002", "--plan-path", "/plans/shared.md", "--force",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000002")["plan_path"] == "/plans/shared.md"
+    assert "ab-00000001" in result.output  # told the owner still holds it
+
+
+def test_node_can_rebind_the_plan_it_already_owns(tmp_graph):
+    """Re-binding the same plan to the same node is a no-op repoint, not a
+    refusal: the node is its own owner, not a 'second' holder."""
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "owner", "domain": "code", "project": "p",
+         "plan_path": "/plans/shared.md"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", "/plans/shared.md",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000001")["plan_path"] == "/plans/shared.md"
 
 
 def test_clearing_the_url_alone_is_refused_when_a_number_remains(tmp_graph):

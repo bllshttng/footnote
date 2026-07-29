@@ -147,6 +147,20 @@ CANONICAL_FIELD_ORDER: list[str] = [
 CHILD_SUMMARY_FIELDS: tuple[str, ...] = ("id", "title", "project", "status")
 
 
+def normalize_plan_path(path: str | None) -> str | None:
+    """Normalize a ``plan_path`` for comparison across graph / ledger and across
+    absolute-vs-relative + trailing-slash conventions.
+
+    A plan owned by two nodes is the delivery-unit violation (x-04b9): a plan is
+    one PR is one node. Comparing raw strings lets an abs/rel mismatch smuggle a
+    second binding past the refusal, so every comparison site routes through this
+    one normalizer rather than each writing its own.
+    """
+    if not path:
+        return None
+    return os.path.normpath(path).rstrip(os.sep)
+
+
 def _mirror_related(
     by_id: dict, node_id: str, *, added: set, removed: set
 ) -> None:

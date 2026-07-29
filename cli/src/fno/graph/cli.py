@@ -2530,6 +2530,16 @@ def cmd_update(
     untag: Optional[List[str]] = typer.Option(
         None, "--untag", hidden=True, help="Remove a tag (repeatable, no-op if absent)."
     ),
+    force: bool = typer.Option(
+        False,
+        "--force",
+        "-F",
+        help=(
+            "Escape the one-plan-one-node refusal on --plan-path: bind this node to "
+            "a plan another node already owns (a deliberate repoint). The other "
+            "holder is still named on stderr."
+        ),
+    ),
 ) -> None:
     from fno.graph._constants import PRIORITY_ORDER, has_node_id_prefix, normalize_tag
     from fno.graph.store import locked_mutate_graph
@@ -2835,6 +2845,46 @@ def cmd_update(
             if plan_path.lower() == "null":
                 node["plan_path"] = None
             else:
+                # plan == PR == node (x-04b9): a plan file is the delivery unit
+                # of exactly one node. Refuse to arm a second node against a plan
+                # another node already owns; the ambiguous state is what armed
+                # two concurrent dispatches against one sequential-mode plan on
+                # 2026-07-28. Checked at this WRITE site (the only non-decompose
+                # plan_path writer) so it cannot be bypassed by a reader; the
+                # decompose repoint is scoped to a slug it owns and never lands
+                # here. Normalize both sides so an abs/rel mismatch cannot
+                # smuggle a second binding past the check. --force escapes a
+                # deliberate repoint and still names the other holder (AC2).
+                from fno.graph.store import normalize_plan_path
+
+                new_norm = normalize_plan_path(plan_path)
+                owner = next(
+                    (
+                        e["id"]
+                        for e in entries
+                        if e.get("id") != node["id"]
+                        and isinstance(e.get("id"), str)
+                        and normalize_plan_path(e.get("plan_path")) == new_norm
+                    ),
+                    None,
+                )
+                if owner is not None and not force:
+                    typer.echo(
+                        f"error: plan {plan_path} is already the delivery unit of {owner}\n"
+                        f"  a plan is one PR is one node; binding it to {node['id']} would arm both\n"
+                        f"  to record that {node['id']} ships inside that PR: "
+                        f"fno backlog decompose ... \"adopt\": [\"{node['id']}\"]\n"
+                        f"  to repoint deliberately: --force",
+                        err=True,
+                    )
+                    raise typer.Exit(code=2)
+                if owner is not None:
+                    typer.echo(
+                        f"note: plan {plan_path} is also held by {owner}; "
+                        f"binding {node['id']} anyway (--force). Both will "
+                        f"dispatch and cost independently.",
+                        err=True,
+                    )
                 node["plan_path"] = plan_path
                 if linked_size and not node.get("size"):
                     node["size"] = linked_size
