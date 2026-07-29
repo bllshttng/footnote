@@ -62,10 +62,12 @@
 #     never reports a launch that did not happen; never silently swallows.
 #   - Fire-and-forget: this script NEVER writes/clears the caller's
 #     .fno/target-state.md. The planning session is untouched.
-#   - Under --all-ready only `ready` nodes dispatch. An EXPLICITLY-NAMED node
-#     also dispatches when idea-status (the triage pile; there is no distinct
-#     `triage` status) - naming it is the human's vet, the worker runs
-#     think->blueprint->do; blocked/deferred are always parked.
+#   - Under --all-ready, `ready` nodes and plan-less `idea` nodes (Rung.NONE,
+#     cold-dispatchable per x-e24a) dispatch; a linked idea stub (plan_path set,
+#     Rung.IDEA) and `design` are parked. An EXPLICITLY-NAMED node also dispatches
+#     when idea-status (the triage pile; there is no distinct `triage` status) -
+#     naming it is the human's vet, the worker runs think->blueprint->do;
+#     blocked/deferred are always parked.
 
 set -uo pipefail
 
@@ -253,6 +255,7 @@ for id in "${NODES[@]}"; do
   fi
 
   status="$(printf '%s' "$node_json" | jq -r '.status // "unknown"')"
+  plan_path="$(printf '%s' "$node_json" | jq -r '.plan_path // ""')"
 
   case "$status" in
     done)
@@ -276,9 +279,10 @@ for id in "${NODES[@]}"; do
       # `design` is a linked-but-unblueprinted doc) IS the human's vet: dispatch
       # it and let the /target worker run the phases the rung still needs -
       # think->blueprint->do from `idea`, blueprint->do from `design`.
-      # --all-ready stays ready-only (its enumeration yields neither rung;
-      # this guard makes that fail-safe).
-      if [[ "$ALL_READY" -eq 1 ]]; then
+      # Under --all-ready a plan-less idea (Rung.NONE) is cold-dispatchable
+      # (x-e24a) and drains like ready work; a linked idea stub (plan_path set,
+      # Rung.IDEA) or a `design` doc still needs warm inline-fill, so park it.
+      if [[ "$ALL_READY" -eq 1 && ( "$status" != "idea" || -n "$plan_path" ) ]]; then
         echo "parked $id reason=\"$status (not up-next)\""
         n_parked=$((n_parked + 1))
         continue

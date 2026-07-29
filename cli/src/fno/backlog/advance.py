@@ -2002,6 +2002,7 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
     """
     from fno.graph.store import read_graph
     from fno.paths import graph_json
+    from fno.graph.ladder import is_cold_dispatchable
 
     entries = read_graph(graph_json())
     # Containers are never dispatched as workers (x-33b2): a dependent that is
@@ -2023,10 +2024,13 @@ def _direct_dependents(closed_node_id: str, closed_project: Optional[str]) -> li
             continue
         if closed_node_id not in (e.get("blocked_by") or []):
             continue
-        # "now-unblocked" == ready: blocker done + no other open blocker + has a
-        # plan. A still-blocked dependent reads `blocked`; a plan-less one reads
-        # `idea`; a claimed/done/deferred one reads its own bucket - all excluded.
-        if e.get("status") != "ready":
+        # "now-unblocked" == ready OR a plan-less idea (x-e24a): blocker done + no
+        # other open blocker. A still-blocked dependent reads `blocked` (status
+        # derivation resolves an unresolved blocker to blocked, never idea), so an
+        # idea-status dependent is genuinely unblocked and cold-dispatchable; a
+        # claimed/done/deferred one reads its own bucket. A linked-but-undesigned
+        # stub (Rung.IDEA) is filtered out by is_cold_dispatchable's rung check.
+        if e.get("status") != "ready" and not is_cold_dispatchable(e):
             continue
         if selection_guards(e, by_id, staleness_days=staleness_days):
             continue  # dead-ancestor or stale-quarantine - do not revive

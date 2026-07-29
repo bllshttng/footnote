@@ -56,15 +56,19 @@ case "$sub $verb" in
       # x-3218: a title-derived slug feeds the agent-name budget. Omitted unless
       # set, so every pre-existing scenario keeps its slugless <verb>-<id> name.
       [[ -f "$S/slug_$id" ]] && verb_fragment="$verb_fragment,\"slug\":\"$(cat "$S/slug_$id")\""
+      # x-e24a: plan_path distinguishes a plan-less idea (Rung.NONE) from a
+      # linked idea stub (Rung.IDEA) for the --all-ready cold-dispatch gate.
+      plan_fragment=""
+      [[ -f "$S/plan_$id" ]] && plan_fragment=",\"plan_path\":\"$(cat "$S/plan_$id")\""
       # Emit _resolved_cwd when set, otherwise omit the field (stale-fno sim).
       if [[ -f "$S/resolved_cwd_$id" ]]; then
-        printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s}\n' \
+        printf '{"id":"%s","status":"%s","_resolved_cwd":"%s","cwd":"%s"%s%s%s}\n' \
           "$id" "$(cat "$S/status_$id")" \
           "$(cat "$S/resolved_cwd_$id")" \
-          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment"
+          "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment"
       else
-        printf '{"id":"%s","status":"%s","cwd":"%s"%s%s}\n' \
-          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment"
+        printf '{"id":"%s","status":"%s","cwd":"%s"%s%s%s}\n' \
+          "$id" "$(cat "$S/status_$id")" "$(cat "$S/cwd_$id" 2>/dev/null || echo "")" "$pr_fragment" "$verb_fragment" "$plan_fragment"
       fi
     else
       exit 1   # unknown node -> nonzero, no output (mirrors not-found)
@@ -224,6 +228,7 @@ chmod +x "$NAME_BRIDGE"
 export NAME_BRIDGE
 
 set_status() { echo "$2" > "$MOCKSTATE/status_$1"; }
+set_plan()   { echo "$2" > "$MOCKSTATE/plan_$1"; }   # x-e24a: plan_path -> linked stub (Rung.IDEA)
 set_claim()  { echo "$2" > "$MOCKSTATE/claim_$1"; }
 set_agent_live() { printf '{"agents":[{"name":"%s","status":"%s"}]}\n' "$1" "$2" > "$MOCKSTATE/agents_list.json"; }
 set_cwd() { echo "$2" > "$MOCKSTATE/cwd_$1"; }
@@ -452,24 +457,29 @@ echo "$out" | grep -q "^launched ab-8888dddd name=target-ab-8888dddd session=dea
   && pass "gate: explicit idea node dispatches via a real launch (think->blueprint->do)" \
   || fail "gate: explicit idea not dispatched: $out"
 
-# ---- gate: --all-ready parks an idea node even if the enumeration leaked it ----
+# ---- gate: --all-ready drains ready + plan-less idea, parks a linked stub ----
+# x-e24a: a plan-less idea (Rung.NONE) is cold-dispatchable and drains like ready
+# work; a linked idea stub (plan_path set, Rung.IDEA) still parks.
 reset_mock
-printf '[{"id":"ab-aaaa1111"},{"id":"ab-8888dddd"}]\n' > "$MOCKSTATE/ready.json"
-set_status ab-aaaa1111 ready; set_status ab-8888dddd idea
+printf '[{"id":"ab-aaaa1111"},{"id":"ab-8888dddd"},{"id":"ab-9999eeee"}]\n' > "$MOCKSTATE/ready.json"
+set_status ab-aaaa1111 ready
+set_status ab-8888dddd idea; set_plan ab-8888dddd stub.md   # linked stub -> parked
+set_status ab-9999eeee idea                                 # plan-less -> cold-dispatched
 out="$(bash "$DISPATCH" --all-ready --dry-run 2>&1)"
-echo "$out" | grep -q '^launched ab-aaaa1111 ' && echo "$out" | grep -q '^parked ab-8888dddd ' \
-  && pass "gate: --all-ready stays ready-only (leaked idea node parked)" \
-  || fail "gate: --all-ready idea guard wrong: $out"
+echo "$out" | grep -q '^launched ab-aaaa1111 ' && echo "$out" | grep -q '^launched ab-9999eeee ' && echo "$out" | grep -q '^parked ab-8888dddd ' \
+  && pass "gate: --all-ready drains ready + plan-less idea, parks linked stub" \
+  || fail "gate: --all-ready cold-idea guard wrong: $out"
 
-# ---- gate: an explicit idea node under --all-ready is still parked (guard is
-#      ALL_READY-scoped per the maintainer's decided scope, not per-id) ----
+# ---- gate: a linked idea stub is parked under --all-ready even when named ----
+# x-e24a: ALL_READY admits plan-less ideas (Rung.NONE) but still parks a linked
+# stub (Rung.IDEA); naming the node does not override the rung gate.
 reset_mock
 printf '[{"id":"ab-aaaa1111"}]\n' > "$MOCKSTATE/ready.json"
-set_status ab-aaaa1111 ready; set_status ab-8888dddd idea
+set_status ab-aaaa1111 ready; set_status ab-8888dddd idea; set_plan ab-8888dddd stub.md
 out="$(bash "$DISPATCH" --all-ready --dry-run ab-8888dddd 2>&1)"
 echo "$out" | grep -q '^parked ab-8888dddd ' \
-  && pass "gate: idea node parked under --all-ready even when also named (ready-only invariant)" \
-  || fail "gate: --all-ready + explicit idea guard wrong: $out"
+  && pass "gate: linked idea stub parked under --all-ready even when named" \
+  || fail "gate: --all-ready + named linked-stub guard wrong: $out"
 
 # ---- AC5-FR: dispatch never mutates the caller's target-state.md ----
 reset_mock; set_status ab-aaaa1111 ready
