@@ -20,6 +20,13 @@
 
 set -uo pipefail
 
+# fno shells can wedge on a stalled daemon / graph lock; bound every call with
+# the shared wall-clock helper rather than the harness's 30s hook timeout
+# (x-989d). Fails closed like the other injection hooks: a missing helper exits 0.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 EVENTS="$REPO_ROOT/.fno/events.jsonl"
 CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
@@ -90,7 +97,9 @@ offer_cmd="${parsed#*$'\t'}"
 # parsed, so a missing/garbled resolver never eats a real fresh offer. Run from
 # $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
 if command -v fno >/dev/null 2>&1; then
-    if node_json=$( cd "$REPO_ROOT" && fno backlog get "$node_id" 2>/dev/null ); then
+    node_json=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
+    _get_rc=$?
+    if [[ "$_get_rc" -eq 0 ]]; then
         # Resolved. Suppress only if the node is already underway; a parse
         # failure or unknown shape exits 1 -> surface (fail safe).
         if printf '%s' "$node_json" | python3 -c '
@@ -109,10 +118,13 @@ except Exception:
 ' 2>/dev/null; then
             exit 0
         fi
-    else
-        # Unresolvable -> phantom, suppress.
+    elif [[ "$_get_rc" -ne 124 ]]; then
+        # Authoritative not-found (nonzero, not a timeout) -> phantom, suppress.
         exit 0
     fi
+    # _get_rc == 124: resolution timed out, not an authoritative not-found. The
+    # cursor already advanced past this offer, so suppressing would discard a
+    # possibly-real offer permanently; degrade to surfacing.
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
@@ -181,7 +193,7 @@ except Exception:
         cand_id=""
         cand_title=""
         if command -v fno >/dev/null 2>&1; then
-            cand_id=$( cd "$REPO_ROOT" && fno backlog ready 2>/dev/null | python3 -c '
+            cand_id=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog ready 2>/dev/null | python3 -c '
 import sys, json
 offered, domain = sys.argv[1], sys.argv[2]
 try:
@@ -199,7 +211,7 @@ except Exception:
 ' "$node_id" "$e_domain" 2>/dev/null ) || cand_id=""
 
             if [[ -z "$cand_id" ]]; then
-                cand_id=$( cd "$REPO_ROOT" && fno backlog next 2>/dev/null | python3 -c '
+                cand_id=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog next 2>/dev/null | python3 -c '
 import sys, json
 offered = sys.argv[1]
 try:
@@ -212,7 +224,7 @@ except Exception:
             fi
 
             if [[ -n "$cand_id" ]]; then
-                cand_title=$( cd "$REPO_ROOT" && fno backlog get "$cand_id" 2>/dev/null | python3 -c '
+                cand_title=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$cand_id" 2>/dev/null | python3 -c '
 import sys, json, re
 _TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 try:

@@ -59,6 +59,9 @@ other_line()      { printf '{"ts":"%s","type":"think_spawned","source":"backlog"
 
 # Stub `fno` so the resolve/in-progress guard's `fno backlog get <id>` is
 # deterministic:
+#   - id in $FNO_STUB_HANG        -> sleep past the hook's bound (with_timeout
+#                                    returns 124; a transient stall, NOT a
+#                                    phantom, so the offer must still surface)
 #   - id in $FNO_STUB_PHANTOM     -> exit 1 (unresolvable / phantom)
 #   - id in $FNO_STUB_INPROGRESS  -> exit 0 + JSON with a PR + claimed status
 #                                    (work already underway)
@@ -74,6 +77,7 @@ cat > "$WORK/bin/fno" <<'STUB'
 # A sentinel so AC2-FR can assert the no-offer fast path makes ZERO fno calls.
 [[ -n "${FNO_STUB_CALLLOG:-}" ]] && printf '%s\n' "$*" >> "$FNO_STUB_CALLLOG"
 if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
+  for h in ${FNO_STUB_HANG:-}; do [[ "${3:-}" == "$h" ]] && { sleep 5; exit 0; }; done
   for p in ${FNO_STUB_PHANTOM:-}; do [[ "${3:-}" == "$p" ]] && exit 1; done
   for w in ${FNO_STUB_INPROGRESS:-}; do
     [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"status":"claimed"}\n'; exit 0; }
@@ -111,6 +115,7 @@ run_hook() { ( cd "$WORK" && PATH="$WORK/bin:$PATH" \
     FNO_STUB_PHANTOM="${FNO_STUB_PHANTOM:-}" \
     FNO_STUB_INPROGRESS="${FNO_STUB_INPROGRESS:-}" \
     FNO_STUB_NONDICT="${FNO_STUB_NONDICT:-}" \
+    FNO_STUB_HANG="${FNO_STUB_HANG:-}" \
     FNO_STUBDIR="${FNO_STUBDIR:-}" \
     FNO_STUB_CALLLOG="${FNO_STUB_CALLLOG:-}" \
     bash "$HOOK" </dev/null ); }
@@ -178,6 +183,16 @@ out="$(run_hook)" || fail "hook nonzero on real offer after phantom"
 ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" == *"x-eeee5555"* ]] || fail "resolve-guard: real offer after a phantom did not surface"
 pass "resolve-guard: real offer still surfaces after a suppressed phantom"
+
+# ── Resolve-guard: a wedged resolver (timeout rc=124) must surface, not eat ──
+# A timeout is transient, not an authoritative not-found, and the cursor already
+# advanced past this offer, so suppressing would discard a real offer for good.
+offered_line "2026-06-30T07:45:00Z" "x-hang9999" >> "$EVENTS"
+out="$(FNO_STUB_HANG="x-hang9999" run_hook)" || fail "hook nonzero on a timed-out resolve"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-hang9999"* ]] \
+    || fail "resolve-guard: a timed-out resolve ate the offer (should surface): ${ctx:-<empty>}"
+pass "resolve-guard: timed-out (rc=124) resolve degrades to surfacing, not suppression"
 
 # ── In-progress guard: an offer for a node already underway is suppressed ──
 # (x-a83a) A claimed / PR-open node re-offering a born-with-why /think is the

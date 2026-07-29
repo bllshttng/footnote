@@ -289,6 +289,96 @@ else
     fail "timeout preference chain reintroduced in: $chain"
 fi
 
+# 7. POSITIVE per-hook guard for the per-turn 30s budget (x-989d). #6 above
+#    proves only that no SECOND bound implementation exists - a negative
+#    invariant, structurally blind to a hook with NO bound at all, which is how
+#    inside-leg-report.sh shipped unbounded right under this passing test. The
+#    positive invariant: every UserPromptSubmit hook (the only hooks bound by
+#    Claude Code's per-turn timeout) that shells to a potentially-blocking
+#    daemon must source the shared helper AND wrap every such call. Scoped to
+#    UserPromptSubmit hooks read LIVE from hooks.json - SessionStart / Stop /
+#    helper hooks run under other budgets and are out of scope, and reading the
+#    wiring instead of a hardcoded list is what catches a FOURTH unbounded hook
+#    the day it is added (the exact hole x-1386's negative guard left open).
+hooks_dir="$REPO_ROOT/hooks"
+hooks_json="$hooks_dir/hooks.json"
+ups_hooks="$(python3 - "$hooks_json" <<'PY'
+import json, os, re, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+seen = []
+for entry in d.get("hooks", {}).get("UserPromptSubmit", []):
+    for h in entry.get("hooks", []):
+        m = re.search(r"([\w./-]+\.sh)", h.get("command", ""))
+        if m:
+            seen.append(os.path.basename(m.group(1)))
+print("\n".join(dict.fromkeys(seen)))
+PY
+)"
+# Scope control: the known UserPromptSubmit hooks must all parse out, else the
+# json read broke and every check below is vacuous (AGENTS.md: an empty result is
+# a claim, not a success).
+for _known in inside-leg-report.sh born-with-why-offer-inject.sh inject-mail-notify.sh; do
+    grep -qx "$_known" <<<"$ups_hooks" \
+        || fail "scope control: $_known missing from parsed UserPromptSubmit hooks; guard cannot run"
+done
+[[ -n "$ups_hooks" ]] && pass "parsed UserPromptSubmit hooks: ${ups_hooks//$'\n'/ }"
+
+guard_fail=0
+for name in $ups_hooks; do
+    f="$hooks_dir/$name"
+    [[ -f "$f" ]] || { fail "UserPromptSubmit hook $name not found at $f"; guard_fail=1; continue; }
+
+    # (a) If it touches a daemon at all - a bare fno/fno-agents token, or a
+    #     resolved "$VAR" report RPC over a socket - it must source the bound.
+    if grep -qE '\b(fno|fno-agents)\b' "$f" \
+       || grep -qE '"\$[A-Z_][A-Z_]*"[[:space:]]+report' "$f"; then
+        grep -qE '(^|[[:space:]])source[[:space:]].*with-timeout\.sh' "$f" \
+            || { fail "$name shells to a daemon but does not source scripts/lib/with-timeout.sh"; guard_fail=1; }
+    fi
+
+    # (b) No UNWRAPPED direct fno/fno-agents call. A wrapped call has
+    #     `with_timeout N ` between the statement boundary and the binary, so a
+    #     direct command-position hit IS the defect. Comments (which quote `fno`
+    #     in backticks) are stripped; `command -v` presence checks never match
+    #     because the `-v` sits between the boundary and the binary.
+    bad="$(grep -nE '(^|[|&;]|\$\(|`)[[:space:]]*(fno|fno-agents)([[:space:]]|$)' "$f" 2>/dev/null \
+           | grep -vE '^[0-9]+:[[:space:]]*#' || true)"
+    [[ -z "$bad" ]] \
+        || { fail "$name has an unwrapped daemon call (wrap in with_timeout): $bad"; guard_fail=1; }
+
+    # (c) A resolved-binary report RPC (e.g. `"$BIN" report`) is invisible to
+    #     the fno-token grep in (b), so check it on its own: every such line
+    #     must carry with_timeout.
+    while IFS= read -r ln; do
+        [[ -n "$ln" ]] || continue
+        printf '%s' "$ln" | grep -q with_timeout \
+            || { fail "$name has an unwrapped report RPC: $ln"; guard_fail=1; }
+    done < <(grep -nE '"\$[A-Z_][A-Z_]*"[[:space:]]+report' "$f" 2>/dev/null)
+done
+[[ $guard_fail -eq 0 ]] \
+    && pass "every UserPromptSubmit hook sources the bound and wraps every daemon call"
+
+# Positive control for (b): a hook with a known-unwrapped call MUST trip the
+# same grep, else the empty result above proves nothing.
+mkdir -p "$TMP/ctl"
+printf '#!/usr/bin/env bash\nx=$(fno backlog get foo)\n' > "$TMP/ctl/bad.sh"
+ctl_hit="$(grep -nE '(^|[|&;]|\$\(|`)[[:space:]]*(fno|fno-agents)([[:space:]]|$)' "$TMP/ctl/bad.sh" 2>/dev/null)"
+[[ -n "$ctl_hit" ]] \
+    && pass "positive control: an unwrapped fno call is detected" \
+    || fail "positive control failed: grep missed a known-unwrapped fno call"
+
+# Positive control for (c): a resolved-binary report RPC MUST trip the feed-grep,
+# else the empty loop above proves nothing - the same vacuous-pass hole this
+# guard exists to close.
+printf '#!/usr/bin/env bash\n"$BIN" report --session-id x\n' > "$TMP/ctl/rpc.sh"
+rpc_hit="$(grep -nE '"\$[A-Z_][A-Z_]*"[[:space:]]+report' "$TMP/ctl/rpc.sh" 2>/dev/null)"
+[[ -n "$rpc_hit" ]] \
+    && pass "positive control: an unwrapped report RPC is detected" \
+    || fail "positive control failed: grep missed a known-unwrapped report RPC"
+
 echo ""
 echo "with-timeout: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
