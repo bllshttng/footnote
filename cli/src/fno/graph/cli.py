@@ -1373,7 +1373,7 @@ def cmd_decompose(
 
     # 3. Validate the spec entirely before touching the graph (atomicity).
     try:
-        norm = validate_groups(parsed, effective_cap, cap_source)
+        norm = validate_groups(parsed, effective_cap, cap_source, epic_id)
     except DecomposeError as e:
         emit_error(ctx, str(e))
         raise typer.Exit(code=e.exit_code)

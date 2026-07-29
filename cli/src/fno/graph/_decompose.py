@@ -39,6 +39,15 @@ class NormalizedGroup(TypedDict):
     `hard`) happens in the CLI, which can read the epic doc. `stub_against` is an
     optional explicit contract-ref override; absent, the CLI derives it.
 
+    `adopt` (x-b9d7 US1, default []) names EXISTING node ids to re-parent under
+    this group child instead of minting new ones - the packaging path for an
+    epic already populated by `fno backlog idea --parent`. Only the shape is
+    checked here; resolution, group-child identity, and the cycle guard need the
+    graph and run in the CLI's Pass 1. Adopted nodes deliberately never receive
+    `group_slug`: that field is the identity key `group_child_slug` (and hence
+    `find_orphans` and the Pass 1 upsert) reads, so a second claimant for one
+    slug would break re-decompose idempotency. Membership rides on `parent`.
+
     `needs_think` (x-edf7 US3, default False) flags a group whose child gets a
     dispatched `/think` + `/blueprint` design pass rather than inline-fill - set
     it for a group that owns a feasibility spike, carries unresolved epic Open
@@ -56,6 +65,7 @@ class NormalizedGroup(TypedDict):
     dep: str
     stub_against: Optional[str]
     needs_think: bool
+    adopt: list[str]
 
 
 def extract_contract_versions(doc_text: str) -> set[int]:
@@ -430,6 +440,7 @@ def validate_groups(
     groups: object,
     max_prs: Optional[int],
     cap_source: Optional[str] = None,
+    epic_id: Optional[str] = None,
 ) -> list[NormalizedGroup]:
     """Validate the group spec; return the normalized list or raise DecomposeError.
 
@@ -439,10 +450,14 @@ def validate_groups(
       - slugs are well-formed and unique
       - blocked_by_groups reference declared slugs
       - the inter-group dependency graph is acyclic
+      - `adopt` is a list of non-empty ids, no id claimed twice, none the epic
 
     `cap_source` labels where the ceiling came from (`max_children` + doc path,
     `--max-prs`, or the config default) so an overflow refusal is self-describing;
     it defaults to `--max-prs N` when the caller passes nothing.
+
+    `epic_id` is the epic the spec decomposes, used only to reject an `adopt`
+    entry naming it. Omit it and that one check is skipped (the CLI passes it).
     """
     if max_prs is not None and max_prs < 1:
         raise DecomposeError(
@@ -540,6 +555,20 @@ def validate_groups(
                 f"group {slug!r} needs_think must be a boolean (got {needs_think!r})",
                 exit_code=1,
             )
+        # Optional adoption list (x-b9d7 US1). Default [] = mint-only, today's
+        # behavior. Shape only: the graph-dependent checks (resolvable, not
+        # already a group child, no cycle) need the locked snapshot and live in
+        # the CLI's Pass 1, keeping the module's rule that a bad SPEC fails
+        # before any graph read.
+        adopt = grp.get("adopt") or []
+        if not isinstance(adopt, list) or not all(
+            isinstance(a, str) and a.strip() for a in adopt
+        ):
+            raise DecomposeError(
+                f"group {slug!r} adopt must be a list of non-empty node ids "
+                f"(got {adopt!r})",
+                exit_code=1,
+            )
         normalized.append(
             {
                 "slug": slug,
@@ -553,8 +582,30 @@ def validate_groups(
                     stub_against.strip() if isinstance(stub_against, str) else None
                 ),
                 "needs_think": needs_think,
+                "adopt": [a.strip() for a in adopt],
             }
         )
+
+    # Adoption re-parents a node under exactly ONE group child, so two groups
+    # claiming the same id is ambiguous rather than additive; name both slugs.
+    # The epic cannot adopt itself into its own child (that is a cycle, caught
+    # again in Pass 1 - this is the cheaper, better-worded refusal).
+    claimed_by: dict[str, str] = {}
+    for grp in normalized:
+        for aid in grp["adopt"]:
+            if epic_id is not None and aid == epic_id:
+                raise DecomposeError(
+                    f"group {grp['slug']!r} adopt names the epic {aid!r} itself",
+                    exit_code=1,
+                )
+            prior = claimed_by.get(aid)
+            if prior is not None:
+                raise DecomposeError(
+                    f"node {aid!r} appears in the adopt list of both group "
+                    f"{prior!r} and group {grp['slug']!r}; it can belong to one",
+                    exit_code=1,
+                )
+            claimed_by[aid] = grp["slug"]
 
     # All referenced slugs must be declared in this decomposition.
     for grp in normalized:
