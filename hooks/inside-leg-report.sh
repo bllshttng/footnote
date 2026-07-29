@@ -56,6 +56,14 @@
 
 set -uo pipefail
 
+# The report RPC and the OSC marker write both reach a daemon socket / a pane
+# PTY that can stall; both are bounded with the shared wall-clock helper rather
+# than the harness's 30s hook timeout (x-989d). Sourcing fails closed: a missing
+# helper makes this fire-and-forget hook exit 0 instead of blocking unbounded.
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+
 STATE="${1:-working}"
 case "$STATE" in
   working | blocked | done) ;;
@@ -98,13 +106,15 @@ fi
 # The sink is /dev/tty (the pane PTY, this process's controlling terminal);
 # FNO_TURN_MARKER_TTY overrides it for tests. Redirect-open fails silently with
 # no controlling terminal (headless), hence the stderr silence + || true. A
-# write to a pane whose reader stalled can block rather than fail; accepted --
-# that pane is frozen anyway, and the hook's own timeout bounds it.
+# write to a pane whose reader stalled blocks rather than fails, so the write
+# runs under the shared bound: a stalled PTY costs the cap, the marker is
+# dropped, and the turn proceeds. The cap needs the helper's process-group kill,
+# not just a subshell, because a blocked printf holds the fd open.
 # Append, not truncate: a turn boundary can emit two markers (D then a re-open
 # C) and each printf reopens the sink. `>>` is identical to `>` on a tty stream
 # but preserves both writes when the sink is a regular file (the test seam).
 TTY_SINK="${FNO_TURN_MARKER_TTY:-/dev/tty}"
-emit_marker() { { printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null || true; }
+emit_marker() { { with_timeout 2 printf '%b' "$1" >>"$TTY_SINK"; } 2>/dev/null || true; }
 
 # First-writer session-identity gate: only the claude pty.rs spawned INTO the
 # pane emits. It fires its first C at turn start, BEFORE it can spawn a nested
@@ -199,7 +209,7 @@ fi
 # No binary -> nothing to report to; stay silent (the inside leg is best-effort).
 [[ -z "$BIN" ]] && exit 0
 
-"$BIN" report \
+with_timeout 2 "$BIN" report \
   --session-id "$SESSION_ID" \
   --seq "$SEQ" \
   --state "$STATE" \
