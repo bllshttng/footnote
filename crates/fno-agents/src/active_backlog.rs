@@ -1152,6 +1152,27 @@ mod tests {
 
     use std::os::unix::fs::PermissionsExt;
 
+    /// Hold this for the whole body of any test that shells `fno_cmd`.
+    ///
+    /// `fno_cmd` resolves its binary from the process-global `$FNO_BIN` IN
+    /// PREFERENCE to the path passed in, and cargo runs a crate's tests as
+    /// threads in ONE process. So while a sibling test has `FNO_BIN` set to its
+    /// own stub (`scrape.rs` does exactly this), every stub built here is
+    /// silently bypassed and that sibling's stub runs instead - which answers
+    /// nothing this test asked, leaving an empty receipt that
+    /// `dispatch_mission` correctly treats as a benign skip. The failure
+    /// therefore surfaces as a plain empty-vec assertion far from its cause,
+    /// and only under enough parallelism to overlap the two.
+    ///
+    /// Reading `$FNO_BIN` needs the lock exactly as much as writing it: the
+    /// race is reader-vs-writer, so a lock only the writer takes excludes
+    /// nobody.
+    fn env_guard() -> std::sync::MutexGuard<'static, ()> {
+        crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+    }
+
     /// A stub `fno` that appends its argv to `record` and exits 0, so a test can
     /// assert which `backlog done`/`defer` side effects the reconcile fired.
     fn stub_fno(dir: &std::path::Path, record: &std::path::Path) -> String {
@@ -1237,6 +1258,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_done_records_success_and_marks_done() {
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let record = tmp.path().join("fno-calls.txt");
         let fno = stub_fno(&tmp.path().join("bin"), &record);
@@ -1271,6 +1293,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_done_pr_green_without_pr_ref_is_a_failure() {
+        let _env = env_guard();
         // The dead-dispatch signature. A DonePRGreen terminal asserts a
         // PR; a node carrying none means the worker died leaving nothing. It must
         // count toward the streak AND must not `backlog done` (whose merged-PR
@@ -1314,6 +1337,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_done_pr_green_with_pr_ref_is_success() {
+        let _env = env_guard();
         // The healthy counterpart: a PR ref present means the terminal told the
         // truth, so the existing close path runs untouched.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1345,6 +1369,7 @@ mod tests {
 
     #[test]
     fn zero_artifact_check_fails_open_on_unreadable_node() {
+        let _env = env_guard();
         // Fail-open is the safety property: an unparseable `backlog get` must
         // never auto-defer a healthy node. `stub_fno` prints nothing, so the
         // parse fails and the node reports as PR-bearing.
@@ -1361,6 +1386,7 @@ mod tests {
 
     #[test]
     fn pr_ref_read_unions_additional_prs() {
+        let _env = env_guard();
         // The CLI's node_pr_refs unions additional_prs; if this predicate did not,
         // a node whose only ref lives there would read as a dead dispatch.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1377,6 +1403,7 @@ mod tests {
 
     #[test]
     fn empty_pr_url_is_not_a_ref() {
+        let _env = env_guard();
         // A ref must be usable: `--pr-url ""` is present-but-empty and the CLI
         // can derive no ref from it, so it must not read as evidence of a ship.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1393,6 +1420,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_advisory_without_pr_ref_is_still_success() {
+        let _env = env_guard();
         // DoneAdvisory is a doc terminal with no PR by design - the zero-artifact
         // guard must not touch it, or every doc run would trip the breaker.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1424,6 +1452,7 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_awaiting_merge_is_success_without_done() {
+        let _env = env_guard();
         // DoneAwaitingMerge is a successful dispatch (closes at merge via
         // reconcile) - the keep-set records success but must NOT `backlog done`.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1458,6 +1487,7 @@ mod tests {
         // Parity with MegawalkQueue::close: if `fno backlog done` FAILS, the node
         // was not actually closed, so the dispatch must Park (a failure toward the
         // streak), never a false success. Regression guard for the review finding.
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1496,6 +1526,7 @@ mod tests {
         // exits 5 (awaiting merge). That is a SUCCESSFUL dispatch (the node
         // closes at the human merge via reconcile), so the breaker must NOT
         // record a failure - mirror of MegawalkQueue::close's exit-5 mapping.
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
         std::fs::create_dir_all(&bin).unwrap();
@@ -1534,6 +1565,7 @@ mod tests {
 
     #[test]
     fn resolve_crash_at_limit_defers_and_parks() {
+        let _env = env_guard();
         // AC1-FR: a worker death (no termination event) counts as a failure; the
         // Nth consecutive death trips the breaker -> defer + parked event.
         let tmp = tempfile::TempDir::new().unwrap();
@@ -1561,6 +1593,7 @@ mod tests {
 
     #[test]
     fn park_records_a_defer_that_did_not_land() {
+        let _env = env_guard();
         // `breaker.reset` runs whether or not the defer succeeded, so a `parked`
         // row that ASSERTS the park misleads whoever debugs the resulting
         // re-dispatch loop: the node is back with a fresh streak allowance and
@@ -1591,6 +1624,7 @@ mod tests {
 
     #[test]
     fn reconcile_boot_grace_then_crash_floor() {
+        let _env = env_guard();
         // A dispatched worker that never takes its `node:<id>` claim (never
         // booted) is kept for BOOT_GRACE_TICKS reconcile passes, then counted as
         // a crash. Uses a unique fake node id (naturally Free at the global root).
@@ -1628,6 +1662,7 @@ mod tests {
 
     #[test]
     fn refless_done_pr_green_waits_for_the_stamp_before_parking() {
+        let _env = env_guard();
         // finalize stamps pr_number after loop-check emits termination, and its
         // tail is unbounded - so a ref-less read is held across ticks rather than
         // decided on the spot. Only a dispatch still ref-less after the grace is
@@ -1762,6 +1797,7 @@ mod tests {
 
     #[test]
     fn dispatch_mission_records_dispatched_and_continues() {
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
@@ -1787,6 +1823,7 @@ mod tests {
 
     #[test]
     fn dispatch_mission_retires_on_deactivated() {
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
@@ -1803,6 +1840,7 @@ mod tests {
 
     #[test]
     fn dispatch_mission_retires_on_all_done() {
+        let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
             &tmp.path().join("bin"),
@@ -1819,6 +1857,7 @@ mod tests {
 
     #[test]
     fn dispatch_mission_dedups_already_pending() {
+        let _env = env_guard();
         // A boot-window re-echo of a still-pending node must not double-record it.
         let tmp = tempfile::TempDir::new().unwrap();
         let fno = stub_fno_advance(
@@ -1839,6 +1878,7 @@ mod tests {
 
     #[test]
     fn dispatch_mission_unparseable_receipt_continues() {
+        let _env = env_guard();
         // A garbled receipt is a transient skip (Continue), never a crash or a
         // false Retire (the loop's re-resolve catches a truly gone mission).
         let tmp = tempfile::TempDir::new().unwrap();

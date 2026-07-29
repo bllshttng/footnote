@@ -1339,12 +1339,18 @@ fn renew_locked(path: &Path, holder: &str, ttl_ms: i64) -> Result<bool, String> 
     Ok(true)
 }
 
-/// Process-global lock serializing every test (in ANY module) that mutates
-/// `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and the
-/// crate test suite runs multithreaded, so a per-module lock lets a daemon test
-/// and a drive test interleave and clobber each other's env — one shared mutex
-/// is the only correct serialization. `cfg(test)` sets crate-wide during
+/// Process-global lock serializing every test (in ANY module) that mutates OR
+/// READS `FNO_CLAIMS_ROOT` / `PATH` / `FNO_BIN`. Env vars are process-global and
+/// the crate test suite runs multithreaded, so a per-module lock lets a daemon
+/// test and a drive test interleave and clobber each other's env - one shared
+/// mutex is the only correct serialization. `cfg(test)` sets crate-wide during
 /// `cargo test`, so this is visible to every module's test code.
+///
+/// READS COUNT, and the word "mutates" alone used to say otherwise. The race is
+/// reader-vs-writer, so a lock only writers take excludes nobody: while one test
+/// holds `FNO_BIN` pointed at its own stub, every concurrent test that resolves a
+/// binary through `$FNO_BIN` silently execs that stub instead of its own. A
+/// reader is not exempt just because it leaves the variable as it found it.
 #[cfg(test)]
 pub fn test_env_lock() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
