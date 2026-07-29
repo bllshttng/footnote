@@ -373,6 +373,47 @@ def test_headless_create_account_spawn_passes_settings_flag(
     assert "--settings" in seen["argv"]
 
 
+def test_account_threads_overlay_to_bg_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The account overlay must reach the bg create lane through the real CLI
+    dispatch path, not only at the mocked provider seam - mirrors
+    test_route_threads_resolved_env_to_dispatch for the account axis. Without it,
+    dropping the `account_env=account_env` kwarg on the bg dispatch call would
+    leave every other account test green."""
+    from fno.agents import account_env as ae, dispatch, spawn_gate
+
+    # Force the Python dispatch path so the spawn reaches cmd_spawn regardless of
+    # whether an fno-agents binary is installed (an --account spawn is not in the
+    # py_spawn set, so auto-routing would otherwise exec the binary).
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    overlay = ae.AccountOverlay(
+        account_id="acct", env={"CLAUDE_CONFIG_DIR": "/x/.claude"}, lane="config-dir"
+    )
+    monkeypatch.setattr(ae, "resolve_account_overlay_or_exit", lambda _aid: overlay)
+
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch_spawn(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch_spawn)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--account", "acct"],
+    )
+    assert result.exit_code == 0, result.output
+    # The overlay threaded through to the bg create lane.
+    assert captured["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    # account and route are mutually exclusive; route_env is absent on this spawn.
+    assert captured.get("route_env") in (None, {})
+
+
 def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
     from fno.agents import dispatch, spawn_gate
 
