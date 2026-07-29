@@ -10,7 +10,9 @@ import os
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
+from fno.adapters.providers.model import ProviderRecord
 from fno.agents.account_env import SCRUB_AUTH_VARS
 from fno.agents.model_routing import (
     MODEL_ENV_KEYS,
@@ -196,6 +198,43 @@ def test_seam_scrub_leaves_a_non_account_spawn_alone(monkeypatch):
     monkeypatch.setenv("ANTHROPIC_BASE_URL", ZAI_ENV["ANTHROPIC_BASE_URL"])
     _scrub_account_auth_at_seam([*BASE, "-P", "zai", "--model", "glm-5.2"])
     assert os.environ["ANTHROPIC_BASE_URL"] == ZAI_ENV["ANTHROPIC_BASE_URL"]
+
+
+# ---- x-369c: auth=api_key recognizes ANTHROPIC_AUTH_TOKEN ----
+
+
+def test_an_api_key_record_naming_an_anthropic_compatible_vendor_validates():
+    # ANTHROPIC_AUTH_TOKEN is the credential Claude Code reads for a non-Anthropic
+    # Anthropic-compatible endpoint (z.ai, DeepSeek), so an api_key record may
+    # carry it instead of ANTHROPIC_API_KEY.
+    record = ProviderRecord(
+        id="zai",
+        name="zai",
+        cli="claude",
+        auth="api_key",
+        env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "${ENV:ZAI_API_KEY}",
+            "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+        },
+    )
+    assert record.auth == "api_key"
+
+
+def test_an_api_key_record_with_no_recognized_credential_still_fails():
+    # The validator must not become a rubber stamp: an env block with endpoint
+    # and model vars but no credential is still rejected.
+    with pytest.raises(ValidationError):
+        ProviderRecord(
+            id="zai",
+            name="zai",
+            cli="claude",
+            auth="api_key",
+            env={
+                "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+            },
+        )
 
 
 if __name__ == "__main__":
