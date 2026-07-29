@@ -2987,6 +2987,11 @@ def reconcile_agents(
     # re-register, and stamping by name alone would put the old row's claude uuid
     # onto a replacement (possibly codex/gemini) row and misroute its mail.
     pending_backfill: dict[str, tuple[Optional[str], str]] = {}
+    # name -> (pid, mux ref, resolved Codex thread id). Unlike the Claude
+    # backfill above, every field is rechecked under the registry write lock:
+    # the pane process is the identity authority and a same-name replacement
+    # must never inherit its rollout.
+    pending_codex_backfill: dict[str, tuple[int, dict, str]] = {}
 
     # ``pending_updates`` accumulates per-name status flips across the
     # probe loop; at the end we apply ALL of them via a SINGLE
@@ -3089,7 +3094,88 @@ def reconcile_agents(
             )
             continue
         elif entry.harness == "codex":
-            if codex_index_state != "ready":
+            # An id-less persistent pane can be healthy while Codex is still
+            # creating its rollout. Heal it from the pane's own process tree;
+            # the session index is not needed for this correlation.
+            if not entry.harness_session_id and entry.mux and entry.pid:
+                terminal = entry.status in {
+                    "orphaned",
+                    "failed",
+                    "exited",
+                    "permanent_dead",
+                }
+                if terminal:
+                    continue
+
+                from fno.agents.mux_spawn import _codex_session_id_for_pid
+                from fno.agents.spawn_gate import _pid_alive
+
+                if _pid_alive(entry.pid, entry.pid_start_time):
+                    try:
+                        healed = _codex_session_id_for_pid(entry.pid)
+                    except Exception:  # noqa: BLE001 -- an unreadable process stays pending
+                        healed = None
+                    if healed:
+                        duplicate = any(
+                            other.name != entry.name
+                            and other.harness_session_id == healed
+                            for other in entries
+                        )
+                        if duplicate:
+                            errors.append(
+                                {
+                                    "name": entry.name,
+                                    "provider": "codex",
+                                    "id": None,
+                                    "reason": "duplicate-codex-session-id",
+                                }
+                            )
+                        else:
+                            pending_codex_backfill[entry.name] = (
+                                entry.pid,
+                                dict(entry.mux),
+                                healed,
+                            )
+                        continue
+
+                    if entry.status != "spawning":
+                        pending_updates[entry.name] = replace(entry, status="spawning")
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "codex-session-id-pending",
+                        }
+                    )
+                    continue
+
+                # The pane process is gone. Preserve terminal rows above; a
+                # nonterminal pending/live row follows the existing orphan path.
+                new_status = "orphaned"
+            elif not entry.harness_session_id and entry.status in {
+                "orphaned",
+                "failed",
+                "exited",
+                "permanent_dead",
+            }:
+                continue
+            elif not entry.harness_session_id:
+                events.emit(
+                    "agent_inconsistent",
+                    name=entry.name,
+                    provider="codex",
+                )
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "codex",
+                        "id": None,
+                        "reason": "missing-codex-session-id",
+                    }
+                )
+                continue
+            elif codex_index_state != "ready":
                 # AC3-EDGE: cannot probe codex reachability; report as
                 # error but do NOT flip status. The reason discriminator
                 # distinguishes "fresh install" (operator action: ignore)
@@ -3107,27 +3193,9 @@ def reconcile_agents(
                     }
                 )
                 continue
-            if not entry.harness_session_id:
-                # Registry corruption: a codex row should always carry its
-                # session id (US4-codex AC1-HP invariant). Surface but do
-                # not mutate - mark as inconsistent for manual triage.
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="codex",
-                )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "codex",
-                        "id": None,
-                        "reason": "missing-codex-session-id",
-                    }
-                )
-                continue
-
-            reachable = entry.harness_session_id in known_codex_ids
-            new_status = "live" if reachable else "orphaned"
+            else:
+                reachable = entry.harness_session_id in known_codex_ids
+                new_status = "live" if reachable else "orphaned"
 
         elif entry.harness == "claude":
             if not claude_path_present:
@@ -3271,7 +3339,9 @@ def reconcile_agents(
     # a partial split. The all-or-nothing atomicity is enforced by
     # update_registry's own atomic-rename semantics — the closure is
     # pure, so an OSError mid-write leaves the registry untouched.
-    if pending_updates or pending_backfill:
+    if pending_updates or pending_backfill or pending_codex_backfill:
+
+        codex_backfill_applied: set[str] = set()
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Build the new entries from the CURRENT (under-lock) entries,
@@ -3296,6 +3366,25 @@ def reconcile_agents(
                         # claude uuid is synced from it on the next load's backfill.
                         updates["harness_session_id"] = hsid
                         updates["harness"] = e.harness
+                if e.name in pending_codex_backfill:
+                    probed_pid, probed_mux, hsid = pending_codex_backfill[e.name]
+                    duplicate = any(
+                        other.name != e.name
+                        and other.harness_session_id == hsid
+                        for other in current_entries
+                    )
+                    if (
+                        e.harness == "codex"
+                        and e.pid == probed_pid
+                        and e.mux == probed_mux
+                        and not e.harness_session_id
+                        and e.status
+                        not in {"orphaned", "failed", "exited", "permanent_dead"}
+                        and not duplicate
+                    ):
+                        updates["harness_session_id"] = hsid
+                        updates["status"] = "live"
+                        codex_backfill_applied.add(e.name)
                 out.append(replace(e, **updates) if updates else e)
             return out
 
@@ -3307,7 +3396,7 @@ def reconcile_agents(
             # see a recovered/orphaned record that never actually committed.
             # A backfill that never committed must not claim it healed either.
             write_error = f"registry-write-failed: {exc}"
-            failed_names = set(pending_updates.keys())
+            failed_names = set(pending_updates.keys()) | set(pending_codex_backfill.keys())
             for change in list(orphaned):
                 if change["name"] in failed_names:
                     orphaned.remove(change)
@@ -3319,6 +3408,34 @@ def reconcile_agents(
             for change in list(backfilled):
                 backfilled.remove(change)
                 errors.append({**change, "id": None, "reason": write_error})
+            for name in pending_codex_backfill:
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": "codex",
+                        "id": None,
+                        "reason": write_error,
+                    }
+                )
+        else:
+            for name, (_pid, _mux, hsid) in pending_codex_backfill.items():
+                if name in codex_backfill_applied:
+                    backfilled.append(
+                        {
+                            "name": name,
+                            "provider": "codex",
+                            "harness_session_id": hsid,
+                        }
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "codex-session-id-backfill-raced",
+                        }
+                    )
 
     events.emit(
         "reconcile_done",

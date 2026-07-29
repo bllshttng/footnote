@@ -2142,9 +2142,10 @@ impl Core {
     /// Decision 6); `PaneWhere` is the reverse.
     fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
         self.agents.iter().find_map(|a| match &a.mux {
-            Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
-                a.session_id.clone()
-            }
+            Some((sess, pane)) if sess == &self.session_name && *pane == pid => a
+                .session_id
+                .clone()
+                .or_else(|| a.harness_session_id.clone()),
             _ => None,
         })
     }
@@ -11452,6 +11453,12 @@ mod tests {
             None,
             "no registry row -> no fno_id"
         );
+
+        // Python-authored pane rows carry the canonical harness identity and
+        // leave the legacy fno session slot empty.
+        core.agents[0].session_id = None;
+        core.agents[0].harness_session_id = Some("CODEX-THREAD".into());
+        assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
     }
 
     #[test]

@@ -17,7 +17,6 @@ from __future__ import annotations
 import json
 import subprocess
 from pathlib import Path
-from typing import Optional
 
 import pytest
 
@@ -709,6 +708,157 @@ def test_reconcile_codex_reachable_flips_to_live(
 
     assert len(result.recovered) == 1
     assert load_registry()[0].status == "live"
+
+
+def test_reconcile_backfills_late_codex_pane_identity_without_index(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-CON: the live pane PID is sufficient authority for late binding."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(
+            name="worker-codex",
+            provider="codex",
+            status="spawning",
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch
+    from fno.agents import mux_spawn
+    from fno.agents import spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: pid == 4242)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_codex_session_id_for_pid",
+        lambda pid: session_id if pid == 4242 else None,
+    )
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    row = load_registry()[0]
+    assert row.harness_session_id == session_id
+    assert row.status == "live"
+    assert result.backfilled == [
+        {
+            "name": "worker-codex",
+            "provider": "codex",
+            "harness_session_id": session_id,
+        }
+    ]
+
+
+def test_reconcile_keeps_live_unresolved_codex_pane_pending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC3-FR: a live PID with no rollout stays pending, never orphaned."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-codex",
+            provider="codex",
+            status="spawning",
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: True)
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda _pid: None)
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    row = load_registry()[0]
+    assert row.status == "spawning"
+    assert row.harness_session_id is None
+    assert result.orphaned == []
+    assert result.backfilled == []
+    assert result.errors[0]["reason"] == "codex-session-id-pending"
+
+
+def test_reconcile_refuses_duplicate_late_codex_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-CON: two registry rows may never share one full Codex thread ID."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(
+            name="owner",
+            provider="codex",
+            harness_session_id=session_id,
+            status="live",
+        ),
+        dict(
+            name="late",
+            provider="codex",
+            status="spawning",
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: True)
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_id_for_pid", lambda _pid: session_id
+    )
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    late = next(row for row in load_registry() if row.name == "late")
+    assert late.harness_session_id is None
+    assert late.status == "spawning"
+    assert result.backfilled == []
+    assert any(e["reason"] == "duplicate-codex-session-id" for e in result.errors)
+
+
+@pytest.mark.parametrize("status", ["orphaned", "exited", "permanent_dead"])
+def test_reconcile_never_backfills_terminal_codex_rows(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    """AC4-ERR: terminal lifecycle truth wins over a late rollout."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-codex",
+            provider="codex",
+            status=status,
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: True)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_codex_session_id_for_pid",
+        lambda _pid: pytest.fail("terminal row must not be probed"),
+    )
+
+    dispatch.reconcile_agents(codex_session_index_path=tmp_path / "missing-index.jsonl")
+
+    row = load_registry()[0]
+    assert row.status == status
+    assert row.harness_session_id is None
 
 
 # ---------------------------------------------------------------------------
