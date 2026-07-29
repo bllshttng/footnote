@@ -10,6 +10,7 @@ Filter: `python -m pytest tests/ -k maintain`
 from __future__ import annotations
 
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -212,6 +213,46 @@ def test_detect_dup_groups_idea_only():
     groups = m.detect_dup_groups(entries)
     assert len(groups) == 1
     assert set(groups[0]) == {"ab-a", "ab-b"}
+
+
+# --- leg 3c: shared-plan cost double-count (x-d9a4 task 1.6) ---------------
+
+
+def test_shared_plan_with_two_cost_holders_is_reported():
+    """AC7: a plan held by two nodes that both carry cost_usd is the violation."""
+    entries = [
+        _n("ab-a", plan_path="/plans/p.md", cost_usd=1.20),
+        _n("ab-b", plan_path="/plans/p.md", cost_usd=0.80),
+    ]
+    violations = m.detect_shared_plan_cost_violations(entries)
+    assert len(violations) == 1
+    assert violations[0].plan_path == os.path.normpath("/plans/p.md")
+    assert violations[0].nodes == ["ab-a", "ab-b"]
+
+
+def test_shared_plan_with_one_cost_holder_is_not_reported():
+    """The legal contained shape: one delivery unit (costed) + a contained child
+    (no cost). Only the double-count is the violation (x-e957 boundary)."""
+    entries = [
+        _n("ab-a", plan_path="/plans/p.md", cost_usd=2.0),
+        _n("ab-b", plan_path="/plans/p.md", cost_usd=None),
+    ]
+    assert m.detect_shared_plan_cost_violations(entries) == []
+
+
+def test_abs_rel_mismatch_still_detects_the_double_count():
+    entries = [
+        _n("ab-a", plan_path="/plans/p.md", cost_usd=1.0),
+        _n("ab-b", plan_path="/plans/./p.md", cost_usd=1.0),
+    ]
+    violations = m.detect_shared_plan_cost_violations(entries)
+    assert len(violations) == 1
+    assert set(violations[0].nodes) == {"ab-a", "ab-b"}
+
+
+def test_single_owner_plan_is_not_reported():
+    entries = [_n("ab-a", plan_path="/plans/p.md", cost_usd=1.0)]
+    assert m.detect_shared_plan_cost_violations(entries) == []
 
 
 # --- leg 4: drain stale ----------------------------------------------------

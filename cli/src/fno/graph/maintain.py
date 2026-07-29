@@ -397,6 +397,55 @@ def detect_rollup_candidates(
 
 
 # ---------------------------------------------------------------------------
+# Leg 3c: shared-plan cost double-count (propose-only, even under --apply)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SharedPlanCostViolation:
+    """A plan_path held by more than one node that ALL carry ``cost_usd``.
+
+    ``plan == PR == node`` (x-04b9): one plan should cost once. Two nodes sharing
+    a plan that both carry cost triple the dollars, points, and sessions at the
+    flat project sum. Change 1.1 stops new bindings; this leg finds the instances
+    already in the graph - the check that would have caught the 2026-07-28
+    mislinking the day it happened. Read-only: which node is the delivery unit is
+    operator judgment, and guessing it would move cost.
+    """
+
+    plan_path: str
+    nodes: list[str]  # ids carrying cost_usd on this plan
+
+
+def detect_shared_plan_cost_violations(entries: list[dict]) -> list[SharedPlanCostViolation]:
+    """Plans whose cost is claimed by more than one node.
+
+    A plan held by two nodes where only one carries ``cost_usd`` is the LEGAL
+    contained shape (one delivery unit plus contained children, x-e957) and is
+    NOT reported - only the double-count is the violation. Never mutates.
+    """
+    from fno.graph.store import normalize_plan_path
+
+    cost_holders: dict[str, list[str]] = {}
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        plan = normalize_plan_path(e.get("plan_path"))
+        if plan is None or e.get("cost_usd") is None:
+            continue
+        nid = e.get("id")
+        if not isinstance(nid, str):
+            continue
+        cost_holders.setdefault(plan, []).append(nid)
+    violations = [
+        SharedPlanCostViolation(plan_path=plan, nodes=sorted(ids))
+        for plan, ids in cost_holders.items()
+        if len(ids) > 1
+    ]
+    violations.sort(key=lambda v: v.plan_path)
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # Leg 4: drain stale ideas (propose-only)
 # ---------------------------------------------------------------------------
 

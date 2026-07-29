@@ -7539,6 +7539,7 @@ def cmd_maintain(
     pr_url_writable = [f for f in pr_url_fixes if f.pr_url]
     pr_url_unresolvable = [f for f in pr_url_fixes if not f.pr_url]
     dup_groups = _maintain.detect_dup_groups(entries)
+    plan_cost_violations = _maintain.detect_shared_plan_cost_violations(entries)
     # Propose-only in v1 even under --apply: a bulk reparent has no human
     # reading a receipt the way intake's one-at-a-time auto-link does.
     try:
@@ -7808,6 +7809,7 @@ def cmd_maintain(
         "pr_url_backfilled": len(applied_pr_urls) if apply else len(pr_url_writable),
         "pr_url_unresolvable": len(pr_url_unresolvable),
         "dedup_groups": len(dup_groups),
+        "shared_plan_cost_violations": len(plan_cost_violations),
         "rollup_candidates": len(rollup_cands),
         "stale_ideas": len(stale),
         "now_overflow": list(overflow) if overflow else None,
@@ -7862,6 +7864,9 @@ def cmd_maintain(
                 ],
             },
             "dedup_groups": dup_groups,
+            "shared_plan_cost_violations": [
+                {"plan_path": v.plan_path, "nodes": v.nodes} for v in plan_cost_violations
+            ],
             "rollup_candidates": [
                 {"node_id": n, "epic_id": e, "score": sc} for n, e, sc in rollup_cands
             ],
@@ -7985,6 +7990,13 @@ def cmd_maintain(
         )
     for group in dup_groups:
         typer.echo(f"  near-duplicate ideas (merge/supersede by hand): {', '.join(group)}")
+    for v in plan_cost_violations:
+        typer.echo(
+            f"  shared-plan cost double-count {v.plan_path}: {', '.join(v.nodes)} "
+            f"all carry cost_usd (a plan is one PR is one node; one node is the "
+            f"delivery unit, the rest are contained). Read-only: pick the unit "
+            f"and `fno backlog update <other> --plan-path null` by hand."
+        )
     for nid, epic_id, score in rollup_cands:
         typer.echo(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
