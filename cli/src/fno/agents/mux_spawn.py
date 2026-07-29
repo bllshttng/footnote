@@ -680,19 +680,19 @@ def _mesh_env_wrapper(
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
-    if role or route_env:
-        route = route_env
-        if route is None:
-            from fno.agents.model_routing import resolve_route
+    # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
+    # account's own login. SCRUB inherited auth vars (env -u) so an ambient
+    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't override the account's
+    # login and bill the wrong account. Applied BEFORE the route so a route (when
+    # both are present, x-5ed4) wins endpoint+auth+model atomically (x-2af5):
+    # env(1) assignments are left-to-right last-wins, so the route pairs below
+    # override the account's, while CLAUDE_CONFIG_DIR survives.
+    if account_env:
+        from fno.agents.account_env import SCRUB_AUTH_VARS
 
-            route = resolve_route(role)
-        if route:
-            # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
-            # a lingering API key or subscription OAuth token would otherwise
-            # override it and send the routed pane back to Anthropic. `env -u`
-            # on an unset var is a harmless no-op.
-            unset = ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
-            pairs += [f"{k}={v}" for k, v in route.items()]
+        for _k in SCRUB_AUTH_VARS:
+            unset += ["-u", _k]
+        pairs += [f"{k}={v}" for k, v in account_env.items()]
     # Set-or-clear the whole triple, never merge. A pane spawned from a
     # node-bound worker inherits that worker's env, so adding only what this
     # spawn resolved would leave an ad-hoc pane carrying the parent's FNO_NODE
@@ -704,19 +704,20 @@ def _mesh_env_wrapper(
         if _k not in resolved_prov:
             unset += ["-u", _k]
     pairs += [f"{k}={v}" for k, v in resolved_prov.items()]
-    # Per-spawn account overlay (x-d012), applied LAST so an explicit --account
-    # beats a stale parent CLAUDE_CONFIG_DIR (env(1) assignments are
-    # left-to-right, last wins). --account + --route/--role is refused at the
-    # CLI (contradictory axes), so the role-route pairs above are never present
-    # on an --account spawn - the two never co-occur here. SCRUB inherited auth
-    # vars (env -u) so an ambient ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't
-    # override the account's own login and bill the wrong account.
-    if account_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
+    if role or route_env:
+        route = route_env
+        if route is None:
+            from fno.agents.model_routing import resolve_route
 
-        for _k in SCRUB_AUTH_VARS:
-            unset += ["-u", _k]
-        pairs += [f"{k}={v}" for k, v in account_env.items()]
+            route = resolve_route(role)
+        if route:
+            # Scrub the parent's Anthropic creds so the routed AUTH_TOKEN wins:
+            # a lingering API key or subscription OAuth token would otherwise
+            # override it and send the routed pane back to Anthropic. `env -u`
+            # on an unset var is a harmless no-op. `unset +=` (not `=`) so the
+            # account/provenance unsets above are preserved.
+            unset += ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
+            pairs += [f"{k}={v}" for k, v in route.items()]
     return ["env", *unset, *pairs, *argv]
 
 

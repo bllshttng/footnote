@@ -107,29 +107,80 @@ def test_account_non_claude_provider_refused(monkeypatch, runner):
     assert received == {}
 
 
-def test_account_plus_route_refused(monkeypatch, runner):
-    """--account + --route is contradictory (bill claude account vs route away)."""
-    received = _stub_pane_path(monkeypatch)
+def test_account_plus_route_composes(monkeypatch, runner):
+    """x-5ed4: --account + --route compose (account profile + vendor route).
+    Both overlays reach dispatch_spawn; the old 'cannot combine' exit 2 is gone."""
+    from fno.agents import dispatch, spawn_gate
+    import fno.agents.account_env as ae
+    from fno.agents.account_env import AccountOverlay
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: type("G", (), {"release": lambda self: None})())
+    monkeypatch.setattr(
+        ae,
+        "resolve_account_overlay",
+        lambda *a, **k: AccountOverlay(
+            "readyrule", {"CLAUDE_CONFIG_DIR": "/x/.claude"}, "config-dir"
+        ),
+    )
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
         agents_app,
-        ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--substrate", "bg",
-         "--route", "zai,glm-5.2"],
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--account", "readyrule", "--route", "zai,glm-5.2"],
     )
-    assert result.exit_code == 2
-    assert "cannot combine with --route" in result.output
-    assert received == {}
+    assert result.exit_code == 0, result.output
+    assert "cannot combine" not in result.output
+    # The account profile AND the vendor route both reached dispatch.
+    assert captured["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
 
 
-def test_account_plus_role_refused(monkeypatch, runner):
-    """--account + --role is refused (role auto-routing would mis-bill)."""
-    received = _stub_pane_path(monkeypatch)
+def test_account_plus_role_composes(monkeypatch, runner):
+    """x-5ed4: --account + --role compose too (the role's fail-safe route + the
+    account profile); no longer refused."""
+    from fno.agents import dispatch, spawn_gate
+    import fno.agents.account_env as ae
+    from fno.agents.account_env import AccountOverlay
+
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: type("G", (), {"release": lambda self: None})())
+    monkeypatch.setattr(
+        ae,
+        "resolve_account_overlay",
+        lambda *a, **k: AccountOverlay(
+            "readyrule", {"CLAUDE_CONFIG_DIR": "/x/.claude"}, "config-dir"
+        ),
+    )
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
     from fno.agents.cli import agents_app
 
     result = runner.invoke(
-        agents_app, ["spawn", "--name", "w1", "hi", "--account", "readyrule", "--role", "tidy"]
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--account", "readyrule", "--role", "tidy"],
     )
-    assert result.exit_code == 2
-    assert "cannot combine with --role" in result.output
-    assert received == {}
+    assert result.exit_code == 0, result.output
+    assert "cannot combine" not in result.output
+    assert captured["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    # role tidy auto-routes to zai (DEFAULT_ROUTED_ROLES) with a key present.
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"

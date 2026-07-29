@@ -1100,23 +1100,19 @@ def cmd_spawn(
             raise typer.Exit(code=2)
         crown_level, crown_scope = _parse_crown(crown)
 
-    # --account contradictions (x-d012), refused BEFORE route resolution so a
-    # keyless route never masks this receipt. --account bills a specific claude
-    # account; a non-claude provider, a --route, or an auto-routing --role sends
-    # the worker to a different provider - the route's ANTHROPIC_* would override
-    # the account's CLAUDE_CONFIG_DIR and silently mis-bill. Refuse all three.
-    if account is not None:
-        if provider != "claude":
-            print(f"--account is claude-only; got provider {provider!r}", file=sys.stderr)
-            raise typer.Exit(code=2)
-        if route is not None or role is not None:
-            other = "--route" if route is not None else "--role"
-            print(
-                f"--account cannot combine with {other}: --account bills a claude "
-                "account, provider routing sends the worker elsewhere. Pass one.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
+    # --account names a claude account PROFILE (config_dir/settings/plugins); a
+    # vendor route (-P/--route/--role) names endpoint+auth+model. They are
+    # independent axes and COMPOSE (x-5ed4): `--account readyrule -P zai` runs
+    # z.ai's model under readyrule's profile. Only a non-claude harness is
+    # refused here (an account rides the claude binary). The composition is made
+    # atomic at the provider layer (providers/claude.py: the route wins
+    # endpoint+auth+model as one unit, the account keeps CLAUDE_CONFIG_DIR), so
+    # the x-2af5 split-brain (overlay winning endpoint+auth while the route won
+    # the model) cannot recur. Refused BEFORE route resolution so a keyless route
+    # never masks this receipt.
+    if account is not None and provider != "claude":
+        print(f"--account is claude-only; got provider {provider!r}", file=sys.stderr)
+        raise typer.Exit(code=2)
 
     # Explicit --route override (x-b0b4). Resolve + FAIL CLOSED here, BEFORE the
     # gate, so a refusal spawns nothing, acquires no gate slot, and leaves the
