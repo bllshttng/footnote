@@ -1561,6 +1561,16 @@ def cmd_decompose(
                         "to no node",
                         exit_code=3,
                     )
+                if target["id"] == epic_resolved_id:
+                    # validate_groups makes the same check against the RAW epic
+                    # argument, so an aliasable `ab-` prefix of the epic slips
+                    # past it and would otherwise land on the generic cycle
+                    # refusal (exit 2) instead of this one (exit 1).
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopt names the epic "
+                        f"{epic_resolved_id} itself",
+                        exit_code=1,
+                    )
                 prior_slug = adopt_claim.get(target["id"])
                 if prior_slug is not None:
                     raise DecomposeError(

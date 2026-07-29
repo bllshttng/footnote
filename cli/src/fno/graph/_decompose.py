@@ -377,6 +377,16 @@ def is_group_child(node: dict) -> bool:
     longer finds it (the upsert lookup is scoped to ``parent == epic``) and
     mints a duplicate for the slug, which is the duplication this whole feature
     exists to prevent, moved one epic over.
+
+    Known false positive, accepted: a PLAIN node whose plan filename happens to
+    match ``<anything>.group-<x>.md`` is classified as a group child, so it is
+    both refused for adoption and left out of the un-adopted warning. That name
+    belongs to the legacy group convention and no shipped path produces it for a
+    non-group plan (``fno plan path`` mints ``<date>-<slug>-<id>.md``), and the
+    failure direction is the safe one: refusing to move an ambiguous node rather
+    than moving it. The un-adopted warning MUST keep using this same predicate -
+    keying it on the base-scoped ``group_child_slug`` instead makes the warning
+    recommend adopting a node this refusal blocks.
     """
     gslug = node.get("group_slug")
     if isinstance(gslug, str) and gslug:

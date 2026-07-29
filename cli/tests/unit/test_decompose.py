@@ -2360,3 +2360,51 @@ def test_own_legacy_group_child_refusal_does_not_blame_another_epic(graph_env, t
     assert result.exit_code == 2, result.output
     assert "another epic" not in result.output
     assert "this epic's group child on a legacy plan path" in result.output
+
+
+def test_adopt_names_the_epic_by_prefix_exits_1_not_as_a_cycle(graph_env, tmp_path):
+    """The epic-self refusal must survive an aliasable spelling.
+
+    `validate_groups` compares the raw epic argument, so a 4-7 hex `ab-` prefix
+    of the epic reaches Pass 1 and used to land on the generic cycle refusal
+    (exit 2) rather than the purpose-built one (exit 1).
+    """
+    g, read_entries = graph_env
+    doc = tmp_path / "e2.md"
+    doc.write_text("---\ntitle: E2\n---\n")
+    _seed_children(g, _node("ab-abcd0001", title="Epic 2", plan_path=str(doc),
+                            status="ready"))
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-abcd0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-abcd"]},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert "names the epic" in result.output
+    assert read_entries() == before
+
+
+@pytest.mark.parametrize("spec,code", [
+    ([{"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-nosuch01"]}], 3),
+    ([{"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-epic0001"]}], 1),
+    ([{"slug": "one", "title": "One", "waves": "1", "adopt": False}], 1),
+    ([{"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+      {"slug": "two", "title": "Two", "waves": "2", "adopt": ["ab-kid00001"]}], 1),
+])
+def test_every_refusal_leaves_the_graph_byte_identical(graph_env, spec, code):
+    """The atomicity contract is byte-level, not parsed-equality.
+
+    The other refusal tests compare `read_entries()`, which would stay green if
+    a refusal path rewrote the file with different key order or whitespace.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"))
+    raw_before = g.read_bytes()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
+    )
+    assert result.exit_code == code, result.output
+    assert g.read_bytes() == raw_before
