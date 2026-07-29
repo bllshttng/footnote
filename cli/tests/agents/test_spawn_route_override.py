@@ -270,6 +270,103 @@ def test_headless_create_routed_spawn_passes_settings_flag(
     assert "--settings" in seen["argv"]
 
 
+# ---------------------------------------------------------------------------
+# An --account spawn expresses its auth/model scrub via a --settings file too:
+# the env scrub is dropped at the claude --bg daemon fork, but a settings file is
+# read by the forked session itself. CLAUDE_CONFIG_DIR rides the env overlay
+# (it selects the config the settings file is read FROM), never the file.
+# ---------------------------------------------------------------------------
+
+
+def test_materialize_account_scrub_settings_unsets_vendor_and_keeps_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import json
+    import os
+
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+    from fno.agents.model_routing import materialize_account_scrub_settings
+
+    # A config_dir account: the overlay only carries CLAUDE_CONFIG_DIR, which
+    # must NOT land in the settings file. Every vendor auth/model var is written
+    # empty, which claude reads as unset (so the account's own login wins).
+    path = materialize_account_scrub_settings({"CLAUDE_CONFIG_DIR": "/x/.claude"})
+    blob = json.load(open(path))["env"]
+    assert "CLAUDE_CONFIG_DIR" not in blob
+    for var in SCRUB_AUTH_VARS:
+        assert blob[var] == ""
+
+    # An api_key account: its resolved ANTHROPIC_* is re-applied over the scrub
+    # so it survives the fork; CLAUDE_CONFIG_DIR is still excluded.
+    overlay = {
+        "CLAUDE_CONFIG_DIR": "/x/.claude",
+        "ANTHROPIC_BASE_URL": "https://api.example/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "acct-token",
+        "ANTHROPIC_MODEL": "claude-opus-4-5",
+    }
+    path2 = materialize_account_scrub_settings(overlay)
+    blob2 = json.load(open(path2))["env"]
+    assert blob2["ANTHROPIC_BASE_URL"] == "https://api.example/anthropic"
+    assert blob2["ANTHROPIC_AUTH_TOKEN"] == "acct-token"
+    assert blob2["ANTHROPIC_MODEL"] == "claude-opus-4-5"
+    assert "CLAUDE_CONFIG_DIR" not in blob2
+    for var in SCRUB_AUTH_VARS:  # vars the overlay did not supply stay unset
+        if var not in overlay:
+            assert blob2[var] == ""
+    assert oct(os.stat(path2).st_mode & 0o777) == "0o600"  # carries a token
+    assert materialize_account_scrub_settings(dict(overlay)) == path2  # content-addressed
+
+
+def test_bg_create_account_spawn_passes_settings_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents.providers import claude as claude_mod
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="backgrounded \xb7 abcd1234 \xb7 ok\n", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(
+        name="w",
+        message="hi",
+        cwd=tmp_path,
+        account_env={"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")},
+    )
+    argv = seen["argv"]
+    assert "--settings" in argv
+    assert argv[argv.index("--settings") + 1].endswith(".json")
+
+
+def test_headless_create_account_spawn_passes_settings_flag(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    from fno.agents.providers import claude as claude_mod
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.headless_create(
+        message="hi",
+        cwd=tmp_path,
+        account_env={"CLAUDE_CONFIG_DIR": str(tmp_path / ".claude")},
+    )
+    assert "--settings" in seen["argv"]
+
+
 def test_route_allowed_on_headless(monkeypatch: pytest.MonkeyPatch) -> None:
     from fno.agents import dispatch, spawn_gate
 

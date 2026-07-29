@@ -324,11 +324,17 @@ def headless_create(
     # direct `claude -p` subprocess would inherit route env too, but --settings
     # keeps the two lanes identical and is the mechanism that survives the bg
     # daemon fork, so the route behaves the same whichever substrate the caller
-    # picked.
+    # picked. An --account spawn gets its auth/model scrub via the same channel
+    # for the same reason (and for parity with bg); the env scrub still runs as
+    # the floor below.
     if route_env:
         from fno.agents.model_routing import materialize_route_settings
 
         argv += ["--settings", materialize_route_settings(route_env)]
+    elif account_env:
+        from fno.agents.model_routing import materialize_account_scrub_settings
+
+        argv += ["--settings", materialize_account_scrub_settings(account_env)]
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
     else:
@@ -457,11 +463,19 @@ def bg_create(
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
     # x-6de8: a routed bg session loses its ANTHROPIC_* env across the daemon
     # fork; write it to a --settings file the session process reads itself.
+    # An --account spawn has the same problem: the env scrub below is dropped at
+    # the fork too, so the scrub (and an api_key account's resolved ANTHROPIC_*)
+    # rides a settings file as well. --account and --route/--role are mutually
+    # exclusive (refused at the CLI), so the two branches never co-occur.
     settings_path: Optional[str] = None
     if route_env:
         from fno.agents.model_routing import materialize_route_settings
 
         settings_path = materialize_route_settings(route_env)
+    elif account_env:
+        from fno.agents.model_routing import materialize_account_scrub_settings
+
+        settings_path = materialize_account_scrub_settings(account_env)
     argv = _build_argv(
         name=name,
         message=message,
