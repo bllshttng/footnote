@@ -6277,13 +6277,21 @@ done
         // caller's 2s liveness probe time out and the test flake as
         // delivered:false ("not-a-live-stream-thread"). Wait for a ping before
         // handing the socket back, so the caller always sees a warm worker.
+        // Capture the successful probe rather than re-probing in the assert: a
+        // second independent 2s probe can itself time out under the same
+        // CPU-starvation that made us wait, flaking the helper after readiness
+        // was already established.
         let live_start = std::time::Instant::now();
-        while live_start.elapsed() < Duration::from_secs(30) && !is_live_stream_thread(&sock).await
-        {
+        let mut live = false;
+        while live_start.elapsed() < Duration::from_secs(30) {
+            if is_live_stream_thread(&sock).await {
+                live = true;
+                break;
+            }
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
-            is_live_stream_thread(&sock).await,
+            live,
             "stream worker socket appeared but never answered a ping for {short_id}"
         );
         sock
