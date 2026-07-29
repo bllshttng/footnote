@@ -6262,13 +6262,29 @@ done
             });
         });
         let sock = home.worker_sock(short_id);
-        let start = std::time::Instant::now();
-        while !sock.exists() && start.elapsed() < Duration::from_secs(20) {
+        // Phase 1: the socket file appears (the worker has bound).
+        let bind_start = std::time::Instant::now();
+        while !sock.exists() && bind_start.elapsed() < Duration::from_secs(20) {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
         assert!(
             sock.exists(),
             "stream worker socket never appeared for {short_id}"
+        );
+        // Phase 2: the worker actually accepts and answers a ping. sock.exists()
+        // is bind, not readiness - a bound-but-starved worker (its own OS thread
+        // + bash subprocess compete for cores under --test-threads=32) makes the
+        // caller's 2s liveness probe time out and the test flake as
+        // delivered:false ("not-a-live-stream-thread"). Wait for a ping before
+        // handing the socket back, so the caller always sees a warm worker.
+        let live_start = std::time::Instant::now();
+        while live_start.elapsed() < Duration::from_secs(30) && !is_live_stream_thread(&sock).await
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        assert!(
+            is_live_stream_thread(&sock).await,
+            "stream worker socket appeared but never answered a ping for {short_id}"
         );
         sock
     }
