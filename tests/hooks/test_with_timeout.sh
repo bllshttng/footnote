@@ -370,6 +370,15 @@ ctl_hit="$(grep -nE '(^|[|&;]|\$\(|`)[[:space:]]*(fno|fno-agents)([[:space:]]|$)
     && pass "positive control: an unwrapped fno call is detected" \
     || fail "positive control failed: grep missed a known-unwrapped fno call"
 
+# Positive control for (c): a resolved-binary report RPC MUST trip the feed-grep,
+# else the empty loop above proves nothing - the same vacuous-pass hole this
+# guard exists to close.
+printf '#!/usr/bin/env bash\n"$BIN" report --session-id x\n' > "$TMP/ctl/rpc.sh"
+rpc_hit="$(grep -nE '"\$[A-Z_][A-Z_]*"[[:space:]]+report' "$TMP/ctl/rpc.sh" 2>/dev/null)"
+[[ -n "$rpc_hit" ]] \
+    && pass "positive control: an unwrapped report RPC is detected" \
+    || fail "positive control failed: grep missed a known-unwrapped report RPC"
+
 echo ""
 echo "with-timeout: $PASS passed, $FAIL failed"
 [[ $FAIL -eq 0 ]]
