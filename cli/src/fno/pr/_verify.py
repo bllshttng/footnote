@@ -377,8 +377,15 @@ def _bounded_remediation(
     pr_number: str, state_file: str, cwd: str, repo_root: str, sleep_fn
 ) -> int:
     """Single gh pr merge --auto attempt + single 30s poll (anti-thrash)."""
-    strategy = _auto_merge().merge_strategy
-    res = run(["gh", "pr", "merge", pr_number, f"--{strategy}", "--auto"], cwd=cwd)
+    auto_merge = _auto_merge()
+    strategy = auto_merge.merge_strategy
+    cmd = ["gh", "pr", "merge", pr_number, f"--{strategy}", "--auto"]
+    # Third of the three sites that build this argv, after `_do_merge` and
+    # `finalize::arm_auto_merge`. All three now read both keys, so a repo that
+    # keeps its branches gets the same treatment whichever path merges the PR.
+    if auto_merge.delete_branch_on_merge:
+        cmd.append("--delete-branch")
+    res = run(cmd, cwd=cwd)
     gh_stderr = res.stderr or ""
     if res.ok:
         # Re-fetch once; if still OPEN do ONE bounded 30s poll.

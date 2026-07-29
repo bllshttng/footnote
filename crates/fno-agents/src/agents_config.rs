@@ -10,10 +10,15 @@
 //! read/parse failure: bounded never prompts, so a typo can never re-introduce
 //! the headless hang AND never silently drops the sandbox into a full bypass.
 //!
-//! Stage 3 (x-8526): the on-disk file is flat `config.toml`, parsed with the
-//! `toml` crate. A `config.toml`-only reader is safe because a Rust runtime is
-//! spawned by Python flows that auto-migrate a legacy settings.yaml on their
-//! first config load, so the flat file is already present by the time this runs.
+//! Stage 3: the on-disk file is flat `config.toml`, parsed with the `toml`
+//! crate. A `config.toml`-only reader is safe because a Rust runtime is spawned
+//! by Python flows that auto-migrate a legacy settings.yaml on their first
+//! config load, so the flat file is already present by the time this runs.
+//!
+//! That invariant has exactly one hole, and it is deliberate: `$FNO_CONFIG`
+//! pinning a `.yaml` path is never migrated (Python parses it by suffix
+//! instead), so this reader cannot see it. `warn_once_if_yaml` makes that case
+//! loud rather than silent; see its comment for why it is not parsed here.
 
 use std::path::{Path, PathBuf};
 
@@ -38,18 +43,68 @@ fn global_config_path() -> Option<PathBuf> {
     std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
 }
 
-/// Ordered config.toml read candidates, mirroring the Python loader precedence:
+/// Ordered config read candidates, mirroring the Python loader precedence:
 /// `$FNO_CONFIG` is the SOLE candidate when set (an explicit path, read as-is);
-/// otherwise `<cwd>/.fno/config.toml` then the global config.toml.
+/// otherwise `<cwd>/.fno/config.toml`, the CANONICAL checkout's config.toml, then
+/// the global one.
+///
+/// The canonical tier is load-bearing under this project's worktree-first
+/// default. `setup-worktree.sh` symlinks `.fno/config.toml` into a worktree only
+/// when it is run; a worktree made by `claude --worktree` or the harness
+/// EnterWorktree has no local copy, so without this tier every getter skips the
+/// project's real config and Rust silently disagrees with `fno config get`.
+/// Deduped when the canonical root IS the cwd, and dropped entirely by
+/// `FNO_NO_CANONICAL_CONFIG=1` (preflight's hermetic runner), exactly as Python
+/// does at `config/__init__.py`'s `_settings_yaml_locations`.
 fn config_candidates(cwd: &Path) -> Vec<PathBuf> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
-        return vec![PathBuf::from(explicit)];
+        let path = PathBuf::from(explicit);
+        warn_once_if_yaml(&path);
+        return vec![path];
     }
     let mut out = vec![cwd.join(".fno/config.toml")];
+    // Exactly "1" suppresses, any other value inert, matching the Python check.
+    let suppress_canonical = std::env::var_os("FNO_NO_CANONICAL_CONFIG")
+        .is_some_and(|v| v == *std::ffi::OsStr::new("1"));
+    if !suppress_canonical {
+        if let Some(canonical) = crate::paths::canonical_repo_root(cwd)
+            .map(|root| root.join(".fno/config.toml"))
+            .filter(|c| !out.contains(c))
+        {
+            out.push(canonical);
+        }
+    }
     if let Some(g) = global_config_path() {
         out.push(g);
     }
     out
+}
+
+/// The one config the Python loader reads and this one cannot.
+///
+/// A legacy `settings.yaml` at a STANDARD location is converted to a flat
+/// config.toml on first load (`_ensure_migrated`), after which Python, Rust and
+/// shell all see the same TOML. But that migration is skipped by design when
+/// `$FNO_CONFIG` pins an explicit path, so Python keeps parsing the handed file
+/// by suffix while this reader's TOML parse fails and EVERY getter silently
+/// takes its default. Say so once instead of diverging in silence: a config
+/// asking for `squash` that reads as `merge` is exactly the failure this module
+/// exists to stop.
+fn warn_once_if_yaml(path: &Path) {
+    static WARNED: std::sync::Once = std::sync::Once::new();
+    if matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some("yaml" | "yml")
+    ) {
+        WARNED.call_once(|| {
+            eprintln!(
+                "fno-agents: $FNO_CONFIG points at {}, which this reader parses as TOML \
+                 and cannot read; every config value falls back to its built-in default. \
+                 Point it at a config.toml, or unset it to use the migrated file.",
+                path.display()
+            );
+        });
+    }
 }
 
 /// Parse a flat config.toml body into a table; `None` on any parse error (a
@@ -93,9 +148,16 @@ fn table_mux_bool(t: &toml::Table, key: &str) -> Option<bool> {
 
 /// Normalize a scalar toml value to the raw string each caller re-coerces
 /// (mirrors the old scanner contract: strings lowercased, numbers stringified).
+///
+/// Trimmed as well as lowercased, matching Python's `_coerce_affirmative`, which
+/// does `v.strip().lower()`. Without the trim a padded `" yes "` reads as false
+/// here while `fno pr merge` reads it as true, and the numeric callers below
+/// fail their `parse()` on padding the Python side tolerates. Trimming in this
+/// one shared normalizer covers every caller; trimming per caller would leave
+/// the siblings diverged.
 fn scalar_to_string(v: &Value) -> Option<String> {
     match v {
-        Value::String(s) => Some(s.to_ascii_lowercase()),
+        Value::String(s) => Some(s.trim().to_ascii_lowercase()),
         Value::Integer(i) => Some(i.to_string()),
         Value::Float(f) => Some(f.to_string()),
         Value::Boolean(b) => Some(b.to_string()),
@@ -185,6 +247,52 @@ pub fn dispatch_auto_merge(cwd: &Path) -> bool {
         t.get("dispatch")?.as_table()?.get("auto_merge")?.as_bool()
     })
     .unwrap_or(false)
+}
+
+/// The `config.auto_merge.*` block, the knobs that shape the `gh pr merge`
+/// argv. Distinct from `dispatch.auto_merge` above, which is the per-project
+/// POSTURE (may we merge at all); these decide HOW, once something has already
+/// decided to.
+///
+/// Both mirror `fno.config.AutoMergeBlock`, which is the source of truth;
+/// `cli/tests/test_config_schema_drift.py` fails when the allowlist here drifts
+/// from the model's. Both degrade to the value `finalize` hardcoded before it
+/// read config at all, so a malformed file is never worse than the old behavior.
+///
+/// One known parity edge, shared with `dispatch_auto_merge`: a NON-STRING value
+/// (`merge_strategy = 3`) yields `None` from the extractor and so falls through
+/// to the next config candidate, where Python's merge-then-coerce loader would
+/// let the malformed project value mask the global one. A misspelled string (the
+/// realistic typo) is handled correctly, because the extractor takes any string
+/// and the allowlist filter runs after resolution.
+pub fn auto_merge_strategy(cwd: &Path) -> String {
+    resolve(cwd, |t| {
+        t.get("auto_merge")?
+            .as_table()?
+            .get("merge_strategy")?
+            .as_str()
+            .map(|s| s.trim().to_string())
+    })
+    .filter(|v| matches!(v.as_str(), "merge" | "squash" | "rebase"))
+    .unwrap_or_else(|| "merge".to_string())
+}
+
+/// Resolve `auto_merge.delete_branch_on_merge` (default `true`).
+///
+/// Mirrors `_coerce_affirmative`'s truth table rather than calling `as_bool()`:
+/// a PRESENT non-affirmative value reads as false, so `delete_branch_on_merge =
+/// "no"` (the shape a settings.yaml migration can leave behind) suppresses the
+/// flag. `as_bool()` would return `None` there and fall through to the `true`
+/// default, deleting a branch the config asked to keep.
+pub fn auto_merge_delete_branch(cwd: &Path) -> bool {
+    resolve(cwd, |t| {
+        t.get("auto_merge")?
+            .as_table()?
+            .get("delete_branch_on_merge")
+            .and_then(scalar_to_string)
+    })
+    .map(|raw| matches!(raw.as_str(), "1" | "true" | "yes" | "on"))
+    .unwrap_or(true)
 }
 
 /// The normalized raw scalar for a direct child of `agents:` (the generalized
@@ -540,6 +648,184 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("am-false", "[dispatch]\nauto_merge = false\n");
         assert!(!dispatch_auto_merge(&cwd));
+    }
+
+    // --- auto_merge.{merge_strategy,delete_branch_on_merge} readers ---
+    // `finalize` hardcoded `--merge` and never passed `--delete-branch`, so a
+    // squash-only repo was armed with a method it forbids and auto-merge
+    // silently never worked. Every default below is the old hardcode, so a
+    // malformed config lands exactly on the pre-fix behavior.
+
+    #[test]
+    fn auto_merge_strategy_absent_is_merge() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ams-absent", "schema_version = 1\n");
+        assert_eq!(auto_merge_strategy(&cwd), "merge");
+    }
+
+    #[test]
+    fn auto_merge_strategy_honors_squash_and_rebase() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for want in ["squash", "rebase", "merge"] {
+            clear_config_env();
+            let cwd = write_project_settings(
+                &format!("ams-{want}"),
+                &format!("[auto_merge]\nmerge_strategy = \"{want}\"\n"),
+            );
+            assert_eq!(auto_merge_strategy(&cwd), want);
+        }
+    }
+
+    #[test]
+    fn auto_merge_strategy_invalid_degrades_to_merge() {
+        // Mirrors the bash + Pydantic coercers, which both fall back to `merge`
+        // on an out-of-allowlist value. No FNO_CONFIG pin needed, unlike the
+        // absent case: the extractor takes ANY string, so a misspelled project
+        // value resolves and is then rejected by the filter, and the global tier
+        // is never consulted.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("ams-bad", "[auto_merge]\nmerge_strategy = \"octopus\"\n");
+        assert_eq!(auto_merge_strategy(&cwd), "merge");
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_absent_is_true() {
+        // Matches AutoMergeBlock's `True` default, which `fno pr merge` honors.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings("amd-absent", "schema_version = 1\n");
+        assert!(auto_merge_delete_branch(&cwd));
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_present_non_affirmative_is_false() {
+        // The reason this reader is not `as_bool()`: a settings.yaml migration
+        // can leave a STRING behind, and `_coerce_affirmative` reads any present
+        // non-affirmative value as false. `as_bool()` would yield None on "no"
+        // and fall through to the `true` default, deleting a branch the config
+        // asked to keep.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for body in [
+            "[auto_merge]\ndelete_branch_on_merge = false\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"no\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"false\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = 0\n",
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings("amd-off", body);
+            assert!(
+                !auto_merge_delete_branch(&cwd),
+                "a present non-affirmative value must suppress --delete-branch: {body}"
+            );
+        }
+    }
+
+    #[test]
+    fn auto_merge_delete_branch_affirmative_forms_are_true() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for body in [
+            "[auto_merge]\ndelete_branch_on_merge = true\n",
+            "[auto_merge]\ndelete_branch_on_merge = \"yes\"\n",
+            "[auto_merge]\ndelete_branch_on_merge = 1\n",
+            // Padded + upper: Python does `v.strip().lower()`, so this is a
+            // supported affirmative there. Untrimmed it read as false here,
+            // appending --delete-branch via `fno pr merge` but not via finalize.
+            "[auto_merge]\ndelete_branch_on_merge = \" YES \"\n",
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings("amd-on", body);
+            assert!(auto_merge_delete_branch(&cwd), "affirmative: {body}");
+        }
+    }
+
+    /// Build a main checkout + linked worktree, with `body` as the CANONICAL
+    /// config and nothing in the worktree. Returns the linked worktree path, or
+    /// None when git is unavailable (mirrors the skip in `paths.rs`).
+    fn linked_worktree_with_canonical_config(name: &str, body: &str) -> Option<PathBuf> {
+        fn git(dir: &Path, args: &[&str]) -> bool {
+            std::process::Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(args)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false)
+        }
+        std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .ok()?;
+        let base = std::env::temp_dir().join(format!("fno-canon-{}-{name}", std::process::id()));
+        std::fs::remove_dir_all(&base).ok();
+        let main = base.join("main");
+        std::fs::create_dir_all(&main).ok()?;
+        git(&main, &["init", "-q"]).then_some(())?;
+        git(&main, &["config", "user.email", "t@t"]);
+        git(&main, &["config", "user.name", "t"]);
+        git(&main, &["commit", "-q", "--allow-empty", "-m", "init"]);
+        std::fs::create_dir_all(main.join(".fno")).ok()?;
+        std::fs::write(main.join(".fno/config.toml"), body).ok()?;
+        let linked = base.join("wt");
+        git(
+            &main,
+            &["worktree", "add", "-q", linked.to_str()?, "-b", "feat"],
+        )
+        .then_some(())?;
+        // The whole point: the worktree has no config of its own.
+        assert!(!linked.join(".fno/config.toml").exists());
+        Some(linked)
+    }
+
+    #[test]
+    fn canonical_checkout_config_is_read_from_a_linked_worktree() {
+        // Worktree-first is this project's default and setup-worktree.sh only
+        // symlinks .fno/config.toml when it runs, so a `claude --worktree` tree
+        // has none. Without the canonical tier every getter here silently
+        // disagrees with `fno config get`, and a squash repo arms `--merge`.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let Some(linked) = linked_worktree_with_canonical_config(
+            "read",
+            "[auto_merge]\nmerge_strategy = \"squash\"\ndelete_branch_on_merge = false\n",
+        ) else {
+            return;
+        };
+        assert_eq!(auto_merge_strategy(&linked), "squash");
+        assert!(!auto_merge_delete_branch(&linked));
+    }
+
+    #[test]
+    fn canonical_checkout_config_is_dropped_by_the_suppress_env() {
+        // FNO_NO_CANONICAL_CONFIG=1 drops ONLY this tier (preflight's hermetic
+        // runner). Exactly "1"; the local and global tiers still apply.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let Some(linked) = linked_worktree_with_canonical_config(
+            "suppress",
+            "[auto_merge]\nmerge_strategy = \"squash\"\n",
+        ) else {
+            return;
+        };
+        std::env::set_var("FNO_NO_CANONICAL_CONFIG", "1");
+        let got = auto_merge_strategy(&linked);
+        std::env::remove_var("FNO_NO_CANONICAL_CONFIG");
+        assert_eq!(
+            got, "merge",
+            "suppressed canonical must fall to the default"
+        );
+    }
+
+    #[test]
+    fn auto_merge_strategy_tolerates_padding() {
+        // The sibling half of the trim above, pinned separately because this
+        // reader trims in its own extractor rather than via scalar_to_string.
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd =
+            write_project_settings("ams-pad", "[auto_merge]\nmerge_strategy = \" squash \"\n");
+        assert_eq!(auto_merge_strategy(&cwd), "squash");
     }
 
     #[test]
