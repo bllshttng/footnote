@@ -22,6 +22,7 @@ on:
       - cli/src/fno/events/schema.yaml
       - scripts/check-event-schema-parity.sh
       - scripts/ci/check-registry-schema-parity.sh
+      - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - cli/src/fno/config/__init__.py
       - .github/workflows/rust-ci.yml
@@ -32,6 +33,7 @@ on:
       - cli/src/fno/events/schema.yaml
       - scripts/check-event-schema-parity.sh
       - scripts/ci/check-registry-schema-parity.sh
+      - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
       - cli/src/fno/config/__init__.py
       - .github/workflows/rust-ci.yml
@@ -79,6 +81,26 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v5
+        with:
+          # The PROTO_VERSION guard below needs a merge-base between the base
+          # tip and the PR head; the default shallow fetch cannot compute one.
+          fetch-depth: 0
+
+      - name: PROTO_VERSION monotonic bump guard
+        # Runs before the Rust build so a version collision fails in seconds
+        # instead of after a full cargo test.
+        #
+        # PR_HEAD_SHA is load-bearing: this job's checkout is the MERGE ref,
+        # whose content already contains the base branch. When two branches bump
+        # to the same value their identical one-line changes merge cleanly, so
+        # the merged file just reads that value and the PR's own change to the
+        # line is invisible in any diff against the base. Only the PR's own head
+        # commit still shows it.
+        if: github.event_name == 'pull_request'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_BASE_REF: ${{ github.base_ref }}
+        run: bash scripts/ci/check-proto-version-bump.sh
 
       - name: Install stable Rust toolchain
         uses: dtolnay/rust-toolchain@stable
