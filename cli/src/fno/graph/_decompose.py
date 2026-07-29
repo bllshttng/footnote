@@ -273,6 +273,7 @@ def scaffold_separate_plan(
     epic_id: str,
     source_doc: str,
     why_digest: str = "",
+    adopted: list[tuple[str, str]] | None = None,
 ) -> str:
     """A self-contained quick-plan stub for one group child.
 
@@ -283,6 +284,13 @@ def scaffold_separate_plan(
     a fresh-context worker never dispatches against an unfilled plan. The epic doc
     remains the design authority; this child carries its own execution plan.
 
+    ``adopted`` seeds an ``## Adopted coverage`` checklist (id + title per folded
+    node) when the group absorbed existing nodes into one PR. Node-level coverage
+    is mechanical (anything unclaimed prints on stderr), but nothing verifies a
+    folded group's plan actually addresses every commitment it absorbed, because
+    both nodes close on merge either way - the checklist is the one mitigation.
+    Empty/None is byte-identical to the pre-adopt scaffold (AC10).
+
     ``idea`` replaced the earlier ``stub`` spelling: ``stub`` was in no status
     vocabulary, so every readiness gate classified a linked scaffold as ``ready``
     and the validator was the only thing standing between it and a dispatcher.
@@ -292,6 +300,17 @@ def scaffold_separate_plan(
     # Escape so a title containing a double quote can't emit invalid YAML.
     yaml_title = group["title"].replace("\\", "\\\\").replace('"', '\\"')
     why_block = why_digest.strip() or _WHY_STUB
+    if adopted:
+        checklist = "".join(f"- [ ] `{nid}` - {title}\n" for nid, title in adopted)
+        coverage_block = (
+            "## Adopted coverage\n\n"
+            "This PR folds work that already had its own node; both close on merge "
+            "whether or not the plan below addresses them, so check each off "
+            "explicitly.\n\n"
+            f"{checklist}\n"
+        )
+    else:
+        coverage_block = ""
     return (
         f'---\n'
         f'title: "{yaml_title}"\n'
@@ -308,6 +327,7 @@ def scaffold_separate_plan(
         f'{group["waves"] or "(unset)"} of the epic\'s Execution Strategy. This is a '
         f'self-contained quick-plan for a fresh-context builder; pull scope detail '
         f'from the named waves and the epic\'s `## File Ownership Map`.\n\n'
+        f'{coverage_block}'
         f'## Changes\n\n'
         f'<!-- Seeded from epic waves {group["waves"] or "(unset)"}. Fill in the '
         f'concrete changes this group ships. -->\n\n'

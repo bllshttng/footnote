@@ -886,6 +886,41 @@ def test_scaffold_empty_why_falls_back_to_stub_marker():
     assert "<!-- Why (from epic):" in text
 
 
+def test_scaffold_seeds_adopted_coverage_checklist():
+    # AC8 (x-d9a4 task 1.7): a group that folds three existing nodes seeds them
+    # as a coverage checklist - node-level coverage is mechanical, but nothing
+    # verifies a folded group's plan addresses every commitment it absorbed,
+    # because both close on merge either way.
+    adopted = [
+        ("ab-00000001", "Add validation"),
+        ("ab-00000002", "Log the retry"),
+        ("ab-00000003", "Doc the flag"),
+    ]
+    text = scaffold_separate_plan(
+        _grp(), "ab-epic0001", "big.md", why_digest="w", adopted=adopted
+    )
+    assert "## Adopted coverage" in text
+    # Sits between Context and Changes, so a reader hits it before the work.
+    assert text.index("## Context") < text.index("## Adopted coverage") < text.index("## Changes")
+    for nid, title in adopted:
+        assert f"- [ ] `{nid}` - {title}" in text
+
+
+def test_scaffold_with_no_adopt_is_byte_identical_to_mint_only():
+    # AC10 (x-d9a4 task 1.7): an empty/absent adopt list must not change the
+    # scaffold at all. Assert the bytes across default/None/[], not merely the
+    # absence of a heading.
+    base = scaffold_separate_plan(_grp(), "ab-epic0001", "big.md", why_digest="w")
+    none_adopt = scaffold_separate_plan(
+        _grp(), "ab-epic0001", "big.md", why_digest="w", adopted=None
+    )
+    empty_adopt = scaffold_separate_plan(
+        _grp(), "ab-epic0001", "big.md", why_digest="w", adopted=[]
+    )
+    assert base == none_adopt == empty_adopt
+    assert "Adopted coverage" not in base
+
+
 # extract_why_digest (US4) ----------------------------------------------------
 
 

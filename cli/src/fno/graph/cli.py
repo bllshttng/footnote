@@ -1781,9 +1781,18 @@ def cmd_decompose(
                 continue
             try:
                 canonical.parent.mkdir(parents=True, exist_ok=True)
+                # Seed the folded nodes (discovery children adopted into this one
+                # PR) as a coverage checklist, so a fresh-context builder sees
+                # every commitment the plan must address (x-d9a4 task 1.7).
+                adopted_nodes = [
+                    (aid, (by_id.get(aid) or {}).get("title") or aid)
+                    for aid in (grp.get("adopt") or [])
+                ]
                 canonical.write_text(
                     scaffold_separate_plan(
-                        grp, epic_resolved_id, source_doc, why_digest=why_digest
+                        grp, epic_resolved_id, source_doc,
+                        why_digest=why_digest,
+                        adopted=adopted_nodes,
                     ),
                     encoding="utf-8",
                 )
