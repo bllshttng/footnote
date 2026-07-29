@@ -358,3 +358,91 @@ def test_brief_without_verb_still_rides_env():
     out = _resolve(node_id="x-1", brief="ship carefully")
     assert out["command"] == "/target no-merge x-1"
     assert out["env"]["TARGET_BRIEF"] == "ship carefully"
+
+
+def _normalize_sh():
+    """Locate skills/agent/scripts/normalize.sh from this test's location."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve()
+    for _ in range(8):
+        cand = root / "skills/agent/scripts/normalize.sh"
+        if cand.exists():
+            return cand
+        root = root.parent
+    raise AssertionError("normalize.sh not found from test location")
+
+
+def test_normalize_reads_the_same_merge_posture_key_as_harness_map():
+    """Parity: the merge posture has TWO independent readers and nothing else
+    pins them together.
+
+    normalize.sh gates arbitrary `/fno:agent spawn` payloads, which never reach
+    resolve_dispatch, so it legitimately keeps its own read rather than being
+    deleted as a workaround (x-8e59). That independence is the hazard: if one
+    side is repointed at a renamed key and the other is not, the two silently
+    disagree about whether a worker may merge.
+
+    The sibling test above mirrors command_surface and slash_prefix. It does not
+    cover posture, which is how the pair went unpinned in the first place.
+    """
+    import re
+    import types
+
+    text = _normalize_sh().read_text()
+    m = re.search(r"fno config get ([\w.]+)", text)
+    assert m, "normalize.sh no longer reads a config key for the merge posture"
+    key = m.group(1)
+
+    # The key must be a declared config key, not a plausible-looking typo.
+    from fno.config.registry import meta_for
+
+    assert meta_for(key) is not None, (
+        f"normalize.sh reads {key!r}, which the config registry does not declare"
+    )
+
+    # Then EXERCISE the Python reader with the key the shell actually reads,
+    # rather than comparing the shell to a literal spelled out here. A literal
+    # only pins the shell to this test file: repoint _load_dispatch_cfg at a
+    # renamed field and a string comparison stays green while the two readers
+    # have silently diverged - the same "guard that never touches the path it
+    # claims to cover" shape as the bug this node fixed (codex P2 on PR #640).
+    #
+    # Build the settings stub FROM the shell's key. If Python is repointed, this
+    # stub no longer grants and the assertion fails; if the shell is repointed,
+    # the registry check above fails. Neither side can move alone.
+    section, _, field = key.partition(".")
+    assert section and field, f"expected a dotted config key, got {key!r}"
+    stub = types.SimpleNamespace(**{section: types.SimpleNamespace(**{field: True})})
+    out = resolve_dispatch(harness="claude", node_id="x-1", settings=stub)
+    assert out["command"] == "/target x-1", (
+        f"normalize.sh reads {key!r}, but setting that field does not grant merge "
+        f"on the Python path (got {out['command']!r}) - the two readers have diverged"
+    )
+
+
+def test_both_merge_posture_readers_default_to_deny():
+    """Parity: no key, no grant - on BOTH sides.
+
+    Granting merge authority is the irreversible direction, so the default and
+    every error path must land on no-merge. normalize.sh states this as
+    `ALLOW_MERGE=0` before its config read (so `fno` absent or erroring degrades
+    to deny); harness_map states it as `is True`, which refuses a truthy
+    non-boolean. A change that flips either default to allow is the one drift
+    worth failing a build over.
+    """
+    import re
+
+    text = _normalize_sh().read_text()
+    # The assignment guarding the config read must be the deny value.
+    m = re.search(r"if \[\[ -z \"\$ALLOW_MERGE\" \]\]; then\s*\n\s*ALLOW_MERGE=(\d)", text)
+    assert m, "normalize.sh's ALLOW_MERGE default block changed shape; re-verify it still denies"
+    assert m.group(1) == "0", "normalize.sh now defaults to GRANTING merge"
+
+    # harness_map: absent key, and a truthy non-boolean, both deny.
+    assert resolve_dispatch(harness="claude", node_id="x-1", dispatch_cfg={})[
+        "command"
+    ] == "/target no-merge x-1"
+    assert resolve_dispatch(
+        harness="claude", node_id="x-1", dispatch_cfg={"auto_merge": "true"}
+    )["command"] == "/target no-merge x-1"
