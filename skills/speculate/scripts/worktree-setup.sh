@@ -29,19 +29,14 @@ if command -v jq >/dev/null 2>&1; then
     WORKTREE_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.path // .worktree_path // empty' 2>/dev/null || true)
 fi
 if [[ -z "$WORKTREE_PATH" ]]; then
-    # No explicit path from CC (the contract at the file top lists only `name`,
-    # so an absent .path is the normal case, not an edge case). Falling back to
-    # $(pwd) is ONLY safe when cwd is already a linked worktree - i.e. CC chdir'd
-    # into the worktree it created. If cwd is the canonical checkout, CC did NOT
-    # chdir, so there is no real worktree path: emitting $(pwd) would tell CC the
-    # canonical root IS the worktree, and edits then land on main while every
-    # signal says the session is isolated (x-ab78 WAVE 1, worst failure shape).
-    # Refuse with the hook's supported abort - exit 0 with NOTHING on stdout
-    # ("no successful output"). NEVER exit non-zero here: per the contract above
-    # a non-zero exit FALLS BACK to CC's default worktree flow and would create
-    # the very thing we are refusing. Canonical detection mirrors the shared
-    # location verdict (hooks/helpers/check-impl-location.sh in the plugin copy):
-    # equal absolute --git-dir / --git-common-dir = canonical; differing = linked.
+    # No .path from CC is normal (the contract lists only `name`). $(pwd) is a
+    # safe fallback only in a linked worktree; on the canonical checkout emitting
+    # it would defeat isolation - edits land on main while every signal says
+    # isolated (x-ab78 WAVE 1). Refuse via exit 0 + empty stdout (the supported
+    # abort: non-zero falls back to CC's default flow and creates the very
+    # worktree refused). Detection mirrors the shared location verdict
+    # (hooks/helpers/check-impl-location.sh): equal absolute
+    # --git-dir/--git-common-dir (incl. both-empty) = canonical; differing = linked.
     _gd="$(git rev-parse --git-dir 2>/dev/null || true)"
     _gcd="$(git rev-parse --git-common-dir 2>/dev/null || true)"
     _is_canonical=1
@@ -51,7 +46,7 @@ if [[ -z "$WORKTREE_PATH" ]]; then
         [[ -n "$_gd" && -n "$_gcd" && "$_gd" != "$_gcd" ]] && _is_canonical=0
     fi
     if [[ "$_is_canonical" == "1" ]]; then
-        echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation). Re-dispatch from a worktree or pass the worktree path explicitly." >&2
+        echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
         exit 0
     fi
     WORKTREE_PATH="$(pwd)"
