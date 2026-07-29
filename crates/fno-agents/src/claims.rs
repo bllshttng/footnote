@@ -2146,13 +2146,19 @@ mod tests {
                     append_event_line(
                         &events,
                         &json!({"ts": "t", "type": "x", "i": i}),
-                        // Generous on purpose: the assertion is that all four
-                        // lines land whole with one rename winner, never that
-                        // they land fast. A tight budget makes a correctness
-                        // test fail on a loaded machine - this flaked at 10s
-                        // under a full preflight and passed alone. A real
-                        // deadlock still fails here, just later.
-                        Duration::from_secs(120),
+                        // The assertion is that all four lines land whole with
+                        // one rename winner, never that they land fast, so the
+                        // budget is generous. But it must EXCEED STALE_MUTEX_STEAL,
+                        // not equal it. steal_if_stale is age-gated, so a FRESH
+                        // holder is never stolen and always releases; the only
+                        // delay past normal contention is a holder starved under
+                        // parallel load, whose lock becomes stealable at exactly
+                        // STALE_MUTEX_STEAL. A budget == the threshold (the prior
+                        // 120s == 120s) puts the steal and the waiter's deadline on
+                        // the same knife-edge, so the deadline wins and the test
+                        // flakes at 120s wall. 2x gives the steal a full threshold
+                        // of headroom before the deadline.
+                        STALE_MUTEX_STEAL * 2,
                     )
                 })
             })
