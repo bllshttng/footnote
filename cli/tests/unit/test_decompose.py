@@ -1742,3 +1742,252 @@ def test_starvation_receipt_names_a_linked_idea_child(graph_env, tmp_path):
         [node], None, True, None, set(), datetime.now(timezone.utc), 21
     )
     assert out == [("x-scaff01", "idea")], f"receipt dropped the node: {out}"
+
+
+# -- adopt: package existing epic children into groups (x-b9d7) --
+
+
+def _epic_child(node_id: str, **overrides) -> dict:
+    """A rich child born via `fno backlog idea --parent` - no group_slug."""
+    return _node(node_id, parent="ab-epic0001", **{"status": "ready", **overrides})
+
+
+def _seed_children(g, *children) -> None:
+    entries = json.loads(g.read_text())["entries"]
+    entries.extend(children)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+
+ADOPT_GROUP = [
+    {"slug": "appendix", "title": "Appendix correctness", "waves": "1",
+     "blocked_by_groups": [], "adopt": ["ab-kid00001", "ab-kid00002", "ab-kid00003"]},
+]
+
+
+def test_adopt_reparents_existing_children_minting_nothing(graph_env):
+    """AC1: three hand-created children become the group's tasks, not duplicates."""
+    g, read_entries = graph_env
+    _seed_children(
+        g,
+        _epic_child("ab-kid00001", title="row counts", details="verified 4,182 rows"),
+        _epic_child("ab-kid00002", title="related-party export", plan_path="/p/two.md"),
+        _epic_child("ab-kid00003", title="appendix B", priority="p1"),
+    )
+    before = {e["id"] for e in read_entries()}
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    )
+    assert result.exit_code == 0, result.output
+
+    entries = read_entries()
+    child = _child(entries, "appendix")
+    by_id = {e["id"]: e for e in entries}
+
+    # Exactly one node was minted: the group child itself.
+    assert set(by_id) - before == {child["id"]}
+    assert before <= set(by_id)  # nothing deleted
+
+    for kid in ("ab-kid00001", "ab-kid00002", "ab-kid00003"):
+        assert by_id[kid]["parent"] == child["id"]
+        # group_slug is the identity key find_orphans and the upsert lookup use;
+        # a second claimant for one slug would break re-decompose idempotency.
+        assert by_id[kid].get("group_slug") is None
+
+    # The epic keeps exactly one direct child now: the group.
+    assert [e["id"] for e in entries if e.get("parent") == "ab-epic0001"] == [child["id"]]
+
+    # Evidence-carrying fields are untouched by adoption.
+    assert by_id["ab-kid00001"]["details"] == "verified 4,182 rows"
+    assert by_id["ab-kid00002"]["plan_path"] == "/p/two.md"
+    assert by_id["ab-kid00003"]["priority"] == "p1"
+
+
+def test_adopt_reports_adopted_ids(graph_env):
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    result = _invoke(
+        ["--json", "backlog", "decompose", "ab-epic0001",
+         "--groups", _groups_json(ADOPT_GROUP)]
+    )
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["groups"][0]["adopted"] == [
+        "ab-kid00001", "ab-kid00002", "ab-kid00003"
+    ]
+
+
+def test_adopt_rerun_is_an_idempotent_noop(graph_env):
+    """AC2: re-running the same spec re-parents nothing and settles the bytes.
+
+    Byte identity is asserted between runs 2 and 3, not 1 and 2. A plain
+    re-decompose carrying no `adopt` key is already not byte-identical on its
+    FIRST re-run: ``read_graph`` migrates entries on read, so a node minted in
+    run 1 gains its full default field set the next time it is written back.
+    The graph converges at run 2 and is stable from there. Pinning run 1 == run
+    2 would fail on today's mint path with no adopt list in sight.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    ).exit_code == 0
+    ids_after_first = {e["id"] for e in read_entries()}
+    parents_after_first = {e["id"]: e.get("parent") for e in read_entries()}
+
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    ).exit_code == 0
+    settled = g.read_text()
+
+    result = _invoke(
+        ["--json", "backlog", "decompose", "ab-epic0001",
+         "--groups", _groups_json(ADOPT_GROUP)]
+    )
+    assert result.exit_code == 0, result.output
+    assert g.read_text() == settled
+
+    # Adoption itself is a no-op from run 2 on: nothing minted, nothing
+    # deleted, no parent moved, and the receipt says so.
+    assert {e["id"] for e in read_entries()} == ids_after_first
+    assert {e["id"]: e.get("parent") for e in read_entries()} == parents_after_first
+    assert json.loads(result.stdout)["groups"][0]["adopted"] == []
+
+
+def test_adopt_same_id_in_two_groups_is_refused(graph_env):
+    """AC3: ambiguous claim fails in validate_groups, before any graph write."""
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"))
+    before = read_entries()
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+            {"slug": "two", "title": "Two", "waves": "2", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert "one" in result.output and "two" in result.output
+    assert read_entries() == before
+
+
+def test_adopt_unresolvable_id_is_refused(graph_env):
+    """AC4: exit 3 (not found) naming the id, graph unmodified."""
+    g, read_entries = graph_env
+    before = read_entries()
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-nosuch01"]},
+        ])]
+    )
+    assert result.exit_code == 3, result.output
+    assert "ab-nosuch01" in result.output
+    assert read_entries() == before
+
+
+def test_adopt_existing_group_child_is_refused(graph_env):
+    """AC5: demoting a group into a task would silently reshape the epic."""
+    g, read_entries = graph_env
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    ).exit_code == 0
+    victim = _child(read_entries(), "1")["id"]
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(
+            THREE_GROUPS + [{"slug": "4", "title": "Group 4", "waves": "7",
+                             "adopt": [victim]}]
+        )]
+    )
+    assert result.exit_code == 2, result.output
+    assert victim in result.output
+    assert read_entries() == before
+
+
+def test_adopt_self_is_refused(graph_env):
+    """A group naming its own resolved id resolves a group_slug by construction."""
+    g, read_entries = graph_env
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    ).exit_code == 0
+    own = _child(read_entries(), "1")["id"]
+    before = read_entries()
+
+    spec = [dict(g0) for g0 in THREE_GROUPS]
+    spec[0]["adopt"] = [own]
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
+    )
+    assert result.exit_code == 2, result.output
+    assert read_entries() == before
+
+
+def test_adopt_the_epic_itself_is_refused(graph_env):
+    g, read_entries = graph_env
+    before = read_entries()
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-epic0001"]},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert read_entries() == before
+
+
+def test_adopt_ancestor_of_the_epic_is_refused_as_a_cycle(graph_env):
+    """The re-parent cycle guard cli.py already carried for exactly this path."""
+    g, read_entries = graph_env
+    entries = json.loads(g.read_text())["entries"]
+    entries.append(_node("ab-grand0001"))
+    for e in entries:
+        if e["id"] == "ab-epic0001":
+            e["parent"] = "ab-grand0001"
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    before = read_entries()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-grand0001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert read_entries() == before
+
+
+@pytest.mark.parametrize("bad", ["x-261c", 7, [""], [None], [7]])
+def test_adopt_shape_errors_are_refused(graph_env, bad):
+    g, read_entries = graph_env
+    before = read_entries()
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": bad},
+        ])]
+    )
+    assert result.exit_code == 1, result.output
+    assert "adopt" in result.output
+    assert read_entries() == before
+
+
+def test_adopt_a_shipped_node_is_permitted(graph_env):
+    """Re-parenting changes rollup membership, not delivery state.
+
+    The `is_shipped` refusal stays scoped to ORPHANED group children, which is
+    a different operation - refusing here would strand exactly the
+    evidence-carrying nodes adoption exists to preserve.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001", pr_number=612,
+                                  merge_status="merged", status="done"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 0, result.output
+    entries = read_entries()
+    kid = next(e for e in entries if e["id"] == "ab-kid00001")
+    assert kid["parent"] == _child(entries, "one")["id"]
+    assert kid["pr_number"] == 612
+

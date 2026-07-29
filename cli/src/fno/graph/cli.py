@@ -1276,6 +1276,7 @@ def cmd_decompose(
         extract_contract_versions,
         extract_why_digest,
         find_orphans,
+        group_child_slug,
         is_shipped,
         plan_base,
         resolve_effective_cap,
@@ -1533,12 +1534,55 @@ def cmd_decompose(
                 graph_entries.append(node)
             slug_to_id[grp["slug"]] = node["id"]
             plan_to_group.append((node, grp))
+
+            # Adoption (x-b9d7 US2): re-parent each named node under this group
+            # child, inside the same locked mutation. Nothing is minted for it
+            # and nothing is deleted; its plan_path, details, priority, and
+            # evidence are untouched, because membership is carried by the
+            # `parent` pointer alone. Adopted nodes deliberately do NOT get
+            # `group_slug` - that is the identity key group_child_slug (hence
+            # find_orphans and the upsert lookup above) reads, so a second
+            # claimant for one slug would break re-decompose idempotency the
+            # moment one of them moves.
+            adopted: list[str] = []
+            for adopt_id in grp["adopt"]:
+                target = _find_node(graph_entries, adopt_id)
+                if target is None:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {adopt_id}, which resolves "
+                        "to no node",
+                        exit_code=3,
+                    )
+                existing_slug = group_child_slug(target, base)
+                if existing_slug is not None:
+                    # Also covers self-adoption: a group naming its own resolved
+                    # id resolves a group_slug by construction.
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which is "
+                        f"already the group child for slug {existing_slug!r}; "
+                        "demoting a group into a task reshapes the epic",
+                        exit_code=2,
+                    )
+                if target.get("parent") == node["id"]:
+                    continue  # already adopted - re-running the spec is a no-op
+                # The re-parent path the existing minted-child guard was written
+                # for and could not reach (see the comment on that call).
+                if _would_create_cycle(graph_entries, target["id"], node["id"]):
+                    raise DecomposeError(
+                        f"adopting {target['id']} into group {grp['slug']!r} "
+                        "would create a cycle",
+                        exit_code=2,
+                    )
+                target["parent"] = node["id"]
+                adopted.append(target["id"])
+
             results.append(
                 {
                     "id": node["id"],
                     "slug": grp["slug"],
                     "waves": grp["waves"],
                     "action": action,
+                    "adopted": adopted,
                 }
             )
 
