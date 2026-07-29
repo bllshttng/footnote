@@ -1281,6 +1281,7 @@ def cmd_decompose(
         extract_why_digest,
         find_orphans,
         group_child_slug,
+        is_group_child,
         is_shipped,
         plan_base,
         resolve_effective_cap,
@@ -1549,11 +1550,8 @@ def cmd_decompose(
             # child, inside the same locked mutation. Nothing is minted for it
             # and nothing is deleted; its plan_path, details, priority, and
             # evidence are untouched, because membership is carried by the
-            # `parent` pointer alone. Adopted nodes deliberately do NOT get
-            # `group_slug` - that is the identity key group_child_slug (hence
-            # find_orphans and the upsert lookup above) reads, so a second
-            # claimant for one slug would break re-decompose idempotency the
-            # moment one of them moves.
+            # `parent` pointer alone. Why adopted nodes never get `group_slug`
+            # is on the NormalizedGroup field in _decompose.py.
             adopted: list[str] = []
             for adopt_id in grp["adopt"]:
                 target = _find_node(graph_entries, adopt_id)
@@ -1572,14 +1570,22 @@ def cmd_decompose(
                         exit_code=1,
                     )
                 adopt_claim[target["id"]] = grp["slug"]
-                existing_slug = group_child_slug(target, base)
-                if existing_slug is not None:
-                    # Also covers self-adoption: a group naming its own resolved
-                    # id resolves a group_slug by construction.
+                # Unscoped on purpose: group_child_slug answers "group child of
+                # THIS doc", which misses a legacy child of ANOTHER epic and
+                # lets adoption steal it. Also covers self-adoption, since a
+                # group naming its own resolved id is a group child by
+                # construction.
+                if is_group_child(target):
+                    owner = group_child_slug(target, base)
+                    whose = (
+                        f"the group child for slug {owner!r}"
+                        if owner
+                        else f"a group child of another epic ({target.get('plan_path')})"
+                    )
                     raise DecomposeError(
                         f"group {grp['slug']!r} adopts {target['id']}, which is "
-                        f"already the group child for slug {existing_slug!r}; "
-                        "demoting a group into a task reshapes the epic",
+                        f"already {whose}; demoting a group into a task "
+                        "reshapes the epic",
                         exit_code=2,
                     )
                 if target.get("parent") == node["id"]:
@@ -1641,20 +1647,20 @@ def cmd_decompose(
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
 
-        # Epic children that no group adopted (x-b9d7 US3). These are the exact
-        # complement of find_orphans, which walks the same parent == epic set
-        # and KEEPS the slugs this one drops - which is why decompose could not
-        # previously see a populated epic at all: a non-group child is invisible
-        # to every refusal downstream of that call, not merely unhandled.
-        # Collected after the re-parenting above, so adopted nodes have already
-        # left the epic and exclude themselves; no cross-reference against the
-        # adopt lists is needed. Warning, not refusal: refusing deadlocks,
-        # because re-parenting needs the group nodes a refusal prevents
-        # creating, and a parked child is a legitimate steady state.
+        # Epic children that no group adopted (x-b9d7 US3). The exact complement
+        # of find_orphans, which walks the same parent == epic set and KEEPS the
+        # slugs this one drops. Collected after the re-parenting above, so
+        # adopted nodes have already left the epic and exclude themselves; no
+        # cross-reference against the adopt lists is needed. Warning, not
+        # refusal: refusing deadlocks, because re-parenting needs the group
+        # nodes a refusal prevents creating, and a parked child is a legitimate
+        # steady state.
         unadopted_box[0] = [
-            e["id"]
+            e.get("id")
             for e in graph_entries
-            if e.get("parent") == epic_resolved_id and group_child_slug(e, base) is None
+            if e.get("id")
+            and e.get("parent") == epic_resolved_id
+            and group_child_slug(e, base) is None
         ]
         return graph_entries
 
@@ -1942,9 +1948,7 @@ def cmd_decompose(
     # 4c. Name the epic children no group adopted (x-b9d7 US3). Emitted on BOTH
     #     report paths, not just the human one: a --json caller decomposing a
     #     populated epic needs this as much as an operator does, and stderr
-    #     never pollutes the JSON on stdout. This is the line that would have
-    #     prevented an epic with 14 hand-created children from silently
-    #     becoming 28.
+    #     never pollutes the JSON on stdout.
     if unadopted_ids:
         typer.echo(
             f"warning: {len(unadopted_ids)} epic child(ren) adopted by no group, "

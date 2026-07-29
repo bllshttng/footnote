@@ -128,14 +128,33 @@ def test_think_template_carries_every_required_plan_field() -> None:
     )
 
 
-def test_think_template_shows_claims_as_a_scalar() -> None:
-    """`claims: str | None` - a template showing a list teaches a violation."""
-    claims = re.search(r"^claims:(.*)$", _think_output_contract(), re.M)
-    assert claims, f"{THINK_MD.name}'s frontmatter template dropped `claims:`"
-    assert "[" not in claims.group(1), (
-        "the template shows `claims` as a list, but PlanFrontmatter types it "
-        f"`str | None`: {claims.group(0)!r}"
+def test_think_template_actually_validates() -> None:
+    """AC8, the real check: the template's own VALUES must satisfy the model.
+
+    The name-subset test above cannot see a type error - a template writing
+    `claims` as a list, `status` as a retired spelling, or `created` as
+    something that is not a date shows the right keys and passes it. That is
+    exactly the drift that shipped (`claims: [x-9999, x-8888]` -> `Input should
+    be a valid string`), so this instantiates the model from the template with
+    its `<...>` placeholders filled in.
+    """
+    import yaml
+
+    frontmatter = _think_output_contract().split("---")[1]
+    # Fill the angle-bracket placeholders the way the doc tells an author to.
+    filled = (
+        frontmatter.replace("<title>", "Probe")
+        .replace("<node id; a scalar, never a list>", "x-9999")
+        .replace("<node id>", "x-9999")
+        .replace("<YYYY-MM-DD>", "2026-07-28")
+        .replace("light|standard|deep", "standard")
+        .replace("[<artifacts actually read>]", "[probe.py]")
     )
+    assert "<" not in filled, (
+        "the frontmatter template grew a placeholder this test does not fill, "
+        f"so it is no longer validating the real shape: {filled!r}"
+    )
+    PlanFrontmatter(**yaml.safe_load(filled))  # raises ValidationError on drift
 
 
 def test_think_contract_carries_the_section_blueprint_builds_tasks_from() -> None:

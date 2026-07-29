@@ -362,6 +362,29 @@ def group_child_slug(node: dict, base: str) -> Optional[str]:
     return None
 
 
+_LEGACY_GROUP_PLAN_RE = re.compile(r"\.group-[^/]+\.md$")
+
+
+def is_group_child(node: dict) -> bool:
+    """True when a node is a group child of SOME epic, independent of any base.
+
+    :func:`group_child_slug` answers the base-SCOPED question ("is this the
+    group child for THIS doc"), which is exactly what re-decompose identity
+    needs. Adoption needs the unscoped one. A legacy child of a DIFFERENT epic -
+    born before ``group_slug`` existed, so identifiable only by its plan_path
+    shape - resolves ``None`` against this epic's base, and adopting it would
+    silently re-parent it away from its own epic. That epic's next decompose no
+    longer finds it (the upsert lookup is scoped to ``parent == epic``) and
+    mints a duplicate for the slug, which is the duplication this whole feature
+    exists to prevent, moved one epic over.
+    """
+    gslug = node.get("group_slug")
+    if isinstance(gslug, str) and gslug:
+        return True
+    pp = node.get("plan_path") or ""
+    return "#group-" in pp or bool(_LEGACY_GROUP_PLAN_RE.search(Path(pp).name))
+
+
 def find_orphans(
     entries: list[dict], epic_id: str, base: str, keep_slugs: set[str]
 ) -> list[dict]:
@@ -608,6 +631,14 @@ def validate_groups(
                     exit_code=1,
                 )
             prior = claimed_by.get(aid)
+            if prior == grp["slug"]:
+                # A copy-paste duplicate inside one list is the likelier typo,
+                # and the cross-group wording reads as self-contradicting there.
+                raise DecomposeError(
+                    f"group {grp['slug']!r} names node {aid!r} twice in its "
+                    "adopt list",
+                    exit_code=1,
+                )
             if prior is not None:
                 raise DecomposeError(
                     f"node {aid!r} appears in the adopt list of both group "
