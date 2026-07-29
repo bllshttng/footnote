@@ -122,16 +122,22 @@ is known):
    children (verified line numbers, row counts, evidence) that have no
    `group_slug`. Decompose owns only group children, so without this step it
    mints a fresh empty child per group and leaves those alongside, silently
-   doubling the epic:
-   ```bash
-   fno backlog get "$EPIC_ID" --json >/dev/null   # confirm the epic resolves
-   fno backlog tree "$EPIC_ID"                     # existing children, if any
+   doubling the epic.
+
+   There is no epic-scoped child listing verb, so let decompose tell you. It is
+   idempotent, so running it and refining the spec is safe: any child no group
+   adopted is named on stderr as
+
    ```
-   Assign each existing child to the group that will ship it, via that group's
-   `adopt` list. Adoption re-parents the node in the same locked mutation:
-   nothing is minted for it, nothing is deleted, and its plan, details,
-   priority, and evidence are untouched. A child you deliberately leave parked
-   is fine - decompose names it on stderr and still exits 0.
+   warning: N epic child(ren) adopted by no group, left parented to the epic: <ids>
+   ```
+
+   Assign each id it names to the group that will ship it, via that group's
+   `adopt` list, then re-run the same command. Adoption re-parents the node in
+   the same locked mutation: nothing is minted for it, nothing is deleted, and
+   its plan, details, priority, and evidence are untouched. A child you
+   deliberately leave parked is fine - the warning repeats and the run still
+   exits 0.
 
 6. Build the groups JSON and call the CLI (atomic + idempotent upsert). A
    `contract` group just carries `"dep": "contract"` (it must already
