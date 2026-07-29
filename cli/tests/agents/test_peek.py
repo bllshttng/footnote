@@ -94,6 +94,84 @@ def test_peek_resolve_miss_exits_13_with_suggestions(tmp_path):
     assert "worker-a" in err.getvalue()
 
 
+def test_peek_requested_name_reads_repaired_codex_thread(tmp_path):
+    """AC2-CON: the requested registry name observes the repaired rollout."""
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    requested_name = "repro-late-id"
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name=requested_name,
+                harness="codex",
+                harness_session_id=session_id,
+                status="live",
+                cwd="/repo",
+                log_path="",
+                mux={"session": "main", "pane_id": 7},
+            )
+        ],
+        path=registry,
+    )
+    day = tmp_path / "rollouts" / "2026" / "07" / "29"
+    day.mkdir(parents=True)
+    rollout = day / f"rollout-2026-07-29T16-00-00-{session_id}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": session_id, "cwd": "/repo"},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "READY"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def resolve(handle):
+        return discover.resolve_or_suggest(
+            handle,
+            registry_path=registry,
+            sessions_dir=tmp_path / "no-claude-sessions",
+            projects_dir=tmp_path / "no-projects",
+            codex_sessions_dir=tmp_path / "rollouts",
+            opencode_storage_dir=tmp_path / "no-opencode",
+            name_map_path=tmp_path / "no-names.json",
+            require_alive=False,
+            project_resolver=lambda _cwd: None,
+        )
+
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        requested_name,
+        stdout=out,
+        stderr=err,
+        resolve=resolve,
+        codex_sessions_dir=tmp_path / "rollouts",
+    )
+
+    assert rc == 0
+    assert err.getvalue() == ""
+    assert f"peer {requested_name}: agent=codex short_id={session_id[:8]}" in out.getvalue()
+    assert "assistant: READY" in out.getvalue()
+
+
 # --------------------------------------------------------------------------
 # peek_reader — US2
 # --------------------------------------------------------------------------
@@ -129,7 +207,6 @@ def test_peek_unsupported_agent_exit_1(tmp_path):
 
 def test_peek_reader_codex(tmp_path, monkeypatch):
     """AC2-HP: codex arm locates the rollout by session_meta id and parses it."""
-    sess = _Session(agent="codex", session_id="cx-999")
     day = tmp_path / "2025" / "10" / "16"
     day.mkdir(parents=True)
     rollout = day / "rollout-2025-10-16T00-00-00-cx-999.jsonl"
@@ -184,7 +261,7 @@ def test_peek_json_emits_rows(tmp_path):
     out, err = io.StringIO(), io.StringIO()
     rc = peek("w", json_out=True, stdout=out, stderr=err, resolve=lambda h: (sess, []), projects_root=tmp_path)
     assert rc == 0
-    rows = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
     assert {"role": "assistant", "text": "done"} in rows
 
 
@@ -195,7 +272,7 @@ def test_peek_json_idle_is_still_json(tmp_path):
     out, err = io.StringIO(), io.StringIO()
     rc = peek("w", json_out=True, stdout=out, stderr=err, resolve=lambda h: (sess, []), projects_root=tmp_path)
     assert rc == 0
-    rows = [json.loads(l) for l in out.getvalue().splitlines() if l.strip()]
+    rows = [json.loads(line) for line in out.getvalue().splitlines() if line.strip()]
     assert {"status": "no activity yet"} in rows
 
 

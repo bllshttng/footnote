@@ -11459,6 +11459,13 @@ mod tests {
         core.agents[0].session_id = None;
         core.agents[0].harness_session_id = Some("CODEX-THREAD".into());
         assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
+        core.backlog_holders
+            .insert("x-identity".into(), "CODEX-THREAD".into());
+        assert_eq!(
+            core.fno_id_for_pane(1).as_deref(),
+            core.backlog_holders.get("x-identity").map(String::as_str),
+            "mux identity and node claim holder must be the same peer"
+        );
     }
 
     #[test]

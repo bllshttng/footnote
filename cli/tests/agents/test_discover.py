@@ -1390,6 +1390,49 @@ def test_us2_peek_resolves_codex_name(tmp_path, monkeypatch):
     assert match.name == "codex-x2af5"
 
 
+def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
+    tmp_path, monkeypatch
+):
+    """AC2-CON: every public handle reaches the one repaired registry peer."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    requested_name = "repro-late-id"
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name=requested_name,
+                harness="codex",
+                harness_session_id=session_id,
+                status="live",
+                cwd="/repo",
+                log_path="",
+                pid=4242,
+                mux={"session": "main", "pane_id": 7},
+            )
+        ],
+        path=registry,
+    )
+
+    resolved = []
+    for handle in (requested_name, session_id[:8], session_id):
+        match, suggestions = discover.resolve_or_suggest(
+            handle,
+            registry_path=registry,
+            require_alive=False,
+            **_empty_seams(tmp_path),
+        )
+        assert suggestions == []
+        assert match is not None
+        resolved.append(match)
+
+    assert {peer.session_id for peer in resolved} == {session_id}
+    assert {peer.short_id for peer in resolved} == {session_id[:8]}
+    assert {peer.name for peer in resolved} == {requested_name}
+
+
 def test_ac1_err_name_miss_suggests_registered_names(tmp_path, monkeypatch):
     """AC1-ERR: a near-miss on a registered name suggests the roster's actual
     names, now that the name axis is in the did-you-mean candidate pool."""

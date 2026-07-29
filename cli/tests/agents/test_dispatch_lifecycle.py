@@ -861,6 +861,43 @@ def test_reconcile_never_backfills_terminal_codex_rows(
     assert row.harness_session_id is None
 
 
+def test_reconcile_orphans_a_pending_codex_pane_after_process_exit(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC4-ERR: process death keeps the existing orphan lifecycle authoritative."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-codex",
+            provider="codex",
+            status="spawning",
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: False)
+    monkeypatch.setattr(
+        mux_spawn,
+        "_codex_session_id_for_pid",
+        lambda _pid: pytest.fail("an exited process must not be probed"),
+    )
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    row = load_registry()[0]
+    assert row.status == "orphaned"
+    assert row.harness_session_id is None
+    assert result.orphaned == [
+        {"name": "worker-codex", "provider": "codex", "id": None}
+    ]
+
+
 # ---------------------------------------------------------------------------
 # attach_agent — AC7-*
 # ---------------------------------------------------------------------------
