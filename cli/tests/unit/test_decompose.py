@@ -2192,6 +2192,10 @@ def test_adopt_cannot_steal_a_modern_group_child_of_another_epic(graph_env, tmp_
         ])]
     )
     assert result.exit_code == 2, result.output
+    # NOTE: the base-scoped check already refused this one, because group_slug
+    # short-circuits independently of base. Only the LEGACY sibling above
+    # exercises the unscoped predicate; this pins the message either way.
+    assert "already the group child for slug 'api'" in result.output
     assert read_entries() == before
 
 
@@ -2316,3 +2320,43 @@ def test_adopting_a_plain_child_of_another_epic_is_allowed(graph_env, tmp_path):
     assert next(e for e in entries if e["id"] == "ab-b0020001")["parent"] == (
         _child(entries, "one")["id"]
     )
+
+
+def test_warning_never_recommends_a_node_the_refusal_blocks(graph_env, tmp_path):
+    """The warning and the adoption refusal must share one predicate.
+
+    This epic's own group child on a plan path that no longer matches a renamed
+    epic doc resolves no base-scoped slug. Keying the warning on that resolved
+    slug listed it as un-adopted, so the warning told the operator to adopt a
+    node the refusal then blocked - with no --force escape.
+    """
+    g, read_entries = graph_env
+    _seed_children(
+        g,
+        _node("ab-old00001", parent="ab-epic0001", title="own legacy group",
+              plan_path=str(tmp_path / "old.group-api.md")),
+    )
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "api", "title": "Api", "waves": "1"},
+        ])]
+    )
+    assert result.exit_code == 0, result.output
+    assert "ab-old00001" not in result.stderr
+
+
+def test_own_legacy_group_child_refusal_does_not_blame_another_epic(graph_env, tmp_path):
+    g, read_entries = graph_env
+    _seed_children(
+        g,
+        _node("ab-old00001", parent="ab-epic0001", title="own legacy group",
+              plan_path=str(tmp_path / "old.group-api.md")),
+    )
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "api", "title": "Api", "waves": "1", "adopt": ["ab-old00001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert "another epic" not in result.output
+    assert "this epic's group child on a legacy plan path" in result.output

@@ -1577,14 +1577,26 @@ def cmd_decompose(
                 # construction.
                 if is_group_child(target):
                     owner = group_child_slug(target, base)
-                    whose = (
-                        f"the group child for slug {owner!r}"
-                        if owner
-                        else f"a group child of another epic ({target.get('plan_path')})"
-                    )
+                    if owner:
+                        whose = f"already the group child for slug {owner!r}"
+                    elif target.get("parent") == epic_resolved_id:
+                        # This epic's own group child on a plan path that no
+                        # longer matches the doc (a rename). Saying "another
+                        # epic" here would be a plain lie about the operator's
+                        # own node.
+                        whose = (
+                            "already this epic's group child on a legacy plan "
+                            f"path ({target.get('plan_path')}) that no longer "
+                            "matches the epic doc"
+                        )
+                    else:
+                        whose = (
+                            "already a group child of another epic "
+                            f"({target.get('plan_path')})"
+                        )
                     raise DecomposeError(
                         f"group {grp['slug']!r} adopts {target['id']}, which is "
-                        f"already {whose}; demoting a group into a task "
+                        f"{whose}; demoting a group into a task "
                         "reshapes the epic",
                         exit_code=2,
                     )
@@ -1647,9 +1659,12 @@ def cmd_decompose(
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
 
-        # Epic children that no group adopted (x-b9d7 US3). The exact complement
-        # of find_orphans, which walks the same parent == epic set and KEEPS the
-        # slugs this one drops. Collected after the re-parenting above, so
+        # Epic children that no group adopted (x-b9d7 US3). Uses the SAME
+        # predicate as the adoption refusal above, deliberately: keying this on
+        # the base-scoped group_child_slug instead would list a group child
+        # whose plan path no longer matches a renamed epic doc, and the warning
+        # would then tell the operator to adopt a node the refusal blocks.
+        # Collected after the re-parenting above, so
         # adopted nodes have already left the epic and exclude themselves; no
         # cross-reference against the adopt lists is needed. Warning, not
         # refusal: refusing deadlocks, because re-parenting needs the group
@@ -1660,7 +1675,7 @@ def cmd_decompose(
             for e in graph_entries
             if e.get("id")
             and e.get("parent") == epic_resolved_id
-            and group_child_slug(e, base) is None
+            and not is_group_child(e)
         ]
         return graph_entries
 
