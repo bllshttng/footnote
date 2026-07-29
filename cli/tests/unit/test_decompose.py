@@ -1991,3 +1991,58 @@ def test_adopt_a_shipped_node_is_permitted(graph_env):
     assert kid["parent"] == _child(entries, "one")["id"]
     assert kid["pr_number"] == 612
 
+
+
+# -- warn on epic children that no group adopted (x-b9d7 US3) --
+
+
+def test_unadopted_epic_child_warns_and_still_exits_zero(graph_env):
+    """AC6: a half-packaged epic is visible without the run failing."""
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001", title="left behind"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "ab-kid00001" in result.output
+    assert "adopt" in result.output
+
+
+def test_adopted_children_are_not_warned_about(graph_env):
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "adopted by no group" not in result.output
+
+
+def test_no_adopt_key_against_a_clean_epic_is_unchanged(graph_env):
+    """AC7 regression guard: the overwhelmingly common path must not move."""
+    g, read_entries = graph_env
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    assert "adopted by no group" not in result.output
+    children = [e for e in read_entries() if e.get("parent") == "ab-epic0001"]
+    assert len(children) == 3
+
+
+def test_unadopted_warning_reaches_the_json_path_too(graph_env):
+    """A --json caller decomposing a populated epic needs the warning as much.
+
+    Guarding only the human report would leave the JSON path silently
+    duplicating an epic - and stderr never pollutes the payload on stdout.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001", title="left behind"))
+    result = _invoke(
+        ["--json", "backlog", "decompose", "ab-epic0001",
+         "--groups", _groups_json(THREE_GROUPS)]
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["epic"] == "ab-epic0001"
+    assert "ab-kid00001" in result.stderr

@@ -1216,11 +1216,15 @@ def cmd_decompose(
         ...,
         "--groups",
         help=(
-            "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]} "
-            "group specs. Optional per-group project/cwd route a child into a "
-            "different repo (multi-repo decomposition): project resolves its cwd "
-            "from the settings work-map; an explicit cwd overrides; absent -> "
-            "inherit the epic's repo. "
+            "JSON array of {slug,title,waves,blocked_by_groups[,project][,cwd]"
+            "[,adopt]} group specs. Optional per-group project/cwd route a child "
+            "into a different repo (multi-repo decomposition): project resolves "
+            "its cwd from the settings work-map; an explicit cwd overrides; "
+            "absent -> inherit the epic's repo. "
+            "Optional `adopt: [<node-id>...]` re-parents EXISTING nodes under the "
+            "group child instead of minting new ones - use it to package an epic "
+            "already populated by `fno backlog idea --parent` rather than "
+            "doubling it. Epic children no group adopts are named on stderr. "
             "Prefix '@' to read a file (--groups @groups.json) or pass '-' to read stdin."
         ),
     ),
@@ -1621,9 +1625,26 @@ def cmd_decompose(
         # Surface any unshipped orphans (slug dropped from the spec). They are
         # left in place, not deleted - deleting graph nodes is destructive.
         orphan_box[0] = [o["id"] for o in orphans]
+
+        # Epic children that no group adopted (x-b9d7 US3). These are the exact
+        # complement of find_orphans, which walks the same parent == epic set
+        # and KEEPS the slugs this one drops - which is why decompose could not
+        # previously see a populated epic at all: a non-group child is invisible
+        # to every refusal downstream of that call, not merely unhandled.
+        # Collected after the re-parenting above, so adopted nodes have already
+        # left the epic and exclude themselves; no cross-reference against the
+        # adopt lists is needed. Warning, not refusal: refusing deadlocks,
+        # because re-parenting needs the group nodes a refusal prevents
+        # creating, and a parked child is a legitimate steady state.
+        unadopted_box[0] = [
+            e["id"]
+            for e in graph_entries
+            if e.get("parent") == epic_resolved_id and group_child_slug(e, base) is None
+        ]
         return graph_entries
 
     orphan_box: list[list[str]] = [[]]
+    unadopted_box: list[list[str]] = [[]]
     base_box: list = [None]
     verbatim_base_box: list = [None]
     epic_cwd_box: list = [None]
@@ -1636,6 +1657,7 @@ def cmd_decompose(
 
     epic_resolved_id = epic_id_box[0]
     orphan_ids = orphan_box[0]
+    unadopted_ids = unadopted_box[0]
     downgrades = downgrade_box[0]
 
     # Shared post-mutation graph re-read: 3c reads each child's created_at +
@@ -1894,6 +1916,20 @@ def cmd_decompose(
             )
         for msg in downgrades:
             typer.echo(f"warning: {msg}", err=True)
+
+    # 4c. Name the epic children no group adopted (x-b9d7 US3). Emitted on BOTH
+    #     report paths, not just the human one: a --json caller decomposing a
+    #     populated epic needs this as much as an operator does, and stderr
+    #     never pollutes the JSON on stdout. This is the line that would have
+    #     prevented an epic with 14 hand-created children from silently
+    #     becoming 28.
+    if unadopted_ids:
+        typer.echo(
+            f"warning: {len(unadopted_ids)} epic child(ren) adopted by no group, "
+            f"left parented to the epic: {', '.join(unadopted_ids)}. "
+            "Add them to a group's `adopt` list to package them into that PR.",
+            err=True,
+        )
 
     # 5. Record the group count N on the shared epic doc so it graduates only
     #    after all N group PRs ship (not after the first). The graph mutation
