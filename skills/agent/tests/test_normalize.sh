@@ -269,6 +269,10 @@ check_eq   'dangling model is error'            "$(field "$out" status)" 'error'
 # flag-vocabulary scan), not a silent drop of the override
 out="$(run 'ab-99999999 --model opus')"
 check_eq   'inline --model in task text is error' "$(field "$out" status)" 'error'
+# the refusal must be actionable from a slash command (x-ab78 WAVE 3): it names
+# the dashless trailing form, not only "pass it as a real flag" (impossible via
+# /command where everything after the verb is one string).
+check_contains 'flag-in-payload refusal names dashless form' "$(field "$out" error)" 'model opus'
 # mid-task `model` stays task text (right-anchored run)
 out="$(run 'model the user data carefully')"
 check_contains 'mid-task model stays in message' "$(field "$out" message)" 'model the user data carefully'

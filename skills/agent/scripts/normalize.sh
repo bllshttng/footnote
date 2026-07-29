@@ -298,7 +298,7 @@ if [[ "$HANDOFF_MODE" -eq 0 ]] && { [[ "$msg" == /* ]] || printf '%s' "$_scan_ft
     esac
     case "$scan_cano" in
       -y|--yes|-m|--allow-merge|--no-merge|-n|--name|-i|--interactive|-Y|--yolo|--provider|-P|--model|--effort|-C|--project|-f|--force|--permission-mode|-r|--role|-t|--timeout|--fresh|--here|--in-place|--add-dir|--agent|--tools|--deny-tools)
-        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Pass it as a real flag (-y / -m / -n N) separated from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash), or quote/rephrase it if it is genuinely part of the task text."
+        emit_error "the task text contains a token that looks like a dispatch flag ('$scan_tok') - refusing so it cannot fold silently into the payload. Through a slash command the trailing grammar is dashless: write 'model opus', 'bg', 'yolo', 'merge', or 'as <name>' rather than a flag glued into the text. Calling the CLI directly, pass it as a real flag (-y / -m / -n N) separate from the task text (on a phone use the single-dash short form: iOS turns a typed -- into a long dash). If the token is genuinely part of the task text, quote or rephrase it."
         ;;
     esac
   done
