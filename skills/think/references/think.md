@@ -282,4 +282,8 @@ Use one of these boundaries:
 - stop when the receipt reveals the work is already done or truly duplicative.
 
 Think is optional depth, not a tax on every target.
+
+A commitments list is not a design question: a transcript or action-item list wants extraction to nodes (`fno backlog idea --parent`), not narrowing here.
+Running `/think` over commitments hands scope authority to the step whose job is cutting.
+See `skills/blueprint/references/extraction-vs-think.md` for where extraction, `/think`, and `adopt` reconcile.
 The deterministic receipt is reusable whether intent began in conversation, native Plan Mode, or a Footnote design document.

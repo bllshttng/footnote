@@ -123,6 +123,8 @@ is known):
    `group_slug`. Decompose owns only group children, so without this step it
    mints a fresh empty child per group and leaves those alongside, silently
    doubling the epic.
+   This is the reconciliation step: discovery mints at finding granularity and delivery ships at PR granularity, and `adopt` (not `/think`) is what draws the one-plan-one-node boundary between them.
+   See `extraction-vs-think.md`.
 
    There is no epic-scoped child listing verb, so let decompose tell you. It is
    idempotent, so running it and refining the spec is safe: any child no group
