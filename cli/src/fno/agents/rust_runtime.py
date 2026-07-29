@@ -950,7 +950,11 @@ def make_agents_group_cls() -> type:
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
-                    _warn_env_scrub_spawn(args)
+                    # The env-scrub warning is NOT emitted here: a Python-route
+                    # spawn falls through to dispatch_spawn / dispatch_spawn_pane,
+                    # which emit it, so warning at the seam too would print it
+                    # twice. The Rust-exec branches below emit it before they
+                    # exec, since the binary never reaches dispatch.
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
@@ -972,6 +976,7 @@ def make_agents_group_cls() -> type:
                     or _is_output_format_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
+                    _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     route_to_rust(list(args))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
@@ -981,6 +986,7 @@ def make_agents_group_cls() -> type:
                     # branch anymore.
                     binary = resolve_installed_binary()
                     if binary is not None:
+                        _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         route_to_rust(list(args), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
