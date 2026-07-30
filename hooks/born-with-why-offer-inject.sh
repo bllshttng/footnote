@@ -64,13 +64,22 @@ command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
 # ride-along list into it (same trap the enrichment parse below documents).
 parsed=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | head -c "$((size - offset))" 2>/dev/null | python3 -c '
 import sys, json, re
-# Decoding happens at the `for` below, OUTSIDE the per-line try, so one invalid
-# UTF-8 byte anywhere in the slice would raise before any line is examined and
-# take every offer down with it. .fno/events.jsonl has non-Python appenders
-# (the stop hooks printf shell-interpolated lines), and `head -c` cuts on a byte
-# boundary, so a truncated multi-byte char is reachable. Replace, never raise:
-# a mangled line then fails json.loads inside the try and is skipped as designed.
-sys.stdin.reconfigure(errors="replace")
+# Read the slice as BYTES and require exactly the count the caller measured.
+# A completion sentinel alone proves the parser ran, not that it was fed: a
+# failing `tail`/`head` hands it empty stdin, it finds no offers, and the caller
+# advances over a live offer. A short read exits without the sentinel instead,
+# so the cursor stays put and the next turn re-scans (verified: a `tail` that
+# exits 1 used to consume the slice and emit nothing).
+expected = int(sys.argv[1])
+raw = sys.stdin.buffer.read()
+if len(raw) != expected:
+    sys.exit(1)
+# Decode with replacement, never raising: .fno/events.jsonl has non-Python
+# appenders (the stop hooks printf shell-interpolated lines) and `head -c` cuts
+# on a byte boundary, so a truncated multi-byte char is reachable. Decoding at a
+# bare `for line in sys.stdin` would raise OUTSIDE the per-line try below and
+# take every offer in the slice down with it. A mangled line instead fails
+# json.loads inside the try and is skipped, as the file header already claims.
 # The reminder wrapper is hook-owned; offer_line is free text (spawn_think
 # interpolates a filesystem path into it), so it gets the same defang the
 # enrichment parse applies to title/details or it could close the wrapper early.
@@ -78,7 +87,7 @@ _TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 nid = ""
 offer = ""
 older = []
-for line in sys.stdin:
+for line in raw.decode("utf-8", "replace").splitlines():
     line = line.strip()
     if not line:
         continue
@@ -108,7 +117,7 @@ for line in sys.stdin:
 # to advance without this byte, so a failed parse re-scans instead of eating the
 # slice. A clean scan that found no offer still prints it, and still advances.
 sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]) + "\x04")
-' 2>/dev/null)
+' "$((size - offset))" 2>/dev/null)
 
 # No completion sentinel -> the parse died rather than finding nothing. Leave the
 # cursor where it is so the next turn re-scans; burning the slice on a broken

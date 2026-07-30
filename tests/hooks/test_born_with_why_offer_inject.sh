@@ -549,6 +549,24 @@ out="$(cd "$WORK" && PATH="$BROKENBIN" bash "$HOOK" 2>/dev/null)" || fail "broke
 [[ "$(tr -d ' \n' < "$CURSOR")" == "$cursor_before" ]] \
     || fail "broken-py: cursor advanced on a failed parse (slice destroyed)"
 pass "broken-py: a failing interpreter leaves the slice unconsumed"
+
+# ── A failing `tail` must not burn the slice either ─────────────────
+# The completion sentinel proves the parser RAN, not that it was fed. A broken
+# tail hands it empty stdin, it honestly finds no offers, and the caller would
+# advance over a live one. Only the byte-count check catches this.
+BADTAIL="$WORK/badtail"; mkdir -p "$BADTAIL"
+for t in bash dirname git head jq kill python3 sleep tail tr wc; do
+    p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$BADTAIL/$t"
+done
+rm -f "$BADTAIL/tail"; printf '#!/usr/bin/env bash\nexit 1\n' > "$BADTAIL/tail"
+chmod +x "$BADTAIL/tail"
+cursor_before="$(tr -d ' \n' < "$CURSOR")"
+out="$(cd "$WORK" && PATH="$BADTAIL" bash "$HOOK" 2>/dev/null)" || fail "bad-tail: hook nonzero"
+[[ -z "$out" ]] || fail "bad-tail: emitted output from an unfed parse: $out"
+[[ "$(tr -d ' \n' < "$CURSOR")" == "$cursor_before" ]] \
+    || fail "bad-tail: cursor advanced on a short read (slice destroyed)"
+pass "bad-tail: a short read leaves the slice unconsumed"
+
 run_hook >/dev/null 2>&1   # drain for the cases below
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
