@@ -204,7 +204,7 @@ def _tier3_target(
         return None
     node_status = status_map.get(link)
     if node_status is None:
-        warnings.append(f"tier3 skip (link {link} not in graph): {name}")
+        warnings.append(f"tier3 skip (link {link} not in graph or archive): {name}")
         return None
     return project_plan_status(current, node_status)
 
@@ -230,6 +230,18 @@ def sweep(
     if status_map is None:
         status_map = _node_status_map()
 
+    # An empty map is absent evidence, and Tier 2 treats a False signal as
+    # "not closed" -> `superseded`, so a graph that fails to read would stamp a
+    # terminal status onto every live drift-token plan. `read_graph` returns []
+    # on corruption WITHOUT raising, and two callers run --apply with output
+    # discarded (session-start.sh, pr/_ritual.py), so that write is unattended
+    # and silent. Tier 3 already refuses on `not status_map`; this gives Tier 2
+    # the same stance. An explicitly injected `signal_for` is exempt: that
+    # caller supplied the signal out of band and does not depend on the map.
+    tier2_blind = not status_map and signal_for is _default_signal
+    if tier2_blind:
+        res.warnings.append("tier2 off (no node status available): drift tokens left as-is")
+
     for path in sorted(plans_dir.glob("*.md")):
         try:
             text = path.read_text(encoding="utf-8")
@@ -244,6 +256,10 @@ def sweep(
         if s in KNOWN_STATUSES:
             # Tier 3: a canonical status may still be stale vs its node.
             new = _tier3_target(doc.frontmatter, s, status_map, res.warnings, path.name)
+        elif tier2_blind and _norm(raw) not in _TIER1:
+            # Tier 1 is a pure synonym rewrite and needs no signal, so it still
+            # runs; only the signal-gated tier stands down.
+            new = None
         else:
             # Tiers 1-2: drift-token rewrite (synonym / signal-gated).
             new = target_status(raw, lambda: signal_for(doc.frontmatter))

@@ -338,7 +338,6 @@ def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
     # instead of falling through to the honest-but-wrong `superseded`.
     assert rs._done_node_ids() == frozenset({"x-gone"})
     assert rs._default_signal({"node": "x-gone"}) is True
-    rs._node_status_map.cache_clear()
 
 
 def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
@@ -356,4 +355,105 @@ def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
     rs._node_status_map.cache_clear()
 
     assert rs._node_status_map() == {"x-live": "done"}
-    rs._node_status_map.cache_clear()
+
+
+@pytest.fixture(autouse=True)
+def _clear_node_status_cache():
+    """`_node_status_map` is lru_cached, so a test that points it at a tmp graph
+    leaks that map into every later test in the worker - including on a failing
+    assert, which skips any cleanup written at the end of the test body.
+    """
+    from fno.plan import reconcile_status as rs
+
+    # getattr: a test may have monkeypatched the function with a plain lambda,
+    # and teardown can run before monkeypatch restores it.
+    def clear():
+        getattr(rs._node_status_map, "cache_clear", lambda: None)()
+
+    clear()
+    yield
+    clear()
+
+
+def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
+    """x-4e31 at the user-visible level: the node shipped and was archived, so
+    on the working graph alone Tier 2 writes `superseded` and Tier 3 skips.
+    No `status_map=` / `signal_for=` override - this is the real path.
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    graph = _write_graphs(
+        tmp_path,
+        live=[{"id": "x-other", "status": "ready"}],
+        archived=[{"id": "x-shipped", "status": "done"}],
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph)
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "tier2.md").write_text(_linked_plan("implemented", node="x-shipped"))
+    (plans / "tier3.md").write_text(_linked_plan("design", node="x-shipped"))
+
+    res = rs.sweep(plans, apply=True)
+
+    t2 = (plans / "tier2.md").read_text()
+    assert 'status: "done"' in t2 and "superseded" not in t2  # signal survived archiving
+    assert 'status: "done"' in (plans / "tier3.md").read_text()  # projected, not skipped
+    assert res.superseded == 0 and res.normalized == 2
+
+
+# --- absent evidence must not manufacture a terminal status ------------------
+# `read_graph` returns [] on corruption WITHOUT raising, so an unreadable graph
+# reaches the sweep as an empty status_map. Tier 3 already refuses on that;
+# Tier 2 used to read the empty done-set as "not closed" and stamp `superseded`
+# onto every live drift-token plan - unattended, since session-start.sh and
+# pr/_ritual.py both run --apply with output discarded.
+
+
+def test_tier2_stands_down_when_no_node_status_is_available(tmp_path, monkeypatch):
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("implemented"))
+    before = p.read_text()
+
+    res = rs.sweep(tmp_path, apply=True)
+
+    assert res.superseded == 0 and res.skipped == 1
+    assert p.read_text() == before  # byte-for-byte: no terminal written
+    assert any("tier2 off" in w for w in res.warnings)  # and the operator is told
+
+
+def test_tier1_synonyms_still_rewrite_without_a_graph(tmp_path, monkeypatch):
+    """Tier 1 is a pure synonym map and needs no signal, so the Tier 2 stand-down
+    must not take it down too.
+    """
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("draft"))
+
+    res = rs.sweep(tmp_path, apply=True)
+
+    assert res.normalized == 1
+    assert 'status: "design"' in p.read_text()
+
+
+def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
+    """A caller that injects `signal_for` supplied the evidence out of band and
+    does not depend on the graph, so the stand-down must not swallow it.
+    """
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("implemented"))
+
+    res = rs.sweep(tmp_path, apply=True, signal_for=lambda fm: True)
+
+    assert res.normalized == 1
+    assert 'status: "done"' in p.read_text()
