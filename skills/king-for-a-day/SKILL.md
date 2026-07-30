@@ -362,6 +362,14 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
 
   **Launch it as a harness-tracked task, and never append `&`.** A trailing `&` hands the command back to the shell, so the call returns instantly, your harness records it as finished, and *nothing is left waiting* - the court then sleeps through the very transition the wait exists to catch. Same detached-process trap that makes a `nohup`'d watcher useless.
 
+  **Never hand-roll the wait.** The shape to refuse is a timed shell loop around a status command:
+
+  ```bash
+  end=$((SECONDS+2700)); while [ $SECONDS -lt $end ]; do fno agents top; sleep 60; done   # NEVER
+  ```
+
+  It looks like a wait and behaves like the heartbeat this section replaced: every pass re-reads a status table into your context, and none of those passes sees a transition sooner than the armed wait would. One reign wrote this 25 times against 4 uses of the real verb, which is how the anti-pattern shows up in practice - not as a king ignoring the rule, but as one substituting for a verb it had been told was insufficient. If `fno-agents wait` does not cover what you need, that is a defect to report, never a loop to write.
+
   **This wait does not cover `blocked`.** The verb takes one target and returns only on an exact match, and `blocked` is a state the inside-leg hook never emits - it is in the contract but has no Claude Code trigger wired, so the hook reports `working` and `done` only. A `--state blocked` wait on a claude or codex teammate therefore never fires, which is worth knowing before you reach for it. Today a blocked teammate reaches you two ways: its own report mail, which the minion clause requires it to send on blocking, and your sweep, where it shows as a `BlockedAnswerable` badge. So a block whose mail was lost waits out this timeout.
 
   **This is a wiring gap, not a law, so do not build around it.** The durable push leg for `blocked` already exists on the event bus: `fno event emit -t blocked` auto-pushes a notice to the parent handle, and `fno event push-parent --type blocked` is the manual verb. What is missing is an emitter - no worker calls either today, so the channel is silent rather than absent. Until one does, treat the mail-plus-sweep path above as the coverage you actually have, and treat its slowness as a known defect with a fix pending rather than a bound to engineer against. Concretely: do not compensate by shortening your sweep interval or by inventing a wake source of your own, because both cost context every pass and neither sees a block any sooner than the badge already does.
