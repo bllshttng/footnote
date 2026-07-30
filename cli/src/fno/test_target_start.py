@@ -1008,14 +1008,42 @@ def test_start_explicit_model_wins_over_tier(monkeypatch, tmp_path):
     wt.mkdir()
     init_args = _wire_start(monkeypatch, wt)
 
-    def _boom(nid):  # node lookup must NOT run when -m is explicit (short-circuit)
-        raise AssertionError("node loaded despite explicit -m")
+    # `start` now reads the node ONCE for the containment redirect (x-e957),
+    # which has to happen before `worktree ensure` or a contained node leaves an
+    # orphan worktree behind. So this can no longer ban every node read; it
+    # counts them, which still catches a tier lookup sneaking back in as a
+    # SECOND read. The invariant itself - explicit -m never loads the node -
+    # belongs to _resolve_node_model and is pinned directly below.
+    seen = []
+    real_find = target_cli._find_node
 
-    monkeypatch.setattr(target_cli, "_find_node", _boom)
+    def _counted(nid):
+        seen.append(nid)
+        return real_find(nid)
+
+    monkeypatch.setattr(target_cli, "_find_node", _counted)
     result = runner.invoke(target_app, ["start", "x-d7a7", "-m", "glm-4.7"])
     assert result.exit_code == 0, result.stdout
     assert init_args[init_args.index("--model") + 1] == "glm-4.7"
     assert "model=glm-4.7 (explicit)" in result.stdout
+    assert len(seen) <= 1, f"node read more than once with explicit -m: {seen}"
+
+
+def test_resolve_node_model_never_loads_the_node_when_explicit(monkeypatch):
+    """AC1-EDGE, pinned where the invariant lives rather than at a caller.
+
+    Asserted on the helper because any unrelated node read in `start` would trip
+    a caller-level ban - which is exactly what happened when the containment
+    redirect landed, and a test that fails for an unrelated reason is one people
+    edit rather than read.
+    """
+    def _boom(nid):
+        raise AssertionError("node loaded despite explicit -m")
+
+    monkeypatch.setattr(target_cli, "_find_node", _boom)
+    model, source = target_cli._resolve_node_model("x-d7a7", explicit="glm-4.7")
+    assert model == "glm-4.7"
+    assert source == "explicit"
 
 
 def test_start_untiered_node_forwards_no_model(monkeypatch, tmp_path):
