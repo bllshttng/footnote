@@ -326,6 +326,44 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
 
 
 @requires_rust
+def test_resume_opencode_canonical_tail_case_parity(tmp_path) -> None:
+    """The Rust promotion gate preserves OpenCode's case-sensitive tail."""
+    from fno.agents import resume_cli
+
+    full = "ses_7f3a9b2cAbCd1234"
+    entries = [
+        {
+            "name": "oc",
+            "short_id": "ocworker",
+            "harness": "opencode",
+            "cwd": "/tmp/proj",
+            "project_root": "/tmp/proj",
+            "log_path": "/tmp/proj/l.jsonl",
+            "harness_session_id": full,
+            "status": "live",
+            "created_at": "2026-05-26T09:00:00Z",
+        }
+    ]
+    agents = tmp_path / "agents"
+    _seed_registry(agents, entries)
+
+    def loader():
+        return [SimpleNamespace(**entry) for entry in entries]
+
+    for token in ("oc", full, "AbCd1234", "ocworker", "abcd1234"):
+        rust = _run_rust(["resume", token, "--print-command"], agents)
+        py = resume_cli.resume_logic(
+            name=token, print_command=True, registry_loader=loader
+        )
+        assert rust.returncode == py.exit_code, f"exit parity for token {token}"
+        assert rust.stdout == py.output, f"stdout parity for token {token}"
+        assert rust.stderr == py.stderr, f"stderr parity for token {token}"
+
+    assert _run_rust(["resume", "AbCd1234", "--print-command"], agents).returncode == 0
+    assert _run_rust(["resume", "abcd1234", "--print-command"], agents).returncode != 0
+
+
+@requires_rust
 @pytest.mark.parametrize(
     "name,expected_exit",
     [("nope", 13), ("no-cwd", 13), ("no-sid", 13)],

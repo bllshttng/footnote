@@ -189,7 +189,9 @@ def test_trace_refuses_registry_name_colliding_with_store_session(
     result = trace_logic(name="deadbeef", events_path=events)
 
     assert result.exit_code == 13
-    assert "not found" in result.stderr
+    assert registered_id in result.stderr
+    assert store_only_id in result.stderr
+    assert "not found" not in result.stderr
     assert "agent_ask_started" not in result.output
 
 

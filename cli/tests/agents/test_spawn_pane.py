@@ -1434,14 +1434,25 @@ def test_spawn_stamps_process_incarnation_token(tmp_path: Path, monkeypatch) -> 
     assert row.pid_start_time == 987654
 
 
-@pytest.mark.parametrize("failure", [OSError("disk full"), ValueError("invalid row")])
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["os-error", "value-error", "identity-collision"],
+)
 def test_registry_write_failure_reaps_exact_spawned_pane(
-    tmp_path: Path, monkeypatch, failure: Exception
+    tmp_path: Path, monkeypatch, failure_kind: str
 ) -> None:
     """A pane without its registry identity is rolled back before failure."""
     from fno.agents import mux_spawn
     from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import AgentResolutionError, load_registry
+
+    failure: Exception
+    if failure_kind == "os-error":
+        failure = OSError("disk full")
+    elif failure_kind == "value-error":
+        failure = ValueError("invalid row")
+    else:
+        failure = AgentResolutionError("identity collision", ambiguous=True)
 
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.delenv("FNO_SESSION", raising=False)

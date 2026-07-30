@@ -20,6 +20,7 @@ from fno.agents.discover import (
     default_opencode_storage_dir,
     opencode_connect,
 )
+from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.harness_identity import canonical_handle, legacy_prefix_handle
 
 
@@ -72,7 +73,13 @@ def _codex_records(root: Path) -> dict[str, float]:
     if not root.is_dir():
         raise _unavailable("codex", f"directory not found: {root}")
     try:
-        paths = sorted(root.rglob("rollout-*.jsonl"))
+        paths = sorted(
+            scan_files(
+                root,
+                include=lambda name: name.startswith("rollout-")
+                and name.endswith(".jsonl"),
+            )
+        )
     except OSError as exc:
         raise _unavailable("codex", str(exc)) from exc
     if not paths:
@@ -122,7 +129,13 @@ def _opencode_legacy_records(root: Path) -> dict[str, float]:
     if not session_root.is_dir():
         raise _unavailable("opencode", f"database and legacy store not found: {root}")
     try:
-        paths = sorted(session_root.glob("*/*.json"))
+        paths = sorted(
+            scan_files(
+                session_root,
+                max_depth=1,
+                include=lambda name: name.endswith(".json"),
+            )
+        )
     except OSError as exc:
         raise _unavailable("opencode", str(exc)) from exc
     if not paths:
@@ -178,9 +191,13 @@ def run_census(
 ) -> dict[str, HarnessReport]:
     """Read both corpora once and measure full and discovery-window scopes."""
     codex = _codex_records(codex_sessions_dir)
+    try:
+        has_opencode_db = path_exists_strict(opencode_db_path)
+    except OSError as exc:
+        raise _unavailable("opencode", str(exc)) from exc
     opencode = (
         _opencode_db_records(opencode_db_path)
-        if opencode_db_path.exists()
+        if has_opencode_db
         else _opencode_legacy_records(opencode_storage_dir)
     )
     return {

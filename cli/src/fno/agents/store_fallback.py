@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.harness_identity import claude_transport_short_id, session_handle_tier
 
 if TYPE_CHECKING:
@@ -121,15 +122,11 @@ def _probe_claude(token: str) -> list[StoreHit]:
     needle = token.lower()
     hits: dict[str, StoreHit] = {}
     root = _claude_projects_dir()
-    found = {
-        path
-        for pattern in (
-            f"*/{needle}.jsonl",      # full id
-            f"*/*{needle}.jsonl",     # canonical tail
-            f"*/{needle}*.jsonl",     # legacy prefix
-        )
-        for path in root.glob(pattern)
-    }
+    found = scan_files(
+        root,
+        max_depth=1,
+        include=lambda name: name.endswith(".jsonl") and needle in name.lower(),
+    )
     for path in sorted(found):
         name = path.name
         if ".sync-conflict-" in name:
@@ -149,15 +146,12 @@ def _probe_codex(token: str) -> list[StoreHit]:
     hits: dict[str, StoreHit] = {}
     root = _codex_sessions_dir()
     needle = token.lower()
-    found = {
-        path
-        for pattern in (
-            f"rollout-*-{needle}.jsonl",   # full id
-            f"rollout-*-*{needle}.jsonl",  # canonical tail
-            f"rollout-*-{needle}*.jsonl",  # legacy prefix
-        )
-        for path in root.rglob(pattern)
-    }
+    found = scan_files(
+        root,
+        include=lambda name: name.startswith("rollout-")
+        and name.endswith(".jsonl")
+        and needle in name.lower(),
+    )
     for path in sorted(found):
         meta = _codex_meta(path)
         if meta is None:
@@ -174,11 +168,29 @@ def _probe_opencode(token: str) -> list[StoreHit]:
     never reaches here -- and a `ses_` token never reaches the other two."""
     if not (_OPENCODE_RE.match(token) or _SHORT_RE.match(token)):
         return []
-    from fno.agents.discover import default_opencode_db_path, opencode_query
+    from fno.agents.discover import (
+        _opencode_session_info,
+        default_opencode_db_path,
+        default_opencode_storage_dir,
+        opencode_query,
+    )
 
     db = default_opencode_db_path()
-    if not db.exists():
-        return []
+    if not path_exists_strict(db):
+        paths = scan_files(
+            default_opencode_storage_dir() / "session",
+            max_depth=1,
+            include=lambda name: name.endswith(".json") and token in name,
+        )
+        hits: list[StoreHit] = []
+        for path in paths:
+            info = _opencode_session_info(path)
+            if info is None:
+                raise OSError(f"unreadable opencode session candidate: {path}")
+            sid, cwd = info
+            if session_handle_tier(token, sid) is not None:
+                hits.append(StoreHit("opencode", sid, cwd))
+        return hits
     rows = opencode_query(
         db,
         "SELECT id, directory FROM session "

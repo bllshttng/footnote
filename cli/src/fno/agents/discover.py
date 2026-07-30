@@ -389,7 +389,15 @@ def opencode_connect(db_path: Path, *, raise_on_error: bool = False):
     """
     import sqlite3
 
-    if not db_path.exists():
+    from fno.agents.fs_scan import path_exists_strict
+
+    try:
+        exists = path_exists_strict(db_path)
+    except OSError:
+        if raise_on_error:
+            raise
+        return None
+    if not exists:
         return None
     try:
         return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)

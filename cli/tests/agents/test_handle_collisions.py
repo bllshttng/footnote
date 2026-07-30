@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,6 +104,69 @@ def test_ac1_edge_reads_legacy_opencode_created_time_when_database_is_absent(tmp
     )
     assert reports["opencode"].full.session_count == 1
     assert reports["opencode"].window.session_count == 1
+
+
+def test_codex_census_refuses_partially_unreadable_tree(tmp_path):
+    codex = tmp_path / "codex"
+    _rollouts(
+        codex / "visible",
+        [("019fb417-aaaa-7e73-b8b4-000000000001", RECENT)],
+    )
+    blocked = codex / "blocked"
+    _rollouts(
+        blocked,
+        [("019fb417-bbbb-7e73-b8b4-000000000002", RECENT)],
+    )
+    database = tmp_path / "opencode.db"
+    _database(database, [("ses_one", _epoch_ms(RECENT))])
+
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("test user can still enumerate mode-000 directories")
+        with pytest.raises(handle_collisions.CorpusUnavailable, match="codex"):
+            handle_collisions.run_census(
+                codex_sessions_dir=codex,
+                opencode_db_path=database,
+                opencode_storage_dir=tmp_path / "storage",
+                window_days=7,
+                now=NOW,
+            )
+    finally:
+        blocked.chmod(0o700)
+
+
+def test_legacy_opencode_census_refuses_partially_unreadable_tree(tmp_path):
+    codex = tmp_path / "codex"
+    _rollouts(codex, [("019fb417-aaaa-7e73-b8b4-000000000001", RECENT)])
+    storage = tmp_path / "opencode" / "storage"
+    visible = storage / "session" / "visible"
+    blocked = storage / "session" / "blocked"
+    for directory, session_id in (
+        (visible, "ses_abcd11111111"),
+        (blocked, "ses_abcd22222222"),
+    ):
+        directory.mkdir(parents=True)
+        (directory / f"{session_id}.json").write_text(
+            json.dumps(
+                {"id": session_id, "time": {"created": _epoch_ms(RECENT)}}
+            )
+        )
+
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("test user can still enumerate mode-000 directories")
+        with pytest.raises(handle_collisions.CorpusUnavailable, match="opencode"):
+            handle_collisions.run_census(
+                codex_sessions_dir=codex,
+                opencode_db_path=tmp_path / "opencode" / "opencode.db",
+                opencode_storage_dir=storage,
+                window_days=7,
+                now=NOW,
+            )
+    finally:
+        blocked.chmod(0o700)
 
 
 @pytest.mark.parametrize("kind", ["missing", "empty", "corrupt"])

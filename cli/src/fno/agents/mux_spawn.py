@@ -45,6 +45,7 @@ from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
+    AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
     load_registry,
@@ -1240,7 +1241,7 @@ def dispatch_spawn_pane(
 
         try:
             update_registry(_append, path=registry_path)
-        except (OSError, ValueError, RegistryVersionError) as exc:
+        except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             cleanup = _run_mux(
                 ["mux", "pane", "kill", "--session", session, str(pane_id)],
                 runner,

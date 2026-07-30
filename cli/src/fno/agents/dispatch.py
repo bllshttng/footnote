@@ -45,9 +45,11 @@ from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
+    AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
     load_registry,
+    resolve_registered_agent_across_sources,
     update_registry,
 )
 from fno.harness_identity import resolve_harness_identity
@@ -855,7 +857,7 @@ def _codex_create_path(
 
     try:
         update_registry(lambda entries: entries + [new_entry])
-    except (OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -1324,7 +1326,7 @@ def _claude_create_path(
 
     try:
         update_registry(_write)
-    except (OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -5040,9 +5042,10 @@ def dispatch_send(
 
     1. Validate name / message / from_name (same rules as dispatch_ask).
     2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
-    3. Acquire per-agent flock (hold_agent_lock) with timeout (exit 11).
+    3. Resolve the address to its registry primary key, then acquire that
+       per-agent flock (hold_agent_lock) with timeout (exit 11).
     4. INSIDE the flock:
-       a. Load registry; unknown name -> exit 16 (same message as ask).
+       a. Reload and re-resolve; unknown or changed identity refuses.
        b. Provider mismatch -> exit 2.
        c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
        d. Attempt live delivery via _deliver_live (fire-and-forget).
@@ -5074,10 +5077,49 @@ def dispatch_send(
         )
 
     registry_path = paths.agents_registry_path()
+    requested_name = name
+
+    def _load_and_resolve_target() -> tuple[list[AgentEntry], AgentEntry]:
+        try:
+            entries = load_registry(registry_path)
+        except (OSError, ValueError, RegistryVersionError) as exc:
+            events.emit(
+                "agent_send_failed",
+                stage="registry-read",
+                name=requested_name,
+            )
+            raise DispatchAskError(
+                f"registry read failed: {exc}",
+                exit_code=12,
+            ) from exc
+        try:
+            existing = resolve_registered_agent_across_sources(
+                entries, requested_name
+            ).entry
+        except AgentResolutionError as exc:
+            events.emit(
+                "agent_send_failed",
+                stage="ambiguous-address" if exc.ambiguous else "unknown-name",
+                name=requested_name,
+            )
+            if exc.ambiguous:
+                raise DispatchAskError(str(exc), exit_code=2) from exc
+            raise DispatchAskError(
+                f"unknown agent {requested_name!r}; spawn it first: "
+                f"fno agents spawn {requested_name} --harness <harness>",
+                exit_code=UNKNOWN_AGENT_EXIT_CODE,
+            ) from exc
+        return entries, existing
+
+    # Resolve before locking so every address form serializes on the registry
+    # primary key. The second resolution under that lock closes the read/lock
+    # race and refuses if the address changed owners while we waited.
+    _, initial = _load_and_resolve_target()
+    canonical_name = initial.name
 
     def _on_wait() -> None:
         print(
-            f"Waiting for agent {name!r} lock...",
+            f"Waiting for agent {canonical_name!r} lock...",
             file=sys.stderr,
             flush=True,
         )
@@ -5085,50 +5127,22 @@ def dispatch_send(
     # 3. Per-agent flock.
     try:
         with hold_agent_lock(
-            name,
+            canonical_name,
             registry_path,
             timeout=lock_timeout,
             on_wait=_on_wait,
         ):
-            # 4a. Load registry under the lock.
-            try:
-                entries = load_registry()
-            except (OSError, ValueError, RegistryVersionError) as exc:
-                events.emit(
-                    "agent_send_failed",
-                    stage="registry-read",
-                    name=name,
-                )
+            entries, existing = _load_and_resolve_target()
+            if existing.name != canonical_name:
                 raise DispatchAskError(
-                    f"registry read failed: {exc}",
-                    exit_code=12,
-                ) from exc
-
-            from fno.agents.registry import (
-                AgentResolutionError,
-                resolve_registered_agent_across_sources,
-            )
-
-            try:
-                existing = resolve_registered_agent_across_sources(
-                    entries, name
-                ).entry
-            except AgentResolutionError as exc:
-                events.emit(
-                    "agent_send_failed",
-                    stage="ambiguous-address" if exc.ambiguous else "unknown-name",
-                    name=name,
+                    f"agent address {requested_name!r} changed from "
+                    f"{canonical_name!r} to {existing.name!r} while acquiring "
+                    "its lock; retry the send",
+                    exit_code=2,
                 )
-                if exc.ambiguous:
-                    raise DispatchAskError(str(exc), exit_code=2) from exc
-                raise DispatchAskError(
-                    f"unknown agent {name!r}; spawn it first: "
-                    f"fno agents spawn {name} --harness <harness>",
-                    exit_code=UNKNOWN_AGENT_EXIT_CODE,
-                ) from exc
             # All later transport, event, durable-recipient, and stamp paths use
             # the registry primary key, never the caller's alias or short token.
-            name = existing.name
+            name = canonical_name
 
             # 4b. Provider mismatch check (mirrors dispatch_ask).
             try:

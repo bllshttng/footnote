@@ -7,6 +7,7 @@ or claiming a dead session is live.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 
@@ -207,6 +208,27 @@ def test_one_hit_plus_unreadable_store_is_not_unique(monkeypatch):
         store_fallback.complete_store_hits("deadbeef")
 
     assert hit.session_id in str(exc.value)
+
+
+def test_real_unreadable_directory_refuses_partial_store_answer(
+    _registry_home, monkeypatch
+):
+    """Filesystem traversal errors are coverage failures, not empty directories."""
+    matching = "019fb417-1111-7222-8333-4444deadbeef"
+    _write_codex_session(_registry_home, matching)
+    blocked = _registry_home / "projects" / "blocked"
+    blocked.mkdir()
+    (blocked / "unrelated.jsonl").write_text("{}\n")
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("test user can still enumerate mode-000 directories")
+        with pytest.raises(AgentResolutionError, match="claude") as exc:
+            store_fallback.complete_store_hits("deadbeef")
+    finally:
+        blocked.chmod(0o700)
+
+    assert matching in str(exc.value)
 
 
 def test_registry_hit_and_store_only_session_share_one_ambiguity_namespace(
@@ -752,6 +774,38 @@ def test_canonical_tail_resolves_mixed_case_opencode_store(tmp_path, monkeypatch
     hits = store_fallback.probe_stores("AbCd1234")
     assert [hit.session_id for hit in hits] == [sid]
     assert store_fallback.probe_stores("abcd1234") == []
+
+
+def test_legacy_opencode_tail_participates_in_cross_store_ambiguity(
+    tmp_path, monkeypatch
+):
+    """A host without opencode.db still contributes its legacy JSON sessions."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    storage = tmp_path / "opencode" / "storage"
+    session_dir = storage / "session" / "project"
+    session_dir.mkdir(parents=True)
+    opencode_sid = "ses_7f3a9b2cAbCd1234"
+    (session_dir / f"{opencode_sid}.json").write_text(
+        json.dumps({"id": opencode_sid, "directory": "/opencode"})
+    )
+    monkeypatch.setenv("FNO_OPENCODE_STORAGE_DIR", str(storage))
+    registry_sid = "aaaaaaaa-1111-2222-3333-4444abcd1234"
+    write_registry([
+        AgentEntry(
+            name="codex-worker",
+            harness="codex",
+            harness_session_id=registry_sid,
+            cwd="/codex",
+            log_path="",
+        )
+    ])
+
+    with pytest.raises(AgentResolutionError, match="ambiguous across 2 sessions") as exc:
+        resolve_agent("AbCd1234")
+
+    assert registry_sid in str(exc.value)
+    assert opencode_sid in str(exc.value)
 
 
 def test_canonical_tail_collision_in_store_fallback_is_ambiguous(tmp_path, monkeypatch):

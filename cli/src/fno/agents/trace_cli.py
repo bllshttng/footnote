@@ -139,6 +139,10 @@ class _RegistryReadError(RuntimeError):
     """
 
 
+class _RegistryResolutionError(RuntimeError):
+    """A trace address was ambiguous or could not be proven unique."""
+
+
 def _resolve_registry_name(token: str) -> "str | None":
     """Resolve a trace ``token`` (name | 8-hex short | full session id, x-1b1e)
     to its canonical registry name, or ``None`` when it matches nothing.
@@ -167,7 +171,9 @@ def _resolve_registry_name(token: str) -> "str | None":
         raise _RegistryReadError(f"registry load failed: {exc}") from exc
     try:
         return resolve_registered_agent_across_sources(entries, token).entry.name
-    except AgentResolutionError:
+    except AgentResolutionError as exc:
+        if exc.ambiguous:
+            raise _RegistryResolutionError(str(exc)) from exc
         return None
 
 
@@ -253,6 +259,11 @@ def trace_logic(
         except _RegistryReadError as exc:
             return TraceResult(
                 exit_code=12,
+                stderr=f"fno agents trace: {exc}\n",
+            )
+        except _RegistryResolutionError as exc:
+            return TraceResult(
+                exit_code=13,
                 stderr=f"fno agents trace: {exc}\n",
             )
         if resolved_name is None:
