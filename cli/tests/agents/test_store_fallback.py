@@ -174,6 +174,41 @@ def test_unknown_token_returns_none(_registry_home):
         resolve_agent("deadbeef")
 
 
+def test_unreadable_store_refuses_short_token_resolution(monkeypatch):
+    """An errored probe is unknown coverage, never proof of no collision."""
+
+    def _unreadable(_token):
+        raise OSError("store permission denied")
+
+    monkeypatch.setattr(store_fallback, "_PROBES", (_unreadable,))
+
+    with pytest.raises(AgentResolutionError, match="could not be checked") as exc:
+        store_fallback.complete_store_hits("deadbeef")
+
+    assert exc.value.ambiguous is True
+    assert "unreadable" in str(exc.value)
+
+
+def test_one_hit_plus_unreadable_store_is_not_unique(monkeypatch):
+    """A candidate cannot win while another source may hide its collision."""
+    hit = store_fallback.StoreHit(
+        "codex", "019fb417-1111-7222-8333-4444deadbeef", "/repo"
+    )
+
+    def _hit(_token):
+        return [hit]
+
+    def _unreadable(_token):
+        raise OSError("store permission denied")
+
+    monkeypatch.setattr(store_fallback, "_PROBES", (_hit, _unreadable))
+
+    with pytest.raises(AgentResolutionError, match="could not be checked") as exc:
+        store_fallback.complete_store_hits("deadbeef")
+
+    assert hit.session_id in str(exc.value)
+
+
 def test_registry_hit_and_store_only_session_share_one_ambiguity_namespace(
     _registry_home,
 ):
@@ -200,6 +235,69 @@ def test_registry_hit_and_store_only_session_share_one_ambiguity_namespace(
     assert registered_id in str(exc.value)
     assert store_only_id in str(exc.value)
     assert [e.harness_session_id for e in load_registry()] == [registered_id]
+
+
+def test_registry_hit_refuses_when_any_harness_store_is_unreadable(
+    _registry_home, monkeypatch
+):
+    """A partial store census cannot prove that a registry short is unique."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+        )
+    ])
+
+    def unreadable_codex(_token):
+        raise OSError("codex store unreadable")
+
+    monkeypatch.setattr(
+        store_fallback,
+        "_PROBES",
+        (store_fallback._probe_claude, unreadable_codex, store_fallback._probe_opencode),
+    )
+
+    with pytest.raises(AgentResolutionError, match="could not be checked") as exc:
+        resolve_agent("deadbeef")
+
+    assert exc.value.ambiguous is True
+    assert "unreadable_codex" in str(exc.value)
+
+
+def test_store_only_hit_refuses_when_another_harness_store_is_unreadable(
+    _registry_home, monkeypatch
+):
+    """A unique partial hit is still an unsafe guess on the registry-miss path."""
+    hit = store_fallback.StoreHit(
+        "claude",
+        "aaaaaaaa-1111-2222-3333-4444deadbeef",
+        "/repo/one",
+    )
+
+    def one_hit(_token):
+        return [hit]
+
+    def unreadable_codex(_token):
+        raise OSError("codex store unreadable")
+
+    monkeypatch.setattr(
+        store_fallback,
+        "_PROBES",
+        (one_hit, unreadable_codex, store_fallback._probe_opencode),
+    )
+
+    with pytest.raises(AgentResolutionError, match="could not be checked") as exc:
+        store_fallback.heal_from_harness_store("deadbeef")
+
+    assert exc.value.ambiguous is True
+    assert "unreadable_codex" in str(exc.value)
+    assert load_registry() == []
 
 
 def test_registry_and_store_sighting_of_same_session_deduplicate(_registry_home):
@@ -277,6 +375,81 @@ def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
     assert store_only_id in str(exc.value)
 
 
+def test_attach_refuses_registry_name_that_collides_with_store_session(
+    _registry_home, monkeypatch
+):
+    from fno.agents import dispatch
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+            short_id="aaaaaaaa",
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+    attached = []
+    monkeypatch.setattr(
+        "fno.agents.providers.claude.claude_attach",
+        lambda short: attached.append(short) or 0,
+    )
+
+    with pytest.raises(dispatch.DispatchAskError) as exc:
+        dispatch.attach_agent("deadbeef")
+
+    assert exc.value.exit_code == 2
+    assert registered_id in str(exc.value)
+    assert store_only_id in str(exc.value)
+    assert attached == []
+
+
+def test_dispatch_send_refuses_registry_name_colliding_with_store_session(
+    _registry_home, monkeypatch
+):
+    """Directed send shares the resolver and never exact-name guesses."""
+    from fno.agents import dispatch
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+            short_id="aaaaaaaa",
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+    delivered = []
+    monkeypatch.setattr(
+        dispatch,
+        "_mail_inject_claude",
+        lambda *_args: delivered.append(True) or True,
+    )
+
+    with pytest.raises(dispatch.DispatchAskError) as exc:
+        dispatch.dispatch_send(
+            name="deadbeef",
+            message="do not misroute",
+            provider=None,
+            cwd=_registry_home,
+        )
+
+    assert exc.value.exit_code == 2
+    assert registered_id in str(exc.value)
+    assert store_only_id in str(exc.value)
+    assert delivered == []
+
+
 def test_registry_full_id_and_unshaped_name_keep_store_fast_paths(
     _registry_home, monkeypatch
 ):
@@ -325,6 +498,32 @@ def test_registry_write_failure_still_resolves(_registry_home, monkeypatch, caps
 
     assert entry.harness_session_id == CLAUDE_UUID
     assert "could not register" in capsys.readouterr().err
+
+
+def test_registration_identity_collision_is_never_degraded_to_a_synthesized_row(
+    _registry_home,
+):
+    """A designed ambiguity refusal is not a best-effort registry write failure."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    existing_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "019fb417-1111-7222-8333-4444deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=existing_id,
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+
+    with pytest.raises(AgentResolutionError, match="canonical handle") as exc:
+        store_fallback.heal_from_harness_store("deadbeef")
+
+    assert exc.value.ambiguous is True
+    assert [entry.harness_session_id for entry in load_registry()] == [existing_id]
 
 
 def test_corrupt_store_never_denies_resolution(_registry_home):

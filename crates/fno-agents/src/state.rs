@@ -19,6 +19,7 @@
 
 use crate::AgentStatus;
 use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -937,6 +938,11 @@ where
     // classic footgun; locking the sidecar sidesteps it entirely).
     let lock = acquire_exclusive(&lock_path(path))?;
     let mut registry = read_existing_registry(path)?;
+    let before = registry
+        .entries
+        .iter()
+        .map(|entry| (entry.name.clone(), identity_signature(entry)))
+        .collect::<BTreeMap<_, _>>();
     let out = f(&mut registry);
     // Write-path harness sync (x-880e, AC6-FR): a closure that mutated a legacy
     // session-id field (the stream-json adopt path writes claude_session_uuid on a
@@ -947,6 +953,8 @@ where
     for entry in &mut registry.entries {
         entry.backfill_harness_aliases();
     }
+    validate_changed_identities(&before, &registry.entries)
+        .map_err(StateError::InvariantViolation)?;
     // One-live-ref invariant (4a-G2), enforced at the single Rust write choke
     // point so no closure can persist a double-ref row. The lock guard drops
     // on the early return, so a violation never wedges the registry.
@@ -965,6 +973,76 @@ where
     write_json_atomic(path, &registry)?;
     let _ = lock.unlock();
     Ok(out)
+}
+
+type IdentitySignature = (String, String, String, String);
+
+fn identity_signature(entry: &RegistryEntry) -> IdentitySignature {
+    (
+        entry.name.clone(),
+        entry.short_id.clone(),
+        entry.harness_name().to_string(),
+        entry.harness_session_id.clone().unwrap_or_default(),
+    )
+}
+
+fn validate_changed_identities(
+    before: &BTreeMap<String, IdentitySignature>,
+    entries: &[RegistryEntry],
+) -> Result<(), String> {
+    use crate::identity::{canonical_handle, legacy_prefix_handle, session_handle_tier};
+
+    let matches = |token: &str, other: &RegistryEntry, include_legacy: bool| {
+        if token == other.name || (!other.short_id.is_empty() && token == other.short_id) {
+            return true;
+        }
+        let Some(session_id) = other.harness_session_id.as_deref() else {
+            return false;
+        };
+        match session_handle_tier(token, session_id) {
+            Some(2) => include_legacy,
+            Some(_) => true,
+            None => false,
+        }
+    };
+
+    for (index, candidate) in entries.iter().enumerate() {
+        if before.get(&candidate.name) == Some(&identity_signature(candidate)) {
+            continue;
+        }
+        let mut strong = BTreeSet::from([candidate.name.clone()]);
+        if !candidate.short_id.is_empty() {
+            strong.insert(candidate.short_id.clone());
+        }
+        let session_id = candidate.harness_session_id.as_deref().unwrap_or("");
+        if !session_id.is_empty() {
+            strong.insert(session_id.to_string());
+            strong.insert(canonical_handle(session_id));
+        }
+        let legacy = (!session_id.is_empty()).then(|| legacy_prefix_handle(session_id));
+        for (other_index, other) in entries.iter().enumerate() {
+            if index == other_index {
+                continue;
+            }
+            let collision = strong
+                .iter()
+                .find(|token| matches(token, other, true))
+                .cloned()
+                .or_else(|| {
+                    legacy
+                        .as_ref()
+                        .filter(|token| matches(token, other, false))
+                        .cloned()
+                });
+            if let Some(token) = collision {
+                return Err(format!(
+                    "registry identity {token:?} for new or changed row {:?} collides with row {:?}; use a different name or the full session id",
+                    candidate.name, other.name
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn read_existing_registry(path: &Path) -> Result<Registry, StateError> {
@@ -1428,6 +1506,57 @@ mod tests {
         let reg = load_registry(&path).unwrap();
         assert_eq!(reg.entries.len(), 1);
         assert_eq!(reg.schema_version, REGISTRY_SCHEMA_VERSION);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_update_registry_refuses_new_canonical_handle_collision() {
+        let dir = tmpdir("identity-collision");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut first = sample_entry("first");
+            first.short_id = "transport1".into();
+            first.harness = Some("codex".into());
+            first.harness_session_id = Some("aaaaaaaa-0000-0000-0000-1111deadbeef".into());
+            registry.entries.push(first);
+        })
+        .unwrap();
+
+        let result = update_registry(&path, |registry| {
+            let mut second = sample_entry("second");
+            second.short_id = "transport2".into();
+            second.harness = Some("codex".into());
+            second.harness_session_id = Some("bbbbbbbb-0000-0000-0000-2222deadbeef".into());
+            registry.entries.push(second);
+        });
+
+        assert!(matches!(result, Err(StateError::InvariantViolation(_))));
+        assert_eq!(load_registry(&path).unwrap().entries.len(), 1);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn state_update_registry_allows_retired_prefix_collision() {
+        let dir = tmpdir("legacy-prefix-compatible");
+        let path = dir.join("registry.json");
+        update_registry(&path, |registry| {
+            let mut first = sample_entry("first");
+            first.short_id = "transport1".into();
+            first.harness = Some("codex".into());
+            first.harness_session_id = Some("019fb417-0000-0000-0000-111122223333".into());
+            registry.entries.push(first);
+        })
+        .unwrap();
+        update_registry(&path, |registry| {
+            let mut second = sample_entry("second");
+            second.short_id = "transport2".into();
+            second.harness = Some("codex".into());
+            second.harness_session_id = Some("019fb417-0000-0000-0000-444455556666".into());
+            registry.entries.push(second);
+        })
+        .unwrap();
+
+        assert_eq!(load_registry(&path).unwrap().entries.len(), 2);
         std::fs::remove_dir_all(&dir).ok();
     }
 

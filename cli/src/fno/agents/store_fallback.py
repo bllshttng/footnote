@@ -120,19 +120,16 @@ def _probe_claude(token: str) -> list[StoreHit]:
         return []
     needle = token.lower()
     hits: dict[str, StoreHit] = {}
-    try:
-        root = _claude_projects_dir()
-        found = {
-            path
-            for pattern in (
-                f"*/{needle}.jsonl",      # full id
-                f"*/*{needle}.jsonl",     # canonical tail
-                f"*/{needle}*.jsonl",     # legacy prefix
-            )
-            for path in root.glob(pattern)
-        }
-    except OSError:
-        return []
+    root = _claude_projects_dir()
+    found = {
+        path
+        for pattern in (
+            f"*/{needle}.jsonl",      # full id
+            f"*/*{needle}.jsonl",     # canonical tail
+            f"*/{needle}*.jsonl",     # legacy prefix
+        )
+        for path in root.glob(pattern)
+    }
     for path in sorted(found):
         name = path.name
         if ".sync-conflict-" in name:
@@ -150,24 +147,21 @@ def _probe_codex(token: str) -> list[StoreHit]:
     from fno.agents.discover import _codex_meta
 
     hits: dict[str, StoreHit] = {}
-    try:
-        root = _codex_sessions_dir()
-        needle = token.lower()
-        found = {
-            path
-            for pattern in (
-                f"rollout-*-{needle}.jsonl",   # full id
-                f"rollout-*-*{needle}.jsonl",  # canonical tail
-                f"rollout-*-{needle}*.jsonl",  # legacy prefix
-            )
-            for path in root.rglob(pattern)
-        }
-    except OSError:
-        return []
+    root = _codex_sessions_dir()
+    needle = token.lower()
+    found = {
+        path
+        for pattern in (
+            f"rollout-*-{needle}.jsonl",   # full id
+            f"rollout-*-*{needle}.jsonl",  # canonical tail
+            f"rollout-*-{needle}*.jsonl",  # legacy prefix
+        )
+        for path in root.rglob(pattern)
+    }
     for path in sorted(found):
         meta = _codex_meta(path)
         if meta is None:
-            continue
+            raise OSError(f"unreadable codex session candidate: {path}")
         sid, cwd = meta
         if session_handle_tier(token, sid) is None:
             continue
@@ -190,6 +184,7 @@ def _probe_opencode(token: str) -> list[StoreHit]:
         "SELECT id, directory FROM session "
         "WHERE id = ? OR substr(id, -8) = ? OR substr(id, 1, 8) = ?",
         (token, token, token),
+        raise_on_error=True,
     )
     return [
         StoreHit("opencode", sid, directory if isinstance(directory, str) else "")
@@ -201,24 +196,52 @@ def _probe_opencode(token: str) -> list[StoreHit]:
 _PROBES = (_probe_claude, _probe_codex, _probe_opencode)
 
 
-def probe_stores(token: str) -> list[StoreHit]:
-    """Every harness store's answer for ``token``. Never raises: a corrupt or
-    missing store contributes no rows rather than denying the whole probe."""
+def probe_stores(token: str, *, require_complete: bool = True) -> list[StoreHit]:
+    """Every harness store's answer for ``token``.
+
+    Callers that explicitly pass ``require_complete=False`` retain the
+    historical partial-result behavior. Identity selection uses the strict
+    default because a partial answer cannot prove a short token unique across
+    the shared namespace.
+    """
     token = _normalize(token)
     if not is_session_shaped(token):
         return []
     hits: list[StoreHit] = []
+    failed: list[str] = []
     for probe in _PROBES:
         try:
             hits.extend(probe(token))
-        except Exception:  # noqa: BLE001 - one broken store never denies the rest
+        except Exception:  # noqa: BLE001 - collect every readable store before refusing
+            failed.append(probe.__name__.removeprefix("_probe_"))
             continue
     matched = [
         hit
         for hit in hits
         if session_handle_tier(token, hit.session_id) is not None
     ]
-    return list({(hit.harness, hit.session_id): hit for hit in matched}.values())
+    distinct = list({(hit.harness, hit.session_id): hit for hit in matched}.values())
+    if failed and require_complete:
+        from fno.agents.registry import AgentResolutionError
+
+        candidates = ""
+        if distinct:
+            candidates = " Visible candidates: " + ", ".join(
+                f"{hit.session_id} ({hit.harness})"
+                for hit in sorted(distinct, key=lambda hit: (hit.harness, hit.session_id))
+            ) + "."
+        raise AgentResolutionError(
+            f"token {token!r} could not be checked for cross-store uniqueness "
+            f"because these harness stores were unreadable: {', '.join(failed)}. "
+            f"{candidates} Use the full session id.",
+            ambiguous=True,
+        )
+    return distinct
+
+
+def complete_store_hits(token: str) -> list[StoreHit]:
+    """Return a complete cross-harness answer or refuse short-token selection."""
+    return probe_stores(token, require_complete=True)
 
 
 def heal_from_harness_store(
@@ -237,7 +260,7 @@ def heal_from_harness_store(
     """
     from fno.agents.registry import AgentEntry, AgentResolutionError, register_existing_session
 
-    hits = probe_stores(token)
+    hits = complete_store_hits(token)
     if not hits:
         return None
     if len(hits) > 1:
@@ -263,6 +286,8 @@ def heal_from_harness_store(
             status="orphaned",
             registry_path=registry_path,
         )
+    except AgentResolutionError:
+        raise
     except Exception as exc:  # noqa: BLE001 - reaching the session beats the roster row
         sys.stderr.write(
             f"WARN: resolved {token!r} from the {hit.harness} store but could not "

@@ -45,6 +45,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from fno.harness_identity import claude_transport_short_id
+
 # Terminal-or-needs-input states. The poll loop exits when state.json
 # transitions to one of these; the timeline tail picks ``text`` from
 # rows with these states (recipient may emit ``text`` during running
@@ -164,7 +166,7 @@ def roster_sessions() -> list[dict]:
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid.split("-")[0],
+                "short_id": claude_transport_short_id(sid),
                 "pid": pid,
                 "cwd": str(w.get("cwd") or ""),
                 "status": None,

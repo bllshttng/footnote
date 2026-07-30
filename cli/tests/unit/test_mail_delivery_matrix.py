@@ -422,13 +422,34 @@ def test_cell6b_retired_form_read_off_a_stored_record_is_migrated(
     The reply path first shipped this as a refusal -- the same wall class as this
     node's root cause -- and was reversed on PR #491.
     """
-    from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
+    from fno.bus.log import iter_messages
+    from fno.inbox.store import write_new_thread
 
-    stored = f"claude-{LIVE_LEGACY_PREFIX}"
-    assert LEGACY_HANDLE_RE.fullmatch(stored), "fixture is not the retired form"
+    _seed_asleep_transcript(monkeypatch, tmp_path, session_id=LIVE_SID)
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_and_deliver",
+        lambda *_a, **_k: (False, "wake-refused"),
+    )
+    inbound = write_new_thread(
+        recipient="meeeeeee",
+        sender=LIVE_LEGACY_PREFIX,
+        kind="send",
+        body="ping",
+        to_kind="name",
+    )
 
-    # Stored prefixed records migrate only to the explicit legacy lookup tier.
-    assert legacy_prefix_handle(LIVE_SID) == LIVE_LEGACY_PREFIX
+    result = runner.invoke(
+        app,
+        ["mail", "reply", "--to", inbound.thread_id, "--body", "ack"],
+    )
+
+    assert result.exit_code == 0, result.output
+    replies = [m for m in iter_messages() if m.in_reply_to == inbound.thread_id]
+    assert len(replies) == 1
+    assert replies[0].to == LIVE_HANDLE
+    drained = _drain_as(runner, monkeypatch, LIVE_SID)
+    assert any(message["id"] == replies[0].id for message in drained)
 
 
 # ---------------------------------------------------------------------------

@@ -251,6 +251,35 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
 
 
+def test_reply_refuses_ambiguous_offline_sender_handle(
+    runner, mailbox, monkeypatch
+):
+    """A discovery miss must not turn a known store ambiguity into durable mail."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(discover, "resolve_or_suggest", lambda *_a, **_k: (None, []))
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (
+            None,
+            [
+                "aaaaaaaa-1111-2222-3333-4444deadbeef",
+                "bbbbbbbb-1111-2222-3333-5555deadbeef",
+            ],
+        ),
+    )
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_="deadbeef", body="ping"
+    )
+
+    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert result.exit_code != 0
+    assert "ambiguous" in result.output.lower()
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
+
+
 def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     runner, mailbox, monkeypatch, tmp_path
 ):

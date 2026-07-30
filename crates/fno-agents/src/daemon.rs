@@ -3061,38 +3061,20 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// Registry-local projection used by the address-form unit test. Production
-/// stop/rm uses [`canonical_name_for_lifecycle`] so stores join the decision.
-#[cfg(test)]
-fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
-    let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
-        return token.to_string();
-    };
-    match crate::client_verbs::find_agent_entry(&rows, token) {
-        Ok(e) => e
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(token)
-            .to_string(),
-        Err(_) => token.to_string(),
-    }
-}
-
-/// Resolve lifecycle tokens through the all-source client resolver. A genuine
-/// miss keeps the daemon's familiar raw-token not-found path; ambiguity is
-/// returned to the caller instead of falling back to a colliding registry name.
-async fn canonical_name_for_lifecycle(
+/// Resolve lifecycle tokens through the all-source client resolver. Return the
+/// resolved row itself because the helper may have just adopted a store-only
+/// session that is absent from the caller's pre-heal registry snapshot.
+async fn entry_for_lifecycle(
     registry: &state::Registry,
     token: &str,
     registry_path: &std::path::Path,
-) -> Result<String, String> {
+) -> Result<Option<RegistryEntry>, String> {
     let Value::Array(rows) = serde_json::to_value(&registry.entries)
         .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
     else {
         return Err("could not inspect registry identities".to_string());
     };
-    let raw = token.to_string();
-    let worker_token = raw.clone();
+    let worker_token = token.to_string();
     let path = registry_path.to_path_buf();
     let resolved = tokio::task::spawn_blocking(move || {
         crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
@@ -3100,37 +3082,42 @@ async fn canonical_name_for_lifecycle(
     .await
     .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
     match resolved {
-        Ok(entry) => Ok(entry
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(&raw)
-            .to_string()),
-        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(raw),
+        Ok(entry) => {
+            let mut entry: RegistryEntry = serde_json::from_value(entry)
+                .map_err(|exc| format!("resolved identity row is unreadable: {exc}"))?;
+            entry.backfill_harness_aliases();
+            if let Some(legacy) = entry.backfill_short_id() {
+                return Err(format!(
+                    "resolved identity row {:?} has conflicting transport ids (legacy={legacy:?})",
+                    entry.name
+                ));
+            }
+            Ok(Some(entry))
+        }
+        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(None),
         Err(err) => Err(err.message()),
     }
 }
 
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
-    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+    let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = match canonical_name_for_lifecycle(&registry, &name, &ctx.home.registry_json()).await
-    {
-        Ok(name) => name,
-        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-    };
-    let entry = match registry.find(&name) {
-        Some(e) => e.clone(),
-        None => {
-            return Response::err(
-                req.id,
-                ErrorCode::AgentNotFound,
-                format!("agent {name} not found"),
-            )
-        }
-    };
+    let entry =
+        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Response::err(
+                    req.id,
+                    ErrorCode::AgentNotFound,
+                    format!("agent {requested_name} not found"),
+                )
+            }
+            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+        };
+    let name = entry.name.clone();
     if entry.status == AgentStatus::Exited {
         // An exited agent needs no stop work. (Pre-G4 this also force-cleared a
         // lingering WebSocket driver; the drive surface was retired at G4.)
@@ -3356,7 +3343,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
 }
 
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
-    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+    let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
@@ -3366,21 +3353,19 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = match canonical_name_for_lifecycle(&registry, &name, &ctx.home.registry_json()).await
-    {
-        Ok(name) => name,
-        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
-    };
-    let entry = match registry.find(&name) {
-        Some(e) => e.clone(),
-        None => {
-            return Response::err(
-                req.id,
-                ErrorCode::AgentNotFound,
-                format!("agent {name} not found"),
-            )
-        }
-    };
+    let entry =
+        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Response::err(
+                    req.id,
+                    ErrorCode::AgentNotFound,
+                    format!("agent {requested_name} not found"),
+                )
+            }
+            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+        };
+    let name = entry.name.clone();
     if entry.status == AgentStatus::Live && !force {
         return Response::err(
             req.id,
@@ -4567,6 +4552,21 @@ fn fill_random(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Registry-local projection used only by the address-form unit test.
+    fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
+        let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
+            return token.to_string();
+        };
+        match crate::client_verbs::find_agent_entry(&rows, token) {
+            Ok(entry) => entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(token)
+                .to_string(),
+            Err(_) => token.to_string(),
+        }
+    }
     use crate::state::{AgentState, DriveWindow, PtyState};
 
     fn tmp_home(tag: &str) -> AgentsHome {
@@ -5069,7 +5069,7 @@ mod tests {
             entries: vec![named, short],
         };
 
-        let error = canonical_name_for_lifecycle(
+        let error = entry_for_lifecycle(
             &reg,
             "deadbeef",
             std::path::Path::new("/nonexistent/registry.json"),

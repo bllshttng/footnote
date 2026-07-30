@@ -15,6 +15,7 @@ from fno.agents.registry import (
     AgentResolutionError,
     resolve_agent,
     resolve_agent_in,
+    update_registry,
     write_registry,
 )
 
@@ -80,6 +81,48 @@ def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
     assert resolve_agent_in([row], "AbCd1234").matched_by == "canonical_handle"
     with pytest.raises(AgentResolutionError):
         resolve_agent_in([row], "abcd1234")
+
+
+def test_update_registry_refuses_new_canonical_handle_collision(tmp_path: Path) -> None:
+    """Normal producers cannot mint two rows sharing one durable mailbox."""
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1111deadbeef"),
+    )
+    second = _claude(
+        "second", "transport2", "bbbbbbbb-0000-0000-0000-2222deadbeef"
+    )
+
+    with pytest.raises(AgentResolutionError, match="identity 'deadbeef'"):
+        update_registry(lambda rows: [*rows, second], path=reg)
+
+
+def test_update_registry_refuses_name_shadowing_existing_handle(tmp_path: Path) -> None:
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1111deadbeef"),
+    )
+    shadow = _claude(
+        "deadbeef", "transport2", "bbbbbbbb-0000-0000-0000-222233334444"
+    )
+
+    with pytest.raises(AgentResolutionError, match="collides with row 'first'"):
+        update_registry(lambda rows: [*rows, shadow], path=reg)
+
+
+def test_update_registry_allows_legacy_prefix_collision(tmp_path: Path) -> None:
+    """Retired UUIDv7 time prefixes remain ambiguity-compatible, not a spawn wall."""
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "019fb417-0000-0000-0000-111122223333"),
+    )
+    second = _claude(
+        "second", "transport2", "019fb417-0000-0000-0000-444455556666"
+    )
+
+    persisted = update_registry(lambda rows: [*rows, second], path=reg)
+
+    assert [entry.name for entry in persisted] == ["first", "second"]
 
 
 def test_ac4_err_canonical_handle_and_legacy_prefix_are_ambiguous() -> None:

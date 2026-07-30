@@ -157,7 +157,7 @@ def _resolve_registry_name(token: str) -> "str | None":
             AgentResolutionError,
             RegistryVersionError,
             load_registry,
-            resolve_agent_in,
+            resolve_registered_agent_across_sources,
         )
     except ImportError as exc:
         raise _RegistryReadError(f"registry module unavailable: {exc}") from exc
@@ -166,7 +166,7 @@ def _resolve_registry_name(token: str) -> "str | None":
     except (OSError, ValueError, RegistryVersionError) as exc:
         raise _RegistryReadError(f"registry load failed: {exc}") from exc
     try:
-        return resolve_agent_in(entries, token).entry.name
+        return resolve_registered_agent_across_sources(entries, token).entry.name
     except AgentResolutionError:
         return None
 

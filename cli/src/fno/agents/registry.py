@@ -35,7 +35,12 @@ from pathlib import Path
 from typing import Callable, Iterator, Literal, Optional
 
 from fno import paths
-from fno.harness_identity import canonical_handle, session_handle_tier, sync_harness_aliases
+from fno.harness_identity import (
+    canonical_handle,
+    legacy_prefix_handle,
+    session_handle_tier,
+    sync_harness_aliases,
+)
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
@@ -473,7 +478,7 @@ def resolve_agent_across_sources(
 ) -> ResolvedAgent:
     """Resolve one token against a registry snapshot and every harness store."""
     try:
-        resolved = resolve_agent_in(entries, token)
+        return resolve_registered_agent_across_sources(entries, token)
     except AgentResolutionError as exc:
         # A MISS may fall through; a registry the caller must disambiguate must
         # not. Otherwise a store hit on one of several matching rows would pick
@@ -484,14 +489,23 @@ def resolve_agent_across_sources(
         if entry is None:
             raise
         return ResolvedAgent(entry=entry, matched_by="harness_store")
-    return _ensure_unique_across_stores(resolved, token)
+
+
+def resolve_registered_agent_across_sources(entries: list, token: str) -> ResolvedAgent:
+    """Resolve a registry row while checking store-only collision candidates.
+
+    A registry miss stays a miss and never adopts a store-only session. Registry-
+    gated read and delivery verbs use this to share the all-source ambiguity rule
+    without changing their established miss contract.
+    """
+    return _ensure_unique_across_stores(resolve_agent_in(entries, token), token)
 
 
 def _ensure_unique_across_stores(
     resolved: ResolvedAgent, token: str
 ) -> ResolvedAgent:
     """Union one registry hit with store-only candidates before selecting it."""
-    from fno.agents.store_fallback import is_session_shaped, probe_stores
+    from fno.agents.store_fallback import complete_store_hits, is_session_shaped
 
     if resolved.matched_by == "full_session_id" or not is_session_shaped(token):
         return resolved
@@ -500,7 +514,7 @@ def _ensure_unique_across_stores(
     registry_key = (entry.harness, entry.harness_session_id)
     foreign = {
         (hit.harness, hit.session_id): hit
-        for hit in probe_stores(token)
+        for hit in complete_store_hits(token)
         if (hit.harness, hit.session_id) != registry_key
     }
     if not foreign:
@@ -1080,6 +1094,69 @@ def update_registry(
     target = _registry_path(path)
     with _hold_registry_lock(target):
         current = load_registry(path=target)
+        before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))
+        _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
         return new_entries
+
+
+def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
+    """Fields whose mutation can change what token addresses a registry row."""
+    return (
+        entry.name,
+        entry.short_id or "",
+        entry.harness or "",
+        entry.harness_session_id or "",
+    )
+
+
+def _validate_changed_identities(
+    before: dict[str, tuple[str, str, str, str]], entries: list[AgentEntry]
+) -> None:
+    """Reject a newly minted address that shadows any existing row.
+
+    Historical legacy-prefix collisions remain readable and resolve as
+    ambiguity. New names, transport keys, full ids, and canonical handles may
+    not enter that namespace because those are current producers and durable
+    mailbox addresses.
+    """
+
+    def _matches(token: str, other: AgentEntry, *, include_legacy: bool) -> bool:
+        if token == other.name or (other.short_id and token == other.short_id):
+            return True
+        tier = _session_tier(other, token)
+        return tier is not None and (include_legacy or tier != 2)
+
+    for index, candidate in enumerate(entries):
+        if before.get(candidate.name) == _identity_signature(candidate):
+            continue
+        sid = candidate.harness_session_id or ""
+        strong_tokens = {candidate.name}
+        if candidate.short_id:
+            strong_tokens.add(candidate.short_id)
+        if sid:
+            strong_tokens.update((sid, canonical_handle(sid)))
+        legacy = legacy_prefix_handle(sid) if sid else ""
+        for other_index, other in enumerate(entries):
+            if index == other_index:
+                continue
+            collision = next(
+                (
+                    token
+                    for token in strong_tokens
+                    if _matches(token, other, include_legacy=True)
+                ),
+                None,
+            )
+            if collision is None and legacy and _matches(
+                legacy, other, include_legacy=False
+            ):
+                collision = legacy
+            if collision is not None:
+                raise AgentResolutionError(
+                    f"registry identity {collision!r} for new or changed row "
+                    f"{candidate.name!r} collides with row {other.name!r}; use a "
+                    "different name or the full session id",
+                    ambiguous=True,
+                )

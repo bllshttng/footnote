@@ -20,8 +20,10 @@ from fno.agents import format as fmt
 from fno.agents import truth_status
 from fno.agents.registry import (
     AgentEntry,
+    AgentResolutionError,
     RegistryVersionError,
     load_registry,
+    resolve_agent_across_sources,
 )
 
 
@@ -274,14 +276,10 @@ def read_logs(
     except RegistryVersionError as exc:
         return LogsResult(exit_code=1, warnings=[str(exc)])
 
-    entry: Optional[AgentEntry] = None
-    for e in entries:
-        if e.name == name:
-            entry = e
-            break
-
-    if entry is None:
-        err.write(f"agent not found: {name}\n")
+    try:
+        entry = resolve_agent_across_sources(entries, name).entry
+    except AgentResolutionError as exc:
+        err.write(f"{exc}\n" if exc.ambiguous else f"agent not found: {name}\n")
         return LogsResult(exit_code=EXIT_NOT_FOUND)
 
     if entry.harness == "claude":

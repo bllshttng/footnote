@@ -3674,7 +3674,11 @@ def attach_agent(name: str) -> AttachResult:
 
     try:
         resolved = resolve_agent(name)
-    except (AgentResolutionError, OSError, RegistryVersionError):
+    except AgentResolutionError as exc:
+        if exc.ambiguous:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        existing = _resolve_registry_entry(name)
+    except (OSError, RegistryVersionError):
         existing = _resolve_registry_entry(name)
     else:
         existing, name = resolved.entry, resolved.entry.name
@@ -5100,20 +5104,31 @@ def dispatch_send(
                     exit_code=12,
                 ) from exc
 
-            existing = next((e for e in entries if e.name == name), None)
+            from fno.agents.registry import (
+                AgentResolutionError,
+                resolve_registered_agent_across_sources,
+            )
 
-            # 4a (cont). Unknown-agent guard: send never creates.
-            if existing is None:
+            try:
+                existing = resolve_registered_agent_across_sources(
+                    entries, name
+                ).entry
+            except AgentResolutionError as exc:
                 events.emit(
                     "agent_send_failed",
-                    stage="unknown-name",
+                    stage="ambiguous-address" if exc.ambiguous else "unknown-name",
                     name=name,
                 )
+                if exc.ambiguous:
+                    raise DispatchAskError(str(exc), exit_code=2) from exc
                 raise DispatchAskError(
                     f"unknown agent {name!r}; spawn it first: "
                     f"fno agents spawn {name} --harness <harness>",
                     exit_code=UNKNOWN_AGENT_EXIT_CODE,
-                )
+                ) from exc
+            # All later transport, event, durable-recipient, and stamp paths use
+            # the registry primary key, never the caller's alias or short token.
+            name = existing.name
 
             # 4b. Provider mismatch check (mirrors dispatch_ask).
             try:

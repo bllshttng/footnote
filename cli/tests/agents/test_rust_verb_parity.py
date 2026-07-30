@@ -64,13 +64,27 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
         if inherited_pythonpath
         else source_path
     )
+    env = {
+        **os.environ,
+        "FNO_AGENTS_HOME": str(home),
+        "PYTHONPATH": pythonpath,
+    }
+    # A short-token parity case asks the Rust client to invoke the Python
+    # all-source resolver. Keep that test hermetic instead of scanning the
+    # operator's real Claude/OpenCode corpora; individual tests can still
+    # override these seams through monkeypatch before calling this helper.
+    isolated_stores = {
+        "FNO_CLAUDE_PROJECTS_DIR": home.parent / "empty-claude-projects",
+        "FNO_CODEX_SESSIONS_DIR": home.parent / "empty-codex-sessions",
+        "FNO_OPENCODE_STORAGE_DIR": home.parent / "empty-opencode" / "storage",
+    }
+    for key, path in isolated_stores.items():
+        if key not in env:
+            path.mkdir(parents=True, exist_ok=True)
+            env[key] = str(path)
     return subprocess.run(
         [str(RUST_BIN), *args],
-        env={
-            **os.environ,
-            "FNO_AGENTS_HOME": str(home),
-            "PYTHONPATH": pythonpath,
-        },
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -378,20 +392,32 @@ def test_attach_missing_agent_exit2(tmp_path) -> None:
 
 @requires_rust
 @pytest.mark.parametrize("tail", [2, 0, 100])
-def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
+@pytest.mark.parametrize("token", ["cx", "deadbeef"])
+def test_logs_codex_oneshot_parity(tmp_path, monkeypatch, tail, token) -> None:
     from fno.agents import read as read_mod
     from fno.agents.registry import AgentEntry
     import io
 
     agents = tmp_path / "agents"
     agents.mkdir(parents=True)
+    projects = tmp_path / "projects"
+    codex = tmp_path / "codex"
+    opencode_storage = tmp_path / "opencode" / "storage"
+    projects.mkdir()
+    codex.mkdir()
+    opencode_storage.mkdir(parents=True)
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(projects))
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(codex))
+    monkeypatch.setenv("FNO_OPENCODE_STORAGE_DIR", str(opencode_storage))
     log = agents / "cx.log.jsonl"
     log.write_text('{"line":1}\n{"line":2}\n{"line":3}\n{"line":4}')  # last line no newline
+    session_id = "019fb417-1111-7222-8333-4444deadbeef"
     entries = [
         {
             "name": "cx",
             "short_id": "cx",
             "provider": "codex",
+            "harness_session_id": session_id,
             "cwd": "/tmp/x",
             "project_root": "/tmp/x",
             "log_path": str(log),
@@ -404,7 +430,15 @@ def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
     # Python side: read_logs with load_registry pointed at the fixture.
     def fake_registry():
         return [
-            AgentEntry(name=e["name"], harness=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
+            AgentEntry(
+                name=e["name"],
+                harness=e["provider"],
+                harness_session_id=e["harness_session_id"],
+                cwd=e["cwd"],
+                log_path=e["log_path"],
+                created_at=e["created_at"],
+                status=e["status"],
+            )
             for e in entries
         ]
 
@@ -413,13 +447,13 @@ def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
     try:
         out = io.StringIO()
         err = io.StringIO()
-        py = read_mod.read_logs(name="cx", tail=tail, stdout=out, stderr=err)
+        py = read_mod.read_logs(name=token, tail=tail, stdout=out, stderr=err)
         py_out = out.getvalue()
         py_exit = py.exit_code
     finally:
         read_mod.load_registry = orig
 
-    rust = _run_rust(["logs", "cx", "--tail", str(tail)], agents)
+    rust = _run_rust(["logs", token, "--tail", str(tail)], agents)
     assert rust.stdout == py_out
     assert rust.returncode == py_exit
 

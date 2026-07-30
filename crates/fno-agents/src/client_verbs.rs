@@ -716,14 +716,23 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
                     };
                 }
                 Ok(rows) => match find_agent_entry(&rows, token) {
-                    Ok(e) => {
-                        resolved_name = Some(
-                            e.get("name")
-                                .and_then(Value::as_str)
-                                .unwrap_or(token)
-                                .to_string(),
-                        );
-                    }
+                    Ok(_) => match resolve_entry_with_heal(&rows, token, registry_path) {
+                        Ok(e) => {
+                            resolved_name = Some(
+                                e.get("name")
+                                    .and_then(Value::as_str)
+                                    .unwrap_or(token)
+                                    .to_string(),
+                            );
+                        }
+                        Err(err) => {
+                            return TraceResult {
+                                exit_code: 13,
+                                output: String::new(),
+                                stderr: format!("fno agents trace: {}\n", err.message()),
+                            };
+                        }
+                    },
                     Err(_) => {
                         return TraceResult {
                             exit_code: 13,
@@ -966,39 +975,7 @@ impl ResolveError {
     }
 }
 
-fn canonical_handle(session_id: &str) -> String {
-    let mut tail = session_id.chars().rev().take(8).collect::<Vec<_>>();
-    tail.reverse();
-    tail.into_iter().collect()
-}
-
-fn legacy_prefix_handle(session_id: &str) -> String {
-    session_id.chars().take(8).collect()
-}
-
-/// Full id, canonical tail, and retired prefix tiers shared with Python.
-fn session_handle_tier(token: &str, session_id: &str) -> Option<u8> {
-    let token = token.trim();
-    if token.is_empty() || session_id.is_empty() {
-        return None;
-    }
-    let exact_case = session_id.starts_with("ses_");
-    let equal = |value: &str| {
-        if exact_case {
-            token == value
-        } else {
-            token.eq_ignore_ascii_case(value)
-        }
-    };
-    [
-        session_id.to_string(),
-        canonical_handle(session_id),
-        legacy_prefix_handle(session_id),
-    ]
-    .iter()
-    .position(|value| equal(value))
-    .map(|tier| tier as u8)
-}
+use crate::identity::session_handle_tier;
 
 fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
     let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
@@ -1118,57 +1095,20 @@ fn token_helper_output(token: &str, registry_path: &Path) -> std::io::Result<std
 
 /// Ask the Python resolver to union registry and harness-store candidates.
 ///
-/// `Ok(Some(row))` on resolution, `Ok(None)` on anything that should reproduce the
-/// caller's original not-found error, and `Err(msg)` ONLY for an ambiguous token
-/// (the healer's candidate list, relayed verbatim -- refusing to guess is a
-/// designed outcome, not a miss). `FNO_AGENTS_RUNTIME=python` pins the child to
-/// the Python dispatch so the shellout cannot recurse back into this binary.
+/// `Ok(Some(row))` on resolution, `Ok(None)` only on the helper's documented
+/// clean miss, and `Err(msg)` on ambiguity or unavailable/incomplete coverage.
+/// `FNO_AGENTS_RUNTIME=python` pins the child to the Python dispatch so the
+/// shellout cannot recurse back into this binary.
 fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String> {
-    // Exit-code contract of `fno agents heal-token`: 0 resolved, 13 miss, 3
-    // ambiguous. Anything else (missing binary, internal error) is a miss.
-    const ADOPTED: i32 = 0;
-    const AMBIGUOUS: i32 = 3;
-    const MISS: i32 = 13;
-
     let out = match token_helper_output(token, registry_path) {
         Ok(o) => o,
         Err(exc) => {
-            // A missing `fno` is the expected degrade; anything else (a
-            // permission-denied shim, say) is worth naming before we do.
-            if exc.kind() != std::io::ErrorKind::NotFound {
-                eprintln!("fno agents: heal probe could not run: {exc}");
-            }
-            return Ok(None);
+            return Err(format!(
+                "cannot safely resolve token {} because the all-source identity helper could not run: {exc}. Use the full session id.",
+                py_repr_str(token)
+            ));
         }
     };
-    if out.status.code() == Some(AMBIGUOUS) {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
-    }
-    // Exit code BEFORE stdout: a failed heal that happened to print parseable
-    // JSON must still degrade to the original error, never a half-resolved row.
-    if !out.status.success() {
-        // An off-contract code means the healer itself broke (a stale install, a
-        // probe that raised). The verb's own refusal is still what prints, so
-        // relay only ONE labelled line of the cause: dumping the child's stderr
-        // whole would put a python traceback in front of the refusal, which is
-        // exactly the "never a new error class or a stack trace" this degrade
-        // path exists to avoid. Silence is not the alternative -- it would tell
-        // the operator the session does not exist when the probe crashed.
-        if !matches!(out.status.code(), Some(ADOPTED) | Some(MISS)) {
-            let why = String::from_utf8_lossy(&out.stderr);
-            let first = why.lines().find(|l| !l.trim().is_empty()).unwrap_or("");
-            eprintln!(
-                "fno agents: heal probe failed (exit {}){}",
-                out.status.code().unwrap_or(-1),
-                if first.is_empty() {
-                    String::new()
-                } else {
-                    format!(": {}", first.trim())
-                }
-            );
-        }
-        return Ok(None);
-    }
     // The healer adopts best-effort: a failed registry write still returns the
     // row, with the reason on stderr. Swallowing that would make the degradation
     // invisible -- the verb works, the roster silently does not.
@@ -1176,12 +1116,57 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
     if !warn.trim().is_empty() {
         eprint!("{warn}");
     }
+    parse_heal_token_output(token, &out)
+}
+
+/// Enforce the Python helper's output contract without collapsing unavailable
+/// coverage into a clean miss. Kept pure so malformed/off-contract subprocess
+/// results are mechanically testable without mutating PATH.
+fn parse_heal_token_output(
+    token: &str,
+    out: &std::process::Output,
+) -> Result<Option<Value>, String> {
+    const AMBIGUOUS: i32 = 3;
+    const MISS: i32 = 13;
+
+    if out.status.code() == Some(AMBIGUOUS) {
+        let detail = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        return Err(if detail.is_empty() {
+            format!(
+                "token {} is ambiguous across harness stores",
+                py_repr_str(token)
+            )
+        } else {
+            detail
+        });
+    }
+    if out.status.code() == Some(MISS) {
+        return Ok(None);
+    }
+    if !out.status.success() {
+        let why = String::from_utf8_lossy(&out.stderr);
+        let first = why
+            .lines()
+            .find(|line| !line.trim().is_empty())
+            .unwrap_or("");
+        return Err(format!(
+            "cannot safely resolve token {} because the all-source identity helper failed (exit {}){}. Use the full session id.",
+            py_repr_str(token),
+            out.status.code().unwrap_or(-1),
+            if first.is_empty() { String::new() } else { format!(": {}", first.trim()) },
+        ));
+    }
     // The LAST non-empty line, not the whole buffer: a first-run `fno` may print
     // a setup-migration banner ahead of the payload.
     let text = String::from_utf8_lossy(&out.stdout);
     let line = match text.lines().rev().find(|l| !l.trim().is_empty()) {
         Some(l) => l,
-        None => return Ok(None),
+        None => {
+            return Err(format!(
+                "cannot safely resolve token {} because the all-source identity helper returned no row. Use the full session id.",
+                py_repr_str(token)
+            ))
+        }
     };
     match serde_json::from_str::<Value>(line) {
         Ok(mut row) if row.is_object() => {
@@ -1194,7 +1179,7 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
             // missing-cwd error three frames later instead of a clean not-found.
             let obj = match row.as_object_mut() {
                 Some(o) => o,
-                None => return Ok(None),
+                None => unreachable!("object guard above"),
             };
             backfill_row_aliases(obj);
             let has_identity = is_identity_token(obj.get("harness").and_then(Value::as_str));
@@ -1202,11 +1187,17 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
                 .iter()
                 .all(|k| obj.contains_key(*k));
             if !has_identity || !has_fields {
-                return Ok(None);
+                return Err(format!(
+                    "cannot safely resolve token {} because the all-source identity helper returned an incomplete row. Use the full session id.",
+                    py_repr_str(token)
+                ));
             }
             Ok(Some(row))
         }
-        _ => Ok(None),
+        _ => Err(format!(
+            "cannot safely resolve token {} because the all-source identity helper returned malformed JSON. Use the full session id.",
+            py_repr_str(token)
+        )),
     }
 }
 
@@ -1215,8 +1206,8 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
 /// The one choke point the session-connecting verbs resolve through. Returns an
 /// OWNED row because the shared Python resolver may synthesize a healed row;
 /// full ids and non-session-shaped registry hits clone their small local row.
-/// `trace` deliberately does NOT use this: an adopted row has no events, so its
-/// not-found is honest.
+/// Registry-gated trace calls this only after a local hit, so it gains the same
+/// store-collision refusal without adopting a store-only row that has no events.
 pub(crate) fn resolve_entry_with_heal(
     rows: &[Value],
     token: &str,
@@ -2799,12 +2790,11 @@ mod tests {
                 .unwrap()["name"],
             "billing"
         );
-        let err =
-            resolve_entry_with_heal(&rows, "reviewer", Path::new("/nonexistent/registry.json"))
-                .unwrap_err();
+        let err = resolve_entry_with_heal(&rows, "ghost", Path::new("/nonexistent/registry.json"))
+            .unwrap_err();
         assert_eq!(
             err.message(),
-            "no agent matching 'reviewer'; accepted forms: name, canonical handle, transport short id, or full session id"
+            "no agent matching 'ghost'; accepted forms: name, canonical handle, transport short id, or full session id"
         );
     }
 
@@ -2820,6 +2810,32 @@ mod tests {
             resolve_entry_with_heal(&rows, "abcd1234", Path::new("/nonexistent/registry.json")),
             Err(ResolveError::Ambiguous(_))
         ));
+    }
+
+    #[test]
+    fn heal_output_distinguishes_clean_miss_from_broken_coverage() {
+        use std::process::Command;
+
+        let miss = Command::new("sh").args(["-c", "exit 13"]).output().unwrap();
+        assert!(parse_heal_token_output("deadbeef", &miss)
+            .unwrap()
+            .is_none());
+
+        let off_contract = Command::new("sh")
+            .args(["-c", "echo probe-broke >&2; exit 7"])
+            .output()
+            .unwrap();
+        let message = parse_heal_token_output("deadbeef", &off_contract).unwrap_err();
+        assert!(message.contains("cannot safely resolve"));
+        assert!(message.contains("probe-broke"));
+
+        let malformed = Command::new("sh")
+            .args(["-c", "printf 'not-json\\n'"])
+            .output()
+            .unwrap();
+        assert!(parse_heal_token_output("deadbeef", &malformed)
+            .unwrap_err()
+            .contains("malformed JSON"));
     }
 
     #[test]

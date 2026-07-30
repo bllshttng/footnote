@@ -409,12 +409,33 @@ def _reply_to_name_handle(
         _name_lane_send(
             body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
         )
-    elif require_resolution:
-        detail = f"; candidates: {', '.join(suggestions)}" if suggestions else ""
-        raise typer.BadParameter(
-            f"retired sender handle {target!r} cannot be resolved uniquely{detail}"
-        )
     else:
+        try:
+            reachable, ambiguous = discover_mod.resolve_reachable(target)
+        except discover_mod.StoreReadError as exc:
+            raise typer.BadParameter(
+                f"sender handle {target!r} cannot be checked uniquely; unreadable "
+                f"stores: {', '.join(exc.failed)}"
+            ) from exc
+        if ambiguous:
+            raise typer.BadParameter(
+                f"sender handle {target!r} is ambiguous across sessions: "
+                f"{', '.join(ambiguous)}"
+            )
+        if reachable is not None:
+            _name_lane_send(
+                body_text,
+                from_name=from_project,
+                resolved=None,
+                token=target,
+                reply_to=to_msg,
+            )
+            return
+        if require_resolution:
+            detail = f"; candidates: {', '.join(suggestions)}" if suggestions else ""
+            raise typer.BadParameter(
+                f"retired sender handle {target!r} cannot be resolved uniquely{detail}"
+            )
         # AC1-FR: the original sender is no longer live -> durable floor addressed
         # to their canonical handle, still drainable. No provider: it is only
         # consulted on the live-inject path, which a None `resolved` already skips.
@@ -927,7 +948,10 @@ _RAW_SELF_TOKEN = object()
 
 
 def _self_recipient(
-    token: str, *, resolved_session_id: object = _RAW_SELF_TOKEN
+    token: str,
+    *,
+    resolved_session_id: object = _RAW_SELF_TOKEN,
+    full_only: bool = False,
 ) -> Optional[str]:
     """Canonical own address after resolution, or on a clean raw-token miss."""
     from fno.harness_identity import (
@@ -943,7 +967,11 @@ def _self_recipient(
     if not isinstance(candidate, str):
         return None
     tier = session_handle_tier(candidate, own)
-    if tier is None or (resolved_session_id is not _RAW_SELF_TOKEN and tier != 0):
+    if (
+        tier is None
+        or (resolved_session_id is not _RAW_SELF_TOKEN and tier != 0)
+        or (full_only and tier != 0)
+    ):
         return None
     return canonical_handle(own)
 
@@ -1073,8 +1101,10 @@ def _name_lane_send(
         # the canonical recipient without attempting to inject into self.
         self_recipient = None
         token_reachable, token_lane = _resolve_token(token)
-        if token_reachable is None and token_lane is None:
-            self_recipient = _self_recipient(token)
+        if token_reachable is None:
+            self_recipient = _self_recipient(
+                token, full_only=token_lane is not None
+            )
             if self_recipient is not None:
                 token_lane = "self-send"
         if token_reachable is not None:

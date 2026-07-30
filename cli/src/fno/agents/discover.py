@@ -379,7 +379,7 @@ def default_opencode_db_path(storage_dir: Optional[Path] = None) -> Path:
     return (storage_dir or default_opencode_storage_dir()).parent / "opencode.db"
 
 
-def opencode_connect(db_path: Path):
+def opencode_connect(db_path: Path, *, raise_on_error: bool = False):
     """A read-only connection to opencode's store, or None if unavailable.
 
     Read-only URI mode is load-bearing, not decoration: a live opencode holds
@@ -394,10 +394,18 @@ def opencode_connect(db_path: Path):
     try:
         return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return None
 
 
-def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+def opencode_query(
+    db_path: Path,
+    sql: str,
+    params: tuple = (),
+    *,
+    raise_on_error: bool = False,
+) -> list[tuple]:
     """Run one read-only query, returning ``[]`` on any failure.
 
     A missing file, a lock, or schema drift on a future opencode all degrade to
@@ -406,12 +414,14 @@ def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
     """
     import sqlite3
 
-    con = opencode_connect(db_path)
+    con = opencode_connect(db_path, raise_on_error=raise_on_error)
     if con is None:
         return []
     try:
         return list(con.execute(sql, params))
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return []
     finally:
         con.close()
@@ -1702,10 +1712,9 @@ def resolve_reachable(
     tokens = [token, *alias_sids]
 
     degraded: list[str] = [] if alias_ok else ["alias-map"]
-    # Keyed case-insensitively: _token_matches is case-insensitive, so keying on
-    # the stored spelling would make one uuid recorded lowercase in one store and
-    # uppercase in another look like two sessions -- a false ambiguity, and one
-    # the raw-token/alias expansion below would hit routinely.
+    # UUID-family ids fold across source spelling; mixed-case OpenCode ids do
+    # not. Using plain ``lower()`` here would merge two real OpenCode sessions
+    # even though the identity matcher correctly treats them as distinct.
     found: dict[str, ReachableSession] = {}
     cwd_verbatim: dict[str, bool] = {}
     for source, lookup in sources:
@@ -1716,7 +1725,7 @@ def resolve_reachable(
                     degraded.append(source)
                 continue
             for sid, agent, cwd, verbatim in hits:
-                key = sid.lower()
+                key = _fold_token(sid)
                 prior = found.get(key)
                 if prior is None:
                     found[key] = ReachableSession(

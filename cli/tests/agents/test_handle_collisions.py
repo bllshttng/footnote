@@ -40,10 +40,6 @@ def _database(path: Path, rows: list[tuple[str, object]]) -> None:
     con.close()
 
 
-def _tail(session_id: str) -> str:
-    return session_id[-8:]
-
-
 def _census(tmp_path: Path, codex_rows, opencode_rows):
     codex = tmp_path / "codex"
     database = tmp_path / "opencode.db"
@@ -55,7 +51,6 @@ def _census(tmp_path: Path, codex_rows, opencode_rows):
         opencode_storage_dir=tmp_path / "storage",
         window_days=7,
         now=NOW,
-        canonical_fn=_tail,
     )
 
 
@@ -105,7 +100,6 @@ def test_ac1_edge_reads_legacy_opencode_created_time_when_database_is_absent(tmp
         opencode_storage_dir=storage,
         window_days=7,
         now=NOW,
-        canonical_fn=_tail,
     )
     assert reports["opencode"].full.session_count == 1
     assert reports["opencode"].window.session_count == 1
@@ -129,7 +123,6 @@ def test_ac4_err_codex_unavailable_or_empty_is_not_reported_as_zero(tmp_path, ki
             opencode_storage_dir=tmp_path / "storage",
             window_days=7,
             now=NOW,
-            canonical_fn=_tail,
         )
 
 
@@ -154,7 +147,6 @@ def test_ac4_err_opencode_unavailable_or_empty_is_not_reported_as_zero(tmp_path,
             opencode_storage_dir=tmp_path / "storage",
             window_days=7,
             now=NOW,
-            canonical_fn=_tail,
         )
 
 
@@ -172,7 +164,6 @@ def test_ac1_hp_main_prints_every_metric_and_exits_zero_for_collision_free_tails
     code = handle_collisions.main(
         ["--codex-sessions-dir", str(codex), "--opencode-db", str(database)],
         now=NOW,
-        canonical_fn=_tail,
     )
 
     output = capsys.readouterr().out
@@ -217,7 +208,6 @@ def test_ac4_err_main_emits_unavailable_not_zero_metrics(tmp_path, capsys):
             str(tmp_path / "missing-storage"),
         ],
         now=NOW,
-        canonical_fn=_tail,
     )
     captured = capsys.readouterr()
     assert code == 2

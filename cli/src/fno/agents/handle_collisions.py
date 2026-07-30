@@ -20,7 +20,7 @@ from fno.agents.discover import (
     default_opencode_storage_dir,
     opencode_connect,
 )
-from fno.harness_identity import canonical_handle
+from fno.harness_identity import canonical_handle, legacy_prefix_handle
 
 
 class CorpusUnavailable(RuntimeError):
@@ -153,7 +153,7 @@ def _collision_metrics(
 def _scope(session_ids: Sequence[str], current: Callable[[str], str]) -> ScopeMetrics:
     return ScopeMetrics(
         len(session_ids),
-        _collision_metrics(session_ids, lambda session_id: session_id[:8]),
+        _collision_metrics(session_ids, legacy_prefix_handle),
         _collision_metrics(session_ids, current),
     )
 

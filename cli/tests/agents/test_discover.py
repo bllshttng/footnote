@@ -2453,6 +2453,31 @@ def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
     assert not _token_matches("ses_abc123", "ses_AbC123")
 
 
+def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
+    tmp_path, monkeypatch
+):
+    """Two case-distinct OpenCode ids must remain an ambiguity, not deduplicate."""
+    from fno.agents import discover
+
+    upper = "ses_AbCd0000SAMEtail"
+    lower = "ses_aBcD0000SAMEtail"
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_transcripts",
+        lambda *_a: ([(upper, "opencode", "/upper", True), (lower, "opencode", "/lower", True)], True),
+    )
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        "SAMEtail", projects_dir=tmp_path / "projects"
+    )
+
+    assert found is None
+    assert ambiguous == sorted([upper, lower])
+
+
 def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
     tmp_path, monkeypatch
 ):

@@ -727,6 +727,34 @@ def test_full_and_legacy_ambient_self_queue_to_canonical_without_inject(
     assert payload and payload[0]["to"] == "55556666"
 
 
+def test_unreadable_store_full_self_id_still_queues_to_canonical(
+    runner, mailbox, monkeypatch
+):
+    """Store uncertainty cannot strand self-mail under the full UUID address."""
+    from fno.agents import discover
+
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            discover.StoreReadError(["registry"])
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
+    )
+
+    sent = runner.invoke(app, ["mail", "send", sid, "note", "--from-name", "web"])
+
+    assert sent.exit_code == 0, sent.output
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "55556666"
+
+
 def test_live_discovered_ambient_self_queues_canonical_without_inject_or_mux(
     runner, mailbox, monkeypatch
 ):
