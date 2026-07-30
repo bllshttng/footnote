@@ -15,6 +15,13 @@
 //!
 //! Subsequent runs read a sentinel and forward immediately - no network.
 //!
+//! A provision that installs cleanly but yields no usable `fno` writes no
+//! sentinel (there is no verified binary to point at), so it also records a
+//! short-lived failure stamp beside it. Without that, every later invocation
+//! repeats the whole `uv tool install --force` to reach the same error, turning a
+//! one-time breakage into a permanent per-call tax. The stamp is keyed to the
+//! install source, so changing what you install from takes effect immediately.
+//!
 //! The wheel's Python CLI ships as the `fno-py` console script (this Rust
 //! binary owns `fno`), and the shim execs it by absolute path, NEVER via a PATH
 //! lookup. Two guards against a self-loop, either sufficient: the target is a
@@ -105,30 +112,103 @@ fn run(args: &[OsString]) -> BootResult<()> {
         }
     }
 
+    // Resolve the install source before anything expensive. It decides both what
+    // we are about to install and whether a remembered failure still applies, and
+    // resolving it first means a bad `config.dev.source` pin errors without first
+    // downloading uv.
+    let source = install_source(
+        env::var("FNO_BOOTSTRAP_WHEEL").ok().as_deref(),
+        read_dev_source_pin().as_deref(),
+    )?;
+
+    // A provision that installs cleanly but yields no usable fno leaves nothing
+    // behind: the sentinel is written only by `record_and_exec`, which every
+    // failure path below returns before reaching. So the next invocation repeats
+    // the whole `uv tool install --force` from scratch, and the banner's "one
+    // time" becomes false forever. Remember the failure briefly instead, so a
+    // broken environment costs one reinstall rather than one per call. Both fast
+    // paths run ABOVE this, so an install that starts working is adopted
+    // immediately and the cooldown never delays a recovery.
+    if let Some(msg) = read_failure_stamp(&source) {
+        return Err(BootErr::new(1, msg));
+    }
+
     // Provision. Progress line BEFORE the slow step so the first run never
     // looks like a hang (AC1-UI).
     let uv = ensure_uv()?;
     eprintln!(
         "fno: first run - provisioning the fno CLI via uv (one time, may take a few seconds)..."
     );
-    install_wheel(&uv)?;
+    install_wheel(&uv, &source)?;
 
-    let real = resolve_via_uv_tool_dir()
-        .filter(|p| is_executable(p))
-        .ok_or_else(|| {
-            // A successful install that still has no `fno-py` script almost
-            // always means PyPI served a wheel older than the fno->fno-py
-            // rename. Name the version and the real remedy instead of the
-            // generic locate error, which hid this cause for months.
-            let msg = diagnose_locate_failure().unwrap_or_else(|| {
-                "provisioned the wheel but could not locate the installed fno; \
-                 try `uv tool install fno` manually"
-                    .to_string()
-            });
-            BootErr::new(1, msg)
-        })?;
-    verify_ours(&real)?;
+    let real = match resolve_via_uv_tool_dir() {
+        Some(p) if is_executable(&p) => p,
+        candidate => {
+            // Name the path we built, why we rejected it, and what we installed
+            // from. Without those three facts the failure is unfalsifiable from
+            // the terminal, and the generic message sent two separate diagnoses
+            // down the wrong path.
+            let present = candidate.as_deref().is_some_and(|p| p.exists());
+            let msg = locate_failure_message(
+                candidate.as_deref(),
+                present,
+                &source,
+                diagnose_locate_failure(),
+            );
+            write_failure_stamp(&source, &msg);
+            return Err(BootErr::new(1, msg));
+        }
+    };
+    if let Err(e) = verify_ours(&real) {
+        // Same reasoning: a foreign package at our path is a stable condition, so
+        // re-downloading 18 packages to reach the same refusal helps nobody.
+        write_failure_stamp(&source, &e.msg);
+        return Err(e);
+    }
     Err(record_and_exec(&real, args))
+}
+
+/// Compose the post-install locate-failure message. Pure (the caller does the
+/// filesystem probe) so the wording is unit-testable. `candidate` is the console
+/// script path we constructed, or `None` when `uv tool dir` itself was unreadable
+/// and no path could be built; `present` is whether anything exists there;
+/// `stale` is the optional stale-wheel diagnosis, which stays the closing remedy
+/// when it applies because it names a concrete fix.
+fn locate_failure_message(
+    candidate: Option<&Path>,
+    present: bool,
+    source: &str,
+    stale: Option<String>,
+) -> String {
+    let mut msg = String::from("provisioned the wheel but could not locate the installed fno.");
+    // Which rung installed matters: `fno` is the PyPI default, anything else is a
+    // local checkout or wheel from `config.dev.source` / FNO_BOOTSTRAP_WHEEL, and
+    // the two fail for entirely different reasons.
+    msg.push_str(&format!("\n  installed from: {source}"));
+    match candidate {
+        Some(p) => {
+            msg.push_str(&format!("\n  looked for: {}", p.display()));
+            msg.push_str(if present {
+                "\n  rejected because: something is there but it is not an executable file"
+            } else {
+                "\n  rejected because: nothing exists at that path"
+            });
+        }
+        None => msg
+            .push_str("\n  looked for: (no path built - `uv tool dir` failed or printed nothing)"),
+    }
+    match stale {
+        Some(s) => {
+            msg.push('\n');
+            msg.push_str(&s);
+        }
+        None => msg.push_str(
+            "\nInstall it manually to see uv's own error: \
+             `uv tool install --force fno`, or from a checkout: \
+             `uv tool install --force --from <repo>/cli fno`",
+        ),
+    }
+    msg
 }
 
 // ---------------------------------------------------------------------------
@@ -194,22 +274,19 @@ fn ensure_uv() -> BootResult<PathBuf> {
     })
 }
 
-/// `uv tool install <source>`. Source is `fno` (PyPI by name) by default, or
-/// the value of `FNO_BOOTSTRAP_WHEEL` (a local wheel path or any uv install
-/// spec) so the channel is testable before the PyPI publish lands, or a
-/// maintainer's pinned checkout (`config.dev.source`) so editing source never
-/// re-provisions the stale published wheel.
-fn install_wheel(uv: &Path) -> BootResult<()> {
-    let source = install_source(
-        env::var("FNO_BOOTSTRAP_WHEEL").ok().as_deref(),
-        read_dev_source_pin().as_deref(),
-    )?;
+/// `uv tool install <source>`, where `source` was resolved by [`install_source`]:
+/// `fno` (PyPI by name) by default, or `FNO_BOOTSTRAP_WHEEL` (a local wheel path
+/// or any uv install spec) so the channel is testable before the PyPI publish
+/// lands, or a maintainer's pinned checkout (`config.dev.source`) so editing
+/// source never re-provisions the stale published wheel. Every rung registers the
+/// tool under the same uv name (`TOOL_NAME`), so resolution is source-agnostic.
+fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
     // --force so a half-built or stale tool venv is repaired rather than failing
     // with "already installed" (AC4-FR: never trust a half-provisioned state).
     // We only reach here when no usable install was found, so --force never does
     // a redundant reinstall over a healthy one.
     let status = Command::new(uv)
-        .args(["tool", "install", "--force", &source])
+        .args(["tool", "install", "--force", source])
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
@@ -538,12 +615,16 @@ fn exec_real(real: &Path, args: &[OsString]) -> BootErr {
 // Sentinel (fast path)
 // ---------------------------------------------------------------------------
 
-fn sentinel_path() -> PathBuf {
+fn sentinel_dir() -> PathBuf {
     let base = env::var_os("XDG_CACHE_HOME")
         .map(PathBuf::from)
         .or_else(|| home_dir().map(|h| h.join(".cache")))
         .unwrap_or_else(|| PathBuf::from(".cache"));
-    base.join("fno-bootstrap").join("real-fno")
+    base.join("fno-bootstrap")
+}
+
+fn sentinel_path() -> PathBuf {
+    sentinel_dir().join("real-fno")
 }
 
 /// Sentinel format: the verified binary's mtime (nanos since epoch) on the
@@ -596,7 +677,108 @@ fn record_and_exec(real: &Path, args: &[OsString]) -> BootErr {
     if let Some(m) = file_mtime(real) {
         write_sentinel(real, m);
     }
+    // We hold a verified, working fno, so any remembered provision failure is
+    // moot. Clearing here (the single place we prove success) means a recovered
+    // environment never serves a stale refusal.
+    clear_failure_stamp();
     exec_real(real, args)
+}
+
+// ---------------------------------------------------------------------------
+// Provision-failure stamp (negative cache)
+// ---------------------------------------------------------------------------
+
+/// How long a failed provision suppresses the next reinstall attempt. Long
+/// enough that a scripted burst of `fno` calls pays the 18-package install once,
+/// short enough that a walked-away operator is never wedged for long - and the
+/// refusal names the file to delete for an immediate retry either way.
+const FAILURE_COOLDOWN_SECS: u64 = 600;
+
+/// The provision-failure stamp: a short-lived negative cache beside the
+/// sentinel. Its only job is to keep one failed provision from being repeated on
+/// every subsequent invocation.
+fn failure_stamp_path() -> PathBuf {
+    sentinel_dir().join("provision-failed")
+}
+
+fn now_secs() -> Option<u64> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .map(|d| d.as_secs())
+}
+
+/// Read the stamp and, when it is still inside the cooldown AND was recorded for
+/// the source we are about to install from, return the message to fail with.
+fn read_failure_stamp(source: &str) -> Option<String> {
+    let raw = fs::read_to_string(failure_stamp_path()).ok()?;
+    let (original, age) = decide_cached_failure(&raw, now_secs()?, source)?;
+    Some(cached_failure_message(
+        &original,
+        age,
+        &failure_stamp_path(),
+    ))
+}
+
+/// Pure core of [`read_failure_stamp`]: decide from the raw stamp body, the
+/// current time, and the source we are about to install from, returning
+/// `(original message, age in seconds)`.
+///
+/// The stamp is keyed on the install source because the three rungs are separate
+/// channels: a PyPI failure says nothing about a local checkout, and a maintainer
+/// who repoints `config.dev.source` (or sets `FNO_BOOTSTRAP_WHEEL`) is asking for
+/// a genuinely different install and must never be served a refusal about the old
+/// one. A source change therefore invalidates the cache immediately.
+///
+/// An absent, malformed, expired, future-dated, or other-source stamp is `None`
+/// so we re-provision normally - a negative cache must never be able to wedge the
+/// bootstrap shut, which is why every unreadable shape fails OPEN, not closed.
+fn decide_cached_failure(raw: &str, now: u64, source: &str) -> Option<(String, u64)> {
+    let (header, msg) = raw.split_once('\n')?;
+    // Header is `<unix-secs>\t<source>`; a tab cannot appear in the timestamp, and
+    // a source containing one simply fails to parse, i.e. re-provisions.
+    let (stamped, stamped_source) = header.split_once('\t')?;
+    if stamped_source != source {
+        return None;
+    }
+    let stamped: u64 = stamped.trim().parse().ok()?;
+    // checked_sub: a stamp dated in the future (clock skew, a restored backup)
+    // yields None, i.e. re-provision, never a cooldown that outlives the clock.
+    let age = now.checked_sub(stamped)?;
+    if age > FAILURE_COOLDOWN_SECS || msg.trim().is_empty() {
+        return None;
+    }
+    Some((msg.to_string(), age))
+}
+
+/// The fast-fail text for a remembered provision failure. Pure so the contract
+/// that matters - we are deliberately NOT reinstalling, and here is how to retry
+/// right now - is unit-testable.
+fn cached_failure_message(original: &str, age_secs: u64, stamp: &Path) -> String {
+    format!(
+        "{original}\n\n\
+         (repeat of a provision failure {age_secs}s ago; fno is deliberately not \
+         reinstalling on every call.\n\
+         Force a fresh attempt now: rm {})",
+        stamp.display()
+    )
+}
+
+/// Best-effort: remember that this provision failed, keyed to the source it
+/// failed for. A write failure is non-fatal - the next run just re-provisions,
+/// which is today's behaviour.
+fn write_failure_stamp(source: &str, msg: &str) {
+    let Some(now) = now_secs() else { return };
+    let path = failure_stamp_path();
+    if let Some(parent) = path.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+    let _ = fs::write(&path, format!("{now}\t{source}\n{msg}"));
+}
+
+/// Drop the negative cache.
+fn clear_failure_stamp() {
+    let _ = fs::remove_file(failure_stamp_path());
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +1003,167 @@ mod tests {
         assert_eq!(parse_dev_source(""), None);
         assert_eq!(parse_dev_source("[other]\nkey = 1\n"), None);
         assert_eq!(parse_dev_source("[dev]\nsource = \"\"\n"), None);
+    }
+
+    #[test]
+    fn locate_failure_names_the_path_and_the_reason() {
+        // The whole point: the terminal must show WHICH path was built and WHY it
+        // was rejected. The generic message named neither, which is how two
+        // separate sessions concluded the resolver looks for `fno` when it looks
+        // for `fno-py`.
+        let p = PathBuf::from("/u/.local/share/uv/tools/fno/bin/fno-py");
+        let m = locate_failure_message(Some(&p), false, "fno", None);
+        assert!(m.contains("/u/.local/share/uv/tools/fno/bin/fno-py"), "{m}");
+        assert!(m.contains("nothing exists at that path"), "{m}");
+    }
+
+    #[test]
+    fn locate_failure_names_the_install_source() {
+        // PyPI-by-name and a local checkout fail for different reasons, so the
+        // message must say which rung ran. `fno` is the PyPI default; anything
+        // else came from config.dev.source / FNO_BOOTSTRAP_WHEEL.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let pypi = locate_failure_message(Some(&p), false, "fno", None);
+        assert!(pypi.contains("installed from: fno"), "{pypi}");
+        let local = locate_failure_message(Some(&p), false, "/home/me/footnote/cli", None);
+        assert!(
+            local.contains("installed from: /home/me/footnote/cli"),
+            "{local}"
+        );
+    }
+
+    #[test]
+    fn locate_failure_distinguishes_present_from_absent() {
+        // Present-but-unusable and absent are different bugs with different
+        // fixes, so they must not collapse into one message.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let present = locate_failure_message(Some(&p), true, "fno", None);
+        assert!(present.contains("not an executable file"), "{present}");
+        assert!(!present.contains("nothing exists"), "{present}");
+    }
+
+    #[test]
+    fn locate_failure_without_a_tool_dir_says_so() {
+        // `uv tool dir` unreadable -> no path was ever built; claiming we
+        // "looked for" a path would be a lie.
+        let m = locate_failure_message(None, false, "fno", None);
+        assert!(m.contains("no path built"), "{m}");
+        assert!(m.contains("uv tool dir"), "{m}");
+    }
+
+    #[test]
+    fn locate_failure_keeps_the_stale_wheel_remedy() {
+        // When the stale-wheel diagnosis applies it is the actionable one, so it
+        // must survive alongside the new path/reason lines.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let stale = stale_wheel_message(true, Some("0.2.1"));
+        let m = locate_failure_message(Some(&p), false, "fno", stale);
+        assert!(m.contains("/tools/fno/bin/fno-py"), "{m}");
+        assert!(m.contains("(0.2.1)"), "{m}");
+    }
+
+    #[test]
+    fn cached_failure_is_honest_about_not_reinstalling() {
+        // AC: the fast-fail must preserve the original diagnosis, say it is a
+        // repeat, and name the exact file to remove for an immediate retry.
+        let stamp = PathBuf::from("/c/fno-bootstrap/provision-failed");
+        let m = cached_failure_message("could not locate the installed fno", 42, &stamp);
+        assert!(m.contains("could not locate the installed fno"), "{m}");
+        assert!(m.contains("42s ago"), "{m}");
+        assert!(
+            m.contains("not \nreinstalling") || m.contains("not reinstalling"),
+            "{m}"
+        );
+        assert!(m.contains("rm /c/fno-bootstrap/provision-failed"), "{m}");
+    }
+
+    #[test]
+    fn cached_failure_honored_inside_the_cooldown() {
+        // The severity multiplier this node exists for: a second invocation
+        // inside the window must NOT re-run the 18-package install.
+        let (msg, age) = decide_cached_failure("1000\tfno\nboom", 1000 + 30, "fno").unwrap();
+        assert_eq!(msg, "boom");
+        assert_eq!(age, 30);
+        // still honored at the exact boundary
+        assert!(
+            decide_cached_failure("1000\tfno\nboom", 1000 + FAILURE_COOLDOWN_SECS, "fno").is_some()
+        );
+    }
+
+    #[test]
+    fn cached_failure_expires() {
+        // One second past the window re-provisions, so a transient breakage
+        // heals on its own without the operator knowing the cache exists.
+        assert!(
+            decide_cached_failure("1000\tfno\nboom", 1000 + FAILURE_COOLDOWN_SECS + 1, "fno")
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn cached_failure_is_keyed_to_the_install_source() {
+        // The three install rungs are separate channels. A PyPI failure must not
+        // suppress a local-checkout install, and repointing config.dev.source (or
+        // setting FNO_BOOTSTRAP_WHEEL) must take effect on the very next call
+        // rather than waiting out a cooldown earned by a different source.
+        let pypi = "1000\tfno\nboom";
+        assert!(decide_cached_failure(pypi, 1030, "fno").is_some());
+        assert!(decide_cached_failure(pypi, 1030, "/home/me/footnote/cli").is_none());
+
+        let local = "1000\t/home/me/footnote/cli\nboom";
+        assert!(decide_cached_failure(local, 1030, "/home/me/footnote/cli").is_some());
+        assert!(decide_cached_failure(local, 1030, "fno").is_none());
+        // A different checkout is a different source too.
+        assert!(decide_cached_failure(local, 1030, "/home/me/other/cli").is_none());
+    }
+
+    #[test]
+    fn cached_failure_fails_open_on_every_unreadable_shape() {
+        // A negative cache that can wedge the bootstrap shut is worse than the
+        // bug it fixes, so anything we cannot read means "re-provision".
+        assert!(decide_cached_failure("", 2000, "fno").is_none()); // empty
+        assert!(decide_cached_failure("no newline", 2000, "fno").is_none()); // no body
+        assert!(decide_cached_failure("1000\nboom", 2000, "fno").is_none()); // no source field
+        assert!(decide_cached_failure("nan\tfno\nboom", 2000, "fno").is_none()); // bad ts
+        assert!(decide_cached_failure("1000\tfno\n", 2000, "fno").is_none()); // empty body
+        assert!(decide_cached_failure("1000\tfno\n   \n", 2000, "fno").is_none()); // blank body
+                                                                                   // Future-dated (clock skew / restored backup): never a cooldown that
+                                                                                   // outlives the clock.
+        assert!(decide_cached_failure("9999\tfno\nboom", 1000, "fno").is_none());
+    }
+
+    #[test]
+    fn cached_failure_multiline_body_survives_intact() {
+        // The stamped message is itself multi-line (source + path + reason +
+        // remedy), so only the FIRST newline may end the header.
+        let (msg, _) =
+            decide_cached_failure("1000\tfno\nline one\nline two\nline three", 1010, "fno")
+                .unwrap();
+        assert_eq!(msg, "line one\nline two\nline three");
+    }
+
+    #[test]
+    fn failure_stamp_round_trips_through_its_own_writer_format() {
+        // Guards the writer/reader pair against drifting apart: the exact bytes
+        // write_failure_stamp emits must be what decide_cached_failure accepts.
+        let msg = locate_failure_message(
+            Some(Path::new("/tools/fno/bin/fno-py")),
+            false,
+            "/home/me/footnote/cli",
+            None,
+        );
+        let raw = format!("{}\t{}\n{}", 1000, "/home/me/footnote/cli", msg);
+        let (back, age) = decide_cached_failure(&raw, 1005, "/home/me/footnote/cli").unwrap();
+        assert_eq!(back, msg);
+        assert_eq!(age, 5);
+    }
+
+    #[test]
+    fn failure_stamp_sits_beside_the_sentinel() {
+        // Same cache dir, distinct name: one operator-facing place to look, and
+        // `rm -rf` of that dir is a complete reset.
+        assert_eq!(failure_stamp_path().parent(), sentinel_path().parent());
+        assert_ne!(failure_stamp_path(), sentinel_path());
     }
 
     #[test]
