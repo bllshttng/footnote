@@ -71,7 +71,13 @@ def _normalize(token: str) -> str:
 def is_session_shaped(token: str) -> bool:
     """True for a token worth probing a harness store with."""
     t = _normalize(token)
-    return bool(_SHORT_RE.match(t) or _UUID_RE.match(t) or _OPENCODE_RE.match(t))
+    return bool(_SHORT_RE.match(t) or is_full_session_id(t))
+
+
+def is_full_session_id(token: str) -> bool:
+    """True when ``token`` is a complete, collision-free harness session id."""
+    t = _normalize(token)
+    return bool(_UUID_RE.match(t) or _OPENCODE_RE.match(t))
 
 
 def _claude_projects_dir() -> Path:

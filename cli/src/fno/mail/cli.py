@@ -944,6 +944,15 @@ class UnreachableTokenError(Exception):
     """
 
 
+class UnavailableTokenError(Exception):
+    """A short token could not be proven unique because stores were unreadable."""
+
+    def __init__(self, failed: list[str], candidates: list[str]) -> None:
+        super().__init__("session token resolution unavailable")
+        self.failed = failed
+        self.candidates = candidates
+
+
 _RAW_SELF_TOKEN = object()
 
 
@@ -998,9 +1007,15 @@ def _resolve_token(token: str):
     try:
         reachable, ambiguous = discover_mod.resolve_reachable(token)
     except discover_mod.StoreReadError as exc:
-        # Unreadable is not proof of absence, and exit 16 queues nothing. Keep
-        # the mail: demote durably, addressed to the lone candidate when the
-        # resolver found one, and name the stores that could not be read.
+        from fno.agents.store_fallback import is_full_session_id
+
+        # Full ids are collision-free and remain safe to address directly. A
+        # short token is different: the unreadable store may contain another
+        # match, so even a durable write to the lone visible candidate is a
+        # wrong-recipient side effect. Refuse before minting or writing mail.
+        if not is_full_session_id(token):
+            candidates = [exc.resolved.session_id] if exc.resolved is not None else []
+            raise UnavailableTokenError(exc.failed, candidates) from exc
         return exc.resolved, f"wake=stores-unreadable({','.join(exc.failed)})"
     if ambiguous:
         raise AmbiguousTokenError(ambiguous)
@@ -1078,7 +1093,7 @@ def _name_lane_send(
     from fno.agents.provider_resolve import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
-    from fno.harness_identity import canonical_handle, session_handle_tier
+    from fno.harness_identity import canonical_handle
     from fno.inbox.store import (
         classify_durable_owner,
         generate_msg_id,
@@ -1156,25 +1171,11 @@ def _name_lane_send(
         # LISTING, so a miss means "not listed", never "not reachable" -- and
         # demoting here without attempting a live rung is the wall this whole
         # node exists to remove.
-        degraded_short = (
-            token_lane not in (None, "self-send")
-            and (
-                token_reachable is None
-                or session_handle_tier(token, token_reachable.session_id) != 0
-            )
-        )
         if token_lane == "self-send":
             # A session can neither inject into nor wake itself; attempting it
             # deadlocks a live session and revives a second writer on an asleep
             # one. Durable is the only honest lane.
             lanes.append("self-send")
-        elif degraded_short:
-            # A short token plus an unreadable store has only an unproven-unique
-            # candidate. Injecting is a side effect, not a probe, so it cannot
-            # decide which colliding session the caller meant. Keep the durable
-            # copy addressed to the visible candidate and surface the degraded
-            # evidence; a full session id remains safe to probe directly.
-            lanes.append(token_lane)
         else:
             # Rung 3: inject-as-probe. The socket is its own source of truth --
             # a confirmed delivery IS the receipt, so no roster query is needed
@@ -1852,6 +1853,19 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=exc.exit_code) from exc
+        except UnavailableTokenError as unavailable:
+            stores = ", ".join(unavailable.failed)
+            visible = (
+                f" Visible candidates: {', '.join(unavailable.candidates)}."
+                if unavailable.candidates
+                else ""
+            )
+            print(
+                f"cannot resolve short session token {name!r}: unreadable stores: "
+                f"{stores}.{visible} Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from unavailable
         return
 
     # AC3-UI: distinguish delivered vs queued on stdout.

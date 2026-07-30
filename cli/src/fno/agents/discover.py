@@ -1379,19 +1379,18 @@ class StoreReadError(Exception):
 
     The distinction this exists to preserve: "read the store, the token is not
     there" and "could not read the store" look identical as an empty list, but
-    they must not be treated identically. The first earns exit 16 (nothing is
-    queued, because nothing would ever drain it); the second must NOT, because
-    demoting to the durable queue costs one stranded envelope while a wrong
-    exit 16 costs the message permanently. When we cannot prove unreachable, we
-    fall toward keeping the mail.
+    they must not be treated identically. A complete session id remains safe to
+    address, but a short token must be refused: an unreadable store may contain
+    another matching session, so neither live nor durable delivery can choose a
+    recipient without risking a wrong-recipient side effect.
     """
 
     def __init__(self, failed: list[str], resolved=None) -> None:
         super().__init__(f"unreadable reachability stores: {', '.join(failed)}")
         self.failed = failed
-        # The lone candidate, when one was found but uniqueness could not be
-        # proven. Carrying it lets the caller address the durable copy to a real
-        # session rather than to the raw token it was handed.
+        # The lone visible candidate, when one was found but uniqueness could
+        # not be proven. Carrying it lets the caller explain the incomplete
+        # evidence without treating this candidate as the recipient.
         self.resolved = resolved
 
 

@@ -578,17 +578,10 @@ def test_a_resolved_codex_session_is_probed_on_its_own_harness(
     assert tried == ["codex"], f"a resolved codex session was probed as claude: {tried}"
 
 
-def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
+def test_an_unreadable_store_refuses_short_token_without_durable_write(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    """Mail loss guard: exit 16 requires PROVEN absence, not a failed lookup.
-
-    Exit 16 queues nothing, so treating "could not read the store" as "the
-    token names nothing" destroys the message. The asymmetry decides it: a
-    wrong durable copy strands one envelope nobody drains, while a wrong exit
-    16 loses a real message permanently. When absence cannot be proven, keep
-    the mail.
-    """
+    """Unreadable evidence cannot authorize any short-token side effect."""
     from fno.agents import discover
 
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
@@ -600,10 +593,11 @@ def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
 
     res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
-    assert res.exit_code == 0, res.output
-    assert "queued (durable)" in res.output
-    assert "stores-unreadable" in (res.output + (res.stderr or ""))
-    assert _drain_as(runner, monkeypatch, ASLEEP_SID), "the message was lost"
+    assert res.exit_code == 2, res.output
+    assert "queued (durable)" not in res.output
+    assert "unreadable stores: transcript" in (res.output + (res.stderr or ""))
+    assert "full session id" in (res.output + (res.stderr or ""))
+    assert not _drain_as(runner, monkeypatch, ASLEEP_SID)
 
 
 def test_an_unreadable_store_never_injects_into_an_unproven_candidate(
@@ -639,11 +633,48 @@ def test_an_unreadable_store_never_injects_into_an_unproven_candidate(
         ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"],
     )
 
-    assert res.exit_code == 0, res.output
+    assert res.exit_code == 2, res.output
     assert attempted == []
-    assert "queued (durable)" in res.output
-    assert "stores-unreadable" in (res.output + (res.stderr or ""))
-    assert _drain_as(runner, monkeypatch, ASLEEP_SID), "the message was lost"
+    assert "queued (durable)" not in res.output
+    assert "unreadable stores: registry" in (res.output + (res.stderr or ""))
+    assert ASLEEP_SID in (res.output + (res.stderr or ""))
+    assert "full session id" in (res.output + (res.stderr or ""))
+    assert not _drain_as(runner, monkeypatch, ASLEEP_SID)
+
+
+def test_unreadable_store_still_allows_an_exact_full_session_id(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A complete id identifies one session even when another store is unreadable."""
+    from fno.agents import discover
+
+    candidate = discover.ReachableSession(
+        session_id=ASLEEP_SID,
+        source="transcript",
+        agent="claude",
+    )
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            discover.StoreReadError(["registry"], resolved=candidate)
+        ),
+    )
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda session_id, _message: (attempted.append(session_id), True)[1],
+    )
+
+    res = runner.invoke(
+        app,
+        ["mail", "send", ASLEEP_SID, "hi", "--from-name", "web"],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert attempted == [ASLEEP_SID]
+    assert "delivered (hosted)" in res.output
+    assert "queued (durable)" not in res.output
 
 
 def test_a_non_claude_session_is_not_woken_as_claude(
