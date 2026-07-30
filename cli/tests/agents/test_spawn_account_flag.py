@@ -184,3 +184,45 @@ def test_account_plus_role_composes(monkeypatch, runner):
     assert captured["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
     # role tidy auto-routes to zai (DEFAULT_ROUTED_ROLES) with a key present.
     assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+
+
+def test_account_plus_route_composes_under_inherited_managed(monkeypatch, runner):
+    """x-3db9 P1: under an inherited FNO_PROVIDER_AUTH=managed (spawning from
+    inside a managed worker), --account + --route still composes. The managed-
+    OAuth half-composition refusal is skipped when an account overlay pins a
+    profile: the route is fail-closed (its own token) and route-wins is atomic,
+    so the split-brain the guard existed to prevent cannot recur."""
+    from fno.agents import dispatch, spawn_gate
+    import fno.agents.account_env as ae
+    from fno.agents.account_env import AccountOverlay
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: type("G", (), {"release": lambda self: None})())
+    monkeypatch.setattr(
+        ae,
+        "resolve_account_overlay",
+        lambda *a, **k: AccountOverlay(
+            "readyrule", {"CLAUDE_CONFIG_DIR": "/x/.claude"}, "config-dir"
+        ),
+    )
+    captured: dict = {}
+
+    def fake_dispatch(**kwargs):
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--account", "readyrule", "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["account_env"] == {"CLAUDE_CONFIG_DIR": "/x/.claude"}
+    assert captured["route_env"]["ANTHROPIC_AUTH_TOKEN"] == "zk-live"

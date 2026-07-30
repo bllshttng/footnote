@@ -1166,6 +1166,7 @@ def cmd_spawn(
                 route_env,
                 intent=intent,
                 notice=lambda note: print(note, file=sys.stderr),
+                account_overlay=account is not None,
             )
         except RouteCompositionError as exc:
             print(str(exc), file=sys.stderr)

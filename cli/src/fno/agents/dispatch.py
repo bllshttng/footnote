@@ -2009,6 +2009,7 @@ def dispatch_spawn(
                 role,
                 route_env,
                 notice=lambda note: print(note, file=sys.stderr),
+                account_overlay=bool(account_env),
             )
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc

@@ -115,6 +115,7 @@ def resolve_spawn_route(
     *,
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
+    account_overlay: bool = False,
 ) -> Optional[dict[str, str]]:
     """Resolve one spawn route and reject managed-OAuth half-composition.
 
@@ -122,10 +123,20 @@ def resolve_spawn_route(
     pane/bg/headless births. A pre-resolved explicit route wins over ``role``;
     otherwise the normal fail-safe role resolver decides whether routing is
     active. Managed OAuth owns the default Claude credential slot, so applying
-    a secondary endpoint/model over that snapshot is refused as one unit.
+    a secondary endpoint/model over that snapshot is refused as one unit -
+    unless an account overlay is present (``account_overlay``). The overlay
+    pins a profile and the route composes atomically (route wins
+    endpoint+auth+model, account keeps CLAUDE_CONFIG_DIR); the route is
+    fail-closed and always carries its own token, and claude prefers an env
+    credential over Keychain OAuth, so the split-brain the guard exists to
+    prevent cannot recur.
     """
     route = dict(route_env) if route_env else resolve_route(role, notice=notice)
-    if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
+    if (
+        route
+        and not account_overlay
+        and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed"
+    ):
         overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
         route_intent = intent or (
             f"routed role {role!r}" if role is not None else "pre-resolved route"
