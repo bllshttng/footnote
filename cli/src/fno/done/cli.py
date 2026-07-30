@@ -158,14 +158,38 @@ def _load_ledger_entries() -> list[dict]:
     return []
 
 
-def _rollup_from_ledger(plan_path: Optional[str]) -> dict:
+def _rollup_from_ledger(node: Optional[dict]) -> dict:
     """Aggregate session_id / cost_usd / cost_sessions / points from ledger.
 
     Returns a dict with keys: session_id, cost_usd, cost_sessions, points.
     Any field for which the ledger has no information is returned as None
     (or [] for cost_sessions) so the caller can preserve existing graph
     values instead of nulling them out.
+
+    Takes the whole NODE, not its ``plan_path``. The rollup matches ledger rows
+    on plan_path, so N nodes sharing one plan each claim the same cost, points,
+    and session_id - the flat project sum at ``fno backlog`` project-cost then
+    counts one run N times. A contained node must therefore be suppressed here
+    (x-e957 task 1.4), and a plan_path parameter cannot see that. Passing the
+    node makes the containment read structurally unskippable: there is no
+    signature a caller can satisfy while bypassing the guard.
+
+    Suppression is empty-handed, not zeroed: ``cost_usd`` stays None,
+    ``cost_sessions`` [], ``points`` None. The delivery unit carries the whole
+    figure, and contained nodes contributing NOTHING is what keeps the flat
+    project sum correct with no dedup logic of its own.
     """
+    if not isinstance(node, dict):
+        return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
+
+    # Session id and points ride the same return as cost, so they must be
+    # suppressed together - a contained node granted the session id would claim
+    # a run it never made, and the metrics backfills cross-reference that.
+    contained = node.get("contained_in")
+    if isinstance(contained, str) and contained:
+        return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
+
+    plan_path = node.get("plan_path")
     if not plan_path:
         return {"session_id": None, "cost_usd": None, "cost_sessions": [], "points": None}
 
@@ -409,7 +433,7 @@ def done_command(
         rollups: dict[str, dict] = {}
         for e in entries:
             if e.get("id") in target_ids:
-                rollups[e["id"]] = _rollup_from_ledger(e.get("plan_path"))
+                rollups[e["id"]] = _rollup_from_ledger(e)
 
         touched: list[tuple[str, list[str]]] = []
 
@@ -578,7 +602,7 @@ def done_command(
                 err=True,
             )
             raise typer.Exit(code=2)
-    rollup = _rollup_from_ledger(node.get("plan_path"))
+    rollup = _rollup_from_ledger(node)
     rollup_tags: list[str] = []
 
     # Collision tracking: set inside the mutator, read after locked_mutate_graph.

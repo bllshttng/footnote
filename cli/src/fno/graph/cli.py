@@ -6419,7 +6419,7 @@ def cmd_done(
     try:
         from fno.done.cli import _rollup_from_ledger
 
-        cost_rollup = _rollup_from_ledger(node.get("plan_path"))
+        cost_rollup = _rollup_from_ledger(node)
     except Exception:
         cost_rollup = {}
 
@@ -6879,9 +6879,7 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj:
-                    reconcile_rollups[record.node_id] = _rollup_from_ledger(
-                        node_obj.get("plan_path")
-                    )
+                    reconcile_rollups[record.node_id] = _rollup_from_ledger(node_obj)
         except Exception:
             reconcile_rollups = {}
 

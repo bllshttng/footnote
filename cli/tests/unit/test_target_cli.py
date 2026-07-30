@@ -904,3 +904,112 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
     assert seen["init"] is False                    # never ran init under x-other
     combined = result.output + (getattr(result, "stderr", "") or "")
     assert "x-other" in combined
+
+
+# ---------------------------------------------------------------------------
+# x-e957 task 1.3b: a NAMED contained node is redirected, not claimed
+# ---------------------------------------------------------------------------
+
+
+def _contained_graph(tmp_path, monkeypatch, *, owner="x-6320"):
+    """A graph with one delivery unit and one node contained in it."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": owner, "plan_path": "/p/one.md", "status": "ready"},
+        {"id": "x-261c", "plan_path": "/p/one.md", "status": "ready",
+         "contained_in": owner},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    return gp
+
+
+def _init_env(tmp_path, monkeypatch):
+    """Wire target init so the bash bootstrap is stubbed and observable."""
+    ran = []
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            ran.append(dict(env or {}))
+        return _Result()
+
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(_fake_plugin_root(tmp_path)))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    return ran
+
+
+def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
+    """AC4: report the delivery unit's id and claim nothing.
+
+    Naming a node is consent and selection_guards honors that (it is autonomous-
+    only by its own docstring), so without this the operator walks straight past
+    the guard and opens a second PR for one plan.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2, result.output
+    # Nothing was claimed: the bash bootstrap - which acquires the node claim
+    # and writes the immutable manifest - never ran.
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_target_init_redirect_names_the_delivery_unit_it_routes_to(tmp_path, monkeypatch):
+    """The DESTINATION is the payload, not the fact that something was refused.
+
+    Two nodes contained in different units must route to different places; an
+    assertion that only checks "it was refused" agrees on the tag and says
+    nothing about where the operator should go.
+    """
+    _contained_graph(tmp_path, monkeypatch, owner="x-8a4f")
+    _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2
+    assert "x-8a4f" in result.output
+    assert "/fno:target x-8a4f" in result.output
+    _clear_root_cache()
+
+
+def test_target_init_still_dispatches_the_delivery_unit_itself(tmp_path, monkeypatch):
+    """The unit carries the PR, so naming IT is the whole point of the redirect."""
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-6320"])
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+    assert ran[0].get("TARGET_INPUT") == "x-6320"
+    _clear_root_cache()
+
+
+def test_target_init_free_text_is_untouched_by_the_containment_read(tmp_path, monkeypatch):
+    """An idea-first run resolves no node; the gate must not invent one."""
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "fix the login redirect"])
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+    _clear_root_cache()
+
+
+def test_redirect_helper_ignores_non_contained_and_malformed_input():
+    """Fail-open on anything that is not an affirmative owner id.
+
+    Raising on a missing/odd node would turn a fail-open resolver into a
+    dispatch-blocker, and the resolver returns None for every free-text input.
+    """
+    target_cli._redirect_if_contained(None)
+    target_cli._redirect_if_contained({"id": "x-a"})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": None})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": ""})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": 0})

@@ -39,9 +39,9 @@ def _seed(ledger_path: Path, rows: list[dict]) -> None:
     ledger_path.write_text(json.dumps({"entries": rows}, indent=2) + "\n")
 
 
-def _rollup(plan_path: str = "/p") -> dict:
+def _rollup(plan_path: str = "/p", **node_fields) -> dict:
     from fno.done.cli import _rollup_from_ledger
-    return _rollup_from_ledger(plan_path)
+    return _rollup_from_ledger({"id": "x-unit", "plan_path": plan_path, **node_fields})
 
 
 # -- AC1: a row recorded under two aliases of one run yields one cost row --
@@ -402,3 +402,89 @@ def test_cost_update_says_so_when_there_is_no_graph(tmp_path, capsys):
 
     assert _update_graph_node(tmp_path / "absent.json", "ab-12345678", "S1", 4.0) is False
     assert "no graph at" in capsys.readouterr().err
+
+
+# -- AC9: a contained node projects no rollup at all (x-e957 task 1.4) --
+
+
+def test_contained_node_takes_no_cost_from_the_shared_plan(ledger):
+    """N nodes on one plan each matched the same rows and each claimed the lot.
+
+    The plan is the join key, so containment is invisible from plan_path alone -
+    which is why the rollup reads the node. An unlinked node already returned
+    empty, but by accident of the ledger's grain: it stops being safe the moment
+    a child is linked again, which is exactly what happened on 2026-07-28.
+    """
+    _seed(ledger, [{
+        "plan_path": "/p",
+        "cost_usd": 18.22,
+        "points": 5,
+        "fno_id": "R",
+        "sessions": ["R"],
+        "completed": "2026-07-27T09:07:20.801626",
+    }])
+    # The delivery unit takes the whole figure.
+    assert _rollup()["cost_usd"] == 18.22
+
+    # A node contained in it, on the SAME plan, takes none of it.
+    contained = _rollup(contained_in="x-unit0001")
+    assert contained == {
+        "session_id": None, "cost_usd": None, "cost_sessions": [], "points": None,
+    }
+
+
+def test_contained_suppression_covers_points_and_session_not_just_cost(ledger):
+    """They ride one return, so a partial suppression claims a run never made.
+
+    session_id is what the metrics backfills cross-reference; a contained node
+    carrying it attributes a real session to a node that opened no PR.
+    """
+    _seed(ledger, [{
+        "plan_path": "/p", "cost_usd": 3.0, "points": 8,
+        "fno_id": "R", "sessions": ["R"], "completed": "2026-07-27T09:07:20",
+    }])
+    assert _rollup()["points"] == 8 and _rollup()["session_id"] == "R"
+    contained = _rollup(contained_in="x-unit0001")
+    assert contained["points"] is None
+    assert contained["session_id"] is None
+
+
+def test_empty_contained_in_is_not_containment(ledger):
+    """Only a non-empty owner id suppresses; "" and None are ordinary nodes.
+
+    A falsy value here would silently zero a delivery unit's cost, and the
+    symptom (money quietly missing from the project total) is one nobody reads
+    as a bug in a containment guard.
+    """
+    _seed(ledger, [{
+        "plan_path": "/p", "cost_usd": 7.5,
+        "fno_id": "R", "sessions": ["R"], "completed": "2026-07-27T09:07:20",
+    }])
+    assert _rollup(contained_in=None)["cost_usd"] == 7.5
+    assert _rollup(contained_in="")["cost_usd"] == 7.5
+
+
+def test_ac9_flat_project_total_sums_delivery_units_only(ledger):
+    """The project sum stays a flat sum with no dedup logic of its own.
+
+    Teaching it to dedup was the alternative and is explicitly not the design:
+    contained nodes contributing zero is what keeps the naive
+    `sum(cost_usd)` correct. This pins the invariant at the summation itself,
+    not just at the rollup that feeds it.
+    """
+    unit = {"id": "x-unit0001", "type": "feature", "plan_path": "/p", "cost_usd": 18.22}
+    kids = [
+        {"id": f"x-kid0000{i}", "type": "feature", "plan_path": "/p",
+         "contained_in": "x-unit0001",
+         "cost_usd": _rollup(contained_in="x-unit0001")["cost_usd"]}
+        for i in (1, 2)
+    ]
+    features = [unit, *kids]
+    assert sum(e.get("cost_usd", 0) or 0 for e in features) == pytest.approx(18.22)
+
+
+def test_rollup_tolerates_a_non_dict_node(ledger):
+    """Every caller resolves the node from the graph and can hand back None."""
+    from fno.done.cli import _rollup_from_ledger
+
+    assert _rollup_from_ledger(None)["cost_usd"] is None

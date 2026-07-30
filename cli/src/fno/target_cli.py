@@ -338,6 +338,39 @@ def _resolve_dispatch_node(
     return matches[0] if len(matches) == 1 else None
 
 
+def _redirect_if_contained(node: Optional[dict]) -> None:
+    """Route a named contained node to the delivery unit that owns its PR.
+
+    A node carrying ``contained_in`` ships inside another node's PR (x-e957),
+    so initializing a session on it would claim it, build it, and open a SECOND
+    PR for one plan - the double-binding this invariant exists to prevent.
+
+    A REDIRECT, not a refusal. Naming a node is consent and this does not
+    overrule it; the operator asked for work that exists, and the answer is
+    which node owns it. Exits before ``_retro_dispatch_preflight`` and before
+    the shell bootstrap, so nothing is claimed and no manifest is written.
+
+    This is the NAMED half of the guard. ``selection_guards`` covers autonomous
+    selection only - by its own docstring, an explicitly-named node dispatches
+    from any rung - so without this an operator typing the id walks straight
+    past it, and the autonomous guard alone would be decorative.
+    """
+    if not isinstance(node, dict):
+        return
+    owner = node.get("contained_in")
+    if not isinstance(owner, str) or not owner:
+        return
+    nid = node.get("id") or "that node"
+    typer.echo(
+        f"fno target init: {nid} ships inside {owner}'s PR; "
+        f"run `/fno:target {owner}`.\n"
+        f"{nid} was folded into {owner} as a contained node, so it has no PR of "
+        "its own and is not separately costed. Nothing was claimed.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
+
+
 def _source_pr_repo(node: dict, source_pr: int) -> Optional[str]:
     """Extract the source PR repo from the retro node's canonical permalink."""
     from fno.graph._reconcile import repo_slug_from_url
@@ -853,11 +886,19 @@ def init(
         typer.echo(f"fno target init: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    # Resolved once and shared: both gates below want the same exact-match node,
+    # and the resolver reads the whole graph.
+    _dispatch_node = _resolve_dispatch_node(input_, plan_path)
+
+    # A named contained node is redirected to its delivery unit before anything
+    # is claimed (x-e957 task 1.3b).
+    _redirect_if_contained(_dispatch_node)
+
     # Retro-triaged nodes get a dispatch-time dedup check before the shell
     # bootstrap acquires the node claim. Ordinary target inputs return early;
     # probe failures remain fail-open toward dispatch.
     _retro_dispatch_preflight(
-        _resolve_dispatch_node(input_, plan_path),
+        _dispatch_node,
         beastmode=beastmode,
         unattended=bool(
             os.environ.get("TARGET_UNATTENDED")
