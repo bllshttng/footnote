@@ -262,11 +262,25 @@ fi
 #     plan states its own provenance - no correlation guesswork, and nothing here
 #     depends on locating the session's sidecar. Frontmatter only: a `source:` line
 #     in a doc BODY is prose, never authority.
-_PLAN_SOURCE="$(awk '
+#     A plan-mode plan reaches here via the plan_path tier, which resolves the node
+#     from the graph WITHOUT opening the plan, so an unreadable plan is not screened
+#     out by an earlier exit: capture awk's rc and park on a failed read the way the
+#     ready-gate above parks on a failed status read, rather than letting "could not
+#     read" masquerade as "not a plan-mode plan" and dispatch.
+_PLAN_FM="$(awk '
   NR==1 && $0 !~ /^---[[:space:]]*$/ { exit }
   /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
   fence==1 && /^source:[[:space:]]/ { print; exit }
-' "$PLAN_PATH" 2>/dev/null | sed -E 's/^source:[[:space:]]*//; s/[[:space:]]*$//; s/\r$//' || true)"
+' "$PLAN_PATH" 2>/dev/null)"
+_FM_RC=$?
+if [[ "$_FM_RC" -ne 0 ]]; then
+  echo "parked $node reason=\"plan provenance read failed (rc=$_FM_RC) - not launched\""
+  exit 0
+fi
+# Strip quotes like the graph_node_id read above: this frontmatter is round-tripped
+# by /blueprint, and a quoted scalar must not read as a different provenance.
+_PLAN_SOURCE="$(printf '%s\n' "$_PLAN_FM" \
+  | sed -E 's/^source:[[:space:]]*//; s/[[:space:]]*$//' | tr -d '"' | tr -d "'")"
 if [[ "$_PLAN_SOURCE" == "claude-plan-mode" ]]; then
   echo "parked $node reason=\"plan-mode-front-door-owns-it: /target executes this plan on the human's [y/N]; run 'target bg $node' to dispatch it unsupervised on purpose\""
   exit 0

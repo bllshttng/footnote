@@ -99,6 +99,9 @@ Two rejected alternatives are worth recording, since both look reasonable and bo
 Keying off "a `pending` sidecar exists" fails because a declined confirm deliberately leaves the sidecar `pending` and re-offerable, so every unrelated `/blueprint` inside the sidecar's TTL would park and the configured auto-launch path would silently stop working.
 Correlating on the sidecar's first body line fails because that line is whatever heading the plan opens with: `## Overview` is a whole line in twelve docs in this repo, so a common heading parks unrelated plans, while a short heading correlates with nothing and silently restores the original bug.
 
+A failed provenance read parks rather than dispatching, mirroring the ready-gate above.
+This matters because a backfilled plan carries no `claims:` or `graph_node_id:` and so resolves through the `plan_path` tier, which reads the graph and never opens the plan: an unreadable plan is therefore not screened out by an earlier exit, and "could not read" must not be allowed to masquerade as "not a plan-mode plan".
+
 **Known residual: this closes the auto-launch path, not every path.**
 During the confirm window the node is `ready` and unclaimed, so anything else that dispatches a ready node (`fno backlog advance`, the megawalk walker, a direct `dispatch-node.sh`, another session's `/target`) can still start work the human has not approved.
 Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking, which is a change to the front door rather than to this gate.
