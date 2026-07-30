@@ -873,16 +873,46 @@ def test_every_deferred_at_writer_releases_contained_children():
 
     from fno.graph import cli as gcli
 
-    src = _P(gcli.__file__).read_text(encoding="utf-8")
-    lines = src.splitlines()
-    writers = [
-        i for i, ln in enumerate(lines)
-        if re.search(r'\["deferred_at"\]\s*=\s*datetime\.now', ln)
-    ]
-    assert writers, "no deferred_at writers found - the probe itself broke"
-    for i in writers:
-        window = "\n".join(lines[i:i + 12])
+    # Scan EVERY module under fno/graph, not just cli.py. The first version of
+    # this test grepped one file and passed green while triage.py - a writer the
+    # helper's own docstring names - had no release at all.
+    root = _P(gcli.__file__).parent
+    writers: list[tuple[str, int, str]] = []
+    for path in sorted(root.glob("*.py")):
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for i, ln in enumerate(lines):
+            if re.search(r'\["deferred_at"\]\s*=\s*datetime\.now', ln):
+                writers.append((path.name, i, "\n".join(lines[i:i + 12])))
+    assert len(writers) >= 4, f"probe found only {len(writers)} writers - it broke"
+    for name, i, window in writers:
         assert "_release_contained_children" in window, (
-            f"deferred_at written at line {i + 1} without releasing contained "
+            f"{name}:{i + 1} writes deferred_at without releasing contained "
             "children; a dead unit strands them (unbuildable and uncloseable)"
+        )
+        # Name-adjacency is not enough: the call must take the list the mutator
+        # was handed, never an outer pre-lock snapshot. Passing `entries` inside
+        # a mutator whose parameter is `ents` made the release a silent no-op
+        # and this test still passed, which is the whole reason for this half.
+        call = re.search(r'_release_contained_children\(\s*(\w+)', window)
+        assert call, f"{name}:{i + 1}: could not read the helper's first argument"
+        arg = call.group(1)
+        src_lines = (root / name).read_text(encoding="utf-8").splitlines()
+        mutator_param = None
+        # UNBOUNDED walk-back. A 60-line window found nothing for the maintain
+        # legs (their `def` is further up), so the check silently skipped on
+        # exactly the two sites that carried the bug - and a skip that reads as
+        # a pass is the failure this whole test exists to catch.
+        for back in range(i, -1, -1):
+            m = re.match(r'\s*def \w+\((\w+)', src_lines[back])
+            if m:
+                mutator_param = m.group(1)
+                break
+        assert mutator_param is not None, (
+            f"{name}:{i + 1}: no enclosing def found; the probe cannot verify "
+            "the release argument, which must fail rather than skip"
+        )
+        assert arg == mutator_param, (
+            f"{name}:{i + 1}: releases against {arg!r} but the enclosing "
+            f"mutator receives {mutator_param!r} - a pre-lock snapshot is NOT "
+            "persisted, so the release is a silent no-op"
         )

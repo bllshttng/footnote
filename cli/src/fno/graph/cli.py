@@ -8181,7 +8181,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    _release_contained_children(entries, n.get("id"))
+                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = reason
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
@@ -8218,7 +8218,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
-                    _release_contained_children(entries, n.get("id"))
+                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
                     applied_stale_ready.append({
                         "node_id": cand.node_id,
