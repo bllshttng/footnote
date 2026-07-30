@@ -1650,7 +1650,35 @@ def cmd_decompose(
                 # writes would open a window where the node is re-parented but
                 # still armed for dispatch, which is the exact state this field
                 # exists to make impossible.
-                target["contained_in"] = node["id"]
+                # Containment says "this node has no PR of its own". A node that
+                # already carries one, or that already carries cost, HAS
+                # independent delivery evidence, so the field simply does not
+                # apply to it (codex P1/P2) - and stamping it anyway would hide
+                # an open PR's node from dispatch, auto-close it under someone
+                # else's merge while its own PR is still open, and report a
+                # finished one as having "shipped inside" a unit it predates.
+                # Its cost also stays in the flat project sum regardless, because
+                # _apply_rollup reads an empty rollup as "preserve existing", so
+                # the double-count the rollup guard prevents for NEW attribution
+                # would simply persist for old.
+                #
+                # Adoption itself still proceeds: re-parenting changes rollup
+                # membership, not delivery state, which is exactly what
+                # test_adopt_a_shipped_node_is_permitted pins. Only the
+                # containment stamp is withheld, and loudly.
+                _own_pr = target.get("pr_number")
+                _own_cost = target.get("cost_usd")
+                if _own_pr or _own_cost is not None:
+                    _why = "carries PR #%s" % _own_pr if _own_pr else "carries cost"
+                    uncontained_box[0].append(
+                        f"warning: adopted {target['id']} into group "
+                        f"{grp['slug']!r} but did NOT mark it contained: it "
+                        f"{_why}, so it is its own delivery unit. It stays "
+                        "separately dispatchable, separately costed, and is not "
+                        "closed by the group's merge."
+                    )
+                else:
+                    target["contained_in"] = node["id"]
                 if target.get("parent") == node["id"]:
                     continue  # already adopted - re-running the spec is a no-op
                 # The re-parent path the existing minted-child guard was written
@@ -1659,6 +1687,28 @@ def cmd_decompose(
                     raise DecomposeError(
                         f"adopting {target['id']} into group {grp['slug']!r} "
                         "would create a cycle",
+                        exit_code=2,
+                    )
+                # An adoptee with descendants (codex P1). Containment is ONE
+                # level by design, and selection_guards does not treat a
+                # contained ANCESTOR as a guard - so the children would stay
+                # independently dispatchable while the merge cascade closed only
+                # this parent, leaving them open to build separate PRs. Refusing
+                # is right rather than propagating: a subtree is a decomposition
+                # of its own, and folding it wholesale into another unit is a
+                # reshape the operator should state explicitly.
+                _kids = [
+                    e.get("id") for e in graph_entries
+                    if isinstance(e, dict) and e.get("parent") == target["id"]
+                ]
+                if _kids:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which has "
+                        f"{len(_kids)} child(ren) ({', '.join(str(k) for k in _kids[:3])}"
+                        f"{'...' if len(_kids) > 3 else ''}); containment is one "
+                        "level, so they would stay dispatchable and open their own "
+                        "PRs while their parent closed. Adopt the children "
+                        "individually, or re-parent them out first",
                         exit_code=2,
                     )
                 target["parent"] = node["id"]
@@ -1732,6 +1782,10 @@ def cmd_decompose(
 
     orphan_box: list[list[str]] = [[]]
     unadopted_box: list[list[str]] = [[]]
+    # Adoptees that were re-parented but deliberately NOT marked contained
+    # (they carry their own PR or cost). Same box-then-emit shape as the
+    # unadopted warning: collected inside the locked mutator, printed after.
+    uncontained_box: list[list[str]] = [[]]
     base_box: list = [None]
     verbatim_base_box: list = [None]
     epic_cwd_box: list = [None]
@@ -1745,6 +1799,10 @@ def cmd_decompose(
     epic_resolved_id = epic_id_box[0]
     orphan_ids = orphan_box[0]
     unadopted_ids = unadopted_box[0]
+    # Deduped: locked_mutate_graph may re-enter the mutator, and this box appends
+    # where the sibling boxes assign.
+    for _uc in sorted(set(uncontained_box[0])):
+        typer.echo(_uc, err=True)
     downgrades = downgrade_box[0]
 
     # Shared post-mutation graph re-read: 3c reads each child's created_at +

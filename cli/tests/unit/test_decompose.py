@@ -2637,3 +2637,123 @@ def test_remove_clears_containment_on_its_children(graph_env, monkeypatch):
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None
     assert kid.get("completed_at") is None
+
+
+def test_adopt_does_not_contain_a_node_that_owns_a_pr(graph_env, monkeypatch):
+    """codex P1: `contained_in` says "this node has no PR of its own".
+
+    A PR-bearing adoptee has one. Stamping it anyway would hide an open PR's
+    node from dispatch, auto-close it under someone else's merge while its own
+    PR is still open, and report a finished one as having "shipped inside" a
+    unit it predates. Adoption still proceeds - re-parenting changes rollup
+    membership, not delivery state, which test_adopt_a_shipped_node_is_permitted
+    pins - only the stamp is withheld, and loudly.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001", pr_number=612,
+                                  merge_status="merged", status="done"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 0, result.output
+    entries = read_entries()
+    kid = next(e for e in entries if e["id"] == "ab-kid00001")
+    # Re-parented (adoption happened) but NOT contained.
+    assert kid["parent"] == _child(entries, "one")["id"]
+    assert kid.get("contained_in") is None
+    assert kid["pr_number"] == 612
+    assert "did NOT mark it contained" in result.output
+    assert "612" in result.output
+
+
+def test_adopt_does_not_contain_a_node_that_already_carries_cost(graph_env,
+                                                                 monkeypatch):
+    """Same rule for cost, and for a reason the rollup guard cannot reach.
+
+    `_apply_rollup` reads an empty rollup as "preserve existing", so a node that
+    already carries `cost_usd` keeps it and stays in the flat project sum - the
+    double-count the rollup guard prevents for NEW attribution would simply
+    persist for old.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001", cost_usd=4.25))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 0, result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+    assert kid["cost_usd"] == 4.25
+    assert "did NOT mark it contained" in result.output
+
+
+def test_adopt_refuses_a_node_with_descendants(graph_env, monkeypatch):
+    """codex P1: containment is one level, so a subtree would half-close.
+
+    `selection_guards` does not treat a contained ANCESTOR as a guard, so the
+    children stay independently dispatchable and open their own PRs while the
+    merge cascade closes only the parent. Refusing beats propagating: a subtree
+    is a decomposition of its own, and folding it wholesale into another unit is
+    a reshape the operator should state.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001"),
+                   _node("ab-sub00001", parent="ab-kid00001", status="ready"))
+    before = g.read_text()
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert "one level" in result.output
+    assert "ab-sub00001" in result.output
+    assert g.read_text() == before
+
+
+def test_rehoming_between_groups_still_restamps_containment(graph_env, monkeypatch):
+    """Rehoming is a SUPPORTED operation here, so containment follows the move.
+
+    An external reviewer proposed refusing an adoptee that already carries a
+    different `contained_in`. That would break
+    test_adopt_rehoming_a_node_to_another_group_moves_it: after a rehome the old
+    owner never delivers the node, so re-stamping is the correct write, not a
+    silent ownership theft.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001"))
+    spec = [
+        {"slug": "alpha", "title": "Alpha", "waves": "1", "adopt": ["ab-kid00001"]},
+        {"slug": "beta", "title": "Beta", "waves": "2"},
+    ]
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
+    ).exit_code == 0
+    alpha = _child(read_entries(), "alpha")["id"]
+    assert next(e for e in read_entries()
+                if e["id"] == "ab-kid00001")["contained_in"] == alpha
+
+    spec[0].pop("adopt")
+    spec[1]["adopt"] = ["ab-kid00001"]
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(spec)]
+    ).exit_code == 0
+    beta = _child(read_entries(), "beta")["id"]
+    assert next(e for e in read_entries()
+                if e["id"] == "ab-kid00001")["contained_in"] == beta
