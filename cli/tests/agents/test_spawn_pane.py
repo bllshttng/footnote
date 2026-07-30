@@ -969,10 +969,10 @@ def test_mesh_env_wrapper_routed_pane_scrubs_anthropic_creds(monkeypatch):
     # -u flags precede any KEY=VAL assignment (env parses options first).
     assert "-u" in wrapped
     ui = wrapped.index("-u")
-    unset_region = wrapped[ui : ui + 4]
+    first_assign = next(i for i, t in enumerate(wrapped) if "=" in t)
+    unset_region = wrapped[ui:first_assign]
     assert "ANTHROPIC_API_KEY" in unset_region
     assert "CLAUDE_CODE_OAUTH_TOKEN" in unset_region
-    first_assign = next(i for i, t in enumerate(wrapped) if "=" in t)
     assert ui < first_assign  # unsets before assignments
     assert "ANTHROPIC_AUTH_TOKEN=zk" in wrapped
 

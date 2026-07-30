@@ -364,10 +364,15 @@ def headless_create(
         spawn_env = dict(os.environ)
         for _k in SCRUB_AUTH_VARS:
             spawn_env.pop(_k, None)
-        if route_env:
-            spawn_env.update(route_env)
+        # Account first (profile + its login), route last: when both are present
+        # the route must win endpoint+auth+model as one unit (x-2af5 atomicity),
+        # or the account overlay splits it (overlay endpoint+auth, route model
+        # -> a foreign model asked of the Anthropic API). CLAUDE_CONFIG_DIR from
+        # the account survives, since the route carries no such key.
         if account_env:
             spawn_env.update(account_env)
+        if route_env:
+            spawn_env.update(route_env)
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -518,25 +523,23 @@ def bg_create(
         from fno.agents.model_routing import resolve_route
 
         route = resolve_route(role, notice=lambda m: print(m, file=sys.stderr))
-    if route:
-        spawn_env.pop("ANTHROPIC_API_KEY", None)
-        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
-        spawn_env.update(route)
-
-    # Per-spawn account overlay (x-d012). Applied LAST so an explicit --account
-    # beats a stale CLAUDE_CONFIG_DIR inherited from the parent shell. --account
-    # combined with --route/--role is refused at the CLI (contradictory: one
-    # bills a claude account, the other routes to a different provider), so the
-    # route block above is never populated on an --account spawn - the two never
-    # co-occur here. SCRUB inherited auth vars first, else an ambient
-    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's own
-    # login and bill the wrong account.
+    # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
+    # account's own login. SCRUB inherited auth vars first, else an ambient
+    # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's
+    # login and bill the wrong account. Applied BEFORE the route so a route (when
+    # both are present, x-5ed4) wins endpoint+auth+model atomically (x-2af5): the
+    # route's keys override the account's here, while CLAUDE_CONFIG_DIR survives.
     if account_env:
         from fno.agents.account_env import SCRUB_AUTH_VARS
 
         for _k in SCRUB_AUTH_VARS:
             spawn_env.pop(_k, None)
         spawn_env.update(account_env)
+
+    if route:
+        spawn_env.pop("ANTHROPIC_API_KEY", None)
+        spawn_env.pop("CLAUDE_CODE_OAUTH_TOKEN", None)
+        spawn_env.update(route)
 
     start = time.monotonic()
     try:

@@ -194,6 +194,82 @@ def test_bg_create_route_env_wins_over_role(
 
 
 # ---------------------------------------------------------------------------
+# x-5ed4 / x-2af5: an account overlay + a vendor route COMPOSE. The route wins
+# endpoint+auth+model as one unit (atomic); the account keeps CLAUDE_CONFIG_DIR.
+# This is the regression for the split-brain the old "refuse" guard existed to
+# prevent (overlay endpoint+auth, route model -> foreign model on Anthropic).
+# ---------------------------------------------------------------------------
+
+
+def test_bg_create_route_wins_over_account_overlay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-anthropic")
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["env"] = kwargs.get("env", {})
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(
+            argv, 0, stdout="backgrounded \xb7 abcd1234 \xb7 ok\n", stderr=""
+        )
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(
+        name="w",
+        message="hi",
+        cwd=tmp_path,
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "zai-token",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+        account_env={
+            "CLAUDE_CONFIG_DIR": "/x/.claude",
+            "ANTHROPIC_AUTH_TOKEN": "account-managed-token",
+        },
+    )
+    env = seen["env"]
+    # The route wins endpoint+auth+model atomically - NOT the account's token.
+    assert env["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
+    assert env["ANTHROPIC_AUTH_TOKEN"] == "zai-token"
+    assert env["ANTHROPIC_MODEL"] == "glm-5.2"
+    # The account's profile survives; its competing login did not win.
+    assert env["CLAUDE_CONFIG_DIR"] == "/x/.claude"
+    assert env["ANTHROPIC_AUTH_TOKEN"] != "account-managed-token"
+
+
+def test_mesh_env_wrapper_route_wins_over_account() -> None:
+    """Pane substrate (env(1) is left-to-right last-wins): the route's auth pairs
+    must follow the account's so the route wins, while CLAUDE_CONFIG_DIR survives."""
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    argv = _mesh_env_wrapper(
+        name="w",
+        provider="claude",
+        role=None,
+        argv=["claude", "hi"],
+        account_env={"CLAUDE_CONFIG_DIR": "/x/.claude", "ANTHROPIC_AUTH_TOKEN": "acct"},
+        route_env={
+            "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+            "ANTHROPIC_AUTH_TOKEN": "zai",
+            "ANTHROPIC_MODEL": "glm-5.2",
+        },
+    )
+    # Both auth assignments are present; the route's must come LAST (env last-wins).
+    assert "ANTHROPIC_AUTH_TOKEN=acct" in argv
+    assert "ANTHROPIC_AUTH_TOKEN=zai" in argv
+    assert argv.index("ANTHROPIC_AUTH_TOKEN=zai") > argv.index("ANTHROPIC_AUTH_TOKEN=acct")
+    # The account profile and the route endpoint both ride the wrapper.
+    assert "CLAUDE_CONFIG_DIR=/x/.claude" in argv
+    assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in argv
+
+
+# ---------------------------------------------------------------------------
 # x-6de8: routed spawn applies its route via a --settings file (survives the
 # daemon fork that drops per-spawn env), on both bg and headless.
 # ---------------------------------------------------------------------------
