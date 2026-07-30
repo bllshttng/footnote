@@ -21,8 +21,12 @@ LIB_RS = REPO_ROOT / "crates/fno-agents/src/lib.rs"
 
 # Floor for the parsed const size. A regex that matches the wrong block (a test
 # fixture's kind list, say) or nothing at all would otherwise turn every
-# assertion below into a vacuous pass.
-MIN_EVENT_KINDS = 40
+# assertion below into a vacuous pass. Kept near the real count (49 at the time of
+# writing) rather than comfortably below it: every check here is membership-only,
+# so a parse that silently loses a few kinds loses exactly the assertions that
+# would have caught them. Raise it with the const; lowering it to go green is the
+# one change this guard exists to stop.
+MIN_EVENT_KINDS = 45
 
 # Source values that must be in the envelope.source enum
 REQUIRED_SOURCES = [

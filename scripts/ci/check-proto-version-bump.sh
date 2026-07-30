@@ -57,7 +57,9 @@ set -uo pipefail
 # flag means a caller believes it is steering something it is not - and silently
 # ignoring `--base other-branch` while checking against main is precisely the
 # kind of quiet misconfiguration this guard is written to prevent.
-while [[ $# -gt 0 ]]; do
+# `if`, not `while`: there is no shift here, so a loop would spin forever the
+# moment someone adds a branch that does not exit.
+if [[ $# -gt 0 ]]; then
     case "$1" in
         # Header block only: stop at `set -`, or --help runs on through every
         # column-0 implementation comment in the file and ends mid-rationale.
@@ -67,7 +69,7 @@ while [[ $# -gt 0 ]]; do
             echo "       this check is configured by env only; see --help" >&2
             exit 2 ;;
     esac
-done
+fi
 
 PROTO_FILE="crates/fno/src/proto.rs"
 REMOTE="${PR_REMOTE:-origin}"
@@ -100,7 +102,7 @@ cd "$REPO_ROOT" || exit 2
 # ---------------------------------------------------------------------------
 read_version() {
     local rev="$1" label="$2" blob line
-    if ! blob="$(git show "$rev:$PROTO_FILE" 2>/dev/null)"; then
+    if ! blob="$(git show "$rev:$PROTO_FILE")"; then
         echo "ERROR: cannot read $PROTO_FILE at $label ($rev)" >&2
         return 1
     fi
@@ -124,17 +126,20 @@ read_version() {
 # Resolve the base tip. Fail CLOSED when it is unreachable: a shallow clone that
 # silently skipped the check would re-open the collision class.
 # ---------------------------------------------------------------------------
-if ! git rev-parse --verify --quiet "$REMOTE/$BASE_REF" >/dev/null; then
-    # NO --depth here. `git fetch --depth=1` against a COMPLETE clone does not
-    # fetch less, it writes .git/shallow and truncates the whole repository:
-    # measured, a 5-commit clone came out at 1 commit needing `--unshallow` to
-    # recover. This script is documented as locally runnable, so it must not
-    # mutate the caller's repo to answer a read-only question.
-    #
-    # The fetch's own error is left on stderr on purpose: "cannot verify the
-    # bump" with no reason is the hardest version of this failure to act on.
-    git fetch --quiet "$REMOTE" "$BASE_REF" || true
-fi
+# Fetched UNCONDITIONALLY, not only when the tracking ref is missing. A ref that
+# merely exists may be days behind, and comparing against a stale base prints OK
+# on the exact collision - from the local run mode this script advertises.
+#
+# NO --depth here. `git fetch --depth=1` against a COMPLETE clone does not fetch
+# less, it writes .git/shallow and truncates the whole repository: measured, a
+# 5-commit clone came out at 1 commit needing `--unshallow` to recover. This
+# script is locally runnable, so it must not mutate the caller's repo to answer a
+# read-only question.
+#
+# The fetch's own error is left on stderr on purpose: "cannot verify the bump"
+# with no reason is the hardest version of this failure to act on. A failure is
+# non-fatal here because the rev-parse below re-derives it and fails closed.
+git fetch --quiet "$REMOTE" "$BASE_REF" || true
 # Resolved ONLY from the remote-tracking ref. An earlier draft fell back to
 # FETCH_HEAD, which is whatever the last fetch in this repo happened to leave
 # behind - an unrelated branch, or a stale commit from a previous run - and
@@ -193,18 +198,27 @@ MERGE_BASE="$(git merge-base "$BASE_TIP" "$HEAD_SHA" 2>/dev/null)" || {
 # reads a successful match as "no match" and passes the guard on a real
 # collision. It needs enough pending output to fill the pipe buffer, which a
 # bump sitting on top of a large earlier proto.rs commit supplies.
-PROTO_PATCH="$(git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE" 2>/dev/null)" || {
+PROTO_PATCH="$(git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")" || {
     echo "ERROR: cannot read this PR's $PROTO_FILE history - unable to verify the bump" >&2
     exit 2
 }
 
+# Read the base version BEFORE deciding the line was untouched.
+#
+# Both greps anchor `pub const` at column 0, so if the const is ever indented
+# into a `mod`, gains an attribute, or is renamed, nothing matches and the
+# untouched branch below would print a pass for every PR forever, with
+# read_version's loud errors sitting on a branch that is never reached. Reading
+# the base first means an unlocatable const fails loud on BOTH paths - the same
+# reason the file-existence check above exists, one level finer.
+BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 1
+
 if ! grep -qE '^[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"; then
     echo "check-proto-version-bump: PROTO_VERSION line untouched by this PR; nothing to check"
-    echo "  head=${HEAD_SHA} base=${REMOTE}/${BASE_REF}@${BASE_TIP}"
+    echo "  head=${HEAD_SHA} base=${REMOTE}/${BASE_REF}@${BASE_TIP} base_version=v${BASE_V}"
     exit 0
 fi
 
-BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 1
 HEAD_V="$(read_version "$HEAD_SHA" "PR head")" || exit 1
 
 if (( HEAD_V > BASE_V )); then

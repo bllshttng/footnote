@@ -21,6 +21,8 @@
 #    9. inherited someone else's bump via a base merge   -> exit 0 (not a touch)
 #   10. bump above a large earlier patch (SIGPIPE trap)  -> still exit 1
 #   11. non-main base ref via PR_BASE_REF                -> exit 0
+#   12. empty PR_HEAD_SHA under CI                       -> exit 2 (refused)
+#   13. unknown arg                                      -> exit 2 (refused)
 #
 # Usage: bash scripts/tests/check-proto-version-bump-selftest.sh
 # Exit 0 = all assertions passed.
@@ -370,6 +372,28 @@ if [[ $rc -eq 0 ]] && [[ "$out" == *"v10 -> v11"* ]] && [[ "$out" == *"origin/de
     pass "a non-main base ref is honored end to end"
 else
     fail "non-main base case: rc=$rc out=$out"
+fi
+
+# --- case 12: an empty PR_HEAD_SHA under CI is refused --------------------
+# Not a silent-pass case but the refusal that PREVENTS one: falling back to HEAD
+# in CI means reading the merge ref, which cannot show the PR's own bump.
+read -r dir sha <<< "$(make_repo 10 "$(version_line 11)")"
+out="$( cd "$dir" && CI=1 PR_HEAD_SHA= PR_BASE_REF=main PR_REMOTE=origin \
+    bash "$GUARD" 2>&1 )"; rc=$?
+if [[ $rc -eq 2 ]] && [[ "$out" == *"PR_HEAD_SHA is empty under CI"* ]]; then
+    pass "an empty PR_HEAD_SHA under CI is refused, not defaulted to HEAD"
+else
+    fail "empty-head-under-CI case: rc=$rc out=$out"
+fi
+
+# --- case 13: an unknown arg is refused, not ignored ----------------------
+# Silently accepting `--base other` while checking main is the quiet
+# misconfiguration this guard exists to prevent.
+out="$( cd "$dir" && PR_HEAD_SHA="$sha" bash "$GUARD" --base other 2>&1 )"; rc=$?
+if [[ $rc -eq 2 ]] && [[ "$out" == *"unknown arg"* ]]; then
+    pass "an unknown arg is refused rather than ignored"
+else
+    fail "unknown-arg case: rc=$rc out=$out"
 fi
 
 echo ""
