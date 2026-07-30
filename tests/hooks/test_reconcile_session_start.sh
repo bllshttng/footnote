@@ -215,6 +215,55 @@ grep -q "backlog reconcile --json" "$FNO_CALL_LOG" \
 pass "render: legacy result is consumed and the reconcile still fires"
 
 # ============================================================================
+# AC: _reconcile_mtime must return DIGITS on either stat dialect.
+# GNU `stat -f` is --file-system, not a format flag, so `stat -f %m FILE`
+# SUCCEEDS on Linux and prints a block starting `  File: ...`. A BSD-first
+# `||` chain therefore never falls through to `-c %Y`, and the caller feeds
+# that text to `$(( ))` where bash reads `File` as a variable name:
+# "File: unbound variable" under the hook's set -u, killing the whole
+# SessionStart reconcile on every Linux host that has a stamp. The macOS-only
+# local run could never see it, which is why this asserts the ANSWER shape
+# rather than the exit code.
+# ============================================================================
+log "mtime: returns digits under a GNU-shaped stat"
+MT_BIN="$WORK/gnu-stat-bin"; mkdir -p "$MT_BIN"
+cat > "$MT_BIN/stat" <<'GNUSTAT'
+#!/usr/bin/env bash
+# GNU-alike: -c takes the format; -f is --file-system and exits 0 with TEXT.
+if [[ "${1:-}" == "-c" ]]; then
+  shift
+  if [[ "${1:-}" == "%Y" ]]; then echo 1700000000; exit 0; fi
+  exit 1
+fi
+if [[ "${1:-}" == "-f" ]]; then
+  printf '  File: "/dev/disk1"\n    ID: 0\n'
+  exit 0
+fi
+exit 1
+GNUSTAT
+chmod +x "$MT_BIN/stat"
+
+# A probe script rather than an inline `bash -uc`: the nested quoting is the
+# kind of thing that fails for its own reasons and reads as a real failure.
+cat > "$WORK/mtime-probe.sh" <<PROBE
+set -u
+source "$THROTTLE_LIB"
+_t="\$(mktemp)"; : > "\$_t"
+_reconcile_mtime "\$_t"
+PROBE
+
+_MT_GNU="$(PATH="$MT_BIN:$PATH" bash "$WORK/mtime-probe.sh" 2>&1)"
+[[ "$_MT_GNU" =~ ^[0-9]+$ ]] \
+    || fail "mtime: non-numeric under a GNU-shaped stat (got: $_MT_GNU)"
+pass "mtime: digits under a GNU-shaped stat"
+
+log "mtime: returns digits under the native stat too"
+_MT_NATIVE="$(bash "$WORK/mtime-probe.sh" 2>&1)"
+[[ "$_MT_NATIVE" =~ ^[0-9]+$ ]] \
+    || fail "mtime: non-numeric on the native stat (got: $_MT_NATIVE)"
+pass "mtime: digits on the native stat"
+
+# ============================================================================
 # AC: non-blocking — the hook always exits 0.
 # ============================================================================
 log "non-blocking: hook exits 0 even with no prior result"
