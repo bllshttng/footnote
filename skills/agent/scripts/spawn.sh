@@ -494,9 +494,15 @@ else
           if [[ "$receipt_status" == "spawning" && -z "$session_id" && -z "$short_id" ]]; then
             short_id="$receipt_name"
             pane_identity_ok=1
+          # Check that short_id is a genuine 8-hex handle derived from THIS
+          # session id, without restating which 8 characters. The producer reads
+          # canonical_handle (fno.harness_identity), the one source for that
+          # string; pinning the offset here would silently reject a correct
+          # receipt the day that function changes which slice it returns.
           elif [[ "$receipt_status" == "live" \
              && "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
-             && "$short_id" == "${session_id:0:8}" ]]; then
+             && "$short_id" =~ ^[0-9a-f]{8}$ \
+             && "$session_id" == *"$short_id"* ]]; then
             pane_identity_ok=1
           fi
         elif [[ -z "$short_id" ]]; then

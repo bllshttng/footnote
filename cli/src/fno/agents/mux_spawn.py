@@ -1254,12 +1254,18 @@ def dispatch_spawn_pane(
                 exit_code=12,
             ) from exc
 
-        # Claude and Codex both resolve the canonical full harness id through
-        # its 8-hex prefix. The row keeps short_id empty because mux is its one
-        # live transport ref; the receipt may still hand out the derived handle.
+        # Claude and Codex both resolve the canonical full harness id through the
+        # generated mailbox handle. The row keeps short_id empty because mux is
+        # its one live transport ref; the receipt may still hand out the derived
+        # handle. Derive it via canonical_handle, the single source for that
+        # string - a local slice here would be a fourth copy to keep in sync, and
+        # the send path, registry name fallback, and drain all read that one
+        # function (see fno.harness_identity).
+        from fno.harness_identity import canonical_handle
+
         session_uuid = stored_session_uuid
         short_id_val = (
-            session_uuid[:8]
+            canonical_handle(session_uuid)
             if provider in ("claude", "codex") and session_uuid
             else ""
         )
