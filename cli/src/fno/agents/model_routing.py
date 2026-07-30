@@ -216,7 +216,7 @@ def remap_conflict_message(alias: str, remapped: str) -> str:
         "Name the route instead, so endpoint, auth, and model are chosen as "
         "one unit:\n"
         f"  --account <id> --model {alias}      # Anthropic's {alias} "
-        "(ids from `fno providers list`)\n"
+        "(ids from `fno config accounts list`)\n"
         f"  -P <vendor> --model {remapped}   # stay on the routed vendor "
         "(vendors from `fno route ls`)\n"
         f"Or unset {var} for this command."
