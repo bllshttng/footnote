@@ -5419,6 +5419,18 @@ def cmd_defer(
         node["completed_at"] = None
         node["deferred_at"] = datetime.now(timezone.utc).isoformat()
         node["deferred_reason"] = cleaned_reason
+        # Release anything shipping inside it (x-e957), completing the set with
+        # cmd_remove and cmd_supersede. A deferred unit is not going to merge,
+        # so `_strandable_contained_ids` (keyed on completed_at) can never heal
+        # its children, while selection_guards and `target init` keep refusing
+        # them - unbuildable, uncloseable, invisible to every sweep. Un-contained
+        # rather than closed: deferring the unit is not a claim its children
+        # shipped. Undefer does not re-contain them, deliberately: re-adoption is
+        # decompose's job and inferring it here would re-hide work the operator
+        # may have since re-scoped.
+        for _e in entries:
+            if isinstance(_e, dict) and _e.get("contained_in") == node.get("id"):
+                _e.pop("contained_in", None)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -7524,10 +7536,31 @@ def cmd_reconcile(
                 # Same order as the real mutator: contained children close
                 # first, so the simulated parent cascade sees the same
                 # all-children-done world a real run would.
-                _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
+                # Guarded like the real mutator. Unguarded, a raise crashed the
+                # PREVIEW with a traceback where a real run degrades to a
+                # warning - the preview failing harder than the thing it
+                # previews - and `contained_errors` stayed [] in the --json
+                # payload, asserting no errors for a leg that never completed.
+                try:
+                    _sim_contained.extend(
+                        _cascade_close_contained(_sim, record.node_id)
+                    )
+                except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
+                    contained_errors.append({
+                        "owner": record.node_id,
+                        "stage": "merge-cascade (dry-run)",
+                        "error": str(_sc_exc)[:200],
+                    })
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
         if node is None:
-            _sim_contained.extend(_sweep_close_stranded_contained(_sim))
+            try:
+                _sim_contained.extend(_sweep_close_stranded_contained(_sim))
+            except Exception as _ss_exc:  # noqa: BLE001 - preview never crashes
+                contained_errors.append({
+                    "owner": None,
+                    "stage": "stranded-heal (dry-run)",
+                    "error": str(_ss_exc)[:200],
+                })
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))

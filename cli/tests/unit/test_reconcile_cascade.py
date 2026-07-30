@@ -791,3 +791,50 @@ def test_clean_sweep_reports_no_contained_errors(world, merged_pr, dispatches):
     """The key is always present so a reader need not distinguish absent from empty."""
     payload = json.loads(_reconcile("--json").stdout)
     assert payload["contained_errors"] == []
+
+
+def test_dry_run_never_crashes_on_a_fallible_cascade(world, merged_pr, dispatches,
+                                                     monkeypatch):
+    """The preview must not fail harder than the run it previews.
+
+    The real mutator wraps both legs precisely because they are fallible; the
+    simulation called them bare, so a raise crashed --dry-run with a traceback
+    while `contained_errors` stayed [] - asserting no errors for a leg that
+    never completed.
+    """
+    import fno.graph.cli as gcli
+
+    def boom(entries, node_id):
+        raise RuntimeError("cascade exploded")
+
+    monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
+    result = _reconcile("--dry-run", "--json")
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["contained_errors"], payload
+    assert "cascade exploded" in payload["contained_errors"][0]["error"]
+
+
+def test_deferring_a_unit_releases_its_contained_children(world, dispatches):
+    """Completes the set with remove and supersede.
+
+    A deferred unit will not merge, so `_strandable_contained_ids` (keyed on
+    completed_at) can never heal its children while selection and target init
+    keep refusing them.
+    """
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli
+
+    write, read = world
+    write(_world(Path("/tmp")))
+    assert read()[KID_A]["contained_in"] == UNIT
+
+    assert CliRunner().invoke(
+        cli, ["defer", UNIT, "--reason", "parked"]
+    ).exit_code == 0
+
+    kid = read()[KID_A]
+    assert kid.get("contained_in") is None, "child left pointing at a deferred unit"
+    # Released, not closed: deferring the unit is not a claim its work shipped.
+    assert kid.get("completed_at") is None

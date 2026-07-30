@@ -551,6 +551,18 @@ def is_stale_ready(entry: dict, now: datetime, staleness_days: int) -> bool:
     """
     from fno.graph.ladder import UNSELECTABLE_RUNGS, plan_rung
 
+    if entry.get("contained_in"):
+        # Contained work is delivered inside another node's PR, so it can never
+        # acquire a movement signal - no PR, session, or claim of its own, by
+        # design (x-e957). Without this it is quarantine-eligible the moment it
+        # is old enough, and `maintain --apply` auto-defers it with the
+        # misleading reason "stale-quarantine". The adopt back-fill makes that
+        # immediate rather than eventual: it stamps containment onto legacy
+        # nodes whose created_at is already months old, so they qualify on the
+        # very next groom. Placed HERE and not in selection_guards for the same
+        # reason the rung check below is: two of this predicate's three callers
+        # never route through that guard.
+        return False
     if entry.get("blocked_by"):
         return False  # was gated by a dependency, not abandoned
     if plan_rung(entry) in UNSELECTABLE_RUNGS:
