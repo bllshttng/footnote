@@ -585,3 +585,137 @@ def test_heal_is_idempotent_across_repeated_sweeps(world, monkeypatch, dispatche
     assert result.exit_code == 0
     assert read()[KID_A]["completed_at"] == first
     assert "in sync" in result.output
+
+
+# -- sigma round: defects the panel found in the first cut --
+
+
+def test_contained_node_gets_its_own_starvation_reason_not_quarantined():
+    """`quarantined` reads as stale work needing attention; this is neither.
+
+    A decomposed epic printed one bogus line per adopted node on every
+    `fno backlog next`, and it could not clear until the unit merged - permanent
+    noise the operator cannot act on. The other named guards each get their own
+    reason for exactly this reason.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.cli import _starvation_receipts
+
+    now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    entries = [
+        _node(KID_A, contained_in=UNIT, plan_path=PLAN,
+              created_at=now.isoformat()),
+        _node(UNIT, plan_path=PLAN, created_at=now.isoformat()),
+    ]
+    receipts = _starvation_receipts(
+        entries, None, True, None, set(), now, 21
+    )
+    assert (KID_A, "contained") in receipts
+    assert not any(r == (KID_A, "quarantined") for r in receipts)
+
+
+def test_sweep_calls_the_strandable_scan_once_not_once_per_entry():
+    """It ran inside a set comprehension: O(N^2) on a SessionStart-hot path.
+
+    Counting calls rather than timing: a timing assertion would be flaky, and
+    the defect is the call count, not the wall clock.
+    """
+    import fno.graph.cli as gcli
+
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+
+    real = gcli._strandable_contained_ids
+    calls = []
+
+    def counted(es):
+        calls.append(1)
+        return real(es)
+
+    try:
+        gcli._strandable_contained_ids = counted
+        gcli._sweep_close_stranded_contained(entries)
+    finally:
+        gcli._strandable_contained_ids = real
+    assert len(calls) == 1, f"scanned {len(calls)}x for {len(entries)} entries"
+
+
+def test_neither_id_read_raises_on_a_row_carrying_contained_in_without_an_id():
+    """A KeyError here aborts the WHOLE reconcile - it runs outside any guard.
+
+    Same failure class as the SessionStart jq bug in this PR: a read of
+    untrusted graph rows must never be the thing that takes the sweep down.
+    """
+    from fno.graph.cli import _cascade_close_contained, _strandable_contained_ids
+
+    entries = [
+        {"contained_in": UNIT},                      # no id at all
+        {"id": None, "contained_in": UNIT},          # null id
+        _node(UNIT, completed_at="2026-07-28T00:00:00+00:00"),
+        _node(KID_A, contained_in=UNIT),
+    ]
+    assert _strandable_contained_ids(entries) == {KID_A}
+    assert _cascade_close_contained(entries, UNIT) == [KID_A]
+
+
+def test_heal_only_sweep_does_not_claim_there_were_PRs(world, monkeypatch,
+                                                        dispatches):
+    """With no drift there are no "those PRs" to point at, and no "Also"."""
+    import fno.graph._reconcile as rec
+
+    write, _read = world
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+    write(entries)
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+
+    out = _reconcile().output
+    assert "Closed 0 node(s)" not in out
+    assert "those PRs" not in out
+    assert "already-merged delivery units" in out
+
+
+def test_reparenting_away_from_the_unit_un_adopts(world, dispatches):
+    """The only escape from a mistyped `adopt` id, and it must exist.
+
+    Nothing else clears `contained_in`: decompose is the sole writer, re-running
+    the spec without the entry leaves the stale value, and graph.json is a
+    hook-blocked forbidden surface. One typo therefore unarmed a real delivery
+    unit permanently AND had the cascade later stamp it "shipped inside
+    <owner>" - a false completion note on work that never shipped.
+    """
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli
+
+    write, read = world
+    write(_world(Path("/tmp")))
+
+    assert CliRunner().invoke(
+        cli, ["update", KID_A, "--parent", "null"]
+    ).exit_code == 0
+    assert read()[KID_A].get("contained_in") is None
+
+
+def test_reparenting_within_the_unit_keeps_containment(world, dispatches):
+    """Keyed on moving away from THE OWNER, not on any re-parent at all.
+
+    A contained node re-parented to its own delivery unit is still contained;
+    clearing on every `--parent` would silently re-arm it.
+    """
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli
+
+    write, read = world
+    write(_world(Path("/tmp")))
+
+    assert CliRunner().invoke(
+        cli, ["update", KID_A, "--parent", UNIT]
+    ).exit_code == 0
+    assert read()[KID_A]["contained_in"] == UNIT

@@ -1109,3 +1109,66 @@ def test_init_script_wires_the_containment_gate():
     assert "fno target check-contained" in text
     # rc 9 refuses; anything else must fall through rather than brick bootstrap.
     assert '"$_CT_RC" -eq 9' in text
+
+
+def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch):
+    """The first narrowing covered len(units)==1 and missed len(units)==0.
+
+    Owner superseded, deleted, or its plan_path edited away leaves a plan whose
+    every holder is contained. That fell back to the len==1 rule, returned None,
+    and skipped the redirect - the exact second-PR state the guard exists for.
+    They all name one owner, so the destination is unambiguous.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    assert result.exit_code == 2, result.output
+    assert "x-6320" in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_contained_nodes_naming_different_owners_stay_ambiguous(tmp_path, monkeypatch):
+    """Two owners means no single destination; do not pick one."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-8a4f"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
+
+
+def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
+    """After the cascade the owner is usually done; routing there is a dead end.
+
+    "run /fno:target <done node>" reads as a broken redirect rather than as
+    "this already shipped".
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "pr_number": 700,
+         "completed_at": "2026-07-29T00:00:00+00:00"},
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2
+    assert "already shipped" in result.output
+    assert "700" in result.output
+    assert "run `/fno:target x-6320`" not in result.output
+    _clear_root_cache()

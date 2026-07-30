@@ -3040,6 +3040,26 @@ def cmd_update(
             # a reparent (or --parent null) leaves the OLD epic/mission counting
             # a child it no longer owns until it is projected (codex P2).
             reparent_old_parent[0] = node.get("parent")
+            # Re-parenting AWAY from the delivery unit un-adopts the node
+            # (x-e957). Without this there is no supported way out of a mistyped
+            # `adopt` id: only decompose writes `contained_in`, re-running the
+            # spec without the entry leaves the stale value, and graph.json is a
+            # hook-blocked forbidden surface - so one typo permanently unarmed a
+            # real delivery unit AND had the cascade later stamp it "shipped
+            # inside <owner>", a false completion note on work that never
+            # shipped. It also keeps `parent` and `contained_in` from
+            # disagreeing, which is what produced that false note.
+            #
+            # Deliberately keyed on moving away from THE OWNER, not on any
+            # re-parent: a contained node moved between two nodes that both sit
+            # under its delivery unit is still contained.
+            _new_parent = None if parent.lower() == "null" else parent
+            _owner = node.get("contained_in")
+            if _owner and (
+                _new_parent is None
+                or (_find_node(entries, _new_parent) or {}).get("id") != _owner
+            ):
+                node.pop("contained_in", None)
             if parent.lower() == "null":
                 node["parent"] = None
             else:
@@ -3374,6 +3394,13 @@ def _starvation_receipts(
                 continue  # no known exclusion (would have been selected)
             if g.startswith("dead-ancestor"):
                 reason = "dead-ancestor"
+            elif g.startswith("contained"):
+                # Not starvation either: the work IS being delivered, inside
+                # another node's PR. Left in the generic `quarantined` bucket it
+                # read as stale work needing attention, and a decomposed epic
+                # printed one bogus line per adopted node on every `next` until
+                # its unit merged - permanent noise the operator cannot act on.
+                reason = "contained"
             elif g == "design-stage":
                 # Not starvation: planned but not blueprinted, so it reads as
                 # its own rung rather than the generic quarantine bucket.
@@ -6073,9 +6100,12 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
             continue
         if e.get("completed_at"):
             continue  # already closed (out of band, or a previous sweep)
+        nid = e.get("id")
+        if not isinstance(nid, str) or not nid:
+            continue  # unidentifiable row: nothing to report, nothing to close
         _apply_completion_fields(e)
         e["completion_note"] = note
-        closed.append(e["id"])
+        closed.append(nid)
     return closed
 
 
@@ -6107,8 +6137,14 @@ def _strandable_contained_ids(entries: list[dict]) -> set[str]:
         if not isinstance(owner_id, str) or not owner_id:
             continue
         owner = by_id.get(owner_id)
-        if owner is not None and owner.get("completed_at"):
-            out.add(e["id"])
+        nid = e.get("id")
+        # `.get`, not `e["id"]`: a row carrying contained_in but no id would
+        # raise KeyError, and this runs OUTSIDE any try/except in cmd_reconcile
+        # - so it would abort the whole sweep. Exactly the failure class as the
+        # SessionStart jq bug this same PR fixes; a read of untrusted graph rows
+        # must never be the thing that takes reconcile down.
+        if owner is not None and owner.get("completed_at") and isinstance(nid, str) and nid:
+            out.add(nid)
     return out
 
 
@@ -6118,15 +6154,19 @@ def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
     Grouped by owner so each node gets the same note the merge-time cascade
     writes, naming its unit and that unit's PR.
     """
+    # Hoisted: called inside the comprehension it re-ran once per entry, each
+    # pass rebuilding the whole by_id map - O(N^2) on a path reconcile fires at
+    # every SessionStart.
+    stranded = _strandable_contained_ids(entries)
+    if not stranded:
+        return []
+    owners = {
+        e.get("contained_in")
+        for e in entries
+        if isinstance(e, dict) and e.get("id") in stranded
+    }
     closed: list[str] = []
-    for owner_id in sorted(
-        {
-            entries_e["contained_in"]
-            for entries_e in entries
-            if isinstance(entries_e, dict)
-            and entries_e.get("id") in _strandable_contained_ids(entries)
-        }
-    ):
+    for owner_id in sorted(o for o in owners if isinstance(o, str) and o):
         closed.extend(_cascade_close_contained(entries, owner_id))
     return closed
 
@@ -7447,13 +7487,20 @@ def cmd_reconcile(
         return
 
     if dry_run:
-        typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
+        if closeable:
+            typer.echo(
+                f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):"
+            )
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
         if contained_closed:
+            # "those PRs" only reads correctly when a PR actually drifted this
+            # run. On a heal-only sweep `closeable` is empty, so the 0-header
+            # above says nothing-to-do directly over a line saying otherwise.
+            _whose = "those PRs" if closeable else "already-merged delivery units"
             typer.echo(
                 f"Would close {len(contained_closed)} contained node(s) shipped "
-                "inside those PRs: " + ", ".join(contained_closed)
+                f"inside {_whose}: " + ", ".join(contained_closed)
             )
         if healed_epics:
             typer.echo(
@@ -7461,16 +7508,22 @@ def cmd_reconcile(
                 + ", ".join(healed_epics)
             )
     else:
-        typer.echo(f"Closed {len(closed)} node(s):")
+        if closed:
+            typer.echo(f"Closed {len(closed)} node(s):")
         for c in closed:
             stamp_note = " (plan stamped)" if c["plan_stamped"] else ""
             typer.echo(f"  {c['node_id']}  PR #{c['pr_number']}{stamp_note}")
         if closed:
             typer.echo(f"Retro sentinels written under {retro_pending_dir()}")
         if contained_closed:
+            # Same wording rule as the dry-run branch: with no drift this sweep
+            # there are no "those PRs" to point at, and "Also" implies a
+            # preceding close that did not happen.
+            _lead = "Also closed" if closed else "Closed"
+            _whose = "those PRs" if closed else "already-merged delivery units"
             typer.echo(
-                f"Also closed {len(contained_closed)} contained node(s) shipped "
-                "inside those PRs (cost stays on the delivery unit): "
+                f"{_lead} {len(contained_closed)} contained node(s) shipped "
+                f"inside {_whose} (cost stays on the delivery unit): "
                 + ", ".join(contained_closed)
             )
         if healed_epics:

@@ -346,6 +346,17 @@ def _resolve_dispatch_node(
         units = [e for e in matches if not e.get("contained_in")]
         if len(units) == 1:
             return units[0]
+        if not units:
+            # Every holder is contained (the owner was superseded, deleted, or
+            # had its plan_path edited away). The first narrowing missed this:
+            # it fell back to the len==1 rule and returned None, so a
+            # `--plan-path` bootstrap of such a plan skipped the redirect
+            # entirely - the exact second-PR state the guard exists to stop.
+            # When they all name ONE owner the destination is unambiguous, so
+            # hand back any of them and let the redirect route to that owner.
+            owners = {e.get("contained_in") for e in matches}
+            if len(owners) == 1:
+                return matches[0]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -372,6 +383,22 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     if not isinstance(owner, str) or not owner:
         return
     nid = node.get("id") or "that node"
+    # Route on the owner's LIVE state. After the merge cascade closes the
+    # children the owner is usually done, and `/fno:target <done node>` is a
+    # dead end - the operator reads the redirect as broken rather than as
+    # "this already shipped".
+    owner_node = _find_node(owner)
+    if owner_node is not None and owner_node.get("completed_at"):
+        shipped = owner_node.get("pr_number")
+        where = f" in PR #{shipped}" if shipped else ""
+        typer.echo(
+            f"fno target init: {nid} already shipped inside {owner}{where}, "
+            f"which is done - there is nothing left to build here.\n"
+            f"{nid} was folded into {owner} as a contained node, so it has no "
+            "PR of its own and is not separately costed. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     typer.echo(
         f"fno target init: {nid} ships inside {owner}'s PR; "
         f"run `/fno:target {owner}`.\n"
