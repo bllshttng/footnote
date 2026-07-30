@@ -6011,6 +6011,74 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     return closed
 
 
+def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
+    """Close every node that shipped inside ``node_id``'s PR (x-e957 task 1.5).
+
+    Called inside the close mutator right after a delivery unit's completion
+    fields are set. A node carrying ``contained_in`` was folded into that unit
+    by ``decompose ... adopt:``; its work rides the unit's PR, so it has no PR
+    of its own and ``scan_merge_drift`` - which only ever returns nodes carrying
+    a PR - can never see it. Before this, dispatch and cost had each learned to
+    read containment and completion had no inference at all, so a contained node
+    stayed open forever behind a merged PR.
+
+    Deliberately NOT the inverse of ``_cascade_close_parents``. That one closes
+    a parent when its last child lands (bottom-up, conditional on the siblings);
+    this closes children off their owner's merge (top-down, unconditional). One
+    level only: containment is a direct relation to the node that owns the PR,
+    not a chain, so a node contained in a contained node is a shape decompose
+    cannot produce.
+
+    Three deliberate omissions, each load-bearing:
+
+    - No ledger rollup. Reusing ``fno done``'s path would hand each contained
+      node the same plan's cost and re-introduce the very triple count task 1.4
+      just removed. ``cost_usd`` stays None; the note is what makes that null
+      read as located rather than missing.
+    - No ``merge_status``. The field means "GitHub confirmed THIS node's PR
+      merged" and a contained node has no PR, matching how the PR-less epic
+      cascade leaves it unset.
+    - No auto-continue dispatch. See the AC6 note in
+      ``tests/unit/test_reconcile_cascade.py``: a contained node is not a legal
+      ``blocked_by`` target, and fanning one merge into N dispatches would scale
+      with how finely an epic happened to be decomposed. The close still
+      re-arms any dependent for the next selection pass.
+
+    Idempotent: an already-closed node keeps its own completion and note, so a
+    child that shipped its own PR is never relabelled as contained cargo.
+    Reconcile runs on every SessionStart, so this matters more than once.
+
+    The note is built BEFORE any mutation and nothing fallible runs between a
+    node's ``_apply_completion_fields`` and its note. The caller treats a raised
+    cascade as a warning and keeps the delivery unit's close, so anything that
+    can throw mid-loop leaves nodes closed with no note - done, with the reason
+    they are done missing. Cheap to arrange, and the alternative is a state no
+    reader can interpret.
+    """
+    unit = next(
+        (e for e in entries
+         if isinstance(e, dict) and e.get("id") == node_id),
+        {},
+    )
+    pr = unit.get("pr_number")
+    where = f"PR #{pr}" if pr else "its PR"
+    note = (
+        f"auto-closed: shipped inside {node_id} ({where}); "
+        f"cost and session are recorded on {node_id}"
+    )
+
+    closed: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("contained_in") != node_id:
+            continue
+        if e.get("completed_at"):
+            continue  # already closed (out of band, or a previous sweep)
+        _apply_completion_fields(e)
+        e["completion_note"] = note
+        closed.append(e["id"])
+    return closed
+
+
 def _strandable_epic_ids(entries: list[dict]) -> set[str]:
     """Open epics (parents) whose children are ALL done - closeable right now.
 
@@ -6928,6 +6996,29 @@ def cmd_reconcile(
                     if record.pr_number and not node_obj.get("pr_number"):
                         node_obj["pr_number"] = record.pr_number
                         node_obj["pr_url"] = record.pr_url
+                    # Close every node that shipped inside this PR (x-e957),
+                    # BEFORE the parent cascade: a contained node is a child of
+                    # the delivery unit, so the epic above is only all-done once
+                    # these are closed too. Running it after would leave the
+                    # ancestor open for a sweep it should have closed now.
+                    #
+                    # A loud warning, never an abort. The merge already
+                    # happened and the delivery unit's own close is the
+                    # load-bearing write; a cascade that raised here would leave
+                    # that unit open against a merged PR - strictly worse than
+                    # the bug this fixes. Contained ids are NOT added to
+                    # cascade_closed_acc: that accumulator drives auto-continue
+                    # dispatch, which contained nodes deliberately do not get.
+                    try:
+                        _cascade_close_contained(entries, record.node_id)
+                    except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
+                        typer.echo(
+                            f"warning: closed {record.node_id} but the contained-node "
+                            f"cascade failed: {_cc_exc}; any node with "
+                            f"contained_in={record.node_id} is still open "
+                            "(`fno backlog reconcile` retries on the next run)",
+                            err=True,
+                        )
                     # Cascade-close now-all-done ancestor epics (x-33b2), uniform
                     # across projects (follows the parent edge, not a filter).
                     cascade_closed_acc.extend(
