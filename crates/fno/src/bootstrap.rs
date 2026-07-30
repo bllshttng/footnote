@@ -19,8 +19,9 @@
 //! sentinel (there is no verified binary to point at), so it also records a
 //! short-lived failure stamp beside it. Without that, every later invocation
 //! repeats the whole `uv tool install --force` to reach the same error, turning a
-//! one-time breakage into a permanent per-call tax. The stamp is keyed to the
-//! install source, so changing what you install from takes effect immediately.
+//! one-time breakage into a permanent per-call tax. The stamp is keyed to a
+//! digest of the install source, so changing what you install from takes effect
+//! immediately and a credential-bearing source is never written to the cache.
 //!
 //! The wheel's Python CLI ships as the `fno-py` console script (this Rust
 //! binary owns `fno`), and the shim execs it by absolute path, NEVER via a PATH
@@ -183,8 +184,10 @@ fn locate_failure_message(
     let mut msg = String::from("provisioned the wheel but could not locate the installed fno.");
     // Which rung installed matters: `fno` is the PyPI default, anything else is a
     // local checkout or wheel from `config.dev.source` / FNO_BOOTSTRAP_WHEEL, and
-    // the two fail for entirely different reasons.
-    msg.push_str(&format!("\n  installed from: {source}"));
+    // the two fail for entirely different reasons. Redacting HERE rather than at
+    // the call site means no future caller can leak a credential-bearing source
+    // by forgetting to.
+    msg.push_str(&format!("\n  installed from: {}", redact_source(source)));
     match candidate {
         Some(p) => {
             msg.push_str(&format!("\n  looked for: {}", p.display()));
@@ -293,8 +296,10 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         Ok(s) => Err(BootErr::new(
             s.code().unwrap_or(1),
             format!(
-                "`uv tool install {source}` failed. Check your network / PyPI access \
-                 and retry, or run it manually."
+                "`uv tool install {}` failed. Check your network / PyPI access \
+                 and retry, or run it manually (re-supplying any credential your \
+                 FNO_BOOTSTRAP_WHEEL carries).",
+                redact_source(source)
             ),
         )),
         Err(e) => Err(BootErr::new(
@@ -701,6 +706,53 @@ fn failure_stamp_path() -> PathBuf {
     sentinel_dir().join("provision-failed")
 }
 
+/// The cache identity of an install source: a digest, never the source itself.
+/// `FNO_BOOTSTRAP_WHEEL` may be an authenticated URL, and the stamp is a file in
+/// a shared cache dir, so the raw source must never be persisted. Canonicalizing
+/// first means the same wheel named relatively from two working directories keys
+/// the same, and two different wheels that share a relative name do not.
+fn source_key(source: &str) -> String {
+    blake3::hash(canonical_source(source).as_bytes())
+        .to_hex()
+        .to_string()
+}
+
+/// Canonicalize a path-shaped source. Only a source containing a separator is a
+/// path candidate: canonicalizing a bare spec like `fno` would resolve against
+/// the cwd whenever a directory of that name happened to sit there (this repo has
+/// one at `crates/fno`), making the by-name rung's key depend on where it ran.
+/// A URL and a non-existent path both fail canonicalization and pass through.
+fn canonical_source(source: &str) -> String {
+    if source.contains('/') {
+        if let Ok(p) = fs::canonicalize(source) {
+            return p.to_string_lossy().into_owned();
+        }
+    }
+    source.to_string()
+}
+
+/// A display-safe rendering of an install source. This string is printed and
+/// persisted, and uv accepts a credential in exactly two places within a URL:
+/// the userinfo and the query. Both are replaced rather than dropped, so the
+/// reader still sees that a credential was in play. A package spec or a
+/// filesystem path passes through unchanged: those are what an operator needs in
+/// order to recognise which rung ran, and neither is a secret channel.
+fn redact_source(source: &str) -> String {
+    let Some((scheme, rest)) = source.split_once("://") else {
+        return source.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    let host = match authority.rsplit_once('@') {
+        Some((_userinfo, h)) => format!("<redacted>@{h}"),
+        None => authority.to_string(),
+    };
+    let path_end = tail.find(['?', '#']).unwrap_or(tail.len());
+    let (path, query) = tail.split_at(path_end);
+    let suffix = if query.is_empty() { "" } else { "?<redacted>" };
+    format!("{scheme}://{host}{path}{suffix}")
+}
+
 fn now_secs() -> Option<u64> {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -712,7 +764,7 @@ fn now_secs() -> Option<u64> {
 /// the source we are about to install from, return the message to fail with.
 fn read_failure_stamp(source: &str) -> Option<String> {
     let raw = fs::read_to_string(failure_stamp_path()).ok()?;
-    let (original, age) = decide_cached_failure(&raw, now_secs()?, source)?;
+    let (original, age) = decide_cached_failure(&raw, now_secs()?, &source_key(source))?;
     Some(cached_failure_message(
         &original,
         age,
@@ -733,12 +785,13 @@ fn read_failure_stamp(source: &str) -> Option<String> {
 /// An absent, malformed, expired, future-dated, or other-source stamp is `None`
 /// so we re-provision normally - a negative cache must never be able to wedge the
 /// bootstrap shut, which is why every unreadable shape fails OPEN, not closed.
-fn decide_cached_failure(raw: &str, now: u64, source: &str) -> Option<(String, u64)> {
+fn decide_cached_failure(raw: &str, now: u64, source_key: &str) -> Option<(String, u64)> {
     let (header, msg) = raw.split_once('\n')?;
-    // Header is `<unix-secs>\t<source>`; a tab cannot appear in the timestamp, and
-    // a source containing one simply fails to parse, i.e. re-provisions.
-    let (stamped, stamped_source) = header.split_once('\t')?;
-    if stamped_source != source {
+    // Header is `<unix-secs>\t<source-key>`, where the key is a digest so a
+    // credential-bearing source is never written here. Neither field can contain
+    // a tab, so a malformed header simply fails to parse, i.e. re-provisions.
+    let (stamped, stamped_key) = header.split_once('\t')?;
+    if stamped_key != source_key {
         return None;
     }
     let stamped: u64 = stamped.trim().parse().ok()?;
@@ -764,16 +817,20 @@ fn cached_failure_message(original: &str, age_secs: u64, stamp: &Path) -> String
     )
 }
 
-/// Best-effort: remember that this provision failed, keyed to the source it
-/// failed for. A write failure is non-fatal - the next run just re-provisions,
-/// which is today's behaviour.
+/// Best-effort: remember that this provision failed, keyed to a digest of the
+/// source it failed for. A write failure is non-fatal - the next run just
+/// re-provisions, which is today's behaviour.
 fn write_failure_stamp(source: &str, msg: &str) {
     let Some(now) = now_secs() else { return };
     let path = failure_stamp_path();
     if let Some(parent) = path.parent() {
         let _ = fs::create_dir_all(parent);
     }
-    let _ = fs::write(&path, format!("{now}\t{source}\n{msg}"));
+    if fs::write(&path, format!("{}\t{}\n{msg}", now, source_key(source))).is_ok() {
+        // Owner-only: the body is already redacted, but this file records local
+        // paths in a cache dir that is not guaranteed to be private.
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
 }
 
 /// Drop the negative cache.
@@ -1033,6 +1090,107 @@ mod tests {
     }
 
     #[test]
+    fn locate_failure_never_prints_a_credential() {
+        // FNO_BOOTSTRAP_WHEEL can be an authenticated URL, and this message is
+        // both printed and persisted. Redaction lives INSIDE the builder so no
+        // caller can leak by forgetting; assert through the builder, not the
+        // helper, so that stays true.
+        let p = PathBuf::from("/tools/fno/bin/fno-py");
+        let m = locate_failure_message(
+            Some(&p),
+            false,
+            "https://ci:s3cr3t@pkgs.example.com/fno.whl?token=deadbeef",
+            None,
+        );
+        assert!(!m.contains("s3cr3t"), "{m}");
+        assert!(!m.contains("deadbeef"), "{m}");
+        assert!(m.contains("pkgs.example.com"), "{m}");
+    }
+
+    #[test]
+    fn redact_source_strips_userinfo_and_query_only() {
+        // Both credential channels uv accepts inside a URL, replaced (not
+        // dropped) so the reader can see a credential was in play.
+        assert_eq!(
+            redact_source("https://ci:tok@host/fno.whl"),
+            "https://<redacted>@host/fno.whl"
+        );
+        assert_eq!(
+            redact_source("https://host/fno.whl?token=abc"),
+            "https://host/fno.whl?<redacted>"
+        );
+        assert_eq!(
+            redact_source("https://ci:tok@host/a.whl?t=x"),
+            "https://<redacted>@host/a.whl?<redacted>"
+        );
+        // A clean URL keeps every part an operator needs to recognise it.
+        assert_eq!(
+            redact_source("https://host/fno.whl"),
+            "https://host/fno.whl"
+        );
+        // The two non-URL rungs are not secret channels and must pass through,
+        // or the message stops identifying which rung ran.
+        assert_eq!(redact_source("fno"), "fno");
+        assert_eq!(redact_source("fno==0.1.0"), "fno==0.1.0");
+        assert_eq!(
+            redact_source("/home/me/footnote/cli"),
+            "/home/me/footnote/cli"
+        );
+    }
+
+    #[test]
+    fn source_key_is_a_digest_not_the_source() {
+        // The stamp lives in a shared cache dir, so the raw source must never
+        // reach it. A digest also means the key cannot be reversed into a token.
+        let secret = "https://ci:s3cr3t@host/fno.whl";
+        let k = source_key(secret);
+        assert!(!k.contains("s3cr3t"), "{k}");
+        assert!(!k.contains("host"), "{k}");
+        assert_eq!(k.len(), 64, "expected a blake3 hex digest, got {k}");
+        // Still a stable identity: same source in, same key out.
+        assert_eq!(source_key(secret), k);
+        assert_ne!(source_key("fno"), k);
+    }
+
+    #[test]
+    fn source_key_resolves_relative_paths_before_keying() {
+        // A relative FNO_BOOTSTRAP_WHEEL names different artifacts from different
+        // working directories. Keying on the literal string would let a broken
+        // install under checkout A suppress a valid first install under checkout
+        // B for the whole cooldown.
+        let root = valid_checkout();
+        let a = root.join("cli");
+        let b = root.join("cli/.");
+        // Two spellings of ONE path agree.
+        assert_eq!(
+            source_key(a.to_str().unwrap()),
+            source_key(b.to_str().unwrap())
+        );
+        // Two different paths do not.
+        let other = valid_checkout();
+        assert_ne!(
+            source_key(a.to_str().unwrap()),
+            source_key(other.join("cli").to_str().unwrap())
+        );
+    }
+
+    #[test]
+    fn source_key_does_not_canonicalize_a_bare_spec() {
+        // `fno` is a PyPI name, not a path. Canonicalizing it would resolve
+        // against the cwd whenever a file or dir of that name sits there (this
+        // repo has `crates/fno`), making the by-name rung's key cwd-dependent.
+        assert_eq!(canonical_source("fno"), "fno");
+        assert_eq!(canonical_source("fno==0.1.0"), "fno==0.1.0");
+        // A URL contains separators but is not a path: it must pass through.
+        assert_eq!(
+            canonical_source("https://host/fno.whl"),
+            "https://host/fno.whl"
+        );
+        // A path-shaped source that does not exist also passes through.
+        assert_eq!(canonical_source("/no/such/wheel.whl"), "/no/such/wheel.whl");
+    }
+
+    #[test]
     fn locate_failure_distinguishes_present_from_absent() {
         // Present-but-unusable and absent are different bugs with different
         // fixes, so they must not collapse into one message.
@@ -1106,15 +1264,18 @@ mod tests {
         // suppress a local-checkout install, and repointing config.dev.source (or
         // setting FNO_BOOTSTRAP_WHEEL) must take effect on the very next call
         // rather than waiting out a cooldown earned by a different source.
-        let pypi = "1000\tfno\nboom";
-        assert!(decide_cached_failure(pypi, 1030, "fno").is_some());
-        assert!(decide_cached_failure(pypi, 1030, "/home/me/footnote/cli").is_none());
+        // Composed through source_key, which is what run() actually passes.
+        let pypi = format!("1000\t{}\nboom", source_key("fno"));
+        assert!(decide_cached_failure(&pypi, 1030, &source_key("fno")).is_some());
+        assert!(decide_cached_failure(&pypi, 1030, &source_key("/home/me/footnote/cli")).is_none());
 
-        let local = "1000\t/home/me/footnote/cli\nboom";
-        assert!(decide_cached_failure(local, 1030, "/home/me/footnote/cli").is_some());
-        assert!(decide_cached_failure(local, 1030, "fno").is_none());
+        let local = format!("1000\t{}\nboom", source_key("/home/me/footnote/cli"));
+        assert!(
+            decide_cached_failure(&local, 1030, &source_key("/home/me/footnote/cli")).is_some()
+        );
+        assert!(decide_cached_failure(&local, 1030, &source_key("fno")).is_none());
         // A different checkout is a different source too.
-        assert!(decide_cached_failure(local, 1030, "/home/me/other/cli").is_none());
+        assert!(decide_cached_failure(&local, 1030, &source_key("/home/me/other/cli")).is_none());
     }
 
     #[test]
@@ -1146,14 +1307,18 @@ mod tests {
     fn failure_stamp_round_trips_through_its_own_writer_format() {
         // Guards the writer/reader pair against drifting apart: the exact bytes
         // write_failure_stamp emits must be what decide_cached_failure accepts.
+        let source = "https://ci:s3cr3t@pkgs.example.com/fno.whl?token=deadbeef";
         let msg = locate_failure_message(
             Some(Path::new("/tools/fno/bin/fno-py")),
             false,
-            "/home/me/footnote/cli",
+            source,
             None,
         );
-        let raw = format!("{}\t{}\n{}", 1000, "/home/me/footnote/cli", msg);
-        let (back, age) = decide_cached_failure(&raw, 1005, "/home/me/footnote/cli").unwrap();
+        let raw = format!("{}\t{}\n{}", 1000, source_key(source), msg);
+        // No part of the persisted stamp may carry the credential.
+        assert!(!raw.contains("s3cr3t"), "{raw}");
+        assert!(!raw.contains("deadbeef"), "{raw}");
+        let (back, age) = decide_cached_failure(&raw, 1005, &source_key(source)).unwrap();
         assert_eq!(back, msg);
         assert_eq!(age, 5);
     }

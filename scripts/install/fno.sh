@@ -122,6 +122,22 @@ ensure_uv() {
 }
 
 # --- install source resolution ---------------------------------------------
+# Display-safe rendering of an install source. FNO_INSTALL_WHEEL may be an
+# authenticated URL, and uv accepts a credential in exactly two places within
+# one: the userinfo and the query. Replace both (rather than dropping them) so a
+# reader still sees a credential was in play. A package spec or a filesystem path
+# is not a secret channel and passes through, since that is what identifies which
+# rung ran. Mirrors redact_source in crates/fno/src/bootstrap.rs.
+redact_source() {
+	case "$1" in
+		*://*)
+			printf '%s\n' "$1" | sed -e 's#^\([a-zA-Z][a-zA-Z0-9+.-]*://\)[^/?#]*@#\1<redacted>@#' \
+				-e 's#[?#].*$#?<redacted>#'
+			;;
+		*) printf '%s\n' "$1" ;;
+	esac
+}
+
 # Choose the `uv tool install` source. FNO_INSTALL_WHEEL (a local wheel / any uv
 # spec) wins so the channel is testable before the PyPI publish; otherwise the
 # by-name PyPI package `fno`, optionally pinned by FNO_VERSION. Sets FNO_SOURCE.
@@ -305,7 +321,7 @@ main() {
 	# verified install was found, so --force never clobbers a healthy one.
 	say "provisioning the fno CLI via uv (one time, may take a few seconds)..."
 	if ! "$FNO_UV" tool install --force "$FNO_SOURCE"; then
-		die "\`uv tool install $FNO_SOURCE\` failed (network/PyPI unreachable, disk full, or a bad version). Check the error above and retry, or run it manually."
+		die "\`uv tool install $(redact_source "$FNO_SOURCE")\` failed (network/PyPI unreachable, disk full, or a bad version). Check the error above and retry, or run it manually (re-supplying any credential your FNO_INSTALL_WHEEL carries)."
 	fi
 
 	# Name the source we installed from, the path we built, and why we rejected
@@ -315,7 +331,7 @@ main() {
 	# - both are reachable, so a fix in only one is decorative.
 	if ! resolve_real; then
 		die "provisioned the wheel but could not locate the installed fno.
-  installed from: $FNO_SOURCE
+  installed from: $(redact_source "$FNO_SOURCE")
   looked for: (no path built - \`uv tool dir\` failed or printed nothing)
 Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
@@ -326,7 +342,7 @@ Install it manually to see uv's own error: \`uv tool install --force fno\`"
 			_why="nothing exists at that path"
 		fi
 		die "provisioned the wheel but could not locate the installed fno.
-  installed from: $FNO_SOURCE
+  installed from: $(redact_source "$FNO_SOURCE")
   looked for: $FNO_REAL
   rejected because: $_why
 Install it manually to see uv's own error: \`uv tool install --force fno\`"
