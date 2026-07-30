@@ -7548,7 +7548,11 @@ def cmd_reconcile(
                 + ", ".join(healed_epics)
             )
     else:
-        if closed:
+        # Suppressed ONLY on a heal-only sweep (no drift candidates at all),
+        # where a bare "Closed 0 node(s):" sits above a line saying nodes were
+        # closed. With candidates present, "Closed 0" is real signal - it says
+        # every one of them was already closed between the scan and the lock.
+        if closed or closeable:
             typer.echo(f"Closed {len(closed)} node(s):")
         for c in closed:
             stamp_note = " (plan stamped)" if c["plan_stamped"] else ""
