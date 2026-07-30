@@ -18,8 +18,17 @@ from pydantic import (
 )
 
 
+# ANTHROPIC_AUTH_TOKEN is the credential Claude Code reads for a non-Anthropic
+# Anthropic-compatible endpoint (z.ai, DeepSeek), so an auth=api_key record may
+# name one of those vendors. It is a credential on fno's own terms: it lives in
+# SCRUB_AUTH_VARS, where an inherited one would override a pinned account.
 _RECOGNIZED_API_KEY_NAMES = frozenset(
-    {"ANTHROPIC_API_KEY", "GEMINI_API_KEY", "OPENAI_API_KEY"}
+    {
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_AUTH_TOKEN",
+        "GEMINI_API_KEY",
+        "OPENAI_API_KEY",
+    }
 )
 
 # The harness axis: the CLI binary an account's credential belongs to. Distinct

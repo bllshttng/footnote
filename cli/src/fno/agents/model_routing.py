@@ -261,6 +261,86 @@ def check_spawn_tier_remap(
     raise TierRemapConflict(remap_conflict_message(*found))
 
 
+# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB. Set by an operator (or a hardened shell) to
+# strip inherited ANTHROPIC_* env from a subprocess. Read at BOTH the CLI spawn
+# seam and the in-process spawn APIs so every reachable path sees the warning.
+ENV_SCRUB_VAR = "CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"
+
+
+def env_scrub_truthy(env: Optional[Mapping[str, str]] = None) -> bool:
+    """Whether CLAUDE_CODE_SUBPROCESS_ENV_SCRUB is set to a truthy value.
+
+    Claude Code honors ``=0`` as the opt-out, so empty / ``0`` / ``false`` and
+    the common off-words are falsy."""
+    if env is None:
+        env = os.environ
+    return (env.get(ENV_SCRUB_VAR) or "").strip().lower() not in (
+        "",
+        "0",
+        "false",
+        "no",
+        "off",
+    )
+
+
+def env_scrub_warning(
+    provider: Optional[str],
+    *,
+    permission_pinned: bool,
+    env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """The one stderr warning when a claude spawn pins a permission mode under
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
+
+    The var half-scrubs a vendor env (drops ANTHROPIC_AUTH_TOKEN, leaves
+    ANTHROPIC_BASE_URL and the tier models) and silently forces an explicit
+    permission mode to default, so an unattended worker stalls on approvals no
+    one is present to give. This names both consequences and points at ``=0``.
+
+    A warning, never a refusal: the var is the operator's security posture and a
+    legitimate hardened setup must still spawn. Narrow, since the downgrade only
+    contradicts a stated intent: a non-claude provider and a spawn naming no
+    permission mode are left alone.
+
+    Takes the RESOLVED provider so the in-process spawn APIs (which know the
+    harness they were handed) judge the spawn on what it actually is; the CLI
+    seam resolves it via its argv adapter, since a bare spawn defaults to the
+    invoking harness rather than claude.
+    """
+    if (provider or "").strip().lower() != "claude":
+        return None
+    if not env_scrub_truthy(env):
+        return None
+    if not permission_pinned:
+        return None
+    return (
+        f"fno agents spawn: {ENV_SCRUB_VAR} is set; it strips "
+        "ANTHROPIC_AUTH_TOKEN but leaves ANTHROPIC_BASE_URL and the tier model "
+        "vars (a half-composition), and silently forces --permission-mode to "
+        "default over the one pinned here, so this worker may stall on "
+        f"approvals. Set {ENV_SCRUB_VAR}=0 to keep the pinned mode."
+    )
+
+
+def emit_env_scrub_warning(
+    provider: Optional[str],
+    *,
+    permission_pinned: bool,
+    env: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Surface the env-scrub warning from an in-process spawn path.
+
+    Pairs with :func:`check_spawn_tier_remap` at the same call sites so the
+    reachability is identical: the invariant that lives at the CLI seam also
+    holds for in-process callers that bypass argument parsing. A warning, never
+    a refusal."""
+    msg = env_scrub_warning(provider, permission_pinned=permission_pinned, env=env)
+    if msg is not None:
+        import sys
+
+        print(msg, file=sys.stderr)
+
+
 def _emit(notice: Optional[Callable[[str], object]], message: str) -> None:
     """Surface a one-line fail-safe notice; quiet when no sink is supplied."""
     if notice is not None:

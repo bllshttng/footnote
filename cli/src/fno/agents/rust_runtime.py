@@ -665,6 +665,48 @@ def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     raise SystemExit(2)
 
 
+def env_scrub_spawn_warning(
+    args: Sequence[str], env: Optional[Mapping[str, str]] = None
+) -> Optional[str]:
+    """Argv adapter over :func:`model_routing.env_scrub_warning` for the CLI
+    spawn seam, returning the warning when the spawn pins a permission mode
+    under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, else None.
+
+    Resolves the harness the way ``spawn`` does: an explicit ``-H`` wins, else
+    the invoking harness (``CODEX_THREAD_ID`` -> codex, ...), else claude. The
+    seam runs BEFORE Typer resolves the option default, so resolving it here
+    avoids a false positive on a non-claude invoking session. Reuses
+    ``spawn_defaults._has_permission_mode`` (the one knob the spawn parser
+    treats as mutually exclusive, including ``--yolo``) rather than a parallel
+    flag scan.
+    """
+    explicit = _spawn_flag_value(args, "--harness", "-H")
+    if explicit:
+        provider = explicit
+    else:
+        from fno.harness_identity import resolve_harness_identity
+
+        provider = resolve_harness_identity(env).harness or "claude"
+    from fno.agents.model_routing import env_scrub_warning
+    from fno.agents.spawn_defaults import _has_permission_mode
+
+    return env_scrub_warning(
+        provider,
+        permission_pinned=_has_permission_mode(_args_before_argv(args)),
+        env=env,
+    )
+
+
+def _warn_env_scrub_spawn(args: Sequence[str]) -> None:
+    """Surface the env-scrub warning at the spawn seam, never a refusal.
+
+    Pairs with _refuse_inherited_tier_remap at the same seam (both runtimes see
+    this one edit) and runs AFTER it, so a refused spawn stays quiet."""
+    msg = env_scrub_spawn_warning(args)
+    if msg is not None:
+        print(msg, file=sys.stderr)
+
+
 def _is_provenance_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--node``/``--slug``/``--plan`` (x-84a8).
 
@@ -908,6 +950,11 @@ def make_agents_group_cls() -> type:
                     args = _pick_account_at_seam(args)
                     _scrub_account_auth_at_seam(args)
                     _refuse_inherited_tier_remap(args)
+                    # The env-scrub warning is NOT emitted here: a Python-route
+                    # spawn falls through to dispatch_spawn / dispatch_spawn_pane,
+                    # which emit it, so warning at the seam too would print it
+                    # twice. The Rust-exec branches below emit it before they
+                    # exec, since the binary never reaches dispatch.
                 mode = runtime_mode()
                 # A role-bearing spawn (x-d2fe) is Python-only: the Rust client
                 # cannot parse --role, so never route it to the binary in any
@@ -929,6 +976,7 @@ def make_agents_group_cls() -> type:
                     or _is_output_format_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
+                    _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                     route_to_rust(list(args))  # execs; does not return
                 elif mode == "auto" and verb in AUTO_ROUTE_VERBS and not py_spawn:
                     # Since ab-73da4ac2 this includes ``ask`` for every provider
@@ -938,6 +986,7 @@ def make_agents_group_cls() -> type:
                     # branch anymore.
                     binary = resolve_installed_binary()
                     if binary is not None:
+                        _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         route_to_rust(list(args), binary=binary)  # execs
                     # else: no installed binary -> Python dispatch below.
                 # mode == "python", or no installed binary -> Python dispatch below.
