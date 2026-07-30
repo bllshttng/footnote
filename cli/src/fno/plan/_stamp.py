@@ -259,6 +259,12 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
         # Indented comments are also safe to ignore; they can't be a nested value
         # because comments never hold data.
         if stripped.startswith("#"):
+            # Clear the attribution rather than carry it past a comment. A
+            # commented-out key followed by an indented line (`# depends_on:`
+            # then `  - x`) would otherwise blame the last REAL key above it,
+            # and a confidently wrong key name is worse than none: the message
+            # degrades to the unnamed form on its own.
+            last_key = None
             continue
         # An indented line at this level is leftover from an unclosed parent;
         # the inner block-list reader below consumes its own children, so
