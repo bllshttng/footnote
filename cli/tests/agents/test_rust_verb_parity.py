@@ -265,9 +265,7 @@ def test_resume_gemini_print_command_parity(tmp_path) -> None:
 
 @requires_rust
 def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
-    """x-1b1e AC1-UI / AC2-HP: `resume` reaches the same row by name, by the
-    derived 8-hex prefix of its session id, and by the full session id - the
-    Rust binary and the Python resume_logic agree on all three forms."""
+    """Rust and Python agree on every current and compatibility address form."""
     from fno.agents import resume_cli
 
     full = "a1b2c3d4-1111-2222-3333-444455556666"
@@ -292,7 +290,7 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
 
     by_name = _run_rust(["resume", "cx", "--print-command"], agents)
     assert by_name.returncode == 0, by_name.stderr
-    for token in ("a1b2c3d4", full, "cxworker"):
+    for token in ("55556666", "a1b2c3d4", full, "cxworker"):
         rust = _run_rust(["resume", token, "--print-command"], agents)
         assert rust.stdout == by_name.stdout, f"token {token} diverged"
         assert rust.returncode == 0
@@ -358,7 +356,7 @@ def test_attach_missing_agent_exit2(tmp_path) -> None:
     rust = _run_rust(["attach", "ghost"], agents)
     assert rust.stderr == (
         "no agent matching 'ghost'; "
-        "accepted forms: name, 8-hex short id, or full session id\n"
+        "accepted forms: name, canonical handle, transport short id, or full session id\n"
     )
     assert rust.returncode == 2
 
@@ -459,7 +457,7 @@ def test_logs_agent_not_found_parity(tmp_path) -> None:
     rust = _run_rust(["logs", "ghost"], agents)
     assert rust.stderr == (
         "no agent matching 'ghost'; "
-        "accepted forms: name, 8-hex short id, or full session id\n"
+        "accepted forms: name, canonical handle, transport short id, or full session id\n"
     )
     assert rust.returncode == 13
 

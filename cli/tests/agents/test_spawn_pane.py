@@ -453,7 +453,7 @@ def test_codex_spawn_with_capture_returns_bound_identity(
     assert row.status == "live"
     assert result.status == "live"
     assert result.session_uuid == session_id
-    assert result.short_id == session_id[:8]
+    assert result.short_id == session_id[-8:]
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
@@ -495,16 +495,15 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     # The row keeps short_id empty: it is the worker/bg transport slot, and a mux
     # row holds exactly one live ref (validate_single_live_ref).
     assert row.short_id == ""
-    # US8: the receipt-facing result carries claude's 8-hex jobId so the king can
-    # mail the pane straight from the spawn receipt...
-    assert result.short_id == result.session_uuid[:8]
-    # ...and that handle resolves back to this exact row via the derived_short
-    # rule (harness_session_id[:8]), proving the receipt handle is addressable.
+    # The pane receipt carries the generated mailbox handle, not a provider
+    # transport job id, so the caller can mail the pane from the receipt.
+    assert result.short_id == result.session_uuid[-8:]
+    # That canonical handle resolves back to this exact row.
     from fno.agents.registry import resolve_agent_in
 
     resolved = resolve_agent_in(rows, result.short_id)
     assert resolved.entry.name == "peer"
-    assert resolved.matched_by == "derived_short"
+    assert resolved.matched_by == "canonical_handle"
 
 
 def test_ac1_hp_session_resolution_env_beats_default(
@@ -1062,7 +1061,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
             pane_id=9,
             child_pid=4242,
             session_uuid=session_id,
-            short_id=session_id[:8],
+            short_id=session_id[-8:],
             status="live",
         ),
     )
@@ -1078,7 +1077,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt["status"] == "live"
     assert receipt["session_id"] == session_id
-    assert receipt["short_id"] == session_id[:8]
+    assert receipt["short_id"] == session_id[-8:]
 
 
 def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(

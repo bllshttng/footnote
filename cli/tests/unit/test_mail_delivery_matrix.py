@@ -42,6 +42,9 @@ from fno.paths_testing import use_tmpdir
 
 LIVE_SID = "9a063cd3-69d4-415a-ada5-649b0164189c"
 ASLEEP_SID = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
+LIVE_HANDLE = LIVE_SID[-8:]
+LIVE_LEGACY_PREFIX = LIVE_SID[:8]
+ASLEEP_HANDLE = ASLEEP_SID[-8:]
 
 
 @pytest.fixture
@@ -134,7 +137,7 @@ def test_cell1_discovery_miss_still_injects_over_the_socket(
 
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", _inject)
 
-    res = runner.invoke(app, ["mail", "send", LIVE_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", LIVE_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert "delivered (hosted)" in res.output
@@ -152,7 +155,7 @@ def test_cell1_inject_body_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
         lambda _r, text: (bodies.append(text), True)[1],
     )
 
-    runner.invoke(app, ["mail", "send", LIVE_SID[:8], "hi", "--from-name", "web"])
+    runner.invoke(app, ["mail", "send", LIVE_HANDLE, "hi", "--from-name", "web"])
 
     assert bodies, "nothing was injected"
     assert "<fno_mail" in bodies[0]
@@ -182,7 +185,7 @@ def test_cell1_inject_is_attempted_before_any_durable_write(
         _recording_durable(order),
     )
 
-    runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert "inject" in order, "the socket rung was skipped entirely"
     assert order.index("inject") < order.index("durable"), (
@@ -220,7 +223,7 @@ def test_cell2_asleep_session_is_woken_not_queued(
 
     monkeypatch.setattr("fno.agents.dispatch.wake_and_deliver", _wake)
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "wake up", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "wake up", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert "delivered (woken)" in res.output
@@ -241,7 +244,7 @@ def test_cell2_wake_prompt_is_envelope_wrapped(runner, mailbox, monkeypatch, tmp
         lambda _sid, wrapped, **_kw: (seeds.append(wrapped), (True, "bg-7f3a"))[1],
     )
 
-    runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "wake up", "--from-name", "web"])
+    runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "wake up", "--from-name", "web"])
 
     assert seeds, "nothing was sent as a wake prompt"
     assert "<fno_mail" in seeds[0]
@@ -254,7 +257,7 @@ def test_cell2_receipt_names_the_revived_thread(runner, mailbox, monkeypatch, tm
         "fno.agents.dispatch.wake_and_deliver", lambda *_a, **_k: (True, "bg-7f3a")
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert "bg-7f3a" in res.output, "the receipt does not name the revived thread"
 
@@ -275,7 +278,7 @@ def test_cell4_failed_wake_demotes_durably_with_lane_receipt(
         lambda *_a, **_k: (False, "spawn-exit-1"),
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     # Exit 0: the envelope is safe even though every live lane missed.
     assert res.exit_code == 0, res.output
@@ -295,7 +298,7 @@ def test_cell4_receipt_names_every_failed_lane(runner, mailbox, monkeypatch, tmp
         lambda *_a, **_k: (False, "writer-possibly-live"),
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
     combined = res.output + (res.stderr or "")
 
     assert "inject=" in combined, "the inject lane failure is unnamed"
@@ -380,12 +383,12 @@ def test_cell6a_caller_typed_retired_handle_is_refused(
     monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda *_a: False)
 
     res = runner.invoke(
-        app, ["mail", "send", f"claude-{LIVE_SID[:8]}", "hi", "--from-name", "web"]
+        app, ["mail", "send", f"claude-{LIVE_LEGACY_PREFIX}", "hi", "--from-name", "web"]
     )
 
     assert res.exit_code != 0
     combined = res.output + (res.stderr or "")
-    assert LIVE_SID[:8] in combined, "the suggestion does not lead with the bare id"
+    assert LIVE_LEGACY_PREFIX in combined, "the suggestion does not lead with the bare id"
     assert "queued (durable)" not in res.output
 
 
@@ -404,7 +407,7 @@ def test_cell6a_retired_handle_triggers_no_wake_or_inject(
     )
 
     runner.invoke(
-        app, ["mail", "send", f"claude-{LIVE_SID[:8]}", "hi", "--from-name", "web"]
+        app, ["mail", "send", f"claude-{LIVE_LEGACY_PREFIX}", "hi", "--from-name", "web"]
     )
 
     assert not touched, f"a refused retired handle still hit lanes: {touched}"
@@ -419,13 +422,13 @@ def test_cell6b_retired_form_read_off_a_stored_record_is_migrated(
     The reply path first shipped this as a refusal -- the same wall class as this
     node's root cause -- and was reversed on PR #491.
     """
-    from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
+    from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
 
-    stored = f"claude-{LIVE_SID[:8]}"
+    stored = f"claude-{LIVE_LEGACY_PREFIX}"
     assert LEGACY_HANDLE_RE.fullmatch(stored), "fixture is not the retired form"
 
-    # The migration target is the bare id -- what every live path addresses today.
-    assert canonical_handle(LIVE_SID) == LIVE_SID[:8]
+    # Stored prefixed records migrate only to the explicit legacy lookup tier.
+    assert legacy_prefix_handle(LIVE_SID) == LIVE_LEGACY_PREFIX
 
 
 # ---------------------------------------------------------------------------
@@ -449,7 +452,7 @@ def test_self_send_queues_durably_without_touching_a_live_lane(
     )
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", LIVE_SID)
 
-    res = runner.invoke(app, ["mail", "send", LIVE_SID[:8], "note to self", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", LIVE_HANDLE, "note to self", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert "queued (durable)" in res.output
@@ -514,7 +517,7 @@ def test_cell1_codex_is_probed_too_when_nothing_resolved(
         lambda *_a: (tried.append("codex"), True)[1],
     )
 
-    res = runner.invoke(app, ["mail", "send", LIVE_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", LIVE_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert tried == ["claude", "codex"], f"probe order/coverage wrong: {tried}"
@@ -548,7 +551,7 @@ def test_a_resolved_codex_session_is_probed_on_its_own_harness(
         lambda *_a: (tried.append("codex"), True)[1],
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert tried == ["codex"], f"a resolved codex session was probed as claude: {tried}"
@@ -574,7 +577,7 @@ def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
         lambda *_a, **_k: (_ for _ in ()).throw(discover.StoreReadError(["transcript"])),
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert "queued (durable)" in res.output
@@ -610,7 +613,7 @@ def test_a_non_claude_session_is_not_woken_as_claude(
         lambda *_a, **_k: (woke.append(1), (True, "x"))[1],
     )
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     assert not woke, "a codex session was handed to a claude resume"
@@ -692,7 +695,7 @@ def test_exactly_one_receipt_line_per_send(
     if wake is not None:
         monkeypatch.setattr("fno.agents.dispatch.wake_and_deliver", lambda *_a, **_k: wake)
 
-    res = runner.invoke(app, ["mail", "send", ASLEEP_SID[:8], "hi", "--from-name", "web"])
+    res = runner.invoke(app, ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"])
 
     assert res.exit_code == 0, res.output
     receipts = [
