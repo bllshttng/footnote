@@ -1008,6 +1008,14 @@ try:
 except Exception:
     sys.exit(0)
 entries = data.get("entries", []) if isinstance(data, dict) else data
+# Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
+# picked whichever came first in entry order, and adopted children precede the
+# group child that was minted for them - so `--plan-path <shared plan>` resolved
+# to a CONTAINED node, the post-claim containment check refused, and the plan
+# became undispatchable by path even for the node that owns its PR.
+# Same rule as `_resolve_dispatch_node` in target_cli.py, deliberately: two
+# resolvers for one question that disagree is worse than either answer.
+matches = []
 for entry in entries:
     plan_path = entry.get("plan_path")
     if not plan_path:
@@ -1015,10 +1023,15 @@ for entry in entries:
     abs_plan = plan_path if os.path.isabs(plan_path) else os.path.join(repo_root, plan_path)
     try:
         if os.path.realpath(abs_plan) == target:
-            print(entry.get("id", ""))
-            break
+            matches.append(entry)
     except OSError:
         pass
+if len(matches) > 1:
+    units = [e for e in matches if not e.get("contained_in")]
+    if len(units) == 1:
+        matches = units
+if len(matches) == 1:
+    print(matches[0].get("id", ""))
 PYEOF
 )
   fi
