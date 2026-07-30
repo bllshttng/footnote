@@ -81,8 +81,10 @@ class MuxSpawnResult:
     pane_id: int
     child_pid: Optional[int]
     session_uuid: Optional[str]
-    # Claude's 8-hex jobId (``session_uuid[:8]``), the addressable mail handle;
-    # "" for providers whose transport key is not short_id (US8).
+    # The addressable mail handle, derived from ``session_uuid`` by
+    # ``harness_identity.canonical_handle`` (the single source for that string -
+    # do not restate which slice it takes); "" for providers whose transport key
+    # is not short_id (US8).
     short_id: str = ""
     # A Codex pane whose rollout has not appeared yet is created but not
     # addressable. Keep that transition explicit instead of calling it live.
