@@ -60,25 +60,13 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     elif [[ "$_RG_RC" -ne 0 ]]; then
       echo "[init-target-state] note: review capability gate unavailable (rc=$_RG_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-review-gate\`." >&2
     fi
-  else
-    echo "[init-target-state] note: fno absent - config.review capability gate not checked" >&2
-  fi
-fi
-
-# ── Containment gate on the unwrapped path (x-e957) ──────────────────
-# Same seam, same reason, same rc idiom as the review gate above. A node
-# carrying `contained_in` ships inside another node's PR; this script acquires
-# the claim and writes the manifest, so bootstrapping one here opens the second
-# PR for one plan that the delivery-unit invariant exists to prevent. `fno
-# target init` performs the redirect in-process and marks it with
-# FNO_TARGET_INIT_GATED, so this covers only the direct path SKILL.md documents.
-#
-# Separate verb rather than folded into check-review-gate: the two gates refuse
-# for unrelated reasons and each needs its own rc, so a broken one must not
-# suppress the other. The node is read from TARGET_INPUT/TARGET_PLAN_PATH by
-# the verb itself - the shell passes nothing and so cannot pass the wrong node.
-if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
-  if command -v fno >/dev/null 2>&1; then
+    # Containment gate (x-e957), same seam and same rc idiom. A node carrying
+    # `contained_in` ships inside another node's PR, and this script acquires
+    # the claim and writes the manifest - so bootstrapping one here opens the
+    # second PR for one plan that the invariant exists to prevent. Its own verb
+    # and its own rc, so a broken gate cannot suppress the other one; the node
+    # is read from TARGET_INPUT/TARGET_PLAN_PATH by the verb, so the shell
+    # passes nothing and cannot pass the wrong node.
     fno target check-contained && _CT_RC=0 || _CT_RC=$?
     if [[ "$_CT_RC" -eq 9 ]]; then
       echo "[init-target-state] REFUSED: contained node (see above). Refusing to write state file or claim." >&2
@@ -87,7 +75,7 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
       echo "[init-target-state] note: containment gate unavailable (rc=$_CT_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
     fi
   else
-    echo "[init-target-state] note: fno absent - containment gate not checked" >&2
+    echo "[init-target-state] note: fno absent - config.review capability + containment gates not checked" >&2
   fi
 fi
 # Consume the marker like TARGET_START above: it means "the gate already ran for
