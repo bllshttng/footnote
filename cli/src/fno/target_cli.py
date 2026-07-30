@@ -821,7 +821,19 @@ def check_contained() -> None:
 
     try:
         _fd = _acquire_flock(_graph_lock_path(graph_json()))
-    except Exception:  # noqa: BLE001 - an unlockable graph must not block dispatch
+    except Exception as _lock_exc:  # noqa: BLE001 - never block dispatch
+        # Say so. The serialization above is what makes this check unraceable,
+        # so losing it silently while still exiting 0 lets every caller read the
+        # result as "checked, and it is fine" - the same swallow this gate has
+        # already been fixed for twice. Still fail-open: an unlockable graph
+        # must not block every bootstrap, and the pre-claim check plus
+        # decompose's own live-claim refusal both still stand.
+        typer.echo(
+            f"fno target check-contained: could not take the graph lock "
+            f"({_lock_exc}); the containment read is UNSERIALIZED, so a "
+            "decompose committing right now could be missed. Proceeding.",
+            err=True,
+        )
         _fd = None
     try:
         node = _resolve_dispatch_node(

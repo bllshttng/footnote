@@ -838,3 +838,51 @@ def test_deferring_a_unit_releases_its_contained_children(world, dispatches):
     assert kid.get("contained_in") is None, "child left pointing at a deferred unit"
     # Released, not closed: deferring the unit is not a claim its work shipped.
     assert kid.get("completed_at") is None
+
+
+def test_release_helper_covers_every_way_a_unit_dies(world, dispatches):
+    """One helper, because there are SIX writers of this transition.
+
+    Wiring three of them was the decorative-guard shape this whole change is
+    about: the maintain auto-defer legs reach the same state as `cmd_defer` and
+    must free the same children.
+    """
+    from fno.graph.cli import _release_contained_children
+
+    entries = _world(Path("/tmp"))
+    freed = _release_contained_children(entries, UNIT)
+    assert sorted(freed) == sorted([KID_A, KID_B])
+    assert all(e.get("contained_in") is None for e in entries)
+    # Released, never closed - a unit dying is not a claim its children shipped.
+    assert all(e.get("completed_at") is None for e in entries)
+    # Idempotent, and a falsy owner frees nothing rather than everything.
+    assert _release_contained_children(entries, UNIT) == []
+    assert _release_contained_children(_world(Path("/tmp")), None) == []
+    assert _release_contained_children(_world(Path("/tmp")), "") == []
+
+
+def test_every_deferred_at_writer_releases_contained_children():
+    """Pins the count so a SEVENTH writer cannot land without wiring the release.
+
+    An enumeration test rather than six behavioral ones: the defect is that a
+    writer exists which does not call the helper, and that is a property of the
+    file, not of any one code path.
+    """
+    import re
+    from pathlib import Path as _P
+
+    from fno.graph import cli as gcli
+
+    src = _P(gcli.__file__).read_text(encoding="utf-8")
+    lines = src.splitlines()
+    writers = [
+        i for i, ln in enumerate(lines)
+        if re.search(r'\["deferred_at"\]\s*=\s*datetime\.now', ln)
+    ]
+    assert writers, "no deferred_at writers found - the probe itself broke"
+    for i in writers:
+        window = "\n".join(lines[i:i + 12])
+        assert "_release_contained_children" in window, (
+            f"deferred_at written at line {i + 1} without releasing contained "
+            "children; a dead unit strands them (unbuildable and uncloseable)"
+        )

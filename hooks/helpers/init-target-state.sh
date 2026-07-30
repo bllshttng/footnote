@@ -1032,6 +1032,19 @@ if len(matches) > 1:
         matches = units
 if len(matches) == 1:
     print(matches[0].get("id", ""))
+elif len(matches) > 1:
+    # Ambiguous and un-narrowable: two or more UNCONTAINED holders (a shape the
+    # write-site refusal now prevents creating). Print nothing rather than pick
+    # one, matching _resolve_dispatch_node - but say so, because a plan-path
+    # bootstrap that resolves to no node otherwise proceeds unclaimed in total
+    # silence (the stderr note below keys on TARGET_INPUT, which a plan-only
+    # run does not set).
+    sys.stderr.write(
+        "[init-target-state] note: %d nodes share this plan_path and none is a "
+        "single delivery unit (%s); resolving to no node, so this session runs "
+        "UNCLAIMED. Name the node explicitly, or fix the duplicate binding.\n"
+        % (len(matches), ", ".join(str(m.get("id")) for m in matches[:4]))
+    )
 PYEOF
 )
   fi

@@ -5338,17 +5338,10 @@ def cmd_remove(
             # that source_node_id is null or resolves - never a dangling string.
             if e.get("source_node_id") == task_id:
                 e["source_node_id"] = None
-            # Same invariant for containment (x-e957), and here a dangling
-            # pointer is not merely untidy - it is a permanent trap. A child
-            # left naming a deleted delivery unit is refused by selection AND by
-            # `fno target init`, while the reconcile heal deliberately skips a
-            # missing owner (an owner that resolves to nothing is not evidence
-            # anything shipped). So the node is unbuildable, uncloseable, and
-            # invisible to every sweep until someone rebuilds the group by hand.
-            # Un-contain rather than close: deleting the unit is not a claim
-            # that its children shipped.
-            if e.get("contained_in") == task_id:
-                e.pop("contained_in", None)
+        # Same invariant for containment (x-e957), and here a dangling pointer
+        # is a permanent trap rather than mere untidiness: the reconcile heal
+        # deliberately skips a MISSING owner, so nothing would ever free them.
+        _release_contained_children(entries, task_id)
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -5428,9 +5421,7 @@ def cmd_defer(
         # shipped. Undefer does not re-contain them, deliberately: re-adoption is
         # decompose's job and inferring it here would re-hide work the operator
         # may have since re-scoped.
-        for _e in entries:
-            if isinstance(_e, dict) and _e.get("contained_in") == node.get("id"):
-                _e.pop("contained_in", None)
+        _release_contained_children(entries, node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -6188,6 +6179,36 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         closed.append(pid)
         cur = parent  # cascade up to the grandparent
     return closed
+
+
+def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
+
+    Called wherever a delivery unit DIES - removed, superseded, or deferred by
+    any route (x-e957). A dead unit will never merge, so
+    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
+    its children, while ``selection_guards`` and ``fno target init`` keep
+    refusing them: unbuildable, uncloseable, invisible to every sweep.
+
+    One helper because there are SIX writers of this transition and wiring three
+    of them was the decorative-guard shape this whole change is about - the
+    maintain auto-defer legs and the triage defer reach the same state as
+    ``cmd_defer`` and must free the same children.
+
+    Un-contained, never closed: a unit dying is not a claim that its children
+    shipped. Nothing re-contains them on undefer, deliberately - re-adoption is
+    decompose's job, and inferring it would re-hide work since re-scoped.
+    """
+    if not owner_id:
+        return []
+    freed: list[str] = []
+    for e in entries:
+        if isinstance(e, dict) and e.get("contained_in") == owner_id:
+            e.pop("contained_in", None)
+            nid = e.get("id")
+            if isinstance(nid, str) and nid:
+                freed.append(nid)
+    return freed
 
 
 def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
@@ -8160,6 +8181,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
+                    _release_contained_children(entries, n.get("id"))
                     n["deferred_reason"] = reason
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
@@ -8196,6 +8218,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
+                    _release_contained_children(entries, n.get("id"))
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
                     applied_stale_ready.append({
                         "node_id": cand.node_id,
@@ -9420,9 +9443,7 @@ def cmd_supersede(
         # at a node that is not going to ship. Unbuildable, uncloseable, and
         # invisible to every sweep. Un-contained rather than closed: superseding
         # the unit is not a claim that its children shipped.
-        for _e in entries:
-            if isinstance(_e, dict) and _e.get("contained_in") == old_node.get("id"):
-                _e.pop("contained_in", None)
+        _release_contained_children(entries, old_node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)

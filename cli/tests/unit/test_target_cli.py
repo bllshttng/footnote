@@ -1296,3 +1296,27 @@ def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypa
     assert "run `/fno:target x-6320`" not in result.output
     assert ran == []
     _clear_root_cache()
+
+
+def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """A lost serialization that still exits 0 reads as "checked, and fine".
+
+    The flock is what makes this check unraceable, so swallowing its failure
+    silently is the same degrade this gate has already been fixed for twice.
+    Still fail-open - it just says what it lost.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+
+    def boom(p):
+        raise OSError("no lock for you")
+
+    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert "UNSERIALIZED" in result.output
+    assert "no lock for you" in result.output
