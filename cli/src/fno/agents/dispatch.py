@@ -3167,6 +3167,7 @@ def reconcile_agents(
                     )
                     continue
                 if pid_state is True:
+                    assert probe_pid is not None
                     try:
                         healed = _codex_session_id_for_pid(probe_pid)
                     except Exception:  # noqa: BLE001 -- an unreadable process stays pending

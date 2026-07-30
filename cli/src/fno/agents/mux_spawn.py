@@ -45,6 +45,7 @@ from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
+    AgentStatus,
     RegistryVersionError,
     load_registry,
     update_registry,
@@ -1194,7 +1195,7 @@ def dispatch_spawn_pane(
         crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
         stored_session_uuid: Optional[str] = None
-        row_status = "live"
+        row_status: AgentStatus = "live"
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
             nonlocal stored_session_uuid, row_status

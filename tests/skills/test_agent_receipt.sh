@@ -439,17 +439,18 @@ else
   fail "ab-ca822421 codex handoff route: $OUT (spawn_log: $(cat "$SPAWN_LOG"))"
 fi
 
-# Python's pane receipt has no worker-socket short_id. Its real addressable
-# handle is the unique registry name, backed by mux_session + pane_id evidence.
+# A Codex pane can be addressable by its unique registry name before the
+# provider writes the canonical thread id. That receipt must remain pending.
 reset_log
-PANE_RECEIPT='{"name":"handoff-pane","short_id":"","provider":"codex","status":"live","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
+PANE_RECEIPT='{"name":"handoff-pane","short_id":"","provider":"codex","status":"spawning","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
 OUT="$(MOCK_SPAWN_OUT="$PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
-if [[ "$OUT" == *"result=launched"* ]] && [[ "$OUT" == *"short_id=handoff-pane"* ]] \
+if [[ "$OUT" == *"result=pending"* ]] && [[ "$OUT" != *"result=launched"* ]] \
+   && [[ "$OUT" == *"short_id=handoff-pane"* ]] \
    && [[ "$OUT" == *"mode=spawn"* ]]; then
-  pass "ab-ca822421: empty-id pane receipt -> verified registry-name handle"
+  pass "ab-ca822421: late-id pane receipt -> pending registry-name handle"
 else
-  fail "ab-ca822421 empty-id pane receipt: $OUT"
+  fail "ab-ca822421 late-id pane receipt: $OUT"
 fi
 
 # An empty short_id without matching pane evidence remains a hard failure.
