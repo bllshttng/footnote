@@ -269,4 +269,42 @@ grep -q "node:x-261c" "$_MANIFEST_PATH" \
   && fail "shared plan: claimed the CONTAINED child instead of the delivery unit"
 pass "shared plan: resolved to the delivery unit"
 
+# ── A BROKEN post-claim gate must say so, not degrade silently ──
+# Only rc 9 refuses, but a crash or a stale fno without the verb must not look
+# identical to "checked, and it is fine" - and here it happens with the claim
+# already held. The pre-claim gate has said this for its own rc all along.
+log "post-claim: broken gate (rc 1) => note and proceed, claim kept"
+make_repo TMP_PCBROKEN 0 1
+_ALL_TMPS+=("$TMP_PCBROKEN")
+
+run_init "$TMP_PCBROKEN"
+_RC=$?
+[[ "$_RC" -eq 0 ]] \
+  || fail "post-claim/broken: a broken gate blocked bootstrap (exit $_RC)"
+grep -q "post-claim containment gate unavailable (rc=1)" "$TMP_PCBROKEN/err.log" \
+  || fail "post-claim/broken: degraded silently (got: $(cat "$TMP_PCBROKEN/err.log"))"
+[[ -f "$(manifest_of "$TMP_PCBROKEN")" ]] \
+  || fail "post-claim/broken: manifest missing - a broken gate must fail open"
+[[ "$(releases "$TMP_PCBROKEN")" == "0" ]] \
+  || fail "post-claim/broken: released the claim on a gate failure"
+pass "post-claim: broken gate noted, run proceeded with the claim"
+
+# ── The cleanup message must agree with reality ──
+# Same rule as the release beside it: an unchecked rm plus a message asserting
+# "no state file written" is the trap the code comment describes, told
+# backwards. Simulating a failing rm portably is not worth a test that skips
+# inconclusively, so this pins the invariant instead - the success wording is
+# only ever printed when the file is genuinely gone, which is what makes the
+# failure branch meaningful.
+log "post-claim: the cleanup message agrees with the filesystem"
+if grep -q "no state file written" "$TMP_POST/err.log"; then
+  [[ ! -e "$(manifest_of "$TMP_POST")" ]] \
+    || fail "post-claim: said 'no state file written' while the manifest exists"
+  pass "post-claim: success wording matches a genuinely removed manifest"
+else
+  grep -q "could not remove" "$TMP_POST/err.log" \
+    || fail "post-claim: cleanup outcome not reported either way (got: $(cat "$TMP_POST/err.log"))"
+  pass "post-claim: a failed removal is reported as such"
+fi
+
 log "all scenarios passed"

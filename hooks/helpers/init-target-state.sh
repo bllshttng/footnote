@@ -1089,6 +1089,14 @@ PYEOF
         # negation's status, so the rc test would never see the 9.
         TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno target check-contained \
           && _PC_RC=0 || _PC_RC=$?
+        # A BROKEN gate on this path degrades silently unless it is said out
+        # loud, exactly like the pre-claim gate a hundred lines above: only 9
+        # refuses, but a crash or a stale fno without the verb must not look
+        # identical to "checked, and it is fine" - and here it happens while the
+        # claim is already held.
+        if [[ "$_PC_RC" -ne 0 && "$_PC_RC" -ne 9 ]]; then
+          echo "[init-target-state] note: post-claim containment gate unavailable (rc=$_PC_RC); proceeding with the claim held. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
+        fi
         if [[ "$_PC_RC" -eq 9 ]]; then
           # Report what actually happened. Swallowing the release rc while the
           # message said "claim released" would strand a live claim for its full
@@ -1107,8 +1115,17 @@ PYEOF
           # reaper only archives on a terminal status or a dead claim key -
           # neither of which this leaves - so the delivery unit's own run would
           # silently skip its manifest write and never claim the owner.
+          # Same rule as the release above: report what actually happened. An
+          # unchecked rm with a message asserting "No state file written" is the
+          # trap the comment above describes, told backwards - the operator is
+          # assured of a cleanup that did not occur.
           rm -f "$STATE_FILE"
-          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); $_REL_NOTE. No state file written." >&2
+          if [[ -e "$STATE_FILE" ]]; then
+            _RM_NOTE="WARNING: could not remove $STATE_FILE - it names a contained node with no claim, and the delivery unit's own init will SKIP its manifest write while this file exists; delete it by hand"
+          else
+            _RM_NOTE="no state file written"
+          fi
+          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); $_REL_NOTE; $_RM_NOTE." >&2
           exit 2
         fi
         echo "target_claim_key: \"$_CLAIM_KEY\"" >> "$STATE_FILE"
