@@ -116,7 +116,15 @@ def test_late_codex_identity_composes_across_every_peer_surface(
     repo = Path(__file__).resolve().parents[3]
     manifest = repo / "crates" / "fno" / "Cargo.toml"
     fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
-    cargo = Path(shutil.which("cargo") or "cargo")
+    cargo_path = shutil.which("cargo")
+    if cargo_path is None:
+        # This is the strongest test in the suite and it drives the real fno
+        # binary, so it needs a toolchain. Skip where there is none rather than
+        # hard-erroring: an environment without cargo has nothing to say about
+        # this invariant, and a red that means "no rust here" trains people to
+        # ignore reds.
+        pytest.skip("cargo not on PATH; this journey drives the real fno binary")
+    cargo = Path(cargo_path)
     cargo_home = cargo.parent.parent
     build_env = {
         **os.environ,

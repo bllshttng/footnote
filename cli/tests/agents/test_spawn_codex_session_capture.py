@@ -295,6 +295,36 @@ def test_codex_session_id_for_pid_walks_wrapper_descendants(tmp_path: Path) -> N
     assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
 
 
+def test_codex_session_id_for_pid_refuses_an_ambiguous_tree(tmp_path: Path) -> None:
+    """AC5-CON: the same-cwd sibling-safety property, at the one place that owns it.
+
+    Two distinct rollouts open in one process tree means the correlator cannot say
+    which session this pane is, so it must return None rather than pick. Without
+    this the "siblings can never be cross-stamped" claim lives only in a docstring.
+    """
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    roll_a = _write_rollout_with_id(tmp_path / "a", SID_A, SID_A)
+    roll_b = _write_rollout_with_id(tmp_path / "b", SID_B, SID_B)
+    native = _FakeProc([_FakeOpenFile(str(roll_b))])
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(str(roll_a))], children=[native]))
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) is None
+
+
+def test_codex_session_id_for_pid_binds_when_the_tree_is_unambiguous(
+    tmp_path: Path,
+) -> None:
+    """Positive control for the refusal above: the SAME shape with one rollout
+    open twice still binds, so that test proves ambiguity and not merely that a
+    descendant walk with two open files always fails."""
+    from fno.agents.mux_spawn import _codex_session_id_for_pid
+
+    rollout = _write_rollout_with_id(tmp_path / "a", SID_A, SID_A)
+    native = _FakeProc([_FakeOpenFile(str(rollout))])
+    psu = _FakePsutil(_FakeProc([_FakeOpenFile(str(rollout))], children=[native]))
+    assert _codex_session_id_for_pid(4242, psutil_mod=psu) == SID_A
+
+
 def test_codex_session_id_for_pid_returns_none_with_no_rollout_open() -> None:
     from fno.agents.mux_spawn import _codex_session_id_for_pid
 

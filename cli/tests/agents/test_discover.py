@@ -1393,7 +1393,13 @@ def test_us2_peek_resolves_codex_name(tmp_path, monkeypatch):
 def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
     tmp_path, monkeypatch
 ):
-    """AC2-CON: every public handle reaches the one repaired registry peer."""
+    """Every public handle reaches one peer, GIVEN an already-repaired row.
+
+    Scope note: this seeds the repaired state and performs no repair, so it pins
+    resolver behaviour only and does NOT prove AC2-CON. The end-to-end repair
+    claim belongs to test_late_codex_identity_composes_across_every_peer_surface
+    in test_spawn_pane.py, which reconciles for real and then joins the surfaces.
+    """
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import AgentEntry, write_registry
 

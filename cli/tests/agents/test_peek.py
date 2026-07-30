@@ -95,7 +95,12 @@ def test_peek_resolve_miss_exits_13_with_suggestions(tmp_path):
 
 
 def test_peek_requested_name_reads_repaired_codex_thread(tmp_path):
-    """AC2-CON: the requested registry name observes the repaired rollout."""
+    """The requested name reads the rollout, GIVEN an already-repaired row.
+
+    Scope note: this seeds the repaired state and performs no repair, so it does
+    NOT prove AC2-CON; it pins the peek-by-name path only. The end-to-end repair
+    claim belongs to test_late_codex_identity_composes_across_every_peer_surface.
+    """
     from fno.agents import discover
     from fno.agents.registry import AgentEntry, write_registry
 
