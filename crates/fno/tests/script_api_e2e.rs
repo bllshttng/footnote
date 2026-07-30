@@ -33,6 +33,16 @@ fn kill_server(scratch: &Scratch) {
     let _ = scratch.command().args(["mux", "kill-server"]).output();
 }
 
+fn write_registry(scratch: &Scratch, rows: &str) {
+    let home = scratch.0.join("iso-agents");
+    std::fs::create_dir_all(&home).unwrap();
+    std::fs::write(
+        home.join("registry.json"),
+        format!(r#"{{"schema_version":11,"agents":[{rows}]}}"#),
+    )
+    .unwrap();
+}
+
 /// Poll `pane ls --json` until it reports the empty listing (the session has
 /// ended and its server is gone). Bounded so a stuck server fails loudly.
 fn wait_ls_empty(scratch: &Scratch, secs: u64) {
@@ -440,4 +450,94 @@ fn defensive_reaper_sweeps_a_pane_when_its_exit_notification_is_lost() {
         log.contains("deliberately dropped exit") && log.contains("last dead pane reaped"),
         "the test must exercise the lost-exit timer path; log: {log}"
     );
+}
+
+#[test]
+fn zero_viewer_identity_join_reads_fresh_registry_and_real_claim() {
+    let scratch = Scratch::new("zero_viewer_identity");
+    let dir = scratch.0.to_str().unwrap();
+    let run = pane(
+        &scratch,
+        &["run", "--cwd", dir, "--", "/bin/sh", "-c", "sleep 30"],
+    );
+    assert!(run.status.success());
+    let pane_id = stdout(&run);
+    let full_id = "019fb024-2327-75f3-8b80-06e9d5ade05f";
+    write_registry(
+        &scratch,
+        &format!(
+            r#"{{"name":"requested-name","cwd":"{dir}","harness":"codex","harness_session_id":"{full_id}","status":"live","mux":{{"session":"main","pane_id":{pane_id}}}}}"#
+        ),
+    );
+
+    let ls = pane(&scratch, &["ls", "--json"]);
+    assert!(
+        ls.status.success(),
+        "pane ls stderr: {:?}",
+        String::from_utf8_lossy(&ls.stderr)
+    );
+    let listing = stdout(&ls);
+    assert!(
+        listing.contains(&format!(r#""fno_id":"{full_id}""#)),
+        "fresh fno_id: {listing}"
+    );
+
+    for handle in [full_id, "019fb024"] {
+        let located = scratch
+            .command()
+            .args(["mux", "where", handle, "--json"])
+            .output()
+            .unwrap();
+        assert!(
+            located.status.success(),
+            "where {handle} stderr: {:?}",
+            String::from_utf8_lossy(&located.stderr)
+        );
+        let location = stdout(&located);
+        assert!(location.contains(&format!(r#""fno_id":"{handle}""#)));
+        assert!(location.contains(&format!(r#""panes":[{pane_id}]"#)));
+    }
+
+    let claim = scratch
+        .command()
+        .args([
+            "claim",
+            "acquire",
+            "node:x-f0c2-verify",
+            "--holder",
+            full_id,
+            "--ttl",
+            "60s",
+            "--json",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        claim.status.success(),
+        "claim stderr: {:?}",
+        String::from_utf8_lossy(&claim.stderr)
+    );
+    assert!(
+        stdout(&claim).contains(full_id),
+        "claim holder must be the peer identity"
+    );
+
+    let _ = pane(&scratch, &["kill", &pane_id]);
+    wait_ls_empty(&scratch, 10);
+}
+
+#[test]
+fn mux_where_cli_rejects_harness_only_ambiguous_prefix() {
+    let scratch = Scratch::new("where_ambiguous_harness");
+    write_registry(
+        &scratch,
+        r#"{"name":"a","cwd":"/a","harness":"codex","harness_session_id":"019fb024-one","status":"live","mux":{"session":"main","pane_id":1}},{"name":"b","cwd":"/b","harness":"codex","harness_session_id":"019fb024-two","status":"live","mux":{"session":"main","pane_id":2}}"#,
+    );
+    let out = scratch
+        .command()
+        .args(["mux", "where", "019fb024", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(16));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("ambiguous prefix"));
 }

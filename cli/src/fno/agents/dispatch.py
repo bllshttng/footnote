@@ -189,6 +189,11 @@ def select_provider(name: str, requested_provider: Optional[str]) -> str:
 # ---------------------------------------------------------------------------
 
 
+# Absorbing states: once a row reaches one, no probe may move it and no identity
+# may be backfilled onto it. Named once because reconcile tests it on three
+# separate paths and a set that drifts between them reopens the resurrection bug.
+_TERMINAL_AGENT_STATUSES = frozenset({"orphaned", "failed", "exited", "permanent_dead"})
+
 _NAME_MAX_LEN = 128
 _SHORT_ID_NAME_SHAPE = re.compile(r"^[0-9a-f]{8}$")
 _DEFAULT_LOCK_TIMEOUT = 30.0
@@ -2987,6 +2992,14 @@ def reconcile_agents(
     # re-register, and stamping by name alone would put the old row's claude uuid
     # onto a replacement (possibly codex/gemini) row and misroute its mail.
     pending_backfill: dict[str, tuple[Optional[str], str]] = {}
+    # name -> (pid, mux ref, resolved Codex thread id). Unlike the Claude
+    # backfill above, every field is rechecked under the registry write lock:
+    # the pane process is the identity authority and a same-name replacement
+    # must never inherit its rollout.
+    pending_codex_backfill: dict[
+        str,
+        tuple[Optional[int], Optional[int], dict, int, Optional[int], str],
+    ] = {}
 
     # ``pending_updates`` accumulates per-name status flips across the
     # probe loop; at the end we apply ALL of them via a SINGLE
@@ -3000,7 +3013,7 @@ def reconcile_agents(
     # discards ``pending_updates`` because the propagated KeyboardInterrupt
     # bypasses the post-loop ``update_registry`` call. The on-disk
     # registry mtime never changes.
-    pending_updates: dict[str, AgentEntry] = {}
+    pending_updates: dict[str, tuple[AgentEntry, AgentStatus]] = {}
 
     # Read codex's session index ONCE outside the loop so a registry with
     # N codex agents only pays the I/O cost once. Mirror the same one-shot
@@ -3089,7 +3102,184 @@ def reconcile_agents(
             )
             continue
         elif entry.harness == "codex":
-            if codex_index_state != "ready":
+            # An id-less persistent pane can be healthy while Codex is still
+            # creating its rollout. Heal it from the pane's own process tree;
+            # the session index is not needed for this correlation.
+            if not entry.harness_session_id and entry.mux:
+                if entry.status in _TERMINAL_AGENT_STATUSES:
+                    continue
+
+                from fno.agents.mux_spawn import (
+                    _codex_session_id_for_pid,
+                    _lookup_child_pid,
+                    _mux_pane_alive,
+                )
+                from fno.agents.spawn_gate import _pid_alive, _process_start_time
+
+                pane_state = _mux_pane_alive(entry.mux)
+                if pane_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "mux-pane-liveness-unavailable",
+                        }
+                    )
+                    continue
+                probe_pid = entry.pid
+                probe_start = entry.pid_start_time
+                # An incarnation token is what makes a recorded pid trustworthy:
+                # without one `_pid_alive` degrades to bare existence, so a
+                # recycled pid could bind a stranger's rollout onto this row. Rows
+                # written before this stamping have no token, and they are exactly
+                # the population this heal exists to repair - so re-derive the
+                # pane's real child and require agreement. `_mux_pane_alive` proves
+                # the PANE is up, never that this pid is still its child.
+                confirmed = probe_start is not None
+                if pane_state is not False and not confirmed:
+                    live_pid = _lookup_child_pid(
+                        str(entry.mux["session"]),
+                        int(entry.mux["pane_id"]),
+                        subprocess.run,
+                    )
+                    if live_pid is not None and probe_pid in (None, live_pid):
+                        probe_pid = live_pid
+                        probe_start = _process_start_time(probe_pid)
+                        confirmed = True
+                    elif probe_pid is None:
+                        errors.append(
+                            {
+                                "name": entry.name,
+                                "provider": "codex",
+                                "id": None,
+                                "reason": "codex-pane-pid-pending",
+                            }
+                        )
+                        continue
+
+                pid_state = (
+                    _pid_alive(probe_pid, probe_start)
+                    if pane_state is True and probe_pid is not None
+                    else False
+                )
+                if pid_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "codex-process-incarnation-unavailable",
+                        }
+                    )
+                    continue
+                if pid_state is True:
+                    assert probe_pid is not None
+                    # Live, but we could not prove this pid is the pane's child.
+                    # Never stamp an identity on that; a DEAD unconfirmed pid still
+                    # takes the orphan path below, which binds nothing.
+                    if not confirmed:
+                        errors.append(
+                            {
+                                "name": entry.name,
+                                "provider": "codex",
+                                "id": None,
+                                "reason": "codex-pane-pid-unconfirmed",
+                            }
+                        )
+                        continue
+                    probe_failed = False
+                    try:
+                        healed = _codex_session_id_for_pid(probe_pid)
+                    except Exception as exc:  # noqa: BLE001 -- stays pending, never guesses
+                        # The correlator already absorbs every EXPECTED failure
+                        # (gone / access-denied / no rollout open) and returns None
+                        # for them, so anything landing here is unexpected. Keep the
+                        # row pending, but never render it as the benign "codex has
+                        # not opened its rollout yet" case with the cause dropped -
+                        # that reads as "still starting" forever.
+                        healed = None
+                        probe_failed = True
+                        sys.stderr.write(
+                            f"WARN: codex identity probe failed for {entry.name} "
+                            f"(pid {probe_pid}): {exc}\n"
+                        )
+                    if healed:
+                        # Scan the rows AND the ids this same pass already decided
+                        # to stamp. Two id-less rows pointing at one pane both see
+                        # the other as `harness_session_id=None`, so a rows-only
+                        # check clears both and stamps the duplicate identity this
+                        # guard exists to prevent.
+                        duplicate = any(
+                            other.name != entry.name
+                            and other.harness_session_id == healed
+                            for other in entries
+                        ) or any(
+                            claimed[-1] == healed
+                            for name, claimed in pending_codex_backfill.items()
+                            if name != entry.name
+                        )
+                        if duplicate:
+                            if entry.status != "spawning":
+                                pending_updates[entry.name] = (entry, "spawning")
+                            errors.append(
+                                {
+                                    "name": entry.name,
+                                    "provider": "codex",
+                                    "id": None,
+                                    "reason": "duplicate-codex-session-id",
+                                }
+                            )
+                        else:
+                            pending_codex_backfill[entry.name] = (
+                                entry.pid,
+                                entry.pid_start_time,
+                                dict(entry.mux),
+                                probe_pid,
+                                probe_start,
+                                healed,
+                            )
+                        continue
+
+                    if entry.status != "spawning":
+                        pending_updates[entry.name] = (entry, "spawning")
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": (
+                                "codex-session-probe-failed"
+                                if probe_failed
+                                else "codex-session-id-pending"
+                            ),
+                        }
+                    )
+                    continue
+
+                # The pane process is gone. Preserve terminal rows above; a
+                # nonterminal pending/live row follows the existing orphan path.
+                new_status = "orphaned"
+            elif entry.status in {"failed", "exited", "permanent_dead"}:
+                continue
+            elif not entry.harness_session_id and entry.status == "orphaned":
+                continue
+            elif not entry.harness_session_id:
+                events.emit(
+                    "agent_inconsistent",
+                    name=entry.name,
+                    provider="codex",
+                )
+                errors.append(
+                    {
+                        "name": entry.name,
+                        "provider": "codex",
+                        "id": None,
+                        "reason": "missing-codex-session-id",
+                    }
+                )
+                continue
+            elif codex_index_state != "ready":
                 # AC3-EDGE: cannot probe codex reachability; report as
                 # error but do NOT flip status. The reason discriminator
                 # distinguishes "fresh install" (operator action: ignore)
@@ -3107,27 +3297,9 @@ def reconcile_agents(
                     }
                 )
                 continue
-            if not entry.harness_session_id:
-                # Registry corruption: a codex row should always carry its
-                # session id (US4-codex AC1-HP invariant). Surface but do
-                # not mutate - mark as inconsistent for manual triage.
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="codex",
-                )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "codex",
-                        "id": None,
-                        "reason": "missing-codex-session-id",
-                    }
-                )
-                continue
-
-            reachable = entry.harness_session_id in known_codex_ids
-            new_status = "live" if reachable else "orphaned"
+            else:
+                reachable = entry.harness_session_id in known_codex_ids
+                new_status = "live" if reachable else "orphaned"
 
         elif entry.harness == "claude":
             if not claude_path_present:
@@ -3218,14 +3390,11 @@ def reconcile_agents(
                 except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
                     healed = None
                 if healed:
+                    # Queue only. The `backfilled` claim is made AFTER the write,
+                    # against the names the write actually stamped: the under-lock
+                    # guard can refuse this row (same-name rm + re-register), and
+                    # claiming success here reported a heal that never landed.
                     pending_backfill[entry.name] = (entry.short_id, healed)
-                    backfilled.append(
-                        {
-                            "name": entry.name,
-                            "provider": "claude",
-                            "harness_session_id": healed,
-                        }
-                    )
 
         else:
             errors.append(
@@ -3246,7 +3415,7 @@ def reconcile_agents(
         # preserves every other field automatically (Gemini medium on
         # PR #317), which is more robust against future AgentEntry
         # schema additions than manual field-by-field reconstruction.
-        pending_updates[entry.name] = replace(entry, status=new_status)
+        pending_updates[entry.name] = (entry, new_status)
 
         change = {
             "name": entry.name,
@@ -3271,9 +3440,21 @@ def reconcile_agents(
     # a partial split. The all-or-nothing atomicity is enforced by
     # update_registry's own atomic-rename semantics — the closure is
     # pure, so an OSError mid-write leaves the registry untouched.
-    if pending_updates or pending_backfill:
+    if pending_updates or pending_backfill or pending_codex_backfill:
+
+        codex_backfill_applied: set[str] = set()
+        status_updates_applied: set[str] = set()
+        codex_ids_claimed: set[str] = set()
+        claude_backfill_applied: set[str] = set()
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
+            # Reset per call: update_registry may re-run _apply against a fresh
+            # snapshot after lock contention, and carrying a previous attempt's
+            # names over would report a row as applied that this attempt skipped.
+            codex_backfill_applied.clear()
+            status_updates_applied.clear()
+            codex_ids_claimed.clear()
+            claude_backfill_applied.clear()
             # Build the new entries from the CURRENT (under-lock) entries,
             # overriding only the ``status`` field from pending_updates.
             # Pre-fix this returned ``pending_updates.get(e.name, e)`` which
@@ -3285,7 +3466,18 @@ def reconcile_agents(
             for e in current_entries:
                 updates: dict = {}
                 if e.name in pending_updates:
-                    updates["status"] = pending_updates[e.name].status
+                    probed, target_status = pending_updates[e.name]
+                    if (
+                        e.harness == probed.harness
+                        and e.pid == probed.pid
+                        and e.pid_start_time == probed.pid_start_time
+                        and e.mux == probed.mux
+                        and e.harness_session_id == probed.harness_session_id
+                        and e.short_id == probed.short_id
+                        and e.status == probed.status
+                    ):
+                        updates["status"] = target_status
+                        status_updates_applied.add(e.name)
                 if e.name in pending_backfill:
                     probed_short, hsid = pending_backfill[e.name]
                     # Only stamp a row that STILL matches the row we probed: a
@@ -3296,6 +3488,46 @@ def reconcile_agents(
                         # claude uuid is synced from it on the next load's backfill.
                         updates["harness_session_id"] = hsid
                         updates["harness"] = e.harness
+                        claude_backfill_applied.add(e.name)
+                if e.name in pending_codex_backfill:
+                    (
+                        expected_pid,
+                        expected_start,
+                        probed_mux,
+                        resolved_pid,
+                        resolved_start,
+                        hsid,
+                    ) = pending_codex_backfill[e.name]
+                    # `codex_ids_claimed` carries ids stamped EARLIER IN THIS APPLY,
+                    # which `current_entries` cannot show because it is a consistent
+                    # pre-update snapshot. Without it two rows racing for one pane
+                    # both read "nobody owns this id" and both take it.
+                    duplicate = hsid in codex_ids_claimed or any(
+                        other.name != e.name
+                        and other.harness_session_id == hsid
+                        for other in current_entries
+                    )
+                    # ONE guard, branch inside. These were two near-identical eight
+                    # conjunct conditions differing only in `duplicate`; a term added
+                    # to one and not the other would silently drop the update and
+                    # report it as a race.
+                    if (
+                        e.harness == "codex"
+                        and e.pid == expected_pid
+                        and e.pid_start_time == expected_start
+                        and e.mux == probed_mux
+                        and not e.harness_session_id
+                        and e.status not in _TERMINAL_AGENT_STATUSES
+                    ):
+                        if duplicate:
+                            updates["status"] = "spawning"
+                        else:
+                            updates["harness_session_id"] = hsid
+                            updates["status"] = "live"
+                            updates["pid"] = resolved_pid
+                            updates["pid_start_time"] = resolved_start
+                            codex_ids_claimed.add(hsid)
+                            codex_backfill_applied.add(e.name)
                 out.append(replace(e, **updates) if updates else e)
             return out
 
@@ -3307,7 +3539,7 @@ def reconcile_agents(
             # see a recovered/orphaned record that never actually committed.
             # A backfill that never committed must not claim it healed either.
             write_error = f"registry-write-failed: {exc}"
-            failed_names = set(pending_updates.keys())
+            failed_names = set(pending_updates.keys()) | set(pending_codex_backfill.keys())
             for change in list(orphaned):
                 if change["name"] in failed_names:
                     orphaned.remove(change)
@@ -3319,6 +3551,78 @@ def reconcile_agents(
             for change in list(backfilled):
                 backfilled.remove(change)
                 errors.append({**change, "id": None, "reason": write_error})
+            for name in pending_backfill:
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": "claude",
+                        "id": None,
+                        "reason": write_error,
+                    }
+                )
+            for name in pending_codex_backfill:
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": "codex",
+                        "id": None,
+                        "reason": write_error,
+                    }
+                )
+        else:
+            for name, (_probed_short, hsid) in pending_backfill.items():
+                if name in claude_backfill_applied:
+                    backfilled.append(
+                        {
+                            "name": name,
+                            "provider": "claude",
+                            "harness_session_id": hsid,
+                        }
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-session-id-backfill-raced",
+                        }
+                    )
+            for name, (_epid, _estart, _mux, _pid, _start, hsid) in pending_codex_backfill.items():
+                if name in codex_backfill_applied:
+                    backfilled.append(
+                        {
+                            "name": name,
+                            "provider": "codex",
+                            "harness_session_id": hsid,
+                        }
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "codex-session-id-backfill-raced",
+                        }
+                    )
+            raced_updates = set(pending_updates) - status_updates_applied
+            for change in list(orphaned):
+                if change["name"] in raced_updates:
+                    orphaned.remove(change)
+            for change in list(recovered):
+                if change["name"] in raced_updates:
+                    recovered.remove(change)
+            for name in raced_updates:
+                probed, _target = pending_updates[name]
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": probed.harness,
+                        "id": probed.short_id or probed.harness_session_id,
+                        "reason": "registry-status-update-raced",
+                    }
+                )
 
     events.emit(
         "reconcile_done",

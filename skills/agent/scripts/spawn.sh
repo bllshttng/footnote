@@ -471,25 +471,49 @@ if [[ "$REPLY" -eq 1 ]]; then
   exit 0
 else
   short_id="$(printf '%s' "$spawn_out" | jq -r '.short_id // empty' 2>/dev/null)"
-  PANE_SESSION=""; PANE_ID=""   # set below only for a matched Python mux-pane receipt
+  session_id="$(printf '%s' "$spawn_out" | jq -r '.session_id // empty' 2>/dev/null)"
+  PANE_SESSION=""; PANE_ID=""; PANE_STATUS=""
+  # Set below only for a matched Python mux-pane receipt.
   # Python-authored pane rows have no worker socket, so their genuine receipt
   # carries an empty short_id plus the addressable registry name and concrete
   # mux coordinates. Accept that handle only when every identity field matches
   # this launch; a partial/mismatched empty-id receipt still fails closed below.
   case "$SUBSTRATE" in
     ""|pane)
-      if [[ -z "$short_id" ]]; then
-        receipt_name="$(printf '%s' "$spawn_out" | jq -r '.name // empty' 2>/dev/null)"
-        receipt_provider="$(printf '%s' "$spawn_out" | jq -r '.provider // empty' 2>/dev/null)"
-        receipt_status="$(printf '%s' "$spawn_out" | jq -r '.status // empty' 2>/dev/null)"
-        mux_session="$(printf '%s' "$spawn_out" | jq -r '.mux_session // empty' 2>/dev/null)"
-        pane_id="$(printf '%s' "$spawn_out" | jq -r '.pane_id // empty' 2>/dev/null)"
-        if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
-           && "$receipt_status" == "live" && -n "$mux_session" && -n "$pane_id" ]]; then
+      receipt_name="$(printf '%s' "$spawn_out" | jq -r '.name // empty' 2>/dev/null)"
+      receipt_provider="$(printf '%s' "$spawn_out" | jq -r '.provider // empty' 2>/dev/null)"
+      receipt_status="$(printf '%s' "$spawn_out" | jq -r '.status // empty' 2>/dev/null)"
+      mux_session="$(printf '%s' "$spawn_out" | jq -r '.mux_session // empty' 2>/dev/null)"
+      pane_id="$(printf '%s' "$spawn_out" | jq -r '.pane_id // empty' 2>/dev/null)"
+      if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
+         && ( "$receipt_status" == "live" || "$receipt_status" == "spawning" ) \
+         && -n "$mux_session" && -n "$pane_id" ]]; then
+        pane_identity_ok=1
+        if [[ "$PROVIDER" == "codex" ]]; then
+          pane_identity_ok=0
+          if [[ "$receipt_status" == "spawning" && -z "$session_id" && -z "$short_id" ]]; then
+            short_id="$receipt_name"
+            pane_identity_ok=1
+          # Check that short_id is a genuine 8-hex handle derived from THIS
+          # session id, without restating which 8 characters. The producer reads
+          # canonical_handle (fno.harness_identity), the one source for that
+          # string; pinning the offset here would silently reject a correct
+          # receipt the day that function changes which slice it returns.
+          elif [[ "$receipt_status" == "live" \
+             && "$session_id" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ \
+             && "$short_id" =~ ^[0-9a-f]{8}$ \
+             && "$session_id" == *"$short_id"* ]]; then
+            pane_identity_ok=1
+          fi
+        elif [[ -z "$short_id" ]]; then
           short_id="$receipt_name"
+        fi
+        if [[ "$pane_identity_ok" == "1" ]]; then
           # Remember the mux coordinates so the report points at `fno mux attach`:
           # a pane row has no log_path, so the `fno agents logs` hint misses.
-          PANE_SESSION="$mux_session"; PANE_ID="$pane_id"
+          PANE_SESSION="$mux_session"; PANE_ID="$pane_id"; PANE_STATUS="$receipt_status"
+        elif [[ "$PROVIDER" == "codex" ]]; then
+          fail "invalid Codex pane identity receipt (status/session_id/short_id disagree): $(sanitize "$spawn_out")"
         fi
       fi
       ;;
@@ -539,8 +563,10 @@ else
     # log_path). Surface the coordinates and quote the ref (a session name may
     # contain a space); shell-quote the session in the hint so `fno mux attach
     # <session>` stays copy-pasteable.
-    printf 'result=launched short_id=%s name=%s mode=%s%s pane="%s:%s" hint="fno mux attach %s"\n' \
-      "$short_id" "$NAME" "$report_mode" "$wt_field" "$PANE_SESSION" "$PANE_ID" "$(printf '%q' "$PANE_SESSION")"
+    pane_result="launched"
+    [[ "$PANE_STATUS" == "spawning" ]] && pane_result="pending"
+    printf 'result=%s short_id=%s name=%s mode=%s%s pane="%s:%s" hint="fno mux attach %s"\n' \
+      "$pane_result" "$short_id" "$NAME" "$report_mode" "$wt_field" "$PANE_SESSION" "$PANE_ID" "$(printf '%q' "$PANE_SESSION")"
   else
     # Address the hint by short_id on bg/headless, where it is the session-id
     # prefix: registration can silently fail (the receipt only validates the

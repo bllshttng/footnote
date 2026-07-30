@@ -15,9 +15,13 @@ socket); these tests pin the Python contract:
 """
 from __future__ import annotations
 
+import io
 import json
 import os
+import shutil
 import subprocess
+import time
+import uuid
 from pathlib import Path
 from typing import Optional
 
@@ -104,6 +108,244 @@ def _spawn(monkeypatch, tmp_path, **kwargs):
     return result, runner
 
 
+def test_late_codex_identity_composes_across_every_peer_surface(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """One derived pane identity reaches every public peer surface unchanged."""
+    use_tmpdir(monkeypatch, tmp_path)
+    repo = Path(__file__).resolve().parents[3]
+    manifest = repo / "crates" / "fno" / "Cargo.toml"
+    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
+    cargo_path = shutil.which("cargo")
+    if cargo_path is None:
+        # This is the strongest test in the suite and it drives the real fno
+        # binary, so it needs a toolchain. Skip where there is none rather than
+        # hard-erroring: an environment without cargo has nothing to say about
+        # this invariant, and a red that means "no rust here" trains people to
+        # ignore reds.
+        pytest.skip("cargo not on PATH; this journey drives the real fno binary")
+    cargo = Path(cargo_path)
+    cargo_home = cargo.parent.parent
+    build_env = {
+        **os.environ,
+        "CARGO_HOME": str(cargo_home),
+        "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
+    }
+    built = subprocess.run(
+        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
+        cwd=repo,
+        env=build_env,
+        text=True,
+        capture_output=True,
+    )
+    assert built.returncode == 0, built.stderr
+
+    agents_home = tmp_path / ".fno" / "agents"
+    mux_dir = Path("/tmp") / f"fno-i-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    mux_dir.mkdir()
+    monkeypatch.setenv("FNO_BIN", str(fno_bin))
+    monkeypatch.setenv("FNO_AGENTS_HOME", str(agents_home))
+    monkeypatch.setenv("FNO_MUX_DIR", str(mux_dir))
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path / "claim-root"))
+    monkeypatch.setenv("FNO_E2E", "1")
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+
+    requested_name = "late-codex-identity"
+    mux_session = "identity-journey"
+    rollout_root = tmp_path / "rollouts"
+    rollout_root.mkdir()
+    rollout = rollout_root / f"rollout-{uuid.uuid4()}.jsonl"
+    rollout.write_text(
+        "\n".join(
+            [
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"id": str(uuid.uuid4()), "cwd": str(repo)},
+                    }
+                ),
+                json.dumps(
+                    {
+                        "type": "response_item",
+                        "payload": {
+                            "type": "message",
+                            "role": "assistant",
+                            "content": [{"type": "output_text", "text": "READY"}],
+                        },
+                    }
+                ),
+            ]
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.discover import resolve_or_suggest
+    from fno.agents.peek import peek
+    from fno.agents.registry import load_registry, resolve_agent
+    from fno.claims.core import acquire_claim
+
+    original_argv = mux_spawn.build_pane_argv
+    original_capture = mux_spawn._backfill_codex_session_id
+    monkeypatch.setattr(
+        mux_spawn,
+        "build_pane_argv",
+        lambda *_args, **_kwargs: [
+            "/bin/sh",
+            "-c",
+            'exec 3<"$1"; sleep 60',
+            "sh",
+            str(rollout),
+        ],
+    )
+    monkeypatch.setattr(
+        mux_spawn, "_backfill_codex_session_id", lambda *_args, **_kwargs: None
+    )
+
+    spawned = None
+    try:
+        spawned = mux_spawn.dispatch_spawn_pane(
+            name=requested_name,
+            message="wait",
+            provider="codex",
+            cwd=repo,
+            session=mux_session,
+        )
+        assert spawned.status == "spawning"
+        assert spawned.session_uuid is None
+        assert spawned.short_id == ""
+
+        monkeypatch.setattr(mux_spawn, "build_pane_argv", original_argv)
+        monkeypatch.setattr(
+            mux_spawn, "_backfill_codex_session_id", original_capture
+        )
+        # The pane child opens the rollout on fd 3 only after it execs, and the
+        # heal correlates on exactly that open fd. Reconciling before it is open
+        # observes a legitimate "pending" and proves nothing, so wait for the
+        # precondition instead of assuming the spawn won the race: this test
+        # passed serially and failed only under parallel load, where child
+        # startup is the thing that slips.
+        probe_pid = load_registry(path=agents_home / "registry.json")[0].pid
+        deadline = time.monotonic() + 30.0
+        opened = None
+        while time.monotonic() < deadline:
+            opened = mux_spawn._codex_session_id_for_pid(probe_pid)
+            if opened:
+                break
+            time.sleep(0.05)
+        assert opened, (
+            f"pane child pid={probe_pid} never opened its rollout within 30s; "
+            "the late-identity heal correlates on that open fd"
+        )
+
+        reconciled = dispatch.reconcile_agents(
+            codex_session_index_path=tmp_path / "missing-index.jsonl"
+        )
+        assert len(reconciled.backfilled) == 1
+        identity = reconciled.backfilled[0]["harness_session_id"]
+
+        registry_path = agents_home / "registry.json"
+        row = load_registry(path=registry_path)[0]
+        assert row.harness_session_id == identity
+        assert row.status == "live"
+        assert resolve_agent(requested_name, path=registry_path).entry == row
+
+        def resolver(handle):
+            return resolve_or_suggest(
+                handle,
+                registry_path=registry_path,
+                require_alive=False,
+                sessions_dir=tmp_path / "no-claude",
+                projects_dir=tmp_path / "no-projects",
+                codex_sessions_dir=rollout_root,
+                opencode_storage_dir=tmp_path / "no-opencode",
+                name_map_path=tmp_path / "no-names.json",
+                project_resolver=lambda _cwd: None,
+            )
+
+        resolved = []
+        for handle in (requested_name, identity[:8], identity):
+            peer, suggestions = resolver(handle)
+            assert suggestions == []
+            assert peer is not None
+            resolved.append(peer.session_id)
+
+        pane_ls = subprocess.run(
+            [str(fno_bin), "mux", "pane", "ls", "--session", mux_session, "--json"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        pane = next(
+            item
+            for item in json.loads(pane_ls.stdout)
+            if item["pane_id"] == spawned.pane_id
+        )
+        assert pane["fno_id"] == identity
+        located = subprocess.run(
+            [str(fno_bin), "mux", "where", identity, "--session", mux_session, "--json"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+        assert json.loads(located.stdout)["panes"] == [spawned.pane_id]
+
+        claim = acquire_claim(
+            "node:ab-acde1234",
+            identity,
+            pid=row.pid,
+            root=tmp_path / "claim-root",
+        )
+        assert claim.holder == identity
+
+        observed, errors = io.StringIO(), io.StringIO()
+        assert (
+            peek(
+                requested_name,
+                stdout=observed,
+                stderr=errors,
+                resolve=resolver,
+                codex_sessions_dir=rollout_root,
+            )
+            == 0
+        )
+        assert errors.getvalue() == ""
+        assert "assistant: READY" in observed.getvalue()
+        assert {row.harness_session_id, pane["fno_id"], claim.holder, *resolved} == {
+            identity
+        }
+    finally:
+        monkeypatch.setattr(mux_spawn, "build_pane_argv", original_argv)
+        monkeypatch.setattr(
+            mux_spawn, "_backfill_codex_session_id", original_capture
+        )
+        if spawned is not None:
+            subprocess.run(
+                [
+                    str(fno_bin),
+                    "mux",
+                    "pane",
+                    "kill",
+                    "--session",
+                    mux_session,
+                    str(spawned.pane_id),
+                ],
+                cwd=repo,
+                text=True,
+                capture_output=True,
+            )
+        subprocess.run(
+            [str(fno_bin), "mux", "kill-server", mux_session, "--json"],
+            cwd=repo,
+            text=True,
+            capture_output=True,
+        )
+        shutil.rmtree(mux_dir, ignore_errors=True)
+
+
 def test_opencode_spawn_stamps_the_captured_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -172,6 +414,46 @@ def test_opencode_spawn_without_capture_stays_live_only(
     assert result.pane_id == 7
     rows = load_registry()
     assert [r.harness_session_id for r in rows] == [None]
+
+
+def test_codex_spawn_without_capture_stays_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC2-CON: an id-less Codex pane is created but not yet addressable."""
+    from fno.agents.registry import load_registry
+
+    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
+
+    row = load_registry()[0]
+    assert row.harness_session_id is None
+    assert row.status == "spawning"
+    assert result.status == "spawning"
+    assert result.session_uuid is None
+    assert result.short_id == ""
+
+
+def test_codex_spawn_with_capture_returns_bound_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: the receipt and registry share the captured Codex thread ID."""
+    from fno.agents import mux_spawn
+    from fno.agents.registry import load_registry
+
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    monkeypatch.setattr(
+        mux_spawn,
+        "_backfill_codex_session_id",
+        lambda *_args, **_kwargs: session_id,
+    )
+
+    result, _ = _spawn(monkeypatch, tmp_path, provider="codex")
+
+    row = load_registry()[0]
+    assert row.harness_session_id == session_id
+    assert row.status == "live"
+    assert result.status == "live"
+    assert result.session_uuid == session_id
+    assert result.short_id == session_id[:8]
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
@@ -749,13 +1031,54 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "short_id": "",
         "provider": "codex",
         "provider_source": "explicit",  # dispatch-provider provenance
-        "status": "live",
+        "status": "spawning",
         "mux_session": "main",
         "pane_id": 9,
         "effective_message": "$fno:target x-81ad",
     }
     pane_run = next(call for call in fake_runner.calls if call[1:4] == ["mux", "pane", "run"])
     assert "$fno:target x-81ad" in pane_run
+
+
+def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-HP: a bound public receipt exposes the canonical full thread ID."""
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: MuxSpawnResult(
+            name=kwargs["name"],
+            provider="codex",
+            session="main",
+            pane_id=9,
+            child_pid=4242,
+            session_uuid=session_id,
+            short_id=session_id[:8],
+            status="live",
+        ),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        ["spawn", "--name", "peer", "--harness", "codex", "hello"],
+    )
+
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output.strip().splitlines()[-1])
+    assert receipt["status"] == "live"
+    assert receipt["session_id"] == session_id
+    assert receipt["short_id"] == session_id[:8]
 
 
 def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(
@@ -1097,6 +1420,47 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
     assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
     assert "7" in kill, "the placed pane id is reaped"
     assert load_registry() == [], "no registry row on launch failure"
+
+
+def test_spawn_stamps_process_incarnation_token(tmp_path: Path, monkeypatch) -> None:
+    """The registry row binds the pane PID and its process incarnation."""
+    from fno.agents import spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_process_start_time", lambda _pid: 987654)
+    _spawn(monkeypatch, tmp_path, provider="codex")
+
+    row = load_registry()[0]
+    assert row.pid == 4242
+    assert row.pid_start_time == 987654
+
+
+@pytest.mark.parametrize("failure", [OSError("disk full"), ValueError("invalid row")])
+def test_registry_write_failure_reaps_exact_spawned_pane(
+    tmp_path: Path, monkeypatch, failure: Exception
+) -> None:
+    """A pane without its registry identity is rolled back before failure."""
+    from fno.agents import mux_spawn
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner()
+    monkeypatch.setattr(
+        mux_spawn, "update_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(failure),
+    )
+
+    with pytest.raises(DispatchAskError, match=r"registry write failed.*pane 7 reaped"):
+        dispatch_spawn_pane(
+            name="peer", message="hi", provider="codex", cwd=tmp_path, runner=runner,
+        )
+
+    assert runner.kill_calls == [
+        ["fno", "mux", "pane", "kill", "--session", "main", "7"]
+    ]
+    assert load_registry() == []
 
 
 def test_exact_at_current_proceeds_live_when_unpainted(

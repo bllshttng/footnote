@@ -15,12 +15,14 @@ What each harness fundamentally is, from fno's point of view:
 | Substrates | pane, **bg**, headless | pane, headless | pane, headless | pane, headless | pane only |
 | Detached-thread lane (`--substrate bg`) | yes (`claude --bg`) | no (hard error, use headless) | no | no | no |
 | Headless one-shot (`--substrate headless` / `--headless` / `-p` / `--once`) | yes (`claude -p`) | yes (`codex exec`) | yes (one-shot) | yes (`agy -p`) | **no** (refuses, pointing to pane) |
-| Session id recorded | `claude_short_id` (jobId) + `claude_session_uuid` (full transcript UUID) | `codex_session_id` | `gemini_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
+| Session id recorded | `short_id` (jobId) + `harness_session_id` (full transcript UUID) | `harness_session_id` (full thread ID) | `harness_session_id` | **none** (stateless: plain-text output, no parseable ID) | `harness_session_id` (the `ses_` id, captured at spawn) |
 | Re-enter a **live** session | `attach` / `resume` | `resume` | `resume` | no | `resume` |
 | Revive a **dead** session | `spawn --resume <uuid>` (bg lane) | no | no | no | no |
 | Read-only observation (`peek`, `logs`) | yes | yes | yes | yes | yes |
 
 The pane substrate (the default) is the great equalizer: all five harnesses can be spawned as a mux-hosted interactive PTY pane. Everything asymmetric lives in the detached lanes.
+Codex pane spawn returns `status: live`, `session_id`, and the derived eight-character `short_id` when its rollout is immediately bound.
+If the rollout appears late, spawn returns `status: spawning` with the mux coordinates, and `fno agents reconcile` binds the full thread ID from that pane's live PID without guessing by cwd.
 
 ## Verbs: creating and reviving workers
 
@@ -70,7 +72,7 @@ These operate on the registry / daemon, not on a harness CLI, so they work for e
 | `stop <name>` | Stop the underlying session (idempotent; already-exited is a clean no-op). |
 | `rm <name>` | Remove the registry row. Refused while live - stop first. |
 | `reap [--json]` | Garbage-collect exited rows in bulk (same sweep as the daemon's idle tick; keeps rows whose worktree is dirty and tells you why). |
-| `reconcile` | Sync registry status with harness reality. |
+| `reconcile` | Sync registry status with harness reality; a live id-less Codex pane is bound from the rollout open in its own PID tree, while unresolved live panes remain `spawning` and dead panes retain orphan/exited behavior. |
 | `restart` | Restart a stale daemon to pick up a new build; PTY workers survive. |
 | `ping` | **Placeholder stub** - prints `(not yet implemented)` and exits 0 without probing anything. Do not script against it; use `status` for a real daemon probe. |
 
@@ -136,6 +138,7 @@ Read the pane back with `fno mux pane read <id> --lines N` to confirm, rather th
 
 - **claude** is the only harness with a supervisor-managed detached thread (`claude --bg`), which is what makes the bg substrate, `attach`, `watch`, and dead-session revival (`spawn --resume` off the persisted transcript UUID) possible. When the supervisor dies, the short jobId dies with it - only the full session UUID survives on disk, which is why revival and attach key on different IDs.
 - **codex / gemini** run as mux-hosted PTY panes (the Python back half) or through their own one-shot/resume CLIs. No detached thread means no bg lane and no attach.
+- A **codex** pane's full thread ID is the shared identity in the registry, mux `fno_id`, discovery handles, requested-name resolution, and any session-keyed node claim.
 - **agy** emits plain text with no parseable session ID, so it is **stateless**: the live pane works while attached, but there is nothing to re-enter after it settles. `ask`-by-name is refused; use a fresh `--once`.
 - **opencode** is pane-hostable with a readiness detector and badge manifest. Its `ses_` session id is captured at spawn (a best-effort store lookup; an ambiguous or missed capture leaves the row live-only), probed for store membership, and resumable via `opencode --session <id>`. The fno plugin exposes the footnote verbs in opencode's command palette AND headlessly, so dispatch renders the native `/fno:verb` (not a prose brief). The headless spawn routes it through `opencode run --command fno:verb <args>` (a bare `run <message>` treats a leading slash as prose - verified against opencode v1.14.50), so a rendered slash command actually invokes the plugin command.
 

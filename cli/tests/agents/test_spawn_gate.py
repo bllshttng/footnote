@@ -50,6 +50,34 @@ ALIVE = os.getpid()  # a pid that is definitely alive (this test process)
 
 
 class TestCensus:
+    def test_pid_start_token_mismatch_is_not_our_process(self, monkeypatch):
+        """A reused numeric PID must not keep an old registry row alive."""
+        class Proc:
+            def is_running(self):
+                return True
+
+            def status(self):
+                return "running"
+
+        class Psutil:
+            STATUS_ZOMBIE = "zombie"
+
+            @staticmethod
+            def Process(_pid):
+                return Proc()
+
+        monkeypatch.setattr(
+            spawn_gate, "_process_start_time",
+            lambda _pid, _psutil=None: 42_000_000,
+            raising=False,
+        )
+        assert not spawn_gate._pid_alive(4242, 41_000_000, _psutil=Psutil)
+        assert spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil)
+
+        monkeypatch.setattr(spawn_gate, "_process_start_time", lambda *_args: None)
+        assert spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil) is None
+        assert not spawn_gate._pid_alive(4242, 42_000_000, _psutil=Psutil)
+
     def test_union_counts_and_dedups_adopted_session(self, tmp_path, monkeypatch):
         """AC1-EDGE: 1 fno pane worker + 1 foreign roster worker + 1 adopted
         session (roster row AND minted registry row) -> count 3."""
@@ -82,6 +110,18 @@ class TestCensus:
         rows = [_row("dead-worker", status="live", pid=4194321)]
         monkeypatch.setattr("fno.agents.registry.load_registry", lambda: rows)
         assert spawn_gate.census().count == 0
+
+    def test_unknown_process_incarnation_counts_conservatively(self, monkeypatch):
+        row = _row("unreadable-worker", pid=ALIVE)
+        monkeypatch.setattr("fno.agents.registry.load_registry", lambda: [row])
+        monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args: None)
+
+        result = spawn_gate.census()
+
+        assert result.count == 1
+        assert result.fno_slot_workers == 1
+        assert [worker.name for worker in result.workers] == ["unreadable-worker"]
+        assert any("incarnation unreadable" in warning for warning in result.warnings)
 
     def test_non_live_statuses_never_counted(self, monkeypatch):
         rows = [

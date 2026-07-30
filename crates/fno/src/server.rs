@@ -389,7 +389,10 @@ enum CoreMsg {
     // connection task closes). Snapshot reads and the spawn/kill mutations
     // reply inline on the core loop; `PaneWait` hands its reply to an
     // off-loop watcher so nothing blocking ever lands on the loop.
-    PaneLs(ControlReply),
+    PaneLs {
+        agents: Option<Vec<RegistryAgent>>,
+        reply: ControlReply,
+    },
     PaneRead {
         pane: u64,
         lines: Option<u16>,
@@ -475,6 +478,7 @@ enum CoreMsg {
     },
     PaneWhere {
         fno_id: String,
+        agents: Option<Vec<RegistryAgent>>,
         reply: ControlReply,
     },
     PaneBreak {
@@ -2107,7 +2111,7 @@ impl Core {
     /// Every pane's metadata for `pane ls`, ordered by pane id so the listing
     /// is stable and machine-readable. A pane mid-teardown (not in the tree)
     /// is still listed with what is known rather than dropped silently.
-    fn pane_infos(&self) -> Vec<PaneInfo> {
+    fn pane_infos_with_agents(&self, agents: &[RegistryAgent]) -> Vec<PaneInfo> {
         let mut out: Vec<PaneInfo> = self
             .panes
             .iter()
@@ -2129,7 +2133,7 @@ impl Core {
                     // (x-d865) The fno_id join: the registry row whose mux ref
                     // points at this pane in THIS session carries the durable
                     // identity. Server-owned (self.agents is the cached read).
-                    fno_id: self.fno_id_for_pane(pid),
+                    fno_id: self.fno_id_for_pane_with_agents(pid, agents),
                 }
             })
             .collect();
@@ -2137,13 +2141,30 @@ impl Core {
         out
     }
 
+    fn pane_ls_from_fresh_agents(&self, agents: Option<&[RegistryAgent]>) -> ServerMsg {
+        match agents {
+            Some(rows) => ServerMsg::PaneList {
+                panes: self.pane_infos_with_agents(rows),
+            },
+            None => ServerMsg::Err {
+                code: err_code::REGISTRY_UNAVAILABLE,
+                msg: "agent registry unavailable".into(),
+            },
+        }
+    }
+
     /// The `fno_id` (durable session id) of the registry row hosting `pid` in
     /// this session, if any. The forward half of the identity join (Locked
     /// Decision 6); `PaneWhere` is the reverse.
+    #[cfg(test)]
     fn fno_id_for_pane(&self, pid: u64) -> Option<String> {
-        self.agents.iter().find_map(|a| match &a.mux {
+        self.fno_id_for_pane_with_agents(pid, &self.agents)
+    }
+
+    fn fno_id_for_pane_with_agents(&self, pid: u64, agents: &[RegistryAgent]) -> Option<String> {
+        agents.iter().find_map(|a| match &a.mux {
             Some((sess, pane)) if sess == &self.session_name && *pane == pid => {
-                a.session_id.clone()
+                a.effective_identity().map(str::to_owned)
             }
             _ => None,
         })
@@ -2971,7 +2992,16 @@ impl Core {
     /// (it reads registry.json); the server's cache is always consultable, so
     /// an unmatched id here is NOT_FOUND, and a matched-but-paneless one is
     /// NOT_PANE_HOSTED.
+    #[cfg(test)]
     fn pane_where(&self, fno_id: &str) -> Result<ServerMsg, u32> {
+        self.pane_where_with_agents(fno_id, &self.agents)
+    }
+
+    fn pane_where_with_agents(
+        &self,
+        fno_id: &str,
+        agents: &[RegistryAgent],
+    ) -> Result<ServerMsg, u32> {
         let id = fno_id.trim();
         if id.is_empty() {
             return Err(err_code::NOT_FOUND);
@@ -2979,22 +3009,15 @@ impl Core {
         // Exact identity wins; a prefix only resolves when it is unambiguous
         // (hits a single distinct identity). An ambiguous prefix is NOT_FOUND,
         // never a silent pick of the first registry row (codex P2).
-        let exact: Vec<&RegistryAgent> = self
-            .agents
-            .iter()
-            .filter(|a| identity_exact(a, id))
-            .collect();
+        let exact: Vec<&RegistryAgent> = agents.iter().filter(|a| identity_exact(a, id)).collect();
         let matched: Vec<&RegistryAgent> = if !exact.is_empty() {
             exact
         } else {
-            let prefix: Vec<&RegistryAgent> = self
-                .agents
-                .iter()
-                .filter(|a| identity_prefix(a, id))
-                .collect();
+            let prefix: Vec<&RegistryAgent> =
+                agents.iter().filter(|a| identity_prefix(a, id)).collect();
             let mut ids: Vec<&str> = prefix
                 .iter()
-                .filter_map(|a| a.session_id.as_deref())
+                .filter_map(|a| a.effective_identity())
                 .collect();
             ids.sort_unstable();
             ids.dedup();
@@ -3040,6 +3063,26 @@ impl Core {
         }
     }
 
+    fn pane_where_from_fresh_agents(
+        &self,
+        fno_id: &str,
+        agents: Option<&[RegistryAgent]>,
+    ) -> ServerMsg {
+        let Some(rows) = agents else {
+            return ServerMsg::Err {
+                code: err_code::REGISTRY_UNAVAILABLE,
+                msg: "agent registry unavailable".into(),
+            };
+        };
+        match self.pane_where_with_agents(fno_id, rows) {
+            Ok(location) => location,
+            Err(code) => ServerMsg::Err {
+                code,
+                msg: format!("fno_id not located: {fno_id}"),
+            },
+        }
+    }
+
     /// Resolve an fno session id to a single live pane it hosts in THIS session,
     /// mirroring [`Self::pane_where`]'s exact-then-unambiguous-prefix match
     /// (x-c4d4 reuses the x-d865 registry join). `None` for an id that resolves
@@ -3065,7 +3108,7 @@ impl Core {
                 .collect();
             let mut ids: Vec<&str> = prefix
                 .iter()
-                .filter_map(|a| a.session_id.as_deref())
+                .filter_map(|a| a.effective_identity())
                 .collect();
             ids.sort_unstable();
             ids.dedup();
@@ -7835,10 +7878,8 @@ impl Core {
             }
             // -- v4 control verbs. Each answers on its oneshot; a dropped
             // receiver (client vanished mid-verb) makes the send a no-op.
-            CoreMsg::PaneLs(reply) => {
-                let _ = reply.send(ServerMsg::PaneList {
-                    panes: self.pane_infos(),
-                });
+            CoreMsg::PaneLs { agents, reply } => {
+                let _ = reply.send(self.pane_ls_from_fresh_agents(agents.as_deref()));
                 Flow::Continue
             }
             CoreMsg::PaneRead {
@@ -8101,14 +8142,12 @@ impl Core {
                 let _ = reply.send(msg);
                 Flow::Continue
             }
-            CoreMsg::PaneWhere { fno_id, reply } => {
-                let msg = match self.pane_where(&fno_id) {
-                    Ok(location) => location,
-                    Err(code) => ServerMsg::Err {
-                        code,
-                        msg: format!("fno_id not located: {fno_id}"),
-                    },
-                };
+            CoreMsg::PaneWhere {
+                fno_id,
+                agents,
+                reply,
+            } => {
+                let msg = self.pane_where_from_fresh_agents(&fno_id, agents.as_deref());
                 let _ = reply.send(msg);
                 Flow::Continue
             }
@@ -9094,7 +9133,15 @@ async fn handle_control(
     }
     let (reply_tx, reply_rx) = oneshot::channel();
     let sent = match verb {
-        ControlVerb::PaneLs => core_tx.send(CoreMsg::PaneLs(reply_tx)).await,
+        ControlVerb::PaneLs => {
+            let agents = read_guard_agents().await;
+            core_tx
+                .send(CoreMsg::PaneLs {
+                    agents,
+                    reply: reply_tx,
+                })
+                .await
+        }
         ControlVerb::PaneRead { pane, lines, block } => {
             core_tx
                 .send(CoreMsg::PaneRead {
@@ -9267,9 +9314,11 @@ async fn handle_control(
                 .await
         }
         ControlVerb::PaneWhere { fno_id } => {
+            let agents = read_guard_agents().await;
             core_tx
                 .send(CoreMsg::PaneWhere {
                     fno_id,
+                    agents,
                     reply: reply_tx,
                 })
                 .await
@@ -11452,6 +11501,19 @@ mod tests {
             None,
             "no registry row -> no fno_id"
         );
+
+        // Python-authored pane rows carry the canonical harness identity and
+        // leave the legacy fno session slot empty.
+        core.agents[0].session_id = None;
+        core.agents[0].harness_session_id = Some("CODEX-THREAD".into());
+        assert_eq!(core.fno_id_for_pane(1), Some("CODEX-THREAD".into()));
+        core.backlog_holders
+            .insert("x-identity".into(), "CODEX-THREAD".into());
+        assert_eq!(
+            core.fno_id_for_pane(1).as_deref(),
+            core.backlog_holders.get("x-identity").map(String::as_str),
+            "mux identity and node claim holder must be the same peer"
+        );
     }
 
     #[test]
@@ -12112,6 +12174,42 @@ mod tests {
         match core.pane_where("abc111") {
             Ok(ServerMsg::PaneLocation { panes, .. }) => assert_eq!(panes, vec![1]),
             other => panic!("exact prefix should resolve: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn pane_where_rejects_ambiguous_harness_only_prefix() {
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut a = agent_in("sess", 1, None, false);
+        a.harness_session_id = Some("019fb024-one".into());
+        let mut b = agent_in("sess", 2, None, false);
+        b.harness_session_id = Some("019fb024-two".into());
+        core.agents = vec![a, b];
+
+        assert_eq!(core.pane_where("019fb024"), Err(err_code::NOT_FOUND));
+        assert_eq!(core.resolve_local_pane("019fb024"), None);
+    }
+
+    #[test]
+    fn pane_ls_can_join_a_fresh_registry_snapshot_without_viewers() {
+        let mut core = two_tab_core();
+        core.session_name = "sess".into();
+        let mut fresh = agent_in("sess", 1, None, false);
+        fresh.harness_session_id = Some("019fb024-fresh".into());
+
+        assert_eq!(
+            core.fno_id_for_pane_with_agents(1, &[fresh]).as_deref(),
+            Some("019fb024-fresh")
+        );
+        assert!(core.agents.is_empty(), "zero-viewer cache stays untouched");
+        match core.pane_ls_from_fresh_agents(None) {
+            ServerMsg::Err { code, .. } => assert_eq!(code, err_code::REGISTRY_UNAVAILABLE),
+            other => panic!("registry failure must surface, got {other:?}"),
+        }
+        match core.pane_where_from_fresh_agents("019fb024-fresh", None) {
+            ServerMsg::Err { code, .. } => assert_eq!(code, err_code::REGISTRY_UNAVAILABLE),
+            other => panic!("registry failure must surface, got {other:?}"),
         }
     }
 
