@@ -35,6 +35,27 @@ def _app():
     return app
 
 
+# Fixture timestamps are RELATIVE to now, not hardcoded (x-e957 fix-on-discovery).
+# The scoreboard windows on "last 28d", so the literal 2026-07-02/03 rows these
+# tests used aged out of the window on 2026-07-30T10:00Z and reddened CI on
+# every PR from that moment. It passed locally only because the timestamps are
+# naive and a UTC-behind developer clock still placed them inside the window -
+# a failure that arrives on a wall-clock date and depends on the runner's
+# timezone is the worst shape of flake to debug from a red PR.
+def _days_ago(n: int, hour: int = 10) -> str:
+    from datetime import datetime, timedelta
+
+    return (datetime.now() - timedelta(days=n)).replace(
+        hour=hour, minute=0, second=0, microsecond=0
+    ).isoformat(timespec="seconds")
+
+
+# Named for the role each plays in the window, so a reader sees the intent
+# rather than an arithmetic puzzle.
+_RECENT = _days_ago(1)
+_OLDER = _days_ago(2)
+
+
 def _wire(monkeypatch, tmp_path, ledger_path):
     import fno.paths as paths
 
@@ -45,8 +66,8 @@ def _wire(monkeypatch, tmp_path, ledger_path):
 # --- AC5-HP -----------------------------------------------------------------
 def test_hp_prints_core_metrics(tmp_path, monkeypatch):
     rows = [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0},
-        {"completed": "2026-07-02T10:00:00", "termination_reason": "NoProgress", "graph_node_id": "x-2", "cost_usd": 2.0},
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0},
+        {"completed": _OLDER, "termination_reason": "NoProgress", "graph_node_id": "x-2", "cost_usd": 2.0},
     ]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), [])
@@ -60,8 +81,8 @@ def test_hp_prints_core_metrics(tmp_path, monkeypatch):
 
 def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
     # W4 signals present: a human_touch event + a graph node carrying a causal field.
-    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
-    (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": "2026-07-03T09:00:00"}) + "\n")
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
+    (tmp_path / "events.jsonl").write_text(json.dumps({"type": "human_touch", "ts": _days_ago(1, hour=9)}) + "\n")
     (tmp_path / "graph.json").write_text(json.dumps({"entries": [{"id": "x-1", "reverted": False}]}))
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
@@ -71,7 +92,7 @@ def test_hp_autonomy_survival_activate_with_w4(tmp_path, monkeypatch):
 
 
 def test_degrades_without_w4(tmp_path, monkeypatch):
-    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0}]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), [])
     assert "Autonomy      n/a" in res.output
@@ -99,8 +120,8 @@ def test_err_load_raises_broken_ledger(tmp_path):
 # --- AC5-UI -----------------------------------------------------------------
 def test_ui_partial_coverage_shows_caveat(tmp_path, monkeypatch):
     rows = [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0},
-        {"completed": "2026-07-02T10:00:00", "cost_usd": 1.0},  # no termination_reason -> <100%
+        {"completed": _RECENT, "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 5.0},
+        {"completed": _OLDER, "cost_usd": 1.0},  # no termination_reason -> <100%
     ]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), [])
@@ -132,7 +153,7 @@ def test_since_below_one_rejected(tmp_path, monkeypatch):
 
 
 def test_malformed_cost_does_not_crash(tmp_path, monkeypatch):
-    rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "cost_usd": "not-a-number"}]
+    rows = [{"completed": _RECENT, "termination_reason": "DonePRGreen", "cost_usd": "not-a-number"}]
     _wire(monkeypatch, tmp_path, _ledger(tmp_path, rows))
     res = runner.invoke(_app(), ["--json"])
     assert res.exit_code == 0
@@ -151,6 +172,8 @@ def test_aware_offset_timestamps_land_on_one_timeline():
 
 def test_survival_ignores_fix_predating_ship(tmp_path, monkeypatch):
     # A fix-node created BEFORE the ship is not a follow-up to it -> node survives.
+    # Fixed dates on purpose: this test injects an explicit `now=`, so it is
+    # deterministic and must NOT follow the wall clock.
     rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-1", "cost_usd": 1.0}]
     graph = [
         {"id": "x-1", "reverted": False},
@@ -168,6 +191,7 @@ def test_survival_ignores_fix_predating_ship(tmp_path, monkeypatch):
 def test_zero_shipped_nodes_is_na_not_a_bare_rate():
     # W4 signals present but no Done* row in window -> autonomy/survival must be n/a,
     # never "0/0" or a raw touch count.
+    # Fixed dates on purpose: explicit `now=` makes this deterministic.
     rows = [{"completed": "2026-07-03T10:00:00", "termination_reason": "NoProgress", "graph_node_id": "x-2", "cost_usd": 1.0}]
     touch = [{"type": "human_touch", "ts": "2026-07-03T09:00:00"}]
     graph = [{"id": "x-2", "reverted": False}, {"id": "x-9", "caused_by": "x-1"}]
@@ -206,7 +230,7 @@ def test_live_ledger_shape_folds_without_crash():
 def test_fr_single_retry_recovers(tmp_path, monkeypatch):
     """First read sees a truncated file (mid-append), the retry sees it whole."""
     p = tmp_path / "ledger.json"
-    good = {"entries": [{"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen", "cost_usd": 1.0}]}
+    good = {"entries": [{"completed": _RECENT, "termination_reason": "DonePRGreen", "cost_usd": 1.0}]}
     p.write_text('{"entries": [ {"completed"')  # truncated
 
     state = {"n": 0}
