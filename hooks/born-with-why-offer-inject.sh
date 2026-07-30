@@ -46,6 +46,12 @@ offset=0
 # Nothing new appended since last scan.
 (( offset >= size )) && exit 0
 
+# Never burn the slice we cannot deliver: the cursor advance below is one-way,
+# and both tools are used unconditionally after it. jq is NOT a given here -
+# session-start.sh exits silently without it - and losing the slice is worse
+# than re-scanning it next turn.
+command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
+
 # Scan only the slice [offset, size): bound the read with `head -c` so events
 # appended AFTER we captured `size` are NOT consumed here -- the cursor only
 # advances to `size`, so a racing append belongs to the next run, never both
@@ -65,18 +71,26 @@ for line in sys.stdin:
     line = line.strip()
     if not line:
         continue
+    # Every field access stays INSIDE the try, and both carried values are
+    # type-checked: a valid-JSON non-object line, a non-dict "data", or a
+    # non-string node_id/offer_line must skip that line, never kill the parse.
+    # The old code tolerated a bad id by overwriting it; accumulating older ids
+    # would instead carry it to the join, and a dead parse here means the cursor
+    # advances over the whole slice and destroys every offer in it.
     try:
         ev = json.loads(line)
-    except Exception:
-        continue
-    if ev.get("type") == "think_offered":
+        if ev.get("type") != "think_offered":
+            continue
         data = ev.get("data") or {}
         x = data.get("node_id")
-        if x:
-            if nid:
-                older.append(nid)
-            nid = x
-            offer = data.get("offer_line") or ""
+        o = data.get("offer_line")
+    except Exception:
+        continue
+    if isinstance(x, str) and x:
+        if nid:
+            older.append(nid)
+        nid = x
+        offer = o if isinstance(o, str) else ""
 sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]))
 ' 2>/dev/null)
 
@@ -141,13 +155,17 @@ except Exception:
 ' 2>/dev/null; then
             emit_older_only
         fi
-    elif [[ "$_get_rc" -ne 124 ]]; then
-        # Authoritative not-found (nonzero, not a timeout) -> phantom, suppress.
+    elif [[ "$_get_rc" -eq 1 ]]; then
+        # Authoritative not-found -> phantom, suppress.
         emit_older_only
     fi
-    # _get_rc == 124: resolution timed out, not an authoritative not-found. The
-    # cursor already advanced past this offer, so suppressing would discard a
-    # possibly-real offer permanently; degrade to surfacing.
+    # Any OTHER nonzero degrades to surfacing, because the cursor already
+    # advanced and suppressing would discard a possibly-real offer for good.
+    # Only rc 1 means "graph read cleanly, node absent": `fno backlog get` exits
+    # 3 on an unreadable graph (GRAPH_UNREADABLE_EXIT, cli/src/fno/graph/cli.py),
+    # 2 on a click usage error, 124 when with_timeout kills a wedged call, and
+    # the captured $? also covers a failed `cd "$REPO_ROOT"`. Every one of those
+    # is transient or our own fault, never evidence the node does not exist.
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
@@ -276,9 +294,9 @@ This is an offer, not something that already ran - nothing was spawned.
     fi
 fi
 
-# jq is a repo invariant for these hooks (session-start.sh uses it unconditionally).
-# All node text reaches JSON only through --arg, so backticks / quotes / $() in a
-# title render literally and never trigger shell expansion (AC2-EDGE).
+# jq presence was checked before the cursor advanced, so reaching here means it
+# exists. All node text reaches JSON only through --arg, so backticks / quotes /
+# $() in a title render literally and never trigger shell expansion (AC2-EDGE).
 jq -n --arg ctx "$reminder" \
     '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
 

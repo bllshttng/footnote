@@ -79,6 +79,9 @@ cat > "$WORK/bin/fno" <<'STUB'
 if [[ "${1:-}" == "backlog" && "${2:-}" == "get" ]]; then
   for h in ${FNO_STUB_HANG:-}; do [[ "${3:-}" == "$h" ]] && { sleep 5; exit 0; }; done
   for p in ${FNO_STUB_PHANTOM:-}; do [[ "${3:-}" == "$p" ]] && exit 1; done
+  # GRAPH_UNREADABLE_EXIT (cli/src/fno/graph/cli.py): a wedged graph, NOT an
+  # authoritative not-found. Must degrade to surfacing like the 124 timeout.
+  for u in ${FNO_STUB_UNREADABLE:-}; do [[ "${3:-}" == "$u" ]] && exit 3; done
   for w in ${FNO_STUB_INPROGRESS:-}; do
     [[ "${3:-}" == "$w" ]] && { printf '{"pr_number":207,"status":"claimed"}\n'; exit 0; }
   done
@@ -409,13 +412,103 @@ out="$(FNO_STUB_INPROGRESS="x-underway8" run_hook)" || fail "burst-underway: hoo
 ctx="$(printf '%s' "$out" | extract_ctx)"
 [[ "$ctx" == *"x-keep0002"* ]] \
     || fail "burst-underway: an underway newest destroyed the older offer: ${ctx:-<empty>}"
+# Discriminating half: without it this passes even when the guard is broken,
+# because a surfaced newest carries the older id along anyway.
+[[ "$ctx" != *"x-underway8"* ]] || fail "burst-underway: underway newest was offered anyway"
 pass "burst-underway: underway newest suppressed, older ids still surface"
+
+# ── Burst with NO offer_line on the newest: the \x1f arity case ──────
+# This is what the tab -> \x1f separator change exists for. Under tab, `read`
+# collapses the empty offer_line and shifts the older-id list into it, so the
+# operator is told to run the OLDER id as a command and the ride-along vanishes.
+offered_line    "2026-06-30T14:30:00Z" "x-older777" >> "$EVENTS"
+offered_no_line "2026-06-30T14:30:03Z" "x-newest88" >> "$EVENTS"
+out="$(FNO_STUBDIR="$STUBDIR" run_hook)" || fail "burst-noline: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"/think dispatch x-newest88"* ]] \
+    || fail "burst-noline: offer_cmd did not fall back correctly (field shift?): ${ctx:-<empty>}"
+[[ "$ctx" == *"Also born this gap"*"x-older777"* ]] \
+    || fail "burst-noline: older id lost to field collapse: ${ctx:-<empty>}"
+pass "burst-noline: empty offer_line keeps its arity, older id survives"
+
+# ── Burst on the ENRICHED reminder (the normal production path) ──────
+# The burst cases above all land on the v1 fallback (no enrichment fixture), so
+# without this the ride-along clause is deletable from the enriched branch.
+cat > "$STUBDIR/get-x-rich0001.json" <<'JSON'
+{"id":"x-rich0001","title":"A titled node","details":"the why","domain":"code"}
+JSON
+cat > "$STUBDIR/ready.json" <<'JSON'
+[]
+JSON
+offered_line "2026-06-30T14:45:00Z" "x-older888" >> "$EVENTS"
+offered_line "2026-06-30T14:45:03Z" "x-rich0001" >> "$EVENTS"
+out="$(FNO_STUBDIR="$STUBDIR" run_hook)" || fail "burst-enriched: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"A titled node"* ]] \
+    || fail "burst-enriched: did not take the enriched path: ${ctx:-<empty>}"
+[[ "$ctx" == *"x-older888"* ]] \
+    || fail "burst-enriched: enriched reminder dropped the ride-along clause: ${ctx:-<empty>}"
+pass "burst-enriched: enriched reminder carries the ride-along clause"
+
+# ── Malformed shapes must skip their line, never kill the whole slice ──
+# A non-string node_id, a valid-JSON non-object line, and a non-dict "data" each
+# used to raise inside the parse; the cursor advances regardless, so a dead
+# parse destroys every offer in the slice including valid newer ones.
+printf '{"type":"think_offered","data":{"node_id":123}}\n' >> "$EVENTS"
+printf '123\n' >> "$EVENTS"
+printf '{"type":"think_offered","data":[1,2]}\n' >> "$EVENTS"
+offered_line "2026-06-30T14:50:00Z" "x-survivor1" >> "$EVENTS"
+out="$(FNO_STUBDIR="$STUBDIR" run_hook)" || fail "malformed-shapes: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-survivor1"* ]] \
+    || fail "malformed-shapes: a bad line killed the parse and ate the slice: ${ctx:-<empty>}"
+pass "malformed-shapes: bad node_id / non-object line / non-dict data skipped, valid offer survives"
 
 # Solo suppressed offer stays silent - naming nothing is still the right answer.
 offered_line "2026-06-30T14:02:00Z" "ab-phantom7" >> "$EVENTS"
 out="$(FNO_STUB_PHANTOM="ab-phantom7" run_hook)" || fail "solo-phantom: hook nonzero"
 [[ -z "$out" ]] || fail "solo-phantom: suppressed solo offer emitted output: $out"
 pass "solo-phantom: suppressed offer with no older ids stays silent"
+
+# ── Resolve-guard: an UNREADABLE graph (rc 3) is not a phantom ──────
+# Only rc 1 means "read cleanly, node absent". rc 3 is a wedged graph, as
+# transient as the 124 timeout; treating it as phantom destroys a real offer
+# that the cursor has already consumed.
+offered_line "2026-06-30T15:00:00Z" "x-wedged001" >> "$EVENTS"
+out="$(FNO_STUB_UNREADABLE="x-wedged001" run_hook)" || fail "unreadable: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-wedged001"* ]] \
+    || fail "unreadable: rc=3 (wedged graph) ate the offer as a phantom: ${ctx:-<empty>}"
+pass "resolve-guard: unreadable graph (rc 3) degrades to surfacing, not suppression"
+
+# ── Cursor is not burned when the emitter is unavailable ─────────────
+# jq/python3 are used unconditionally after the one-way cursor advance, so a
+# missing one must leave the slice unconsumed rather than silently eat it.
+MINBIN="$WORK/minbin"; mkdir -p "$MINBIN"
+for t in bash dirname git head jq kill python3 sleep tail tr wc; do
+    p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$MINBIN/$t"
+done
+# POSITIVE CONTROL first. A stripped PATH missing some unrelated tool would make
+# the hook die early and the no-jq assertion below pass for the wrong reason
+# (it did: `dirname` was absent, so the hook exited at its `source` line and
+# never reached the guard under test). Prove this PATH can produce an offer.
+offered_line "2026-06-30T15:30:00Z" "x-ctrl00001" >> "$EVENTS"
+out="$(cd "$WORK" && PATH="$MINBIN" bash "$HOOK" 2>/dev/null)" || fail "minbin-control: hook nonzero"
+[[ "$(printf '%s' "$out" | extract_ctx)" == *"x-ctrl00001"* ]] \
+    || fail "minbin-control: stripped PATH cannot surface an offer at all; the no-jq case below would be vacuous"
+pass "minbin-control: stripped PATH still surfaces an offer (no-jq case is meaningful)"
+
+# Same PATH, jq removed: the slice must survive for the next turn.
+rm -f "$MINBIN/jq"
+offered_line "2026-06-30T15:31:00Z" "x-nojq00001" >> "$EVENTS"
+cursor_before="$(tr -d ' \n' < "$CURSOR")"
+out="$(cd "$WORK" && PATH="$MINBIN" bash "$HOOK" 2>/dev/null)" || fail "no-jq: hook nonzero"
+[[ -z "$out" ]] || fail "no-jq: emitted output without jq: $out"
+[[ "$(tr -d ' \n' < "$CURSOR")" == "$cursor_before" ]] \
+    || fail "no-jq: cursor advanced while unable to emit (slice destroyed)"
+pass "no-jq: missing emitter leaves the slice unconsumed"
+# Consume the pending offer so later cases start from a clean cursor.
+run_hook >/dev/null 2>&1
 
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
