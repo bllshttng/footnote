@@ -14,9 +14,10 @@
 #
 # ponytail: single project-local cursor (not session-keyed) -- surfacing an
 # attended offer once TOTAL across sessions is the intent; two concurrent
-# sessions sharing .fno should not both nag. If multiple offers land between two
-# turns, only the newest surfaces (offers are attended/human-paced, so 0-1 per
-# gap is the norm); the stop-hook escalation that catches the rest is x-965f.
+# sessions sharing .fno should not both nag. Bursts DO happen (four births 3s
+# apart, 2026-07-30T02:39:58..02:40:08), so only the newest gets the full offer,
+# but the rest ride along as bare ids: the cursor eats them either way, and
+# naming them is the difference between deferred and destroyed (x-965f).
 
 set -uo pipefail
 
@@ -45,42 +46,117 @@ offset=0
 # Nothing new appended since last scan.
 (( offset >= size )) && exit 0
 
+# Never burn the slice we cannot deliver: the cursor advance below is one-way,
+# and both tools are used unconditionally after it. jq is NOT a given here -
+# session-start.sh exits silently without it - and losing the slice is worse
+# than re-scanning it next turn.
+command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
+
 # Scan only the slice [offset, size): bound the read with `head -c` so events
 # appended AFTER we captured `size` are NOT consumed here -- the cursor only
 # advances to `size`, so a racing append belongs to the next run, never both
 # (once-per-offer). Per-line JSON parse so a malformed/truncated line is skipped,
 # not fatal. Latest think_offered wins; carry its offer_line, the authoritative
 # command the offer path recorded (a reconstructed bare `/think <id>` is a single
-# non-mode token the router rejects -- skills/think/SKILL.md).
+# non-mode token the router rejects -- skills/think/SKILL.md). Older offers in
+# the slice ride along as bare ids. \x1f-separated, not tab: tab is
+# IFS-whitespace, so `read` would collapse an empty offer_line and shift the
+# ride-along list into it (same trap the enrichment parse below documents).
 parsed=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | head -c "$((size - offset))" 2>/dev/null | python3 -c '
-import sys, json
+import sys, json, re
+# Read the slice as BYTES and require exactly the count the caller measured.
+# A completion sentinel alone proves the parser ran, not that it was fed: a
+# failing `tail`/`head` hands it empty stdin, it finds no offers, and the caller
+# advances over a live offer. A short read exits without the sentinel instead,
+# so the cursor stays put and the next turn re-scans (verified: a `tail` that
+# exits 1 used to consume the slice and emit nothing).
+expected = int(sys.argv[1])
+raw = sys.stdin.buffer.read()
+if len(raw) != expected:
+    sys.exit(1)
+# Decode with replacement, never raising: .fno/events.jsonl has non-Python
+# appenders (the stop hooks printf shell-interpolated lines) and `head -c` cuts
+# on a byte boundary, so a truncated multi-byte char is reachable. Decoding at a
+# bare `for line in sys.stdin` would raise OUTSIDE the per-line try below and
+# take every offer in the slice down with it. A mangled line instead fails
+# json.loads inside the try and is skipped, as the file header already claims.
+# The reminder wrapper is hook-owned; offer_line is free text (spawn_think
+# interpolates a filesystem path into it), so it gets the same defang the
+# enrichment parse applies to title/details or it could close the wrapper early.
+_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 nid = ""
 offer = ""
-for line in sys.stdin:
+older = []
+for line in raw.decode("utf-8", "replace").splitlines():
     line = line.strip()
     if not line:
         continue
+    # Every field access stays INSIDE the try, and both carried values are
+    # type-checked: a valid-JSON non-object line, a non-dict "data", or a
+    # non-string node_id/offer_line must skip that line, never kill the parse.
+    # The old code tolerated a bad id by overwriting it; accumulating older ids
+    # would instead carry it to the join, and a dead parse here means the cursor
+    # advances over the whole slice and destroys every offer in it.
     try:
         ev = json.loads(line)
-    except Exception:
-        continue
-    if ev.get("type") == "think_offered":
+        if ev.get("type") != "think_offered":
+            continue
         data = ev.get("data") or {}
         x = data.get("node_id")
-        if x:
-            nid = x
-            offer = data.get("offer_line") or ""
-print(nid + "\t" + offer)
-' 2>/dev/null)
+        o = data.get("offer_line")
+    except Exception:
+        continue
+    if isinstance(x, str) and x:
+        if nid:
+            older.append(nid)
+        nid = _TAG.sub(r"[\1system-reminder]", x)
+        offer = _TAG.sub(r"[\1system-reminder]", o) if isinstance(o, str) else ""
+# Cap the ride-along list. Not defensive padding: on a COLD START there is no
+# cursor, so offset is 0 and the entire history is one slice - measured at 418
+# ids and 3472 chars against the events.jsonl in this repo. Bursts are small (4 is
+# the observed max), which is why an earlier cut of this deleted the cap as
+# speculative; that reasoning missed the offset==0 case entirely.
+MAX = 5
+if len(older) > MAX:
+    older = older[-MAX:] + ["+%d more" % (len(older) - MAX)]
+# Trailing \x04 is a completion sentinel: `command -v python3` proves presence,
+# not success, and a present-but-broken interpreter (dead pyenv shim, broken
+# venv) would emit nothing while the cursor advanced anyway. The caller refuses
+# to advance without this byte, so a failed parse re-scans instead of eating the
+# slice. A clean scan that found no offer still prints it, and still advances.
+sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]) + "\x04")
+' "$((size - offset))" 2>/dev/null)
+
+# No completion sentinel -> the parse died rather than finding nothing. Leave the
+# cursor where it is so the next turn re-scans; burning the slice on a broken
+# interpreter is the loss this hook exists to prevent.
+[[ "$parsed" == *$'\x04' ]] || exit 0
+parsed="${parsed%$'\x04'}"
 
 # Advance the cursor to the captured EOF regardless of what we found -- consuming
 # exactly the [offset, size) slice we scanned is what makes the reminder fire
 # once per offer.
 printf '%s' "$size" > "$CURSOR" 2>/dev/null || true
 
-node_id="${parsed%%$'\t'*}"
-offer_cmd="${parsed#*$'\t'}"
+IFS=$'\x1f' read -r node_id offer_cmd older_ids <<<"$parsed"
 [[ -n "$node_id" ]] || exit 0
+
+# The cursor already consumed these, so this clause is their only surfacing.
+also_born_line=""
+[[ -n "${older_ids:-}" ]] && also_born_line="
+Also born this gap (not offered separately): ${older_ids}."
+
+# Suppressing the NEWEST offer must not destroy the older ids with it: the guard
+# below exits before any reminder is built, and the cursor is already past the
+# whole slice (codex P2). Naming an id is not an offer, so it is safe to list
+# them unresolved - a stale id is noise, a discarded one is data loss.
+emit_older_only() {
+    [[ -n "${older_ids:-}" ]] || exit 0
+    jq -n --arg ctx "<system-reminder>
+Nodes born this gap, not offered: ${older_ids}.
+</system-reminder>" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
+    exit 0
+}
 
 # Resolve + in-progress guard: suppress an offer that should not reach the
 # operator. Two cases, both from one `fno backlog get`:
@@ -97,7 +173,11 @@ offer_cmd="${parsed#*$'\t'}"
 # parsed, so a missing/garbled resolver never eats a real fresh offer. Run from
 # $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
 if command -v fno >/dev/null 2>&1; then
-    node_json=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
+    # `cd` failure exits 1 -- the SAME code as an authoritative not-found -- so a
+    # deleted worktree (archive-worktree.sh / `fno worktree cleanup` can remove one
+    # under a live session) would read as "node absent" and destroy a live offer.
+    # Map it to 99 so it lands in the degrade-to-surfacing branch below.
+    node_json=$( cd "$REPO_ROOT" 2>/dev/null || exit 99; with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
     _get_rc=$?
     if [[ "$_get_rc" -eq 0 ]]; then
         # Resolved. Suppress only if the node is already underway; a parse
@@ -116,15 +196,19 @@ try:
 except Exception:
     sys.exit(1)  # unparseable or unexpected shape -> do NOT suppress (surface)
 ' 2>/dev/null; then
-            exit 0
+            emit_older_only
         fi
-    elif [[ "$_get_rc" -ne 124 ]]; then
-        # Authoritative not-found (nonzero, not a timeout) -> phantom, suppress.
-        exit 0
+    elif [[ "$_get_rc" -eq 1 ]]; then
+        # Authoritative not-found -> phantom, suppress.
+        emit_older_only
     fi
-    # _get_rc == 124: resolution timed out, not an authoritative not-found. The
-    # cursor already advanced past this offer, so suppressing would discard a
-    # possibly-real offer permanently; degrade to surfacing.
+    # Any OTHER nonzero degrades to surfacing, because the cursor already
+    # advanced and suppressing would discard a possibly-real offer for good.
+    # Only rc 1 means "graph read cleanly, node absent": `fno backlog get` exits
+    # 3 on an unreadable graph (GRAPH_UNREADABLE_EXIT, cli/src/fno/graph/cli.py),
+    # 2 on a click usage error, 124 when with_timeout kills a wedged call, and 99
+    # when the `cd` above failed. Every one of those is transient or our own
+    # fault, never evidence the node does not exist.
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
@@ -137,7 +221,7 @@ fi
 v1_reminder="<system-reminder>
 A born-with-why offer is pending for ${node_id}. Surface it to the operator as a
 yes/no before wrapping up: \"Run \`${offer_cmd}\` now, or skip?\" This is an
-offer, not something that already ran - nothing was spawned.
+offer, not something that already ran - nothing was spawned.${also_born_line}
 </system-reminder>"
 
 reminder="$v1_reminder"
@@ -246,16 +330,16 @@ Also on deck: ${cand_id} - \"${cand_title}\" (\`/think ${cand_id}\`)."
 
         reminder="<system-reminder>
 It's about time you think about ${node_id} - \"${e_title}\".${why_line}
-Run \`${offer_cmd}\` now, or skip?${ondeck_line}
+Run \`${offer_cmd}\` now, or skip?${also_born_line}${ondeck_line}
 
 This is an offer, not something that already ran - nothing was spawned.
 </system-reminder>"
     fi
 fi
 
-# jq is a repo invariant for these hooks (session-start.sh uses it unconditionally).
-# All node text reaches JSON only through --arg, so backticks / quotes / $() in a
-# title render literally and never trigger shell expansion (AC2-EDGE).
+# jq presence was checked before the cursor advanced, so reaching here means it
+# exists. All node text reaches JSON only through --arg, so backticks / quotes /
+# $() in a title render literally and never trigger shell expansion (AC2-EDGE).
 jq -n --arg ctx "$reminder" \
     '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
 
