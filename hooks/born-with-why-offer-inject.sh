@@ -14,9 +14,10 @@
 #
 # ponytail: single project-local cursor (not session-keyed) -- surfacing an
 # attended offer once TOTAL across sessions is the intent; two concurrent
-# sessions sharing .fno should not both nag. If multiple offers land between two
-# turns, only the newest surfaces (offers are attended/human-paced, so 0-1 per
-# gap is the norm); the stop-hook escalation that catches the rest is x-965f.
+# sessions sharing .fno should not both nag. Bursts DO happen (four births 3s
+# apart, 2026-07-30T02:39:58..02:40:08), so only the newest gets the full offer,
+# but the rest ride along as bare ids: the cursor eats them either way, and
+# naming them is the difference between deferred and destroyed (x-965f).
 
 set -uo pipefail
 
@@ -51,11 +52,15 @@ offset=0
 # (once-per-offer). Per-line JSON parse so a malformed/truncated line is skipped,
 # not fatal. Latest think_offered wins; carry its offer_line, the authoritative
 # command the offer path recorded (a reconstructed bare `/think <id>` is a single
-# non-mode token the router rejects -- skills/think/SKILL.md).
+# non-mode token the router rejects -- skills/think/SKILL.md). Older offers in
+# the slice ride along as bare ids. \x1f-separated, not tab: tab is
+# IFS-whitespace, so `read` would collapse an empty offer_line and shift the
+# ride-along list into it (same trap the enrichment parse below documents).
 parsed=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | head -c "$((size - offset))" 2>/dev/null | python3 -c '
 import sys, json
 nid = ""
 offer = ""
+older = []
 for line in sys.stdin:
     line = line.strip()
     if not line:
@@ -68,9 +73,11 @@ for line in sys.stdin:
         data = ev.get("data") or {}
         x = data.get("node_id")
         if x:
+            if nid:
+                older.append(nid)
             nid = x
             offer = data.get("offer_line") or ""
-print(nid + "\t" + offer)
+sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]))
 ' 2>/dev/null)
 
 # Advance the cursor to the captured EOF regardless of what we found -- consuming
@@ -78,9 +85,13 @@ print(nid + "\t" + offer)
 # once per offer.
 printf '%s' "$size" > "$CURSOR" 2>/dev/null || true
 
-node_id="${parsed%%$'\t'*}"
-offer_cmd="${parsed#*$'\t'}"
+IFS=$'\x1f' read -r node_id offer_cmd older_ids <<<"$parsed"
 [[ -n "$node_id" ]] || exit 0
+
+# The cursor already consumed these, so this clause is their only surfacing.
+also_born_line=""
+[[ -n "${older_ids:-}" ]] && also_born_line="
+Also born this gap (not offered separately): ${older_ids}."
 
 # Resolve + in-progress guard: suppress an offer that should not reach the
 # operator. Two cases, both from one `fno backlog get`:
@@ -137,7 +148,7 @@ fi
 v1_reminder="<system-reminder>
 A born-with-why offer is pending for ${node_id}. Surface it to the operator as a
 yes/no before wrapping up: \"Run \`${offer_cmd}\` now, or skip?\" This is an
-offer, not something that already ran - nothing was spawned.
+offer, not something that already ran - nothing was spawned.${also_born_line}
 </system-reminder>"
 
 reminder="$v1_reminder"
@@ -246,7 +257,7 @@ Also on deck: ${cand_id} - \"${cand_title}\" (\`/think ${cand_id}\`)."
 
         reminder="<system-reminder>
 It's about time you think about ${node_id} - \"${e_title}\".${why_line}
-Run \`${offer_cmd}\` now, or skip?${ondeck_line}
+Run \`${offer_cmd}\` now, or skip?${also_born_line}${ondeck_line}
 
 This is an offer, not something that already ran - nothing was spawned.
 </system-reminder>"

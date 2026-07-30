@@ -372,6 +372,24 @@ out="$(FNO_STUBDIR="$STUBDIR" FNO_STUB_CALLLOG="$CALLLOG" run_hook)" || fail "AC
 [[ ! -s "$CALLLOG" ]] || fail "AC2-FR: fno was called on the no-offer fast path: $(cat "$CALLLOG")"
 pass "AC2-FR: no-offer fast path makes zero fno calls"
 
+# ── Burst: several offers in one gap -> newest offered, older named ──
+# The hook shipped assuming "0-1 offers per gap is the norm"; events.jsonl
+# disproved it (four births 3s apart). The cursor consumes the whole slice, so
+# an unnamed older offer is destroyed, not deferred (x-965f).
+offered_line "2026-06-30T13:00:00Z" "x-burst001" >> "$EVENTS"
+offered_line "2026-06-30T13:00:03Z" "x-burst002" >> "$EVENTS"
+offered_line "2026-06-30T13:00:06Z" "x-burst003" >> "$EVENTS"
+out="$(FNO_STUBDIR="$STUBDIR" run_hook)" || fail "burst: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"pending for x-burst003"* ]] \
+    || fail "burst: newest offer is not the one offered: ${ctx:-<empty>}"
+[[ "$ctx" == *"x-burst001"* && "$ctx" == *"x-burst002"* ]] \
+    || fail "burst: older offers in the slice were silently dropped: ${ctx:-<empty>}"
+# Still exactly one full offer, not three (naming != nagging).
+[[ "$(grep -c 'now, or skip' <<<"$ctx")" == "1" ]] \
+    || fail "burst: more than one full offer surfaced"
+pass "burst: newest offer surfaced, older offers in the slice named not dropped"
+
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
 python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hook not registered under UserPromptSubmit"
