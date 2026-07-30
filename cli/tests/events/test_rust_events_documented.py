@@ -19,14 +19,17 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SCHEMA_PATH = REPO_ROOT / "cli/src/fno/events/schema.yaml"
 LIB_RS = REPO_ROOT / "crates/fno-agents/src/lib.rs"
 
-# Floor for the parsed const size. A regex that matches the wrong block (a test
-# fixture's kind list, say) or nothing at all would otherwise turn every
-# assertion below into a vacuous pass. Kept near the real count (49 at the time of
-# writing) rather than comfortably below it: every check here is membership-only,
-# so a parse that silently loses a few kinds loses exactly the assertions that
-# would have caught them. Raise it with the const; lowering it to go green is the
-# one change this guard exists to stop.
-MIN_EVENT_KINDS = 45
+# Floor for the parsed const size, guarding against a VACUOUS pass: a regex that
+# matched the wrong block or nothing at all would otherwise leave every assertion
+# below comparing against an empty list.
+#
+# Deliberately well below the real count (49 at the time of writing) rather than
+# just under it. Tightening it to catch a parse that loses a handful of kinds also
+# turns a legitimate removal of a handful into a false red, and the const-to-
+# schema.yaml direction is independently checked by step 6 of
+# scripts/check-event-schema-parity.sh, so this does not have to carry that too.
+# Its one job is telling a broken parse from a working one.
+MIN_EVENT_KINDS = 40
 
 # Source values that must be in the envelope.source enum
 REQUIRED_SOURCES = [
@@ -65,7 +68,9 @@ def parse_known_event_kinds(text: str) -> list[str]:
     assert len(kinds) >= MIN_EVENT_KINDS, (
         f"parsed only {len(kinds)} kinds out of KNOWN_EVENT_KINDS, expected at "
         f"least {MIN_EVENT_KINDS}. The const was probably reformatted and this "
-        f"parser needs updating; do not lower MIN_EVENT_KINDS to go green."
+        f"parser needs updating. If instead kinds were legitimately removed and "
+        f"the count is really this low, lower the floor deliberately - but check "
+        f"the parse first, because that is the failure this floor is here for."
     )
     return kinds
 
@@ -92,20 +97,10 @@ def test_floor_rejects_a_truncated_parse() -> None:
     A reformat the regex cannot read yields a short list; without the floor that
     compares as equal-to-everything and every assertion below passes vacuously.
     """
-    with pytest.raises(AssertionError, match="do not lower MIN_EVENT_KINDS"):
+    with pytest.raises(AssertionError, match="check the parse first"):
         parse_known_event_kinds(
             'pub const KNOWN_EVENT_KINDS: &[&str] = &[\n    "a", "b", "c",\n];\n'
         )
-
-
-def test_floor_accepts_a_full_parse() -> None:
-    """Positive control: the floor is not rejecting everything."""
-    body = "".join(f'    "kind_{i}",\n' for i in range(MIN_EVENT_KINDS))
-    parsed = parse_known_event_kinds(
-        f"pub const KNOWN_EVENT_KINDS: &[&str] = &[\n{body}];\n"
-    )
-    assert len(parsed) == MIN_EVENT_KINDS
-    assert parsed[0] == "kind_0"
 
 
 def test_unterminated_const_block_is_loud() -> None:

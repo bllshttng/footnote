@@ -106,10 +106,7 @@ read_version() {
         echo "ERROR: cannot read $PROTO_FILE at $label ($rev)" >&2
         return 1
     fi
-    # Here-string, not a pipe: under `pipefail` a producer that takes a SIGPIPE
-    # makes the pipeline non-zero even on a successful match. Harmless with a
-    # bare `grep` today, since it reads to EOF, but the same shape one flag away
-    # (`-q`, `-m1`) is a silent pass, so neither instance uses a pipe.
+    # Here-string, not a pipe, for the reason spelled out at the match site below.
     line="$(grep -E '^pub const PROTO_VERSION' <<<"$blob" || true)"
     if [[ -z "$line" ]]; then
         echo "ERROR: no 'pub const PROTO_VERSION' line in $PROTO_FILE at $label" >&2
@@ -126,9 +123,15 @@ read_version() {
 # Resolve the base tip. Fail CLOSED when it is unreachable: a shallow clone that
 # silently skipped the check would re-open the collision class.
 # ---------------------------------------------------------------------------
-# Fetched UNCONDITIONALLY, not only when the tracking ref is missing. A ref that
-# merely exists may be days behind, and comparing against a stale base prints OK
-# on the exact collision - from the local run mode this script advertises.
+# Fetched UNCONDITIONALLY, and a FAILED fetch is fatal.
+#
+# Both halves matter. Fetching only when the tracking ref is missing compares
+# against a ref that may be days behind; and tolerating a failed fetch because
+# "the rev-parse below re-derives it" is worse, because rev-parse happily
+# succeeds against the stale ref. Measured on a broken remote with a tracking ref
+# pinned at v10 while the real base held v11: the guard printed
+# "OK (v10 -> v11)" and exited 0 on a real collision. Not fetching and not
+# knowing are the same state, and this check answers "cannot verify" with exit 2.
 #
 # NO --depth here. `git fetch --depth=1` against a COMPLETE clone does not fetch
 # less, it writes .git/shallow and truncates the whole repository: measured, a
@@ -136,10 +139,20 @@ read_version() {
 # script is locally runnable, so it must not mutate the caller's repo to answer a
 # read-only question.
 #
-# The fetch's own error is left on stderr on purpose: "cannot verify the bump"
-# with no reason is the hardest version of this failure to act on. A failure is
-# non-fatal here because the rev-parse below re-derives it and fails closed.
-git fetch --quiet "$REMOTE" "$BASE_REF" || true
+# git's own error is left on stderr: "cannot verify the bump" with no reason is
+# the hardest version of this failure to act on.
+if ! git fetch --quiet "$REMOTE" "$BASE_REF"; then
+    if git rev-parse --verify --quiet "$REMOTE/$BASE_REF" >/dev/null; then
+        echo "ERROR: cannot fetch $REMOTE/$BASE_REF - unable to verify the bump" >&2
+        echo "       A local $REMOTE/$BASE_REF exists but cannot be confirmed current," >&2
+        echo "       and a stale base passes a real collision. Refusing." >&2
+    else
+        echo "ERROR: cannot resolve $REMOTE/$BASE_REF - unable to verify the bump" >&2
+        echo "       (fetch it, or set PR_BASE_REF/PR_REMOTE)" >&2
+    fi
+    exit 2
+fi
+
 # Resolved ONLY from the remote-tracking ref. An earlier draft fell back to
 # FETCH_HEAD, which is whatever the last fetch in this repo happened to leave
 # behind - an unrelated branch, or a stale commit from a previous run - and
@@ -238,6 +251,13 @@ if (( HEAD_V == BASE_V )); then
     # lands here: a PR that bumps and then reverts within its own commits reads
     # as touched, ends level with the base, and has no parallel branch anywhere.
     # Sending that author to look for one wastes their time.
+    #
+    # The two are not indistinguishable, only not worth distinguishing. A value
+    # comparison at the merge-base cannot separate them (both read head ==
+    # merge-base), but PROTO_PATCH already holds the discriminator: the revert
+    # carries a `+` line above BASE_V and the collision does not. That is a
+    # heuristic, not a total function - overshoot to v12, come back to v11, and
+    # collide at v11 and it mislabels - so this branch names both instead.
     echo "       This PR's commits touch the PROTO_VERSION line, but its value is" >&2
     echo "       level with $REMOTE/$BASE_REF rather than above it, so the change" >&2
     echo "       lands with no effective bump." >&2
@@ -247,9 +267,9 @@ if (( HEAD_V == BASE_V )); then
     echo "       Fix: re-bump to v$((BASE_V + 1)) in $PROTO_FILE (and any" >&2
     echo "       assert_eq!(PROTO_VERSION, ...) pinned to the old value)." >&2
     echo "" >&2
-    echo "       If instead you bumped and then reverted inside this PR and the" >&2
-    echo "       wire shape is unchanged, no bump is needed - revert the const" >&2
-    echo "       edits too so the line is untouched." >&2
+    echo "       If instead the value is unchanged for any reason - a revert, a" >&2
+    echo "       reflow, an attribute - and the wire shape did not change, no bump" >&2
+    echo "       is needed: undo the const edits so the line reads as untouched." >&2
 else
     echo "       This PR lowers PROTO_VERSION. It must only ever increase." >&2
     echo "       Fix: set it above v$BASE_V in $PROTO_FILE." >&2

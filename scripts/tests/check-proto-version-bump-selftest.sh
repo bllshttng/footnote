@@ -23,6 +23,10 @@
 #   11. non-main base ref via PR_BASE_REF                -> exit 0
 #   12. empty PR_HEAD_SHA under CI                       -> exit 2 (refused)
 #   13. unknown arg                                      -> exit 2 (refused)
+#   14. untouched PR + unlocatable base const            -> exit 1 (order guard)
+#   15. bump then revert inside the PR                   -> exit 1, revert guidance
+#   16. failed fetch over a stale tracking ref           -> exit 2 (refused)
+# Case 1 also asserts the run leaves the caller's repo unshallowed.
 #
 # Usage: bash scripts/tests/check-proto-version-bump-selftest.sh
 # Exit 0 = all assertions passed.
@@ -121,13 +125,24 @@ run_guard() {
         bash "$GUARD" 2>&1 )
 }
 
-# --- case 1: clean bump ----------------------------------------------------
+# --- case 1: clean bump, and the run leaves the repo intact ----------------
 read -r dir sha <<< "$(make_repo 10 "$(version_line 11)")"
+commits_before="$(git -C "$dir" rev-list --count HEAD)"
 out="$(run_guard "$dir" "$sha")"; rc=$?
 if [[ $rc -eq 0 ]] && [[ "$out" == *"v10 -> v11"* ]]; then
     pass "clean bump exits 0"
 else
     fail "clean bump: rc=$rc out=$out"
+fi
+# The guard fetches on every run, and `--depth` there would write .git/shallow
+# and truncate the caller's repository (measured: 5 commits -> 1). The header
+# calls that out; nothing asserted it until here. A read-only question must not
+# mutate the repo it is asked about.
+commits_after="$(git -C "$dir" rev-list --count HEAD)"
+if [[ ! -f "$dir/.git/shallow" ]] && [[ "$commits_before" == "$commits_after" ]]; then
+    pass "the run leaves the repo unshallowed and its history intact"
+else
+    fail "guard truncated the caller's repo: shallow=$([ -f "$dir/.git/shallow" ] && echo yes || echo no) commits=$commits_before->$commits_after"
 fi
 
 # --- case 2: the collision this guard exists for --------------------------
@@ -279,12 +294,10 @@ else
 fi
 
 # --- case 10: a large earlier patch must not swallow the match --------------
-# `git log` emits newest-first, so a bump commit on top of a big earlier
-# proto.rs commit means the match appears while a lot of output is still
-# pending. Piping that into `grep -q` lets grep exit at the match, the producer
-# take a SIGPIPE, and `pipefail` turn the whole pipeline non-zero - which reads
-# as "no match" and passes the guard on a real collision. The bulk here has to
-# exceed the pipe buffer (~64K) for the producer to still be writing.
+# The SIGPIPE-under-pipefail trap; the guard's match site explains it. `git log`
+# emits newest-first, so the bump matches while a lot of output is still pending.
+# The bulk has to exceed the pipe buffer (~64K) for the producer to still be
+# writing when a piped `grep -q` would exit.
 dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
 git -C "$dir" init --quiet -b main
 git -C "$dir" config user.email t@example.com
@@ -389,11 +402,97 @@ fi
 # --- case 13: an unknown arg is refused, not ignored ----------------------
 # Silently accepting `--base other` while checking main is the quiet
 # misconfiguration this guard exists to prevent.
-out="$( cd "$dir" && PR_HEAD_SHA="$sha" bash "$GUARD" --base other 2>&1 )"; rc=$?
+# No env needed: the refusal happens before the first git call.
+out="$( cd "$dir" && bash "$GUARD" --base other 2>&1 )"; rc=$?
 if [[ $rc -eq 2 ]] && [[ "$out" == *"unknown arg"* ]]; then
     pass "an unknown arg is refused rather than ignored"
 else
     fail "unknown-arg case: rc=$rc out=$out"
+fi
+
+# --- case 14: untouched PR + a base const that cannot be located ----------
+# The guard reads the base version BEFORE deciding "untouched", and this is the
+# case that notices if that order is ever reverted. Both greps anchor `pub const`
+# at column 0, so a const indented into a `mod` matches nothing: with the old
+# order the guard printed a pass for every PR forever. Without this case,
+# reverting the reorder leaves every other case green.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+mkdir -p "$dir/$(dirname "$PROTO_REL")"
+cat > "$dir/$PROTO_REL" <<'EOF'
+// fixture: the const moved inside a mod, so it is no longer at column 0
+mod wire {
+    pub const PROTO_VERSION: u32 = 10;
+}
+EOF
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base with an indented const"
+git -C "$dir" checkout --quiet -b feature
+printf '\n// an unrelated edit, the const line is untouched\n' >> "$dir/$PROTO_REL"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "unrelated"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"no 'pub const PROTO_VERSION' line"* ]]; then
+    pass "an unlocatable base const fails loud even when the PR is untouched"
+else
+    fail "untouched-unlocatable case: rc=$rc out=$out"
+fi
+
+# --- case 15: bump then revert inside the PR ------------------------------
+# Reaches the equal-version branch without any parallel branch existing, which
+# is why that message offers its cause as a likely cause instead of asserting it.
+# Pins the revert guidance, which nothing else asserts.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base v10"
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump to v11"
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "revert the bump"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"unchanged for any reason"* ]]; then
+    pass "bump-then-revert reds and is told how to resolve it"
+else
+    fail "bump-then-revert case: rc=$rc out=$out"
+fi
+
+# --- case 16: a failed fetch with a stale tracking ref must refuse --------
+# The nastiest false pass this guard had: a tracking ref pinned at v10 while the
+# real base holds v11 and the remote is unreachable. rev-parse succeeds against
+# the stale ref, so tolerating a failed fetch printed "OK (v10 -> v11)" on a real
+# collision. Not fetching and not knowing are the same state.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base v10"
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump to v11"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "parallel branch landed v11"
+git -C "$dir" remote add origin "$TMP_BASE/definitely-not-a-repo.git"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 2 ]] && [[ "$out" == *"cannot be confirmed current"* ]]; then
+    pass "a failed fetch over a stale tracking ref refuses instead of passing"
+else
+    fail "stale-tracking-ref case: rc=$rc out=$out"
 fi
 
 echo ""
