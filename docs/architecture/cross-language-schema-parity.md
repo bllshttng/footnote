@@ -2,7 +2,7 @@
 
 The `fno-agents` Rust supervisor and the Python `footnote` package both write the same on-disk files (`~/.fno/agents/events.jsonl`, per-agent `state.json`). They were built independently, so their wire shapes drifted and nothing caught it. W7 formalizes the cross-language contract and makes it enforceable on every commit.
 
-W7 is **document-and-guard**, not **unify**: it pins the current reality in versioned schemas, adds a drift/collision check, and gates the Rust test suite in CI. Collapsing the two envelopes into one byte-identical shape is deferred follow-up work (a breaking change for live Wave 1-4 consumers).
+W7 was **document-and-guard**, not **unify**: it pinned the then-current reality in versioned schemas, added a drift/collision check, and gated the Rust test suite in CI. The unify step it deferred has since landed - `schemas/events-v3.json` is now a single envelope, per its own `$comment` - so read the two-envelope material below as history.
 
 ## The two envelopes
 
@@ -17,7 +17,7 @@ W7 is **document-and-guard**, not **unify**: it pins the current reality in vers
 | `source` values | `target`, `megawalk`, `hook`, ... (fixed enum) | `daemon`, `worker:<id>` (pattern) |
 | size cap | 64KB (legacy YAML) | 500 bytes (`MAX_EVENT_PAYLOAD_BYTES`) |
 
-These are both live. The contract accepts both rather than breaking either.
+Both were live at the time, and the contract accepted both rather than breaking either.
 
 ## Canonical schemas (in-repo)
 

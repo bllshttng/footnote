@@ -27,17 +27,19 @@
 #   15. bump then revert inside the PR                   -> exit 1, revert guidance
 #   16. failed fetch over a stale tracking ref           -> exit 2 (refused)
 #   17. fetch REFRESHES a stale tracking ref             -> exit 1 (positive control)
+#   18. NOVEL merge resolution (differs from both)       -> exit 1 (pairs with 9)
+#   19. leading-zero version reads as decimal            -> exit 0
+#   20. grep itself errors                               -> exit 2 (fail closed)
 # Case 1 also asserts the run leaves the caller's repo unshallowed.
 #
 # Usage: bash scripts/tests/check-proto-version-bump-selftest.sh
 # Exit 0 = all assertions passed.
 #
-# HOW THIS RUNS IN CI: auto-discovered, with no registry entry. `scripts/tests/*.sh`
-# is in _SMOKE_HARNESS_GLOBS (cli/src/fno/test_cmd.py), so `fno test smoke` picks it
-# up, and cli-ci.yml runs that on `scripts/**`. Confirm with
-# `fno test smoke --list | grep proto-version-bump`. Stated explicitly because two
-# reviewers independently grepped for a registry entry, found none, and concluded
-# this file never runs - the glob makes the wiring invisible to grep.
+# HOW THIS RUNS IN CI: auto-discovered, no registry entry. `scripts/tests/*.sh` is
+# in _SMOKE_HARNESS_GLOBS (cli/src/fno/test_cmd.py), so the smoke runner picks it
+# up, and cli-ci.yml runs `fno-py test smoke` on `scripts/**`. Confirm with
+# `fno test smoke --list | grep proto-version-bump` - worth stating, because the
+# glob makes the wiring invisible to a grep for this filename.
 set -uo pipefail
 
 # Hermetic git: the fixtures make dozens of commits, and an ambient
@@ -544,6 +546,71 @@ if [[ "$stale_v" == "10" ]] && [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"
     pass "the fetch refreshes a stale tracking ref (collision still caught)"
 else
     fail "stale-ref-refresh case: stale_v=$stale_v rc=$rc out=$out"
+fi
+
+# --- case 18: a NOVEL merge resolution is scanned ------------------------
+# The other half of case 9. A merge emits no patch by default, which is what keeps
+# an inherited bump from counting - but it also hid a resolution differing from
+# BOTH parents. Here the merge resolves the version DOWN to v9 while the base
+# holds v12, so nothing but a combined diff sees it.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+echo x > "$dir/other.txt"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base v10"
+git -C "$dir" checkout --quiet -b feature
+echo y >> "$dir/other.txt"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "unrelated edit"
+git -C "$dir" checkout --quiet main
+write_proto "$dir" "$(version_line 12)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "main reaches v12"
+git -C "$dir" checkout --quiet feature
+git -C "$dir" merge --no-commit main >/dev/null 2>&1 || true
+write_proto "$dir" "$(version_line 9)"   # novel: differs from both parents
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "merge main, resolve to v9"
+require_merge_commit "$dir" "novel-resolution fixture" || true
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"lowers PROTO_VERSION"* ]]; then
+    pass "a novel merge resolution is scanned, not skipped as inherited"
+else
+    fail "novel-resolution case: rc=$rc out=$out"
+fi
+
+# --- case 19: a leading-zero version is read as decimal -------------------
+# Rust reads `= 010;` as ten; bash arithmetic reads it as octal eight. Without the
+# `10#` forcing, a v9 base against an 010 head flips the verdict to "lowers".
+read -r dir sha <<< "$(make_repo 9 "$(version_line 010)")"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"v9 -> v010"* ]]; then
+    pass "a leading-zero version compares as decimal, not octal"
+else
+    fail "leading-zero case: rc=$rc out=$out"
+fi
+
+# --- case 20: a grep that ERRORS is not read as "no match" ---------------
+# The one branch where turning `exit 2` into `exit 0` would leave every other case
+# green. A stub fails only the `-qE` scan, so read_version's plain `grep -E` still
+# works and the run reaches the patch scan.
+read -r dir sha <<< "$(make_repo 10 "$(version_line 11)" 11)"
+stubdir="$(mktemp -d "$TMP_BASE/stub.XXXXXX")"
+cat > "$stubdir/grep" <<'EOF'
+#!/usr/bin/env bash
+for a in "$@"; do [[ "$a" == "-qE" ]] && exit 2; done
+exec /usr/bin/grep "$@"
+EOF
+chmod +x "$stubdir/grep"
+out="$( cd "$dir" && PATH="$stubdir:$PATH" PR_HEAD_SHA="$sha" PR_BASE_REF=main \
+    PR_REMOTE=origin bash "$GUARD" 2>&1 )"; rc=$?
+if [[ $rc -eq 2 ]] && [[ "$out" == *"cannot scan this PR's patch"* ]]; then
+    pass "a grep error fails closed instead of reading as untouched"
+else
+    fail "grep-error case: rc=$rc out=$out"
 fi
 
 echo ""

@@ -126,12 +126,10 @@ read_version() {
 # Fetched UNCONDITIONALLY, and a FAILED fetch is fatal.
 #
 # Both halves matter. Fetching only when the tracking ref is missing compares
-# against a ref that may be days behind; and tolerating a failed fetch because
-# "the rev-parse below re-derives it" is worse, because rev-parse happily
-# succeeds against the stale ref. Measured on a broken remote with a tracking ref
-# pinned at v10 while the real base held v11: the guard printed
-# "OK (v10 -> v11)" and exited 0 on a real collision. Not fetching and not
-# knowing are the same state, and this check answers "cannot verify" with exit 2.
+# against a ref that may be days behind; and tolerating a failed fetch is worse,
+# because rev-parse happily succeeds against the stale ref and the guard prints a
+# pass. Not fetching and not knowing are the same state, so this answers "cannot
+# verify" with exit 2. Selftest case 16.
 #
 # NO --depth here. `git fetch --depth=1` against a COMPLETE clone does not fetch
 # less, it writes .git/shallow and truncates the whole repository: measured, a
@@ -141,13 +139,11 @@ read_version() {
 #
 # git's own error is left on stderr: "cannot verify the bump" with no reason is
 # the hardest version of this failure to act on.
-# The refspec is EXPLICIT. `git fetch <remote> <branch>` fetches into FETCH_HEAD
-# and updates refs/remotes/<remote>/<branch> only opportunistically, when the
-# configured remote.<remote>.fetch happens to cover it. Measured: with a narrowed
-# refspec (what --single-branch and `git remote set-branches` leave behind) the
-# fetch returned 0, the tracking ref stayed at v10, and upstream was already at
-# v11 - so BASE_TIP read a stale base and the collision passed. Naming the
-# destination makes the update unconditional and independent of caller config.
+# The refspec is EXPLICIT. `git fetch <remote> <branch>` updates
+# refs/remotes/<remote>/<branch> only opportunistically, when the configured
+# remote.<remote>.fetch happens to cover it - so under a narrowed refspec (what
+# --single-branch leaves behind) the fetch returns 0 over a stale ref. Naming the
+# destination makes the update independent of caller config. Selftest case 17.
 if ! git fetch --quiet "$REMOTE" \
         "+refs/heads/$BASE_REF:refs/remotes/$REMOTE/$BASE_REF"; then
     if git rev-parse --verify --quiet "$REMOTE/$BASE_REF" >/dev/null; then
@@ -219,10 +215,28 @@ MERGE_BASE="$(git merge-base "$BASE_TIP" "$HEAD_SHA" 2>/dev/null)" || {
 # reads a successful match as "no match" and passes the guard on a real
 # collision. It needs enough pending output to fill the pipe buffer, which a
 # bump sitting on top of a large earlier proto.rs commit supplies.
-# --no-ext-diff: a diff.external or .gitattributes diff driver would replace the
-# unified diff, dropping the +pub const line and reading as untouched.
-PROTO_PATCH="$(git --no-pager log -p --no-ext-diff --format='' \
-    "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")" || {
+# Each flag closes a measured way the patch stops being matchable. The selftest
+# neutralizes git config wholesale; the guard runs in the caller's environment and
+# has to survive it.
+#   --no-textconv  a .gitattributes diff driver's textconv IS applied by git log,
+#                  and a filter stripping the const line hides the bump. 2 matches
+#                  with the flag, 0 without.
+#   --no-color     color.ui/color.diff = always emits ANSI even to a non-tty, so
+#                  `+` arrives as ESC[32m+ and a column-0 match finds nothing.
+#                  2 with, 0 without.
+#   --cc           a merge emits no patch by default, which is what keeps an
+#                  INHERITED bump from counting - but it also hid a resolution
+#                  that is NOVEL, differing from both parents. A clean resolution
+#                  lowering the version was invisible. --cc shows only hunks that
+#                  differ from every parent, so it adds exactly the novel case and
+#                  still ignores the inherited one. Measured on both: inherited 0,
+#                  novel 2. Selftest cases 9 and 18 pin the pair.
+#   --no-pager     a command substitution is not a tty anyway; kept as belt.
+# Deliberately NOT --no-ext-diff: `git log` ignores an external diff driver unless
+# you pass --ext-diff, so it is a no-op here (measured 2 matches with and without).
+# It sat here for a round with a comment claiming otherwise.
+PROTO_PATCH="$(git --no-pager log -p --cc --no-textconv --no-color \
+    --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")" || {
     echo "ERROR: cannot read this PR's $PROTO_FILE history - unable to verify the bump" >&2
     exit 2
 }
@@ -238,10 +252,12 @@ PROTO_PATCH="$(git --no-pager log -p --no-ext-diff --format='' \
 BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 1
 
 # rc taken explicitly: a negated test cannot tell rc=1 (no match, genuinely
-# untouched) from rc>=2 (grep errored, or bash could not write the here-string temp
-# file). Reading the latter as "no match" is the round-1 SIGPIPE defect wearing a
-# different hat, so anything but a clean 0 or 1 fails closed.
-grep -qE '^[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"
+# untouched) from rc>=2 (grep itself failed). Reading the latter as "no match" is
+# the round-1 SIGPIPE defect wearing a different hat, so anything but a clean 0 or
+# 1 fails closed. This does NOT cover a failed here-string redirection - bash
+# reports 1 for that, indistinguishable from a real no-match - which is why the
+# capture above is status-checked on its own line rather than relied on here.
+grep -qE '^[-+ ]*[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"
 GREP_RC=$?
 case "$GREP_RC" in
     0) ;;  # the PR's own commits touched the line
@@ -275,13 +291,9 @@ if (( 10#$HEAD_V == 10#$BASE_V )); then
     # lands here: a PR that bumps and then reverts within its own commits reads
     # as touched, ends level with the base, and has no parallel branch anywhere.
     # Sending that author to look for one wastes their time.
-    #
-    # The two are not indistinguishable, only not worth distinguishing. A value
-    # comparison at the merge-base cannot separate them (both read head ==
-    # merge-base), but PROTO_PATCH already holds the discriminator: the revert
-    # carries a `+` line above BASE_V and the collision does not. That is a
-    # heuristic, not a total function - overshoot to v12, come back to v11, and
-    # collide at v11 and it mislabels - so this branch names both instead.
+    # Not indistinguishable, only not worth distinguishing: any discriminator here
+    # (the revert leaves a `+` line above BASE_V) is a heuristic that mislabels an
+    # overshoot-then-return, so name both causes rather than guess one.
     echo "       This PR's commits touch the PROTO_VERSION line, but its value is" >&2
     echo "       level with $REMOTE/$BASE_REF rather than above it, so the change" >&2
     echo "       lands with no effective bump." >&2
