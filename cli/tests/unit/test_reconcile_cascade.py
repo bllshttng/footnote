@@ -719,3 +719,43 @@ def test_reparenting_within_the_unit_keeps_containment(world, dispatches):
         cli, ["update", KID_A, "--parent", UNIT]
     ).exit_code == 0
     assert read()[KID_A]["contained_in"] == UNIT
+
+
+def test_reparenting_onto_a_descendant_of_the_unit_keeps_containment(world,
+                                                                     dispatches):
+    """codex P2: an identity test contradicted its own comment.
+
+    A node moved onto a DESCENDANT of its delivery unit is still inside that
+    unit, but `== owner` un-contained it - making it independently dispatchable
+    and costed again, and dropping it from the owner's merge cascade.
+    """
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    entries.append(_node("x-7c2a", parent=UNIT))   # a node under the unit
+    write(entries)
+
+    assert CliRunner().invoke(
+        cli, ["update", KID_A, "--parent", "x-7c2a"]
+    ).exit_code == 0
+    assert read()[KID_A]["contained_in"] == UNIT
+
+
+def test_reparenting_outside_the_unit_subtree_still_un_contains(world, dispatches):
+    """The escape hatch must survive the subtree widening."""
+    from typer.testing import CliRunner
+
+    from fno.graph.cli import cli
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    entries.append(_node("x-5e11"))   # unrelated, not under the unit
+    write(entries)
+
+    assert CliRunner().invoke(
+        cli, ["update", KID_A, "--parent", "x-5e11"]
+    ).exit_code == 0
+    assert read()[KID_A].get("contained_in") is None

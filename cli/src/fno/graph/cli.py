@@ -3084,11 +3084,25 @@ def cmd_update(
             # under its delivery unit is still contained.
             _new_parent = None if parent.lower() == "null" else parent
             _owner = node.get("contained_in")
-            if _owner and (
-                _new_parent is None
-                or (_find_node(entries, _new_parent) or {}).get("id") != _owner
-            ):
-                node.pop("contained_in", None)
+            if _owner:
+                # SUBTREE, not identity (codex P2): the comment above says a
+                # move between two nodes under the unit is still contained, and
+                # an `== _owner` test contradicted it - re-parenting onto a
+                # descendant of the unit silently un-contained the node, making
+                # it independently dispatchable and costed again and dropping it
+                # from the owner's merge cascade. Walk up from the new parent;
+                # depth-capped and cycle-safe like the other ancestor walks.
+                _cur = (_find_node(entries, _new_parent) or {}).get("id") if _new_parent else None
+                _seen: set = set()
+                _still_contained = False
+                while _cur and _cur not in _seen and len(_seen) < 64:
+                    if _cur == _owner:
+                        _still_contained = True
+                        break
+                    _seen.add(_cur)
+                    _cur = (_find_node(entries, _cur) or {}).get("parent")
+                if not _still_contained:
+                    node.pop("contained_in", None)
             if parent.lower() == "null":
                 node["parent"] = None
             else:

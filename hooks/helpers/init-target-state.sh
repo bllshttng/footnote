@@ -1062,6 +1062,26 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
             --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+        # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
+        # below so a refusal leaves no claim fields behind. Every containment
+        # gate above runs before this claim, so adoption committing in that
+        # window left a worker holding the claim on a node that no longer
+        # dispatches - and it built the second PR for one plan anyway. Refusing
+        # adoption while a claim is live closes the common case but not this
+        # one: adoption can read "no holder" and commit while THIS acquire is
+        # already in flight. The claim is the serialization point, so re-reading
+        # while holding it is the only check that cannot be raced.
+        #
+        # `cmd && rc=0 || rc=$?`, not `if ! cmd`: after a negation `$?` is the
+        # negation's status, so the rc test would never see the 9.
+        TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno target check-contained \
+          && _PC_RC=0 || _PC_RC=$?
+        if [[ "$_PC_RC" -eq 9 ]]; then
+          FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
+            --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 || true
+          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); claim released." >&2
+          exit 2
+        fi
         echo "target_claim_key: \"$_CLAIM_KEY\"" >> "$STATE_FILE"
         echo "target_claim_holder: \"$_CLAIM_HOLDER\"" >> "$STATE_FILE"
         echo "target_claim_ttl: \"$_CLAIM_TTL\"" >> "$STATE_FILE"
