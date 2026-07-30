@@ -2563,3 +2563,77 @@ def test_every_refusal_leaves_the_graph_byte_identical(graph_env, spec, code):
     )
     assert result.exit_code == code, result.output
     assert g.read_bytes() == raw_before
+
+
+def test_adopt_refuses_a_node_a_live_worker_is_building(graph_env, monkeypatch):
+    """codex P1: adoption racing a dispatch left a worker on a contained node.
+
+    Every dispatch gate reads containment BEFORE the claim, so adoption landing
+    in that window produced a session holding a claim on a node that no longer
+    dispatches - and it built and opened its own PR regardless. Closed from the
+    adoption side because that is the single boundary: it covers every dispatch
+    path at once and prevents the contradictory state instead of killing a
+    worker mid-flight.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"))
+    before = g.read_text()
+    monkeypatch.setattr(gcli, "_live_worker",
+                        lambda nid: "target-session:S1" if nid == "ab-kid00001" else None)
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert "being built right now" in result.output
+    assert "target-session:S1" in result.output
+    # Atomic: a refused decompose leaves the graph untouched.
+    assert g.read_text() == before
+
+
+def test_adopt_proceeds_when_no_worker_holds_the_node(graph_env, monkeypatch):
+    """The guard must key on a LIVE claim, not on merely having been claimed."""
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"))
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    ).exit_code == 0
+    entries = read_entries()
+    assert next(e for e in entries if e["id"] == "ab-kid00001")["contained_in"] \
+        == _child(entries, "one")["id"]
+
+
+def test_remove_clears_containment_on_its_children(graph_env, monkeypatch):
+    """codex P2: a child left naming a deleted unit is a permanent trap.
+
+    Selection and `fno target init` both refuse it, while the reconcile heal
+    deliberately skips a missing owner - so it is unbuildable, uncloseable, and
+    invisible to every sweep. Un-contained rather than closed: deleting the unit
+    is not a claim that its children shipped.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    ).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+
+    assert _invoke(["backlog", "remove", unit, "--force"]).exit_code == 0
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+    assert kid.get("completed_at") is None

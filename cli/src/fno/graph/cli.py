@@ -1610,6 +1610,35 @@ def cmd_decompose(
                         "reshapes the epic",
                         exit_code=2,
                     )
+                # Refuse to adopt a node someone is actively building (codex
+                # P1). Every dispatch gate reads containment BEFORE the claim -
+                # the in-process redirect earliest of all - so adoption landing
+                # in that window produced a worker holding a claim on a node
+                # that is now contained: it writes its manifest and builds the
+                # second PR for one plan anyway.
+                #
+                # Closed from THIS side rather than by re-validating after the
+                # claim, because it is the single boundary: it covers every
+                # dispatch path at once instead of one script, it prevents the
+                # contradictory state rather than killing a worker that already
+                # started, and it reports to the person running decompose, who
+                # has the context to fix the adopt list. A live claim also means
+                # the node is a delivery unit in practice right now, which is
+                # the thing adoption asserts it is not.
+                #
+                # Reads the LIVE lockfile, not the graph's `locked_by` mirror:
+                # the manifest claim fields are an init-time snapshot and can
+                # lie after a respawn. Suspect counts as held (x-ba4b).
+                _holder = _live_worker(target["id"])
+                if _holder:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which is "
+                        f"being built right now by {_holder}; adopting it would "
+                        "leave that session holding a claim on a node that no "
+                        "longer dispatches, and it would still open its own PR. "
+                        "Wait for it to land, or stop it first",
+                        exit_code=2,
+                    )
                 # Containment (x-e957), stamped BEFORE the already-adopted
                 # short-circuit so re-running the spec CONVERGES: a node adopted
                 # by an older fno (parent set, no contained_in) is back-filled
@@ -5209,6 +5238,17 @@ def cmd_remove(
             # that source_node_id is null or resolves - never a dangling string.
             if e.get("source_node_id") == task_id:
                 e["source_node_id"] = None
+            # Same invariant for containment (x-e957), and here a dangling
+            # pointer is not merely untidy - it is a permanent trap. A child
+            # left naming a deleted delivery unit is refused by selection AND by
+            # `fno target init`, while the reconcile heal deliberately skips a
+            # missing owner (an owner that resolves to nothing is not evidence
+            # anything shipped). So the node is unbuildable, uncloseable, and
+            # invisible to every sweep until someone rebuilds the group by hand.
+            # Un-contain rather than close: deleting the unit is not a claim
+            # that its children shipped.
+            if e.get("contained_in") == task_id:
+                e.pop("contained_in", None)
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
