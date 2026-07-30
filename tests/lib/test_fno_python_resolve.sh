@@ -56,10 +56,13 @@ chmod +x "$TMP/cli/.venv/bin/python3"
 # --- 4. No production script reintroduces the bare-python3 ledger write -------
 # The regression guard for the class: the callers must route through the
 # resolver. Tests may still shell a bare python3; only shipped scripts may not.
-# Comment lines are excluded - the resolver's own docstring names the bad form
-# it exists to prevent (the match is on `file:line:` followed by a `#`).
-STRAY="$(grep -rn 'python3 -m fno\.cost\._register' scripts/ hooks/ skills/ 2>/dev/null \
-    | grep -v ':[[:space:]]*#' || true)"
+# Scoped to *.sh, since prose that merely NAMES the bad form is not a caller -
+# the LOC-ratchet trajectory quotes it verbatim, and every shipped shell script
+# in these trees carries the extension. Comment lines are excluded too: the
+# resolver's own header names the form it exists to prevent (the match is on
+# `file:line:` followed by a `#`).
+STRAY="$(grep -rn --include='*.sh' 'python3 -m fno\.cost\._register' \
+    scripts/ hooks/ skills/ 2>/dev/null | grep -v ':[[:space:]]*#' || true)"
 if [[ -z "$STRAY" ]]; then
     pass "no production caller shells a bare 'python3 -m fno.cost._register'"
 else
