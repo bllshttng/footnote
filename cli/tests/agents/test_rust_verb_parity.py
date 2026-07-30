@@ -350,6 +350,11 @@ def test_resume_opencode_canonical_tail_case_parity(tmp_path) -> None:
     def loader():
         return [SimpleNamespace(**entry) for entry in entries]
 
+    # Warm the first-run Rust front door; dependency provisioning may write to
+    # stderr, but it is not part of the resume contract compared below.
+    warm = _run_rust(["resume", "AbCd1234", "--print-command"], agents)
+    assert warm.returncode == 0, warm.stderr
+
     for token in ("oc", full, "AbCd1234", "ocworker", "abcd1234"):
         rust = _run_rust(["resume", token, "--print-command"], agents)
         py = resume_cli.resume_logic(

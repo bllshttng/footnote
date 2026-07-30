@@ -359,18 +359,25 @@ class AgentResolutionError(RuntimeError):
     default is the fallback, not a universal choke point.
 
     ``ambiguous`` distinguishes "this token names several agents" from "no agent
-    matches". Both are resolution failures, but only a MISS may fall through to
-    the harness-store fallback (x-9cc5): a token the registry already refuses to
-    disambiguate must keep refusing, or a store hit on one of the candidates
-    would silently pick the winner the registry deliberately would not.
+    matches". ``unavailable`` means the evidence needed to decide could not be
+    read. Only a genuine MISS may fall through to the harness-store fallback: a
+    token the registry already refuses to disambiguate must keep refusing, or a
+    store hit on one of the candidates would silently pick the winner the
+    registry deliberately would not.
     """
 
     def __init__(
-        self, message: str, *, exit_code: int = 2, ambiguous: bool = False
+        self,
+        message: str,
+        *,
+        exit_code: int = 2,
+        ambiguous: bool = False,
+        unavailable: bool = False,
     ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.ambiguous = ambiguous
+        self.unavailable = unavailable
 
 
 @dataclass
@@ -454,9 +461,9 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
 def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
     """Resolve ``token`` to one registry entry, loading the registry first.
 
-    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry degrades to
-    a clean :class:`AgentResolutionError`, never a traceback leaking to the
-    verb. See ``resolve_agent_in`` for the matching rules.
+    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry becomes a
+    typed unavailable :class:`AgentResolutionError`, never a traceback leaking
+    to the verb. See ``resolve_agent_in`` for the matching rules.
 
     A full session id and an ordinary name resolve from the registry directly.
     Every session-shaped short token is checked against the harness stores too:
@@ -468,7 +475,8 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
         entries = load_registry(path=path)
     except RegistryVersionError as exc:
         raise AgentResolutionError(
-            f"registry unreadable ({exc}); cannot resolve {token!r}"
+            f"registry unreadable ({exc}); cannot resolve {token!r}",
+            unavailable=True,
         ) from exc
     return resolve_agent_across_sources(entries, token, path=path)
 

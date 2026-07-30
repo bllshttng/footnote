@@ -606,6 +606,46 @@ def test_an_unreadable_store_demotes_durably_rather_than_exiting_16(
     assert _drain_as(runner, monkeypatch, ASLEEP_SID), "the message was lost"
 
 
+def test_an_unreadable_store_never_injects_into_an_unproven_candidate(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A lone visible candidate is not unique while any store is unreadable."""
+    from fno.agents import discover
+
+    candidate = discover.ReachableSession(
+        session_id=ASLEEP_SID,
+        source="transcript",
+        agent="claude",
+    )
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            discover.StoreReadError(["registry"], resolved=candidate)
+        ),
+    )
+    attempted: list[str] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda session_id, _message: (attempted.append(session_id), True)[1],
+    )
+    monkeypatch.setattr(
+        "fno.mail.cli._wake_rung",
+        lambda *_a, **_k: pytest.fail("unproven candidate was woken"),
+    )
+
+    res = runner.invoke(
+        app,
+        ["mail", "send", ASLEEP_HANDLE, "hi", "--from-name", "web"],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert attempted == []
+    assert "queued (durable)" in res.output
+    assert "stores-unreadable" in (res.output + (res.stderr or ""))
+    assert _drain_as(runner, monkeypatch, ASLEEP_SID), "the message was lost"
+
+
 def test_a_non_claude_session_is_not_woken_as_claude(
     runner, mailbox, monkeypatch, tmp_path
 ):

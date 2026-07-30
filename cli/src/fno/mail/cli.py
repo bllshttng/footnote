@@ -1078,7 +1078,7 @@ def _name_lane_send(
     from fno.agents.provider_resolve import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import canonical_handle, session_handle_tier
     from fno.inbox.store import (
         classify_durable_owner,
         generate_msg_id,
@@ -1156,11 +1156,25 @@ def _name_lane_send(
         # LISTING, so a miss means "not listed", never "not reachable" -- and
         # demoting here without attempting a live rung is the wall this whole
         # node exists to remove.
+        degraded_short = (
+            token_lane not in (None, "self-send")
+            and (
+                token_reachable is None
+                or session_handle_tier(token, token_reachable.session_id) != 0
+            )
+        )
         if token_lane == "self-send":
             # A session can neither inject into nor wake itself; attempting it
             # deadlocks a live session and revives a second writer on an asleep
             # one. Durable is the only honest lane.
             lanes.append("self-send")
+        elif degraded_short:
+            # A short token plus an unreadable store has only an unproven-unique
+            # candidate. Injecting is a side effect, not a probe, so it cannot
+            # decide which colliding session the caller meant. Keep the durable
+            # copy addressed to the visible candidate and surface the degraded
+            # evidence; a full session id remains safe to probe directly.
+            lanes.append(token_lane)
         else:
             # Rung 3: inject-as-probe. The socket is its own source of truth --
             # a confirmed delivery IS the receipt, so no roster query is needed
