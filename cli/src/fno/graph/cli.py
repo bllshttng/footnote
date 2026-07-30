@@ -1610,16 +1610,135 @@ def cmd_decompose(
                         "reshapes the epic",
                         exit_code=2,
                     )
-                if target.get("parent") == node["id"]:
-                    continue  # already adopted - re-running the spec is a no-op
-                # The re-parent path the existing minted-child guard was written
-                # for and could not reach (see the comment on that call).
+                # Refuse to adopt a node someone is actively building (codex
+                # P1). Every dispatch gate reads containment BEFORE the claim -
+                # the in-process redirect earliest of all - so adoption landing
+                # in that window produced a worker holding a claim on a node
+                # that is now contained: it writes its manifest and builds the
+                # second PR for one plan anyway.
+                #
+                # Closed from THIS side rather than by re-validating after the
+                # claim, because it is the single boundary: it covers every
+                # dispatch path at once instead of one script, it prevents the
+                # contradictory state rather than killing a worker that already
+                # started, and it reports to the person running decompose, who
+                # has the context to fix the adopt list. A live claim also means
+                # the node is a delivery unit in practice right now, which is
+                # the thing adoption asserts it is not.
+                #
+                # Reads the LIVE lockfile, not the graph's `locked_by` mirror:
+                # the manifest claim fields are an init-time snapshot and can
+                # lie after a respawn. Suspect counts as held (x-ba4b).
+                _holder = _live_worker(target["id"])
+                if _holder:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which is "
+                        f"being built right now by {_holder}; adopting it would "
+                        "leave that session holding a claim on a node that no "
+                        "longer dispatches, and it would still open its own PR. "
+                        "Wait for it to land, or stop it first",
+                        exit_code=2,
+                    )
+                # Cycle + descendants BOTH run before the stamp and before the
+                # already-adopted `continue` below. Placing the descendants
+                # refusal after that short-circuit made it unreachable on the
+                # BACK-FILL path (sigma): re-running a spec against a legacy
+                # adopted node that has since gained children stamped it anyway,
+                # producing the exact half-closed subtree the refusal exists to
+                # prevent. Cycle stays first so an ancestor-of-the-epic adoptee
+                # still gets its specific message rather than the vaguer one.
                 if _would_create_cycle(graph_entries, target["id"], node["id"]):
                     raise DecomposeError(
                         f"adopting {target['id']} into group {grp['slug']!r} "
                         "would create a cycle",
                         exit_code=2,
                     )
+                # An adoptee with descendants (codex P1). Containment is ONE
+                # level by design, and selection_guards does not treat a
+                # contained ANCESTOR as a guard - so the children would stay
+                # independently dispatchable while the merge cascade closed only
+                # this parent, leaving them open to build separate PRs. Refusing
+                # is right rather than propagating: a subtree is a decomposition
+                # of its own, and folding it wholesale into another unit is a
+                # reshape the operator should state explicitly.
+                _kids = [
+                    e.get("id") for e in graph_entries
+                    if isinstance(e, dict) and e.get("parent") == target["id"]
+                ]
+                if _kids:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which has "
+                        f"{len(_kids)} child(ren) ({', '.join(str(k) for k in _kids[:3])}"
+                        f"{'...' if len(_kids) > 3 else ''}); containment is one "
+                        "level, so they would stay dispatchable and open their own "
+                        "PRs while their parent closed. Adopt the children "
+                        "individually, or re-parent them out first",
+                        exit_code=2,
+                    )
+                # Containment (x-e957), stamped BEFORE the already-adopted
+                # short-circuit so re-running the spec CONVERGES: a node adopted
+                # by an older fno (parent set, no contained_in) is back-filled
+                # rather than left half-adopted forever. Writing the value it
+                # already holds is a no-op, so re-running an up-to-date spec
+                # still serializes byte-identically.
+                #
+                # Same locked mutation as the re-parent below, deliberately: two
+                # writes would open a window where the node is re-parented but
+                # still armed for dispatch, which is the exact state this field
+                # exists to make impossible.
+                # Containment says "this node has no PR of its own". A node that
+                # already carries one, or that already carries cost, HAS
+                # independent delivery evidence, so the field simply does not
+                # apply to it (codex P1/P2) - and stamping it anyway would hide
+                # an open PR's node from dispatch, auto-close it under someone
+                # else's merge while its own PR is still open, and report a
+                # finished one as having "shipped inside" a unit it predates.
+                # Its cost also stays in the flat project sum regardless, because
+                # _apply_rollup reads an empty rollup as "preserve existing", so
+                # the double-count the rollup guard prevents for NEW attribution
+                # would simply persist for old.
+                #
+                # Adoption itself still proceeds: re-parenting changes rollup
+                # membership, not delivery state, which is exactly what
+                # test_adopt_a_shipped_node_is_permitted pins. Only the
+                # containment stamp is withheld, and loudly.
+                _own_pr = target.get("pr_number")
+                _own_cost = target.get("cost_usd")
+                _is_done = bool(target.get("completed_at")) or target.get("status") == "done"
+                if (_own_pr or _own_cost is not None) and not _is_done:
+                    # An UNFINISHED delivery unit cannot be adopted at all
+                    # (codex P1). Withholding the stamp keeps it dispatchable,
+                    # but re-parenting still hangs it under the group child -
+                    # and _cascade_close_parents only asks whether the EPIC's
+                    # direct children are complete, never its grandchildren. So
+                    # the group's merge would close the epic (and dispatch its
+                    # dependents) over work that is still open one level down.
+                    # Refuse: a node mid-flight with its own PR or cost is a
+                    # delivery unit, and folding one into another is a reshape
+                    # the operator has to state, not something adopt infers.
+                    _what = f"has an open PR (#{_own_pr})" if _own_pr else "has accrued cost"
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which "
+                        f"{_what} and has not landed; it is its own delivery "
+                        "unit mid-flight. Adopting it would hang open work under "
+                        "the group, and the epic would close over it when the "
+                        "group merges. Let it land first, or drop it from the "
+                        "adopt list",
+                        exit_code=2,
+                    )
+                if _own_pr or _own_cost is not None:
+                    _why = "carries PR #%s" % _own_pr if _own_pr else "carries cost"
+                    uncontained_box[0].append(
+                        f"warning: adopted {target['id']} into group "
+                        f"{grp['slug']!r} but did NOT mark it contained: it "
+                        f"{_why}, so it is its own delivery unit. It stays "
+                        "separately dispatchable, separately costed, and is not "
+                        "closed by the group's merge."
+                    )
+                else:
+                    target["contained_in"] = node["id"]
+                if target.get("parent") == node["id"]:
+                    continue  # already adopted - re-running the spec is a no-op
                 target["parent"] = node["id"]
                 adopted.append(target["id"])
 
@@ -1691,6 +1810,10 @@ def cmd_decompose(
 
     orphan_box: list[list[str]] = [[]]
     unadopted_box: list[list[str]] = [[]]
+    # Adoptees that were re-parented but deliberately NOT marked contained
+    # (they carry their own PR or cost). Same box-then-emit shape as the
+    # unadopted warning: collected inside the locked mutator, printed after.
+    uncontained_box: list[list[str]] = [[]]
     base_box: list = [None]
     verbatim_base_box: list = [None]
     epic_cwd_box: list = [None]
@@ -1704,6 +1827,10 @@ def cmd_decompose(
     epic_resolved_id = epic_id_box[0]
     orphan_ids = orphan_box[0]
     unadopted_ids = unadopted_box[0]
+    # Deduped: locked_mutate_graph may re-enter the mutator, and this box appends
+    # where the sibling boxes assign.
+    for _uc in sorted(set(uncontained_box[0])):
+        typer.echo(_uc, err=True)
     downgrades = downgrade_box[0]
 
     # Shared post-mutation graph re-read: 3c reads each child's created_at +
@@ -3028,6 +3155,40 @@ def cmd_update(
             # a reparent (or --parent null) leaves the OLD epic/mission counting
             # a child it no longer owns until it is projected (codex P2).
             reparent_old_parent[0] = node.get("parent")
+            # Re-parenting AWAY from the delivery unit un-adopts the node
+            # (x-e957). Without this there is no supported way out of a mistyped
+            # `adopt` id: only decompose writes `contained_in`, re-running the
+            # spec without the entry leaves the stale value, and graph.json is a
+            # hook-blocked forbidden surface - so one typo permanently unarmed a
+            # real delivery unit AND had the cascade later stamp it "shipped
+            # inside <owner>", a false completion note on work that never
+            # shipped. It also keeps `parent` and `contained_in` from
+            # disagreeing, which is what produced that false note.
+            #
+            # Deliberately keyed on moving away from THE OWNER, not on any
+            # re-parent: a contained node moved between two nodes that both sit
+            # under its delivery unit is still contained.
+            _new_parent = None if parent.lower() == "null" else parent
+            _owner = node.get("contained_in")
+            if _owner:
+                # SUBTREE, not identity (codex P2): the comment above says a
+                # move between two nodes under the unit is still contained, and
+                # an `== _owner` test contradicted it - re-parenting onto a
+                # descendant of the unit silently un-contained the node, making
+                # it independently dispatchable and costed again and dropping it
+                # from the owner's merge cascade. Walk up from the new parent;
+                # depth-capped and cycle-safe like the other ancestor walks.
+                _cur = (_find_node(entries, _new_parent) or {}).get("id") if _new_parent else None
+                _seen: set = set()
+                _still_contained = False
+                while _cur and _cur not in _seen and len(_seen) < 64:
+                    if _cur == _owner:
+                        _still_contained = True
+                        break
+                    _seen.add(_cur)
+                    _cur = (_find_node(entries, _cur) or {}).get("parent")
+                if not _still_contained:
+                    node.pop("contained_in", None)
             if parent.lower() == "null":
                 node["parent"] = None
             else:
@@ -3362,6 +3523,13 @@ def _starvation_receipts(
                 continue  # no known exclusion (would have been selected)
             if g.startswith("dead-ancestor"):
                 reason = "dead-ancestor"
+            elif g.startswith("contained"):
+                # Not starvation either: the work IS being delivered, inside
+                # another node's PR. Left in the generic `quarantined` bucket it
+                # read as stale work needing attention, and a decomposed epic
+                # printed one bogus line per adopted node on every `next` until
+                # its unit merged - permanent noise the operator cannot act on.
+                reason = "contained"
             elif g == "design-stage":
                 # Not starvation: planned but not blueprinted, so it reads as
                 # its own rung rather than the generic quarantine bucket.
@@ -5151,6 +5319,7 @@ def cmd_remove(
         typer.echo("Use --force to confirm.")
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         node = _find_node(entries, task_id)
         if not node:
@@ -5170,9 +5339,14 @@ def cmd_remove(
             # that source_node_id is null or resolves - never a dangling string.
             if e.get("source_node_id") == task_id:
                 e["source_node_id"] = None
+        # Same invariant for containment (x-e957), and here a dangling pointer
+        # is a permanent trap rather than mere untidiness: the reconcile heal
+        # deliberately skips a MISSING owner, so nothing would ever free them.
+        _freed_box[0] = _release_contained_children(entries, task_id)
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
+    _echo_freed(_freed_box[0], task_id)
     typer.echo(f"Removed {task_id}" + (f" (orphaned deps in {dependents})" if dependents else ""))
 
 
@@ -5219,6 +5393,7 @@ def cmd_defer(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         node = _find_node(entries, task_id)
         if not node:
@@ -5240,10 +5415,21 @@ def cmd_defer(
         node["completed_at"] = None
         node["deferred_at"] = datetime.now(timezone.utc).isoformat()
         node["deferred_reason"] = cleaned_reason
+        # Release anything shipping inside it (x-e957), completing the set with
+        # cmd_remove and cmd_supersede. A deferred unit is not going to merge,
+        # so `_strandable_contained_ids` (keyed on completed_at) can never heal
+        # its children, while selection_guards and `target init` keep refusing
+        # them - unbuildable, uncloseable, invisible to every sweep. Un-contained
+        # rather than closed: deferring the unit is not a claim its children
+        # shipped. Undefer does not re-contain them, deliberately: re-adoption is
+        # decompose's job and inferring it here would re-hide work the operator
+        # may have since re-scoped.
+        _freed_box[0] = _release_contained_children(entries, node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f'Deferred {task_id}: "{cleaned_reason}"')
+    _echo_freed(_freed_box[0], task_id)
     _project_plans_from_graph([task_id])
 
 
@@ -5999,6 +6185,185 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     return closed
 
 
+def _echo_freed(freed: list, owner_id: str) -> None:
+    """Name the nodes a dying delivery unit just released.
+
+    Silence here is a real gap, not tidiness: the release turns N nodes that
+    were invisible to dispatch into autonomously buildable, separately costed
+    ones, and the bare "Deferred <id>" receipt gives the operator no way to know
+    what the next selection pass will pick up.
+    """
+    if not freed:
+        return
+    typer.echo(
+        f"Released {len(freed)} contained node(s) from {owner_id}; they are "
+        f"dispatchable again: {', '.join(freed)}"
+    )
+
+
+def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Un-contain everything shipping inside ``owner_id``; return the ids freed.
+
+    Called wherever a delivery unit DIES - removed, superseded, or deferred by
+    any route (x-e957). A dead unit will never merge, so
+    ``_strandable_contained_ids`` (which keys on ``completed_at``) can never heal
+    its children, while ``selection_guards`` and ``fno target init`` keep
+    refusing them: unbuildable, uncloseable, invisible to every sweep.
+
+    One helper because there are SIX writers of this transition and wiring three
+    of them was the decorative-guard shape this whole change is about - the
+    maintain auto-defer legs and the triage defer reach the same state as
+    ``cmd_defer`` and must free the same children.
+
+    Un-contained, never closed: a unit dying is not a claim that its children
+    shipped. Nothing re-contains them on undefer, deliberately - re-adoption is
+    decompose's job, and inferring it would re-hide work since re-scoped.
+    """
+    if not owner_id:
+        return []
+    freed: list[str] = []
+    for e in entries:
+        if isinstance(e, dict) and e.get("contained_in") == owner_id:
+            e.pop("contained_in", None)
+            nid = e.get("id")
+            if isinstance(nid, str) and nid:
+                freed.append(nid)
+    return freed
+
+
+def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
+    """Close every node that shipped inside ``node_id``'s PR (x-e957 task 1.5).
+
+    Called inside the close mutator right after a delivery unit's completion
+    fields are set. A node carrying ``contained_in`` was folded into that unit
+    by ``decompose ... adopt:``; its work rides the unit's PR, so it has no PR
+    of its own and ``scan_merge_drift`` - which only ever returns nodes carrying
+    a PR - can never see it. Before this, dispatch and cost had each learned to
+    read containment and completion had no inference at all, so a contained node
+    stayed open forever behind a merged PR.
+
+    Deliberately NOT the inverse of ``_cascade_close_parents``. That one closes
+    a parent when its last child lands (bottom-up, conditional on the siblings);
+    this closes children off their owner's merge (top-down, unconditional). One
+    level only: containment is a direct relation to the node that owns the PR,
+    not a chain, so a node contained in a contained node is a shape decompose
+    cannot produce.
+
+    Three deliberate omissions, each load-bearing:
+
+    - No ledger rollup. Reusing ``fno done``'s path would hand each contained
+      node the same plan's cost and re-introduce the very triple count task 1.4
+      just removed. ``cost_usd`` stays None; the note is what makes that null
+      read as located rather than missing.
+    - No ``merge_status``. The field means "GitHub confirmed THIS node's PR
+      merged" and a contained node has no PR, matching how the PR-less epic
+      cascade leaves it unset.
+    - No auto-continue dispatch. See the AC6 note in
+      ``tests/unit/test_reconcile_cascade.py``: a contained node is not a legal
+      ``blocked_by`` target, and fanning one merge into N dispatches would scale
+      with how finely an epic happened to be decomposed. The close still
+      re-arms any dependent for the next selection pass.
+
+    Idempotent: an already-closed node keeps its own completion and note, so a
+    child that shipped its own PR is never relabelled as contained cargo.
+    Reconcile runs on every SessionStart, so this matters more than once.
+
+    The note is built BEFORE any mutation and nothing fallible runs between a
+    node's ``_apply_completion_fields`` and its note. The caller treats a raised
+    cascade as a warning and keeps the delivery unit's close, so anything that
+    can throw mid-loop leaves nodes closed with no note - done, with the reason
+    they are done missing. Cheap to arrange, and the alternative is a state no
+    reader can interpret.
+    """
+    unit = next(
+        (e for e in entries
+         if isinstance(e, dict) and e.get("id") == node_id),
+        {},
+    )
+    pr = unit.get("pr_number")
+    where = f"PR #{pr}" if pr else "its PR"
+    note = (
+        f"auto-closed: shipped inside {node_id} ({where}); "
+        f"cost and session are recorded on {node_id}"
+    )
+
+    closed: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("contained_in") != node_id:
+            continue
+        if e.get("completed_at"):
+            continue  # already closed (out of band, or a previous sweep)
+        nid = e.get("id")
+        if not isinstance(nid, str) or not nid:
+            continue  # unidentifiable row: nothing to report, nothing to close
+        _apply_completion_fields(e)
+        e["completion_note"] = note
+        closed.append(nid)
+    return closed
+
+
+def _strandable_contained_ids(entries: list[dict]) -> set[str]:
+    """Open nodes whose delivery unit is ALREADY done - closeable right now.
+
+    ``_cascade_close_contained`` only fires while a unit is being closed, and
+    ``scan_merge_drift`` never returns an already-closed unit, so a node that
+    became contained AFTER its owner shipped is reachable by neither. That is
+    not hypothetical: re-running an `adopt` spec back-fills ``contained_in``
+    onto a node adopted by an older fno, and if that node's owner has already
+    merged, the back-fill removes it from selection (the containment guard) with
+    nothing left that would ever complete it - visible, unbuildable, never done.
+
+    Read-only. The same self-heal role ``_strandable_epic_ids`` plays for
+    all-done epics, and for the same reason: a state the forward path now
+    prevents still has to be swept out of graphs that already carry it. Once
+    migrated this returns empty and the sweep is a no-op.
+    """
+    by_id = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    out: set[str] = set()
+    for e in entries:
+        if not isinstance(e, dict) or e.get("completed_at"):
+            continue
+        owner_id = e.get("contained_in")
+        if not isinstance(owner_id, str) or not owner_id:
+            continue
+        owner = by_id.get(owner_id)
+        nid = e.get("id")
+        # `.get`, not `e["id"]`: a row carrying contained_in but no id would
+        # raise KeyError, and this runs OUTSIDE any try/except in cmd_reconcile
+        # - so it would abort the whole sweep. Exactly the failure class as the
+        # SessionStart jq bug this same PR fixes; a read of untrusted graph rows
+        # must never be the thing that takes reconcile down.
+        if owner is not None and owner.get("completed_at") and isinstance(nid, str) and nid:
+            out.add(nid)
+    return out
+
+
+def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
+    """Close every node :func:`_strandable_contained_ids` names.
+
+    Grouped by owner so each node gets the same note the merge-time cascade
+    writes, naming its unit and that unit's PR.
+    """
+    # Hoisted: called inside the comprehension it re-ran once per entry, each
+    # pass rebuilding the whole by_id map - O(N^2) on a path reconcile fires at
+    # every SessionStart.
+    stranded = _strandable_contained_ids(entries)
+    if not stranded:
+        return []
+    owners = {
+        e.get("contained_in")
+        for e in entries
+        if isinstance(e, dict) and e.get("id") in stranded
+    }
+    closed: list[str] = []
+    for owner_id in sorted(o for o in owners if isinstance(o, str) and o):
+        closed.extend(_cascade_close_contained(entries, owner_id))
+    return closed
+
+
 def _strandable_epic_ids(entries: list[dict]) -> set[str]:
     """Open epics (parents) whose children are ALL done - closeable right now.
 
@@ -6407,7 +6772,7 @@ def cmd_done(
     try:
         from fno.done.cli import _rollup_from_ledger
 
-        cost_rollup = _rollup_from_ledger(node.get("plan_path"))
+        cost_rollup = _rollup_from_ledger(node)
     except Exception:
         cost_rollup = {}
 
@@ -6837,11 +7202,19 @@ def cmd_reconcile(
     # so the global sweep is suppressed there (the targeted node's own cascade
     # still fires).
     strandable = _strandable_epic_ids(entries) if node is None else set()
+    # Same self-heal role for contained nodes whose unit already shipped
+    # (x-e957): neither the merge-time cascade nor scan_merge_drift can reach
+    # them, so without this leg a back-filled `contained_in` on an
+    # already-merged owner strands the node permanently. Full sweep only, for
+    # the same reason as the epic sweep above.
+    strandable_contained = _strandable_contained_ids(entries) if node is None else set()
 
     closed: list[dict] = []
     healed_epics: list[str] = []
+    contained_closed: list[str] = []
+    contained_errors: list[dict] = []
 
-    if not dry_run and (closeable or strandable):
+    if not dry_run and (closeable or strandable or strandable_contained):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -6854,6 +7227,17 @@ def cmd_reconcile(
         # we accumulate the ids here and run the same dispatch path for them
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
+        # Nodes closed because they shipped inside a closed node's PR (x-e957).
+        # Kept SEPARATE from cascade_closed_acc, which drives auto-continue
+        # dispatch - contained nodes deliberately get none. This list is for
+        # reporting only: a sweep that closes three nodes while saying it closed
+        # one reads as "already in sync" to the next operator.
+        contained_closed_acc: list = []
+        # Cascade/sweep failures, carried into the --json payload. stderr alone
+        # is invisible to the SessionStart hook, which runs `reconcile --json`
+        # and discards stderr - so a repeatedly-failing cascade left contained
+        # nodes open forever with no signal reaching any automated reader.
+        contained_errors_acc: list = []
 
         # Ledger rollup, precomputed outside the lock (ledger I/O must not block
         # other graph mutations). Reconcile is the MAINSTREAM close: a session
@@ -6867,9 +7251,7 @@ def cmd_reconcile(
             for record in closeable:
                 node_obj = _find_node(entries, record.node_id)
                 if node_obj:
-                    reconcile_rollups[record.node_id] = _rollup_from_ledger(
-                        node_obj.get("plan_path")
-                    )
+                    reconcile_rollups[record.node_id] = _rollup_from_ledger(node_obj)
         except Exception:
             reconcile_rollups = {}
 
@@ -6918,6 +7300,36 @@ def cmd_reconcile(
                     if record.pr_number and not node_obj.get("pr_number"):
                         node_obj["pr_number"] = record.pr_number
                         node_obj["pr_url"] = record.pr_url
+                    # Close every node that shipped inside this PR (x-e957),
+                    # BEFORE the parent cascade: a contained node is a child of
+                    # the delivery unit, so the epic above is only all-done once
+                    # these are closed too. Running it after would leave the
+                    # ancestor open for a sweep it should have closed now.
+                    #
+                    # A loud warning, never an abort. The merge already
+                    # happened and the delivery unit's own close is the
+                    # load-bearing write; a cascade that raised here would leave
+                    # that unit open against a merged PR - strictly worse than
+                    # the bug this fixes. Contained ids are NOT added to
+                    # cascade_closed_acc: that accumulator drives auto-continue
+                    # dispatch, which contained nodes deliberately do not get.
+                    try:
+                        contained_closed_acc.extend(
+                            _cascade_close_contained(entries, record.node_id)
+                        )
+                    except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
+                        contained_errors_acc.append({
+                            "owner": record.node_id,
+                            "stage": "merge-cascade",
+                            "error": str(_cc_exc)[:200],
+                        })
+                        typer.echo(
+                            f"warning: closed {record.node_id} but the contained-node "
+                            f"cascade failed: {_cc_exc}; any node with "
+                            f"contained_in={record.node_id} is still open "
+                            "(`fno backlog reconcile` retries on the next run)",
+                            err=True,
+                        )
                     # Cascade-close now-all-done ancestor epics (x-33b2), uniform
                     # across projects (follows the parent edge, not a filter).
                     cascade_closed_acc.extend(
@@ -6930,7 +7342,34 @@ def cmd_reconcile(
             # unrelated epics. Going forward the cascade prevents new ones, so
             # this is a no-op once migrated. Their dependents auto-continue via
             # the same cascade_closed_acc dispatch loop.
+            # Self-heal contained nodes whose unit shipped before the
+            # containment record existed (codex P1): the merge-time cascade
+            # above only fires while closing an owner, and an already-closed
+            # owner never appears in `closeable`. Runs BEFORE the epic sweep so
+            # an epic waiting on one of these sees it done in the same pass.
+            # Full reconcile only, matching _sweep_close_done_epics.
             if node is None:
+                # Guarded for the same reason the merge-time cascade is: this
+                # leg is a self-heal for a state that predates the invariant,
+                # and letting it raise would abort the whole sweep - taking
+                # every genuine PR-drift close with it. Strictly worse than the
+                # stale rows it exists to clean up.
+                try:
+                    contained_closed_acc.extend(
+                        _sweep_close_stranded_contained(entries)
+                    )
+                except Exception as _sw_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append({
+                        "owner": None,
+                        "stage": "stranded-heal",
+                        "error": str(_sw_exc)[:200],
+                    })
+                    typer.echo(
+                        "warning: the stranded-contained self-heal failed: "
+                        f"{_sw_exc}; nodes whose delivery unit already merged "
+                        "stay open (`fno backlog reconcile` retries next run)",
+                        err=True,
+                    )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
             return entries
 
@@ -7118,7 +7557,9 @@ def cmd_reconcile(
         # (codex P3): the close summaries below otherwise only describe PR-drift
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
-    elif dry_run and (closeable or strandable):
+        contained_closed = sorted(set(contained_closed_acc))
+        contained_errors = list(contained_errors_acc)
+    elif dry_run and (closeable or strandable or strandable_contained):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -7128,14 +7569,53 @@ def cmd_reconcile(
 
         _sim = _copy.deepcopy(entries)
         _sim_acc: list = []
+        _sim_contained: list = []
         for record in closeable:
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
+                # Same order as the real mutator: contained children close
+                # first, so the simulated parent cascade sees the same
+                # all-children-done world a real run would.
+                # Guarded like the real mutator. Unguarded, a raise crashed the
+                # PREVIEW with a traceback where a real run degrades to a
+                # warning - the preview failing harder than the thing it
+                # previews - and `contained_errors` stayed [] in the --json
+                # payload, asserting no errors for a leg that never completed.
+                try:
+                    _sim_contained.extend(
+                        _cascade_close_contained(_sim, record.node_id)
+                    )
+                except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
+                    typer.echo(
+                        f"warning: dry-run contained cascade for "
+                        f"{record.node_id} failed: {_sc_exc}; the preview "
+                        "under-reports contained closes",
+                        err=True,
+                    )
+                    contained_errors.append({
+                        "owner": record.node_id,
+                        "stage": "merge-cascade (dry-run)",
+                        "error": str(_sc_exc)[:200],
+                    })
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
         if node is None:
+            try:
+                _sim_contained.extend(_sweep_close_stranded_contained(_sim))
+            except Exception as _ss_exc:  # noqa: BLE001 - preview never crashes
+                typer.echo(
+                    f"warning: dry-run stranded-contained heal failed: "
+                    f"{_ss_exc}; the preview under-reports contained closes",
+                    err=True,
+                )
+                contained_errors.append({
+                    "owner": None,
+                    "stage": "stranded-heal (dry-run)",
+                    "error": str(_ss_exc)[:200],
+                })
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
+        contained_closed = sorted(set(_sim_contained))
 
     # W4 causal links: best-effort revert stamp, full sweep only. A merged
     # "Revert ..." PR referencing a PR carried by a graph node flips that
@@ -7213,6 +7693,14 @@ def cmd_reconcile(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Nodes closed because they shipped inside a closed node's PR
+            # (x-e957). Reported separately from `closed`, whose entries all
+            # carry their own pr_number - a contained node has none.
+            "contained_closed": contained_closed,
+            # Cascade/sweep failures. In the payload because the SessionStart
+            # hook reads --json and discards stderr: a leg whose failure is
+            # unobservable is indistinguishable from one that never ran.
+            "contained_errors": contained_errors,
             # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
             "reverted": reverted_stamped,
             # Canonical-sync catch-up outcome. In the JSON payload rather than
@@ -7236,28 +7724,58 @@ def cmd_reconcile(
         not closeable
         and not failures
         and not strandable
+        and not strandable_contained
         and not healed_epics
+        and not contained_closed
         and not reverted_stamped
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
 
     if dry_run:
-        typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
+        if closeable:
+            typer.echo(
+                f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):"
+            )
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
+        if contained_closed:
+            # "those PRs" only reads correctly when a PR actually drifted this
+            # run. On a heal-only sweep `closeable` is empty, so the 0-header
+            # above says nothing-to-do directly over a line saying otherwise.
+            _whose = "those PRs" if closeable else "already-merged delivery units"
+            typer.echo(
+                f"Would close {len(contained_closed)} contained node(s) shipped "
+                f"inside {_whose}: " + ", ".join(contained_closed)
+            )
         if healed_epics:
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): "
                 + ", ".join(healed_epics)
             )
     else:
-        typer.echo(f"Closed {len(closed)} node(s):")
+        # Suppressed ONLY on a heal-only sweep (no drift candidates at all),
+        # where a bare "Closed 0 node(s):" sits above a line saying nodes were
+        # closed. With candidates present, "Closed 0" is real signal - it says
+        # every one of them was already closed between the scan and the lock.
+        if closed or closeable:
+            typer.echo(f"Closed {len(closed)} node(s):")
         for c in closed:
             stamp_note = " (plan stamped)" if c["plan_stamped"] else ""
             typer.echo(f"  {c['node_id']}  PR #{c['pr_number']}{stamp_note}")
         if closed:
             typer.echo(f"Retro sentinels written under {retro_pending_dir()}")
+        if contained_closed:
+            # Same wording rule as the dry-run branch: with no drift this sweep
+            # there are no "those PRs" to point at, and "Also" implies a
+            # preceding close that did not happen.
+            _lead = "Also closed" if closed else "Closed"
+            _whose = "those PRs" if closed else "already-merged delivery units"
+            typer.echo(
+                f"{_lead} {len(contained_closed)} contained node(s) shipped "
+                f"inside {_whose} (cost stays on the delivery unit): "
+                + ", ".join(contained_closed)
+            )
         if healed_epics:
             typer.echo(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
@@ -7694,6 +8212,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
+                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = reason
                     applied_defers.append(
                         {"node_id": cand.node_id, "streak": cand.streak, "reason": reason}
@@ -7730,6 +8249,7 @@ def cmd_maintain(
                     n["claimed_at"] = None
                     n["completed_at"] = None
                     n["deferred_at"] = datetime.now(timezone.utc).isoformat()
+                    _release_contained_children(ents, n.get("id"))
                     n["deferred_reason"] = _maintain.STALE_QUARANTINE_REASON
                     applied_stale_ready.append({
                         "node_id": cand.node_id,
@@ -8907,6 +9427,7 @@ def cmd_supersede(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         new_node = _find_node(entries, new_id)
         old_node = _find_node(entries, replaces)
@@ -8946,10 +9467,20 @@ def cmd_supersede(
         old_node["claimed_at"] = None
         old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
         old_node["deferred_reason"] = f"superseded by {new_id}: {cleaned_reason}"
+        # Release anything that was shipping inside it (x-e957, sigma). Same
+        # trap `cmd_remove` was fixed for, one step short of deletion: a
+        # superseded unit will never merge, so `_strandable_contained_ids`
+        # (which keys on completed_at) never heals its children, while
+        # selection_guards keeps refusing them and the redirect keeps pointing
+        # at a node that is not going to ship. Unbuildable, uncloseable, and
+        # invisible to every sweep. Un-contained rather than closed: superseding
+        # the unit is not a claim that its children shipped.
+        _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
+    _echo_freed(_freed_box[0], replaces)
     _project_plans_from_graph([replaces, new_id])
 
 

@@ -2024,6 +2024,74 @@ def test_selection_guards_dead_ancestor_via_field_not_status():
 
 
 # ---------------------------------------------------------------------------
+# x-e957 task 1.3a: a contained node is not a delivery unit
+# ---------------------------------------------------------------------------
+
+
+def test_selection_guards_contained_node_is_skipped(tmp_path):
+    """AC4 (autonomous half): its work ships inside another node's PR.
+
+    A healthy-looking ready node with a blueprinted plan - every other guard
+    waves it through, which is the whole point. Dispatching it would open a
+    second PR for one plan.
+    """
+    now = _gnow()
+    node = {
+        "id": "c",
+        "status": "ready",
+        "plan_path": _design_plan(tmp_path, status="ready"),
+        "contained_in": "x-unit0001",
+        "created_at": now.isoformat(),
+    }
+    assert adv.selection_guards(node, {"c": node}, now) == "contained:x-unit0001"
+
+
+def test_selection_guards_contained_reason_names_the_owner_not_just_the_tag():
+    """The destination is the payload; the tag alone is not the answer.
+
+    Two nodes contained in DIFFERENT units must not report the same reason - a
+    variant-only assertion agrees on the tag and disagrees on where the work
+    went, which is the only part an operator can act on.
+    """
+    now = _gnow()
+    a = {"id": "a", "status": "ready", "contained_in": "x-unit0001",
+         "created_at": now.isoformat()}
+    b = {"id": "b", "status": "ready", "contained_in": "x-unit0002",
+         "created_at": now.isoformat()}
+    assert adv.selection_guards(a, {"a": a}, now) == "contained:x-unit0001"
+    assert adv.selection_guards(b, {"b": b}, now) == "contained:x-unit0002"
+
+
+def test_selection_guards_containment_outranks_the_other_skip_reasons():
+    """Containment is a fact about THIS node; the rest read ancestors or plans.
+
+    A stale contained node under a superseded epic could truthfully report
+    three reasons. `contained:<unit>` is the one that names where the work
+    actually went, so it wins.
+    """
+    now = _gnow()
+    old = (now - timedelta(days=80)).isoformat()
+    child = {"id": "c", "parent": "p", "status": "ready",
+             "contained_in": "x-unit0001", "created_at": old}
+    by_id = {"c": child, "p": {"id": "p", "status": "superseded"}}
+    assert adv.selection_guards(child, by_id, now) == "contained:x-unit0001"
+
+
+def test_selection_guards_empty_contained_in_stays_armed():
+    """Only a non-empty owner id skips - "" and None are ordinary nodes.
+
+    Fail-open on a falsy value: silently unarming a real delivery unit starves
+    the backlog, and a starved backlog reads as "nothing to do", not as a bug.
+    """
+    now = _gnow()
+    recent = (now - timedelta(days=2)).isoformat()
+    for value in (None, "", 0):
+        node = {"id": "c", "status": "ready", "plan_path": "x",
+                "contained_in": value, "created_at": recent}
+        assert adv.selection_guards(node, {"c": node}, now) is None
+
+
+# ---------------------------------------------------------------------------
 # x-d1f4: dispatch resolves the brief via autobrief (not the raw field)
 # ---------------------------------------------------------------------------
 

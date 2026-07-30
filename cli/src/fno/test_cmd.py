@@ -585,11 +585,8 @@ tests/hooks/test_hook_events.sh
 tests/hooks/test_init_claim_stderr_and_modern_claim.sh
 tests/hooks/test_init_contested_steal_guard.sh
 tests/hooks/test_init_node_guard_tokenize.sh
-tests/hooks/test_reconcile_session_start.sh
 tests/smoke-megatron-e2e.sh
 tests/smoke-target-shim.sh
-tests/test-autolaunch-gate.sh
-tests/test-backlog-aliases.sh
 tests/test-backlog-triage.sh
 tests/test-graph-resolve.sh
 tests/test-worktree-inside-checkout-redirect.sh

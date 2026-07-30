@@ -335,7 +335,108 @@ def _resolve_dispatch_node(
                 matches.append(entry)
         except OSError:
             continue
+    if len(matches) > 1:
+        # A plan shared by a delivery unit and its contained children is the
+        # LEGAL shape, not an ambiguity (x-e957): exactly one of those nodes
+        # owns the PR. Resolving it to None here treated the normal contained
+        # graph as unresolvable, so `--plan-path <shared plan>` sailed past the
+        # containment redirect and the retro dedup gate alike. Narrow to the
+        # delivery unit; a genuinely ambiguous set (two non-contained holders,
+        # which change 1.1 now refuses to create) still returns None.
+        units = [e for e in matches if not e.get("contained_in")]
+        if len(units) == 1:
+            return units[0]
+        if not units:
+            # Every holder is contained (the owner was superseded, deleted, or
+            # had its plan_path edited away). The first narrowing missed this:
+            # it fell back to the len==1 rule and returned None, so a
+            # `--plan-path` bootstrap of such a plan skipped the redirect
+            # entirely - the exact second-PR state the guard exists to stop.
+            # When they all name ONE owner the destination is unambiguous, so
+            # hand back any of them and let the redirect route to that owner.
+            owners = {e.get("contained_in") for e in matches}
+            if len(owners) == 1:
+                return matches[0]
     return matches[0] if len(matches) == 1 else None
+
+
+def _redirect_if_contained(node: Optional[dict]) -> None:
+    """Route a named contained node to the delivery unit that owns its PR.
+
+    A node carrying ``contained_in`` ships inside another node's PR (x-e957),
+    so initializing a session on it would claim it, build it, and open a SECOND
+    PR for one plan - the double-binding this invariant exists to prevent.
+
+    A REDIRECT, not a refusal. Naming a node is consent and this does not
+    overrule it; the operator asked for work that exists, and the answer is
+    which node owns it. Exits before ``_retro_dispatch_preflight`` and before
+    the shell bootstrap, so nothing is claimed and no manifest is written.
+
+    This is the NAMED half of the guard. ``selection_guards`` covers autonomous
+    selection only - by its own docstring, an explicitly-named node dispatches
+    from any rung - so without this an operator typing the id walks straight
+    past it, and the autonomous guard alone would be decorative.
+    """
+    if not isinstance(node, dict):
+        return
+    owner = node.get("contained_in")
+    if not isinstance(owner, str) or not owner:
+        return
+    nid = node.get("id") or "that node"
+    # Route on the owner's LIVE state. After the merge cascade closes the
+    # children the owner is usually done, and `/fno:target <done node>` is a
+    # dead end - the operator reads the redirect as broken rather than as
+    # "this already shipped".
+    owner_node = _find_node(owner)
+    if owner_node is None:
+        # The owner is gone entirely (removed before the release landed, or a
+        # hand-edited graph). Routing to it is a dead end with no remedy, and
+        # the reconcile heal deliberately skips a missing owner - so say what
+        # to do instead of naming a node the graph does not have.
+        typer.echo(
+            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"no node {owner} exists.\n"
+            f"That containment is stale and nothing will clear it automatically. "
+            f"Clear it with `fno backlog update {nid} --parent null`, then "
+            "dispatch this node on its own. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    # A dead owner will never ship, so routing there is worse than useless -
+    # it sends the operator to a node nothing will build. Named separately from
+    # the shipped case because the remedy differs: this one is stale
+    # containment that wants clearing, not work that already landed.
+    if owner_node is not None and (
+        owner_node.get("superseded_by") or owner_node.get("deferred_at")
+    ) and not owner_node.get("completed_at"):
+        _state = "superseded" if owner_node.get("superseded_by") else "deferred"
+        typer.echo(
+            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"{owner} is {_state} and will never ship it.\n"
+            f"That containment is stale. Clear it with `fno backlog update {nid} "
+            "--parent null`, then dispatch this node on its own. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    if owner_node is not None and owner_node.get("completed_at"):
+        shipped = owner_node.get("pr_number")
+        where = f" in PR #{shipped}" if shipped else ""
+        typer.echo(
+            f"fno target init: {nid} already shipped inside {owner}{where}, "
+            f"which is done - there is nothing left to build here.\n"
+            f"{nid} was folded into {owner} as a contained node, so it has no "
+            "PR of its own and is not separately costed. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    typer.echo(
+        f"fno target init: {nid} ships inside {owner}'s PR; "
+        f"run `/fno:target {owner}`.\n"
+        f"{nid} was folded into {owner} as a contained node, so it has no PR of "
+        "its own and is not separately costed. Nothing was claimed.",
+        err=True,
+    )
+    raise typer.Exit(code=2)
 
 
 def _source_pr_repo(node: dict, source_pr: int) -> Optional[str]:
@@ -692,6 +793,77 @@ def check_review_gate() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("check-contained", hidden=True)
+def check_contained() -> None:
+    """Refuse a contained node for a non-Python caller (x-e957 task 1.3b).
+
+    The bash twin of the redirect ``init`` performs in-process. SKILL.md
+    documents running ``hooks/helpers/init-target-state.sh`` directly when the
+    wrapper is unavailable, and that script acquires the node claim and writes
+    the manifest - so without this, the documented fallback bootstraps a
+    contained node and opens the second PR for one plan that this whole
+    invariant exists to prevent. A guard on one of two reachable paths is
+    decorative; the same reasoning as ``check-review-gate`` above.
+
+    Reads the node from ``TARGET_INPUT`` / ``TARGET_PLAN_PATH``, which is how
+    the script already receives its input, so the shell caller passes nothing
+    and cannot pass the wrong thing.
+
+    Read-only; writes no state. Exit 0 = not contained, not resolvable, or
+    nothing to check; exit ``REVIEW_GATE_REFUSED`` = redirected, message already
+    on stderr. Every other non-zero means a BROKEN gate, and the caller
+    proceeds - a stale `fno` without this verb exits 2 as a Click usage error
+    and must not hard-refuse every direct bootstrap.
+    """
+    # Read UNDER THE GRAPH LOCK (codex P1). `read_graph` explicitly takes no
+    # lock, which left the post-acquire re-check still raceable: decompose holds
+    # the graph flock and sees no claim, the bootstrap acquires the claim, this
+    # read returns the PRE-adoption graph because decompose has not done its
+    # atomic replace yet, and then decompose commits `contained_in` while the
+    # worker proceeds. Taking the same flock totalizes the two orderings, and
+    # both are safe:
+    #
+    #   lock here first  -> we see no containment and proceed; decompose then
+    #                       takes the lock, sees our now-live claim, and refuses.
+    #   decompose first  -> it commits containment and releases; we then read it
+    #                       and refuse, releasing the claim we just took.
+    #
+    # No deadlock: decompose reads claim state as a plain file read and never
+    # holds a claim while waiting on this lock, so there is no cycle.
+    from fno.graph.store import _acquire_flock, _graph_lock_path, _release_flock
+    from fno.paths import graph_json
+
+    try:
+        _fd = _acquire_flock(_graph_lock_path(graph_json()))
+    except Exception as _lock_exc:  # noqa: BLE001 - never block dispatch
+        # Say so. The serialization above is what makes this check unraceable,
+        # so losing it silently while still exiting 0 lets every caller read the
+        # result as "checked, and it is fine" - the same swallow this gate has
+        # already been fixed for twice. Still fail-open: an unlockable graph
+        # must not block every bootstrap, and the pre-claim check plus
+        # decompose's own live-claim refusal both still stand.
+        typer.echo(
+            f"fno target check-contained: could not take the graph lock "
+            f"({_lock_exc}); the containment read is UNSERIALIZED, so a "
+            "decompose committing right now could be missed. Proceeding.",
+            err=True,
+        )
+        _fd = None
+    try:
+        node = _resolve_dispatch_node(
+            os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
+        )
+    finally:
+        if _fd is not None:
+            _release_flock(_fd)
+    try:
+        _redirect_if_contained(node)
+    except typer.Exit as exc:
+        if exc.exit_code != 2:
+            raise
+        raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
+
+
 @target_app.command("status")
 def status(
     node: Optional[str] = typer.Argument(
@@ -853,11 +1025,19 @@ def init(
         typer.echo(f"fno target init: {exc}", err=True)
         raise typer.Exit(code=2)
 
+    # Resolved once and shared: both gates below want the same exact-match node,
+    # and the resolver reads the whole graph.
+    _dispatch_node = _resolve_dispatch_node(input_, plan_path)
+
+    # A named contained node is redirected to its delivery unit before anything
+    # is claimed (x-e957 task 1.3b).
+    _redirect_if_contained(_dispatch_node)
+
     # Retro-triaged nodes get a dispatch-time dedup check before the shell
     # bootstrap acquires the node claim. Ordinary target inputs return early;
     # probe failures remain fail-open toward dispatch.
     _retro_dispatch_preflight(
-        _resolve_dispatch_node(input_, plan_path),
+        _dispatch_node,
         beastmode=beastmode,
         unattended=bool(
             os.environ.get("TARGET_UNATTENDED")
@@ -2160,6 +2340,13 @@ def start(
     # slug would write graph_node_id: null and skip the claim) - both the
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
+    # Redirect a contained node BEFORE `worktree ensure` (sigma). `init` catches
+    # it too, but by then this verb has already created the worktree and branch,
+    # so the operator got a refusal saying "Nothing was claimed" next to an
+    # orphan directory they have to remove by hand. Placed beside the
+    # foreign-holder park above for the same reason: a cold start's refusals
+    # belong before it allocates anything.
+    _redirect_if_contained(_find_node(node))
     name = _wt_name(node)
 
     # Codex Desktop owns the only supported native worktree transition.  Keep

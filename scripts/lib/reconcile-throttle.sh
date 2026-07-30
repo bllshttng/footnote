@@ -37,7 +37,19 @@ _reconcile_resolve_fno() {
 
 # File mtime in epoch seconds, portable across macOS (stat -f) and GNU (stat -c).
 _reconcile_mtime() {
-    stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null || echo 0
+    # BSD-first with `||` was wrong on Linux, and silently: GNU `stat -f` is
+    # --file-system, NOT a format flag, so `stat -f %m FILE` SUCCEEDS there
+    # (treating both as operands) and prints its default block, which starts
+    # `  File: ...`. Exit 0 means the `||` never reaches `-c %Y`, and the caller
+    # feeds that text to `$(( ))`, where bash reads `File` as a variable name:
+    # `File: unbound variable` under the hook's `set -u`, killing the whole
+    # SessionStart reconcile on every Linux host with an existing stamp.
+    # So validate the ANSWER rather than trusting the exit code.
+    local m=""
+    m=$(stat -c %Y "$1" 2>/dev/null) || m=""
+    [[ "$m" =~ ^[0-9]+$ ]] || m=$(stat -f %m "$1" 2>/dev/null) || m=""
+    [[ "$m" =~ ^[0-9]+$ ]] || m=0
+    printf '%s\n' "$m"
 }
 
 # reconcile_maybe_fire <repo_root>

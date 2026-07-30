@@ -173,7 +173,11 @@ _RC=$?
 [[ "$_RC" -eq 0 ]] || fail "AC5-ERR: absent fno blocked bootstrap (exit $_RC; err: $(cat "$TMP_NOFNO/err.log"))"
 pass "AC5-ERR: script exited 0"
 
-grep -q "fno absent - config.review capability gate not checked" "$TMP_NOFNO/err.log" \
+# Both gates share the one `command -v fno` block, so the absent-fno note has
+# to name both (x-e957): a note that mentioned only the review gate would let a
+# reader conclude the containment gate DID run on a host with no `fno`.
+grep -q "fno absent - config.review capability + containment gates not checked" \
+  "$TMP_NOFNO/err.log" \
   || fail "AC5-ERR: the degrade was silent (got: $(cat "$TMP_NOFNO/err.log"))"
 pass "AC5-ERR: absent-fno note printed"
 

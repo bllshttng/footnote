@@ -27,9 +27,12 @@ Delivery ships at PR granularity (one node per shippable plan).
 The two disagree by nature whenever a plan folds two findings into one PR.
 
 `adopt` is the reconciliation.
-In `fno backlog decompose`, a group's `adopt: [<node-id>...]` re-parents the discovery nodes into the group child that ships their PR.
+In `fno backlog decompose`, a group's `adopt: [<node-id>...]` re-parents the discovery nodes into the group child that ships their PR and stamps each with `contained_in: <group-child-id>`.
 The finding is preserved (extraction did its job) and the delivery boundary is drawn (one plan, one PR, one node).
-See `epic-decomposition.md` step 5b.
+
+Adoption is the only moment the system can know that boundary, which is why the record is written here and not later: it is when a discovery node stops being a work item.
+A contained node then never dispatches, never claims the plan's cost, and closes off the unit's merge.
+See `epic-decomposition.md` step 5b for what each of those means in practice.
 
 The ordering is fixed: extract first (nothing dropped), then `adopt` (boundary drawn).
 `/think` belongs before decomposition, scoping the epic; never after it, re-scoping the promises.

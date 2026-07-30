@@ -209,6 +209,19 @@ def selection_guards(
     and the converge readiness filter (_direct_dependents), so the two paths
     can never disagree about what is dispatchable. Guards, in order:
 
+      contained: the node carries ``contained_in`` - its work ships inside
+        another node's PR, so it is not a delivery unit and dispatching it
+        would open a second PR for one plan. Returns ``contained:<owner-id>``,
+        which names where the work actually went (``dead-ancestor`` would only
+        say the subtree is dead). First, because containment is a fact about
+        THIS node while every guard below reads its ancestors or its plan.
+        Belt-and-braces: the write-site refusal (x-d9a4) already stops new
+        double-bindings, so this is a read of a state that should not exist.
+        It is also only HALF the coverage - selection_guards is autonomous-only
+        (see the design-stage note below), so `fno target init` carries the
+        named-dispatch half. A guard on one of two reachable paths is
+        decorative.
+
       dead-ancestor: any transitive ``parent`` in {superseded, deferred} - the
         subtree is abandoned, so building a leaf under a killed epic is wasted
         work. Returns ``dead-ancestor:<ancestor-id>``. A missing parent id ends
@@ -235,6 +248,10 @@ def selection_guards(
     from datetime import datetime, timezone
 
     try:
+        owner = entry.get("contained_in")
+        if isinstance(owner, str) and owner:
+            return f"contained:{owner}"
+
         seen: set[str] = set()
         cur = entry.get("parent")
         steps = 0

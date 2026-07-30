@@ -141,6 +141,26 @@ is known):
    deliberately leave parked is fine - the warning repeats and the run still
    exits 0.
 
+   **Adoption also stamps `contained_in: <group-child-id>`, and that is what
+   makes the node stop being a work item.** The `parent` pointer alone does not:
+   status is recomputed on every write, so an adopted node carrying a plan with
+   no blockers derives `ready` again on the next mutation, armed exactly as
+   before. Three readers inherit the fact, so an adopted node from here on:
+
+   - never dispatches. Autonomous selection skips it (`contained:<owner-id>`),
+     and `fno target init` REDIRECTS a named one to its delivery unit rather
+     than claiming it. Naming stays consent; you are routed, not refused.
+   - never claims the plan's cost. The delivery unit carries the whole
+     `cost_usd`, `points`, and `session_id`; contained nodes contributing zero
+     is what keeps the flat project total correct with no dedup logic.
+   - closes automatically when the unit's PR merges, with a completion note
+     naming the unit and its PR - so the null cost reads as located, not
+     missing. Via `reconcile` (the truth comes from GitHub), not `fno done`.
+
+   So do not point a `blocked_by` at an adopted node: it is not a delivery unit
+   and the cascade close does not dispatch its dependents. Block on the group
+   child that owns the PR.
+
 6. Build the groups JSON and call the CLI (atomic + idempotent upsert). A
    `contract` group just carries `"dep": "contract"` (it must already
    `blocked_by` its blocker); an `adopt` list names EXISTING node ids to

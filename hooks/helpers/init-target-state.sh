@@ -60,8 +60,22 @@ if [[ "${FNO_TARGET_INIT_GATED:-}" != "1" ]]; then
     elif [[ "$_RG_RC" -ne 0 ]]; then
       echo "[init-target-state] note: review capability gate unavailable (rc=$_RG_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-review-gate\`." >&2
     fi
+    # Containment gate (x-e957), same seam and same rc idiom. A node carrying
+    # `contained_in` ships inside another node's PR, and this script acquires
+    # the claim and writes the manifest - so bootstrapping one here opens the
+    # second PR for one plan that the invariant exists to prevent. Its own verb
+    # and its own rc, so a broken gate cannot suppress the other one; the node
+    # is read from TARGET_INPUT/TARGET_PLAN_PATH by the verb, so the shell
+    # passes nothing and cannot pass the wrong node.
+    fno target check-contained && _CT_RC=0 || _CT_RC=$?
+    if [[ "$_CT_RC" -eq 9 ]]; then
+      echo "[init-target-state] REFUSED: contained node (see above). Refusing to write state file or claim." >&2
+      exit 2
+    elif [[ "$_CT_RC" -ne 0 ]]; then
+      echo "[init-target-state] note: containment gate unavailable (rc=$_CT_RC); proceeding. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
+    fi
   else
-    echo "[init-target-state] note: fno absent - config.review capability gate not checked" >&2
+    echo "[init-target-state] note: fno absent - config.review capability + containment gates not checked" >&2
   fi
 fi
 # Consume the marker like TARGET_START above: it means "the gate already ran for
@@ -980,7 +994,12 @@ EOF
   if [[ -n "$_GUARD_NODE" ]]; then
     _NODE_ID="$_GUARD_NODE"
   elif [[ -f "$_GRAPH_FILE" && -n "$INITIAL_PLAN_PATH" ]]; then
-    _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' 2>/dev/null || true
+    # `2>&1 >` is NOT a typo and the order matters: it points the resolver's
+    # stderr at THIS shell's stderr before stdout is captured, so a traceback
+    # still stays quiet-ish but the deliberate ambiguity note reaches the
+    # operator. Plain `2>/dev/null` discarded that note, which made the previous
+    # fix decorative - the run still proceeded unclaimed in silence.
+    _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
 import json, os, sys
 graph_path, raw_target, repo_root = sys.argv[1], sys.argv[2], sys.argv[3]
 if not os.path.isabs(raw_target):
@@ -994,6 +1013,14 @@ try:
 except Exception:
     sys.exit(0)
 entries = data.get("entries", []) if isinstance(data, dict) else data
+# Collect ALL holders, then prefer the delivery unit (x-e957). First-match-wins
+# picked whichever came first in entry order, and adopted children precede the
+# group child that was minted for them - so `--plan-path <shared plan>` resolved
+# to a CONTAINED node, the post-claim containment check refused, and the plan
+# became undispatchable by path even for the node that owns its PR.
+# Same rule as `_resolve_dispatch_node` in target_cli.py, deliberately: two
+# resolvers for one question that disagree is worse than either answer.
+matches = []
 for entry in entries:
     plan_path = entry.get("plan_path")
     if not plan_path:
@@ -1001,10 +1028,28 @@ for entry in entries:
     abs_plan = plan_path if os.path.isabs(plan_path) else os.path.join(repo_root, plan_path)
     try:
         if os.path.realpath(abs_plan) == target:
-            print(entry.get("id", ""))
-            break
+            matches.append(entry)
     except OSError:
         pass
+if len(matches) > 1:
+    units = [e for e in matches if not e.get("contained_in")]
+    if len(units) == 1:
+        matches = units
+if len(matches) == 1:
+    print(matches[0].get("id", ""))
+elif len(matches) > 1:
+    # Ambiguous and un-narrowable: two or more UNCONTAINED holders (a shape the
+    # write-site refusal now prevents creating). Print nothing rather than pick
+    # one, matching _resolve_dispatch_node - but say so, because a plan-path
+    # bootstrap that resolves to no node otherwise proceeds unclaimed in total
+    # silence (the stderr note below keys on TARGET_INPUT, which a plan-only
+    # run does not set).
+    sys.stderr.write(
+        "[init-target-state] note: %d nodes share this plan_path and none is a "
+        "single delivery unit (%s); resolving to no node, so this session runs "
+        "UNCLAIMED. Name the node explicitly, or fix the duplicate binding.\n"
+        % (len(matches), ", ".join(str(m.get("id")) for m in matches[:4]))
+    )
 PYEOF
 )
   fi
@@ -1048,6 +1093,59 @@ PYEOF
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
             --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+        # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
+        # below so a refusal leaves no claim fields behind. Every containment
+        # gate above runs before this claim, so adoption committing in that
+        # window left a worker holding the claim on a node that no longer
+        # dispatches - and it built the second PR for one plan anyway. Refusing
+        # adoption while a claim is live closes the common case but not this
+        # one: adoption can read "no holder" and commit while THIS acquire is
+        # already in flight. The claim is the serialization point, so re-reading
+        # while holding it is the only check that cannot be raced.
+        #
+        # `cmd && rc=0 || rc=$?`, not `if ! cmd`: after a negation `$?` is the
+        # negation's status, so the rc test would never see the 9.
+        TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno target check-contained \
+          && _PC_RC=0 || _PC_RC=$?
+        # A BROKEN gate on this path degrades silently unless it is said out
+        # loud, exactly like the pre-claim gate a hundred lines above: only 9
+        # refuses, but a crash or a stale fno without the verb must not look
+        # identical to "checked, and it is fine" - and here it happens while the
+        # claim is already held.
+        if [[ "$_PC_RC" -ne 0 && "$_PC_RC" -ne 9 ]]; then
+          echo "[init-target-state] note: post-claim containment gate unavailable (rc=$_PC_RC); proceeding with the claim held. If this persists, run \`fno doctor --fix\` - a stale fno predates \`target check-contained\`." >&2
+        fi
+        if [[ "$_PC_RC" -eq 9 ]]; then
+          # Report what actually happened. Swallowing the release rc while the
+          # message said "claim released" would strand a live claim for its full
+          # TTL on a node nobody is building AND tell the operator the opposite.
+          FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
+            --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
+          if [[ "$_REL_RC" -eq 0 ]]; then
+            _REL_NOTE="claim released"
+          else
+            _REL_NOTE="WARNING: claim release FAILED (rc=$_REL_RC) - $_CLAIM_KEY stays held until its $_CLAIM_TTL TTL expires; free it with \`fno claim release $_CLAIM_KEY --holder $_CLAIM_HOLDER\`"
+          fi
+          # Unlike every sibling refusal in this script, this one runs AFTER the
+          # manifest was written, so it must remove it. A left-behind
+          # target-state.md names the contained node with no claim lines, and
+          # the next init is gated on `[[ ! -f "$STATE_FILE" ]]` while the stale
+          # reaper only archives on a terminal status or a dead claim key -
+          # neither of which this leaves - so the delivery unit's own run would
+          # silently skip its manifest write and never claim the owner.
+          # Same rule as the release above: report what actually happened. An
+          # unchecked rm with a message asserting "No state file written" is the
+          # trap the comment above describes, told backwards - the operator is
+          # assured of a cleanup that did not occur.
+          rm -f "$STATE_FILE"
+          if [[ -e "$STATE_FILE" ]]; then
+            _RM_NOTE="WARNING: could not remove $STATE_FILE - it names a contained node with no claim, and the delivery unit's own init will SKIP its manifest write while this file exists; delete it by hand"
+          else
+            _RM_NOTE="no state file written"
+          fi
+          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); $_REL_NOTE; $_RM_NOTE." >&2
+          exit 2
+        fi
         echo "target_claim_key: \"$_CLAIM_KEY\"" >> "$STATE_FILE"
         echo "target_claim_holder: \"$_CLAIM_HOLDER\"" >> "$STATE_FILE"
         echo "target_claim_ttl: \"$_CLAIM_TTL\"" >> "$STATE_FILE"

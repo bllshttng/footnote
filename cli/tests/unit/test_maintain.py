@@ -1261,3 +1261,24 @@ def test_node_has_movement_relative_plan_missing_cwd_no_crash():
     now = datetime.now(timezone.utc)
     # No cwd -> probe stays relative -> getmtime misses -> no movement, no crash.
     assert not m.node_has_movement({"plan_path": "plans/p.md"}, now, 21)
+
+
+def test_contained_node_is_never_stale_quarantined():
+    """x-e957: contained work cannot acquire a movement signal, by design.
+
+    No PR, session, or claim of its own - so without an exemption it becomes
+    quarantine-eligible purely by aging, and `maintain --apply` auto-defers it
+    with the misleading reason "stale-quarantine". The adopt back-fill makes
+    that immediate rather than eventual: it stamps containment onto legacy nodes
+    whose created_at is already months old.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    from fno.graph.maintain import is_stale_ready
+
+    now = datetime(2026, 7, 30, tzinfo=timezone.utc)
+    old = (now - timedelta(days=180)).isoformat()
+    node = {"id": "x-261c", "status": "ready", "created_at": old}
+    # Same node, only containment differs.
+    assert is_stale_ready(node, now, 21) is True
+    assert is_stale_ready({**node, "contained_in": "x-6320"}, now, 21) is False

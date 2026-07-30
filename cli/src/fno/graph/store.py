@@ -103,6 +103,15 @@ CANONICAL_FIELD_ORDER: list[str] = [
     "batch",
     "cost_usd",
     "cost_sessions",
+    # Delivery-unit containment (x-e957): this node's work ships inside the
+    # named node's PR. Deliberately NOT setdefault-ed below, unlike the other
+    # nullable scalars - listed here only so it lands in canonical position
+    # WHEN present. Defaulting it to null would stamp `"contained_in": null`
+    # onto every node in the graph and break the byte-identity guarantee that a
+    # containment-free graph serializes exactly as it did pre-change. Same
+    # sparse treatment as `dep`/`stub_against` above, for the same reason.
+    # Readers must use `.get("contained_in")`, never `[...]`.
+    "contained_in",
     "plan_path",
     "pr_number",
     "pr_url",

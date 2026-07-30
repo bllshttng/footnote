@@ -904,3 +904,419 @@ def test_target_start_never_refuses_mismatched_inplace_manifest(tmp_path, monkey
     assert seen["init"] is False                    # never ran init under x-other
     combined = result.output + (getattr(result, "stderr", "") or "")
     assert "x-other" in combined
+
+
+# ---------------------------------------------------------------------------
+# x-e957 task 1.3b: a NAMED contained node is redirected, not claimed
+# ---------------------------------------------------------------------------
+
+
+def _contained_graph(tmp_path, monkeypatch, *, owner="x-6320"):
+    """A graph with one delivery unit and one node contained in it."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": owner, "plan_path": "/p/one.md", "status": "ready"},
+        {"id": "x-261c", "plan_path": "/p/one.md", "status": "ready",
+         "contained_in": owner},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    return gp
+
+
+def _init_env(tmp_path, monkeypatch):
+    """Wire target init so the bash bootstrap is stubbed and observable."""
+    ran = []
+
+    class _Result:
+        returncode = 0
+
+    def _stub_run(cmd, check=False, env=None, **kwargs):
+        if list(cmd)[:1] == ["bash"]:
+            ran.append(dict(env or {}))
+        return _Result()
+
+    monkeypatch.delenv("CLAUDE_PLUGIN_ROOT", raising=False)
+    monkeypatch.setenv("FNO_REPO_ROOT", str(_fake_plugin_root(tmp_path)))
+    _clear_root_cache()
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    return ran
+
+
+def test_target_init_redirects_a_named_contained_node(tmp_path, monkeypatch):
+    """AC4: report the delivery unit's id and claim nothing.
+
+    Naming a node is consent and selection_guards honors that (it is autonomous-
+    only by its own docstring), so without this the operator walks straight past
+    the guard and opens a second PR for one plan.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2, result.output
+    # Nothing was claimed: the bash bootstrap - which acquires the node claim
+    # and writes the immutable manifest - never ran.
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_target_init_redirect_names_the_delivery_unit_it_routes_to(tmp_path, monkeypatch):
+    """The DESTINATION is the payload, not the fact that something was refused.
+
+    Two nodes contained in different units must route to different places; an
+    assertion that only checks "it was refused" agrees on the tag and says
+    nothing about where the operator should go.
+    """
+    _contained_graph(tmp_path, monkeypatch, owner="x-8a4f")
+    _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2
+    assert "x-8a4f" in result.output
+    assert "/fno:target x-8a4f" in result.output
+    _clear_root_cache()
+
+
+def test_target_init_still_dispatches_the_delivery_unit_itself(tmp_path, monkeypatch):
+    """The unit carries the PR, so naming IT is the whole point of the redirect."""
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-6320"])
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+    assert ran[0].get("TARGET_INPUT") == "x-6320"
+    _clear_root_cache()
+
+
+def test_target_init_free_text_is_untouched_by_the_containment_read(tmp_path, monkeypatch):
+    """An idea-first run resolves no node; the gate must not invent one."""
+    _contained_graph(tmp_path, monkeypatch)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "fix the login redirect"])
+    assert result.exit_code == 0, result.output
+    assert len(ran) == 1
+    _clear_root_cache()
+
+
+def test_redirect_helper_ignores_non_contained_and_malformed_input():
+    """Fail-open on anything that is not an affirmative owner id.
+
+    Raising on a missing/odd node would turn a fail-open resolver into a
+    dispatch-blocker, and the resolver returns None for every free-text input.
+    """
+    target_cli._redirect_if_contained(None)
+    target_cli._redirect_if_contained({"id": "x-a"})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": None})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": ""})
+    target_cli._redirect_if_contained({"id": "x-a", "contained_in": 0})
+
+
+# ---------------------------------------------------------------------------
+# codex P1: containment must hold on EVERY bootstrap path, not just `init`
+# ---------------------------------------------------------------------------
+
+
+def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
+    """A plan held by a unit and its contained children is legal, not ambiguous.
+
+    Returning None for the normal contained shape let `--plan-path <shared>`
+    sail past the containment redirect AND the retro dedup gate: both read this
+    one resolver, so the miss was doubled.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    node = target_cli._resolve_dispatch_node(None, "/p/one.md")
+    assert node is not None and node["id"] == "x-6320"
+
+
+def test_two_uncontained_holders_stay_ambiguous(tmp_path, monkeypatch):
+    """Narrowing to the unit must not start guessing between real rivals.
+
+    Change 1.1 refuses to CREATE this state; a graph that predates it must not
+    have one of the two picked silently.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "status": "ready"},
+        {"id": "x-8a4f", "plan_path": "/p/one.md", "status": "ready"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
+
+
+def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypatch):
+    """No delivery unit on the plan at all -> still a contained node."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    assert result.exit_code == 2, result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_check_contained_refuses_with_the_shell_gates_own_code(tmp_path, monkeypatch):
+    """rc 9, not 2: a stale fno exits 2 as a Click "No such command".
+
+    Treating 2 as a refusal would hard-refuse every direct bootstrap the moment
+    the installed CLI fell behind source - the same reasoning check-review-gate
+    documents for its own code.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert "x-6320" in result.output
+
+
+def test_check_contained_passes_a_delivery_unit_and_a_bare_idea(tmp_path, monkeypatch):
+    """Exit 0 for anything that is not an affirmative contained node."""
+    _contained_graph(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TARGET_INPUT", "x-6320")
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+    monkeypatch.setenv("TARGET_INPUT", "fix the login redirect")
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+    monkeypatch.delenv("TARGET_INPUT", raising=False)
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+
+def test_init_script_wires_the_containment_gate():
+    """The verb is only a guard if the documented direct path actually calls it.
+
+    A refusal nothing invokes is the decorative-guard failure this whole task is
+    about, so assert the wiring, not just the verb.
+    """
+    from pathlib import Path as _P
+
+    from fno.paths import resolve_plugin_script
+
+    script = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh"))
+    text = script.read_text(encoding="utf-8")
+    assert "fno target check-contained" in text
+    # rc 9 refuses; anything else must fall through rather than brick bootstrap.
+    assert '"$_CT_RC" -eq 9' in text
+
+
+def test_plan_held_only_by_contained_nodes_still_redirects(tmp_path, monkeypatch):
+    """The first narrowing covered len(units)==1 and missed len(units)==0.
+
+    Owner superseded, deleted, or its plan_path edited away leaves a plan whose
+    every holder is contained. That fell back to the len==1 rule, returned None,
+    and skipped the redirect - the exact second-PR state the guard exists for.
+    They all name one owner, so the destination is unambiguous.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    assert result.exit_code == 2, result.output
+    assert "x-6320" in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_contained_nodes_naming_different_owners_stay_ambiguous(tmp_path, monkeypatch):
+    """Two owners means no single destination; do not pick one."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+        {"id": "x-3f8d", "plan_path": "/p/one.md", "contained_in": "x-8a4f"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
+
+
+def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
+    """After the cascade the owner is usually done; routing there is a dead end.
+
+    "run /fno:target <done node>" reads as a broken redirect rather than as
+    "this already shipped".
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "pr_number": 700,
+         "completed_at": "2026-07-29T00:00:00+00:00"},
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2
+    assert "already shipped" in result.output
+    assert "700" in result.output
+    assert "run `/fno:target x-6320`" not in result.output
+    _clear_root_cache()
+
+
+def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch):
+    """sigma: `init` caught it, but only after `start` allocated the worktree.
+
+    The operator got a refusal saying "Nothing was claimed" sitting next to an
+    orphan directory and branch they had to remove by hand.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    ensured = []
+
+    def _stub_run(cmd, *a, **k):
+        if "worktree" in list(cmd) and "ensure" in list(cmd):
+            ensured.append(list(cmd))
+
+        class _R:
+            returncode = 0
+            stdout = str(tmp_path / "wt")
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_git_out", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_codex_desktop_handoff_policy", lambda r: None)
+
+    result = runner.invoke(app, ["target", "start", "x-261c"])
+    assert result.exit_code == 2, result.output
+    assert ensured == [], "worktree was allocated before the redirect fired"
+    _clear_root_cache()
+
+
+def test_check_contained_reads_under_the_graph_lock(tmp_path, monkeypatch):
+    """codex P1: `read_graph` takes no lock, so the re-check was still raceable.
+
+    decompose holds the graph flock and sees no claim, the bootstrap acquires
+    the claim, this read returns the PRE-adoption graph because decompose has
+    not done its atomic replace yet, and decompose then commits `contained_in`
+    while the worker proceeds. Taking the same flock totalizes the ordering.
+
+    Asserts the lock is actually held ACROSS the resolve - a lock acquired and
+    dropped before the read would pass a "did we lock" assertion and serialize
+    nothing.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+    held = {"during_resolve": False, "acquired": 0}
+
+    real_acquire, real_release = gs._acquire_flock, gs._release_flock
+    state = {"open": False}
+
+    def acq(p):
+        state["open"] = True
+        held["acquired"] += 1
+        return real_acquire(p)
+
+    def rel(fd):
+        state["open"] = False
+        return real_release(fd)
+
+    real_resolve = target_cli._resolve_dispatch_node
+
+    def resolve(*a, **k):
+        held["during_resolve"] = state["open"]
+        return real_resolve(*a, **k)
+
+    monkeypatch.setattr(gs, "_acquire_flock", acq)
+    monkeypatch.setattr(gs, "_release_flock", rel)
+    monkeypatch.setattr(target_cli, "_resolve_dispatch_node", resolve)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert held["acquired"] == 1, "the graph lock was never taken"
+    assert held["during_resolve"], "the lock was not held across the graph read"
+    assert not state["open"], "the graph lock was leaked"
+
+
+def test_check_contained_proceeds_when_the_graph_lock_is_unavailable(tmp_path,
+                                                                     monkeypatch):
+    """An unlockable graph must not block every dispatch.
+
+    Fail-open matches the rest of this gate: a broken lock is a broken gate, and
+    the pre-claim check plus decompose's own live-claim refusal still stand.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+
+    def boom(p):
+        raise OSError("no lock for you")
+
+    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    # Still resolves and still refuses - the read just was not serialized.
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 9
+
+
+def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypatch):
+    """sigma: a superseded owner will never ship, so routing there is useless.
+
+    Named separately from the shipped case because the remedy differs: this is
+    stale containment that wants clearing, not work that already landed.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "superseded_by": "x-9999",
+         "deferred_at": "2026-07-29T00:00:00+00:00"},
+        {"id": "x-261c", "plan_path": "/p/two.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2, result.output
+    assert "superseded" in result.output
+    assert "--parent null" in result.output
+    assert "run `/fno:target x-6320`" not in result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
+                                                                    monkeypatch,
+                                                                    capsys):
+    """A lost serialization that still exits 0 reads as "checked, and fine".
+
+    The flock is what makes this check unraceable, so swallowing its failure
+    silently is the same degrade this gate has already been fixed for twice.
+    Still fail-open - it just says what it lost.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+
+    def boom(p):
+        raise OSError("no lock for you")
+
+    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert "UNSERIALIZED" in result.output
+    assert "no lock for you" in result.output
