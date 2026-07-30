@@ -262,30 +262,28 @@ fi
 #     session then executes the plan itself, so a bg dispatch would be a second
 #     worker on one node.
 #
-#     Freshness is delegated to detect-pending-plan.sh (status + TTL + integrity)
-#     instead of re-parsed here, so a consumed / expired / malformed sidecar stays
-#     correctly inert. The whole block is gated on the sidecar EXISTING, so an
-#     ordinary /blueprint run pays one file test and is otherwise untouched.
-#     Fail CLOSED when a sidecar exists but its state cannot be read: a park costs
-#     one manual `/target bg <node>`, a wrong launch costs an unapproved worker.
+#     The discriminator is PLAN IDENTITY, not the sidecar's confirm state. A
+#     declined confirm deliberately leaves the sidecar `pending` and re-offerable
+#     (frontdoor step 6 N-branch), so "a pending sidecar exists" would park every
+#     unrelated /blueprint for the sidecar's whole TTL and silently disable the
+#     configured auto-launch path (codex P2). And the state adds nothing anyway:
+#     awaiting-confirm, declined, and consumed all forbid a launch of THIS plan,
+#     so only "is the plan being dispatched the sidecar's plan?" needs answering.
+#
+#     Correlate on the sidecar's first body line, which the backfill preserves
+#     verbatim in the enriched doc (frontdoor: "Preserve the native body verbatim
+#     - ADD sections only"). An unrelated plan does not contain it, so it launches
+#     as before. The anchor must be a whole line and long enough not to collide by
+#     accident; a too-short or missing anchor declines to correlate and launches
+#     rather than parking the world on a guess.
 _SIDECAR="${REPO_ROOT}/.fno/.pending-plan.md"
-if [[ -f "$_SIDECAR" ]]; then
-  _DETECT="$REPO_ROOT/skills/target/scripts/detect-pending-plan.sh"
-  if [[ ! -f "$_DETECT" ]]; then
-    echo "parked $node reason=\"plan-mode-sidecar-unverifiable: sidecar present, detect-pending-plan.sh missing; not launching on an unread confirm state\""
+if [[ -f "$_SIDECAR" ]] && grep -q '^source:[[:space:]]*claude-plan-mode[[:space:]]*$' "$_SIDECAR" 2>/dev/null; then
+  # First non-empty line after the frontmatter's closing fence.
+  _PM_ANCHOR="$(awk 'f>=2 && /[^[:space:]]/ {print; exit} /^---[[:space:]]*$/ {f++}' "$_SIDECAR" 2>/dev/null || true)"
+  if [[ "${#_PM_ANCHOR}" -ge 8 ]] && grep -Fqx -- "$_PM_ANCHOR" "$PLAN_PATH" 2>/dev/null; then
+    echo "parked $node reason=\"plan-mode-confirm-owned: this plan is the front door's approved native plan; /target executes it on the human's [y/N], never a bg worker\""
     exit 0
   fi
-  _PM="$(bash "$_DETECT" detect --sidecar "$_SIDECAR" 2>/dev/null | sed -n 's/^result=//p' | head -1)"
-  case "$_PM" in
-    pending)
-      echo "parked $node reason=\"plan-mode-confirm-outstanding: an approved native plan awaits the front door's [y/N]; /target executes it on yes\""
-      exit 0 ;;
-    none|expired|malformed|superseded_by_arg)
-      : ;;   # inert sidecar - the confirm is settled or the plan is not offerable
-    *)
-      echo "parked $node reason=\"plan-mode-sidecar-unverifiable: detect returned '${_PM:-<empty>}'; not launching on an unread confirm state\""
-      exit 0 ;;
-  esac
 fi
 
 # 5. Dispatch via the target dispatch primitive. Whether the worker may merge

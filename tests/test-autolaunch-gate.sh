@@ -625,64 +625,64 @@ check_contains "T12b: claims: tier resolves x- node" "$NODE_ID" "$OUT12B"
 NODE_ID="$_SAVED_NODE_ID"
 
 # ---------------------------------------------------------------------------
-# Test 13: an OUTSTANDING native-plan-mode confirm suppresses auto-launch.
+# Test 13: the front door's own approved native plan is never bg-dispatched.
 #
 # The /target plan-mode front door calls /blueprint on the enriched doc BEFORE
 # it asks the human "Execute autonomously? [y/N]". /blueprint runs this gate as
-# its last action, so without a suppression the bg worker is dispatched while
-# the confirm is still outstanding - and a human who answers N gets a worker
-# they declined. Park while a `pending` sidecar exists; a `consumed` one is
-# inert (the confirm already happened) and must NOT park.
+# its last action, so without a suppression a bg worker is dispatched while the
+# confirm is still outstanding, and a human who answers N gets a worker they
+# declined.
+#
+# The discriminator is plan IDENTITY, not sidecar state: a declined confirm
+# deliberately leaves the sidecar `pending` and re-offerable, so keying off
+# "a pending sidecar exists" would park every unrelated /blueprint for the
+# sidecar's whole TTL (codex P2 on this change). Correlation is the sidecar's
+# first body line, which the backfill preserves verbatim in the enriched doc.
 # ---------------------------------------------------------------------------
 echo ""
-echo "--- Test 13: pending plan-mode sidecar -> parked, no dispatch ---"
+echo "--- Test 13: front door's own plan -> parked, no dispatch ---"
 
-# The real detector is copied in (not stubbed): its status/TTL/integrity parsing
-# is exactly the freshness logic this gate must inherit rather than re-implement.
-_install_detector() {
-  local sbx="$1"
-  mkdir -p "$sbx/skills/target/scripts"
-  cp "$REPO_ROOT/skills/target/scripts/detect-pending-plan.sh" \
-     "$sbx/skills/target/scripts/detect-pending-plan.sh"
-  chmod +x "$sbx/skills/target/scripts/detect-pending-plan.sh"
-}
-
+# $2 is the sidecar body's first line: the correlation anchor. The sandbox
+# factory writes "# Test Plan" as plan.md's first heading, so passing that
+# simulates the enriched doc (body preserved verbatim); passing anything else
+# simulates an unrelated plan blueprinted while a sidecar happens to exist.
 _write_sidecar() {
-  local sbx="$1" status="$2"
+  local sbx="$1" body="${2:-# Test Plan}" status="${3:-pending}" src="${4:-claude-plan-mode}"
   cat > "$sbx/.fno/.pending-plan.md" <<EOF
 ---
 captured_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
 session_id: ${SESSION_ID}
 slug: some-approved-plan
-source: claude-plan-mode
+source: ${src}
 status: ${status}
 ---
 
-# Some approved plan
+${body}
 EOF
 }
 
 SBX13="$(make_autolaunch_sandbox t13)"
 LOG13="$SBX13/call-log"
-_install_detector "$SBX13"
-_write_sidecar "$SBX13" pending
+_write_sidecar "$SBX13" "# Test Plan"
 
 OUT13="$(run_autolaunch "$SBX13" "$SBX13/plan.md")"
 check_contains "T13: parked line present" "parked" "$OUT13"
-check_contains "T13: names the outstanding confirm" "plan-mode-confirm-outstanding" "$OUT13"
+check_contains "T13: names the owned confirm" "plan-mode-confirm-owned" "$OUT13"
 check_log_absent "T13: dispatch-node.sh NOT invoked" "$LOG13" "dispatch-node.sh"
 
-# 13b: a consumed sidecar is inert -> auto-launch proceeds as normal.
+# 13b: THE codex P2 regression pin. A pending sidecar for a DIFFERENT plan (the
+# declined-but-kept state, which persists for the whole TTL) must not park an
+# unrelated ready node.
 echo ""
-echo "--- Test 13b: consumed sidecar is inert -> dispatch proceeds ---"
+echo "--- Test 13b: unrelated plan + pending sidecar -> dispatch proceeds ---"
 SBX13B="$(make_autolaunch_sandbox t13b)"
 LOG13B="$SBX13B/call-log"
-_install_detector "$SBX13B"
-_write_sidecar "$SBX13B" consumed
+_write_sidecar "$SBX13B" "# A completely different approved plan"
 
 OUT13B="$(run_autolaunch "$SBX13B" "$SBX13B/plan.md")"
 check_contains "T13b: auto-launched line present" "auto-launched" "$OUT13B"
 check_log_present "T13b: dispatch-node.sh was invoked" "$LOG13B" "dispatch-node.sh"
+check_not_contains "T13b: not parked on an unrelated sidecar" "plan-mode-confirm" "$OUT13B"
 
 # 13c: no sidecar at all (the overwhelmingly common /blueprint run) -> unchanged.
 # Pinned so the new gate can never regress the plain blueprint path.
@@ -690,24 +690,47 @@ echo ""
 echo "--- Test 13c: no sidecar -> dispatch proceeds (unchanged) ---"
 SBX13C="$(make_autolaunch_sandbox t13c)"
 LOG13C="$SBX13C/call-log"
-_install_detector "$SBX13C"
 
 OUT13C="$(run_autolaunch "$SBX13C" "$SBX13C/plan.md")"
 check_contains "T13c: auto-launched line present" "auto-launched" "$OUT13C"
 check_log_present "T13c: dispatch-node.sh was invoked" "$LOG13C" "dispatch-node.sh"
 
-# 13d: sidecar present but the detector is MISSING -> fail closed (park).
-# A sidecar is evidence a confirm may be outstanding; parking costs one manual
-# `/target bg <node>`, while launching costs a worker the human never approved.
+# 13d: a file at the sidecar path that is NOT a plan-mode sidecar is ignored.
 echo ""
-echo "--- Test 13d: sidecar + missing detector -> fail closed (parked) ---"
+echo "--- Test 13d: foreign source: sidecar ignored -> dispatch proceeds ---"
 SBX13D="$(make_autolaunch_sandbox t13d)"
 LOG13D="$SBX13D/call-log"
-_write_sidecar "$SBX13D" pending      # deliberately no _install_detector
+_write_sidecar "$SBX13D" "# Test Plan" pending some-other-tool
 
 OUT13D="$(run_autolaunch "$SBX13D" "$SBX13D/plan.md")"
-check_contains "T13d: parked line present" "parked" "$OUT13D"
-check_log_absent "T13d: dispatch-node.sh NOT invoked" "$LOG13D" "dispatch-node.sh"
+check_contains "T13d: auto-launched line present" "auto-launched" "$OUT13D"
+check_log_present "T13d: dispatch-node.sh was invoked" "$LOG13D" "dispatch-node.sh"
+
+# 13e: a consumed sidecar for THIS plan still parks. Consume happens on
+# confirm-yes, after which the front-door session executes the plan itself, so a
+# bg worker would be a second worker on one node.
+echo ""
+echo "--- Test 13e: consumed sidecar for this plan -> still parked ---"
+SBX13E="$(make_autolaunch_sandbox t13e)"
+LOG13E="$SBX13E/call-log"
+_write_sidecar "$SBX13E" "# Test Plan" consumed
+
+OUT13E="$(run_autolaunch "$SBX13E" "$SBX13E/plan.md")"
+check_contains "T13e: parked line present" "parked" "$OUT13E"
+check_log_absent "T13e: dispatch-node.sh NOT invoked" "$LOG13E" "dispatch-node.sh"
+
+# 13f: a too-short anchor declines to correlate rather than parking the world on
+# a generic line that could collide with any plan. "---" is deliberately a line
+# that IS present in the fixture plan, so without the length guard this parks.
+echo ""
+echo "--- Test 13f: short anchor -> no correlation, dispatch proceeds ---"
+SBX13F="$(make_autolaunch_sandbox t13f)"
+LOG13F="$SBX13F/call-log"
+_write_sidecar "$SBX13F" "---"
+
+OUT13F="$(run_autolaunch "$SBX13F" "$SBX13F/plan.md")"
+check_contains "T13f: auto-launched line present" "auto-launched" "$OUT13F"
+check_log_present "T13f: dispatch-node.sh was invoked" "$LOG13F" "dispatch-node.sh"
 
 # ---------------------------------------------------------------------------
 # Summary
