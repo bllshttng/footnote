@@ -388,6 +388,20 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     # dead end - the operator reads the redirect as broken rather than as
     # "this already shipped".
     owner_node = _find_node(owner)
+    if owner_node is None:
+        # The owner is gone entirely (removed before the release landed, or a
+        # hand-edited graph). Routing to it is a dead end with no remedy, and
+        # the reconcile heal deliberately skips a missing owner - so say what
+        # to do instead of naming a node the graph does not have.
+        typer.echo(
+            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"no node {owner} exists.\n"
+            f"That containment is stale and nothing will clear it automatically. "
+            f"Clear it with `fno backlog update {nid} --parent null`, then "
+            "dispatch this node on its own. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     # A dead owner will never ship, so routing there is worse than useless -
     # it sends the operator to a node nothing will build. Named separately from
     # the shipped case because the remedy differs: this one is stale

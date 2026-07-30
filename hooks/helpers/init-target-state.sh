@@ -994,7 +994,12 @@ EOF
   if [[ -n "$_GUARD_NODE" ]]; then
     _NODE_ID="$_GUARD_NODE"
   elif [[ -f "$_GRAPH_FILE" && -n "$INITIAL_PLAN_PATH" ]]; then
-    _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' 2>/dev/null || true
+    # `2>&1 >` is NOT a typo and the order matters: it points the resolver's
+    # stderr at THIS shell's stderr before stdout is captured, so a traceback
+    # still stays quiet-ish but the deliberate ambiguity note reaches the
+    # operator. Plain `2>/dev/null` discarded that note, which made the previous
+    # fix decorative - the run still proceeded unclaimed in silence.
+    _NODE_ID=$(python3 - "$_GRAPH_FILE" "$INITIAL_PLAN_PATH" "$REPO_ROOT" <<'PYEOF' || true
 import json, os, sys
 graph_path, raw_target, repo_root = sys.argv[1], sys.argv[2], sys.argv[3]
 if not os.path.isabs(raw_target):

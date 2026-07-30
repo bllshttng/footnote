@@ -307,4 +307,38 @@ else
   pass "post-claim: a failed removal is reported as such"
 fi
 
+# ── An ambiguous plan must not resolve in SILENCE ──
+# Narrowing correctly refuses to pick between two uncontained holders, but the
+# script's existing resolved-to-no-node note keys on TARGET_INPUT, which a
+# plan-only run never sets. The note added for this was then swallowed by a
+# `2>/dev/null` on the resolver heredoc, so the fix was decorative and the run
+# still proceeded unclaimed with nothing on stderr. This asserts the note
+# ESCAPES, which is the part that was broken.
+log "ambiguous plan: two uncontained holders => note reaches stderr"
+make_repo TMP_AMB 0 0
+_ALL_TMPS+=("$TMP_AMB")
+
+AMB_PLAN="$TMP_AMB/amb-plan.md"
+printf -- '---\nstatus: ready\n---\n# plan\n' > "$AMB_PLAN"
+mkdir -p "$TMP_AMB/home/.fno"
+cat > "$TMP_AMB/home/.fno/graph.json" <<GRAPH
+{"entries": [
+  {"id": "x-aaaa", "plan_path": "$AMB_PLAN"},
+  {"id": "x-bbbb", "plan_path": "$AMB_PLAN"}
+]}
+GRAPH
+
+(cd "$TMP_AMB" && env \
+  PATH="${TMP_AMB}/bin:${PATH}" \
+  HOME="${TMP_AMB}/home" \
+  TARGET_START=1 \
+  TARGET_PLAN_PATH="$AMB_PLAN" \
+  bash "$INIT") > "${TMP_AMB}/out.log" 2> "${TMP_AMB}/err.log"
+
+grep -q "UNCLAIMED" "$TMP_AMB/err.log" \
+  || fail "ambiguous plan: resolved to no node in SILENCE (err: $(cat "$TMP_AMB/err.log"))"
+grep -q "x-aaaa" "$TMP_AMB/err.log" \
+  || fail "ambiguous plan: the note does not name the rival holders"
+pass "ambiguous plan: the note escaped and named the rivals"
+
 log "all scenarios passed"

@@ -5319,6 +5319,7 @@ def cmd_remove(
         typer.echo("Use --force to confirm.")
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         node = _find_node(entries, task_id)
         if not node:
@@ -5341,10 +5342,11 @@ def cmd_remove(
         # Same invariant for containment (x-e957), and here a dangling pointer
         # is a permanent trap rather than mere untidiness: the reconcile heal
         # deliberately skips a MISSING owner, so nothing would ever free them.
-        _release_contained_children(entries, task_id)
+        _freed_box[0] = _release_contained_children(entries, task_id)
         return [e for e in entries if e.get("id") != task_id]
 
     locked_mutate_graph(_graph_path(), mutator)
+    _echo_freed(_freed_box[0], task_id)
     typer.echo(f"Removed {task_id}" + (f" (orphaned deps in {dependents})" if dependents else ""))
 
 
@@ -5391,6 +5393,7 @@ def cmd_defer(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         node = _find_node(entries, task_id)
         if not node:
@@ -5421,11 +5424,12 @@ def cmd_defer(
         # shipped. Undefer does not re-contain them, deliberately: re-adoption is
         # decompose's job and inferring it here would re-hide work the operator
         # may have since re-scoped.
-        _release_contained_children(entries, node.get("id"))
+        _freed_box[0] = _release_contained_children(entries, node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f'Deferred {task_id}: "{cleaned_reason}"')
+    _echo_freed(_freed_box[0], task_id)
     _project_plans_from_graph([task_id])
 
 
@@ -6179,6 +6183,22 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
         closed.append(pid)
         cur = parent  # cascade up to the grandparent
     return closed
+
+
+def _echo_freed(freed: list, owner_id: str) -> None:
+    """Name the nodes a dying delivery unit just released.
+
+    Silence here is a real gap, not tidiness: the release turns N nodes that
+    were invisible to dispatch into autonomously buildable, separately costed
+    ones, and the bare "Deferred <id>" receipt gives the operator no way to know
+    what the next selection pass will pick up.
+    """
+    if not freed:
+        return
+    typer.echo(
+        f"Released {len(freed)} contained node(s) from {owner_id}; they are "
+        f"dispatchable again: {', '.join(freed)}"
+    )
 
 
 def _release_contained_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
@@ -7567,6 +7587,12 @@ def cmd_reconcile(
                         _cascade_close_contained(_sim, record.node_id)
                     )
                 except Exception as _sc_exc:  # noqa: BLE001 - preview never crashes
+                    typer.echo(
+                        f"warning: dry-run contained cascade for "
+                        f"{record.node_id} failed: {_sc_exc}; the preview "
+                        "under-reports contained closes",
+                        err=True,
+                    )
                     contained_errors.append({
                         "owner": record.node_id,
                         "stage": "merge-cascade (dry-run)",
@@ -7577,6 +7603,11 @@ def cmd_reconcile(
             try:
                 _sim_contained.extend(_sweep_close_stranded_contained(_sim))
             except Exception as _ss_exc:  # noqa: BLE001 - preview never crashes
+                typer.echo(
+                    f"warning: dry-run stranded-contained heal failed: "
+                    f"{_ss_exc}; the preview under-reports contained closes",
+                    err=True,
+                )
                 contained_errors.append({
                     "owner": None,
                     "stage": "stranded-heal (dry-run)",
@@ -9396,6 +9427,7 @@ def cmd_supersede(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
+    _freed_box: list[list] = [[]]
     def mutator(entries):
         new_node = _find_node(entries, new_id)
         old_node = _find_node(entries, replaces)
@@ -9443,11 +9475,12 @@ def cmd_supersede(
         # at a node that is not going to ship. Unbuildable, uncloseable, and
         # invisible to every sweep. Un-contained rather than closed: superseding
         # the unit is not a claim that its children shipped.
-        _release_contained_children(entries, old_node.get("id"))
+        _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
+    _echo_freed(_freed_box[0], replaces)
     _project_plans_from_graph([replaces, new_id])
 
 
