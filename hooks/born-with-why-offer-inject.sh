@@ -63,7 +63,18 @@ command -v jq >/dev/null 2>&1 && command -v python3 >/dev/null 2>&1 || exit 0
 # IFS-whitespace, so `read` would collapse an empty offer_line and shift the
 # ride-along list into it (same trap the enrichment parse below documents).
 parsed=$(tail -c +"$((offset + 1))" "$EVENTS" 2>/dev/null | head -c "$((size - offset))" 2>/dev/null | python3 -c '
-import sys, json
+import sys, json, re
+# Decoding happens at the `for` below, OUTSIDE the per-line try, so one invalid
+# UTF-8 byte anywhere in the slice would raise before any line is examined and
+# take every offer down with it. .fno/events.jsonl has non-Python appenders
+# (the stop hooks printf shell-interpolated lines), and `head -c` cuts on a byte
+# boundary, so a truncated multi-byte char is reachable. Replace, never raise:
+# a mangled line then fails json.loads inside the try and is skipped as designed.
+sys.stdin.reconfigure(errors="replace")
+# The reminder wrapper is hook-owned; offer_line is free text (spawn_think
+# interpolates a filesystem path into it), so it gets the same defang the
+# enrichment parse applies to title/details or it could close the wrapper early.
+_TAG = re.compile(r"<\s*(/?)\s*system-reminder\s*>", re.IGNORECASE)
 nid = ""
 offer = ""
 older = []
@@ -89,10 +100,21 @@ for line in sys.stdin:
     if isinstance(x, str) and x:
         if nid:
             older.append(nid)
-        nid = x
-        offer = o if isinstance(o, str) else ""
-sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]))
+        nid = _TAG.sub(r"[\1system-reminder]", x)
+        offer = _TAG.sub(r"[\1system-reminder]", o) if isinstance(o, str) else ""
+# Trailing \x04 is a completion sentinel: `command -v python3` proves presence,
+# not success, and a present-but-broken interpreter (dead pyenv shim, broken
+# venv) would emit nothing while the cursor advanced anyway. The caller refuses
+# to advance without this byte, so a failed parse re-scans instead of eating the
+# slice. A clean scan that found no offer still prints it, and still advances.
+sys.stdout.write("\x1f".join([nid, offer, ", ".join(older)]) + "\x04")
 ' 2>/dev/null)
+
+# No completion sentinel -> the parse died rather than finding nothing. Leave the
+# cursor where it is so the next turn re-scans; burning the slice on a broken
+# interpreter is the loss this hook exists to prevent.
+[[ "$parsed" == *$'\x04' ]] || exit 0
+parsed="${parsed%$'\x04'}"
 
 # Advance the cursor to the captured EOF regardless of what we found -- consuming
 # exactly the [offset, size) slice we scanned is what makes the reminder fire
@@ -134,7 +156,11 @@ Nodes born this gap, not offered: ${older_ids}.
 # parsed, so a missing/garbled resolver never eats a real fresh offer. Run from
 # $REPO_ROOT so resolution is deterministic even if graph_json is project-local.
 if command -v fno >/dev/null 2>&1; then
-    node_json=$( cd "$REPO_ROOT" && with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
+    # `cd` failure exits 1 -- the SAME code as an authoritative not-found -- so a
+    # deleted worktree (archive-worktree.sh / `fno worktree cleanup` can remove one
+    # under a live session) would read as "node absent" and destroy a live offer.
+    # Map it to 99 so it lands in the degrade-to-surfacing branch below.
+    node_json=$( cd "$REPO_ROOT" 2>/dev/null || exit 99; with_timeout 3 fno backlog get "$node_id" 2>/dev/null )
     _get_rc=$?
     if [[ "$_get_rc" -eq 0 ]]; then
         # Resolved. Suppress only if the node is already underway; a parse
@@ -163,9 +189,9 @@ except Exception:
     # advanced and suppressing would discard a possibly-real offer for good.
     # Only rc 1 means "graph read cleanly, node absent": `fno backlog get` exits
     # 3 on an unreadable graph (GRAPH_UNREADABLE_EXIT, cli/src/fno/graph/cli.py),
-    # 2 on a click usage error, 124 when with_timeout kills a wedged call, and
-    # the captured $? also covers a failed `cd "$REPO_ROOT"`. Every one of those
-    # is transient or our own fault, never evidence the node does not exist.
+    # 2 on a click usage error, 124 when with_timeout kills a wedged call, and 99
+    # when the `cd` above failed. Every one of those is transient or our own
+    # fault, never evidence the node does not exist.
 fi
 
 # Fall back to the router-valid dispatch form if the event carried no offer_line.
