@@ -241,6 +241,44 @@ else
     fail "inherited-bump case: rc=$rc out=$out"
 fi
 
+# --- case 10: a large earlier patch must not swallow the match --------------
+# `git log` emits newest-first, so a bump commit on top of a big earlier
+# proto.rs commit means the match appears while a lot of output is still
+# pending. Piping that into `grep -q` lets grep exit at the match, the producer
+# take a SIGPIPE, and `pipefail` turn the whole pipeline non-zero - which reads
+# as "no match" and passes the guard on a real collision. The bulk here has to
+# exceed the pipe buffer (~64K) for the producer to still be writing.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base v10"
+git -C "$dir" checkout --quiet -b feature
+# Earlier feature commit: a big wire-format change, no version touch.
+{
+    echo ""
+    for i in $(seq 1 8000); do
+        echo "// wire shape line $i - padding to exceed the pipe buffer for real"
+    done
+} >> "$dir/$PROTO_REL"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "big wire change"
+# Later feature commit: the bump itself.
+perl -pi -e 's/PROTO_VERSION: u32 = 10;/PROTO_VERSION: u32 = 11;/' "$dir/$PROTO_REL"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump to v11"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "parallel branch landed v11"
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"* ]]; then
+    pass "a large earlier patch does not swallow the version-line match"
+else
+    fail "large-patch case: rc=$rc out=$out"
+fi
+
 echo ""
 if [[ $failures -eq 0 ]]; then
     echo "proto-version-bump selftest: all cases passed"

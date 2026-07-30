@@ -58,7 +58,11 @@ read_version() {
         echo "ERROR: cannot read $PROTO_FILE at $label ($rev)" >&2
         return 1
     fi
-    line="$(printf '%s\n' "$blob" | grep -E '^pub const PROTO_VERSION' || true)"
+    # Here-string, not a pipe: under `pipefail` a producer that takes a SIGPIPE
+    # makes the pipeline non-zero even on a successful match. Harmless with a
+    # bare `grep` today, since it reads to EOF, but the same shape one flag away
+    # (`-q`, `-m1`) is a silent pass, so neither instance uses a pipe.
+    line="$(grep -E '^pub const PROTO_VERSION' <<<"$blob" || true)"
     if [[ -z "$line" ]]; then
         echo "ERROR: no 'pub const PROTO_VERSION' line in $PROTO_FILE at $label" >&2
         return 1
@@ -115,8 +119,18 @@ MERGE_BASE="$(git merge-base "$BASE_TIP" "$HEAD_SHA" 2>/dev/null)" || {
     exit 2
 }
 
-if ! git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE" 2>/dev/null \
-    | grep -qE '^[-+]pub const PROTO_VERSION'; then
+# Captured, then matched WITHOUT a pipe. Piping into `grep -q` lets grep exit at
+# the first match while the producer is still writing, so the producer takes a
+# SIGPIPE and `pipefail` turns the whole pipeline non-zero. A negated test then
+# reads a successful match as "no match" and passes the guard on a real
+# collision. It needs enough pending output to fill the pipe buffer, which a
+# bump sitting on top of a large earlier proto.rs commit supplies.
+PROTO_PATCH="$(git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE" 2>/dev/null)" || {
+    echo "ERROR: cannot read this PR's $PROTO_FILE history - unable to verify the bump" >&2
+    exit 2
+}
+
+if ! grep -qE '^[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"; then
     echo "proto-version-bump: PROTO_VERSION line untouched by this PR; nothing to check"
     exit 0
 fi
