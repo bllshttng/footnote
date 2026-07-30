@@ -1172,3 +1172,34 @@ def test_redirect_to_an_already_merged_owner_says_so(tmp_path, monkeypatch):
     assert "700" in result.output
     assert "run `/fno:target x-6320`" not in result.output
     _clear_root_cache()
+
+
+def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch):
+    """sigma: `init` caught it, but only after `start` allocated the worktree.
+
+    The operator got a refusal saying "Nothing was claimed" sitting next to an
+    orphan directory and branch they had to remove by hand.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    ensured = []
+
+    def _stub_run(cmd, *a, **k):
+        if "worktree" in list(cmd) and "ensure" in list(cmd):
+            ensured.append(list(cmd))
+
+        class _R:
+            returncode = 0
+            stdout = str(tmp_path / "wt")
+            stderr = ""
+        return _R()
+
+    monkeypatch.setattr(target_cli.subprocess, "run", _stub_run)
+    monkeypatch.setattr(target_cli, "_is_linked_worktree", lambda cwd: False)
+    monkeypatch.setattr(target_cli, "_git_out", lambda *a, **k: str(tmp_path))
+    monkeypatch.setattr(target_cli, "_resolve_node_id", lambda n: n)
+    monkeypatch.setattr(target_cli, "_codex_desktop_handoff_policy", lambda r: None)
+
+    result = runner.invoke(app, ["target", "start", "x-261c"])
+    assert result.exit_code == 2, result.output
+    assert ensured == [], "worktree was allocated before the redirect fired"
+    _clear_root_cache()

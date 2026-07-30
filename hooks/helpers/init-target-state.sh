@@ -1077,9 +1077,25 @@ PYEOF
         TARGET_INPUT="$_NODE_ID" TARGET_PLAN_PATH="" fno target check-contained \
           && _PC_RC=0 || _PC_RC=$?
         if [[ "$_PC_RC" -eq 9 ]]; then
+          # Report what actually happened. Swallowing the release rc while the
+          # message said "claim released" would strand a live claim for its full
+          # TTL on a node nobody is building AND tell the operator the opposite.
           FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
-            --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 || true
-          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); claim released." >&2
+            --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
+          if [[ "$_REL_RC" -eq 0 ]]; then
+            _REL_NOTE="claim released"
+          else
+            _REL_NOTE="WARNING: claim release FAILED (rc=$_REL_RC) - $_CLAIM_KEY stays held until its $_CLAIM_TTL TTL expires; free it with \`fno claim release $_CLAIM_KEY --holder $_CLAIM_HOLDER\`"
+          fi
+          # Unlike every sibling refusal in this script, this one runs AFTER the
+          # manifest was written, so it must remove it. A left-behind
+          # target-state.md names the contained node with no claim lines, and
+          # the next init is gated on `[[ ! -f "$STATE_FILE" ]]` while the stale
+          # reaper only archives on a terminal status or a dead claim key -
+          # neither of which this leaves - so the delivery unit's own run would
+          # silently skip its manifest write and never claim the owner.
+          rm -f "$STATE_FILE"
+          echo "[init-target-state] REFUSED: $_NODE_ID was adopted into a delivery unit while this session was starting (see above); $_REL_NOTE. No state file written." >&2
           exit 2
         fi
         echo "target_claim_key: \"$_CLAIM_KEY\"" >> "$STATE_FILE"

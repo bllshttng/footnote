@@ -759,3 +759,35 @@ def test_reparenting_outside_the_unit_subtree_still_un_contains(world, dispatche
         cli, ["update", KID_A, "--parent", "x-5e11"]
     ).exit_code == 0
     assert read()[KID_A].get("contained_in") is None
+
+
+def test_cascade_failure_reaches_the_json_payload_not_only_stderr(world, merged_pr,
+                                                                  dispatches,
+                                                                  monkeypatch):
+    """The SessionStart hook runs `reconcile --json` and discards stderr.
+
+    A warning only on stderr meant a repeatedly-failing cascade left contained
+    nodes open forever with no signal reaching any automated reader - a leg
+    whose failure is unobservable is indistinguishable from one that never ran.
+    """
+    import fno.graph.cli as gcli
+
+    def boom(entries, node_id):
+        raise RuntimeError("cascade exploded")
+
+    monkeypatch.setattr(gcli, "_cascade_close_contained", boom)
+    result = _reconcile("--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["contained_errors"], payload
+    err = payload["contained_errors"][0]
+    assert err["owner"] == UNIT
+    assert "cascade exploded" in err["error"]
+    # The delivery unit still closed - the cascade is a warning, never an abort.
+    assert [c["node_id"] for c in payload["closed"]] == [UNIT]
+
+
+def test_clean_sweep_reports_no_contained_errors(world, merged_pr, dispatches):
+    """The key is always present so a reader need not distinguish absent from empty."""
+    payload = json.loads(_reconcile("--json").stdout)
+    assert payload["contained_errors"] == []

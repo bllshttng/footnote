@@ -7073,6 +7073,7 @@ def cmd_reconcile(
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
+    contained_errors: list[dict] = []
 
     if not dry_run and (closeable or strandable or strandable_contained):
         # Apply every close in ONE locked mutation rather than locking once
@@ -7093,6 +7094,11 @@ def cmd_reconcile(
         # reporting only: a sweep that closes three nodes while saying it closed
         # one reads as "already in sync" to the next operator.
         contained_closed_acc: list = []
+        # Cascade/sweep failures, carried into the --json payload. stderr alone
+        # is invisible to the SessionStart hook, which runs `reconcile --json`
+        # and discards stderr - so a repeatedly-failing cascade left contained
+        # nodes open forever with no signal reaching any automated reader.
+        contained_errors_acc: list = []
 
         # Ledger rollup, precomputed outside the lock (ledger I/O must not block
         # other graph mutations). Reconcile is the MAINSTREAM close: a session
@@ -7173,6 +7179,11 @@ def cmd_reconcile(
                             _cascade_close_contained(entries, record.node_id)
                         )
                     except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
+                        contained_errors_acc.append({
+                            "owner": record.node_id,
+                            "stage": "merge-cascade",
+                            "error": str(_cc_exc)[:200],
+                        })
                         typer.echo(
                             f"warning: closed {record.node_id} but the contained-node "
                             f"cascade failed: {_cc_exc}; any node with "
@@ -7209,6 +7220,11 @@ def cmd_reconcile(
                         _sweep_close_stranded_contained(entries)
                     )
                 except Exception as _sw_exc:  # noqa: BLE001 - never abort the sweep
+                    contained_errors_acc.append({
+                        "owner": None,
+                        "stage": "stranded-heal",
+                        "error": str(_sw_exc)[:200],
+                    })
                     typer.echo(
                         "warning: the stranded-contained self-heal failed: "
                         f"{_sw_exc}; nodes whose delivery unit already merged "
@@ -7403,6 +7419,7 @@ def cmd_reconcile(
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
+        contained_errors = list(contained_errors_acc)
     elif dry_run and (closeable or strandable or strandable_contained):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
@@ -7509,6 +7526,10 @@ def cmd_reconcile(
             # (x-e957). Reported separately from `closed`, whose entries all
             # carry their own pr_number - a contained node has none.
             "contained_closed": contained_closed,
+            # Cascade/sweep failures. In the payload because the SessionStart
+            # hook reads --json and discards stderr: a leg whose failure is
+            # unobservable is indistinguishable from one that never ran.
+            "contained_errors": contained_errors,
             # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
             "reverted": reverted_stamped,
             # Canonical-sync catch-up outcome. In the JSON payload rather than

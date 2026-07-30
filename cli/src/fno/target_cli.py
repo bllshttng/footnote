@@ -2272,6 +2272,13 @@ def start(
     # slug would write graph_node_id: null and skip the claim) - both the
     # worktree name and `init --input` then use the canonical id.
     node = _resolve_node_id(node)
+    # Redirect a contained node BEFORE `worktree ensure` (sigma). `init` catches
+    # it too, but by then this verb has already created the worktree and branch,
+    # so the operator got a refusal saying "Nothing was claimed" next to an
+    # orphan directory they have to remove by hand. Placed beside the
+    # foreign-holder park above for the same reason: a cold start's refusals
+    # belong before it allocates anything.
+    _redirect_if_contained(_find_node(node))
     name = _wt_name(node)
 
     # Codex Desktop owns the only supported native worktree transition.  Keep
