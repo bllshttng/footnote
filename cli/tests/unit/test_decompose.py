@@ -2757,3 +2757,73 @@ def test_rehoming_between_groups_still_restamps_containment(graph_env, monkeypat
     beta = _child(read_entries(), "beta")["id"]
     assert next(e for e in read_entries()
                 if e["id"] == "ab-kid00001")["contained_in"] == beta
+
+
+def test_backfill_still_refuses_an_adoptee_that_gained_children(graph_env,
+                                                                monkeypatch):
+    """sigma: the descendants guard was unreachable on the BACK-FILL path.
+
+    The `already adopted -> continue` short-circuit preceded it, so re-running a
+    spec against a legacy adopted node that had since gained children stamped it
+    anyway - producing the exact half-closed subtree the refusal exists to
+    prevent. Both guards now run before the stamp.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1"},
+        ])]
+    ).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+
+    # The legacy shape: parented to the group child, no contained_in, and it has
+    # since gained a child of its own.
+    _seed_children(g, _node("ab-kid00001", parent=unit, status="ready"),
+                   _node("ab-sub00001", parent="ab-kid00001", status="ready"))
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert "one level" in result.output
+    assert next(
+        e for e in read_entries() if e["id"] == "ab-kid00001"
+    ).get("contained_in") is None
+
+
+def test_supersede_releases_its_contained_children(graph_env, monkeypatch):
+    """sigma: the same trap cmd_remove was fixed for, one step short of deletion.
+
+    A superseded unit will never merge, so `_strandable_contained_ids` (keyed on
+    completed_at) never heals its children while selection keeps refusing them
+    and the redirect keeps pointing at a node that is not going to ship.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    ).exit_code == 0
+    entries = read_entries()
+    unit = _child(entries, "one")["id"]
+    assert next(e for e in entries if e["id"] == "ab-kid00001")["contained_in"] == unit
+
+    _seed_children(g, _node("ab-new00001", status="ready"))
+    assert _invoke(
+        ["backlog", "supersede", "ab-new00001", "--replaces", unit,
+         "--reason", "regrouped"]
+    ).exit_code == 0
+
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None, "child left pointing at a dead unit"
+    # Released, not closed: superseding the unit is not a claim its work shipped.
+    assert kid.get("completed_at") is None

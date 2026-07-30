@@ -1639,6 +1639,42 @@ def cmd_decompose(
                         "Wait for it to land, or stop it first",
                         exit_code=2,
                     )
+                # Cycle + descendants BOTH run before the stamp and before the
+                # already-adopted `continue` below. Placing the descendants
+                # refusal after that short-circuit made it unreachable on the
+                # BACK-FILL path (sigma): re-running a spec against a legacy
+                # adopted node that has since gained children stamped it anyway,
+                # producing the exact half-closed subtree the refusal exists to
+                # prevent. Cycle stays first so an ancestor-of-the-epic adoptee
+                # still gets its specific message rather than the vaguer one.
+                if _would_create_cycle(graph_entries, target["id"], node["id"]):
+                    raise DecomposeError(
+                        f"adopting {target['id']} into group {grp['slug']!r} "
+                        "would create a cycle",
+                        exit_code=2,
+                    )
+                # An adoptee with descendants (codex P1). Containment is ONE
+                # level by design, and selection_guards does not treat a
+                # contained ANCESTOR as a guard - so the children would stay
+                # independently dispatchable while the merge cascade closed only
+                # this parent, leaving them open to build separate PRs. Refusing
+                # is right rather than propagating: a subtree is a decomposition
+                # of its own, and folding it wholesale into another unit is a
+                # reshape the operator should state explicitly.
+                _kids = [
+                    e.get("id") for e in graph_entries
+                    if isinstance(e, dict) and e.get("parent") == target["id"]
+                ]
+                if _kids:
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which has "
+                        f"{len(_kids)} child(ren) ({', '.join(str(k) for k in _kids[:3])}"
+                        f"{'...' if len(_kids) > 3 else ''}); containment is one "
+                        "level, so they would stay dispatchable and open their own "
+                        "PRs while their parent closed. Adopt the children "
+                        "individually, or re-parent them out first",
+                        exit_code=2,
+                    )
                 # Containment (x-e957), stamped BEFORE the already-adopted
                 # short-circuit so re-running the spec CONVERGES: a node adopted
                 # by an older fno (parent set, no contained_in) is back-filled
@@ -1681,36 +1717,6 @@ def cmd_decompose(
                     target["contained_in"] = node["id"]
                 if target.get("parent") == node["id"]:
                     continue  # already adopted - re-running the spec is a no-op
-                # The re-parent path the existing minted-child guard was written
-                # for and could not reach (see the comment on that call).
-                if _would_create_cycle(graph_entries, target["id"], node["id"]):
-                    raise DecomposeError(
-                        f"adopting {target['id']} into group {grp['slug']!r} "
-                        "would create a cycle",
-                        exit_code=2,
-                    )
-                # An adoptee with descendants (codex P1). Containment is ONE
-                # level by design, and selection_guards does not treat a
-                # contained ANCESTOR as a guard - so the children would stay
-                # independently dispatchable while the merge cascade closed only
-                # this parent, leaving them open to build separate PRs. Refusing
-                # is right rather than propagating: a subtree is a decomposition
-                # of its own, and folding it wholesale into another unit is a
-                # reshape the operator should state explicitly.
-                _kids = [
-                    e.get("id") for e in graph_entries
-                    if isinstance(e, dict) and e.get("parent") == target["id"]
-                ]
-                if _kids:
-                    raise DecomposeError(
-                        f"group {grp['slug']!r} adopts {target['id']}, which has "
-                        f"{len(_kids)} child(ren) ({', '.join(str(k) for k in _kids[:3])}"
-                        f"{'...' if len(_kids) > 3 else ''}); containment is one "
-                        "level, so they would stay dispatchable and open their own "
-                        "PRs while their parent closed. Adopt the children "
-                        "individually, or re-parent them out first",
-                        exit_code=2,
-                    )
                 target["parent"] = node["id"]
                 adopted.append(target["id"])
 
@@ -9351,6 +9357,17 @@ def cmd_supersede(
         old_node["claimed_at"] = None
         old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
         old_node["deferred_reason"] = f"superseded by {new_id}: {cleaned_reason}"
+        # Release anything that was shipping inside it (x-e957, sigma). Same
+        # trap `cmd_remove` was fixed for, one step short of deletion: a
+        # superseded unit will never merge, so `_strandable_contained_ids`
+        # (which keys on completed_at) never heals its children, while
+        # selection_guards keeps refusing them and the redirect keeps pointing
+        # at a node that is not going to ship. Unbuildable, uncloseable, and
+        # invisible to every sweep. Un-contained rather than closed: superseding
+        # the unit is not a claim that its children shipped.
+        for _e in entries:
+            if isinstance(_e, dict) and _e.get("contained_in") == old_node.get("id"):
+                _e.pop("contained_in", None)
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)

@@ -388,6 +388,22 @@ def _redirect_if_contained(node: Optional[dict]) -> None:
     # dead end - the operator reads the redirect as broken rather than as
     # "this already shipped".
     owner_node = _find_node(owner)
+    # A dead owner will never ship, so routing there is worse than useless -
+    # it sends the operator to a node nothing will build. Named separately from
+    # the shipped case because the remedy differs: this one is stale
+    # containment that wants clearing, not work that already landed.
+    if owner_node is not None and (
+        owner_node.get("superseded_by") or owner_node.get("deferred_at")
+    ) and not owner_node.get("completed_at"):
+        _state = "superseded" if owner_node.get("superseded_by") else "deferred"
+        typer.echo(
+            f"fno target init: {nid} is marked as shipping inside {owner}, but "
+            f"{owner} is {_state} and will never ship it.\n"
+            f"That containment is stale. Clear it with `fno backlog update {nid} "
+            "--parent null`, then dispatch this node on its own. Nothing was claimed.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     if owner_node is not None and owner_node.get("completed_at"):
         shipped = owner_node.get("pr_number")
         where = f" in PR #{shipped}" if shipped else ""

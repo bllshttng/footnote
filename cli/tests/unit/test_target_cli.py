@@ -1270,3 +1270,29 @@ def test_check_contained_proceeds_when_the_graph_lock_is_unavailable(tmp_path,
     monkeypatch.setenv("TARGET_INPUT", "x-261c")
     # Still resolves and still refuses - the read just was not serialized.
     assert runner.invoke(app, ["target", "check-contained"]).exit_code == 9
+
+
+def test_redirect_names_a_dead_owner_instead_of_routing_to_it(tmp_path, monkeypatch):
+    """sigma: a superseded owner will never ship, so routing there is useless.
+
+    Named separately from the shipped case because the remedy differs: this is
+    stale containment that wants clearing, not work that already landed.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "superseded_by": "x-9999",
+         "deferred_at": "2026-07-29T00:00:00+00:00"},
+        {"id": "x-261c", "plan_path": "/p/two.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--input", "x-261c"])
+    assert result.exit_code == 2, result.output
+    assert "superseded" in result.output
+    assert "--parent null" in result.output
+    assert "run `/fno:target x-6320`" not in result.output
+    assert ran == []
+    _clear_root_cache()
