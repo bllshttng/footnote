@@ -9,6 +9,7 @@ from fno.harness_identity import (
     HarnessIdentity,
     LEGACY_HANDLE_RE,
     canonical_handle,
+    claude_transport_short_id,
     current_session_id,
     current_session_ids,
     resolve_harness_identity,
@@ -159,3 +160,9 @@ def test_ac4_err_legacy_prefix_has_one_named_compatibility_owner():
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     assert harness_identity.legacy_prefix_handle(sid) == "019f48e1"
     assert harness_identity.legacy_prefix_handle(sid) != canonical_handle(sid)
+
+
+def test_claude_transport_key_is_named_separately_from_mailbox_address():
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    assert claude_transport_short_id(sid) == "019f48e1"
+    assert claude_transport_short_id(sid) != canonical_handle(sid)

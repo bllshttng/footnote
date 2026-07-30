@@ -3061,12 +3061,9 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// Resolve a lifecycle token (name | 8-hex short | full session id) to the
-/// canonical registry name via the shared resolver (x-1b1e), so the daemon
-/// `stop`/`rm` handlers accept all three address forms like their Python
-/// counterparts (`_canonical_agent_name`) instead of matching on name alone.
-/// Falls back to the raw token on any miss (unknown/ambiguous/serialize error)
-/// so the caller's familiar `agent {name} not found` path still fires.
+/// Registry-local projection used by the address-form unit test. Production
+/// stop/rm uses [`canonical_name_for_lifecycle`] so stores join the decision.
+#[cfg(test)]
 fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
     let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
         return token.to_string();
@@ -3081,13 +3078,49 @@ fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
     }
 }
 
+/// Resolve lifecycle tokens through the all-source client resolver. A genuine
+/// miss keeps the daemon's familiar raw-token not-found path; ambiguity is
+/// returned to the caller instead of falling back to a colliding registry name.
+async fn canonical_name_for_lifecycle(
+    registry: &state::Registry,
+    token: &str,
+    registry_path: &std::path::Path,
+) -> Result<String, String> {
+    let Value::Array(rows) = serde_json::to_value(&registry.entries)
+        .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
+    else {
+        return Err("could not inspect registry identities".to_string());
+    };
+    let raw = token.to_string();
+    let worker_token = raw.clone();
+    let path = registry_path.to_path_buf();
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
+    })
+    .await
+    .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
+    match resolved {
+        Ok(entry) => Ok(entry
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(&raw)
+            .to_string()),
+        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(raw),
+        Err(err) => Err(err.message()),
+    }
+}
+
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
     let name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = canonical_name_in(&registry, &name);
+    let name = match canonical_name_for_lifecycle(&registry, &name, &ctx.home.registry_json()).await
+    {
+        Ok(name) => name,
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -3333,7 +3366,11 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = canonical_name_in(&registry, &name);
+    let name = match canonical_name_for_lifecycle(&registry, &name, &ctx.home.registry_json()).await
+    {
+        Ok(name) => name,
+        Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+    };
     let entry = match registry.find(&name) {
         Some(e) => e.clone(),
         None => {
@@ -5017,6 +5054,30 @@ mod tests {
         ); // case-insensitive
            // Unknown token -> unchanged, so the caller's not-found path fires.
         assert_eq!(canonical_name_in(&reg, "nope"), "nope");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
+        let mut named = rentry("deadbeef", AgentStatus::Live, None);
+        named.short_id = "transport-a".into();
+        named.harness_session_id = Some("aaaaaaaa-1111-2222-3333-444455556666".into());
+        let mut short = rentry("other", AgentStatus::Live, None);
+        short.short_id = "deadbeef".into();
+        short.harness_session_id = Some("bbbbbbbb-1111-2222-3333-000000000002".into());
+        let reg = crate::state::Registry {
+            schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
+            entries: vec![named, short],
+        };
+
+        let error = canonical_name_for_lifecycle(
+            &reg,
+            "deadbeef",
+            std::path::Path::new("/nonexistent/registry.json"),
+        )
+        .await
+        .expect_err("ambiguous token must not fall back to the matching row name");
+
+        assert!(error.contains("ambiguous across 2 agents"));
     }
 
     #[test]

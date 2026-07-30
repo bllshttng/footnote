@@ -1113,6 +1113,7 @@ def _claude_create_path(
     effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
     from fno.agents.providers import claude as claude_mod
+    from fno.harness_identity import claude_transport_short_id
 
     # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer claim
     # here, so a concurrent resume of the same uuid (the residual window the
@@ -1137,7 +1138,7 @@ def _claude_create_path(
                 # Guard 1: refuse a transcript whose original bg supervisor is
                 # still reachable. Carried in from wake_and_deliver's acquire so
                 # moving the claim inward does not drop the probe.
-                claude_short_id=resume_session_id[:8],
+                claude_short_id=claude_transport_short_id(resume_session_id),
             )
         except claude_mod.SessionWriterClaimError as exc:
             raise DispatchAskError(
@@ -2327,15 +2328,17 @@ def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -
     canonical registry name, so ``stop``/``rm`` address a session by any of the
     three forms (x-1b1e) while still locking + acting on the canonical name.
 
-    Falls back to the token UNCHANGED on any resolution miss (unknown, ambiguous,
-    unreadable registry), so the downstream name lookup raises its familiar
-    ``agent {name!r} not found in registry`` error rather than a second variant -
-    the not-found/exit-2 contract the lifecycle tests pin stays intact."""
+    Falls back to the token UNCHANGED on a genuine miss so the downstream name
+    lookup raises its familiar ``agent {name!r} not found in registry`` error.
+    Ambiguity is a refusal: falling back could make a token that also happens to
+    be a row name select that row and act on the wrong session."""
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
         return resolve_agent(token, path=registry_path).entry.name
-    except AgentResolutionError:
+    except AgentResolutionError as exc:
+        if exc.ambiguous:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
         return token
 
 
@@ -4619,7 +4622,9 @@ def _lineage_seed_prefix(root_uuid: str) -> str:
     resolution across transcripts).
     """
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    short_root = (root_uuid or "")[:8]
+    from fno.harness_identity import legacy_prefix_handle
+
+    short_root = legacy_prefix_handle(root_uuid or "")
     return (
         f"[lineage: forked from {short_root} at {ts}; "
         f"you are the claim-holding incarnation of {short_root}]"
@@ -4708,6 +4713,8 @@ def wake_and_deliver(
     if not session_uuid:
         return False, "no-session-uuid"
 
+    from fno.harness_identity import claude_transport_short_id, legacy_prefix_handle
+
     # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
     # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
     # row), then the rung-1 inject probe re-runs against the revived session.
@@ -4719,7 +4726,7 @@ def wake_and_deliver(
         short = (
             getattr(entry, "short_id", None)
             or getattr(entry, "name", "")
-            or session_uuid[:8]
+            or claude_transport_short_id(session_uuid)
         )
         # F5: take session:<uuid> so two concurrent wakes of one exited session
         # don't both respawn+inject (double delivery / competing writers). Another
@@ -4740,7 +4747,7 @@ def wake_and_deliver(
 
     try:
         result = dispatch_spawn(
-            name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
+            name=f"{_WAKE_NAME_PREFIX}{legacy_prefix_handle(session_uuid)}",
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
@@ -4765,7 +4772,7 @@ def wake_and_deliver(
     # names both the new handle and the old lineage, and the seed prompt above
     # carried the lineage prefix. A fork is never silent.
     print(
-        f"forked new incarnation {short} from lineage {session_uuid[:8]}",
+        f"forked new incarnation {short} from lineage {legacy_prefix_handle(session_uuid)}",
         file=sys.stderr,
     )
     return True, short

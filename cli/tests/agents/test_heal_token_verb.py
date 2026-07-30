@@ -104,6 +104,32 @@ def test_ambiguous_token_refuses_with_every_candidate(_scratch_stores):
     assert load_registry() == []
 
 
+def test_all_sources_refuses_registry_and_store_collision_without_adopting(
+    _scratch_stores,
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    write_registry([
+        AgentEntry(
+            name="c655c326",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+        )
+    ])
+    _write_claude_session(_scratch_stores, CLAUDE_UUID)
+    _write_codex_session(_scratch_stores, TWIN_UUID)
+
+    res = _run("c655c326", "--all-sources")
+
+    assert res.exit_code == HEAL_TOKEN_AMBIGUOUS_EXIT
+    assert registered_id in res.stderr
+    assert CLAUDE_UUID in res.stderr and TWIN_UUID in res.stderr
+    assert [e.harness_session_id for e in load_registry()] == [registered_id]
+
+
 def test_verb_stays_off_the_rust_routing_set():
     """The recursion guard: Rust shells this out, so it must never route back."""
     from fno.agents.rust_runtime import AUTO_ROUTE_VERBS, RUST_CLIENT_VERBS

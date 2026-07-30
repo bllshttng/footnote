@@ -1,12 +1,13 @@
-"""Resolve a session token against its harness's OWN store when the fno
-registry misses, then adopt the row (x-9cc5).
+"""Resolve a session token against its harness's OWN store and adopt store-only
+sessions when the fno registry misses (x-9cc5).
 
 The registry is a cache of reality, not a gate in front of it. A session with no
 roster row -- reaped after a terminal stop, or never spawn-created -- was
 unreachable by every fno verb even though the harness itself resumes it fine.
-This module is the miss-path healer behind ``registry.resolve_agent``: probe the
-harness stores for a session-shaped token, and on exactly one match register the
-row so the verb proceeds AND the session returns to the roster.
+This module owns the store probes behind ``registry.resolve_agent``. Every short
+session-shaped registry hit is checked against them for cross-source ambiguity;
+on a registry miss, exactly one match is registered so the verb proceeds AND the
+session returns to the roster.
 
 Three rules keep it from guessing:
 
@@ -27,14 +28,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
-from fno.harness_identity import legacy_prefix_handle, session_handle_tier
+from fno.harness_identity import claude_transport_short_id, session_handle_tier
 
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
-# Session-shaped tokens only. A name that merely misses (`reviewer`, `deadbeef`
-# as a registry name) never reaches a store probe -- registry names win first in
-# resolve_agent, and anything not matching these shapes raises as it always did.
+# Session-shaped tokens only. Eight alphanumeric characters can be an OpenCode
+# tail even when they look like a friendly name, so those tokens share the store
+# ambiguity check. Names outside these shapes never pay for a store read.
 _SHORT_RE = re.compile(r"^[A-Za-z0-9]{8}$")
 _UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
@@ -58,7 +59,7 @@ class StoreHit:
     @property
     def short_id(self) -> str:
         """Claude's legacy first-eight transport key, not a mailbox address."""
-        return legacy_prefix_handle(self.session_id)
+        return claude_transport_short_id(self.session_id)
 
 
 def _normalize(token: str) -> str:

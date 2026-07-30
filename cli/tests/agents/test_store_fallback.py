@@ -90,7 +90,7 @@ def test_unshaped_token_never_probes(_registry_home, monkeypatch):
     called = []
     monkeypatch.setattr(store_fallback, "_probe_claude", lambda t: called.append(t) or [])
 
-    assert store_fallback.probe_stores("reviewer") == []
+    assert store_fallback.probe_stores("friendly-name") == []
     assert called == []
 
 
@@ -172,6 +172,133 @@ def test_unknown_token_returns_none(_registry_home):
     assert store_fallback.heal_from_harness_store("deadbeef") is None
     with pytest.raises(AgentResolutionError):
         resolve_agent("deadbeef")
+
+
+def test_registry_hit_and_store_only_session_share_one_ambiguity_namespace(
+    _registry_home,
+):
+    """A registry name must not hide a distinct store-only session handle."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+
+    with pytest.raises(AgentResolutionError) as exc:
+        resolve_agent("deadbeef")
+
+    assert exc.value.ambiguous is True
+    assert registered_id in str(exc.value)
+    assert store_only_id in str(exc.value)
+    assert [e.harness_session_id for e in load_registry()] == [registered_id]
+
+
+def test_registry_and_store_sighting_of_same_session_deduplicate(_registry_home):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="same-worker",
+            cwd="/repo/one",
+            log_path="",
+            harness="claude",
+            harness_session_id=CLAUDE_UUID,
+            short_id="c655c326",
+        )
+    ])
+    _write_claude_session(_registry_home, CLAUDE_UUID)
+
+    resolved = resolve_agent("c655c326")
+
+    assert resolved.entry.name == "same-worker"
+    assert len(load_registry()) == 1
+
+
+def test_resume_refuses_registry_hit_that_collides_with_store_session(
+    _registry_home,
+):
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.agents.resume_cli import resume_logic
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="codex",
+            harness_session_id=registered_id,
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+
+    result = resume_logic(name="deadbeef", print_command=True)
+
+    assert result.exit_code == 13
+    assert registered_id in result.stderr
+    assert store_only_id in result.stderr
+
+
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_lifecycle_refuses_registry_name_that_collides_with_store_session(
+    _registry_home, verb
+):
+    from fno.agents import dispatch
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "bbbbbbbb-1111-2222-3333-0000deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="codex",
+            harness_session_id=registered_id,
+        )
+    ])
+    _write_codex_session(_registry_home, store_only_id)
+
+    with pytest.raises(dispatch.DispatchAskError) as exc:
+        getattr(dispatch, f"{verb}_agent")("deadbeef")
+
+    assert exc.value.exit_code == 2
+    assert registered_id in str(exc.value)
+    assert store_only_id in str(exc.value)
+
+
+def test_registry_full_id_and_unshaped_name_keep_store_fast_paths(
+    _registry_home, monkeypatch
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="billing-worker",
+            cwd="/repo/one",
+            log_path="",
+            harness="claude",
+            harness_session_id=CLAUDE_UUID,
+        )
+    ])
+
+    def _unexpected_probe(_token):
+        raise AssertionError("fast-path token reached harness stores")
+
+    monkeypatch.setattr(store_fallback, "probe_stores", _unexpected_probe)
+
+    assert resolve_agent(CLAUDE_UUID).entry.name == "billing-worker"
+    assert resolve_agent("billing-worker").entry.name == "billing-worker"
 
 
 def test_adopted_row_is_never_live(_registry_home):

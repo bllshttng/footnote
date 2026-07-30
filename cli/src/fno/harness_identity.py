@@ -45,6 +45,11 @@ def legacy_prefix_handle(session_id: str) -> str:
     return session_id[:8]
 
 
+def claude_transport_short_id(session_id: str) -> str:
+    """Claude's first-eight attach/job key, which is not a mailbox address."""
+    return legacy_prefix_handle(session_id)
+
+
 def session_handle_tier(token: str, session_id: str) -> Optional[int]:
     """Return full/canonical/legacy match tier (0/1/2), or ``None``.
 

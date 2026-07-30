@@ -453,10 +453,11 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
     a clean :class:`AgentResolutionError`, never a traceback leaking to the
     verb. See ``resolve_agent_in`` for the matching rules.
 
-    On a MISS ONLY, a session-shaped token falls through to the harness stores
-    (x-9cc5): the registry is a cache of reality, so a real session with no
-    roster row is adopted here rather than refused. The happy path pays nothing
-    -- this is a hot seam (spawn dedup, mail), and a hit never reaches the probe.
+    A full session id and an ordinary name resolve from the registry directly.
+    Every session-shaped short token is checked against the harness stores too:
+    the registry is a cache of reality, so a store-only session must participate
+    in the same ambiguity decision. A registry miss may then adopt one unique
+    store hit (x-9cc5).
     """
     try:
         entries = load_registry(path=path)
@@ -464,8 +465,15 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
         raise AgentResolutionError(
             f"registry unreadable ({exc}); cannot resolve {token!r}"
         ) from exc
+    return resolve_agent_across_sources(entries, token, path=path)
+
+
+def resolve_agent_across_sources(
+    entries: list, token: str, *, path: Optional[Path] = None
+) -> ResolvedAgent:
+    """Resolve one token against a registry snapshot and every harness store."""
     try:
-        return resolve_agent_in(entries, token)
+        resolved = resolve_agent_in(entries, token)
     except AgentResolutionError as exc:
         # A MISS may fall through; a registry the caller must disambiguate must
         # not. Otherwise a store hit on one of several matching rows would pick
@@ -476,6 +484,41 @@ def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
         if entry is None:
             raise
         return ResolvedAgent(entry=entry, matched_by="harness_store")
+    return _ensure_unique_across_stores(resolved, token)
+
+
+def _ensure_unique_across_stores(
+    resolved: ResolvedAgent, token: str
+) -> ResolvedAgent:
+    """Union one registry hit with store-only candidates before selecting it."""
+    from fno.agents.store_fallback import is_session_shaped, probe_stores
+
+    if resolved.matched_by == "full_session_id" or not is_session_shaped(token):
+        return resolved
+
+    entry = resolved.entry
+    registry_key = (entry.harness, entry.harness_session_id)
+    foreign = {
+        (hit.harness, hit.session_id): hit
+        for hit in probe_stores(token)
+        if (hit.harness, hit.session_id) != registry_key
+    }
+    if not foreign:
+        return resolved
+
+    registry_id = entry.harness_session_id or entry.name
+    candidates = [
+        f"{registry_id} ({entry.harness}, registry name={entry.name})",
+        *(
+            f"{hit.session_id} ({hit.harness}, harness store)"
+            for hit in sorted(foreign.values(), key=lambda h: (h.harness, h.session_id))
+        ),
+    ]
+    raise AgentResolutionError(
+        f"token {token!r} is ambiguous across {len(candidates)} sessions: "
+        f"{', '.join(candidates)}. Disambiguate with the full session id.",
+        ambiguous=True,
+    )
 
 
 def resolve_from_harness_store(

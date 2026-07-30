@@ -950,7 +950,7 @@ pub(crate) enum ResolveError {
 
 impl ResolveError {
     /// The one-line message a verb prints (prefix it with its own verb name).
-    fn message(&self) -> String {
+    pub(crate) fn message(&self) -> String {
         match self {
             ResolveError::NotFound(tok) if tok.is_empty() => {
                 format!("empty agent token; {ACCEPTED_FORMS_MSG}")
@@ -1024,7 +1024,11 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
                     .and_then(Value::as_str)
                     .filter(|x| !x.is_empty())
                     .unwrap_or("-");
-                let p = e.get("provider").and_then(Value::as_str).unwrap_or("?");
+                let p = e
+                    .get("harness")
+                    .and_then(Value::as_str)
+                    .or_else(|| e.get("provider").and_then(Value::as_str))
+                    .unwrap_or("?");
                 format!("{n} (short={s}, {p})")
             })
             .collect::<Vec<_>>()
@@ -1081,13 +1085,10 @@ pub(crate) fn find_agent_entry<'a>(
 }
 
 // ---------------------------------------------------------------------------
-// Registry-miss heal (x-da8c). The registry is a cache of reality, not a gate in
-// front of it: a live session the harness store knows but the roster does not was
-// addressable by `fno mail` (whose Python resolver already falls through to the
-// x-9cc5 healer) yet refused by every Rust lifecycle verb, which reads the
-// registry file and nothing else. These verbs now reach the SAME healer through a
-// shellout rather than growing a second prober (x-5011 stays a two-prober
-// problem), following the `fetch_discovered_sessions` precedent in client.rs.
+// All-source short-token resolution (x-da8c). The registry is a cache of reality,
+// not a gate in front of it: store-only sessions participate in the same
+// ambiguity namespace as registry rows. Rust lifecycle verbs reach the Python
+// resolver through a shellout rather than growing a second store prober.
 // ---------------------------------------------------------------------------
 
 /// True for a token worth probing a harness store with -- the Rust mirror of
@@ -1102,35 +1103,34 @@ fn is_session_shaped(token: &str) -> bool {
         || is_uuid_shaped(&token.to_ascii_lowercase())
 }
 
-/// Ask the Python healer to adopt `token` from its harness store.
+fn token_helper_output(token: &str, registry_path: &Path) -> std::io::Result<std::process::Output> {
+    use std::process::Command;
+
+    let mut command = Command::new("fno");
+    command
+        .args(["agents", "heal-token", token])
+        .arg("--registry")
+        .arg(registry_path)
+        .arg("--all-sources")
+        .env("FNO_AGENTS_RUNTIME", "python");
+    command.output()
+}
+
+/// Ask the Python resolver to union registry and harness-store candidates.
 ///
-/// `Ok(Some(row))` on adoption, `Ok(None)` on anything that should reproduce the
+/// `Ok(Some(row))` on resolution, `Ok(None)` on anything that should reproduce the
 /// caller's original not-found error, and `Err(msg)` ONLY for an ambiguous token
 /// (the healer's candidate list, relayed verbatim -- refusing to guess is a
 /// designed outcome, not a miss). `FNO_AGENTS_RUNTIME=python` pins the child to
 /// the Python dispatch so the shellout cannot recurse back into this binary.
 fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String> {
-    use std::process::Command;
-
-    // Exit-code contract of `fno agents heal-token`: 0 adopted, 13 miss, 3
+    // Exit-code contract of `fno agents heal-token`: 0 resolved, 13 miss, 3
     // ambiguous. Anything else (missing binary, internal error) is a miss.
     const ADOPTED: i32 = 0;
     const AMBIGUOUS: i32 = 3;
     const MISS: i32 = 13;
 
-    let out = match Command::new("fno")
-        .args(["agents", "heal-token", token])
-        // The two runtimes resolve the registry differently (this side honors
-        // FNO_AGENTS_HOME, the Python side does not), so name the file we
-        // actually read. Without it a non-default agents home heals into the
-        // DEFAULT registry: the verb works, the roster never gains the row, and
-        // every later call re-heals -- all of it invisible, because the write
-        // succeeded and nothing warned.
-        .arg("--registry")
-        .arg(registry_path)
-        .env("FNO_AGENTS_RUNTIME", "python")
-        .output()
-    {
+    let out = match token_helper_output(token, registry_path) {
         Ok(o) => o,
         Err(exc) => {
             // A missing `fno` is the expected degrade; anything else (a
@@ -1210,11 +1210,11 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
     }
 }
 
-/// [`find_agent_entry`], plus a harness-store heal on a session-shaped miss.
+/// [`find_agent_entry`], plus all-source resolution for session-shaped tokens.
 ///
 /// The one choke point the session-connecting verbs resolve through. Returns an
-/// OWNED row because a healed one is synthesized rather than borrowed from
-/// `rows`; a registry hit clones (a one-shot verb, a handful of small fields).
+/// OWNED row because the shared Python resolver may synthesize a healed row;
+/// full ids and non-session-shaped registry hits clone their small local row.
 /// `trace` deliberately does NOT use this: an adopted row has no events, so its
 /// not-found is honest.
 pub(crate) fn resolve_entry_with_heal(
@@ -1223,7 +1223,19 @@ pub(crate) fn resolve_entry_with_heal(
     registry_path: &Path,
 ) -> Result<Value, ResolveError> {
     match find_agent_entry(rows, token) {
-        Ok(e) => Ok(e.clone()),
+        Ok(e) => {
+            if entry_session_tier(e, token) == Some(0) || !is_session_shaped(token) {
+                return Ok(e.clone());
+            }
+            match heal_token(token, registry_path) {
+                Ok(Some(row)) => Ok(row),
+                Ok(None) => Err(ResolveError::Ambiguous(format!(
+                    "cannot safely resolve token {} because the harness stores could not be checked. Use the full session id.",
+                    py_repr_str(token)
+                ))),
+                Err(candidates) => Err(ResolveError::Ambiguous(candidates)),
+            }
+        }
         // An ambiguous REGISTRY is not a miss: healing would pick the winner the
         // registry deliberately refused to pick.
         Err(err @ ResolveError::Ambiguous(_)) => Err(err),
@@ -2705,6 +2717,28 @@ mod tests {
     }
 
     #[test]
+    fn ambiguity_diagnostic_uses_v10_harness_field() {
+        let rows = vec![
+            json!({
+                "name": "one", "harness": "codex", "cwd": "/w", "log_path": "/l",
+                "short_id": "deadbeef", "harness_session_id": "aaaaaaaa-0000-0000-0000-000000000001",
+            }),
+            json!({
+                "name": "two", "harness": "opencode", "cwd": "/w", "log_path": "/l",
+                "short_id": "deadbeef", "harness_session_id": "ses_worker00000001",
+            }),
+        ];
+
+        let message = find_agent_entry(&rows, "deadbeef")
+            .expect_err("shared transport token is ambiguous")
+            .message();
+
+        assert!(message.contains("codex"));
+        assert!(message.contains("opencode"));
+        assert!(!message.contains("(?)"));
+    }
+
+    #[test]
     fn find_agent_entry_unknown_and_empty_and_boundary() {
         // AC1-ERR: unknown token; empty token; 7/9-hex are not shorts.
         let rows = vec![claude_row("billing", "7c5dcf5d", RESOLVE_UUID)];
@@ -2742,8 +2776,8 @@ mod tests {
             "A1B2C3D4",
             "ses_7f3a9b2c1d0e",
             CLAUDE_UUID_FIXTURE,
-            // A canonical OpenCode tail may be eight alphabetic characters;
-            // registry names still win before a miss reaches this shape gate.
+            // A canonical OpenCode tail may be eight alphabetic characters,
+            // so a same-shaped registry name must join the store namespace.
             "reviewer",
         ] {
             assert!(is_session_shaped(t), "{t} should be probeable");
