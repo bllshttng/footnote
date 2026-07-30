@@ -134,6 +134,15 @@ class Entry(BaseModel):
     details: Optional[str] = None
     cost_usd: Optional[float] = None
     cost_sessions: list[dict] = Field(default_factory=list)
+    # Delivery-unit containment (x-e957). Set when `decompose ... adopt:` folds
+    # an existing node into a group child: this node's work ships inside the
+    # named node's PR, so it is not separately dispatchable and not separately
+    # costed. `plan == PR == node` holds for the delivery unit; a contained node
+    # is the same plan seen from inside. What makes `cost_usd: None` READABLE -
+    # without it, "not measured" and "measured on the unit" are the same null.
+    # Sparse on the wire: never setdefault-ed, so a graph with no contained
+    # nodes serializes byte-identically (the `dep`/`stub_against` pattern).
+    contained_in: Optional[str] = None
     size: Optional[str] = None
     # Optional per-node model pin (x-571f). A dispatcher appends `--model <m>`
     # to the worker spawn it builds; null = provider default (no behavior

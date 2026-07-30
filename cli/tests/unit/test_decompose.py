@@ -2033,6 +2033,126 @@ def test_adopt_a_shipped_node_is_permitted(graph_env):
     assert kid["pr_number"] == 612
 
 
+# -- contained_in: the delivery-unit record adoption writes (x-e957 task 1.2) --
+
+
+def test_adopt_records_contained_in_naming_the_delivery_unit(graph_env):
+    """AC3: adoption stamps the owning group child, not just the parent pointer.
+
+    `parent` says "belongs to"; `contained_in` says "ships inside that node's
+    PR". They coincide today, and the second is still the load-bearing one:
+    `parent` is a tree edge every epic child carries, so a reader keying on it
+    could not tell a normal epic child from a node with no PR of its own.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    ).exit_code == 0
+
+    entries = read_entries()
+    unit = _child(entries, "appendix")["id"]
+    by_id = {e["id"]: e for e in entries}
+    for kid in ("ab-kid00001", "ab-kid00002", "ab-kid00003"):
+        assert by_id[kid]["contained_in"] == unit
+    # The delivery unit is NOT contained in itself - it is the thing that ships.
+    assert by_id[unit].get("contained_in") is None
+
+
+def test_contained_in_survives_a_later_unrelated_mutation(graph_env):
+    """AC3: the record is durable, which is the whole reason it is a field.
+
+    Status is recomputed on every write, so an adopted node carrying a plan and
+    no blockers derives `ready` again on the next mutation - armed exactly as
+    before. A completion_note would be equally durable but not queryable; what
+    matters here is that recompute + canonicalize round-trip the field rather
+    than dropping it as an unknown extra.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001", plan_path="/p/one.md"))
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    ).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+
+    # Any other locked mutation: a priority bump on an unrelated node.
+    assert _invoke(
+        ["backlog", "update", "ab-epic0001", "--priority", "p0"]
+    ).exit_code == 0
+
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid["contained_in"] == unit
+
+
+def test_adopt_backfills_contained_in_on_an_already_reparented_node(graph_env):
+    """A node adopted before this field existed converges on the next run.
+
+    The stamp goes BEFORE the already-adopted short-circuit for exactly this:
+    keying it off the re-parent would leave every pre-existing adopted node
+    permanently half-adopted, parented but still armed, with no verb to fix it.
+    """
+    g, read_entries = graph_env
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1"},
+        ])]
+    ).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+
+    # Hand-build the legacy shape: parented to the group child, no contained_in.
+    _seed_children(g, _node("ab-kid00001", parent=unit, status="ready"))
+    assert next(
+        e for e in read_entries() if e["id"] == "ab-kid00001"
+    ).get("contained_in") is None
+
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    ).exit_code == 0
+    assert next(
+        e for e in read_entries() if e["id"] == "ab-kid00001"
+    )["contained_in"] == unit
+
+
+def test_ac10_no_adopt_key_leaves_contained_in_off_the_wire_entirely(graph_env):
+    """AC10: a containment-free graph serializes exactly as it did pre-change.
+
+    The field is listed in CANONICAL_FIELD_ORDER but deliberately never
+    setdefault-ed. Defaulting it beside the other nullable scalars would stamp
+    `"contained_in": null` onto every node in every graph in existence - which
+    reads as harmless and is precisely the byte-level change AC10 forbids.
+    Asserting on the raw bytes, not on read_entries(), because the read path is
+    what would paper over a setdefault.
+    """
+    g, _read_entries = graph_env
+    assert _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(THREE_GROUPS)]
+    ).exit_code == 0
+    assert "contained_in" not in g.read_text()
+
+
+def test_adopt_rerun_leaves_contained_in_byte_stable(graph_env):
+    """AC10 sibling: re-stamping the same value keeps the graph settled.
+
+    Convergence and idempotency have to hold together - writing the field
+    unconditionally is only safe because writing the value it already holds
+    changes no bytes.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-kid00002"),
+                   _epic_child("ab-kid00003"))
+    spec = ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(ADOPT_GROUP)]
+    assert _invoke(spec).exit_code == 0
+    assert _invoke(spec).exit_code == 0
+    settled = g.read_text()
+    assert _invoke(spec).exit_code == 0
+    assert g.read_text() == settled
+    assert '"contained_in"' in settled
+
 
 # -- warn on epic children that no group adopted (x-b9d7 US3) --
 

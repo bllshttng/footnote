@@ -1610,6 +1610,18 @@ def cmd_decompose(
                         "reshapes the epic",
                         exit_code=2,
                     )
+                # Containment (x-e957), stamped BEFORE the already-adopted
+                # short-circuit so re-running the spec CONVERGES: a node adopted
+                # by an older fno (parent set, no contained_in) is back-filled
+                # rather than left half-adopted forever. Writing the value it
+                # already holds is a no-op, so re-running an up-to-date spec
+                # still serializes byte-identically.
+                #
+                # Same locked mutation as the re-parent below, deliberately: two
+                # writes would open a window where the node is re-parented but
+                # still armed for dispatch, which is the exact state this field
+                # exists to make impossible.
+                target["contained_in"] = node["id"]
                 if target.get("parent") == node["id"]:
                     continue  # already adopted - re-running the spec is a no-op
                 # The re-parent path the existing minted-child guard was written
