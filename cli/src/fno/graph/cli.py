@@ -6920,6 +6920,7 @@ def cmd_reconcile(
 
     closed: list[dict] = []
     healed_epics: list[str] = []
+    contained_closed: list[str] = []
 
     if not dry_run and (closeable or strandable):
         # Apply every close in ONE locked mutation rather than locking once
@@ -6934,6 +6935,12 @@ def cmd_reconcile(
         # we accumulate the ids here and run the same dispatch path for them
         # after the lock - else an epic-level dependent stalls.
         cascade_closed_acc: list = []
+        # Nodes closed because they shipped inside a closed node's PR (x-e957).
+        # Kept SEPARATE from cascade_closed_acc, which drives auto-continue
+        # dispatch - contained nodes deliberately get none. This list is for
+        # reporting only: a sweep that closes three nodes while saying it closed
+        # one reads as "already in sync" to the next operator.
+        contained_closed_acc: list = []
 
         # Ledger rollup, precomputed outside the lock (ledger I/O must not block
         # other graph mutations). Reconcile is the MAINSTREAM close: a session
@@ -7010,7 +7017,9 @@ def cmd_reconcile(
                     # cascade_closed_acc: that accumulator drives auto-continue
                     # dispatch, which contained nodes deliberately do not get.
                     try:
-                        _cascade_close_contained(entries, record.node_id)
+                        contained_closed_acc.extend(
+                            _cascade_close_contained(entries, record.node_id)
+                        )
                     except Exception as _cc_exc:  # noqa: BLE001 - never abort a close
                         typer.echo(
                             f"warning: closed {record.node_id} but the contained-node "
@@ -7219,6 +7228,7 @@ def cmd_reconcile(
         # (codex P3): the close summaries below otherwise only describe PR-drift
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
+        contained_closed = sorted(set(contained_closed_acc))
     elif dry_run and (closeable or strandable):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
@@ -7229,14 +7239,20 @@ def cmd_reconcile(
 
         _sim = _copy.deepcopy(entries)
         _sim_acc: list = []
+        _sim_contained: list = []
         for record in closeable:
             _sn = _find_node(_sim, record.node_id)
             if _sn and not _sn.get("completed_at"):
                 _apply_completion_fields(_sn)
+                # Same order as the real mutator: contained children close
+                # first, so the simulated parent cascade sees the same
+                # all-children-done world a real run would.
+                _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
         if node is None:
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
+        contained_closed = sorted(set(_sim_contained))
 
     # W4 causal links: best-effort revert stamp, full sweep only. A merged
     # "Revert ..." PR referencing a PR carried by a graph node flips that
@@ -7314,6 +7330,10 @@ def cmd_reconcile(
             # Auto-closed container epics (cascade + self-heal sweep); on --dry-run
             # this is the simulated preview of what a real run would heal (codex P3).
             "healed_epics": healed_epics,
+            # Nodes closed because they shipped inside a closed node's PR
+            # (x-e957). Reported separately from `closed`, whose entries all
+            # carry their own pr_number - a contained node has none.
+            "contained_closed": contained_closed,
             # Nodes whose ship a merged revert PR names (stamped unless --dry-run).
             "reverted": reverted_stamped,
             # Canonical-sync catch-up outcome. In the JSON payload rather than
@@ -7338,6 +7358,7 @@ def cmd_reconcile(
         and not failures
         and not strandable
         and not healed_epics
+        and not contained_closed
         and not reverted_stamped
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
@@ -7347,6 +7368,11 @@ def cmd_reconcile(
         typer.echo(f"Would close {len(closeable)} node(s) (dry-run, nothing mutated):")
         for r in closeable:
             typer.echo(f"  {r.node_id}  PR #{r.pr_number} MERGED  {r.pr_url or ''}".rstrip())
+        if contained_closed:
+            typer.echo(
+                f"Would close {len(contained_closed)} contained node(s) shipped "
+                "inside those PRs: " + ", ".join(contained_closed)
+            )
         if healed_epics:
             typer.echo(
                 f"Would self-heal {len(healed_epics)} container epic(s): "
@@ -7359,6 +7385,12 @@ def cmd_reconcile(
             typer.echo(f"  {c['node_id']}  PR #{c['pr_number']}{stamp_note}")
         if closed:
             typer.echo(f"Retro sentinels written under {retro_pending_dir()}")
+        if contained_closed:
+            typer.echo(
+                f"Also closed {len(contained_closed)} contained node(s) shipped "
+                "inside those PRs (cost stays on the delivery unit): "
+                + ", ".join(contained_closed)
+            )
         if healed_epics:
             typer.echo(
                 f"Auto-closed {len(healed_epics)} container epic(s) "

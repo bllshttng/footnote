@@ -413,3 +413,52 @@ def test_cascade_tolerates_malformed_rows_and_a_missing_unit():
     assert _cascade(entries, UNIT) == [KID_A]
     # A node_id matching nothing closes nothing and still returns cleanly.
     assert _cascade(_world(Path("/tmp")), "x-0000") == []
+
+
+# -- a sweep that closes three nodes must not report closing one --
+
+
+def test_contained_closes_are_reported_in_the_human_summary(world, merged_pr,
+                                                            dispatches):
+    """Silent extra closes read as "already in sync" to the next operator."""
+    result = _reconcile()
+    assert result.exit_code == 0
+    assert KID_A in result.output
+    assert KID_B in result.output
+    assert "contained" in result.output.lower()
+
+
+def test_contained_closes_are_reported_in_the_json_payload(world, merged_pr,
+                                                           dispatches):
+    """The SessionStart hook runs reconcile with --json and discards stderr.
+
+    Separate from `closed`, whose entries all carry their own pr_number - a
+    contained node has none, so folding it in would need a null-PR row.
+    """
+    result = _reconcile("--json")
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert sorted(payload["contained_closed"]) == sorted([KID_A, KID_B])
+    assert [c["node_id"] for c in payload["closed"]] == [UNIT]
+
+
+def test_dry_run_previews_the_contained_closes_and_mutates_nothing(world, merged_pr,
+                                                                   dispatches):
+    """A preview that under-reports is worse than no preview."""
+    result = _reconcile("--dry-run")
+    assert result.exit_code == 0
+    assert KID_A in result.output and KID_B in result.output
+
+    nodes = world[1]()
+    for nid in (UNIT, KID_A, KID_B):
+        assert nodes[nid]["completed_at"] is None, nid
+
+
+def test_clean_graph_still_reports_in_sync(world, merged_pr, monkeypatch):
+    """The new accumulator must not turn a no-op sweep into a noisy one."""
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+    result = _reconcile()
+    assert result.exit_code == 0
+    assert "in sync" in result.output
