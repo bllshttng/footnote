@@ -785,9 +785,35 @@ def check_contained() -> None:
     proceeds - a stale `fno` without this verb exits 2 as a Click usage error
     and must not hard-refuse every direct bootstrap.
     """
-    node = _resolve_dispatch_node(
-        os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
-    )
+    # Read UNDER THE GRAPH LOCK (codex P1). `read_graph` explicitly takes no
+    # lock, which left the post-acquire re-check still raceable: decompose holds
+    # the graph flock and sees no claim, the bootstrap acquires the claim, this
+    # read returns the PRE-adoption graph because decompose has not done its
+    # atomic replace yet, and then decompose commits `contained_in` while the
+    # worker proceeds. Taking the same flock totalizes the two orderings, and
+    # both are safe:
+    #
+    #   lock here first  -> we see no containment and proceed; decompose then
+    #                       takes the lock, sees our now-live claim, and refuses.
+    #   decompose first  -> it commits containment and releases; we then read it
+    #                       and refuse, releasing the claim we just took.
+    #
+    # No deadlock: decompose reads claim state as a plain file read and never
+    # holds a claim while waiting on this lock, so there is no cycle.
+    from fno.graph.store import _acquire_flock, _graph_lock_path, _release_flock
+    from fno.paths import graph_json
+
+    try:
+        _fd = _acquire_flock(_graph_lock_path(graph_json()))
+    except Exception:  # noqa: BLE001 - an unlockable graph must not block dispatch
+        _fd = None
+    try:
+        node = _resolve_dispatch_node(
+            os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
+        )
+    finally:
+        if _fd is not None:
+            _release_flock(_fd)
     try:
         _redirect_if_contained(node)
     except typer.Exit as exc:

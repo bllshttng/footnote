@@ -1203,3 +1203,70 @@ def test_target_start_redirects_before_creating_a_worktree(tmp_path, monkeypatch
     assert result.exit_code == 2, result.output
     assert ensured == [], "worktree was allocated before the redirect fired"
     _clear_root_cache()
+
+
+def test_check_contained_reads_under_the_graph_lock(tmp_path, monkeypatch):
+    """codex P1: `read_graph` takes no lock, so the re-check was still raceable.
+
+    decompose holds the graph flock and sees no claim, the bootstrap acquires
+    the claim, this read returns the PRE-adoption graph because decompose has
+    not done its atomic replace yet, and decompose then commits `contained_in`
+    while the worker proceeds. Taking the same flock totalizes the ordering.
+
+    Asserts the lock is actually held ACROSS the resolve - a lock acquired and
+    dropped before the read would pass a "did we lock" assertion and serialize
+    nothing.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+    held = {"during_resolve": False, "acquired": 0}
+
+    real_acquire, real_release = gs._acquire_flock, gs._release_flock
+    state = {"open": False}
+
+    def acq(p):
+        state["open"] = True
+        held["acquired"] += 1
+        return real_acquire(p)
+
+    def rel(fd):
+        state["open"] = False
+        return real_release(fd)
+
+    real_resolve = target_cli._resolve_dispatch_node
+
+    def resolve(*a, **k):
+        held["during_resolve"] = state["open"]
+        return real_resolve(*a, **k)
+
+    monkeypatch.setattr(gs, "_acquire_flock", acq)
+    monkeypatch.setattr(gs, "_release_flock", rel)
+    monkeypatch.setattr(target_cli, "_resolve_dispatch_node", resolve)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert held["acquired"] == 1, "the graph lock was never taken"
+    assert held["during_resolve"], "the lock was not held across the graph read"
+    assert not state["open"], "the graph lock was leaked"
+
+
+def test_check_contained_proceeds_when_the_graph_lock_is_unavailable(tmp_path,
+                                                                     monkeypatch):
+    """An unlockable graph must not block every dispatch.
+
+    Fail-open matches the rest of this gate: a broken lock is a broken gate, and
+    the pre-claim check plus decompose's own live-claim refusal still stand.
+    """
+    import fno.graph.store as gs
+
+    _contained_graph(tmp_path, monkeypatch)
+
+    def boom(p):
+        raise OSError("no lock for you")
+
+    monkeypatch.setattr(gs, "_acquire_flock", boom)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    # Still resolves and still refuses - the read just was not serialized.
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 9
