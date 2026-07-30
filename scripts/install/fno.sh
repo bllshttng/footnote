@@ -308,8 +308,28 @@ main() {
 		die "\`uv tool install $FNO_SOURCE\` failed (network/PyPI unreachable, disk full, or a bad version). Check the error above and retry, or run it manually."
 	fi
 
-	if ! resolve_real || [ ! -x "$FNO_REAL" ]; then
-		die "provisioned the wheel but could not locate the installed fno; try 'uv tool install fno' manually."
+	# Name the source we installed from, the path we built, and why we rejected
+	# it. The old one-liner named none of the three, which made the failure
+	# unfalsifiable from the terminal and sent two separate diagnoses down the
+	# wrong path. Kept in step with the same message in crates/fno/src/bootstrap.rs
+	# - both are reachable, so a fix in only one is decorative.
+	if ! resolve_real; then
+		die "provisioned the wheel but could not locate the installed fno.
+  installed from: $FNO_SOURCE
+  looked for: (no path built - \`uv tool dir\` failed or printed nothing)
+Install it manually to see uv's own error: \`uv tool install --force fno\`"
+	fi
+	if [ ! -x "$FNO_REAL" ]; then
+		if [ -e "$FNO_REAL" ]; then
+			_why="something is there but it is not an executable file"
+		else
+			_why="nothing exists at that path"
+		fi
+		die "provisioned the wheel but could not locate the installed fno.
+  installed from: $FNO_SOURCE
+  looked for: $FNO_REAL
+  rejected because: $_why
+Install it manually to see uv's own error: \`uv tool install --force fno\`"
 	fi
 	# A foreign by-name PyPI `fno`, or unreadable metadata, must abort here -
 	# never report success for a package that is not ours (AC5-ERR).
