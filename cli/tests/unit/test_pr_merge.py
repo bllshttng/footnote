@@ -121,10 +121,14 @@ def test_auto_merge_disabled_skips_exit_2(monkeypatch, capsys):
     assert obj["pr"] == 42
 
 
-def test_gh_missing_exits_127(monkeypatch, capsys):
+def test_gh_missing_exits_127(monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_load_auto_merge", lambda: AutoMergeBlock(enabled=True))
     monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
-    assert _merge.run_merge(["42"]) == 127
+    # Isolate from an ambient target-state.md: run_merge with no cwd reads
+    # `auto_merge_approved` from the caller's repo state, so a suite run inside
+    # an active /target worktree (whose manifest carries a per-run no-merge)
+    # bails on that field before the gh check. A fresh tmp cwd has no state.
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 127
     obj = _last_json(capsys, stream="err")
     assert obj["outcome"] == "failed"
     assert obj["reason"] == "gh CLI not installed"

@@ -638,6 +638,37 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     return str(path)
 
 
+def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
+    """Write an ``--account`` spawn's auth/model scrub as a claude ``--settings``
+    JSON and return its path.
+
+    The env scrub layered in ``bg_create``/``headless_create`` is dropped at the
+    ``claude --bg`` daemon fork: the daemon forks the session with its OWN env,
+    not the invoker's per-spawn overlay, so an account worker born under another
+    vendor's exported ``ANTHROPIC_*`` inherits those vars and resolves the vendor
+    model. A settings file is read by the forked session itself, so expressing
+    the scrub here survives that fork where an env overlay cannot.
+
+    Every ``SCRUB_AUTH_VARS`` entry is written as an empty string: claude reads
+    an empty settings env value as UNSET (measured 2026-07-27), which is what
+    drops the inherited vendor endpoint and model tiers. The account's FULL
+    resolved overlay is then re-applied (not just the scrub vars), so an api_key
+    account survives the fork with every env its record pins, including extra
+    entries a scrub-var allowlist would drop (custom headers, proxy vars, ...).
+    CLAUDE_CONFIG_DIR is the one exclusion: it selects which config the worker
+    reads, so it cannot live in a file read FROM that config, and it rides the
+    spawn env (which selects the per-account daemon).
+
+    Content-addressed and 0600 via the shared writer, so identical account
+    overlays reuse one file rather than accumulating per spawn.
+    """
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
+    scrub = {var: "" for var in SCRUB_AUTH_VARS}
+    overlay = {k: v for k, v in account_env.items() if k != "CLAUDE_CONFIG_DIR"}
+    return materialize_route_settings({**scrub, **overlay})
+
+
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
 # (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
 # (OpenAI's API); a routed third-party provider almost always wants "chat".
