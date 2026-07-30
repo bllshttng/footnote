@@ -69,12 +69,17 @@ handle_planning_session_if_applicable() {
     log "Planning session detected (type=$SESSION_TYPE) - registering cost"
 
     # Calculate cost. The cost helpers moved into the fno package; run them as
-    # `python3 -m fno.cost.<mod>`, pointing PYTHONPATH at the package source in
-    # a checkout so it works pre-install (else rely on the installed `fno`).
-    local cost_pkg_src branch cost_json title skill_args slug
-    cost_pkg_src="${SCRIPT_DIR}/cli/src"
-    [[ -f "${cost_pkg_src}/fno/cost/_session_cost.py" ]] && \
-        export PYTHONPATH="${cost_pkg_src}${PYTHONPATH:+:${PYTHONPATH}}"
+    # `"$FNO_PYTHON" -m fno.cost.<mod>` rather than a bare `python3`, which is
+    # whatever is first on PATH - one without fno's deps drops the ledger row
+    # and the log line below is the only trace. fno_python_init also puts the
+    # package source on PYTHONPATH so a checkout works pre-install.
+    local branch cost_json title skill_args slug
+    # shellcheck source=./fno-python.sh
+    source "${SCRIPT_DIR}/scripts/lib/fno-python.sh" 2>/dev/null || true
+    declare -F fno_python_init >/dev/null && fno_python_init "${SCRIPT_DIR}"
+    # A partial deploy that dropped the helper degrades to the old behavior
+    # rather than tripping the hook's `set -u` on an unset FNO_PYTHON.
+    FNO_PYTHON="${FNO_PYTHON:-python3}"
     branch=$(git branch --show-current 2>/dev/null || echo "")
 
     cost_json=""
@@ -82,7 +87,7 @@ handle_planning_session_if_applicable() {
         local cost_args
         cost_args=(--json)
         [[ -n "$branch" ]] && cost_args+=(--branch "$branch")
-        cost_json=$(python3 -m fno.cost._session_cost "${cost_args[@]}" "$session_id" 2>>"$LOG_FILE" || echo "")
+        cost_json=$("$FNO_PYTHON" -m fno.cost._session_cost "${cost_args[@]}" "$session_id" 2>>"$LOG_FILE" || echo "")
     fi
 
     # Build title from transcript (extract the skill args for context)
@@ -124,7 +129,7 @@ for line in open('$TRANSCRIPT_PATH'):
     local register_args
     register_args=(--type "$SESSION_TYPE" --title "$title" --session "$session_id")
     [[ -n "$cost_json" ]] && register_args+=(--cost-json "$cost_json")
-    python3 -m fno.cost._register "${register_args[@]}" 2>>"$LOG_FILE" 1>/dev/null && \
+    "$FNO_PYTHON" -m fno.cost._register "${register_args[@]}" 2>>"$LOG_FILE" 1>/dev/null && \
         log "Planning session registered: $SESSION_TYPE | $session_id" || \
         log "WARNING: fno.cost._register failed for planning session"
 
