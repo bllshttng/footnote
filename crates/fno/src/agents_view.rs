@@ -80,6 +80,16 @@ pub struct RegistryAgent {
     pub crown_scope: Option<String>,
 }
 
+impl RegistryAgent {
+    /// The one durable peer identity, with the legacy session slot winning
+    /// when both spellings are present.
+    pub fn effective_identity(&self) -> Option<&str> {
+        self.session_id
+            .as_deref()
+            .or(self.harness_session_id.as_deref())
+    }
+}
+
 /// One claude-roster worker as the sideline consumes it (three fields, not
 /// the supervisor's model): `short_id` is the `claude attach <id>` jobId (the
 /// first `-`-segment of the roster `sessionId`, == the roster map key), and

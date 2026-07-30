@@ -18,7 +18,7 @@ Assertions:
 """
 from __future__ import annotations
 
-import warnings
+from dataclasses import replace
 from pathlib import Path
 from typing import Callable
 
@@ -27,7 +27,6 @@ import pytest
 from fno.agents.dispatch import reconcile_agents
 from fno.agents.registry import (
     AgentEntry,
-    RegistryVersionError,
     update_registry,
 )
 
@@ -161,6 +160,41 @@ def test_mixed_orphan_and_recovered_writes_once(
     assert len(result.recovered) == 1
 
 
+def test_status_flip_is_compare_and_set_against_same_name_replacement(
+    isolated_registry: Path, monkeypatch
+) -> None:
+    """A probed row cannot overwrite a replacement that reused its name."""
+    original = _seed_codex(
+        "same", status="live",
+        session_id="11111111-1111-1111-1111-111111111111",
+    )
+    _patch_codex_known(monkeypatch, set())
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import load_registry
+
+    real_update = dispatch_mod.update_registry
+    injected = False
+
+    def replace_then_apply(updater):
+        nonlocal injected
+        if not injected:
+            injected = True
+            real_update(lambda _rows: [replace(
+                original, harness="claude", harness_session_id="replacement", status="exited"
+            )])
+        return real_update(updater)
+
+    monkeypatch.setattr(dispatch_mod, "update_registry", replace_then_apply)
+    result = reconcile_agents()
+
+    row = load_registry()[0]
+    assert row.harness == "claude"
+    assert row.status == "exited"
+    assert result.orphaned == []
+    assert any(e["reason"] == "registry-status-update-raced" for e in result.errors)
+
+
 def test_write_failure_routes_every_queued_name_to_errors(
     isolated_registry: Path, monkeypatch
 ) -> None:
@@ -238,10 +272,6 @@ def test_sigint_mid_loop_leaves_registry_untouched(
 
     # Better strategy: patch a helper we control. Iterate manually by
     # patching the loop body's per-entry probe instead.
-    real_update_registry = __import__(
-        "fno.agents.dispatch", fromlist=["update_registry"]
-    ).update_registry
-
     def kbint_update(_):
         raise KeyboardInterrupt
 

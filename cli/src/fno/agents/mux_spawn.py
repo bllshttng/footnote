@@ -839,6 +839,25 @@ def _lookup_child_pid(
 _WAIT_EXITED = 12
 
 
+def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
+    """Return exact pane liveness, or ``None`` when the mux cannot answer."""
+    try:
+        proc = _run_mux(
+            [
+                "mux", "pane", "wait", "--session", str(mux["session"]),
+                str(mux["pane_id"]), "--timeout", "0",
+            ],
+            runner,
+        )
+    except (KeyError, DispatchAskError):
+        return None
+    if proc.returncode == _WAIT_EXITED:
+        return False
+    if proc.returncode in {0, 11}:
+        return True
+    return None
+
+
 def _await_interactive_readiness(
     session: str,
     pane_id: int,
@@ -1106,6 +1125,9 @@ def dispatch_spawn_pane(
                 ) from exc
 
         child_pid = _lookup_child_pid(session, pane_id, runner)
+        from fno.agents.spawn_gate import _process_start_time
+
+        pid_start_time = _process_start_time(child_pid) if child_pid is not None else None
 
         if exact:
             # Interactive readiness gate (x-6928): hold the registry row and the
@@ -1200,6 +1222,7 @@ def dispatch_spawn_pane(
                     harness_session_id=stored_session_uuid,
                     status=row_status,
                     pid=child_pid,
+                    pid_start_time=pid_start_time,
                     mux={"session": session, "pane_id": pane_id},
                     spawned_by_session=spawned_by_session,
                     spawned_by_harness=spawned_by_harness,
@@ -1211,7 +1234,24 @@ def dispatch_spawn_pane(
             )
             return rows
 
-        update_registry(_append, path=registry_path)
+        try:
+            update_registry(_append, path=registry_path)
+        except (OSError, ValueError, RegistryVersionError) as exc:
+            cleanup = _run_mux(
+                ["mux", "pane", "kill", "--session", session, str(pane_id)],
+                runner,
+            )
+            if cleanup.returncode == 0:
+                raise DispatchAskError(
+                    f"registry write failed: {exc}; pane {pane_id} reaped, no registry row written",
+                    exit_code=12,
+                ) from exc
+            detail = (cleanup.stderr or cleanup.stdout or "no output").strip()
+            raise DispatchAskError(
+                f"registry write failed: {exc}; pane {pane_id} may still exist in "
+                f"session {session!r} because exact cleanup failed: {detail}",
+                exit_code=12,
+            ) from exc
 
         # Claude and Codex both resolve the canonical full harness id through
         # its 8-hex prefix. The row keeps short_id empty because mux is its one

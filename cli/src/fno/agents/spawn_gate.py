@@ -98,22 +98,48 @@ def available_ram_gb() -> Optional[float]:
 # Layer 1: the union live-count
 # ---------------------------------------------------------------------------
 
-def _pid_alive(pid: Optional[int], recorded_start: Optional[int]) -> bool:
-    """Is ``pid`` a live (non-zombie) process?
+def _process_start_time(pid: int, _psutil=None) -> Optional[int]:
+    """Return the process-incarnation token in the Rust registry's units."""
+    if sys.platform.startswith("linux"):
+        try:
+            stat = Path(f"/proc/{pid}/stat").read_text(encoding="utf-8")
+            return int(stat.rsplit(")", 1)[1].split()[19])
+        except (OSError, ValueError, IndexError):
+            return None
+    if sys.platform == "darwin":
+        try:
+            if _psutil is None:
+                import psutil as _psutil
+            return int(round(_psutil.Process(pid).create_time() * 1_000_000))
+        except Exception:
+            return None
+    return None
 
-    The strict pid_start_time equality check lives on the Rust side, which
-    minted the recorded value in platform-native units; psutil's epoch-seconds
-    basis cannot be compared to it, so Python degrades to existence+status
-    (matching ``pid_is_ours``'s own no-recorded-value fallback).
+
+def _pid_alive(
+    pid: Optional[int], recorded_start: Optional[int], *, _psutil=None
+) -> Optional[bool]:
+    """Return process liveness, or ``None`` when incarnation proof is unreadable.
+
+    A recorded process-start token makes PID reuse fail closed. Legacy rows
+    without a token retain the existence check and rely on their hosting
+    substrate for the additional incarnation proof.
     """
-    del recorded_start
     if not pid or pid <= 1:
         return False
     try:
-        import psutil
+        if _psutil is None:
+            import psutil as _psutil
 
-        proc = psutil.Process(pid)
-        return proc.is_running() and proc.status() != psutil.STATUS_ZOMBIE
+        proc = _psutil.Process(pid)
+        if not proc.is_running() or proc.status() == _psutil.STATUS_ZOMBIE:
+            return False
+        current_start = _process_start_time(pid, _psutil)
+        if recorded_start is not None:
+            if current_start is None:
+                return None
+            return current_start == recorded_start
+        return True
     except Exception:
         return False
 
@@ -235,7 +261,13 @@ def census() -> LiveCensus:
     for row in rows:
         if row.status not in LIVE_STATUSES:
             continue
-        pid_alive = _pid_alive(row.pid, row.pid_start_time)
+        pid_state = _pid_alive(row.pid, row.pid_start_time)
+        if pid_state is None:
+            out.warnings.append(
+                f"spawn-gate: process incarnation unreadable for {row.name}; "
+                "counting the live registry row conservatively"
+            )
+        pid_alive = pid_state is not False
         # A fno `claude --bg` row is minted with a jobId in short_id but no local
         # pid (liveness lives in the claude daemon roster). Resolve it via the
         # roster so real fno bg workers hold slots — a pid-only filter would drop
@@ -246,7 +278,7 @@ def census() -> LiveCensus:
         # provider claude + roster membership (a worker's name-derived short is
         # never in the claude roster, so the guard is self-limiting).
         bg_alive = (
-            not pid_alive
+            pid_state is False
             and row.pid is None
             and row.harness == "claude"
             and bool(row.short_id)

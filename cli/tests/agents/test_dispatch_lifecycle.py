@@ -732,6 +732,7 @@ def test_reconcile_backfills_late_codex_pane_identity_without_index(
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: pid == 4242)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
     monkeypatch.setattr(
         mux_spawn,
         "_codex_session_id_for_pid",
@@ -773,6 +774,7 @@ def test_reconcile_keeps_live_unresolved_codex_pane_pending(
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
     monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda _pid: None)
 
     result = dispatch.reconcile_agents(
@@ -813,6 +815,7 @@ def test_reconcile_refuses_duplicate_late_codex_identity(
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
     monkeypatch.setattr(
         mux_spawn, "_codex_session_id_for_pid", lambda _pid: session_id
     )
@@ -826,6 +829,191 @@ def test_reconcile_refuses_duplicate_late_codex_identity(
     assert late.status == "spawning"
     assert result.backfilled == []
     assert any(e["reason"] == "duplicate-codex-session-id" for e in result.errors)
+
+
+def test_reconcile_normalizes_under_lock_duplicate_to_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rollout claimed after probing still cannot leave the loser live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(name="late", provider="codex", status="live", pid=4242,
+             pid_start_time=123, mux={"session": "main", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import AgentEntry, load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda _pid: session_id)
+    real_update = dispatch.update_registry
+    injected = False
+
+    def claim_then_apply(updater):
+        nonlocal injected
+        if not injected:
+            injected = True
+            real_update(lambda rows: rows + [AgentEntry(
+                name="owner", harness="codex", cwd="/tmp", log_path="",
+                harness_session_id=session_id, status="live",
+            )])
+        return real_update(updater)
+
+    monkeypatch.setattr(dispatch, "update_registry", claim_then_apply)
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    late = next(row for row in load_registry() if row.name == "late")
+    assert late.status == "spawning"
+    assert late.harness_session_id is None
+    assert any(e["reason"] == "codex-session-id-backfill-raced" for e in result.errors)
+
+
+def test_reconcile_normalizes_duplicate_idless_live_row_to_spawning(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A duplicate rollout never leaves an identity-less row falsely live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(name="owner", provider="codex", harness_session_id=session_id, status="live"),
+        dict(name="late", provider="codex", status="live", pid=4242,
+             pid_start_time=123, mux={"session": "main", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda _pid: session_id)
+
+    dispatch.reconcile_agents(codex_session_index_path=tmp_path / "missing-index.jsonl")
+
+    late = next(row for row in load_registry() if row.name == "late")
+    assert late.status == "spawning"
+    assert late.harness_session_id is None
+
+
+def test_reconcile_rejects_reused_pid_when_original_mux_pane_exited(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Legacy rows without a start token require their exact mux pane to live."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="late", provider="codex", status="spawning", pid=4242,
+             mux={"session": "main", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_id_for_pid",
+        lambda _pid: pytest.fail("an exited pane must not donate a rollout"),
+    )
+
+    dispatch.reconcile_agents(codex_session_index_path=tmp_path / "missing-index.jsonl")
+
+    row = load_registry()[0]
+    assert row.status == "orphaned"
+    assert row.harness_session_id is None
+
+
+def test_reconcile_preserves_legacy_row_when_mux_liveness_is_unknown(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """An unavailable mux is not proof that a reused PID owns the old pane."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="late", provider="codex", status="spawning", pid=4242,
+             mux={"session": "missing", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_id_for_pid",
+        lambda _pid: pytest.fail("unknown pane liveness must not donate a rollout"),
+    )
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    assert load_registry()[0].status == "spawning"
+    assert any(e["reason"] == "mux-pane-liveness-unavailable" for e in result.errors)
+
+
+def test_reconcile_preserves_pending_row_when_process_token_is_unreadable(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live pane plus unreadable incarnation evidence is unknown, not dead."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="late", provider="codex", status="spawning", pid=4242,
+             pid_start_time=123, mux={"session": "main", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(
+        mux_spawn, "_codex_session_id_for_pid",
+        lambda _pid: pytest.fail("unknown process identity must not donate a rollout"),
+    )
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    assert load_registry()[0].status == "spawning"
+    assert any(
+        e["reason"] == "codex-process-incarnation-unavailable"
+        for e in result.errors
+    )
+
+
+def test_reconcile_recovers_pidless_live_codex_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A transient spawn-time pane-ls miss converges on the exact pane later."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(name="late", provider="codex", status="spawning", pid=None,
+             mux={"session": "main", "pane_id": 7}),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_args: 4242)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(mux_spawn, "_codex_session_id_for_pid", lambda _pid: session_id)
+    monkeypatch.setattr(spawn_gate, "_process_start_time", lambda _pid: 123456)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda *_args, **_kwargs: True)
+
+    result = dispatch.reconcile_agents(
+        codex_session_index_path=tmp_path / "missing-index.jsonl"
+    )
+
+    row = load_registry()[0]
+    assert row.pid == 4242
+    assert row.pid_start_time == 123456
+    assert row.harness_session_id == session_id
+    assert row.status == "live"
+    assert result.backfilled[0]["harness_session_id"] == session_id
 
 
 @pytest.mark.parametrize("status", ["orphaned", "exited", "permanent_dead"])
@@ -861,6 +1049,35 @@ def test_reconcile_never_backfills_terminal_codex_rows(
     assert row.harness_session_id is None
 
 
+@pytest.mark.parametrize("status", ["failed", "exited", "permanent_dead"])
+def test_reconcile_never_resurrects_identified_terminal_codex_rows(
+    tmp_path: Path, monkeypatch, status: str
+) -> None:
+    """Terminal lifecycle truth remains absorbing after identity repair."""
+    use_tmpdir(monkeypatch, tmp_path)
+    session_id = "019fb024-2327-75f3-8b80-06e9d5ade05f"
+    _seed_registry(
+        dict(
+            name="worker-codex",
+            provider="codex",
+            harness_session_id=session_id,
+            status=status,
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+    index = tmp_path / "session-index.jsonl"
+    index.write_text(json.dumps({"id": session_id}) + "\n", encoding="utf-8")
+
+    from fno.agents import dispatch
+    from fno.agents.registry import load_registry
+
+    result = dispatch.reconcile_agents(codex_session_index_path=index)
+
+    assert load_registry()[0].status == status
+    assert result.recovered == []
+
+
 def test_reconcile_orphans_a_pending_codex_pane_after_process_exit(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -880,6 +1097,7 @@ def test_reconcile_orphans_a_pending_codex_pane_after_process_exit(
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(spawn_gate, "_pid_alive", lambda _pid, _started: False)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
     monkeypatch.setattr(
         mux_spawn,
         "_codex_session_id_for_pid",

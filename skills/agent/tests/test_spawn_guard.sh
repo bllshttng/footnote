@@ -53,7 +53,7 @@ case "$1 $2" in
     # mux coords; the name/provider are taken from env so they can MATCH the launch
     # (spawn.sh accepts a pane receipt only when every identity field matches).
     if [[ "${STUB_MUX:-0}" == "1" ]]; then
-      echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"\",\"provider\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
+      echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"${STUB_MUX_SHORT_ID-}\",\"session_id\":\"${STUB_MUX_SESSION_ID-}\",\"provider\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
     fi
     echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"provider\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
@@ -182,6 +182,7 @@ ok 'bg slug -> failed'             "$(field "$out")" 'failed'
 
 # AC-HP: pane launch -> launched, pane coords + mux-attach hint, NOT `agents logs`.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneW STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
+  STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
   run --name paneW --provider codex --message 'Implement x')"
 ok  'pane launch -> launched'        "$(field "$out")" 'launched'
 has 'pane coords surfaced'           "$out" 'pane="main:1"'
@@ -195,8 +196,23 @@ ok  'pane pending -> pending'         "$(field "$out")" 'pending'
 has 'pane pending coords surfaced'    "$out" 'pane="main:1"'
 no  'pane pending is not launched'    "$out" 'result=launched'
 
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneI STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=live \
+  STUB_MUX_SESSION=main run --name paneI --provider codex --message 'Implement x')"
+ok  'pane idless live -> failed'       "$(field "$out")" 'failed'
+
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneB STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=live \
+  STUB_MUX_SESSION=main STUB_MUX_SHORT_ID=deadbeef \
+  run --name paneB --provider codex --message 'Implement x')"
+ok  'pane live partial identity -> failed' "$(field "$out")" 'failed'
+
+out="$(STUB_MUX=1 STUB_MUX_NAME=paneT STUB_MUX_PROVIDER=codex STUB_MUX_STATUS=spawning \
+  STUB_MUX_SESSION=main STUB_MUX_SHORT_ID=deadbeef \
+  run --name paneT --provider codex --message 'Implement x')"
+ok  'pane pending torn identity -> failed' "$(field "$out")" 'failed'
+
 # AC-EDGE: a session name with a space -> ref quoted so it can't split the line.
 out="$(STUB_MUX=1 STUB_MUX_NAME=paneS STUB_MUX_PROVIDER=codex STUB_MUX_SESSION='work 1' \
+  STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
   run --name paneS --provider codex --message 'Implement x')"
 ok  'pane spaced session -> launched' "$(field "$out")" 'launched'
 has 'pane spaced ref quoted'          "$out" 'pane="work 1:1"'
@@ -206,15 +222,13 @@ out="$(STUB_MUX=1 STUB_MUX_NAME=someone-else STUB_MUX_PROVIDER=codex \
   run --name paneM --provider codex --message 'Implement x')"
 ok 'pane identity mismatch -> failed' "$(field "$out")" 'failed'
 
-# Regression: a long derived name (<verb>-<node-id>-<slug>) must still launch.
-# The pane short_id shape once capped at 40 chars, so a 43-char name like
-# `spawn-x-7624-dedup-check-before-target-disp` was reported FAILED on a real
-# codex pane launch. The name here is 43 chars.
+# Regression: a long requested name must not replace the Codex thread handle.
 LONGNAME='spawn-x-7624-dedup-check-before-target-disp'
 out="$(STUB_MUX=1 STUB_MUX_NAME="$LONGNAME" STUB_MUX_PROVIDER=codex STUB_MUX_SESSION=main \
+  STUB_MUX_SHORT_ID=019fb024 STUB_MUX_SESSION_ID=019fb024-2327-75f3-8b80-06e9d5ade05f \
   run --name "$LONGNAME" --provider codex --message 'Implement x')"
 ok  'pane long name -> launched'      "$(field "$out")" 'launched'
-has 'pane long name short_id'         "$out" "short_id=$LONGNAME"
+has 'pane long name short_id'         "$out" 'short_id=019fb024'
 
 # --- summary -----------------------------------------------------------------
 printf '\n%d passed, %d failed\n' "$PASS" "$FAIL"

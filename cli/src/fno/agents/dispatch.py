@@ -2991,7 +2991,10 @@ def reconcile_agents(
     # backfill above, every field is rechecked under the registry write lock:
     # the pane process is the identity authority and a same-name replacement
     # must never inherit its rollout.
-    pending_codex_backfill: dict[str, tuple[int, dict, str]] = {}
+    pending_codex_backfill: dict[
+        str,
+        tuple[Optional[int], Optional[int], dict, int, Optional[int], str],
+    ] = {}
 
     # ``pending_updates`` accumulates per-name status flips across the
     # probe loop; at the end we apply ALL of them via a SINGLE
@@ -3005,7 +3008,7 @@ def reconcile_agents(
     # discards ``pending_updates`` because the propagated KeyboardInterrupt
     # bypasses the post-loop ``update_registry`` call. The on-disk
     # registry mtime never changes.
-    pending_updates: dict[str, AgentEntry] = {}
+    pending_updates: dict[str, tuple[AgentEntry, AgentStatus]] = {}
 
     # Read codex's session index ONCE outside the loop so a registry with
     # N codex agents only pays the I/O cost once. Mirror the same one-shot
@@ -3097,7 +3100,7 @@ def reconcile_agents(
             # An id-less persistent pane can be healthy while Codex is still
             # creating its rollout. Heal it from the pane's own process tree;
             # the session index is not needed for this correlation.
-            if not entry.harness_session_id and entry.mux and entry.pid:
+            if not entry.harness_session_id and entry.mux:
                 terminal = entry.status in {
                     "orphaned",
                     "failed",
@@ -3107,12 +3110,65 @@ def reconcile_agents(
                 if terminal:
                     continue
 
-                from fno.agents.mux_spawn import _codex_session_id_for_pid
-                from fno.agents.spawn_gate import _pid_alive
+                from fno.agents.mux_spawn import (
+                    _codex_session_id_for_pid,
+                    _lookup_child_pid,
+                    _mux_pane_alive,
+                )
+                from fno.agents.spawn_gate import _pid_alive, _process_start_time
 
-                if _pid_alive(entry.pid, entry.pid_start_time):
+                pane_state = _mux_pane_alive(entry.mux)
+                if pane_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "mux-pane-liveness-unavailable",
+                        }
+                    )
+                    continue
+                if pane_state is False:
+                    new_status = "orphaned"
+                else:
+                    probe_pid = entry.pid
+                    probe_start = entry.pid_start_time
+                    if probe_pid is None:
+                        probe_pid = _lookup_child_pid(
+                            str(entry.mux["session"]),
+                            int(entry.mux["pane_id"]),
+                            subprocess.run,
+                        )
+                        if probe_pid is None:
+                            errors.append(
+                                {
+                                    "name": entry.name,
+                                    "provider": "codex",
+                                    "id": None,
+                                    "reason": "codex-pane-pid-pending",
+                                }
+                            )
+                            continue
+                        probe_start = _process_start_time(probe_pid)
+
+                pid_state = (
+                    _pid_alive(probe_pid, probe_start)
+                    if pane_state is True and probe_pid is not None
+                    else False
+                )
+                if pid_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "codex",
+                            "id": None,
+                            "reason": "codex-process-incarnation-unavailable",
+                        }
+                    )
+                    continue
+                if pid_state is True:
                     try:
-                        healed = _codex_session_id_for_pid(entry.pid)
+                        healed = _codex_session_id_for_pid(probe_pid)
                     except Exception:  # noqa: BLE001 -- an unreadable process stays pending
                         healed = None
                     if healed:
@@ -3122,6 +3178,8 @@ def reconcile_agents(
                             for other in entries
                         )
                         if duplicate:
+                            if entry.status != "spawning":
+                                pending_updates[entry.name] = (entry, "spawning")
                             errors.append(
                                 {
                                     "name": entry.name,
@@ -3133,13 +3191,16 @@ def reconcile_agents(
                         else:
                             pending_codex_backfill[entry.name] = (
                                 entry.pid,
+                                entry.pid_start_time,
                                 dict(entry.mux),
+                                probe_pid,
+                                probe_start,
                                 healed,
                             )
                         continue
 
                     if entry.status != "spawning":
-                        pending_updates[entry.name] = replace(entry, status="spawning")
+                        pending_updates[entry.name] = (entry, "spawning")
                     errors.append(
                         {
                             "name": entry.name,
@@ -3153,12 +3214,9 @@ def reconcile_agents(
                 # The pane process is gone. Preserve terminal rows above; a
                 # nonterminal pending/live row follows the existing orphan path.
                 new_status = "orphaned"
-            elif not entry.harness_session_id and entry.status in {
-                "orphaned",
-                "failed",
-                "exited",
-                "permanent_dead",
-            }:
+            elif entry.status in {"failed", "exited", "permanent_dead"}:
+                continue
+            elif not entry.harness_session_id and entry.status == "orphaned":
                 continue
             elif not entry.harness_session_id:
                 events.emit(
@@ -3314,7 +3372,7 @@ def reconcile_agents(
         # preserves every other field automatically (Gemini medium on
         # PR #317), which is more robust against future AgentEntry
         # schema additions than manual field-by-field reconstruction.
-        pending_updates[entry.name] = replace(entry, status=new_status)
+        pending_updates[entry.name] = (entry, new_status)
 
         change = {
             "name": entry.name,
@@ -3342,6 +3400,7 @@ def reconcile_agents(
     if pending_updates or pending_backfill or pending_codex_backfill:
 
         codex_backfill_applied: set[str] = set()
+        status_updates_applied: set[str] = set()
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Build the new entries from the CURRENT (under-lock) entries,
@@ -3355,7 +3414,18 @@ def reconcile_agents(
             for e in current_entries:
                 updates: dict = {}
                 if e.name in pending_updates:
-                    updates["status"] = pending_updates[e.name].status
+                    probed, target_status = pending_updates[e.name]
+                    if (
+                        e.harness == probed.harness
+                        and e.pid == probed.pid
+                        and e.pid_start_time == probed.pid_start_time
+                        and e.mux == probed.mux
+                        and e.harness_session_id == probed.harness_session_id
+                        and e.short_id == probed.short_id
+                        and e.status == probed.status
+                    ):
+                        updates["status"] = target_status
+                        status_updates_applied.add(e.name)
                 if e.name in pending_backfill:
                     probed_short, hsid = pending_backfill[e.name]
                     # Only stamp a row that STILL matches the row we probed: a
@@ -3367,7 +3437,14 @@ def reconcile_agents(
                         updates["harness_session_id"] = hsid
                         updates["harness"] = e.harness
                 if e.name in pending_codex_backfill:
-                    probed_pid, probed_mux, hsid = pending_codex_backfill[e.name]
+                    (
+                        expected_pid,
+                        expected_start,
+                        probed_mux,
+                        resolved_pid,
+                        resolved_start,
+                        hsid,
+                    ) = pending_codex_backfill[e.name]
                     duplicate = any(
                         other.name != e.name
                         and other.harness_session_id == hsid
@@ -3375,7 +3452,8 @@ def reconcile_agents(
                     )
                     if (
                         e.harness == "codex"
-                        and e.pid == probed_pid
+                        and e.pid == expected_pid
+                        and e.pid_start_time == expected_start
                         and e.mux == probed_mux
                         and not e.harness_session_id
                         and e.status
@@ -3384,7 +3462,19 @@ def reconcile_agents(
                     ):
                         updates["harness_session_id"] = hsid
                         updates["status"] = "live"
+                        updates["pid"] = resolved_pid
+                        updates["pid_start_time"] = resolved_start
                         codex_backfill_applied.add(e.name)
+                    elif (
+                        e.harness == "codex"
+                        and e.pid == expected_pid
+                        and e.pid_start_time == expected_start
+                        and e.mux == probed_mux
+                        and not e.harness_session_id
+                        and e.status not in {"orphaned", "failed", "exited", "permanent_dead"}
+                        and duplicate
+                    ):
+                        updates["status"] = "spawning"
                 out.append(replace(e, **updates) if updates else e)
             return out
 
@@ -3418,7 +3508,7 @@ def reconcile_agents(
                     }
                 )
         else:
-            for name, (_pid, _mux, hsid) in pending_codex_backfill.items():
+            for name, (_epid, _estart, _mux, _pid, _start, hsid) in pending_codex_backfill.items():
                 if name in codex_backfill_applied:
                     backfilled.append(
                         {
@@ -3436,6 +3526,23 @@ def reconcile_agents(
                             "reason": "codex-session-id-backfill-raced",
                         }
                     )
+            raced_updates = set(pending_updates) - status_updates_applied
+            for change in list(orphaned):
+                if change["name"] in raced_updates:
+                    orphaned.remove(change)
+            for change in list(recovered):
+                if change["name"] in raced_updates:
+                    recovered.remove(change)
+            for name in raced_updates:
+                probed, _target = pending_updates[name]
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": probed.harness,
+                        "id": probed.short_id or probed.harness_session_id,
+                        "reason": "registry-status-update-raced",
+                    }
+                )
 
     events.emit(
         "reconcile_done",

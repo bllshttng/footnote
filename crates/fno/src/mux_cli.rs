@@ -2455,7 +2455,7 @@ pub fn where_(args: &[OsString], _env_session: Option<&str>) -> i32 {
             .collect();
         let mut ids: Vec<&str> = prefix_rows
             .iter()
-            .filter_map(|a| a.session_id.as_deref())
+            .filter_map(|a| a.effective_identity())
             .collect();
         ids.sort_unstable();
         ids.dedup();
