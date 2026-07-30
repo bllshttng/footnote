@@ -569,6 +569,24 @@ pass "bad-tail: a short read leaves the slice unconsumed"
 
 run_hook >/dev/null 2>&1   # drain for the cases below
 
+# ── Cold start: no cursor means the whole history is ONE slice ──────
+# offset==0 makes every past offer a ride-along. Against the real events.jsonl
+# this listed 418 ids in a 3472-char reminder, which is the nagging the hook
+# exists to avoid. Bursts are small; the cold start is what needs the cap.
+COLDW="$WORK/cold"; mkdir -p "$COLDW/.fno"
+git -C "$COLDW" init -q || fail "cold: git init failed"
+for i in $(seq 1 40); do
+    offered_line "2026-06-30T17:00:00Z" "x-cold00$(printf '%03d' "$i")" >> "$COLDW/.fno/events.jsonl"
+done
+out="$(cd "$COLDW" && PATH="$WORK/bin:$PATH" FNO_STUBDIR="$STUBDIR" bash "$HOOK" 2>/dev/null)" \
+    || fail "cold: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"+34 more"* ]] \
+    || fail "cold: cold-start slice was not capped: ${ctx:-<empty>}"
+[[ "$ctx" != *"x-cold00001"* ]] || fail "cold: listed past the cap"
+[[ "${#ctx}" -lt 600 ]] || fail "cold: reminder is ${#ctx} chars; the cap is not holding"
+pass "cold: cold-start slice names the newest few plus a count"
+
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
 python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hook not registered under UserPromptSubmit"

@@ -111,6 +111,14 @@ for line in raw.decode("utf-8", "replace").splitlines():
             older.append(nid)
         nid = _TAG.sub(r"[\1system-reminder]", x)
         offer = _TAG.sub(r"[\1system-reminder]", o) if isinstance(o, str) else ""
+# Cap the ride-along list. Not defensive padding: on a COLD START there is no
+# cursor, so offset is 0 and the entire history is one slice - measured at 418
+# ids and 3472 chars against the events.jsonl in this repo. Bursts are small (4 is
+# the observed max), which is why an earlier cut of this deleted the cap as
+# speculative; that reasoning missed the offset==0 case entirely.
+MAX = 5
+if len(older) > MAX:
+    older = older[-MAX:] + ["+%d more" % (len(older) - MAX)]
 # Trailing \x04 is a completion sentinel: `command -v python3` proves presence,
 # not success, and a present-but-broken interpreter (dead pyenv shim, broken
 # venv) would emit nothing while the cursor advanced anyway. The caller refuses
