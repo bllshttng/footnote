@@ -282,6 +282,15 @@ file_matches() {
 DIFF_OUT=$(git diff --numstat --no-renames "$MB" HEAD) \
     || { echo "ERROR: git diff failed (exit $?); cannot compute delta" >&2; exit 1; }
 
+# This measures COMMITTED HEAD. Run locally with the change still staged or
+# unstaged and the gate honestly reports the delta of a tree that does not
+# contain it -- a "PASS: delta <= 0" that CI then contradicts. Warn rather than
+# fail: a dirty tree is legitimate, reading the verdict as final is not.
+if ! git diff --quiet HEAD 2>/dev/null || ! git diff --cached --quiet 2>/dev/null; then
+    echo "WARNING: working tree is dirty; this gate measures COMMITTED HEAD only." >&2
+    echo "         Commit first, or this delta excludes your uncommitted changes." >&2
+fi
+
 MATCHED_FILES=""
 TOTAL_ADDED=0
 TOTAL_DELETED=0
