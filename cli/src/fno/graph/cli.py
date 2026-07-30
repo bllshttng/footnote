@@ -1704,6 +1704,28 @@ def cmd_decompose(
                 # containment stamp is withheld, and loudly.
                 _own_pr = target.get("pr_number")
                 _own_cost = target.get("cost_usd")
+                _is_done = bool(target.get("completed_at")) or target.get("status") == "done"
+                if (_own_pr or _own_cost is not None) and not _is_done:
+                    # An UNFINISHED delivery unit cannot be adopted at all
+                    # (codex P1). Withholding the stamp keeps it dispatchable,
+                    # but re-parenting still hangs it under the group child -
+                    # and _cascade_close_parents only asks whether the EPIC's
+                    # direct children are complete, never its grandchildren. So
+                    # the group's merge would close the epic (and dispatch its
+                    # dependents) over work that is still open one level down.
+                    # Refuse: a node mid-flight with its own PR or cost is a
+                    # delivery unit, and folding one into another is a reshape
+                    # the operator has to state, not something adopt infers.
+                    _what = f"has an open PR (#{_own_pr})" if _own_pr else "has accrued cost"
+                    raise DecomposeError(
+                        f"group {grp['slug']!r} adopts {target['id']}, which "
+                        f"{_what} and has not landed; it is its own delivery "
+                        "unit mid-flight. Adopting it would hang open work under "
+                        "the group, and the epic would close over it when the "
+                        "group merges. Let it land first, or drop it from the "
+                        "adopt list",
+                        exit_code=2,
+                    )
                 if _own_pr or _own_cost is not None:
                     _why = "carries PR #%s" % _own_pr if _own_pr else "carries cost"
                     uncontained_box[0].append(

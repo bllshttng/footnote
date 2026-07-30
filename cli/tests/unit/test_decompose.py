@@ -2684,7 +2684,11 @@ def test_adopt_does_not_contain_a_node_that_already_carries_cost(graph_env,
 
     g, read_entries = graph_env
     monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
-    _seed_children(g, _epic_child("ab-kid00001", cost_usd=4.25))
+    # Landed: an UNFINISHED cost-carrying node is refused outright (it is a
+    # delivery unit mid-flight); this covers the completed case, where the
+    # measurement is history and only the stamp is withheld.
+    _seed_children(g, _epic_child("ab-kid00001", cost_usd=4.25, status="done",
+                                  completed_at="2026-07-01T00:00:00+00:00"))
     result = _invoke(
         ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
             {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
@@ -2827,3 +2831,54 @@ def test_supersede_releases_its_contained_children(graph_env, monkeypatch):
     assert kid.get("contained_in") is None, "child left pointing at a dead unit"
     # Released, not closed: superseding the unit is not a claim its work shipped.
     assert kid.get("completed_at") is None
+
+
+def test_adopt_refuses_an_unfinished_node_that_owns_a_pr(graph_env, monkeypatch):
+    """codex P1: withholding the stamp is not enough for a node still in flight.
+
+    It stays dispatchable, but re-parenting still hangs it under the group child
+    - and `_cascade_close_parents` only asks whether the EPIC's direct children
+    are complete, never its grandchildren. So the group's merge would close the
+    epic, and dispatch its dependents, over open work one level down.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001", pr_number=613, status="ready"))
+    before = g.read_text()
+
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 2, result.output
+    assert "613" in result.output
+    assert "has not landed" in result.output
+    assert g.read_text() == before
+
+
+def test_adopt_still_permits_a_landed_pr_bearing_node(graph_env, monkeypatch):
+    """The completed case stays permitted - it is history, not open work.
+
+    `test_adopt_a_shipped_node_is_permitted` pins that adoption changes rollup
+    membership rather than delivery state, and a done node cannot strand an
+    epic-level cascade because it is already complete.
+    """
+    import fno.graph.cli as gcli
+
+    g, read_entries = graph_env
+    monkeypatch.setattr(gcli, "_live_worker", lambda nid: None)
+    _seed_children(g, _epic_child("ab-kid00001", pr_number=612,
+                                  merge_status="merged", status="done",
+                                  completed_at="2026-07-01T00:00:00+00:00"))
+    result = _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json([
+            {"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]},
+        ])]
+    )
+    assert result.exit_code == 0, result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+    assert kid["pr_number"] == 612
