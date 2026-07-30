@@ -534,8 +534,22 @@ Read `spawn.sh`'s single outcome line and relay it faithfully:
 - `result=replied ...` (an explicit `headless` substrate one-shot) -> the one-shot returned its
   answer synchronously; the **reply follows the outcome line** and IS the
   deliverable. Relay it (preview ~15 lines; full reply in `fno agents logs <name>`).
+- `result=pending ... pane="<session>:<pane_id>" ...` -> a Codex pane was created
+  and is running, but its rollout has not appeared yet so it has no addressable
+  thread identity. This is a **normal outcome, not a failure**: report the pane as
+  launched-but-not-yet-addressable, relay the pane ref and `fno mux attach
+  <session>` (the line's own `hint=`), and say the identity binds on the next
+  `fno agents reconcile`. The `short_id` on this line is the requested **name**,
+  not a session handle, so do NOT present it as one and do NOT offer `resume`
+  or a session-keyed peek until it is bound.
 - `result=already-running ...` -> a worker already exists for this node/name; no
   second loop was created. Point at its logs.
+- `result=self-handoff name=<n> reason="<...>"` -> **you** already hold the claim on
+  that node, so `/fno:agent` cannot reassign it from here and nothing was launched.
+  Relay the reason and the two real exits it names: hand off via `/fno:target`
+  self-handoff (which archives state, emits the delegated event, and releases the
+  claim atomically), or `fno backlog unclaim <node>` and then re-dispatch. Do not
+  report this as a failure and do not retry the spawn.
 - `result=failed reason="<...>"` -> report **FAILED** with the real reason. NEVER
   emit a short-id, fabricate a reply, or claim a worker launched.
 
@@ -622,6 +636,8 @@ outward actions.
 4. **REPORT** the real receipt exactly as the `spawn` section's REPORT does
    (`result=launched ... mode=spawn` -> quote the real `short_id` and always give
    `fno agents logs <name>` plus `grid`/`drive` for the default pane;
+   `result=pending` -> the pane exists and runs but has no bound identity yet,
+   so relay the pane ref and `fno mux attach`, never a session handle;
    `result=failed` -> FAILED with the real reason, no fabricated short-id). Note
    it is an autonomously seeded, drivable continuation worker, not a
    refuse-to-stop loop, and that the outward-action guardrail is prompt-level.
