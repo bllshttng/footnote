@@ -5,6 +5,7 @@ byte-intact), signal-gated archiving, and idempotency / never-downgrade.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -298,3 +299,198 @@ def test_AC5_ERR_sweep_leaves_both_vocabularies_untouched(tmp_path: Path):
 
     assert res.skipped == 2 and res.normalized == 0 and res.superseded == 0
     assert (old.read_text(), new.read_text()) == before  # byte-for-byte
+
+
+# --- archive read-through: an archived node still resolves ------------------
+# `fno backlog archive` sweeps terminal (done/superseded) nodes out of
+# graph.json into graph-archive.json. Those are exactly the nodes this sweep
+# projects from, so reading the working graph alone made every archived link
+# read as "not in graph": Tier 3 skipped it and Tier 2 wrote `superseded` onto
+# a shipped plan (x-4e31).
+
+
+def _write_graphs(tmp_path: Path, live: list, archived: list) -> Path:
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text(json.dumps({"entries": live}))
+    (home / "graph-archive.json").write_text(json.dumps({"entries": archived}))
+    return home / "graph.json"
+
+
+def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    graph = _write_graphs(
+        tmp_path,
+        live=[{"id": "x-live", "status": "ready"}],
+        archived=[{"id": "x-gone", "status": "done"}],
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph)
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
+    rs._node_status_map.cache_clear()
+
+    status_map = rs._node_status_map()
+
+    assert status_map["x-gone"] == "done"  # archived, still projectable
+    assert status_map["x-live"] == "ready"
+    # Tier 2 reads the same map, so a shipped-and-archived node signals `done`
+    # instead of falling through to the honest-but-wrong `superseded`.
+    assert rs._done_node_ids() == frozenset({"x-gone"})
+    assert rs._default_signal({"node": "x-gone"}) is True
+
+
+def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
+    """The archive is advisory: absent means the working graph, not an empty map
+    (an empty map would silently disable Tier 3 everywhere).
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text(json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
+    monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
+    rs._node_status_map.cache_clear()
+
+    assert rs._node_status_map() == {"x-live": "done"}
+
+
+@pytest.fixture(autouse=True)
+def _clear_node_status_cache():
+    """`_node_status_map` is lru_cached, so a test that points it at a tmp graph
+    leaks that map into every later test in the worker - including on a failing
+    assert, which skips any cleanup written at the end of the test body.
+    """
+    from fno.plan import reconcile_status as rs
+
+    # getattr: a test may have monkeypatched the function with a plain lambda,
+    # and teardown can run before monkeypatch restores it.
+    def clear():
+        getattr(rs._node_status_map, "cache_clear", lambda: None)()
+
+    clear()
+    yield
+    clear()
+
+
+def test_sweep_projects_from_an_archived_node_end_to_end(tmp_path, monkeypatch):
+    """x-4e31 at the user-visible level: the node shipped and was archived, so
+    on the working graph alone Tier 2 writes `superseded` and Tier 3 skips.
+    No `status_map=` / `signal_for=` override - this is the real path.
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    graph = _write_graphs(
+        tmp_path,
+        live=[{"id": "x-other", "status": "ready"}],
+        archived=[{"id": "x-shipped", "status": "done"}],
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph)
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    (plans / "tier2.md").write_text(_linked_plan("implemented", node="x-shipped"))
+    (plans / "tier3.md").write_text(_linked_plan("design", node="x-shipped"))
+
+    res = rs.sweep(plans, apply=True)
+
+    t2 = (plans / "tier2.md").read_text()
+    assert 'status: "done"' in t2 and "superseded" not in t2  # signal survived archiving
+    assert 'status: "done"' in (plans / "tier3.md").read_text()  # projected, not skipped
+    assert res.superseded == 0 and res.normalized == 2
+
+
+# --- absent evidence must not manufacture a terminal status ------------------
+# `read_graph` returns [] on corruption WITHOUT raising, so an unreadable graph
+# reaches the sweep as an empty status_map. Tier 3 already refuses on that;
+# Tier 2 used to read the empty done-set as "not closed" and stamp `superseded`
+# onto every live drift-token plan - unattended, since session-start.sh and
+# pr/_ritual.py both run --apply with output discarded.
+
+
+def test_tier2_stands_down_when_no_node_status_is_available(tmp_path, monkeypatch):
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("implemented"))
+    before = p.read_text()
+
+    res = rs.sweep(tmp_path, apply=True)
+
+    assert res.superseded == 0 and res.stood_down == 1
+    assert res.skipped == 0  # a refusal is not a no-op; it gets its own counter
+    assert "1 stood down" in res.summary()  # so a wedged graph cannot read as healthy
+    assert p.read_text() == before  # byte-for-byte: no terminal written
+    assert any("tier2 off" in w for w in res.warnings)  # and the operator is told
+
+
+def test_tier1_synonyms_still_rewrite_without_a_graph(tmp_path, monkeypatch):
+    """Tier 1 is a pure synonym map and needs no signal, so the Tier 2 stand-down
+    must not take it down too.
+    """
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("draft"))
+
+    res = rs.sweep(tmp_path, apply=True)
+
+    assert res.normalized == 1
+    assert 'status: "design"' in p.read_text()
+
+
+def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
+    """A caller that injects `signal_for` supplied the evidence out of band and
+    does not depend on the graph, so the stand-down must not swallow it.
+    """
+    from fno.plan import reconcile_status as rs
+
+    monkeypatch.setattr(rs, "_node_status_map", lambda: {})
+    p = tmp_path / "a.md"
+    p.write_text(_linked_plan("implemented"))
+
+    res = rs.sweep(tmp_path, apply=True, signal_for=lambda fm: True)
+
+    assert res.normalized == 1
+    assert 'status: "done"' in p.read_text()
+
+
+def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
+    """The stand-down keys on an EMPTY map, so the corrupt working graph must not
+    be topped up into a non-empty one by the archive read-through.
+
+    `read_graph` swallows corruption to [], and `entries_with_archive` would then
+    append the archive's terminal-only rows: a map that is non-empty while
+    covering no live node. Tier 2 would read every live node as "not closed" and
+    stamp `superseded`. `read_graph_strict` makes corruption reach the {} sentinel.
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text("{ not json at all")
+    (home / "graph-archive.json").write_text(
+        json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
+
+    assert rs._node_status_map() == {}  # corruption is absent evidence, not archive-only truth
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    p = plans / "live.md"
+    p.write_text(_linked_plan("implemented", node="x-live-and-active"))
+    before = p.read_text()
+
+    res = rs.sweep(plans, apply=True)
+
+    assert res.superseded == 0 and res.stood_down == 1
+    assert p.read_text() == before

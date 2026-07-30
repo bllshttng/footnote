@@ -10,10 +10,11 @@ idempotent sweep rewrites them to the canonical vocabulary (x-ff83 W2):
 Three tiers. Tier 1 is a pure synonym rewrite (no history needed). Tier 2 (blank
 / ``implemented`` / any unknown token) needs a true-state signal: a linked node
 that is closed -> ``done``, else ``superseded`` (an honest "off the board", never
-a false ``done``). Tier 3 recomputes a CANONICAL-but-stale status from the
-linked node's derived ``status`` (the x-76ea class: plan ``design`` while its
-node is ``done``), forward-only and graph-required. Dry-run by default;
-``--apply`` writes.
+a false ``done``) - but only when a node status is actually available; with no
+readable graph Tier 2 stands down rather than reading absent evidence as a no.
+Tier 3 recomputes a CANONICAL-but-stale status from the linked node's derived
+``status`` (the x-76ea class: plan ``design`` while its node is ``done``),
+forward-only and graph-required. Dry-run by default; ``--apply`` writes.
 
 Only DRIFT tokens are in scope, so a canonical status is never touched: the
 sweep corrects, never downgrades, and is safe to re-run - after a human
@@ -117,30 +118,26 @@ class SweepResult:
     normalized: int = 0  # rewritten to a non-terminal canonical status
     superseded: int = 0  # rewritten to `superseded`
     skipped: int = 0  # already canonical, no frontmatter, or unparseable
+    stood_down: int = 0  # drift token left alone because no node status was available
     changes: list[tuple[str, str, str]] = field(default_factory=list)  # (path, old, new)
     warnings: list[str] = field(default_factory=list)
 
     def summary(self) -> str:
-        return f"{self.normalized} normalized, {self.superseded} superseded, {self.skipped} skipped"
+        # A stand-down is reported separately: folded into `skipped` it is
+        # shaped exactly like a healthy idempotent run, which is how a wedged
+        # graph reads as "nothing to do" to the unattended --apply callers.
+        base = f"{self.normalized} normalized, {self.superseded} superseded, {self.skipped} skipped"
+        return f"{base}, {self.stood_down} stood down" if self.stood_down else base
 
 
-@lru_cache(maxsize=1)
 def _done_node_ids() -> frozenset:
-    """Ids of every closed (`status == done`) node. Read once per process.
+    """Ids of every closed (`status == done`) node - the Tier 2 signal.
 
-    ponytail: cached for the life of a one-shot sweep so the graph is parsed
-    once, not once per plan file (gemini PR#149). A merged-PR probe would add gh
-    calls; node-closed is the one cheap true-state signal.
+    Derived from the one cached graph read rather than parsing the same file a
+    second time. No graph => empty, and `sweep` then stands Tier 2 down rather
+    than reading that as a negative answer and writing a terminal.
     """
-    try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        return frozenset(
-            e.get("id") for e in read_graph(graph_json()) if e.get("status") == "done"
-        )
-    except Exception:  # noqa: BLE001 - no graph => no signal => superseded (honest)
-        return frozenset()
+    return frozenset(i for i, status in _node_status_map().items() if status == "done")
 
 
 def _plan_link_id(frontmatter: dict) -> Optional[str]:
@@ -177,14 +174,28 @@ def _default_signal(frontmatter: dict) -> bool:
 def _node_status_map() -> dict:
     """Map node id -> derived ``status``. Empty when the graph is unreadable,
     which disables Tier 3 (it must never rewrite on absent evidence).
+
+    Reads THROUGH the archive, because the sweep's whole population is plans
+    whose node already shipped and `fno backlog archive` moves exactly those
+    terminal nodes out of the working graph. On the working graph alone every
+    archived link reads as "not in graph": Tier 3 skips it, and worse, Tier 2
+    misses the `done` signal and writes `superseded` onto a shipped plan.
+
+    ``read_graph_strict`` for the working graph, not ``read_graph``: the soft
+    reader swallows corruption to ``[]``, which the archive read-through would
+    then top up with terminal-only rows. That yields a NON-empty map covering
+    none of the live nodes - so the `not status_map` stand-down below misses,
+    and Tier 2 reads every live node as "not closed". Corruption has to reach
+    the ``{}`` sentinel to be treated as absent evidence. The archive keeps the
+    soft read: it is advisory, and losing it is a degrade, not a blind spot.
     """
     try:
-        from fno.graph.store import read_graph
+        from fno.graph.store import entries_with_archive, read_graph_strict
         from fno.paths import graph_json
 
         return {
             e.get("id"): e.get("status")
-            for e in read_graph(graph_json())
+            for e in entries_with_archive(read_graph_strict(graph_json()))
             if e.get("id")
         }
     except Exception:  # noqa: BLE001 - no graph => no Tier 3
@@ -208,7 +219,7 @@ def _tier3_target(
         return None
     node_status = status_map.get(link)
     if node_status is None:
-        warnings.append(f"tier3 skip (link {link} not in graph): {name}")
+        warnings.append(f"tier3 skip (link {link} not in graph or archive): {name}")
         return None
     return project_plan_status(current, node_status)
 
@@ -234,6 +245,18 @@ def sweep(
     if status_map is None:
         status_map = _node_status_map()
 
+    # An empty map is absent evidence, and Tier 2 treats a False signal as
+    # "not closed" -> `superseded`, so a graph that fails to read would stamp a
+    # terminal status onto every live drift-token plan. `read_graph` returns []
+    # on corruption WITHOUT raising, and two callers run --apply with output
+    # discarded (session-start.sh, pr/_ritual.py), so that write is unattended
+    # and silent. Tier 3 already refuses on `not status_map`; this gives Tier 2
+    # the same stance. An explicitly injected `signal_for` is exempt: that
+    # caller supplied the signal out of band and does not depend on the map.
+    tier2_blind = not status_map and signal_for is _default_signal
+    if tier2_blind:
+        res.warnings.append("tier2 off (no node status available): drift tokens left as-is")
+
     for path in sorted(plans_dir.glob("*.md")):
         try:
             text = path.read_text(encoding="utf-8")
@@ -248,6 +271,11 @@ def sweep(
         if s in KNOWN_STATUSES:
             # Tier 3: a canonical status may still be stale vs its node.
             new = _tier3_target(doc.frontmatter, s, status_map, res.warnings, path.name)
+        elif tier2_blind and s not in _TIER1:
+            # Tier 1 is a pure synonym rewrite and needs no signal, so it still
+            # runs; only the signal-gated tier stands down.
+            res.stood_down += 1
+            continue
         else:
             # Tiers 1-2: drift-token rewrite (synonym / signal-gated).
             new = target_status(raw, lambda: signal_for(doc.frontmatter))
