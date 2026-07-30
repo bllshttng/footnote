@@ -221,9 +221,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
     Returns (fields, raw_frontmatter_block, rest_of_content).
     fields maps key -> str (scalar) or list[str] (inline list).
 
-    Raises ValueError if:
-    - There is no frontmatter
-    - A line cannot be parsed (e.g. nested structures)
+    Content with no frontmatter is not an error: it returns empty fields and the
+    content untouched.
+
+    Raises ValueError if a line cannot be parsed - a nested structure, a wrapped
+    scalar, or a line with no `key:` at all.
     """
     m = _FRONT_RE.match(content)
     if not m:
@@ -240,6 +242,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
     # still be able to read its own files after that round-trip.
     lines = block.splitlines()
     i = 0
+    # Last top-level key seen, so the nested-line error below can name the key
+    # whose value ran on. The offending line is the continuation, which carries
+    # no key of its own; without this the reader is told a line number and has
+    # to go find the key itself.
+    last_key: str | None = None
     while i < len(lines):
         line = lines[i]
         lineno = i + 1
@@ -252,14 +259,23 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
         # Indented comments are also safe to ignore; they can't be a nested value
         # because comments never hold data.
         if stripped.startswith("#"):
+            # Clear the attribution rather than carry it past a comment. A
+            # commented-out key followed by an indented line (`# depends_on:`
+            # then `  - x`) would otherwise blame the last REAL key above it,
+            # and a confidently wrong key name is worse than none: the message
+            # degrades to the unnamed form on its own.
+            last_key = None
             continue
         # An indented line at this level is leftover from an unclosed parent;
         # the inner block-list reader below consumes its own children, so
         # anything that surfaces here is genuinely nested = error.
         if line.startswith(" ") or line.startswith("\t"):
+            whose = f" (continuation of {last_key!r})" if last_key else ""
             raise ValueError(
-                f"Malformed frontmatter at line {lineno}: nested structures are not "
-                f"supported - offending line: {line!r}"
+                f"Malformed frontmatter at line {lineno}{whose}: frontmatter scalars "
+                f"must be single-line - a wrapped or indented continuation line is "
+                f"not supported. Put the whole value on the key's own line. "
+                f"Offending line: {line!r}"
             )
         if ":" not in line:
             raise ValueError(
@@ -268,6 +284,7 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
         key, _, raw_val = line.partition(":")
         key = key.strip()
         raw_val = raw_val.strip()
+        last_key = key
 
         if raw_val.startswith("["):
             fields[key] = _parse_inline_list(raw_val)
@@ -298,7 +315,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
                     continue
                 if not (child.startswith(" ") or child.startswith("\t")):
                     # De-indented = the block ended; let the outer loop re-process
-                    # this line as a fresh key.
+                    # this line as a fresh key. This loop must drain every
+                    # contiguous indented line before breaking: an indented line
+                    # that reaches the outer loop is reported as a runaway
+                    # continuation of `last_key`, which is only the right key
+                    # because nothing mid-block ever gets there.
                     break
                 if child_stripped.startswith("#"):
                     if is_raw:

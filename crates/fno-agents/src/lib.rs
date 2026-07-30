@@ -758,7 +758,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
 /// Returns a JSON object suitable for printing via `--emit-schema`:
 /// ```json
 /// {
-///   "envelope": { <Branch B schema> },
+///   "envelope": { <unified events-v3 schema> },
 ///   "status": { <status-v1 schema> },
 ///   "event_kinds": ["agent_spawned", ...]
 /// }
