@@ -141,7 +141,15 @@ read_version() {
 #
 # git's own error is left on stderr: "cannot verify the bump" with no reason is
 # the hardest version of this failure to act on.
-if ! git fetch --quiet "$REMOTE" "$BASE_REF"; then
+# The refspec is EXPLICIT. `git fetch <remote> <branch>` fetches into FETCH_HEAD
+# and updates refs/remotes/<remote>/<branch> only opportunistically, when the
+# configured remote.<remote>.fetch happens to cover it. Measured: with a narrowed
+# refspec (what --single-branch and `git remote set-branches` leave behind) the
+# fetch returned 0, the tracking ref stayed at v10, and upstream was already at
+# v11 - so BASE_TIP read a stale base and the collision passed. Naming the
+# destination makes the update unconditional and independent of caller config.
+if ! git fetch --quiet "$REMOTE" \
+        "+refs/heads/$BASE_REF:refs/remotes/$REMOTE/$BASE_REF"; then
     if git rev-parse --verify --quiet "$REMOTE/$BASE_REF" >/dev/null; then
         echo "ERROR: cannot fetch $REMOTE/$BASE_REF - unable to verify the bump" >&2
         echo "       A local $REMOTE/$BASE_REF exists but cannot be confirmed current," >&2
@@ -211,7 +219,10 @@ MERGE_BASE="$(git merge-base "$BASE_TIP" "$HEAD_SHA" 2>/dev/null)" || {
 # reads a successful match as "no match" and passes the guard on a real
 # collision. It needs enough pending output to fill the pipe buffer, which a
 # bump sitting on top of a large earlier proto.rs commit supplies.
-PROTO_PATCH="$(git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")" || {
+# --no-ext-diff: a diff.external or .gitattributes diff driver would replace the
+# unified diff, dropping the +pub const line and reading as untouched.
+PROTO_PATCH="$(git --no-pager log -p --no-ext-diff --format='' \
+    "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")" || {
     echo "ERROR: cannot read this PR's $PROTO_FILE history - unable to verify the bump" >&2
     exit 2
 }
@@ -226,15 +237,28 @@ PROTO_PATCH="$(git log -p --format='' "$MERGE_BASE..$HEAD_SHA" -- "$PROTO_FILE")
 # reason the file-existence check above exists, one level finer.
 BASE_V="$(read_version "$BASE_TIP" "$REMOTE/$BASE_REF tip")" || exit 1
 
-if ! grep -qE '^[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"; then
-    echo "check-proto-version-bump: PROTO_VERSION line untouched by this PR; nothing to check"
-    echo "  head=${HEAD_SHA} base=${REMOTE}/${BASE_REF}@${BASE_TIP} base_version=v${BASE_V}"
-    exit 0
-fi
+# rc taken explicitly: a negated test cannot tell rc=1 (no match, genuinely
+# untouched) from rc>=2 (grep errored, or bash could not write the here-string temp
+# file). Reading the latter as "no match" is the round-1 SIGPIPE defect wearing a
+# different hat, so anything but a clean 0 or 1 fails closed.
+grep -qE '^[-+]pub const PROTO_VERSION' <<<"$PROTO_PATCH"
+GREP_RC=$?
+case "$GREP_RC" in
+    0) ;;  # the PR's own commits touched the line
+    1)
+        echo "check-proto-version-bump: PROTO_VERSION line untouched by this PR; nothing to check"
+        echo "  head=${HEAD_SHA} base=${REMOTE}/${BASE_REF}@${BASE_TIP} base_version=v${BASE_V}"
+        exit 0 ;;
+    *)
+        echo "ERROR: cannot scan this PR's patch (grep exit $GREP_RC) - unable to verify" >&2
+        exit 2 ;;
+esac
 
 HEAD_V="$(read_version "$HEAD_SHA" "PR head")" || exit 1
 
-if (( HEAD_V > BASE_V )); then
+# 10# forces base 10: bash arithmetic reads a leading-zero literal as octal, so a
+# Rust `= 010;` (which Rust reads as decimal 10) would compare as 8.
+if (( 10#$HEAD_V > 10#$BASE_V )); then
     echo "check-proto-version-bump: OK (v$BASE_V -> v$HEAD_V)"
     echo "  head=${HEAD_SHA} base=${REMOTE}/${BASE_REF}@${BASE_TIP}"
     exit 0
@@ -244,7 +268,7 @@ echo "ERROR: PROTO_VERSION bump is not monotonic against $REMOTE/$BASE_REF." >&2
 echo "       $REMOTE/$BASE_REF tip: v$BASE_V" >&2
 echo "       this PR:               v$HEAD_V" >&2
 echo "" >&2
-if (( HEAD_V == BASE_V )); then
+if (( 10#$HEAD_V == 10#$BASE_V )); then
     # State the observation, then the likely cause as a likely cause. An earlier
     # version asserted "a parallel branch bumped to the same value and merged
     # first" as fact, which is a fabricated diagnosis for the other topology that
@@ -264,7 +288,7 @@ if (( HEAD_V == BASE_V )); then
     echo "" >&2
     echo "       Usually: a parallel branch took v$BASE_V and merged first. Your" >&2
     echo "       identical one-line change then merged cleanly, leaving no bump." >&2
-    echo "       Fix: re-bump to v$((BASE_V + 1)) in $PROTO_FILE (and any" >&2
+    echo "       Fix: re-bump to v$((10#$BASE_V + 1)) in $PROTO_FILE (and any" >&2
     echo "       assert_eq!(PROTO_VERSION, ...) pinned to the old value)." >&2
     echo "" >&2
     echo "       If instead the value is unchanged for any reason - a revert, a" >&2

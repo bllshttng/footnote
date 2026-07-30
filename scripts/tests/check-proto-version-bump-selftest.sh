@@ -26,10 +26,18 @@
 #   14. untouched PR + unlocatable base const            -> exit 1 (order guard)
 #   15. bump then revert inside the PR                   -> exit 1, revert guidance
 #   16. failed fetch over a stale tracking ref           -> exit 2 (refused)
+#   17. fetch REFRESHES a stale tracking ref             -> exit 1 (positive control)
 # Case 1 also asserts the run leaves the caller's repo unshallowed.
 #
 # Usage: bash scripts/tests/check-proto-version-bump-selftest.sh
 # Exit 0 = all assertions passed.
+#
+# HOW THIS RUNS IN CI: auto-discovered, with no registry entry. `scripts/tests/*.sh`
+# is in _SMOKE_HARNESS_GLOBS (cli/src/fno/test_cmd.py), so `fno test smoke` picks it
+# up, and cli-ci.yml runs that on `scripts/**`. Confirm with
+# `fno test smoke --list | grep proto-version-bump`. Stated explicitly because two
+# reviewers independently grepped for a registry entry, found none, and concluded
+# this file never runs - the glob makes the wiring invisible to grep.
 set -uo pipefail
 
 # Hermetic git: the fixtures make dozens of commits, and an ambient
@@ -436,7 +444,8 @@ git -C "$dir" checkout --quiet main
 git -C "$dir" remote add origin "$dir"
 git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
 out="$(run_guard "$dir" "$sha")"; rc=$?
-if [[ $rc -eq 1 ]] && [[ "$out" == *"no 'pub const PROTO_VERSION' line"* ]]; then
+if [[ $rc -eq 1 ]] && [[ "$out" == *"no 'pub const PROTO_VERSION' line"* ]] \
+   && [[ "$out" == *"tip"* ]]; then
     pass "an unlocatable base const fails loud even when the PR is untouched"
 else
     fail "untouched-unlocatable case: rc=$rc out=$out"
@@ -493,6 +502,48 @@ if [[ $rc -eq 2 ]] && [[ "$out" == *"cannot be confirmed current"* ]]; then
     pass "a failed fetch over a stale tracking ref refuses instead of passing"
 else
     fail "stale-tracking-ref case: rc=$rc out=$out"
+fi
+
+# --- case 17: the fetch must actually REFRESH a stale tracking ref --------
+# The positive control every other case lacks. They all pin the tracking ref to
+# the current base before running, so the fetch has nothing to do and a fetch
+# that silently stopped updating the ref would go unnoticed. Here the ref starts
+# stale at v10 while the base really holds v11, over a WORKING remote: only a
+# fetch that remaps refs/remotes/origin/main sees the collision.
+#
+# This is the case that catches a bare `git fetch <remote> <branch>`, whose
+# tracking-ref update is opportunistic and does not happen under a narrowed
+# remote.origin.fetch refspec.
+upstream="$(mktemp -d "$TMP_BASE/up.XXXXXX")"
+git -C "$upstream" init --quiet -b main
+git -C "$upstream" config user.email t@example.com
+git -C "$upstream" config user.name test
+write_proto "$upstream" "$(version_line 10)"
+git -C "$upstream" add -A && git -C "$upstream" commit --quiet -m "base v10"
+
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" clone --quiet "$upstream" . 2>/dev/null || git clone --quiet "$upstream" "$dir"
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump to v11"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+# Upstream independently reaches v11; the clone's tracking ref is still v10.
+write_proto "$upstream" "$(version_line 11)"
+git -C "$upstream" add -A && git -C "$upstream" commit --quiet -m "parallel landed v11"
+# Narrow the refspec so a bare `fetch origin main` would NOT remap the ref.
+git -C "$dir" config remote.origin.fetch '+refs/heads/nothing:refs/remotes/origin/nothing'
+# Anchored to the PROTO_VERSION line: the fixture also carries a SOMETHING_ELSE
+# const, and an unanchored match returns both numbers.
+stale_v="$(git -C "$dir" show origin/main:"$PROTO_REL" \
+    | sed -n 's/^pub const PROTO_VERSION[^=]*=[[:space:]]*\([0-9]\{1,\}\).*/\1/p')"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ "$stale_v" == "10" ]] && [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"* ]]; then
+    pass "the fetch refreshes a stale tracking ref (collision still caught)"
+else
+    fail "stale-ref-refresh case: stale_v=$stale_v rc=$rc out=$out"
 fi
 
 echo ""
