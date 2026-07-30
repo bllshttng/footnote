@@ -180,7 +180,7 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
 def _resolve_provider_id() -> Optional[str]:
     """The provider record a default dispatch would run on (the active one).
 
-    Routes through the SAME resolver `fno providers list` displays, so a managed
+    Routes through the SAME resolver `fno config accounts list` displays, so a managed
     routing-active pointer the slot has moved past no longer evaluates one
     account's headroom for a worker that spawns on another's credential.
 
