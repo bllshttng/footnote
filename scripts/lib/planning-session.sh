@@ -71,14 +71,18 @@ handle_planning_session_if_applicable() {
     # Calculate cost. The cost helpers moved into the fno package; run them as
     # `"$FNO_PYTHON" -m fno.cost.<mod>` rather than a bare `python3`, which is
     # whatever is first on PATH - one without fno's deps drops the ledger row
-    # and the log line below is the only trace. fno_python_init also puts the
-    # package source on PYTHONPATH so a checkout works pre-install.
-    local branch cost_json title skill_args slug
+    # and the log line below is the only trace.
+    local cost_pkg_src branch cost_json title skill_args slug
+    # Package source on PYTHONPATH so a checkout works pre-install. Inline, not
+    # in the resolver: it must still happen when a partial deploy dropped it.
+    cost_pkg_src="${SCRIPT_DIR}/cli/src"
+    [[ -f "${cost_pkg_src}/fno/cost/_session_cost.py" ]] && \
+        export PYTHONPATH="${cost_pkg_src}${PYTHONPATH:+:${PYTHONPATH}}"
     # shellcheck source=./fno-python.sh
     source "${SCRIPT_DIR}/scripts/lib/fno-python.sh" 2>/dev/null || true
     declare -F fno_python_init >/dev/null && fno_python_init "${SCRIPT_DIR}"
-    # A partial deploy that dropped the helper degrades to the old behavior
-    # rather than tripping the hook's `set -u` on an unset FNO_PYTHON.
+    # A missing helper degrades to the old behavior rather than tripping the
+    # hook's `set -u` on an unset FNO_PYTHON.
     FNO_PYTHON="${FNO_PYTHON:-python3}"
     branch=$(git branch --show-current 2>/dev/null || echo "")
 

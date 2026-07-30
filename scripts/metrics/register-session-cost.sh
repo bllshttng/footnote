@@ -14,14 +14,18 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The cost helpers moved into the fno package (cli/src/fno/cost/). Run them as
 # `"$FNO_PYTHON" -m fno.cost.<mod>`: a bare `python3` is whatever is first on
 # PATH, and one without fno's deps drops the ledger row silently (the failures
-# below are non-blocking by design). fno_python_init also puts the package
-# source on PYTHONPATH so a checkout works pre-install.
+# below are non-blocking by design).
 _REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+# Package source on PYTHONPATH so a checkout works pre-install. Inline, not in
+# the resolver: it must still happen when a partial deploy dropped the helper.
+if [[ -f "${_REPO_ROOT}/cli/src/fno/__init__.py" ]]; then
+    export PYTHONPATH="${_REPO_ROOT}/cli/src${PYTHONPATH:+:${PYTHONPATH}}"
+fi
 # shellcheck source=../lib/fno-python.sh
 source "${_REPO_ROOT}/scripts/lib/fno-python.sh" 2>/dev/null || true
 declare -F fno_python_init >/dev/null && fno_python_init "${_REPO_ROOT}"
-# A partial deploy that dropped the helper degrades to the old behavior rather
-# than tripping `set -u` on an unset FNO_PYTHON in this non-blocking path.
+# A missing helper degrades to the old behavior rather than tripping `set -u`
+# on an unset FNO_PYTHON in this non-blocking path.
 FNO_PYTHON="${FNO_PYTHON:-python3}"
 
 # Find current session ID from most recent JSONL in this project's Claude dir
