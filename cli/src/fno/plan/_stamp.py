@@ -221,9 +221,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
     Returns (fields, raw_frontmatter_block, rest_of_content).
     fields maps key -> str (scalar) or list[str] (inline list).
 
-    Raises ValueError if:
-    - There is no frontmatter
-    - A line cannot be parsed (e.g. nested structures)
+    Content with no frontmatter is not an error: it returns empty fields and the
+    content untouched.
+
+    Raises ValueError if a line cannot be parsed - a nested structure, a wrapped
+    scalar, or a line with no `key:` at all.
     """
     m = _FRONT_RE.match(content)
     if not m:
@@ -307,7 +309,11 @@ def parse_frontmatter(content: str) -> tuple[dict[str, Any], str, str]:
                     continue
                 if not (child.startswith(" ") or child.startswith("\t")):
                     # De-indented = the block ended; let the outer loop re-process
-                    # this line as a fresh key.
+                    # this line as a fresh key. This loop must drain every
+                    # contiguous indented line before breaking: an indented line
+                    # that reaches the outer loop is reported as a runaway
+                    # continuation of `last_key`, which is only the right key
+                    # because nothing mid-block ever gets there.
                     break
                 if child_stripped.startswith("#"):
                     if is_raw:
