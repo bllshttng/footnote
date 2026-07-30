@@ -935,7 +935,8 @@ fn session_id_field(harness: &str) -> Option<&'static str> {
 // parity matrix asserts the two agree.
 // ---------------------------------------------------------------------------
 
-const ACCEPTED_FORMS_MSG: &str = "accepted forms: name, 8-hex short id, or full session id";
+const ACCEPTED_FORMS_MSG: &str =
+    "accepted forms: name, canonical handle, transport short id, or full session id";
 
 /// A resolution failure. Verbs map these to their own exit codes (resume/logs
 /// 13, attach 2) and never see a panic.
@@ -965,25 +966,43 @@ impl ResolveError {
     }
 }
 
-/// The canonical full session id, lowercased (x-880e: the per-provider full-id
-/// fields are gone; harness_session_id -- back-filled from a legacy row's
-/// per-provider key in `load_registry_entries` -- is their single successor).
-fn full_session_ids(entry: &Value) -> Vec<String> {
-    entry
-        .get("harness_session_id")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .map(|s| vec![s.to_ascii_lowercase()])
-        .unwrap_or_default()
+fn canonical_handle(session_id: &str) -> String {
+    let mut tail = session_id.chars().rev().take(8).collect::<Vec<_>>();
+    tail.reverse();
+    tail.into_iter().collect()
 }
 
-/// The derived canonical short: the first hex group of `harness_session_id`
-/// when it is exactly 8 hex (claude's jobId is built the same way). `None` for a
-/// row whose id is unresolved or non-hex (e.g. an opencode `ses_...` id).
-fn derived_short(entry: &Value) -> Option<String> {
-    let hsid = entry.get("harness_session_id").and_then(Value::as_str)?;
-    let lead = hsid.split('-').next()?.to_ascii_lowercase();
-    (lead.len() == 8 && lead.bytes().all(|b| b.is_ascii_hexdigit())).then_some(lead)
+fn legacy_prefix_handle(session_id: &str) -> String {
+    session_id.chars().take(8).collect()
+}
+
+/// Full id, canonical tail, and retired prefix tiers shared with Python.
+fn session_handle_tier(token: &str, session_id: &str) -> Option<u8> {
+    let token = token.trim();
+    if token.is_empty() || session_id.is_empty() {
+        return None;
+    }
+    let exact_case = session_id.starts_with("ses_");
+    let equal = |value: &str| {
+        if exact_case {
+            token == value
+        } else {
+            token.eq_ignore_ascii_case(value)
+        }
+    };
+    [
+        session_id.to_string(),
+        canonical_handle(session_id),
+        legacy_prefix_handle(session_id),
+    ]
+    .iter()
+    .position(|value| equal(value))
+    .map(|tier| tier as u8)
+}
+
+fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
+    let session_id = entry.get("harness_session_id").and_then(Value::as_str)?;
+    session_handle_tier(token, session_id)
 }
 
 /// Return the single matched row, or an ambiguity error. Dedups by `name` (the
@@ -1019,10 +1038,9 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
     Ok(*by_name.values().next().unwrap())
 }
 
-/// Resolve `token` (name | full harness_session_id | 8-hex short) to one row.
-/// Precedence: exact name, exact full session id (case-insensitive), exact
-/// stored short_id (shape-agnostic), derived 8-hex prefix. Name wins first so a
-/// hex-shaped name is byte-stable. Mirrors Python `resolve_agent`.
+/// Resolve a name, full session id, transport short id, canonical handle, or
+/// legacy prefix to one row. Name wins first; generated-handle tiers mirror
+/// Python `resolve_agent` and fail closed when the best tier is ambiguous.
 pub(crate) fn find_agent_entry<'a>(
     rows: &'a [Value],
     token: &str,
@@ -1031,8 +1049,6 @@ pub(crate) fn find_agent_entry<'a>(
     if token.is_empty() {
         return Err(ResolveError::NotFound(String::new()));
     }
-    let low = token.to_ascii_lowercase();
-
     let named: Vec<&Value> = rows
         .iter()
         .filter(|e| e.get("name").and_then(Value::as_str) == Some(token))
@@ -1043,7 +1059,7 @@ pub(crate) fn find_agent_entry<'a>(
 
     let by_full: Vec<&Value> = rows
         .iter()
-        .filter(|e| full_session_ids(e).iter().any(|i| i == &low))
+        .filter(|e| entry_session_tier(e, token) == Some(0))
         .collect();
     if !by_full.is_empty() {
         return one_or_ambiguous(by_full, token);
@@ -1057,14 +1073,20 @@ pub(crate) fn find_agent_entry<'a>(
         return one_or_ambiguous(by_short, token);
     }
 
-    if low.len() == 8 && low.bytes().all(|b| b.is_ascii_hexdigit()) {
-        let by_derived: Vec<&Value> = rows
-            .iter()
-            .filter(|e| derived_short(e).as_deref() == Some(low.as_str()))
-            .collect();
-        if !by_derived.is_empty() {
-            return one_or_ambiguous(by_derived, token);
-        }
+    let by_canonical: Vec<&Value> = rows
+        .iter()
+        .filter(|e| entry_session_tier(e, token) == Some(1))
+        .collect();
+    if !by_canonical.is_empty() {
+        return one_or_ambiguous(by_canonical, token);
+    }
+
+    let by_legacy: Vec<&Value> = rows
+        .iter()
+        .filter(|e| entry_session_tier(e, token) == Some(2))
+        .collect();
+    if !by_legacy.is_empty() {
+        return one_or_ambiguous(by_legacy, token);
     }
 
     Err(ResolveError::NotFound(token.to_string()))
@@ -1084,15 +1106,12 @@ pub(crate) fn find_agent_entry<'a>(
 /// `store_fallback.is_session_shaped`. A plain unknown NAME never probes, so a
 /// typo keeps today's refusal instead of paying for three store reads.
 fn is_session_shaped(token: &str) -> bool {
-    // Lowercase FIRST, so `SES_...` is probeable here exactly as it is in Python:
-    // `_normalize` only preserves case for a token already matching the
-    // lowercase-literal `ses_` prefix, and lowercases everything else.
-    let low = token.trim().to_ascii_lowercase();
-    if let Some(rest) = low.strip_prefix("ses_") {
+    let token = token.trim();
+    if let Some(rest) = token.strip_prefix("ses_") {
         return !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_alphanumeric());
     }
-    let hex = |s: &str| s.bytes().all(|b| b.is_ascii_hexdigit());
-    (low.len() == 8 && hex(&low)) || is_uuid_shaped(&low)
+    (token.len() == 8 && token.bytes().all(|b| b.is_ascii_alphanumeric()))
+        || is_uuid_shaped(&token.to_ascii_lowercase())
 }
 
 /// Ask the Python healer to adopt `token` from its harness store.
@@ -2630,9 +2649,9 @@ mod tests {
     }
 
     #[test]
-    fn find_agent_entry_daemon_and_derived_short_both_resolve() {
+    fn find_agent_entry_daemon_and_canonical_handle_both_resolve() {
         // AC2-HP: a codex row resolves by its name-derived daemon short AND by
-        // the derived 8-hex prefix of its thread id.
+        // the canonical random tail of its thread id.
         let uuid = "a1b2c3d4-1111-2222-3333-444455556666";
         let row = json!({
             "name": "reviewer", "provider": "codex", "cwd": "/w", "log_path": "/l",
@@ -2644,9 +2663,28 @@ mod tests {
             "reviewer"
         );
         assert_eq!(
-            find_agent_entry(&rows, "a1b2c3d4").unwrap()["name"],
+            find_agent_entry(&rows, "55556666").unwrap()["name"],
             "reviewer"
         );
+    }
+
+    #[test]
+    fn canonical_handle_beats_legacy_prefix_and_legacy_collision_is_ambiguous() {
+        let canonical = claude_row(
+            "canonical",
+            "transport1",
+            "ffffffff-0000-0000-0000-abcd1234",
+        );
+        let legacy_a = claude_row("legacy-a", "transport2", "abcd1234-0000-0000-0000-11111111");
+        assert_eq!(
+            find_agent_entry(&[legacy_a.clone(), canonical], "abcd1234").unwrap()["name"],
+            "canonical"
+        );
+        let legacy_b = claude_row("legacy-b", "transport3", "abcd1234-0000-0000-0000-22222222");
+        assert!(matches!(
+            find_agent_entry(&[legacy_a, legacy_b], "abcd1234"),
+            Err(ResolveError::Ambiguous(_))
+        ));
     }
 
     #[test]
@@ -2692,9 +2730,8 @@ mod tests {
     }
 
     #[test]
-    fn find_agent_entry_opencode_row_degrades_to_name_and_full_id() {
-        // An opencode ses_ id has no hex prefix: resolvable by name/full-id only.
-        let ses = "ses_7f3a9b2c1d0e";
+    fn find_agent_entry_opencode_row_preserves_canonical_handle_case() {
+        let ses = "ses_7f3a9b2cAbCd1234";
         let row = json!({
             "name": "oc", "provider": "opencode", "cwd": "/w", "log_path": "/l",
             "harness_session_id": ses,
@@ -2702,8 +2739,9 @@ mod tests {
         let rows = vec![row];
         assert_eq!(find_agent_entry(&rows, "oc").unwrap()["name"], "oc");
         assert_eq!(find_agent_entry(&rows, ses).unwrap()["name"], "oc");
+        assert_eq!(find_agent_entry(&rows, "AbCd1234").unwrap()["name"], "oc");
         assert!(matches!(
-            find_agent_entry(&rows, "7f3a9b2c"),
+            find_agent_entry(&rows, "abcd1234"),
             Err(ResolveError::NotFound(_))
         ));
     }
@@ -2716,25 +2754,24 @@ mod tests {
             "a1b2c3d4",
             "A1B2C3D4",
             "ses_7f3a9b2c1d0e",
-            // Python's _normalize lowercases this into a `ses_` id and probes
-            // it; the Rust gate mirrors that rather than declining.
-            "SES_7f3a9b2c1d0e",
             CLAUDE_UUID_FIXTURE,
+            // A canonical OpenCode tail may be eight alphabetic characters;
+            // registry names still win before a miss reaches this shape gate.
+            "reviewer",
         ] {
             assert!(is_session_shaped(t), "{t} should be probeable");
         }
-        // A plain name, a short SHA of the wrong width, and a non-hex 8-char
-        // token must never cost three store reads.
-        for t in ["reviewer", "a1b2c3", "a1b2c3d45", "deadbeeg", "", "ses_"] {
+        // Short tokens of the wrong width remain outside the store seam.
+        for t in ["a1b2c3", "a1b2c3d45", "", "ses_", "SES_7f3a9b2c1d0e"] {
             assert!(!is_session_shaped(t), "{t} should not be probeable");
         }
     }
 
     #[test]
-    fn heal_wrapper_never_probes_on_a_registry_hit_or_a_name_miss() {
+    fn heal_wrapper_preserves_registry_hit_and_clean_miss_results() {
         // No `fno` is stubbed here, so any shellout would degrade to NotFound
-        // anyway; what this pins is that a hit returns the ROW and a name-shaped
-        // miss returns the ORIGINAL error, byte-identical to today's.
+        // anyway; what this pins is that a hit returns the ROW and a store miss
+        // returns the original resolution error.
         let rows = vec![claude_row("billing", "a1b2c3d4", CLAUDE_UUID_FIXTURE)];
         assert_eq!(
             resolve_entry_with_heal(&rows, "billing", Path::new("/nonexistent/registry.json"))
@@ -2746,7 +2783,7 @@ mod tests {
                 .unwrap_err();
         assert_eq!(
             err.message(),
-            "no agent matching 'reviewer'; accepted forms: name, 8-hex short id, or full session id"
+            "no agent matching 'reviewer'; accepted forms: name, canonical handle, transport short id, or full session id"
         );
     }
 

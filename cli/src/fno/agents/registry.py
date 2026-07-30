@@ -28,7 +28,6 @@ import contextlib
 import fcntl
 import json
 import os
-import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -36,7 +35,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Literal, Optional
 
 from fno import paths
-from fno.harness_identity import canonical_handle, sync_harness_aliases
+from fno.harness_identity import canonical_handle, session_handle_tier, sync_harness_aliases
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
@@ -335,17 +334,14 @@ class AgentEntry:
 
 # ---------------------------------------------------------------------------
 # Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
-# verb accepts ONE of three address forms — the registry name/slug, the full
-# harness_session_id, or an 8-hex short. This one function is the single lookup
-# choke point so no verb re-implements a name-only `.find`.
+# verb accepts the registry name, full harness session id, explicit transport
+# short id, canonical handle, or legacy prefix. This function is the single
+# lookup choke point so no verb re-implements a name-only `.find`.
 # ---------------------------------------------------------------------------
 
-# Exactly-8 lowercase hex, the `spawn --resume` convention (_SHORT_ID_RE, PR #397).
-# A 7- or 9-char token is NOT a short; it falls through to name/full-id, then the
-# not-found error.
-_DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
-
-_ACCEPTED_FORMS = "accepted forms: name, 8-hex short id, or full session id"
+_ACCEPTED_FORMS = (
+    "accepted forms: name, canonical handle, transport short id, or full session id"
+)
 
 
 class AgentResolutionError(RuntimeError):
@@ -383,33 +379,17 @@ class ResolvedAgent:
     """
 
     entry: AgentEntry
-    matched_by: str  # "name" | "full_session_id" | "short_id" | "derived_short"
+    matched_by: str  # "name" | "full_session_id" | "short_id" | handle compatibility
 
     @property
     def worker_short_id(self) -> Optional[str]:
         return self.entry.short_id or None
 
 
-def _full_session_ids(entry: object) -> list[str]:
-    """The canonical full session id, lowercased (x-880e: the per-provider
-    full-id fields are gone; harness_session_id is their single successor).
-
-    ``getattr`` so the resolver core also accepts a duck-typed registry row
-    (e.g. a test's SimpleNamespace)."""
+def _session_tier(entry: object, token: str) -> Optional[int]:
+    """Delegate generated and legacy address comparison to the identity owner."""
     hsid = getattr(entry, "harness_session_id", None)
-    return [hsid.lower()] if hsid else []
-
-
-def _derived_short(entry: object) -> Optional[str]:
-    """The canonical addressing short: the first 8 hex of harness_session_id
-    (claude's jobId is built the same way, so for a claude row it equals the
-    stored short_id). ``None`` for a row whose id is unresolved or non-hex
-    (e.g. an opencode ``ses_...`` id), so the derived rule simply never fires."""
-    hsid = getattr(entry, "harness_session_id", None)
-    if not hsid:
-        return None
-    lead = hsid.split("-", 1)[0].lower()
-    return lead if _DERIVED_SHORT_RE.match(lead) else None
+    return session_handle_tier(token, hsid) if hsid else None
 
 
 def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
@@ -434,10 +414,11 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
 
 
 def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
-    """The 4-rule matching core over an already-loaded entry list (the Rust
-    ``find_agent_entry`` mirror). Precedence: exact name, exact full session id
-    (case-insensitive), exact stored short_id (shape-agnostic), derived 8-hex
-    prefix. Name wins first so a hex-shaped name is byte-stable.
+    """The matching core over an already-loaded entry list (the Rust mirror).
+
+    Precedence is exact name, full session id, stored transport short id,
+    canonical handle, then legacy prefix. UUID-family identity matching is
+    case-insensitive; OpenCode identity matching preserves case.
 
     ``getattr``-based, so both real ``AgentEntry`` rows and duck-typed rows (a
     verb that injects its own registry loader) resolve identically. Raises
@@ -445,13 +426,11 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     token = (token or "").strip()
     if not token:
         raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
-    low = token.lower()
-
     named = [e for e in entries if getattr(e, "name", None) == token]
     if named:
         return _one_or_ambiguous(named, "name", token)
 
-    by_full = [e for e in entries if low in _full_session_ids(e)]
+    by_full = [e for e in entries if _session_tier(e, token) == 0]
     if by_full:
         return _one_or_ambiguous(by_full, "full_session_id", token)
 
@@ -459,10 +438,13 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     if by_short:
         return _one_or_ambiguous(by_short, "short_id", token)
 
-    if _DERIVED_SHORT_RE.match(low):
-        by_derived = [e for e in entries if _derived_short(e) == low]
-        if by_derived:
-            return _one_or_ambiguous(by_derived, "derived_short", token)
+    by_canonical = [e for e in entries if _session_tier(e, token) == 1]
+    if by_canonical:
+        return _one_or_ambiguous(by_canonical, "canonical_handle", token)
+
+    by_legacy = [e for e in entries if _session_tier(e, token) == 2]
+    if by_legacy:
+        return _one_or_ambiguous(by_legacy, "legacy_prefix", token)
 
     raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
 
@@ -823,9 +805,9 @@ def register_existing_session(
     Idempotent on ``(provider, session_id)``: re-registering the same
     session (the hook re-fires after a resume/compaction) refreshes the
     row in place rather than appending a duplicate. A genuinely new
-    session whose derived name collides with a different row gets a
-    numeric suffix, so two sessions in one cwd stay addressable under
-    distinct names (AC7-EDGE).
+    session whose generated canonical handle collides with a different row is
+    refused rather than assigned an order-dependent numeric address. Explicitly
+    supplied friendly names retain their existing suffix behavior.
 
     Raises on registry I/O failure or bad input; the SessionStart caller
     (``register_session.main``) fails open and emits a warning event
@@ -889,6 +871,12 @@ def register_existing_session(
                 return entries
         base = name or canonical_handle(session_id)
         taken = {entry.name for entry in entries}
+        if name is None and base in taken:
+            raise AgentResolutionError(
+                f"canonical handle {base!r} collision while registering session "
+                f"{session_id!r}; use the full session id or an explicit friendly name",
+                ambiguous=True,
+            )
         chosen, suffix = base, 2
         while chosen in taken:
             chosen = f"{base}-{suffix}"

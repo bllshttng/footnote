@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
+from fno.harness_identity import canonical_handle, legacy_prefix_handle, session_handle_tier
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
@@ -161,7 +162,7 @@ def _discover_from_codex_daemon() -> list[dict]:
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd if isinstance(cwd, str) else "",
                 "status": None,
@@ -346,7 +347,7 @@ def _discover_from_codex(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd,
                 "status": None,
@@ -443,7 +444,7 @@ def _discover_from_opencode_db(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": directory if isinstance(directory, str) else "",
                 "status": None,
@@ -576,7 +577,7 @@ def _discover_from_opencode(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd,
                 "status": None,
@@ -644,10 +645,10 @@ def _discover_from_registry(
             # here, where before it fell through to durable-only forever.
             short_val = getattr(e, "short_id", "") or None
             sid = getattr(e, "harness_session_id", None) or short_val
-            short = short_val or (sid[:8] if sid else None)
+            short = short_val or (canonical_handle(sid) if sid else None)
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
-            short = sid[:8] if sid else None
+            short = canonical_handle(sid) if sid else None
         if not sid or sid in exclude or sid in seen:
             continue
         seen.add(sid)
@@ -703,6 +704,23 @@ class DiscoveredSession:
             ),
             "agent": self.agent,
         }
+
+
+def _best_session_handle_matches(
+    token: Optional[str], sessions: Iterable[DiscoveredSession]
+) -> list[DiscoveredSession]:
+    """Sessions matching the strongest full/canonical/legacy identity tier."""
+    if not token:
+        return []
+    ranked = [
+        (tier, session)
+        for session in sessions
+        if (tier := session_handle_tier(token, session.session_id)) is not None
+    ]
+    if not ranked:
+        return []
+    best = min(tier for tier, _session in ranked)
+    return [session for tier, session in ranked if tier == best]
 
 
 # --------------------------------------------------------------------------
@@ -876,7 +894,7 @@ def _discover_from_projects(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": pid,
                 "cwd": cwd,
                 "status": None,
@@ -1076,7 +1094,7 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     for sid in sorted(aliases):
         name = aliases[sid]
         if name in seen.values():
-            name = f"{name}-{short_by_sid.get(sid, sid[:8])}"
+            name = f"{name}-{short_by_sid.get(sid, canonical_handle(sid))}"
         out[sid] = name
         seen[sid] = name
     return out
@@ -1242,17 +1260,13 @@ def resolve_or_suggest(
             **discovery_kwargs,
             resolve_metadata=False,
         )
-        bare_exact = [
-            session
-            for session in bare_sessions
-            if handle
-            and handle
-            in {
-                session.session_id,
-                session.short_id,
-                canonical_handle(session.session_id),
-            }
+        bare_explicit = [
+            session for session in bare_sessions if handle and session.short_id == handle
         ]
+        bare_identity = _best_session_handle_matches(handle, bare_sessions)
+        bare_exact = list(
+            {session.session_id: session for session in [*bare_explicit, *bare_identity]}.values()
+        )
         if len(bare_exact) == 1:
             return bare_exact[0], []
         if len(bare_exact) > 1:
@@ -1273,17 +1287,19 @@ def resolve_or_suggest(
     by_name = [s for s in sessions if handle and s.name == handle]
     if len(by_name) == 1:
         return by_name[0], []
-    exact = [
-        s
-        for s in sessions
-        if handle
-        and (
-            s.handle == handle
-            or s.session_id == handle
-            or s.short_id == handle
-            or canonical_handle(s.session_id) == handle
-        )
+    aliases = [
+        session
+        for session in sessions
+        if handle and session.handle == handle and session.handle != session.short_id
     ]
+    explicit = [session for session in sessions if handle and session.short_id == handle]
+    identity = _best_session_handle_matches(handle, sessions)
+    exact = list(
+        {
+            session.session_id: session
+            for session in [*aliases, *explicit, *identity]
+        }.values()
+    )
     if len(exact) == 1:
         return exact[0], []
     if len(exact) > 1:
@@ -1301,7 +1317,7 @@ def resolve_or_suggest(
     # copied out of an old transcript) is still building addresses the retired
     # way. Lead the suggestions with the bare form it should have used.
     if retired:
-        bare = handle.split("-", 1)[1][:8]
+        bare = legacy_prefix_handle(handle.split("-", 1)[1])
         return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
@@ -1462,9 +1478,7 @@ def _token_matches(token: str, session_id: str) -> bool:
     """
     if not token or not session_id:
         return False
-    tok = _fold_token(token)
-    sid = _fold_token(session_id)
-    return tok == sid or tok == sid[:8]
+    return session_handle_tier(token, session_id) is not None
 
 
 _OPENCODE_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
@@ -1711,6 +1725,22 @@ def resolve_reachable(
                     )
                     cwd_verbatim[key] = verbatim
 
+    # A raw canonical handle wins over legacy-prefix compatibility. Friendly
+    # aliases expand to full session ids and therefore keep all their hits.
+    direct_tiers = {
+        key: session_handle_tier(token, reachable.session_id)
+        for key, reachable in found.items()
+    }
+    ranked = {key: tier for key, tier in direct_tiers.items() if tier is not None}
+    if ranked:
+        best = min(ranked.values())
+        keep = {key for key, tier in ranked.items() if tier == best}
+        # Persisted aliases are a separate address category. Keep their expanded
+        # full ids beside the best raw-token tier so a cross-category collision
+        # is ambiguous instead of either side silently taking precedence.
+        keep.update(sid.lower() for sid in alias_sids)
+        found = {key: value for key, value in found.items() if key in keep}
+
     if len(found) > 1:
         return None, sorted(f.session_id for f in found.values())
     if len(found) == 1:
@@ -1782,7 +1812,9 @@ def discover_live_sessions(
                 pid = int(f.stem)
             except ValueError:
                 continue
-        short_id = data.get("jobId") or data.get("name") or session_id[:8]
+        # jobId/name are explicit Claude transport keys; only the absent-key
+        # fallback mints a generated mailbox address.
+        short_id = data.get("jobId") or data.get("name") or canonical_handle(session_id)
         short_id = str(short_id)
         if short_id in exclude:
             continue

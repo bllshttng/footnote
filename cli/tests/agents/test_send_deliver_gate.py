@@ -1236,3 +1236,15 @@ def test_relay_loop_raw_without_mail_ctxs_chat_path(monkeypatch) -> None:
     # No mail ctxs (the chat path) -> body stays raw, no envelope.
     _run_relay_loop("bob", "alice", "bob says hi", ceiling=3)
     assert calls[0]["body"] == "bob says hi"
+
+
+def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
+    from fno.agents.dispatch import _build_mail_ctx
+
+    monkeypatch.setattr("fno.agents.self_stamp.resolve_self_model", lambda: "unknown")
+    context = _build_mail_ctx(
+        "friendly-name",
+        "019fb417-1111-7222-8333-444455556666",
+        "codex",
+    )
+    assert context.from_ == "55556666"

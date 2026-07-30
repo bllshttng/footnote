@@ -27,14 +27,19 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from fno.harness_identity import legacy_prefix_handle, session_handle_tier
+
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
 # Session-shaped tokens only. A name that merely misses (`reviewer`, `deadbeef`
 # as a registry name) never reaches a store probe -- registry names win first in
 # resolve_agent, and anything not matching these shapes raises as it always did.
-_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+_SHORT_RE = re.compile(r"^[A-Za-z0-9]{8}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _OPENCODE_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
 
 # Transcript lines before the session's `cwd` is recorded (line 1 is a summary /
@@ -52,14 +57,13 @@ class StoreHit:
 
     @property
     def short_id(self) -> str:
-        return self.session_id.split("-", 1)[0][:8]
+        """Claude's legacy first-eight transport key, not a mailbox address."""
+        return legacy_prefix_handle(self.session_id)
 
 
 def _normalize(token: str) -> str:
-    """Trim, and lowercase a hex-shaped token. opencode ids are mixed-case by
-    construction, so they are left exactly as given."""
-    t = (token or "").strip()
-    return t if _OPENCODE_RE.match(t) else t.lower()
+    """Trim only; the shared identity owner applies harness-safe case rules."""
+    return (token or "").strip()
 
 
 def is_session_shaped(token: str) -> bool:
@@ -113,10 +117,19 @@ def _probe_claude(token: str) -> list[StoreHit]:
     """
     if _OPENCODE_RE.match(token):
         return []
-    pattern = f"*/{token}.jsonl" if _UUID_RE.match(token) else f"*/{token}-*.jsonl"
+    needle = token.lower()
     hits: dict[str, StoreHit] = {}
     try:
-        found = list(_claude_projects_dir().glob(pattern))
+        root = _claude_projects_dir()
+        found = {
+            path
+            for pattern in (
+                f"*/{needle}.jsonl",      # full id
+                f"*/*{needle}.jsonl",     # canonical tail
+                f"*/{needle}*.jsonl",     # legacy prefix
+            )
+            for path in root.glob(pattern)
+        }
     except OSError:
         return []
     for path in sorted(found):
@@ -124,7 +137,7 @@ def _probe_claude(token: str) -> list[StoreHit]:
         if ".sync-conflict-" in name:
             continue
         sid = name[: -len(".jsonl")]
-        if sid not in hits:
+        if session_handle_tier(token, sid) is not None and sid not in hits:
             hits[sid] = StoreHit("claude", sid, _transcript_cwd(path))
     return list(hits.values())
 
@@ -137,7 +150,17 @@ def _probe_codex(token: str) -> list[StoreHit]:
 
     hits: dict[str, StoreHit] = {}
     try:
-        found = list(_codex_sessions_dir().rglob(f"rollout-*-{token}*.jsonl"))
+        root = _codex_sessions_dir()
+        needle = token.lower()
+        found = {
+            path
+            for pattern in (
+                f"rollout-*-{needle}.jsonl",   # full id
+                f"rollout-*-*{needle}.jsonl",  # canonical tail
+                f"rollout-*-{needle}*.jsonl",  # legacy prefix
+            )
+            for path in root.rglob(pattern)
+        }
     except OSError:
         return []
     for path in sorted(found):
@@ -145,9 +168,7 @@ def _probe_codex(token: str) -> list[StoreHit]:
         if meta is None:
             continue
         sid, cwd = meta
-        # The glob matches on the filename; confirm against the record itself so
-        # a token that lands mid-uuid never counts as a match.
-        if not (sid == token or sid.startswith(token)):
+        if session_handle_tier(token, sid) is None:
             continue
         hits.setdefault(sid, StoreHit("codex", sid, cwd))
     return list(hits.values())
@@ -156,18 +177,23 @@ def _probe_codex(token: str) -> list[StoreHit]:
 def _probe_opencode(token: str) -> list[StoreHit]:
     """opencode's SQLite store. Its ids are ``ses_``-prefixed, so a hex token
     never reaches here -- and a `ses_` token never reaches the other two."""
-    if not _OPENCODE_RE.match(token):
+    if not (_OPENCODE_RE.match(token) or _SHORT_RE.match(token)):
         return []
     from fno.agents.discover import default_opencode_db_path, opencode_query
 
     db = default_opencode_db_path()
     if not db.exists():
         return []
-    rows = opencode_query(db, "SELECT id, directory FROM session WHERE id = ?", (token,))
+    rows = opencode_query(
+        db,
+        "SELECT id, directory FROM session "
+        "WHERE id = ? OR substr(id, -8) = ? OR substr(id, 1, 8) = ?",
+        (token, token, token),
+    )
     return [
         StoreHit("opencode", sid, directory if isinstance(directory, str) else "")
         for sid, directory in rows
-        if isinstance(sid, str) and sid
+        if isinstance(sid, str) and sid and session_handle_tier(token, sid) is not None
     ]
 
 
@@ -186,7 +212,15 @@ def probe_stores(token: str) -> list[StoreHit]:
             hits.extend(probe(token))
         except Exception:  # noqa: BLE001 - one broken store never denies the rest
             continue
-    return hits
+    ranked = [
+        (tier, hit)
+        for hit in hits
+        if (tier := session_handle_tier(token, hit.session_id)) is not None
+    ]
+    if not ranked:
+        return []
+    best = min(tier for tier, _ in ranked)
+    return [hit for tier, hit in ranked if tier == best]
 
 
 def heal_from_harness_store(

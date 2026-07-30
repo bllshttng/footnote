@@ -75,7 +75,7 @@ def test_default_codex_sessions_dir_honors_codex_home(
         ("c655c326", True),
         (CLAUDE_UUID, True),
         ("ses_abc123", True),
-        ("reviewer", False),
+        ("reviewer", True),  # a random OpenCode tail may be alphabetic
         ("c655c3", False),       # 6 hex: not a short
         ("c655c3267", False),    # 9 hex: not a short
         ("", False),
@@ -394,3 +394,78 @@ def test_explicitless_registration_still_refreshes_status(_registry_home):
     )
 
     assert load_registry()[0].status == "idle"
+
+
+def test_canonical_tail_resolves_codex_uuidv7_store(tmp_path, monkeypatch):
+    sid = "019fb417-1111-7222-8333-444455556666"
+    root = tmp_path / "codex" / "2026" / "07" / "30"
+    root.mkdir(parents=True)
+    rollout = root / f"rollout-2026-07-30T00-00-00-{sid}.jsonl"
+    rollout.write_text(
+        json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": "/x"}})
+        + "\n"
+    )
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
+    hits = store_fallback.probe_stores("55556666")
+    assert [(hit.harness, hit.session_id) for hit in hits] == [("codex", sid)]
+
+
+def test_canonical_tail_resolves_mixed_case_opencode_store(tmp_path, monkeypatch):
+    import sqlite3
+
+    storage = tmp_path / "opencode" / "storage"
+    storage.mkdir(parents=True)
+    db = storage.parent / "opencode.db"
+    con = sqlite3.connect(db)
+    con.execute("CREATE TABLE session (id TEXT, directory TEXT)")
+    sid = "ses_7f3a9b2cAbCd1234"
+    con.execute("INSERT INTO session VALUES (?, ?)", (sid, "/x"))
+    con.commit()
+    con.close()
+    monkeypatch.setenv("FNO_OPENCODE_STORAGE_DIR", str(storage))
+    hits = store_fallback.probe_stores("AbCd1234")
+    assert [hit.session_id for hit in hits] == [sid]
+    assert store_fallback.probe_stores("abcd1234") == []
+
+
+def test_canonical_tail_collision_in_store_fallback_is_ambiguous(tmp_path, monkeypatch):
+    from fno.agents.registry import AgentResolutionError
+
+    root = tmp_path / "codex" / "2026" / "07" / "30"
+    root.mkdir(parents=True)
+    for index in (1, 2):
+        sid = f"019fb417-1111-7222-8333-{index:04d}deadbeef"
+        path = root / f"rollout-{index}-{sid}.jsonl"
+        path.write_text(
+            json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": "/x"}})
+            + "\n"
+        )
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
+    with pytest.raises(AgentResolutionError, match="matches 2 sessions"):
+        store_fallback.heal_from_harness_store(
+            "deadbeef", registry_path=tmp_path / "registry.json"
+        )
+
+
+def test_codex_tail_probe_parses_only_filename_candidates(tmp_path, monkeypatch):
+    from fno.agents import discover
+
+    root = tmp_path / "codex" / "2026" / "07" / "30"
+    root.mkdir(parents=True)
+    sid = "019fb417-1111-7222-8333-444455556666"
+    wanted = root / f"rollout-now-{sid}.jsonl"
+    noise = root / "rollout-now-aaaaaaaa-bbbb-7ccc-8ddd-eeeeffffffff.jsonl"
+    wanted.write_text("{}\n")
+    noise.write_text("{}\n")
+    seen = []
+
+    def meta(path):
+        seen.append(path.name)
+        if path == noise:
+            raise AssertionError("unrelated rollout was parsed")
+        return sid, "/x"
+
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
+    monkeypatch.setattr(discover, "_codex_meta", meta)
+    assert [hit.session_id for hit in store_fallback.probe_stores("55556666")] == [sid]
+    assert seen == [wanted.name]

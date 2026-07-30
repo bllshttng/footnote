@@ -48,8 +48,8 @@ def test_ac7_hp_registers_addressable_entry(tmp_path: Path, monkeypatch) -> None
     # must not be a resolve_to_project anycast target (else default sends
     # dead-letter to inbox/<agent-name>/, which its wake hook never reads).
     assert entry.status == "idle"
-    # Derived name is the bare short-id, the one mailbox id a peer addresses.
-    assert entry.name == "ef9982cc"
+    # Derived name is the canonical random tail, the mailbox id a peer addresses.
+    assert entry.name == "ca7119f6"
 
     # AC7-UI: a fresh load shows the row with provider/cwd/status intact.
     rows = load_registry()
@@ -93,17 +93,23 @@ def test_ac7_edge_two_sessions_one_cwd_distinct_names(tmp_path: Path, monkeypatc
     assert ids == {"11111111-aaaa", "22222222-bbbb"}
 
 
-def test_ac7_edge_name_collision_disambiguated(tmp_path: Path, monkeypatch) -> None:
-    """Two session ids sharing the first 8 chars still get distinct names."""
+def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypatch) -> None:
+    """A canonical collision never mints an order-dependent numeric address."""
     use_tmpdir(monkeypatch, tmp_path)
-    from fno.agents.registry import load_registry, register_existing_session
+    from fno.agents.registry import (
+        AgentResolutionError,
+        load_registry,
+        register_existing_session,
+    )
 
-    a = register_existing_session(provider="claude", session_id="abcd1234-XXXX", cwd="/s")
-    b = register_existing_session(provider="claude", session_id="abcd1234-YYYY", cwd="/s")
+    a = register_existing_session(provider="claude", session_id="session-A-tail0001", cwd="/s")
+    with pytest.raises(AgentResolutionError, match="canonical handle.*collision"):
+        register_existing_session(
+            provider="claude", session_id="session-B-tail0001", cwd="/s"
+        )
 
-    assert a.name == "abcd1234"
-    assert b.name == "abcd1234-2"  # suffix disambiguation
-    assert len(load_registry()) == 2
+    assert a.name == "tail0001"
+    assert len(load_registry()) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -240,7 +246,7 @@ _MARKERS = (
 
 
 def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch) -> None:
-    """A claude session self-registers under its bare `<first8>` ambient id."""
+    """A claude session self-registers under its canonical ambient-id tail."""
     use_tmpdir(monkeypatch, tmp_path)
     for m in _MARKERS:
         monkeypatch.delenv(m, raising=False)
@@ -253,9 +259,9 @@ def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(agents_app, ["register"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {"registered": True, "name": "deadbeef", "provider": "claude"}
+    assert payload == {"registered": True, "name": "55556666", "provider": "claude"}
     rows = load_registry()
-    assert len(rows) == 1 and rows[0].name == "deadbeef" and rows[0].status == "idle"
+    assert len(rows) == 1 and rows[0].name == "55556666" and rows[0].status == "idle"
 
 
 def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) -> None:
@@ -277,7 +283,7 @@ def test_register_then_whoami_reports_registered(tmp_path: Path, monkeypatch) ->
     result = runner.invoke(agents_app, ["whoami", "--json"])
     assert result.exit_code == 0, result.output  # exit 3 == unregistered (the bug)
     assert '"registered": true' in result.output
-    assert '"name": "ef9982cc"' in result.output
+    assert '"name": "ca7119f6"' in result.output
 
 
 def test_register_verb_exit3_without_ambient_identity(tmp_path: Path, monkeypatch) -> None:

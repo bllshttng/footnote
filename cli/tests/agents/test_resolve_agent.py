@@ -14,6 +14,7 @@ from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
     resolve_agent,
+    resolve_agent_in,
     write_registry,
 )
 
@@ -54,9 +55,9 @@ def test_ac1_hp_full_uuid_is_case_insensitive(tmp_path: Path) -> None:
     assert r.matched_by == "full_session_id"
 
 
-def test_ac2_hp_daemon_short_and_derived_short_both_resolve(tmp_path: Path) -> None:
+def test_ac2_hp_daemon_short_and_canonical_handle_both_resolve(tmp_path: Path) -> None:
     """AC2-HP: a codex row resolves by its daemon short_id (name-derived,
-    non-hex) AND by the derived 8-hex prefix of its thread id."""
+    non-hex) AND by the canonical tail of its thread id."""
     codex_uuid = "a1b2c3d4-1111-2222-3333-444455556666"
     codex = AgentEntry(
         name="reviewer",
@@ -68,7 +69,34 @@ def test_ac2_hp_daemon_short_and_derived_short_both_resolve(tmp_path: Path) -> N
     )
     reg = _write(tmp_path, codex)
     assert resolve_agent("billingf", path=reg).matched_by == "short_id"
-    assert resolve_agent("a1b2c3d4", path=reg).matched_by == "derived_short"
+    assert resolve_agent("55556666", path=reg).matched_by == "canonical_handle"
+
+
+def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
+    ses = "ses_7f3a9b2cAbCd1234"
+    row = AgentEntry(
+        name="oc", harness="opencode", harness_session_id=ses, cwd="/w", log_path="/l"
+    )
+    assert resolve_agent_in([row], "AbCd1234").matched_by == "canonical_handle"
+    with pytest.raises(AgentResolutionError):
+        resolve_agent_in([row], "abcd1234")
+
+
+def test_ac4_err_canonical_handle_outranks_legacy_prefix() -> None:
+    canonical = _claude("canonical", "transport1", "ffffffff-0000-0000-0000-abcd1234")
+    legacy = _claude("legacy", "transport2", "abcd1234-0000-0000-0000-ffffffff")
+    resolved = resolve_agent_in([legacy, canonical], "abcd1234")
+    assert resolved.entry.name == "canonical"
+    assert resolved.matched_by == "canonical_handle"
+
+
+def test_ac4_err_legacy_prefix_collision_is_ambiguous() -> None:
+    rows = [
+        _claude("one", "transport1", "019fb417-0000-0000-0000-11111111"),
+        _claude("two", "transport2", "019fb417-0000-0000-0000-22222222"),
+    ]
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent_in(rows, "019fb417")
 
 
 def test_ac1_edge_hex_shaped_name_precedence(tmp_path: Path) -> None:
@@ -147,10 +175,9 @@ def test_empty_registry_is_clean_not_found(tmp_path: Path) -> None:
         resolve_agent("billing", path=reg)
 
 
-def test_opencode_style_row_resolves_by_name_and_full_id_only(tmp_path: Path) -> None:
-    """An opencode-shaped row (ses_... id, no hex prefix) has no derived short:
-    it resolves by name and full id, and an 8-hex token simply misses it."""
-    ses = "ses_7f3a9b2c1d0e"
+def test_opencode_style_row_resolves_by_name_full_id_and_canonical_handle(tmp_path: Path) -> None:
+    """An opencode row gains a generated handle without changing its full id."""
+    ses = "ses_7f3a9b2cAbCd1234"
     row = AgentEntry(
         name="oc-worker",
         cwd="/w",
@@ -161,8 +188,7 @@ def test_opencode_style_row_resolves_by_name_and_full_id_only(tmp_path: Path) ->
     reg = _write(tmp_path, row)
     assert resolve_agent("oc-worker", path=reg).matched_by == "name"
     assert resolve_agent(ses, path=reg).matched_by == "full_session_id"
-    with pytest.raises(AgentResolutionError):
-        resolve_agent("7f3a9b2c", path=reg)
+    assert resolve_agent("AbCd1234", path=reg).matched_by == "canonical_handle"
 
 
 def test_no_transport_row_resolves_but_worker_short_is_none(tmp_path: Path) -> None:

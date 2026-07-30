@@ -447,7 +447,7 @@ def cmd_reply(
     # in_reply_to. Anything else falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
-    from fno.harness_identity import LEGACY_HANDLE_RE
+    from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
     if orig is not None and orig.to_kind == "name":
@@ -461,7 +461,7 @@ def cmd_reply(
         # the short-id is what routes, and routing is still a roster lookup.)
         target = orig.from_ or ""
         if LEGACY_HANDLE_RE.match(target):
-            migrated = target.split("-", 1)[1][:8]
+            migrated = legacy_prefix_handle(target.split("-", 1)[1])
             print(
                 f"note: stored sender {target!r} is a retired address form "
                 f"(pre-flip record); replying to {migrated!r}.",
@@ -905,16 +905,34 @@ class UnreachableTokenError(Exception):
     """
 
 
-def _is_self_send(recipient: Optional[str]) -> bool:
-    """True when the sender is addressing its own session."""
-    from fno.harness_identity import current_session_id
+_RAW_SELF_TOKEN = object()
+
+
+def _self_recipient(
+    token: str, *, resolved_session_id: object = _RAW_SELF_TOKEN
+) -> Optional[str]:
+    """Canonical own address after resolution, or on a clean raw-token miss."""
+    from fno.harness_identity import (
+        canonical_handle,
+        current_session_id,
+        session_handle_tier,
+    )
 
     own = current_session_id() or ""
-    if not own or not recipient:
-        return False
-    from fno.harness_identity import canonical_handle
+    if not own:
+        return None
+    candidate = token if resolved_session_id is _RAW_SELF_TOKEN else resolved_session_id
+    if not isinstance(candidate, str):
+        return None
+    tier = session_handle_tier(candidate, own)
+    if tier is None or (resolved_session_id is not _RAW_SELF_TOKEN and tier != 0):
+        return None
+    return canonical_handle(own)
 
-    return canonical_handle(own) == recipient
+
+def _is_self_send(recipient: Optional[str]) -> bool:
+    """True when an already-addressed token is this ambient session."""
+    return bool(recipient and _self_recipient(recipient))
 
 
 def _resolve_token(token: str):
@@ -922,9 +940,8 @@ def _resolve_token(token: str):
 
     Resolution has to precede wrapping. The durable recipient is the resolved
     session's canonical handle, and deriving it from the raw token instead would
-    misaddress every alias: ``canonical_handle`` takes the first 8 characters, so
-    a friendly ``footnote-9a063cd3`` becomes the recipient ``footnote`` and the
-    real session never drains its own mail.
+    misaddress aliases because an alias is not a session identifier. Friendly
+    names must resolve to a full session before the canonical handle is derived.
 
     Returns ``(reachable_or_None, lane_note_or_None)``. A ``None`` reachable with
     no note means every store was read cleanly and knows nothing -- the only case
@@ -1023,22 +1040,36 @@ def _name_lane_send(
     )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
+    self_send = False
     if resolved is not None:
         recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
+        self_send = _self_recipient(
+            recipient, resolved_session_id=resolved.session_id
+        ) is not None
     elif token is not None:
         # Resolve BEFORE addressing. The durable copy must be addressed to the
         # resolved session's canonical handle -- deriving it from the raw token
-        # would misaddress every alias (canonical_handle takes the first 8
-        # chars, so `footnote-9a063cd3` would queue to `footnote`, which nothing
-        # drains). Falls back to the token when nothing resolved, which is the
-        # unregistered/exited-row case the socket probe below still covers.
-        if _is_self_send(canonical_handle(token)):
-            token_reachable, token_lane = None, "self-send"
-        else:
-            token_reachable, token_lane = _resolve_token(token)
-        recipient = canonical_handle(
-            token_reachable.session_id if token_reachable is not None else token
+        # would misaddress every alias. A clean miss may still be this ambient
+        # session's full, canonical, or legacy identity; all three drain under
+        # the canonical recipient without attempting to inject into self.
+        self_recipient = None
+        token_reachable, token_lane = _resolve_token(token)
+        if token_reachable is None and token_lane is None:
+            self_recipient = _self_recipient(token)
+            if self_recipient is not None:
+                token_lane = "self-send"
+        if token_reachable is not None:
+            self_recipient = _self_recipient(
+                token, resolved_session_id=token_reachable.session_id
+            )
+            if self_recipient is not None:
+                token_reachable, token_lane = None, "self-send"
+        self_send = token_lane == "self-send"
+        recipient = self_recipient or (
+            canonical_handle(token_reachable.session_id)
+            if token_reachable is not None
+            else token
         )
         provider = (
             token_reachable.agent if token_reachable is not None else provider
@@ -1123,7 +1154,9 @@ def _name_lane_send(
                     if wake_lane:
                         lanes.append(wake_lane)
 
-    if resolved is not None:
+    if resolved is not None and self_send:
+        lanes.append("self-send")
+    elif resolved is not None:
         if provider == "claude":
             injected = _mail_inject_claude(resolved.session_id, wrapped)
         elif provider == "codex":
@@ -1172,12 +1205,11 @@ def _name_lane_send(
     # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
     # birth we never know a recipient is gone for good (a token no store knows
     # already exits 16 upstream), so the durable floor never escalates non-zero.
-    self_send = resolved is None and token is not None and token_lane == "self-send"
     # A live rung was actually attempted (and missed): the resolved-session
     # inject, or the token ladder run below discovery. A self-send and a
     # durable-only reply (neither resolved nor token) had no live attempt, so
     # the attended lane must not fire for them (Locked Decision 3: live-miss).
-    live_attempted = resolved is not None or (token is not None and not self_send)
+    live_attempted = (resolved is not None or token is not None) and not self_send
     recipient_live = self_send or resolved is not None
     owner = classify_durable_owner(
         param_forced=False,

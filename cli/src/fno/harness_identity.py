@@ -22,11 +22,10 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The mailbox handle is the bare first-8 of the session id - the same prefix that
-# already keys resume/attach/peek/transcripts/registry, so a session has ONE
-# identity everywhere. The signature takes no harness ON PURPOSE: harness is an
-# envelope attribute, never part of an address, and no code path may recover it
-# from a handle string. A harness-prefixed address (`claude-<short8>`) is a
+# The mailbox handle is the random tail of the session id. The signature takes
+# no harness ON PURPOSE: harness is an envelope attribute, never part of an
+# address, and no code path may recover it from a handle string. A
+# harness-prefixed address (`claude-<short8>`) is a
 # retired form that is NOT accepted anywhere - a caller still producing one is a
 # bug to fix at the source, so resolution refuses it by name rather than quietly
 # translating it.
@@ -37,8 +36,35 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # durably-queued message would address one handle while its recipient drained
 # another and silently strand on the bus.
 def canonical_handle(session_id: str) -> str:
-    """The mailbox address: the bare first-8 of the session id."""
+    """The mailbox address: the final eight characters of the session id."""
+    return session_id[-8:]
+
+
+def legacy_prefix_handle(session_id: str) -> str:
+    """The retired first-eight address, for fail-closed lookup compatibility only."""
     return session_id[:8]
+
+
+def session_handle_tier(token: str, session_id: str) -> Optional[int]:
+    """Return full/canonical/legacy match tier (0/1/2), or ``None``.
+
+    OpenCode identifiers are case-sensitive; UUID-family identifiers retain the
+    historical case-insensitive paste behavior. Callers compare tiers only after
+    explicit names and transport keys have had their own precedence.
+    """
+    token = (token or "").strip()
+    if not token or not session_id:
+        return None
+    exact_case = session_id.startswith("ses_")
+
+    def equal(value: str) -> bool:
+        return token == value if exact_case else token.lower() == value.lower()
+    for tier, value in enumerate(
+        (session_id, canonical_handle(session_id), legacy_prefix_handle(session_id))
+    ):
+        if equal(value):
+            return tier
+    return None
 
 
 # The retired harness-prefixed address. Kept ONLY so the send path can recognize

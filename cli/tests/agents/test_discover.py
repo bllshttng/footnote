@@ -462,7 +462,7 @@ def test_x_a1d5_fallback_surfaces_live_session(tmp_path, monkeypatch):
     assert len(sessions) == 1
     s = sessions[0]
     assert s.session_id == sid
-    assert s.short_id == "02a5c8bc"  # session_id[:8], the addressable handle
+    assert s.short_id == "5d0f3671"  # canonical random tail
     assert s.cwd == "/Users/x/code/proj"  # from the live process
     assert s.pid == 4242  # real pid from the running claude
     assert s.agent == "claude"
@@ -501,7 +501,7 @@ def test_x_a1d5_sidecar_and_projects_candidates_are_unioned(tmp_path, monkeypatc
         ),
         project_resolver=lambda c: None,
     )
-    assert {s.short_id for s in sessions} == {"side0001", "ghost-si"}
+    assert {s.short_id for s in sessions} == {"side0001", "host-sid"}
 
 
 def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
@@ -651,7 +651,7 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     s = sessions[0]
     assert s.agent == "codex"
     assert s.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
-    assert s.short_id == "019f48e1"
+    assert s.short_id == "4bcf4ae4"
     assert s.cwd == "/Users/x/proj"
 
 
@@ -1095,7 +1095,7 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
 
     assert [(r["session_id"], r["short_id"], r["cwd"]) for r in rows] == [
         ("short", "short", ""),
-        ("019f4d0c-full", "019f4d0c", "/repo"),
+        ("019f4d0c-full", "d0c-full", "/repo"),
     ]
 
 
@@ -1106,7 +1106,7 @@ def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
         codex, session_id="019abcde-good", cwd="/y", mtime_age=3.0,
     )
     sessions = _run_codex(tmp_path, codex)
-    assert [s.short_id for s in sessions] == ["019abcde"]
+    assert [s.short_id for s in sessions] == ["cde-good"]
 
 
 def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
@@ -1156,7 +1156,7 @@ def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
 
     assert resolved is None
     assert suggestions[0] == "019f48e1"
-    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-019f48e1"
+    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-4bcf4ae4"
 
 
 @pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])
@@ -1423,7 +1423,7 @@ def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
     )
 
     resolved = []
-    for handle in (requested_name, session_id[:8], session_id):
+    for handle in (requested_name, session_id[-8:], session_id[:8], session_id):
         match, suggestions = discover.resolve_or_suggest(
             handle,
             registry_path=registry,
@@ -1435,7 +1435,7 @@ def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
         resolved.append(match)
 
     assert {peer.session_id for peer in resolved} == {session_id}
-    assert {peer.short_id for peer in resolved} == {session_id[:8]}
+    assert {peer.short_id for peer in resolved} == {session_id[-8:]}
     assert {peer.name for peer in resolved} == {requested_name}
 
 
@@ -1695,9 +1695,25 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     # ...and by the canonical handle derived from the uuid, which differs from
     # the jobId short_id, so this exercises the derived-handle branch on its own.
     by_canon, _ = discover.resolve_or_suggest(
-        "aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
+        "44444444", registry_path=reg, **_empty_seams(tmp_path)
     )
     assert by_canon is not None
+
+
+def test_ac2_fr_codex_and_opencode_discovery_rows_use_canonical_tail(tmp_path):
+    codex = tmp_path / "codex"
+    codex_sid = "019fb417-1111-2222-3333-444455556666"
+    _write_codex_rollout(codex, session_id=codex_sid, cwd="/codex")
+    codex_rows = discover._discover_from_codex(codex, recency_seconds=60, now=time.time())
+    assert codex_rows[0]["short_id"] == "55556666"
+
+    storage = tmp_path / "opencode"
+    opencode_sid = "ses_7f3a9b2cAbCd1234"
+    _write_opencode_session(storage, session_id=opencode_sid, cwd="/opencode", mtime_age=1)
+    opencode_rows = discover._discover_from_opencode(
+        storage, recency_seconds=60, now=time.time()
+    )
+    assert opencode_rows[0]["short_id"] == "AbCd1234"
 
 
 # --------------------------------------------------------------------------
@@ -1769,7 +1785,7 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
     s = sessions[0]
     assert s.agent == "opencode"
     assert s.session_id == sid
-    assert s.short_id == sid[:8]
+    assert s.short_id == sid[-8:]
     assert s.cwd == "/Users/x/proj"  # from `directory`, not `cwd`
     assert s.pid == 0  # no OS handle, mirroring the codex lane
 
@@ -1930,8 +1946,8 @@ def test_opencode_db_surfaces_live_session(tmp_path):
     )
     sessions = _run_opencode(tmp_path, storage)
     assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
-        ("ses_live", "/Users/x/proj", "opencode"),
         ("ses_stale", "/Users/x/old", "opencode"),
+        ("ses_live", "/Users/x/proj", "opencode"),
     ]
     assert [s.truth_state for s in sessions] == ["unknown", "unknown"]
 
@@ -2442,3 +2458,26 @@ def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
     # opencode does NOT fold: case is meaningful, so these are distinct.
     assert _token_matches("ses_AbC123", "ses_AbC123")
     assert not _token_matches("ses_abc123", "ses_AbC123")
+
+
+def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
+    tmp_path, monkeypatch
+):
+    """A persisted alias cannot silently displace or be displaced by a handle."""
+    alias_sid = "11111111-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    project = tmp_path / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    for sid in (alias_sid, canonical_sid):
+        (project / f"{sid}.jsonl").write_text("{}\n")
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text(json.dumps({alias_sid: "deadbeef"}))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=project.parent, name_map_path=aliases
+    )
+    assert found is None
+    assert sorted(ambiguous) == sorted([alias_sid, canonical_sid])

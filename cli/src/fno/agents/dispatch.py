@@ -4342,7 +4342,7 @@ def _build_mail_ctx(
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
-    ``from`` is the sender's short 8-hex sessionId (or the bare ``from_name`` when
+    ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is the invoking session's real model,
     resolved from its own transcript store (x-605c); an unresolvable model floors
     to ``"unknown"`` -- never fabricated.
@@ -4352,9 +4352,10 @@ def _build_mail_ctx(
     the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
     backlog node) stays None: dispatch has no truthful source for it today."""
     from fno.agents.self_stamp import resolve_self_model
+    from fno.harness_identity import canonical_handle
     from fno.mail.envelope import harness_for_provider
 
-    from_ = from_session.split("-")[0] if from_session else from_name
+    from_ = canonical_handle(from_session) if from_session else from_name
     return _MailCtx(
         from_=from_,
         harness=harness_for_provider(provider_from),
