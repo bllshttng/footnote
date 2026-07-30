@@ -7,10 +7,8 @@ patching on ``providers.claude``.
 """
 from __future__ import annotations
 
-import re
 import time
 from pathlib import Path
-from unittest.mock import MagicMock
 
 import pytest
 
@@ -75,7 +73,7 @@ def _parallel_dispatch_worker(
         _sys.exit(exc.exit_code)
 
 
-def _hold_lock_until_release(lock_path: str, ready: str, release: str) -> None:
+def _hold_lock_until_release(lock_path: str, ready, release: str) -> None:
     """Module-level multiprocessing target — must be importable for `spawn` start method.
 
     Acquires the per-agent flock at `lock_path`, signals readiness, then
@@ -83,12 +81,10 @@ def _hold_lock_until_release(lock_path: str, ready: str, release: str) -> None:
     """
     import fcntl as _fcntl
     import time as _time
-    from pathlib import Path as _P
-
     with open(lock_path, "w") as fh:
         _fcntl.flock(fh, _fcntl.LOCK_EX)
-        _P(ready).write_text("held")
-        while not _P(release).exists():
+        ready.set()
+        while not Path(release).exists():
             _time.sleep(0.05)
         _fcntl.flock(fh, _fcntl.LOCK_UN)
 
@@ -142,7 +138,6 @@ def test_claude_create_path_happy_path(tmp_path: Path, monkeypatch) -> None:
     from fno import paths
     from fno.agents.dispatch import _claude_create_path
     from fno.agents.registry import load_registry, _agent_lock_path
-    import fcntl as _fcntl
 
     cwd = tmp_path / "workdir"
     cwd.mkdir()
@@ -551,18 +546,18 @@ def test_dispatch_ask_lock_timeout(tmp_path: Path, monkeypatch) -> None:
     lock_path = _agent_lock_path("stuck", registry_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ready = tmp_path / "ready"
+    ready = multiprocessing.Event()
     release = tmp_path / "release"
     proc = multiprocessing.Process(
         target=_hold_lock_until_release,
-        args=(str(lock_path), str(ready), str(release)),
+        args=(str(lock_path), ready, str(release)),
     )
     proc.start()
     try:
-        deadline = time.monotonic() + 5.0
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert ready.exists()
+        assert ready.wait(timeout=15), (
+            f"lock holder failed to become ready "
+            f"(alive={proc.is_alive()}, exitcode={proc.exitcode})"
+        )
 
         cwd = tmp_path / "w"
         cwd.mkdir()
@@ -612,18 +607,18 @@ def test_dispatch_ask_prints_wait_message(
     lock_path = _agent_lock_path("slow", registry_path)
     lock_path.parent.mkdir(parents=True, exist_ok=True)
 
-    ready = tmp_path / "ready"
+    ready = multiprocessing.Event()
     release = tmp_path / "release"
     proc = multiprocessing.Process(
         target=_hold_lock_until_release,
-        args=(str(lock_path), str(ready), str(release)),
+        args=(str(lock_path), ready, str(release)),
     )
     proc.start()
     try:
-        deadline = time.monotonic() + 5.0
-        while not ready.exists() and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert ready.exists()
+        assert ready.wait(timeout=15), (
+            f"lock holder failed to become ready "
+            f"(alive={proc.is_alive()}, exitcode={proc.exitcode})"
+        )
 
         # Schedule release after 1.5s so dispatch_ask hits the on_wait
         # threshold then acquires.
@@ -789,10 +784,9 @@ def test_dispatch_ask_handles_ctrl_c(tmp_path: Path, monkeypatch) -> None:
     use_tmpdir(monkeypatch, tmp_path)
     _install_fake(tmp_path, monkeypatch)
 
-    from fno import paths
     from fno.agents.dispatch import _claude_create_path
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.registry import _agent_lock_path, load_registry
+    from fno.agents.registry import load_registry
 
     def boom(*args, **kwargs):  # type: ignore[no-untyped-def]
         raise KeyboardInterrupt("user pressed ctrl-c")
@@ -919,7 +913,6 @@ def test_dispatch_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
     _seed_followup_target(tmp_path)
 
     from fno import paths
-    from fno.agents import dispatch as dispatch_mod
     from fno.agents.dispatch import dispatch_ask
     from fno.agents.providers import claude as claude_mod
     from fno.agents.registry import load_registry
@@ -1105,7 +1098,6 @@ def test_dispatch_ask_followup_preserves_lock_on_registry_write_failure(
     # First update_registry call is the post-send status bump. Make it raise.
     monkeypatch.setattr(claude_mod, "ask_followup", fake_ask_followup)
 
-    real_update = dispatch_mod.update_registry
     raise_count = {"n": 0}
 
     def boom(updater, path=None):  # type: ignore[no-untyped-def]
