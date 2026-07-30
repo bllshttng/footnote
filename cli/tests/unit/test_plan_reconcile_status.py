@@ -5,6 +5,7 @@ byte-intact), signal-gated archiving, and idempotency / never-downgrade.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -298,3 +299,61 @@ def test_AC5_ERR_sweep_leaves_both_vocabularies_untouched(tmp_path: Path):
 
     assert res.skipped == 2 and res.normalized == 0 and res.superseded == 0
     assert (old.read_text(), new.read_text()) == before  # byte-for-byte
+
+
+# --- archive read-through: an archived node still resolves ------------------
+# `fno backlog archive` sweeps terminal (done/superseded) nodes out of
+# graph.json into graph-archive.json. Those are exactly the nodes this sweep
+# projects from, so reading the working graph alone made every archived link
+# read as "not in graph": Tier 3 skipped it and Tier 2 wrote `superseded` onto
+# a shipped plan (x-4e31).
+
+
+def _write_graphs(tmp_path: Path, live: list, archived: list) -> Path:
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text(json.dumps({"entries": live}))
+    (home / "graph-archive.json").write_text(json.dumps({"entries": archived}))
+    return home / "graph.json"
+
+
+def test_node_status_map_reads_through_the_archive(tmp_path, monkeypatch):
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    graph = _write_graphs(
+        tmp_path,
+        live=[{"id": "x-live", "status": "ready"}],
+        archived=[{"id": "x-gone", "status": "done"}],
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: graph)
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: graph.parent / "graph-archive.json")
+    rs._node_status_map.cache_clear()
+
+    status_map = rs._node_status_map()
+
+    assert status_map["x-gone"] == "done"  # archived, still projectable
+    assert status_map["x-live"] == "ready"
+    # Tier 2 reads the same map, so a shipped-and-archived node signals `done`
+    # instead of falling through to the honest-but-wrong `superseded`.
+    assert rs._done_node_ids() == frozenset({"x-gone"})
+    assert rs._default_signal({"node": "x-gone"}) is True
+    rs._node_status_map.cache_clear()
+
+
+def test_node_status_map_survives_a_missing_archive(tmp_path, monkeypatch):
+    """The archive is advisory: absent means the working graph, not an empty map
+    (an empty map would silently disable Tier 3 everywhere).
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text(json.dumps({"entries": [{"id": "x-live", "status": "done"}]}))
+    monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
+    rs._node_status_map.cache_clear()
+
+    assert rs._node_status_map() == {"x-live": "done"}
+    rs._node_status_map.cache_clear()

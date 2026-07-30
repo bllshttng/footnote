@@ -124,23 +124,13 @@ class SweepResult:
         return f"{self.normalized} normalized, {self.superseded} superseded, {self.skipped} skipped"
 
 
-@lru_cache(maxsize=1)
 def _done_node_ids() -> frozenset:
-    """Ids of every closed (`status == done`) node. Read once per process.
+    """Ids of every closed (`status == done`) node - the Tier 2 signal.
 
-    ponytail: cached for the life of a one-shot sweep so the graph is parsed
-    once, not once per plan file (gemini PR#149). A merged-PR probe would add gh
-    calls; node-closed is the one cheap true-state signal.
+    Derived from the one cached graph read rather than parsing the same file a
+    second time. No graph => empty => `superseded` (honest).
     """
-    try:
-        from fno.graph.store import read_graph
-        from fno.paths import graph_json
-
-        return frozenset(
-            e.get("id") for e in read_graph(graph_json()) if e.get("status") == "done"
-        )
-    except Exception:  # noqa: BLE001 - no graph => no signal => superseded (honest)
-        return frozenset()
+    return frozenset(i for i, status in _node_status_map().items() if status == "done")
 
 
 def _plan_link_id(frontmatter: dict) -> Optional[str]:
@@ -177,14 +167,20 @@ def _default_signal(frontmatter: dict) -> bool:
 def _node_status_map() -> dict:
     """Map node id -> derived ``status``. Empty when the graph is unreadable,
     which disables Tier 3 (it must never rewrite on absent evidence).
+
+    Reads THROUGH the archive, because the sweep's whole population is plans
+    whose node already shipped and `fno backlog archive` moves exactly those
+    terminal nodes out of the working graph. On the working graph alone every
+    archived link reads as "not in graph": Tier 3 skips it, and worse, Tier 2
+    misses the `done` signal and writes `superseded` onto a shipped plan.
     """
     try:
-        from fno.graph.store import read_graph
+        from fno.graph.store import entries_with_archive, read_graph
         from fno.paths import graph_json
 
         return {
             e.get("id"): e.get("status")
-            for e in read_graph(graph_json())
+            for e in entries_with_archive(read_graph(graph_json()))
             if e.get("id")
         }
     except Exception:  # noqa: BLE001 - no graph => no Tier 3
