@@ -281,6 +281,25 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     return None
 
 
+def _plan_pointer_exists(plan_path: str) -> bool:
+    """True when a graph plan pointer names a file that is actually on disk.
+
+    Strips a ``#group-N`` anchor the same way init-target-state.sh does
+    (``${INITIAL_PLAN_PATH%%#*}``) so an anchored plan is not read as missing,
+    and expands ``~`` (the shell helper does not, but graph entries carry
+    ``~``-prefixed paths). A relative pointer resolves against the cwd, which is
+    the worktree init runs from. Fail-safe to True on any error: an unreadable
+    filesystem must not strip a plan binding that is probably fine.
+    """
+    try:
+        bare = plan_path.split("#", 1)[0].strip()
+        if not bare:
+            return False
+        return Path(bare).expanduser().exists()
+    except Exception:
+        return True
+
+
 _TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$", re.IGNORECASE)
 _SOURCE_PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[#?\s)]|$)",
@@ -1101,10 +1120,26 @@ def init(
     # first-fill. An explicit --plan-path wins; an idea-first free-text input
     # resolves no node and stays empty for the legitimate blueprint-then-first-fill
     # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
+    #
+    # Gated on the plan existing on disk, because the manifest is WRITE-ONCE and
+    # `fno state set --field plan_path` accepts a first-fill only while the field
+    # is EMPTY (else exit 5). Back-filling a dangling pointer would therefore not
+    # just record a bad path, it would close the only legal repair route; leaving
+    # it empty keeps the blueprint-then-first-fill escape open. An explicit
+    # --plan-path is NOT gated: the operator named that path, so a typo must
+    # surface as a plan error rather than be silently dropped.
     if not plan_path:
         resolved_plan = _resolve_plan_for_blast(None, input_)
         if resolved_plan:
-            plan_path = resolved_plan
+            if _plan_pointer_exists(resolved_plan):
+                plan_path = resolved_plan
+            else:
+                typer.echo(
+                    f"fno target init: node's bound plan_path does not exist "
+                    f"({resolved_plan}); leaving the manifest plan_path empty so it "
+                    f"can still be first-filled (fno state set --field plan_path).",
+                    err=True,
+                )
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
