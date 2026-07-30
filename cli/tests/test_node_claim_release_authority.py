@@ -54,6 +54,17 @@ ALLOWLIST = {
     # and REFUSES a live foreign holder (warn + point at force-release). Single
     # authority at an explicit operator lifecycle boundary (x-a747).
     "cli/src/fno/graph/cli.py",
+    # init-target-state.sh: the acquire-then-validate refusal (x-e957). Releases
+    # the claim THIS SAME BLOCK acquired one line earlier, with the holder it
+    # just minted, when the post-acquire containment read says the node was
+    # adopted into a delivery unit mid-bootstrap - then exits without writing
+    # state. It is the inverse of ab-588326a7 rather than a repeat: that bug was
+    # a helper releasing the PARENT session's claim, whereas this releases only
+    # its own, never observes a foreign holder (a live one makes the acquire
+    # fail and this branch unreachable), and holds the claim for the microseconds
+    # between the two calls. Not releasing would strand a bogus 2h claim on a
+    # node no one is building.
+    "hooks/helpers/init-target-state.sh",
 }
 
 _EXTS = {".py", ".sh", ".bash", ".rs"}
