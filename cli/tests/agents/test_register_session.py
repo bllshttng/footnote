@@ -112,6 +112,88 @@ def test_ac4_err_generated_name_collision_fails_closed(tmp_path: Path, monkeypat
     assert len(load_registry()) == 1
 
 
+def test_named_row_does_not_hide_its_canonical_handle_collision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import (
+        AgentResolutionError,
+        load_registry,
+        register_existing_session,
+    )
+
+    register_existing_session(
+        provider="claude", session_id="session-A-tail0001", cwd="/s", name="friendly"
+    )
+    with pytest.raises(AgentResolutionError, match="canonical handle.*collision"):
+        register_existing_session(
+            provider="claude",
+            session_id="session-B-tail0001",
+            cwd="/s",
+            name="another-friendly",
+        )
+    assert [row.name for row in load_registry()] == ["friendly"]
+
+
+def test_friendly_name_is_suffixed_away_from_existing_handle_namespace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import register_existing_session
+
+    register_existing_session(
+        provider="claude", session_id="session-A-deadbeef", cwd="/s", name="worker"
+    )
+    entry = register_existing_session(
+        provider="claude", session_id="session-B-cafebabe", cwd="/s", name="deadbeef"
+    )
+    assert entry.name == "deadbeef-2"
+
+
+def test_transport_short_id_cannot_collide_with_existing_handle_namespace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentResolutionError, register_existing_session
+
+    register_existing_session(
+        provider="codex", session_id="session-A-deadbeef", cwd="/s", name="worker"
+    )
+    with pytest.raises(AgentResolutionError, match="transport short id.*collision"):
+        register_existing_session(
+            provider="codex",
+            session_id="session-B-cafebabe",
+            cwd="/s",
+            name="other",
+            short_id="deadbeef",
+        )
+
+
+def test_reregister_cannot_refresh_transport_short_id_into_a_collision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentResolutionError, register_existing_session
+
+    register_existing_session(
+        provider="codex", session_id="session-A-deadbeef", cwd="/s", name="worker"
+    )
+    register_existing_session(
+        provider="codex",
+        session_id="session-B-cafebabe",
+        cwd="/s",
+        name="other",
+        short_id="transport",
+    )
+    with pytest.raises(AgentResolutionError, match="refreshing session"):
+        register_existing_session(
+            provider="codex",
+            session_id="session-B-cafebabe",
+            cwd="/s",
+            short_id="deadbeef",
+        )
+
+
 # ---------------------------------------------------------------------------
 # Input validation
 # ---------------------------------------------------------------------------

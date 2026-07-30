@@ -388,7 +388,12 @@ def _collect_refs(
 # ---------------------------------------------------------------------------
 
 def _reply_to_name_handle(
-    body_text: str, *, from_project: Optional[str], target: str, to_msg: str
+    body_text: str,
+    *,
+    from_project: Optional[str],
+    target: str,
+    to_msg: str,
+    require_resolution: bool = False,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -399,10 +404,15 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
-    resolved, _ = discover_mod.resolve_or_suggest(target)
+    resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
             body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
+        )
+    elif require_resolution:
+        detail = f"; candidates: {', '.join(suggestions)}" if suggestions else ""
+        raise typer.BadParameter(
+            f"retired sender handle {target!r} cannot be resolved uniquely{detail}"
         )
     else:
         # AC1-FR: the original sender is no longer live -> durable floor addressed
@@ -460,16 +470,24 @@ def cmd_reply(
         # (Not the harness-parsing this scheme forbids: the harness is discarded,
         # the short-id is what routes, and routing is still a roster lookup.)
         target = orig.from_ or ""
+        migrated_legacy = False
         if LEGACY_HANDLE_RE.match(target):
             migrated = legacy_prefix_handle(target.split("-", 1)[1])
             print(
                 f"note: stored sender {target!r} is a retired address form "
-                f"(pre-flip record); replying to {migrated!r}.",
+                f"(pre-flip record); resolving legacy token {migrated!r}.",
                 file=sys.stderr,
             )
             target = migrated
+            migrated_legacy = True
 
-        _reply_to_name_handle(body_text, from_project=from_project, target=target, to_msg=to_msg)
+        _reply_to_name_handle(
+            body_text,
+            from_project=from_project,
+            target=target,
+            to_msg=to_msg,
+            require_resolution=migrated_legacy,
+        )
         return
     if orig is None:
         # US3: a live-confirmed delivery writes no durable thread (LD11a), so the

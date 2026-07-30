@@ -1289,11 +1289,11 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
     assert by_short is not None
 
 
-def test_us2_registry_name_resolves_codex_on_fast_path(tmp_path, monkeypatch):
+def test_us2_registry_name_resolves_codex_after_cross_store_uniqueness_check(tmp_path):
     """US2/AC1-HP: truth resolves a live codex pane worker by its registered NAME.
 
-    The name axis lives on the require_alive=False registry fast-path (truth's
-    path), so a name resolves without scanning the transcript store."""
+    Short address categories must consult every store before they are declared
+    unique; a registry name still resolves when the other stores are empty."""
     from fno.agents.registry import AgentEntry, write_registry
 
     registry = tmp_path / "registry.json"
@@ -1309,16 +1309,11 @@ def test_us2_registry_name_resolves_codex_on_fast_path(tmp_path, monkeypatch):
         ],
         path=registry,
     )
-    monkeypatch.setattr(
-        discover,
-        "_discover_from_codex",
-        lambda *_a, **_k: pytest.fail("transcript store was scanned"),
-    )
-
     match, _suggestions = discover.resolve_or_suggest(
         "codex-x2af5",
         registry_path=registry,
         require_alive=False,
+        **_empty_seams(tmp_path),
     )
 
     assert match is not None
@@ -1503,10 +1498,8 @@ def test_us2_registered_name_matching_retired_shape_resolves_for_peek(
     assert match.session_id == sid
 
 
-def test_us2_registered_name_beats_a_colliding_alias(monkeypatch):
-    """Codex P2 r4 (#603): a registered name that also matches another live
-    session's alias resolves to the named row (resolve_agent_in is name-first),
-    not rejected as ambiguous by peek while truth's fast-path resolves it."""
+def test_us2_registered_name_and_colliding_alias_are_ambiguous(monkeypatch):
+    """A registered name cannot silently displace another session's alias."""
     named = discover.DiscoveredSession(
         session_id="sid-named",
         short_id="aa111111",
@@ -1533,9 +1526,9 @@ def test_us2_registered_name_beats_a_colliding_alias(monkeypatch):
     monkeypatch.setattr(
         discover, "discover_live_sessions", lambda **_k: [named, aliased]
     )
-    match, _ = discover.resolve_or_suggest("dup-name")
-    assert match is not None
-    assert match.session_id == "sid-named"
+    match, suggestions = discover.resolve_or_suggest("dup-name")
+    assert match is None
+    assert sorted(suggestions) == ["sid-alias", "sid-named"]
 
 
 def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
@@ -2481,3 +2474,22 @@ def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
     )
     assert found is None
     assert sorted(ambiguous) == sorted([alias_sid, canonical_sid])
+
+
+def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(
+    tmp_path, monkeypatch
+):
+    legacy_sid = "deadbeef-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    project = tmp_path / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    for sid in (legacy_sid, canonical_sid):
+        (project / f"{sid}.jsonl").write_text("{}\n")
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=project.parent
+    )
+    assert found is None
+    assert sorted(ambiguous) == sorted([legacy_sid, canonical_sid])

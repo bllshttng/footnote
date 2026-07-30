@@ -30,10 +30,10 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # bug to fix at the source, so resolution refuses it by name rather than quietly
 # translating it.
 #
-# This ONE function is the single source of the generated string: the send-resolve
-# path (discover), the registry row-name fallback, and the receive-side drain
-# (mail drain-self) all call it. If any two computed it differently, a
-# durably-queued message would address one handle while its recipient drained
+# This function is the Python source of the generated string: discovery,
+# registration, receipts, send, and drain all call it. The Rust lifecycle client
+# carries a parity-tested mirror because it cannot import Python. If those two
+# rules differ, a durable send can address one handle while its recipient drains
 # another and silently strand on the bus.
 def canonical_handle(session_id: str) -> str:
     """The mailbox address: the final eight characters of the session id."""
@@ -49,8 +49,9 @@ def session_handle_tier(token: str, session_id: str) -> Optional[int]:
     """Return full/canonical/legacy match tier (0/1/2), or ``None``.
 
     OpenCode identifiers are case-sensitive; UUID-family identifiers retain the
-    historical case-insensitive paste behavior. Callers compare tiers only after
-    explicit names and transport keys have had their own precedence.
+    historical case-insensitive paste behavior. Callers may prefer the explicit
+    full-id tier, but must union canonical and legacy matches with every other
+    short address category before deciding uniqueness.
     """
     token = (token or "").strip()
     if not token or not session_id:

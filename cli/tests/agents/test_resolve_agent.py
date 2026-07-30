@@ -82,12 +82,11 @@ def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
         resolve_agent_in([row], "abcd1234")
 
 
-def test_ac4_err_canonical_handle_outranks_legacy_prefix() -> None:
+def test_ac4_err_canonical_handle_and_legacy_prefix_are_ambiguous() -> None:
     canonical = _claude("canonical", "transport1", "ffffffff-0000-0000-0000-abcd1234")
     legacy = _claude("legacy", "transport2", "abcd1234-0000-0000-0000-ffffffff")
-    resolved = resolve_agent_in([legacy, canonical], "abcd1234")
-    assert resolved.entry.name == "canonical"
-    assert resolved.matched_by == "canonical_handle"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent_in([legacy, canonical], "abcd1234")
 
 
 def test_ac4_err_legacy_prefix_collision_is_ambiguous() -> None:
@@ -99,15 +98,13 @@ def test_ac4_err_legacy_prefix_collision_is_ambiguous() -> None:
         resolve_agent_in(rows, "019fb417")
 
 
-def test_ac1_edge_hex_shaped_name_precedence(tmp_path: Path) -> None:
-    """AC1-EDGE: a name that is 8-hex-shaped wins over hex interpretation, even
-    when a DIFFERENT row's short_id equals it."""
+def test_ac1_edge_hex_shaped_name_and_short_id_are_ambiguous(tmp_path: Path) -> None:
+    """AC1-EDGE: a name cannot silently displace another row's short id."""
     row_named = _claude("deadbeef", "aaaa0000", "aaaa0000-0000-0000-0000-000000000000")
     row_short = _claude("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111")
     reg = _write(tmp_path, row_named, row_short)
-    r = resolve_agent("deadbeef", path=reg)
-    assert r.entry.name == "deadbeef"
-    assert r.matched_by == "name"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("deadbeef", path=reg)
 
 
 def test_ac2_err_ambiguous_short_across_two_entries(tmp_path: Path) -> None:
@@ -118,10 +115,27 @@ def test_ac2_err_ambiguous_short_across_two_entries(tmp_path: Path) -> None:
     a = _claude("aa", "abcd1234", "ffffffff-0000-0000-0000-000000000000")
     b = _claude("bb", "eeee0000", "abcd1234-2222-3333-4444-555566667777")
     reg = _write(tmp_path, a, b)
-    # "abcd1234": rule 3 hits A (stored short). Rule 4 would hit B, but rule 3
-    # short-circuits — so it resolves A unambiguously. To force cross-tier
-    # ambiguity we need two entries in the SAME tier.
-    assert resolve_agent("abcd1234", path=reg).entry.name == "aa"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("abcd1234", path=reg)
+
+
+def test_same_row_matching_multiple_address_categories_is_not_ambiguous() -> None:
+    row = _claude(
+        "deadbeef", "deadbeef", "deadbeef-0000-0000-0000-0000deadbeef"
+    )
+    resolved = resolve_agent_in([row], "deadbeef")
+    assert resolved.entry.name == "deadbeef"
+    assert resolved.matched_by == "name"
+
+
+def test_exact_full_session_id_wins_over_short_address_categories() -> None:
+    full = _claude("full", "transport1", "deadbeef")
+    named = _claude(
+        "deadbeef", "transport2", "aaaaaaaa-0000-0000-0000-000000000000"
+    )
+    resolved = resolve_agent_in([named, full], "deadbeef")
+    assert resolved.entry.name == "full"
+    assert resolved.matched_by == "full_session_id"
 
 
 def test_ac2_err_ambiguous_same_tier_short_collision(tmp_path: Path) -> None:

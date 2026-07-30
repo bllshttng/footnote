@@ -706,21 +706,17 @@ class DiscoveredSession:
         }
 
 
-def _best_session_handle_matches(
+def _session_handle_matches(
     token: Optional[str], sessions: Iterable[DiscoveredSession]
 ) -> list[DiscoveredSession]:
-    """Sessions matching the strongest full/canonical/legacy identity tier."""
+    """Every session matching the full, canonical, or legacy identity token."""
     if not token:
         return []
-    ranked = [
-        (tier, session)
+    return [
+        session
         for session in sessions
-        if (tier := session_handle_tier(token, session.session_id)) is not None
+        if session_handle_tier(token, session.session_id) is not None
     ]
-    if not ranked:
-        return []
-    best = min(tier for tier, _session in ranked)
-    return [session for tier, session in ranked if tier == best]
 
 
 # --------------------------------------------------------------------------
@@ -1173,19 +1169,14 @@ def resolve_or_suggest(
         return resolved.transcript_path
 
     if not require_alive:
-        # Name-first (resolve_agent_in contract): a registered name that equals
-        # another row's full harness_session_id must resolve to the named row
-        # here, not fall through to the ID tier and select the other row, or
-        # truth and peek can inspect different workers (Codex P2 r5, #603).
         registry_rows = _discover_from_registry(registry_path)
-        name_matches = [
-            row for row in registry_rows if handle and handle == row.get("name")
+        registry_full = [
+            row
+            for row in registry_rows
+            if handle and session_handle_tier(handle, row["session_id"]) == 0
         ]
-        registry_matches = name_matches or [
-            row for row in registry_rows if handle and handle == row["session_id"]
-        ]
-        if len(registry_matches) == 1:
-            row = registry_matches[0]
+        if len(registry_full) == 1:
+            row = registry_full[0]
             transcript_path = (
                 claude_transcript_path(row["session_id"], row["cwd"])
                 if row["agent"] == "claude"
@@ -1205,6 +1196,8 @@ def resolve_or_suggest(
                 ),
                 name=row.get("name"),
             ), []
+        if len(registry_full) > 1:
+            return None, sorted(row["session_id"] for row in registry_full)
 
         if handle:
             transcript_path = claude_transcript_path(handle, "")
@@ -1260,10 +1253,23 @@ def resolve_or_suggest(
             **discovery_kwargs,
             resolve_metadata=False,
         )
+        bare_full = [
+            session
+            for session in bare_sessions
+            if handle and session_handle_tier(handle, session.session_id) == 0
+        ]
+        if len(bare_full) == 1:
+            return bare_full[0], []
+        if len(bare_full) > 1:
+            return None, sorted(session.session_id for session in bare_full)
         bare_explicit = [
             session for session in bare_sessions if handle and session.short_id == handle
         ]
-        bare_identity = _best_session_handle_matches(handle, bare_sessions)
+        bare_identity = [
+            session
+            for session in _session_handle_matches(handle, bare_sessions)
+            if session_handle_tier(handle, session.session_id) in {1, 2}
+        ]
         bare_exact = list(
             {session.session_id: session for session in [*bare_explicit, *bare_identity]}.values()
         )
@@ -1277,27 +1283,35 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
+    full = [
+        session
+        for session in sessions
+        if handle and session_handle_tier(handle, session.session_id) == 0
+    ]
+    if len(full) == 1:
+        return full[0], []
+    if len(full) > 1:
+        return None, sorted(session.session_id for session in full)
+
     # Exact-match the address BEFORE the retired-syntax rejection: a registered
     # name matching the retired <harness>-<short8> shape (e.g. codex-deadbeef,
-    # which validate_spawn_name permits) must still resolve here, or truth's
-    # fast-path and peek disagree (Codex P2, #603). Registered names take
-    # PRECEDENCE over alias/id tiers (resolve_agent_in is name-first): a name
-    # that also matches another live session's alias resolves to the named row,
-    # not rejected as ambiguous by peek while truth resolves it (Codex P2 r4).
+    # which validate_spawn_name permits) remains a valid address when unique.
     by_name = [s for s in sessions if handle and s.name == handle]
-    if len(by_name) == 1:
-        return by_name[0], []
     aliases = [
         session
         for session in sessions
         if handle and session.handle == handle and session.handle != session.short_id
     ]
     explicit = [session for session in sessions if handle and session.short_id == handle]
-    identity = _best_session_handle_matches(handle, sessions)
+    identity = [
+        session
+        for session in _session_handle_matches(handle, sessions)
+        if session_handle_tier(handle, session.session_id) in {1, 2}
+    ]
     exact = list(
         {
             session.session_id: session
-            for session in [*aliases, *explicit, *identity]
+            for session in [*by_name, *aliases, *explicit, *identity]
         }.values()
     )
     if len(exact) == 1:
@@ -1724,22 +1738,6 @@ def resolve_reachable(
                         cwd=cwd,
                     )
                     cwd_verbatim[key] = verbatim
-
-    # A raw canonical handle wins over legacy-prefix compatibility. Friendly
-    # aliases expand to full session ids and therefore keep all their hits.
-    direct_tiers = {
-        key: session_handle_tier(token, reachable.session_id)
-        for key, reachable in found.items()
-    }
-    ranked = {key: tier for key, tier in direct_tiers.items() if tier is not None}
-    if ranked:
-        best = min(ranked.values())
-        keep = {key for key, tier in ranked.items() if tier == best}
-        # Persisted aliases are a separate address category. Keep their expanded
-        # full ids beside the best raw-token tier so a cross-category collision
-        # is ambiguous instead of either side silently taking precedence.
-        keep.update(sid.lower() for sid in alias_sids)
-        found = {key: value for key, value in found.items() if key in keep}
 
     if len(found) > 1:
         return None, sorted(f.session_id for f in found.values())

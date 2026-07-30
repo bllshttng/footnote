@@ -416,9 +416,11 @@ def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
 def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     """The matching core over an already-loaded entry list (the Rust mirror).
 
-    Precedence is exact name, full session id, stored transport short id,
-    canonical handle, then legacy prefix. UUID-family identity matching is
-    case-insensitive; OpenCode identity matching preserves case.
+    A full session id is explicit and resolves first. Every shorter address form
+    shares one namespace: exact name, stored transport short id, canonical
+    handle, and legacy prefix matches are unioned before uniqueness is decided.
+    UUID-family identity matching is case-insensitive; OpenCode identity matching
+    preserves case.
 
     ``getattr``-based, so both real ``AgentEntry`` rows and duck-typed rows (a
     verb that injects its own registry loader) resolve identically. Raises
@@ -426,25 +428,20 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     token = (token or "").strip()
     if not token:
         raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
-    named = [e for e in entries if getattr(e, "name", None) == token]
-    if named:
-        return _one_or_ambiguous(named, "name", token)
-
     by_full = [e for e in entries if _session_tier(e, token) == 0]
     if by_full:
         return _one_or_ambiguous(by_full, "full_session_id", token)
 
-    by_short = [e for e in entries if getattr(e, "short_id", None) == token]
-    if by_short:
-        return _one_or_ambiguous(by_short, "short_id", token)
-
-    by_canonical = [e for e in entries if _session_tier(e, token) == 1]
-    if by_canonical:
-        return _one_or_ambiguous(by_canonical, "canonical_handle", token)
-
-    by_legacy = [e for e in entries if _session_tier(e, token) == 2]
-    if by_legacy:
-        return _one_or_ambiguous(by_legacy, "legacy_prefix", token)
+    categories = (
+        ("name", [e for e in entries if getattr(e, "name", None) == token]),
+        ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
+        ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),
+        ("legacy_prefix", [e for e in entries if _session_tier(e, token) == 2]),
+    )
+    hits = [entry for _matched_by, category in categories for entry in category]
+    if hits:
+        matched_by = next(matched_by for matched_by, category in categories if category)
+        return _one_or_ambiguous(hits, matched_by, token)
 
     raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
 
@@ -843,6 +840,19 @@ def register_existing_session(
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        def _address_is_taken(
+            token: str, *, exclude: Optional[AgentEntry] = None
+        ) -> bool:
+            return any(
+                entry is not exclude
+                and (
+                    getattr(entry, "name", None) == token
+                    or getattr(entry, "short_id", None) == token
+                    or _session_tier(entry, token) is not None
+                )
+                for entry in entries
+            )
+
         for entry in entries:
             # Keyed on harness_session_id, the canonical id every row carries --
             # `session_field` is `short_id` for claude, which a caller may set to
@@ -862,6 +872,14 @@ def register_existing_session(
                 if log_path:
                     entry.log_path = log_path
                 if short_id:
+                    if short_id != entry.short_id and _address_is_taken(
+                        short_id, exclude=entry
+                    ):
+                        raise AgentResolutionError(
+                            f"transport short id {short_id!r} collision while "
+                            f"refreshing session {session_id!r}; use the full session id",
+                            ambiguous=True,
+                        )
                     entry.short_id = short_id
                 # Only restamp origin when the caller passed one: the harness-store
                 # healer refreshes rows without it, and a blind `entry.origin = None`
@@ -869,16 +887,23 @@ def register_existing_session(
                 if origin is not None:
                     entry.origin = origin
                 return entries
-        base = name or canonical_handle(session_id)
-        taken = {entry.name for entry in entries}
-        if name is None and base in taken:
+        generated = canonical_handle(session_id)
+        if _address_is_taken(generated):
             raise AgentResolutionError(
-                f"canonical handle {base!r} collision while registering session "
-                f"{session_id!r}; use the full session id or an explicit friendly name",
+                f"canonical handle {generated!r} collision while registering session "
+                f"{session_id!r}; use the full session id directly",
                 ambiguous=True,
             )
+        if short_id and _address_is_taken(short_id):
+            raise AgentResolutionError(
+                f"transport short id {short_id!r} collision while registering session "
+                f"{session_id!r}; use the full session id",
+                ambiguous=True,
+            )
+
+        base = name or generated
         chosen, suffix = base, 2
-        while chosen in taken:
+        while _address_is_taken(chosen):
             chosen = f"{base}-{suffix}"
             suffix += 1
         fresh = AgentEntry(

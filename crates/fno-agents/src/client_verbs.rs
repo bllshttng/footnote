@@ -931,8 +931,8 @@ fn session_id_field(harness: &str) -> Option<&'static str> {
 // `registry.resolve_agent`. Every session-connecting verb (resume, attach,
 // logs, trace) resolves a token to one row through this, so a session is
 // addressable by name/slug, full harness_session_id, or an 8-hex short. Same
-// four-rule precedence + ambiguity semantics as the Python resolver; the US4
-// parity matrix asserts the two agree.
+// full-id precedence + shared-short-namespace ambiguity semantics as the Python
+// resolver; the US4 parity matrix asserts the two agree.
 // ---------------------------------------------------------------------------
 
 const ACCEPTED_FORMS_MSG: &str =
@@ -1039,8 +1039,8 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
 }
 
 /// Resolve a name, full session id, transport short id, canonical handle, or
-/// legacy prefix to one row. Name wins first; generated-handle tiers mirror
-/// Python `resolve_agent` and fail closed when the best tier is ambiguous.
+/// legacy prefix to one row. A full id is explicit and resolves first; every
+/// shorter address category is unioned before uniqueness is decided.
 pub(crate) fn find_agent_entry<'a>(
     rows: &'a [Value],
     token: &str,
@@ -1049,14 +1049,6 @@ pub(crate) fn find_agent_entry<'a>(
     if token.is_empty() {
         return Err(ResolveError::NotFound(String::new()));
     }
-    let named: Vec<&Value> = rows
-        .iter()
-        .filter(|e| e.get("name").and_then(Value::as_str) == Some(token))
-        .collect();
-    if !named.is_empty() {
-        return one_or_ambiguous(named, token);
-    }
-
     let by_full: Vec<&Value> = rows
         .iter()
         .filter(|e| entry_session_tier(e, token) == Some(0))
@@ -1065,28 +1057,24 @@ pub(crate) fn find_agent_entry<'a>(
         return one_or_ambiguous(by_full, token);
     }
 
-    let by_short: Vec<&Value> = rows
+    let mut short_namespace: Vec<&Value> = rows
+        .iter()
+        .filter(|e| e.get("name").and_then(Value::as_str) == Some(token))
+        .collect();
+    short_namespace.extend(rows
         .iter()
         .filter(|e| matches!(e.get("short_id").and_then(Value::as_str), Some(s) if !s.is_empty() && s == token))
-        .collect();
-    if !by_short.is_empty() {
-        return one_or_ambiguous(by_short, token);
-    }
-
-    let by_canonical: Vec<&Value> = rows
-        .iter()
-        .filter(|e| entry_session_tier(e, token) == Some(1))
-        .collect();
-    if !by_canonical.is_empty() {
-        return one_or_ambiguous(by_canonical, token);
-    }
-
-    let by_legacy: Vec<&Value> = rows
-        .iter()
-        .filter(|e| entry_session_tier(e, token) == Some(2))
-        .collect();
-    if !by_legacy.is_empty() {
-        return one_or_ambiguous(by_legacy, token);
+    );
+    short_namespace.extend(
+        rows.iter()
+            .filter(|e| entry_session_tier(e, token) == Some(1)),
+    );
+    short_namespace.extend(
+        rows.iter()
+            .filter(|e| entry_session_tier(e, token) == Some(2)),
+    );
+    if !short_namespace.is_empty() {
+        return one_or_ambiguous(short_namespace, token);
     }
 
     Err(ResolveError::NotFound(token.to_string()))
@@ -2669,17 +2657,17 @@ mod tests {
     }
 
     #[test]
-    fn canonical_handle_beats_legacy_prefix_and_legacy_collision_is_ambiguous() {
+    fn canonical_handle_and_legacy_prefix_are_ambiguous() {
         let canonical = claude_row(
             "canonical",
             "transport1",
             "ffffffff-0000-0000-0000-abcd1234",
         );
         let legacy_a = claude_row("legacy-a", "transport2", "abcd1234-0000-0000-0000-11111111");
-        assert_eq!(
-            find_agent_entry(&[legacy_a.clone(), canonical], "abcd1234").unwrap()["name"],
-            "canonical"
-        );
+        assert!(matches!(
+            find_agent_entry(&[legacy_a.clone(), canonical], "abcd1234"),
+            Err(ResolveError::Ambiguous(_))
+        ));
         let legacy_b = claude_row("legacy-b", "transport3", "abcd1234-0000-0000-0000-22222222");
         assert!(matches!(
             find_agent_entry(&[legacy_a, legacy_b], "abcd1234"),
@@ -2688,8 +2676,7 @@ mod tests {
     }
 
     #[test]
-    fn find_agent_entry_name_precedence_over_hex() {
-        // AC1-EDGE: a hex-shaped name wins over a different row's short_id.
+    fn find_agent_entry_name_and_short_id_collision_is_ambiguous() {
         let rows = vec![
             claude_row(
                 "deadbeef",
@@ -2698,10 +2685,10 @@ mod tests {
             ),
             claude_row("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111"),
         ];
-        assert_eq!(
-            find_agent_entry(&rows, "deadbeef").unwrap()["name"],
-            "deadbeef"
-        );
+        assert!(matches!(
+            find_agent_entry(&rows, "deadbeef"),
+            Err(ResolveError::Ambiguous(_))
+        ));
     }
 
     #[test]

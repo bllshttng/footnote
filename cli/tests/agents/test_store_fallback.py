@@ -447,6 +447,20 @@ def test_canonical_tail_collision_in_store_fallback_is_ambiguous(tmp_path, monke
         )
 
 
+def test_canonical_tail_and_legacy_prefix_in_store_fallback_are_ambiguous(
+    _registry_home,
+):
+    legacy_sid = "deadbeef-1111-7222-8333-444455556666"
+    canonical_sid = "019fb417-1111-7222-8333-4444deadbeef"
+    _write_codex_session(_registry_home, legacy_sid)
+    _write_codex_session(_registry_home, canonical_sid)
+    with pytest.raises(AgentResolutionError, match="matches 2 sessions") as exc:
+        store_fallback.heal_from_harness_store("deadbeef")
+    assert legacy_sid in str(exc.value)
+    assert canonical_sid in str(exc.value)
+    assert load_registry() == []
+
+
 def test_codex_tail_probe_parses_only_filename_candidates(tmp_path, monkeypatch):
     from fno.agents import discover
 

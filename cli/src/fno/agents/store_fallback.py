@@ -212,15 +212,12 @@ def probe_stores(token: str) -> list[StoreHit]:
             hits.extend(probe(token))
         except Exception:  # noqa: BLE001 - one broken store never denies the rest
             continue
-    ranked = [
-        (tier, hit)
+    matched = [
+        hit
         for hit in hits
-        if (tier := session_handle_tier(token, hit.session_id)) is not None
+        if session_handle_tier(token, hit.session_id) is not None
     ]
-    if not ranked:
-        return []
-    best = min(tier for tier, _ in ranked)
-    return [hit for tier, hit in ranked if tier == best]
+    return list({(hit.harness, hit.session_id): hit for hit in matched}.values())
 
 
 def heal_from_harness_store(

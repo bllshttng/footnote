@@ -116,8 +116,8 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
-    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
+    assert replies[0].to == "0164189c"  # sender resolved to its canonical handle
+    assert replies[0].from_ == "66667777"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
@@ -271,22 +271,53 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     assert r.exit_code == 0, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "9a063cd3"  # migrated, never the retired string
+    assert replies[0].to == "0164189c"  # migrated to the live session's canonical handle
 
 
-def test_reply_to_retired_sender_offline_still_addresses_the_bare_id(
+def test_reply_to_retired_sender_offline_fails_without_queuing_an_unsafe_prefix(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    """Even with nothing live, the durable floor carries the MIGRATED address, so
-    the record is drainable if that session ever wakes - the old string never is."""
+    """A retired prefix cannot recover a canonical recipient while offline."""
     _isolate_empty_discovery(monkeypatch, tmp_path)
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-deadbeef", body="ping")
 
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert r.exit_code == 0, r.output
+    assert r.exit_code != 0
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
-    assert [m.to for m in replies] == ["deadbeef"]
+    assert replies == []
+
+
+def test_reply_to_retired_sender_cross_category_collision_fails_closed(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents.discover import DiscoveredSession
+
+    legacy_sid = "deadbeef-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    sessions = [
+        DiscoveredSession(
+            session_id=sid,
+            short_id=sid[-8:],
+            handle=sid[-8:],
+            pid=1,
+            cwd="/x",
+            project=None,
+            status="live",
+            agent="codex",
+            truth_state="working",
+        )
+        for sid in (legacy_sid, canonical_sid)
+    ]
+    monkeypatch.setattr(
+        "fno.agents.discover.discover_live_sessions", lambda **_kwargs: sessions
+    )
+    msg = _seed_name_lane_inbound(
+        to="meeeeeee", from_="claude-deadbeef", body="ping"
+    )
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    assert r.exit_code != 0
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
 
 
 def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(
