@@ -81,7 +81,9 @@ def _codex_records(root: Path) -> dict[str, float]:
     records: dict[str, float] = {}
     for path in paths:
         payload = _codex_session_meta(path)
-        session_id = payload.get("id") if payload else None
+        if payload is None:
+            raise _unavailable("codex", f"unreadable or malformed record: {path}")
+        session_id = payload.get("id")
         if not isinstance(session_id, str) or not session_id:
             raise _unavailable("codex", f"unreadable or malformed record: {path}")
         try:
