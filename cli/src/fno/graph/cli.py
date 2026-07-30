@@ -6079,6 +6079,58 @@ def _cascade_close_contained(entries: list[dict], node_id: str) -> list[str]:
     return closed
 
 
+def _strandable_contained_ids(entries: list[dict]) -> set[str]:
+    """Open nodes whose delivery unit is ALREADY done - closeable right now.
+
+    ``_cascade_close_contained`` only fires while a unit is being closed, and
+    ``scan_merge_drift`` never returns an already-closed unit, so a node that
+    became contained AFTER its owner shipped is reachable by neither. That is
+    not hypothetical: re-running an `adopt` spec back-fills ``contained_in``
+    onto a node adopted by an older fno, and if that node's owner has already
+    merged, the back-fill removes it from selection (the containment guard) with
+    nothing left that would ever complete it - visible, unbuildable, never done.
+
+    Read-only. The same self-heal role ``_strandable_epic_ids`` plays for
+    all-done epics, and for the same reason: a state the forward path now
+    prevents still has to be swept out of graphs that already carry it. Once
+    migrated this returns empty and the sweep is a no-op.
+    """
+    by_id = {
+        e["id"]: e for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+    out: set[str] = set()
+    for e in entries:
+        if not isinstance(e, dict) or e.get("completed_at"):
+            continue
+        owner_id = e.get("contained_in")
+        if not isinstance(owner_id, str) or not owner_id:
+            continue
+        owner = by_id.get(owner_id)
+        if owner is not None and owner.get("completed_at"):
+            out.add(e["id"])
+    return out
+
+
+def _sweep_close_stranded_contained(entries: list[dict]) -> list[str]:
+    """Close every node :func:`_strandable_contained_ids` names.
+
+    Grouped by owner so each node gets the same note the merge-time cascade
+    writes, naming its unit and that unit's PR.
+    """
+    closed: list[str] = []
+    for owner_id in sorted(
+        {
+            entries_e["contained_in"]
+            for entries_e in entries
+            if isinstance(entries_e, dict)
+            and entries_e.get("id") in _strandable_contained_ids(entries)
+        }
+    ):
+        closed.extend(_cascade_close_contained(entries, owner_id))
+    return closed
+
+
 def _strandable_epic_ids(entries: list[dict]) -> set[str]:
     """Open epics (parents) whose children are ALL done - closeable right now.
 
@@ -6917,12 +6969,18 @@ def cmd_reconcile(
     # so the global sweep is suppressed there (the targeted node's own cascade
     # still fires).
     strandable = _strandable_epic_ids(entries) if node is None else set()
+    # Same self-heal role for contained nodes whose unit already shipped
+    # (x-e957): neither the merge-time cascade nor scan_merge_drift can reach
+    # them, so without this leg a back-filled `contained_in` on an
+    # already-merged owner strands the node permanently. Full sweep only, for
+    # the same reason as the epic sweep above.
+    strandable_contained = _strandable_contained_ids(entries) if node is None else set()
 
     closed: list[dict] = []
     healed_epics: list[str] = []
     contained_closed: list[str] = []
 
-    if not dry_run and (closeable or strandable):
+    if not dry_run and (closeable or strandable or strandable_contained):
         # Apply every close in ONE locked mutation rather than locking once
         # per node: locked_mutate_graph acquires a file lock and rewrites the
         # whole graph, so a per-node loop is O(N) lock+rewrite cycles. The
@@ -7040,7 +7098,29 @@ def cmd_reconcile(
             # unrelated epics. Going forward the cascade prevents new ones, so
             # this is a no-op once migrated. Their dependents auto-continue via
             # the same cascade_closed_acc dispatch loop.
+            # Self-heal contained nodes whose unit shipped before the
+            # containment record existed (codex P1): the merge-time cascade
+            # above only fires while closing an owner, and an already-closed
+            # owner never appears in `closeable`. Runs BEFORE the epic sweep so
+            # an epic waiting on one of these sees it done in the same pass.
+            # Full reconcile only, matching _sweep_close_done_epics.
             if node is None:
+                # Guarded for the same reason the merge-time cascade is: this
+                # leg is a self-heal for a state that predates the invariant,
+                # and letting it raise would abort the whole sweep - taking
+                # every genuine PR-drift close with it. Strictly worse than the
+                # stale rows it exists to clean up.
+                try:
+                    contained_closed_acc.extend(
+                        _sweep_close_stranded_contained(entries)
+                    )
+                except Exception as _sw_exc:  # noqa: BLE001 - never abort the sweep
+                    typer.echo(
+                        "warning: the stranded-contained self-heal failed: "
+                        f"{_sw_exc}; nodes whose delivery unit already merged "
+                        "stay open (`fno backlog reconcile` retries next run)",
+                        err=True,
+                    )
                 cascade_closed_acc.extend(_sweep_close_done_epics(entries))
             return entries
 
@@ -7229,7 +7309,7 @@ def cmd_reconcile(
         # records and would report "in sync" even after healing epics.
         healed_epics = sorted(_seen_parents)
         contained_closed = sorted(set(contained_closed_acc))
-    elif dry_run and (closeable or strandable):
+    elif dry_run and (closeable or strandable or strandable_contained):
         # Accurate --dry-run preview (codex P2): the heal set is NOT just the
         # pre-close `strandable` epics - closing a closeable last child cascade-
         # closes its parent, and the sweep fixpoint reaches ancestors. Simulate
@@ -7250,6 +7330,7 @@ def cmd_reconcile(
                 _sim_contained.extend(_cascade_close_contained(_sim, record.node_id))
                 _sim_acc.extend(_cascade_close_parents(_sim, record.node_id))
         if node is None:
+            _sim_contained.extend(_sweep_close_stranded_contained(_sim))
             _sim_acc.extend(_sweep_close_done_epics(_sim))
         healed_epics = sorted(set(_sim_acc))
         contained_closed = sorted(set(_sim_contained))
@@ -7357,6 +7438,7 @@ def cmd_reconcile(
         not closeable
         and not failures
         and not strandable
+        and not strandable_contained
         and not healed_epics
         and not contained_closed
         and not reverted_stamped

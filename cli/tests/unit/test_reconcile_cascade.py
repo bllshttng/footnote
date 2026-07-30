@@ -462,3 +462,126 @@ def test_clean_graph_still_reports_in_sync(world, merged_pr, monkeypatch):
     result = _reconcile()
     assert result.exit_code == 0
     assert "in sync" in result.output
+
+
+# -- codex P1: a unit that shipped BEFORE the containment record existed --
+
+
+def test_strandable_contained_finds_a_child_of_an_already_done_unit():
+    """The state the merge-time cascade structurally cannot reach.
+
+    Re-running an `adopt` spec back-fills `contained_in` onto a node adopted by
+    an older fno. If that node's owner already merged, the back-fill removes it
+    from selection with nothing left that would ever complete it: visible,
+    unbuildable, never done. `scan_merge_drift` skips the closed owner and the
+    cascade only fires while closing one.
+    """
+    from fno.graph.cli import _strandable_contained_ids
+
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+    assert _strandable_contained_ids(entries) == {KID_A, KID_B}
+
+
+def test_strandable_contained_ignores_an_open_or_missing_owner():
+    """Only an owner that is DONE strands its children.
+
+    An open owner closes them itself on its merge, and a dangling owner id is
+    not evidence anything shipped - closing on it would invent a completion.
+    """
+    from fno.graph.cli import _strandable_contained_ids
+
+    assert _strandable_contained_ids(_world(Path("/tmp"))) == set()
+
+    dangling = [_node(KID_A, contained_in="x-0000")]
+    assert _strandable_contained_ids(dangling) == set()
+
+
+def test_reconcile_heals_a_stranded_contained_node_with_no_drift(world, monkeypatch,
+                                                                 dispatches):
+    """No merged PR this sweep, and the heal still runs and is reported.
+
+    Gated on `strandable_contained` so the lock is taken for a heal-only run;
+    without that the sweep would only fire when some OTHER node happened to
+    have drift, which is arbitrary.
+    """
+    import fno.graph._reconcile as rec
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+            e["cost_usd"] = 18.22
+    write(entries)
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+
+    result = _reconcile()
+    assert result.exit_code == 0
+
+    nodes = read()
+    for nid in (KID_A, KID_B):
+        assert nodes[nid]["completed_at"] is not None, nid
+        assert nodes[nid]["cost_usd"] is None, nid
+        assert UNIT in (nodes[nid]["completion_note"] or ""), nid
+    assert KID_A in result.output
+
+
+def test_heal_is_full_sweep_only(world, monkeypatch, dispatches):
+    """A node-scoped run must not close nodes it was not pointed at.
+
+    Same scoping as the stranded-epic sweep: `reconcile --node <id>` is a
+    targeted operation, and healing unrelated subtrees from it is a surprise.
+    """
+    import fno.graph._reconcile as rec
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+    write(entries)
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+
+    assert _reconcile("--node", DEP).exit_code == 0
+    assert read()[KID_A]["completed_at"] is None
+
+
+def test_heal_is_previewed_by_dry_run_and_mutates_nothing(world, monkeypatch,
+                                                          dispatches):
+    import fno.graph._reconcile as rec
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+    write(entries)
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+
+    result = _reconcile("--dry-run")
+    assert result.exit_code == 0
+    assert KID_A in result.output
+    assert read()[KID_A]["completed_at"] is None
+
+
+def test_heal_is_idempotent_across_repeated_sweeps(world, monkeypatch, dispatches):
+    """reconcile auto-fires on SessionStart; the second run must be a no-op."""
+    import fno.graph._reconcile as rec
+
+    write, read = world
+    entries = _world(Path("/tmp"))
+    for e in entries:
+        if e["id"] == UNIT:
+            e["completed_at"] = "2026-07-28T00:00:00+00:00"
+    write(entries)
+    monkeypatch.setattr(rec, "scan_merge_drift", lambda entries, node_id=None: [])
+
+    assert _reconcile().exit_code == 0
+    first = read()[KID_A]["completed_at"]
+    result = _reconcile()
+    assert result.exit_code == 0
+    assert read()[KID_A]["completed_at"] == first
+    assert "in sync" in result.output

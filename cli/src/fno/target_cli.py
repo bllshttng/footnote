@@ -335,6 +335,17 @@ def _resolve_dispatch_node(
                 matches.append(entry)
         except OSError:
             continue
+    if len(matches) > 1:
+        # A plan shared by a delivery unit and its contained children is the
+        # LEGAL shape, not an ambiguity (x-e957): exactly one of those nodes
+        # owns the PR. Resolving it to None here treated the normal contained
+        # graph as unresolvable, so `--plan-path <shared plan>` sailed past the
+        # containment redirect and the retro dedup gate alike. Narrow to the
+        # delivery unit; a genuinely ambiguous set (two non-contained holders,
+        # which change 1.1 now refuses to create) still returns None.
+        units = [e for e in matches if not e.get("contained_in")]
+        if len(units) == 1:
+            return units[0]
     return matches[0] if len(matches) == 1 else None
 
 
@@ -720,6 +731,39 @@ def check_review_gate() -> None:
         # caller reads a code it does not recognize as a BROKEN gate and
         # proceeds, so widening this to "any non-zero refuses" would turn a
         # future unrelated failure into a hard bootstrap refusal.
+        if exc.exit_code != 2:
+            raise
+        raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
+
+
+@target_app.command("check-contained", hidden=True)
+def check_contained() -> None:
+    """Refuse a contained node for a non-Python caller (x-e957 task 1.3b).
+
+    The bash twin of the redirect ``init`` performs in-process. SKILL.md
+    documents running ``hooks/helpers/init-target-state.sh`` directly when the
+    wrapper is unavailable, and that script acquires the node claim and writes
+    the manifest - so without this, the documented fallback bootstraps a
+    contained node and opens the second PR for one plan that this whole
+    invariant exists to prevent. A guard on one of two reachable paths is
+    decorative; the same reasoning as ``check-review-gate`` above.
+
+    Reads the node from ``TARGET_INPUT`` / ``TARGET_PLAN_PATH``, which is how
+    the script already receives its input, so the shell caller passes nothing
+    and cannot pass the wrong thing.
+
+    Read-only; writes no state. Exit 0 = not contained, not resolvable, or
+    nothing to check; exit ``REVIEW_GATE_REFUSED`` = redirected, message already
+    on stderr. Every other non-zero means a BROKEN gate, and the caller
+    proceeds - a stale `fno` without this verb exits 2 as a Click usage error
+    and must not hard-refuse every direct bootstrap.
+    """
+    node = _resolve_dispatch_node(
+        os.environ.get("TARGET_INPUT"), os.environ.get("TARGET_PLAN_PATH")
+    )
+    try:
+        _redirect_if_contained(node)
+    except typer.Exit as exc:
         if exc.exit_code != 2:
             raise
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None

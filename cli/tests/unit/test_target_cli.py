@@ -1013,3 +1013,99 @@ def test_redirect_helper_ignores_non_contained_and_malformed_input():
     target_cli._redirect_if_contained({"id": "x-a", "contained_in": None})
     target_cli._redirect_if_contained({"id": "x-a", "contained_in": ""})
     target_cli._redirect_if_contained({"id": "x-a", "contained_in": 0})
+
+
+# ---------------------------------------------------------------------------
+# codex P1: containment must hold on EVERY bootstrap path, not just `init`
+# ---------------------------------------------------------------------------
+
+
+def test_shared_plan_path_resolves_to_the_delivery_unit(tmp_path, monkeypatch):
+    """A plan held by a unit and its contained children is legal, not ambiguous.
+
+    Returning None for the normal contained shape let `--plan-path <shared>`
+    sail past the containment redirect AND the retro dedup gate: both read this
+    one resolver, so the miss was doubled.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    node = target_cli._resolve_dispatch_node(None, "/p/one.md")
+    assert node is not None and node["id"] == "x-6320"
+
+
+def test_two_uncontained_holders_stay_ambiguous(tmp_path, monkeypatch):
+    """Narrowing to the unit must not start guessing between real rivals.
+
+    Change 1.1 refuses to CREATE this state; a graph that predates it must not
+    have one of the two picked silently.
+    """
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-6320", "plan_path": "/p/one.md", "status": "ready"},
+        {"id": "x-8a4f", "plan_path": "/p/one.md", "status": "ready"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    assert target_cli._resolve_dispatch_node(None, "/p/one.md") is None
+
+
+def test_plan_path_naming_only_contained_nodes_is_redirected(tmp_path, monkeypatch):
+    """No delivery unit on the plan at all -> still a contained node."""
+    import json
+
+    gp = tmp_path / "graph.json"
+    gp.write_text(json.dumps({"entries": [
+        {"id": "x-261c", "plan_path": "/p/one.md", "contained_in": "x-6320"},
+    ]}), encoding="utf-8")
+    monkeypatch.setattr("fno.paths.graph_json", lambda: gp)
+    ran = _init_env(tmp_path, monkeypatch)
+
+    result = runner.invoke(app, ["target", "init", "--plan-path", "/p/one.md"])
+    assert result.exit_code == 2, result.output
+    assert ran == []
+    _clear_root_cache()
+
+
+def test_check_contained_refuses_with_the_shell_gates_own_code(tmp_path, monkeypatch):
+    """rc 9, not 2: a stale fno exits 2 as a Click "No such command".
+
+    Treating 2 as a refusal would hard-refuse every direct bootstrap the moment
+    the installed CLI fell behind source - the same reasoning check-review-gate
+    documents for its own code.
+    """
+    _contained_graph(tmp_path, monkeypatch)
+    monkeypatch.setenv("TARGET_INPUT", "x-261c")
+    result = runner.invoke(app, ["target", "check-contained"])
+    assert result.exit_code == 9, result.output
+    assert "x-6320" in result.output
+
+
+def test_check_contained_passes_a_delivery_unit_and_a_bare_idea(tmp_path, monkeypatch):
+    """Exit 0 for anything that is not an affirmative contained node."""
+    _contained_graph(tmp_path, monkeypatch)
+
+    monkeypatch.setenv("TARGET_INPUT", "x-6320")
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+    monkeypatch.setenv("TARGET_INPUT", "fix the login redirect")
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+    monkeypatch.delenv("TARGET_INPUT", raising=False)
+    assert runner.invoke(app, ["target", "check-contained"]).exit_code == 0
+
+
+def test_init_script_wires_the_containment_gate():
+    """The verb is only a guard if the documented direct path actually calls it.
+
+    A refusal nothing invokes is the decorative-guard failure this whole task is
+    about, so assert the wiring, not just the verb.
+    """
+    from pathlib import Path as _P
+
+    from fno.paths import resolve_plugin_script
+
+    script = _P(resolve_plugin_script("hooks/helpers/init-target-state.sh"))
+    text = script.read_text(encoding="utf-8")
+    assert "fno target check-contained" in text
+    # rc 9 refuses; anything else must fall through rather than brick bootstrap.
+    assert '"$_CT_RC" -eq 9' in text
