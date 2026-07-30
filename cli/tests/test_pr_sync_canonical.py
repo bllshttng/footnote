@@ -45,13 +45,15 @@ def _gh_row(**overrides):
 
 
 class _Shell:
-    def __init__(self, rc: int = 0):
+    def __init__(self, rc: int = 0, stdout: str = "", stderr: str = ""):
         self.rc = rc
+        self.stdout = stdout
+        self.stderr = stderr
         self.calls: list[tuple[str, str]] = []
 
-    def __call__(self, command: str, cwd: str) -> int:
+    def __call__(self, command: str, cwd: str) -> Result:
         self.calls.append((command, cwd))
-        return self.rc
+        return Result(returncode=self.rc, stdout=self.stdout, stderr=self.stderr)
 
 
 def _run(canonical, **kw):
@@ -145,6 +147,21 @@ def test_failure_leaves_no_marker(tmp_path, capsys):
     rc = _run(tmp_path, shell_runner=shell)
     assert rc == 3
     assert "failed" in capsys.readouterr().err
+    assert not (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
+
+
+def test_failure_surfaces_command_and_captured_stderr(tmp_path, capsys):
+    # The defect this fixes: a failing sync_command reported only an exit code
+    # and discarded the command text, stdout, and stderr. A two-day outage was a
+    # one-word typo (`git checkpout`) the tool had captured and threw away, so
+    # the receipt must now carry the command that ran and its captured stderr.
+    shell = _Shell(rc=1, stderr="git: 'checkpout' is not a git command")
+    rc = _run(tmp_path, shell_runner=shell)
+    assert rc == 1
+    err = capsys.readouterr().err
+    assert "exit 1" in err
+    assert "git pull && fno update" in err  # the command that ran
+    assert "checkpout" in err               # the captured stderr
     assert not (tmp_path / ".fno" / "post-merge-synced" / ("a" * 40)).exists()
 
 
@@ -258,16 +275,19 @@ def test_claim_key_is_canonical_wide_not_per_sha(tmp_path, monkeypatch):
 
 # --- x-adf9: _default_shell_runner detaches daemons + is bounded ---------
 
-def test_default_shell_runner_closes_child_pipes(tmp_path, capsys):
+def test_default_shell_runner_captures_without_leaking_to_parent(tmp_path, capsys):
     # x-adf9: a `fno restart` in sync_command detaches a daemon that inherits
     # the runner's stdout and never closes it, wedging subprocess.run on wait.
-    # Redirecting to DEVNULL means the child's output never reaches the parent
-    # (and a detached child cannot hold the parent's pipe open).
+    # Output is captured to temp FILES (not PIPE), so the child's output never
+    # reaches the parent's stdout (a detached child cannot hold a pipe open and
+    # the parent's wait() never blocks on EOF) - yet it is still recoverable on
+    # the returned Result for the failure receipt.
     from fno.pr._sync_canonical import _default_shell_runner
 
-    rc = _default_shell_runner("echo LEAKED_MARKER_XADF9", str(tmp_path))
-    assert rc == 0
-    assert "LEAKED_MARKER_XADF9" not in capsys.readouterr().out
+    res = _default_shell_runner("echo LEAKED_MARKER_XADF9", str(tmp_path))
+    assert res.returncode == 0
+    assert "LEAKED_MARKER_XADF9" not in capsys.readouterr().out  # parent not polluted
+    assert "LEAKED_MARKER_XADF9" in res.stdout  # ...but captured for the receipt
 
 
 def test_default_shell_runner_is_bounded(tmp_path, capsys, monkeypatch):
@@ -276,6 +296,17 @@ def test_default_shell_runner_is_bounded(tmp_path, capsys, monkeypatch):
     import fno.pr._sync_canonical as mod
 
     monkeypatch.setattr(mod, "_SYNC_COMMAND_TIMEOUT_S", 1.0)
-    rc = mod._default_shell_runner("sleep 30", str(tmp_path))
-    assert rc == 124
+    res = mod._default_shell_runner("sleep 30", str(tmp_path))
+    assert res.returncode == 124
     assert "timed out" in capsys.readouterr().err.lower()
+
+
+def test_default_shell_runner_captures_failing_output(tmp_path):
+    # The real path (file capture, not PIPE): a failing command's stdout and
+    # stderr land on the returned Result so the failure receipt can carry them.
+    from fno.pr._sync_canonical import _default_shell_runner
+
+    res = _default_shell_runner("echo on-stdout; echo on-stderr >&2; exit 3", str(tmp_path))
+    assert res.returncode == 3
+    assert "on-stdout" in res.stdout
+    assert "on-stderr" in res.stderr
