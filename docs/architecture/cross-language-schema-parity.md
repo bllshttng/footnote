@@ -56,12 +56,18 @@ Both are read-only, side-effect-free, and idempotent.
 
 ## How to add a new cross-language event
 
-1. **Emit it.** Rust: `emitter.emit("my_new_kind", &payload)`. Add `"my_new_kind"` to `KNOWN_EVENT_KINDS` in `crates/fno-agents/src/lib.rs` (and to `emit_schema_json()` if it embeds the list). The list is hand-maintained; keep it in sync with every `.emit(...)` call site. Python: emit with a unique `type` not already used by any Rust `kind`.
+1. **Emit it.** Rust: `emitter.emit("my_new_kind", &payload)`. Add `"my_new_kind"` to `KNOWN_EVENT_KINDS` in `crates/fno-agents/src/lib.rs` (and to `emit_schema_json()` if it embeds the list). You do not have to remember this: `every_production_emit_kind_is_registered` scans every production `.emit(` call site and reds on a kind that was never registered. Python: emit with a unique `type` not already used by any Rust `kind`.
 2. **Document it.** Add an additive `event_types` entry in `cli/src/fno/events/schema.yaml` with `sources`, a one-line description, and a minimal `data` shape.
 3. **Keep payloads under 500 bytes.** Larger payloads use the evidence-pointer pattern (put the path in the event, the content in a separate file).
 4. **Run the check.** `bash scripts/check-event-schema-parity.sh` must print `parity OK`. If you renamed a field or changed the envelope shape, bump the schema major version (`events-v3` -> `events-v4`) and release both languages together.
 
-> Known limitation: `KNOWN_EVENT_KINDS` is a hand-maintained list, so it can drift from the actual `.emit()` call sites. A source-scanning completeness test (or a `schemars`-derived schema) would make this drift caught automatically; tracked as follow-up.
+The drift this section used to warn about is now closed on both sides, and it is worth knowing which test closes which half:
+
+- **Rust const vs Rust call sites:** `every_production_emit_kind_is_registered` (`crates/fno-agents/src/lib.rs`) scans every production `.emit(` and fails on an unregistered kind. It truncates each file at the first `#[cfg(test)]` so test fixtures do not register themselves.
+- **Rust const vs `schema.yaml`:** step 6 of `scripts/check-event-schema-parity.sh` asserts `KNOWN_EVENT_KINDS` is a subset of the documented `event_types`. Subset, not equality, because `schema.yaml` also carries Python types and loop-runtime `type` events that never get a const entry. It needs the built binary, so it runs on the `rust-ci.yml` leg.
+- **The Python-side view of the const:** `cli/tests/events/test_rust_events_documented.py` parses the const out of `lib.rs` rather than mirroring it. It previously kept a hand-written copy, which drifted 16 entries behind and stayed green for six weeks, because every assertion there is additive-only: a kind missing from the copy was a kind nothing asserted about. A `>= 40`-entry floor makes a broken parse loud instead of vacuous.
+
+A hand-maintained list with a comment asking the next person to remember is the thing all three of these replaced.
 
 ## Not everything cross-language needs parity: plan readiness
 

@@ -7,16 +7,30 @@
 # function-level string testing reproduces that.
 #
 # Cases:
-#   1. clean bump (base v10, PR v11)              -> exit 0
-#   2. identical parallel bump (base v11, PR v11) -> exit 1, "re-bump to v12"
-#   3. const line untouched by the PR             -> exit 0
-#   4. lowered version                            -> exit 1
-#   5. unparseable const at the PR head           -> exit 1 (never a silent pass)
-#   6. unreachable base ref                       -> exit 2 (fail closed)
+#    1. clean bump (base v10, PR v11)                    -> exit 0
+#    2. identical parallel bump (base v11, PR v11)       -> exit 1, "re-bump to v12"
+#   2b. those identical bumps really do merge clean      -> the guard's premise
+#    3. const line untouched, base ahead                 -> exit 0
+#    4. lowered version                                  -> exit 1
+#    5. unparseable const at the PR head                 -> exit 1 (never a silent pass)
+#   5b. unparseable const at the BASE                    -> exit 1
+#   5c. const line absent entirely at the PR head        -> exit 1
+#    6. unreachable base ref                             -> exit 2 (fail closed)
+#    7. merge-ref checkout (what CI actually gets)       -> still exit 1
+#    8. branch merged the updated base in afterwards     -> still exit 1
+#    9. inherited someone else's bump via a base merge   -> exit 0 (not a touch)
+#   10. bump above a large earlier patch (SIGPIPE trap)  -> still exit 1
+#   11. non-main base ref via PR_BASE_REF                -> exit 0
 #
 # Usage: bash scripts/tests/check-proto-version-bump-selftest.sh
 # Exit 0 = all assertions passed.
 set -uo pipefail
+
+# Hermetic git: the fixtures make dozens of commits, and an ambient
+# `commit.gpgsign = true` with an unusable key fails every one of them (measured:
+# 10 of 12 cases red). Contributor config must not decide whether this passes.
+export GIT_CONFIG_GLOBAL=/dev/null
+export GIT_CONFIG_SYSTEM=/dev/null
 
 REPO_ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 GUARD="$REPO_ROOT/scripts/ci/check-proto-version-bump.sh"
@@ -82,6 +96,21 @@ make_repo() {
     git -C "$dir" fetch --quiet origin main
     git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
     printf '%s %s\n' "$dir" "$head_sha"
+}
+
+# Assert a real merge commit landed in $1 at HEAD, labelled $2.
+#
+# Load-bearing, not defensive noise. The post-base-merge cases assert the SAME
+# rc+message that the plain collision case asserts, so a merge that silently did
+# not happen leaves them green while testing nothing about per-commit detection.
+require_merge_commit() {
+    local dir="$1" label="$2" parents
+    parents="$(git -C "$dir" rev-list --parents -n1 HEAD | wc -w | tr -d ' ')"
+    if [[ "$parents" -ne 3 ]]; then
+        fail "$label: fixture merge did not create a merge commit (parents=$((parents - 1)))"
+        return 1
+    fi
+    return 0
 }
 
 run_guard() {
@@ -169,20 +198,24 @@ git -C "$dir" update-ref -d refs/remotes/origin/main
 git -C "$dir" remote remove origin
 out="$( cd "$dir" && PR_HEAD_SHA="$sha" PR_BASE_REF=main PR_REMOTE=origin \
     bash "$GUARD" 2>&1 )"; rc=$?
-if [[ $rc -eq 2 ]] && [[ "$out" == *"unable to verify"* ]]; then
+# Match the base-resolution message specifically. "unable to verify" alone is
+# carried by three different exit-2 paths (bad base, bad head, unreadable
+# history), so this case would stay green while the failure it targets stopped
+# working, as long as ANY of them fired.
+if [[ $rc -eq 2 ]] && [[ "$out" == *"cannot resolve origin/main"* ]]; then
     pass "unreachable base ref exits 2 (fail closed)"
 else
     fail "unreachable base case: rc=$rc out=$out"
 fi
 
 # --- case 7: the merge-ref checkout CI actually gets ----------------------
-# `actions/checkout` on a pull_request event checks out refs/pull/N/merge, not
-# the branch. This asserts two things at once: the guard still reds on the
-# collision from that checkout, AND a diff against the base from there shows
-# nothing - which is why the workflow passes PR_HEAD_SHA instead of using HEAD.
+# Asserts two things at once: the guard still reds on the collision from a
+# merge-ref checkout, AND a diff against the base from there shows nothing -
+# which is why PR_HEAD_SHA exists. Rationale lives in the guard's header.
 read -r dir sha <<< "$(make_repo 10 "$(version_line 11)" 11)"
 git -C "$dir" checkout --quiet -b pr-merge main
 git -C "$dir" merge --quiet --no-ff -m "merge ref" "$sha" >/dev/null 2>&1
+require_merge_commit "$dir" "merge-ref fixture" || true
 if [[ -z "$(git -C "$dir" diff origin/main HEAD -- "$PROTO_REL")" ]]; then
     pass "merge ref shows no const diff vs base (why PR_HEAD_SHA is required)"
 else
@@ -205,6 +238,7 @@ fi
 read -r dir sha <<< "$(make_repo 10 "$(version_line 11)" 11)"
 git -C "$dir" checkout --quiet feature
 git -C "$dir" merge --quiet --no-edit main >/dev/null 2>&1
+require_merge_commit "$dir" "post-base-merge fixture" || true
 merged_sha="$(git -C "$dir" rev-parse HEAD)"
 out="$(run_guard "$dir" "$merged_sha")"; rc=$?
 if [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"* ]]; then
@@ -231,6 +265,7 @@ write_proto "$dir" "$(version_line 11)"
 git -C "$dir" add -A && git -C "$dir" commit --quiet -m "someone else bumped"
 git -C "$dir" checkout --quiet feature
 git -C "$dir" merge --quiet --no-edit main >/dev/null 2>&1
+require_merge_commit "$dir" "inherited-bump fixture" || true
 merged_sha="$(git -C "$dir" rev-parse HEAD)"
 git -C "$dir" remote add origin "$dir"
 git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
@@ -277,6 +312,64 @@ if [[ $rc -eq 1 ]] && [[ "$out" == *"re-bump to v12"* ]]; then
     pass "a large earlier patch does not swallow the version-line match"
 else
     fail "large-patch case: rc=$rc out=$out"
+fi
+
+# --- case 5b: unparseable const at the BASE -------------------------------
+# Case 5 only corrupts the head. The base leg has its own read_version call, and
+# an unreadable base must fail loud there too rather than compare against junk.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b main
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" 'pub const PROTO_VERSION: u32 = NOT_A_NUMBER;'
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "base with a bad const"
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet main
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/main "$(git -C "$dir" rev-parse main)"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"cannot parse a version"* ]] && [[ "$out" == *"tip"* ]]; then
+    pass "unparseable const at the base exits 1, naming the base"
+else
+    fail "base-unparseable case: rc=$rc out=$out"
+fi
+
+# --- case 5c: const line absent entirely ----------------------------------
+# Distinct from unparseable: nothing matches the const grep at all. Must not be
+# read as "no bump needed".
+read -r dir sha <<< "$(make_repo 10 '// the const was deleted outright')"
+out="$(run_guard "$dir" "$sha")"; rc=$?
+if [[ $rc -eq 1 ]] && [[ "$out" == *"no 'pub const PROTO_VERSION' line"* ]]; then
+    pass "an absent const line exits 1 rather than passing silently"
+else
+    fail "absent-const case: rc=$rc out=$out"
+fi
+
+# --- case 11: a base ref that is not main ---------------------------------
+# Every other case hardcodes main, so nothing pins the PR_BASE_REF plumbing and
+# a regression there would be invisible.
+dir="$(mktemp -d "$TMP_BASE/repo.XXXXXX")"
+git -C "$dir" init --quiet -b develop
+git -C "$dir" config user.email t@example.com
+git -C "$dir" config user.name test
+write_proto "$dir" "$(version_line 10)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "develop base v10"
+git -C "$dir" checkout --quiet -b feature
+write_proto "$dir" "$(version_line 11)"
+git -C "$dir" add -A && git -C "$dir" commit --quiet -m "bump"
+sha="$(git -C "$dir" rev-parse HEAD)"
+git -C "$dir" checkout --quiet develop
+git -C "$dir" remote add origin "$dir"
+git -C "$dir" update-ref refs/remotes/origin/develop "$(git -C "$dir" rev-parse develop)"
+out="$( cd "$dir" && PR_HEAD_SHA="$sha" PR_BASE_REF=develop PR_REMOTE=origin \
+    bash "$GUARD" 2>&1 )"; rc=$?
+if [[ $rc -eq 0 ]] && [[ "$out" == *"v10 -> v11"* ]] && [[ "$out" == *"origin/develop"* ]]; then
+    pass "a non-main base ref is honored end to end"
+else
+    fail "non-main base case: rc=$rc out=$out"
 fi
 
 echo ""

@@ -46,20 +46,15 @@ def schema() -> dict:
     return yaml.safe_load(SCHEMA_PATH.read_text(encoding="utf-8"))
 
 
-@pytest.fixture(scope="module")
-def rust_event_kinds() -> list[str]:
-    """Rust event kinds, read out of KNOWN_EVENT_KINDS in lib.rs.
+def parse_known_event_kinds(text: str) -> list[str]:
+    """Pull the KNOWN_EVENT_KINDS entries out of lib.rs source text.
 
-    Derived from source text rather than mirrored in a Python list. The mirror
-    this replaced had drifted 16 entries behind the const while every test here
-    kept passing: the checks are additive-only, so a kind missing from the
-    mirror is a kind nothing asserts about.
+    A module-level function, not fixture-internal, so the floor below can be
+    tested directly. An anti-vacuous guard that is only ever exercised on the
+    happy path is the same unverified-gate shape this module exists to remove.
     """
-    if not LIB_RS.exists():
-        pytest.skip(f"{LIB_RS} not present in this checkout")
-    text = LIB_RS.read_text(encoding="utf-8")
     start = text.find("pub const KNOWN_EVENT_KINDS")
-    assert start != -1, f"KNOWN_EVENT_KINDS const not found in {LIB_RS}"
+    assert start != -1, "KNOWN_EVENT_KINDS const not found"
     end = text.find("];", start)
     assert end != -1, "KNOWN_EVENT_KINDS block is unterminated"
     kinds = re.findall(r'"([A-Za-z0-9_]+)"', text[start:end])
@@ -69,6 +64,50 @@ def rust_event_kinds() -> list[str]:
         f"parser needs updating; do not lower MIN_EVENT_KINDS to go green."
     )
     return kinds
+
+
+@pytest.fixture(scope="module")
+def rust_event_kinds() -> list[str]:
+    """Rust event kinds, read out of KNOWN_EVENT_KINDS in lib.rs.
+
+    Derived from source text rather than mirrored in a Python list. The mirror
+    this replaced had drifted 16 entries behind the const while every test here
+    kept passing: the checks are additive-only, so a kind missing from the
+    mirror is a kind nothing asserts about.
+    """
+    # Assert, do not skip. The const lives in this repo, so absence means it
+    # moved or the crate was renamed - and a skip is a green run, which would
+    # quietly stop asserting the very thing this fixture exists to assert.
+    assert LIB_RS.exists(), f"{LIB_RS} not found; did the crate move?"
+    return parse_known_event_kinds(LIB_RS.read_text(encoding="utf-8"))
+
+
+def test_floor_rejects_a_truncated_parse() -> None:
+    """The anti-vacuous floor must actually trip, not just sit there.
+
+    A reformat the regex cannot read yields a short list; without the floor that
+    compares as equal-to-everything and every assertion below passes vacuously.
+    """
+    with pytest.raises(AssertionError, match="do not lower MIN_EVENT_KINDS"):
+        parse_known_event_kinds(
+            'pub const KNOWN_EVENT_KINDS: &[&str] = &[\n    "a", "b", "c",\n];\n'
+        )
+
+
+def test_floor_accepts_a_full_parse() -> None:
+    """Positive control: the floor is not rejecting everything."""
+    body = "".join(f'    "kind_{i}",\n' for i in range(MIN_EVENT_KINDS))
+    parsed = parse_known_event_kinds(
+        f"pub const KNOWN_EVENT_KINDS: &[&str] = &[\n{body}];\n"
+    )
+    assert len(parsed) == MIN_EVENT_KINDS
+    assert parsed[0] == "kind_0"
+
+
+def test_unterminated_const_block_is_loud() -> None:
+    """A const with no closing `];` must raise, never return a partial list."""
+    with pytest.raises(AssertionError, match="unterminated"):
+        parse_known_event_kinds('pub const KNOWN_EVENT_KINDS: &[&str] = &[\n    "a",\n')
 
 
 def test_schema_loads(schema: dict) -> None:
