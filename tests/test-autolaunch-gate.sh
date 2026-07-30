@@ -625,6 +625,91 @@ check_contains "T12b: claims: tier resolves x- node" "$NODE_ID" "$OUT12B"
 NODE_ID="$_SAVED_NODE_ID"
 
 # ---------------------------------------------------------------------------
+# Test 13: an OUTSTANDING native-plan-mode confirm suppresses auto-launch.
+#
+# The /target plan-mode front door calls /blueprint on the enriched doc BEFORE
+# it asks the human "Execute autonomously? [y/N]". /blueprint runs this gate as
+# its last action, so without a suppression the bg worker is dispatched while
+# the confirm is still outstanding - and a human who answers N gets a worker
+# they declined. Park while a `pending` sidecar exists; a `consumed` one is
+# inert (the confirm already happened) and must NOT park.
+# ---------------------------------------------------------------------------
+echo ""
+echo "--- Test 13: pending plan-mode sidecar -> parked, no dispatch ---"
+
+# The real detector is copied in (not stubbed): its status/TTL/integrity parsing
+# is exactly the freshness logic this gate must inherit rather than re-implement.
+_install_detector() {
+  local sbx="$1"
+  mkdir -p "$sbx/skills/target/scripts"
+  cp "$REPO_ROOT/skills/target/scripts/detect-pending-plan.sh" \
+     "$sbx/skills/target/scripts/detect-pending-plan.sh"
+  chmod +x "$sbx/skills/target/scripts/detect-pending-plan.sh"
+}
+
+_write_sidecar() {
+  local sbx="$1" status="$2"
+  cat > "$sbx/.fno/.pending-plan.md" <<EOF
+---
+captured_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
+session_id: ${SESSION_ID}
+slug: some-approved-plan
+source: claude-plan-mode
+status: ${status}
+---
+
+# Some approved plan
+EOF
+}
+
+SBX13="$(make_autolaunch_sandbox t13)"
+LOG13="$SBX13/call-log"
+_install_detector "$SBX13"
+_write_sidecar "$SBX13" pending
+
+OUT13="$(run_autolaunch "$SBX13" "$SBX13/plan.md")"
+check_contains "T13: parked line present" "parked" "$OUT13"
+check_contains "T13: names the outstanding confirm" "plan-mode-confirm-outstanding" "$OUT13"
+check_log_absent "T13: dispatch-node.sh NOT invoked" "$LOG13" "dispatch-node.sh"
+
+# 13b: a consumed sidecar is inert -> auto-launch proceeds as normal.
+echo ""
+echo "--- Test 13b: consumed sidecar is inert -> dispatch proceeds ---"
+SBX13B="$(make_autolaunch_sandbox t13b)"
+LOG13B="$SBX13B/call-log"
+_install_detector "$SBX13B"
+_write_sidecar "$SBX13B" consumed
+
+OUT13B="$(run_autolaunch "$SBX13B" "$SBX13B/plan.md")"
+check_contains "T13b: auto-launched line present" "auto-launched" "$OUT13B"
+check_log_present "T13b: dispatch-node.sh was invoked" "$LOG13B" "dispatch-node.sh"
+
+# 13c: no sidecar at all (the overwhelmingly common /blueprint run) -> unchanged.
+# Pinned so the new gate can never regress the plain blueprint path.
+echo ""
+echo "--- Test 13c: no sidecar -> dispatch proceeds (unchanged) ---"
+SBX13C="$(make_autolaunch_sandbox t13c)"
+LOG13C="$SBX13C/call-log"
+_install_detector "$SBX13C"
+
+OUT13C="$(run_autolaunch "$SBX13C" "$SBX13C/plan.md")"
+check_contains "T13c: auto-launched line present" "auto-launched" "$OUT13C"
+check_log_present "T13c: dispatch-node.sh was invoked" "$LOG13C" "dispatch-node.sh"
+
+# 13d: sidecar present but the detector is MISSING -> fail closed (park).
+# A sidecar is evidence a confirm may be outstanding; parking costs one manual
+# `/target bg <node>`, while launching costs a worker the human never approved.
+echo ""
+echo "--- Test 13d: sidecar + missing detector -> fail closed (parked) ---"
+SBX13D="$(make_autolaunch_sandbox t13d)"
+LOG13D="$SBX13D/call-log"
+_write_sidecar "$SBX13D" pending      # deliberately no _install_detector
+
+OUT13D="$(run_autolaunch "$SBX13D" "$SBX13D/plan.md")"
+check_contains "T13d: parked line present" "parked" "$OUT13D"
+check_log_absent "T13d: dispatch-node.sh NOT invoked" "$LOG13D" "dispatch-node.sh"
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 echo ""

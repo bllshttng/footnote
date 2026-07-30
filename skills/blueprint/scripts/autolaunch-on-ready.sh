@@ -252,6 +252,42 @@ if [[ -f "$_MANIFEST" ]]; then
   fi
 fi
 
+# 4b. Outstanding native-plan-mode confirm: the /target front door owns this
+#     decision, not the gate. The front door calls /blueprint on the ENRICHED doc
+#     (skills/target/references/plan-mode-frontdoor.md step 5) BEFORE it asks the
+#     human "Execute autonomously? [y/N]" (step 6), and /blueprint runs this gate
+#     as its last action - so without this park a bg worker is dispatched while
+#     the confirm is still outstanding, and a human who answers N gets a worker
+#     they explicitly declined. A yes is no reason to launch either: the front-door
+#     session then executes the plan itself, so a bg dispatch would be a second
+#     worker on one node.
+#
+#     Freshness is delegated to detect-pending-plan.sh (status + TTL + integrity)
+#     instead of re-parsed here, so a consumed / expired / malformed sidecar stays
+#     correctly inert. The whole block is gated on the sidecar EXISTING, so an
+#     ordinary /blueprint run pays one file test and is otherwise untouched.
+#     Fail CLOSED when a sidecar exists but its state cannot be read: a park costs
+#     one manual `/target bg <node>`, a wrong launch costs an unapproved worker.
+_SIDECAR="${REPO_ROOT}/.fno/.pending-plan.md"
+if [[ -f "$_SIDECAR" ]]; then
+  _DETECT="$REPO_ROOT/skills/target/scripts/detect-pending-plan.sh"
+  if [[ ! -f "$_DETECT" ]]; then
+    echo "parked $node reason=\"plan-mode-sidecar-unverifiable: sidecar present, detect-pending-plan.sh missing; not launching on an unread confirm state\""
+    exit 0
+  fi
+  _PM="$(bash "$_DETECT" detect --sidecar "$_SIDECAR" 2>/dev/null | sed -n 's/^result=//p' | head -1)"
+  case "$_PM" in
+    pending)
+      echo "parked $node reason=\"plan-mode-confirm-outstanding: an approved native plan awaits the front door's [y/N]; /target executes it on yes\""
+      exit 0 ;;
+    none|expired|malformed|superseded_by_arg)
+      : ;;   # inert sidecar - the confirm is settled or the plan is not offerable
+    *)
+      echo "parked $node reason=\"plan-mode-sidecar-unverifiable: detect returned '${_PM:-<empty>}'; not launching on an unread confirm state\""
+      exit 0 ;;
+  esac
+fi
+
 # 5. Dispatch via the target dispatch primitive. Whether the worker may merge
 #    is not decided here: since x-4391 dispatch-node.sh resolves it per node
 #    from that node's own config.dispatch.auto_merge (default false), so an

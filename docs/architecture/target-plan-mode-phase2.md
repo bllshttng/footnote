@@ -72,9 +72,16 @@ The gate reuses the **existing backlog state model** (Locked Decision 3): a `rea
 
 `config.target.auto_launch_on_blueprint` in `.fno/config.toml` (project) or `~/.fno/config.toml` (global). Default `false`. Read with the `get_config "target.auto_launch_on_blueprint" "false"` pattern (same shape as `config.target.dedupe_dead_duplicates`). Manual dispatch via `/target bg <node...>` is always available regardless of the flag.
 
-## Deferred: native-plan-mode auto-launch (Task 3.3a)
+## Native-plan-mode auto-launch (Task 3.3a): no hook dispatch, and why
 
-Auto-launch on a native Plan Mode approval (dispatch from `hooks/capture-plan-mode.sh` after the sidecar write) is deferred to a follow-up. Task 3.3's other half, the capture-hook fix (read the plan body from `tool_response.filePath` first, drop the phantom `approved`/`decision`/`isError` rejection gates, add the `awaitingLeaderApproval` skip), is already implemented in a separate change that rewrote `capture-plan-mode.sh`. Adding the auto-launch to the earlier version of that file would collide; the follow-up builds on the capture-hook fix once it lands.
+Task 3.3a was originally deferred as "dispatch from `hooks/capture-plan-mode.sh` after the sidecar write", waiting on the capture-hook fix (read the plan body from `tool_response.filePath` first, drop the phantom `approved`/`decision`/`isError` rejection gates, add the `awaitingLeaderApproval` skip) that a separate change had already landed.
+That capture-hook fix is in. The hook dispatch it was waiting for is closed unbuilt, because the capture hook is the wrong seam and the native path already reaches Layer 2 without it.
+
+**At capture time there is nothing to dispatch.** The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id; a native plan has no `claims:` / `graph_node_id:`; and `.fno/.pending-plan.md` is no node's `plan_path`. All three of `autolaunch-on-ready.sh`'s resolution tiers therefore miss, so a ready-gate placed there could never see a ready node. The plan is not executable at that moment either: `/blueprint` hard-refuses a doc lacking `## Failure Modes` and a `status` of `design` or `ready`, and the backfill that supplies both runs inside a later `/target`, long after the hook has exited. See the chicken-and-egg section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
+
+**The native path inherits Layer 2 for free.** The front door calls `/blueprint` on the enriched doc, and `/blueprint` runs `autolaunch-on-ready.sh` as its last action in every mode. An approved native plan reaches exactly the same ready-gated dispatch the blueprint path uses, with no hook involvement.
+
+**That inheritance needed one guard, which is the real content of this task.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. With the gate ON, the dispatch fired while that confirm was still outstanding: answering `N` produced a bg worker the human had just declined, and answering `y` produced a second worker racing the front-door session, which executes the plan itself. Step 4b of `autolaunch-on-ready.sh` now parks with `plan-mode-confirm-outstanding` while a `pending` sidecar exists, delegating freshness to `detect-pending-plan.sh` so a consumed or expired sidecar stays inert, and failing closed when a sidecar exists but its state cannot be read. A run with no sidecar (the ordinary `/blueprint`) pays one file test and is otherwise unchanged.
 
 ## Components
 
@@ -82,10 +89,11 @@ Auto-launch on a native Plan Mode approval (dispatch from `hooks/capture-plan-mo
 |---|---|
 | `skills/target/scripts/dispatch-node.sh` | Layer 1 dispatch primitive (US5) |
 | `skills/target/SKILL.md` (`### 0a. Background Dispatch`) | `/target bg <node...>` subcommand |
-| `skills/blueprint/scripts/autolaunch-on-ready.sh` | Layer 2 ready-gated auto-launch (US6) |
+| `skills/blueprint/scripts/autolaunch-on-ready.sh` | Layer 2 ready-gated auto-launch (US6); step 4b parks while a native-plan confirm is outstanding |
 | `skills/blueprint/SKILL.md` (tail) | invokes the auto-launch helper after intake in every mode |
 | `skills/target/references/settings.md` | documents `config.target.auto_launch_on_blueprint` |
 | `tests/test-bg-dispatch.sh` | hermetic AC5 + AC6 regression harness (mock `fno` + `get_config` stub) |
+| `tests/test-autolaunch-gate.sh` | hermetic gate harness: caller-is-holder, node-resolution tiers, and the outstanding-confirm park |
 
 ## Multi-CLI
 
