@@ -20,6 +20,7 @@ import json
 import os
 import shutil
 import subprocess
+import time
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -211,6 +212,25 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         monkeypatch.setattr(
             mux_spawn, "_backfill_codex_session_id", original_capture
         )
+        # The pane child opens the rollout on fd 3 only after it execs, and the
+        # heal correlates on exactly that open fd. Reconciling before it is open
+        # observes a legitimate "pending" and proves nothing, so wait for the
+        # precondition instead of assuming the spawn won the race: this test
+        # passed serially and failed only under parallel load, where child
+        # startup is the thing that slips.
+        probe_pid = load_registry(path=agents_home / "registry.json")[0].pid
+        deadline = time.monotonic() + 30.0
+        opened = None
+        while time.monotonic() < deadline:
+            opened = mux_spawn._codex_session_id_for_pid(probe_pid)
+            if opened:
+                break
+            time.sleep(0.05)
+        assert opened, (
+            f"pane child pid={probe_pid} never opened its rollout within 30s; "
+            "the late-identity heal correlates on that open fd"
+        )
+
         reconciled = dispatch.reconcile_agents(
             codex_session_index_path=tmp_path / "missing-index.jsonl"
         )
