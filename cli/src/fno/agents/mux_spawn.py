@@ -818,6 +818,24 @@ def _run_mux(
         ) from exc
 
 
+def _reap_spawned_pane(
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[bool, str]:
+    """Attempt exact pane cleanup and return confirmed status plus failure detail."""
+    try:
+        cleanup = _run_mux(
+            ["mux", "pane", "kill", "--session", session, str(pane_id)],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return False, str(exc)
+    if cleanup.returncode == 0:
+        return True, ""
+    return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+
+
 def _lookup_child_pid(
     session: str,
     pane_id: int,
@@ -1141,10 +1159,19 @@ def dispatch_spawn_pane(
             # collapses the split, the viewer's focus and any later sibling split
             # survive (AC5-FR/AC6-FR), and no registry row is written.
             if _await_interactive_readiness(session, pane_id, runner) == "failed":
-                _run_mux(["mux", "pane", "kill", "--session", session, str(pane_id)], runner)
+                reaped, cleanup_detail = _reap_spawned_pane(
+                    session, pane_id, runner
+                )
+                if reaped:
+                    raise DispatchAskError(
+                        f"agent {name!r} provider exited before readiness in session "
+                        f"{session!r}; pane {pane_id} reaped, no registry row written",
+                        exit_code=1,
+                    )
                 raise DispatchAskError(
-                    f"agent {name!r} provider exited before readiness in session "
-                    f"{session!r}; pane {pane_id} reaped, no registry row written",
+                    f"agent {name!r} provider exited before readiness; pane "
+                    f"{pane_id} may still exist in session {session!r} because "
+                    f"exact cleanup failed: {cleanup_detail}",
                     exit_code=1,
                 )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
@@ -1242,19 +1269,15 @@ def dispatch_spawn_pane(
         try:
             update_registry(_append, path=registry_path)
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
-            cleanup = _run_mux(
-                ["mux", "pane", "kill", "--session", session, str(pane_id)],
-                runner,
-            )
-            if cleanup.returncode == 0:
+            reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+            if reaped:
                 raise DispatchAskError(
                     f"registry write failed: {exc}; pane {pane_id} reaped, no registry row written",
                     exit_code=12,
                 ) from exc
-            detail = (cleanup.stderr or cleanup.stdout or "no output").strip()
             raise DispatchAskError(
                 f"registry write failed: {exc}; pane {pane_id} may still exist in "
-                f"session {session!r} because exact cleanup failed: {detail}",
+                f"session {session!r} because exact cleanup failed: {cleanup_detail}",
                 exit_code=12,
             ) from exc
 

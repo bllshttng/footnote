@@ -58,6 +58,15 @@ def _write_codex_session(root, uuid, cwd="/repo/two"):
     )
 
 
+def _write_turn_named_codex_session(root, uuid, cwd="/repo/two"):
+    d = root / "codex" / "2026" / "07" / "20"
+    d.mkdir(parents=True, exist_ok=True)
+    meta = json.dumps({"type": "session_meta", "payload": {"id": uuid, "cwd": cwd}})
+    (d / "rollout-2026-07-20T10-00-00-turn_12345.jsonl").write_text(
+        meta + "\n", encoding="utf-8"
+    )
+
+
 def test_default_codex_sessions_dir_honors_codex_home(
     monkeypatch, tmp_path
 ):
@@ -229,6 +238,38 @@ def test_real_unreadable_directory_refuses_partial_store_answer(
         blocked.chmod(0o700)
 
     assert matching in str(exc.value)
+
+
+def test_turn_named_codex_rollout_resolves_from_session_metadata(_registry_home):
+    session_id = "019fb417-1111-7222-8333-4444deadbeef"
+    _write_turn_named_codex_session(_registry_home, session_id)
+
+    for token in (session_id, "deadbeef", "019fb417"):
+        hits = store_fallback.complete_store_hits(token)
+        assert [(hit.harness, hit.session_id) for hit in hits] == [
+            ("codex", session_id)
+        ]
+
+
+def test_turn_named_codex_rollout_participates_in_registry_collision(
+    _registry_home,
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    store_session = "019fb417-1111-7222-8333-4444deadbeef"
+    _write_turn_named_codex_session(_registry_home, store_session)
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            harness="claude",
+            harness_session_id="aaaaaaaa-1111-2222-3333-444455556666",
+            cwd="/registered",
+            log_path="",
+        )
+    ])
+
+    with pytest.raises(AgentResolutionError, match=store_session):
+        resolve_agent("deadbeef")
 
 
 def test_registry_hit_and_store_only_session_share_one_ambiguity_namespace(
@@ -841,7 +882,10 @@ def test_canonical_tail_and_legacy_prefix_in_store_fallback_are_ambiguous(
     assert load_registry() == []
 
 
-def test_codex_tail_probe_parses_only_filename_candidates(tmp_path, monkeypatch):
+def test_codex_tail_probe_parses_every_rollout_before_identity_filter(
+    tmp_path, monkeypatch
+):
+    """Turn-ID filenames require metadata-first filtering for complete coverage."""
     from fno.agents import discover
 
     root = tmp_path / "codex" / "2026" / "07" / "30"
@@ -855,11 +899,11 @@ def test_codex_tail_probe_parses_only_filename_candidates(tmp_path, monkeypatch)
 
     def meta(path):
         seen.append(path.name)
-        if path == noise:
-            raise AssertionError("unrelated rollout was parsed")
-        return sid, "/x"
+        if path == wanted:
+            return sid, "/x"
+        return "aaaaaaaa-bbbb-7ccc-8ddd-eeeeffffffff", "/noise"
 
     monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(tmp_path / "codex"))
     monkeypatch.setattr(discover, "_codex_meta", meta)
     assert [hit.session_id for hit in store_fallback.probe_stores("55556666")] == [sid]
-    assert seen == [wanted.name]
+    assert set(seen) == {wanted.name, noise.name}

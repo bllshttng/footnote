@@ -145,12 +145,10 @@ def _probe_codex(token: str) -> list[StoreHit]:
 
     hits: dict[str, StoreHit] = {}
     root = _codex_sessions_dir()
-    needle = token.lower()
     found = scan_files(
         root,
         include=lambda name: name.startswith("rollout-")
-        and name.endswith(".jsonl")
-        and needle in name.lower(),
+        and name.endswith(".jsonl"),
     )
     for path in sorted(found):
         meta = _codex_meta(path)

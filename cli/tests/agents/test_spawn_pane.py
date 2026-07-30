@@ -44,6 +44,9 @@ class FakeRunner:
         wait_returncode: int = 11,
         read_stdout: str = "",
         placement: Optional[dict] = None,
+        kill_returncode: int = 0,
+        kill_stderr: str = "",
+        kill_exception: Optional[Exception] = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.run_returncode = run_returncode
@@ -55,6 +58,9 @@ class FakeRunner:
         self.read_stdout = read_stdout
         self.placement = placement
         self.kill_calls: list[list[str]] = []
+        self.kill_returncode = kill_returncode
+        self.kill_stderr = kill_stderr
+        self.kill_exception = kill_exception
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -87,7 +93,11 @@ class FakeRunner:
             return subprocess.CompletedProcess(argv, 0, self.read_stdout, "")
         if argv[1:4] == ["mux", "pane", "kill"]:
             self.kill_calls.append(list(argv))
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            if self.kill_exception is not None:
+                raise self.kill_exception
+            return subprocess.CompletedProcess(
+                argv, self.kill_returncode, "", self.kill_stderr
+            )
         raise AssertionError(f"unexpected fno invocation: {argv}")
 
 
@@ -1419,6 +1429,45 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
     assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
     assert "7" in kill, "the placed pane id is reaped"
     assert load_registry() == [], "no registry row on launch failure"
+
+
+@pytest.mark.parametrize("cleanup_failure", ["nonzero", "timeout"])
+def test_exact_readiness_failure_never_claims_unconfirmed_reap(
+    tmp_path: Path, monkeypatch, cleanup_failure: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner(
+        placement={"anchor": 4},
+        wait_returncode=12,
+        kill_returncode=1,
+        kill_stderr="permission denied",
+        kill_exception=(
+            subprocess.TimeoutExpired(["fno", "mux", "pane", "kill"], 30)
+            if cleanup_failure == "timeout"
+            else None
+        ),
+    )
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="peer",
+            message="hi",
+            provider="claude",
+            cwd=tmp_path,
+            split="down",
+            at="current",
+            runner=runner,
+        )
+
+    message = str(exc.value)
+    assert "pane 7 may still exist" in message
+    assert "session 'main'" in message
+    assert "pane 7 reaped" not in message
+    assert load_registry() == []
 
 
 def test_spawn_stamps_process_incarnation_token(tmp_path: Path, monkeypatch) -> None:
