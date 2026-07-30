@@ -93,6 +93,18 @@ also_born_line=""
 [[ -n "${older_ids:-}" ]] && also_born_line="
 Also born this gap (not offered separately): ${older_ids}."
 
+# Suppressing the NEWEST offer must not destroy the older ids with it: the guard
+# below exits before any reminder is built, and the cursor is already past the
+# whole slice (codex P2). Naming an id is not an offer, so it is safe to list
+# them unresolved - a stale id is noise, a discarded one is data loss.
+emit_older_only() {
+    [[ -n "${older_ids:-}" ]] || exit 0
+    jq -n --arg ctx "<system-reminder>
+Nodes born this gap, not offered: ${older_ids}.
+</system-reminder>" '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
+    exit 0
+}
+
 # Resolve + in-progress guard: suppress an offer that should not reach the
 # operator. Two cases, both from one `fno backlog get`:
 #   (a) PHANTOM  -- the node no longer resolves (removed / superseded / a
@@ -127,11 +139,11 @@ try:
 except Exception:
     sys.exit(1)  # unparseable or unexpected shape -> do NOT suppress (surface)
 ' 2>/dev/null; then
-            exit 0
+            emit_older_only
         fi
     elif [[ "$_get_rc" -ne 124 ]]; then
         # Authoritative not-found (nonzero, not a timeout) -> phantom, suppress.
-        exit 0
+        emit_older_only
     fi
     # _get_rc == 124: resolution timed out, not an authoritative not-found. The
     # cursor already advanced past this offer, so suppressing would discard a

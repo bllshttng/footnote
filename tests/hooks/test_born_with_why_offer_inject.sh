@@ -390,6 +390,33 @@ ctx="$(printf '%s' "$out" | extract_ctx)"
     || fail "burst: more than one full offer surfaced"
 pass "burst: newest offer surfaced, older offers in the slice named not dropped"
 
+# ── Burst + suppressed newest: older ids survive the guard (codex P2) ──
+# The resolve/in-progress guard exits before any reminder is built, and the
+# cursor is already past the whole slice, so a phantom/underway NEWEST would
+# take every valid older offer down with it - the exact loss this node fixes.
+offered_line "2026-06-30T14:00:00Z" "x-keep0001" >> "$EVENTS"
+offered_line "2026-06-30T14:00:03Z" "ab-phantom8" >> "$EVENTS"
+out="$(FNO_STUB_PHANTOM="ab-phantom8" run_hook)" || fail "burst-phantom: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-keep0001"* ]] \
+    || fail "burst-phantom: a phantom newest destroyed the older offer: ${ctx:-<empty>}"
+[[ "$ctx" != *"ab-phantom8"* ]] || fail "burst-phantom: phantom newest surfaced anyway"
+pass "burst-phantom: phantom newest suppressed, older ids still surface"
+
+offered_line "2026-06-30T14:01:00Z" "x-keep0002" >> "$EVENTS"
+offered_line "2026-06-30T14:01:03Z" "x-underway8" >> "$EVENTS"
+out="$(FNO_STUB_INPROGRESS="x-underway8" run_hook)" || fail "burst-underway: hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-keep0002"* ]] \
+    || fail "burst-underway: an underway newest destroyed the older offer: ${ctx:-<empty>}"
+pass "burst-underway: underway newest suppressed, older ids still surface"
+
+# Solo suppressed offer stays silent - naming nothing is still the right answer.
+offered_line "2026-06-30T14:02:00Z" "ab-phantom7" >> "$EVENTS"
+out="$(FNO_STUB_PHANTOM="ab-phantom7" run_hook)" || fail "solo-phantom: hook nonzero"
+[[ -z "$out" ]] || fail "solo-phantom: suppressed solo offer emitted output: $out"
+pass "solo-phantom: suppressed offer with no older ids stays silent"
+
 # ── Wiring: hooks.json registers the hook under UserPromptSubmit ──────
 python3 -c "import json; json.load(open('$HOOKS_JSON'))" || fail "hooks.json failed JSON parse"
 python3 - "$HOOKS_JSON" <<'PYEOF' || fail "hook not registered under UserPromptSubmit"
