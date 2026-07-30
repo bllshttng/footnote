@@ -140,8 +140,21 @@ def _pid_alive(
                 return None
             return current_start == recorded_start
         return True
-    except Exception:
-        return False
+    except Exception as exc:
+        # "Gone" is the ONLY confident death. Anything else - psutil missing,
+        # AccessDenied on a process this uid cannot inspect - is unreadable, and
+        # returning False there would present an undecidable case to callers as a
+        # decided death, which reconcile writes through as `orphaned`.
+        if _psutil is not None and isinstance(exc, _psutil.NoSuchProcess):
+            return False
+        try:
+            import psutil
+
+            if isinstance(exc, psutil.NoSuchProcess):
+                return False
+        except Exception:  # noqa: BLE001 -- no psutil means no verdict, not death
+            pass
+        return None
 
 
 def _roster_path() -> Path:

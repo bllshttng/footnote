@@ -987,6 +987,61 @@ def test_reconcile_normalizes_under_lock_duplicate_to_spawning(
     assert any(e["reason"] == "codex-session-id-backfill-raced" for e in result.errors)
 
 
+def test_reconcile_never_claims_a_refused_claude_backfill(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`backfilled` reports what the write STAMPED, not what it intended.
+
+    The under-lock guard refuses a claude row whose short_id changed between probe
+    and apply (rm + re-register under the same name). Claiming the heal at queue
+    time reported a bound identity for a row whose harness_session_id is still
+    null - the same lie this PR removes from the codex path.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    healed_uuid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+    _seed_registry(
+        dict(name="w1", provider="claude", status="live", short_id="11111111"),
+    )
+
+    from fno.agents import dispatch
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.registry import AgentEntry, load_registry
+
+    monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
+    monkeypatch.setattr(
+        claude_mod, "claude_logs_reachable", lambda *_a, **_k: True
+    )
+    monkeypatch.setattr(claude_mod, "resolve_session_uuid", lambda _s: healed_uuid)
+
+    real_update = dispatch.update_registry
+    replaced = False
+
+    def replace_then_apply(updater):
+        nonlocal replaced
+        if not replaced:
+            replaced = True
+            # Same name, different transport handle: the row we probed is gone.
+            real_update(lambda rows: [
+                AgentEntry(
+                    name="w1", harness="claude", cwd="/tmp", log_path="",
+                    short_id="99999999", status="live",
+                )
+            ])
+        return real_update(updater)
+
+    monkeypatch.setattr(dispatch, "update_registry", replace_then_apply)
+    result = dispatch.reconcile_agents()
+
+    row = next(r for r in load_registry() if r.name == "w1")
+    assert row.harness_session_id is None, "a refused stamp still landed"
+    assert not any(
+        b["name"] == "w1" for b in result.backfilled
+    ), f"claimed a heal that was refused: {result.backfilled}"
+    assert any(
+        e["reason"] == "claude-session-id-backfill-raced" for e in result.errors
+    )
+
+
 def test_reconcile_normalizes_duplicate_idless_live_row_to_spawning(
     tmp_path: Path, monkeypatch
 ) -> None:

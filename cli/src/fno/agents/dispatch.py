@@ -3188,10 +3188,22 @@ def reconcile_agents(
                             }
                         )
                         continue
+                    probe_failed = False
                     try:
                         healed = _codex_session_id_for_pid(probe_pid)
-                    except Exception:  # noqa: BLE001 -- an unreadable process stays pending
+                    except Exception as exc:  # noqa: BLE001 -- stays pending, never guesses
+                        # The correlator already absorbs every EXPECTED failure
+                        # (gone / access-denied / no rollout open) and returns None
+                        # for them, so anything landing here is unexpected. Keep the
+                        # row pending, but never render it as the benign "codex has
+                        # not opened its rollout yet" case with the cause dropped -
+                        # that reads as "still starting" forever.
                         healed = None
+                        probe_failed = True
+                        sys.stderr.write(
+                            f"WARN: codex identity probe failed for {entry.name} "
+                            f"(pid {probe_pid}): {exc}\n"
+                        )
                     if healed:
                         # Scan the rows AND the ids this same pass already decided
                         # to stamp. Two id-less rows pointing at one pane both see
@@ -3236,7 +3248,11 @@ def reconcile_agents(
                             "name": entry.name,
                             "provider": "codex",
                             "id": None,
-                            "reason": "codex-session-id-pending",
+                            "reason": (
+                                "codex-session-probe-failed"
+                                if probe_failed
+                                else "codex-session-id-pending"
+                            ),
                         }
                     )
                     continue
@@ -3374,14 +3390,11 @@ def reconcile_agents(
                 except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
                     healed = None
                 if healed:
+                    # Queue only. The `backfilled` claim is made AFTER the write,
+                    # against the names the write actually stamped: the under-lock
+                    # guard can refuse this row (same-name rm + re-register), and
+                    # claiming success here reported a heal that never landed.
                     pending_backfill[entry.name] = (entry.short_id, healed)
-                    backfilled.append(
-                        {
-                            "name": entry.name,
-                            "provider": "claude",
-                            "harness_session_id": healed,
-                        }
-                    )
 
         else:
             errors.append(
@@ -3432,6 +3445,7 @@ def reconcile_agents(
         codex_backfill_applied: set[str] = set()
         status_updates_applied: set[str] = set()
         codex_ids_claimed: set[str] = set()
+        claude_backfill_applied: set[str] = set()
 
         def _apply(current_entries: list[AgentEntry]) -> list[AgentEntry]:
             # Reset per call: update_registry may re-run _apply against a fresh
@@ -3440,6 +3454,7 @@ def reconcile_agents(
             codex_backfill_applied.clear()
             status_updates_applied.clear()
             codex_ids_claimed.clear()
+            claude_backfill_applied.clear()
             # Build the new entries from the CURRENT (under-lock) entries,
             # overriding only the ``status`` field from pending_updates.
             # Pre-fix this returned ``pending_updates.get(e.name, e)`` which
@@ -3473,6 +3488,7 @@ def reconcile_agents(
                         # claude uuid is synced from it on the next load's backfill.
                         updates["harness_session_id"] = hsid
                         updates["harness"] = e.harness
+                        claude_backfill_applied.add(e.name)
                 if e.name in pending_codex_backfill:
                     (
                         expected_pid,
@@ -3535,6 +3551,15 @@ def reconcile_agents(
             for change in list(backfilled):
                 backfilled.remove(change)
                 errors.append({**change, "id": None, "reason": write_error})
+            for name in pending_backfill:
+                errors.append(
+                    {
+                        "name": name,
+                        "provider": "claude",
+                        "id": None,
+                        "reason": write_error,
+                    }
+                )
             for name in pending_codex_backfill:
                 errors.append(
                     {
@@ -3545,6 +3570,24 @@ def reconcile_agents(
                     }
                 )
         else:
+            for name, (_probed_short, hsid) in pending_backfill.items():
+                if name in claude_backfill_applied:
+                    backfilled.append(
+                        {
+                            "name": name,
+                            "provider": "claude",
+                            "harness_session_id": hsid,
+                        }
+                    )
+                else:
+                    errors.append(
+                        {
+                            "name": name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-session-id-backfill-raced",
+                        }
+                    )
             for name, (_epid, _estart, _mux, _pid, _start, hsid) in pending_codex_backfill.items():
                 if name in codex_backfill_applied:
                     backfilled.append(
