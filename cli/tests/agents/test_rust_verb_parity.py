@@ -57,9 +57,20 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
     otherwise resume/attach would diverge purely on which PATH each side was
     handed, not on behavior.
     """
+    source_path = str(Path(__file__).resolve().parents[2] / "src")
+    inherited_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath = (
+        source_path + os.pathsep + inherited_pythonpath
+        if inherited_pythonpath
+        else source_path
+    )
     return subprocess.run(
         [str(RUST_BIN), *args],
-        env={**os.environ, "FNO_AGENTS_HOME": str(home)},
+        env={
+            **os.environ,
+            "FNO_AGENTS_HOME": str(home),
+            "PYTHONPATH": pythonpath,
+        },
         capture_output=True,
         text=True,
     )
