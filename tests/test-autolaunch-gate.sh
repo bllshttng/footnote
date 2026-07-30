@@ -218,8 +218,12 @@ run_autolaunch() {
   output=$(
     cd "$sbx" &&
     export CALL_LOG="$log" REPO_ROOT="$sbx" PATH="$sbx/stub-bin:$PATH"
-    # Optional graph.json fixture for tier-c (plan_path) resolution tests.
-    [ -n "${GRAPH_JSON_FIXTURE:-}" ] && export GRAPH_JSON="$GRAPH_JSON_FIXTURE"
+    # Graph fixture for tier-c (plan_path) resolution tests. Default to a path
+    # that does not exist: unset, the script falls back to $HOME/.fno/graph.json
+    # and every case parses the developer's REAL graph, so an unrelated node
+    # parented to the fixture id silently flips the epic-redirect verdict.
+    export GRAPH_JSON="${GRAPH_JSON_FIXTURE:-$sbx/absent-graph.json}"
+    export GRAPH_JSON_PATH=""
     bash "$AUTOLAUNCH" "$plan" 2>&1
   )
   set -e
@@ -625,7 +629,7 @@ check_contains "T12b: claims: tier resolves x- node" "$NODE_ID" "$OUT12B"
 NODE_ID="$_SAVED_NODE_ID"
 
 # ---------------------------------------------------------------------------
-# Test 13: the front door's own approved native plan is never bg-dispatched.
+# Test 13: a native-plan-mode plan is never bg-dispatched.
 #
 # The /target plan-mode front door calls /blueprint on the enriched doc BEFORE
 # it asks the human "Execute autonomously? [y/N]". /blueprint runs this gate as
@@ -633,104 +637,87 @@ NODE_ID="$_SAVED_NODE_ID"
 # confirm is still outstanding, and a human who answers N gets a worker they
 # declined.
 #
-# The discriminator is plan IDENTITY, not sidecar state: a declined confirm
-# deliberately leaves the sidecar `pending` and re-offerable, so keying off
-# "a pending sidecar exists" would park every unrelated /blueprint for the
-# sidecar's whole TTL (codex P2 on this change). Correlation is the sidecar's
-# first body line, which the backfill preserves verbatim in the enriched doc.
+# The plan states its own provenance: backfill-plan.sh stamps
+# `source: claude-plan-mode` into the enriched doc's frontmatter and /blueprint
+# round-trips frontmatter. Frontmatter ONLY - a `source:` line in a doc body is
+# prose, and treating it as authority is the same trap the graph_node_id tiers
+# above already guard against (T9).
 # ---------------------------------------------------------------------------
-echo ""
-echo "--- Test 13: front door's own plan -> parked, no dispatch ---"
 
-# $2 is the sidecar body's first line: the correlation anchor. The sandbox
-# factory writes "# Test Plan" as plan.md's first heading, so passing that
-# simulates the enriched doc (body preserved verbatim); passing anything else
-# simulates an unrelated plan blueprinted while a sidecar happens to exist.
-_write_sidecar() {
-  local sbx="$1" body="${2:-# Test Plan}" status="${3:-pending}" src="${4:-claude-plan-mode}"
-  cat > "$sbx/.fno/.pending-plan.md" <<EOF
----
-captured_at: $(date -u +%Y-%m-%dT%H:%M:%SZ)
-session_id: ${SESSION_ID}
-slug: some-approved-plan
-source: ${src}
-status: ${status}
----
-
-${body}
-EOF
+# Rewrites the fixture plan with an explicit frontmatter `source:` value; pass
+# an empty value to omit the key entirely (the ordinary blueprint plan).
+_write_plan_source() {
+  local sbx="$1" src="${2:-}" body="${3:-# Test Plan}"
+  {
+    echo "---"
+    echo "title: Test plan"
+    echo "status: ready"
+    echo "claims: ${NODE_ID}"
+    [ -n "$src" ] && echo "source: $src"
+    echo "---"
+    printf '%s\n' "$body"
+  } > "$sbx/plan.md"
 }
 
+echo ""
+echo "--- Test 13: source: claude-plan-mode -> parked, no dispatch ---"
 SBX13="$(make_autolaunch_sandbox t13)"
 LOG13="$SBX13/call-log"
-_write_sidecar "$SBX13" "# Test Plan"
+_write_plan_source "$SBX13" claude-plan-mode
 
 OUT13="$(run_autolaunch "$SBX13" "$SBX13/plan.md")"
 check_contains "T13: parked line present" "parked" "$OUT13"
-check_contains "T13: names the owned confirm" "plan-mode-confirm-owned" "$OUT13"
+check_contains "T13: names the front-door owner" "plan-mode-front-door-owns-it" "$OUT13"
 check_log_absent "T13: dispatch-node.sh NOT invoked" "$LOG13" "dispatch-node.sh"
 
-# 13b: THE codex P2 regression pin. A pending sidecar for a DIFFERENT plan (the
-# declined-but-kept state, which persists for the whole TTL) must not park an
-# unrelated ready node.
+# 13b: the ordinary /blueprint plan (no source: key) must still dispatch. This is
+# the regression pin: an over-broad gate here silently disables the whole
+# configured auto-launch path.
 echo ""
-echo "--- Test 13b: unrelated plan + pending sidecar -> dispatch proceeds ---"
+echo "--- Test 13b: no source: key -> dispatch proceeds (unchanged) ---"
 SBX13B="$(make_autolaunch_sandbox t13b)"
 LOG13B="$SBX13B/call-log"
-_write_sidecar "$SBX13B" "# A completely different approved plan"
 
 OUT13B="$(run_autolaunch "$SBX13B" "$SBX13B/plan.md")"
 check_contains "T13b: auto-launched line present" "auto-launched" "$OUT13B"
 check_log_present "T13b: dispatch-node.sh was invoked" "$LOG13B" "dispatch-node.sh"
-check_not_contains "T13b: not parked on an unrelated sidecar" "plan-mode-confirm" "$OUT13B"
+check_not_contains "T13b: not parked as plan-mode" "plan-mode-front-door" "$OUT13B"
 
-# 13c: no sidecar at all (the overwhelmingly common /blueprint run) -> unchanged.
-# Pinned so the new gate can never regress the plain blueprint path.
+# 13c: a `source: claude-plan-mode` line in the BODY is prose, not authority.
+# Pins the frontmatter-only read: a whole-file grep parks this and is wrong.
 echo ""
-echo "--- Test 13c: no sidecar -> dispatch proceeds (unchanged) ---"
+echo "--- Test 13c: body-only source: line ignored -> dispatch proceeds ---"
 SBX13C="$(make_autolaunch_sandbox t13c)"
 LOG13C="$SBX13C/call-log"
+_write_plan_source "$SBX13C" "" "$(printf '# Test Plan\n\nExample frontmatter:\nsource: claude-plan-mode\n')"
 
 OUT13C="$(run_autolaunch "$SBX13C" "$SBX13C/plan.md")"
 check_contains "T13c: auto-launched line present" "auto-launched" "$OUT13C"
 check_log_present "T13c: dispatch-node.sh was invoked" "$LOG13C" "dispatch-node.sh"
 
-# 13d: a file at the sidecar path that is NOT a plan-mode sidecar is ignored.
+# 13d: a different source: value is somebody else's provenance -> not our gate.
 echo ""
-echo "--- Test 13d: foreign source: sidecar ignored -> dispatch proceeds ---"
+echo "--- Test 13d: foreign source: value -> dispatch proceeds ---"
 SBX13D="$(make_autolaunch_sandbox t13d)"
 LOG13D="$SBX13D/call-log"
-_write_sidecar "$SBX13D" "# Test Plan" pending some-other-tool
+_write_plan_source "$SBX13D" some-other-tool
 
 OUT13D="$(run_autolaunch "$SBX13D" "$SBX13D/plan.md")"
 check_contains "T13d: auto-launched line present" "auto-launched" "$OUT13D"
 check_log_present "T13d: dispatch-node.sh was invoked" "$LOG13D" "dispatch-node.sh"
 
-# 13e: a consumed sidecar for THIS plan still parks. Consume happens on
-# confirm-yes, after which the front-door session executes the plan itself, so a
-# bg worker would be a second worker on one node.
+# 13e: trailing whitespace / CRLF on the value still identifies the plan. A
+# sidecar or doc authored on Windows must not silently fail open into a dispatch.
 echo ""
-echo "--- Test 13e: consumed sidecar for this plan -> still parked ---"
+echo "--- Test 13e: CRLF / trailing space on the value -> still parked ---"
 SBX13E="$(make_autolaunch_sandbox t13e)"
 LOG13E="$SBX13E/call-log"
-_write_sidecar "$SBX13E" "# Test Plan" consumed
+_write_plan_source "$SBX13E" "claude-plan-mode  "
+printf '%s\r\n' "---" "title: Test plan" "status: ready" "claims: ${NODE_ID}" "source: claude-plan-mode" "---" "# Test Plan" > "$SBX13E/plan.md"
 
 OUT13E="$(run_autolaunch "$SBX13E" "$SBX13E/plan.md")"
 check_contains "T13e: parked line present" "parked" "$OUT13E"
 check_log_absent "T13e: dispatch-node.sh NOT invoked" "$LOG13E" "dispatch-node.sh"
-
-# 13f: a too-short anchor declines to correlate rather than parking the world on
-# a generic line that could collide with any plan. "---" is deliberately a line
-# that IS present in the fixture plan, so without the length guard this parks.
-echo ""
-echo "--- Test 13f: short anchor -> no correlation, dispatch proceeds ---"
-SBX13F="$(make_autolaunch_sandbox t13f)"
-LOG13F="$SBX13F/call-log"
-_write_sidecar "$SBX13F" "---"
-
-OUT13F="$(run_autolaunch "$SBX13F" "$SBX13F/plan.md")"
-check_contains "T13f: auto-launched line present" "auto-launched" "$OUT13F"
-check_log_present "T13f: dispatch-node.sh was invoked" "$LOG13F" "dispatch-node.sh"
 
 # ---------------------------------------------------------------------------
 # Summary

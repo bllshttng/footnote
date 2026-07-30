@@ -77,13 +77,31 @@ The gate reuses the **existing backlog state model** (Locked Decision 3): a `rea
 Task 3.3a was originally deferred as "dispatch from `hooks/capture-plan-mode.sh` after the sidecar write", waiting on the capture-hook fix (read the plan body from `tool_response.filePath` first, drop the phantom `approved`/`decision`/`isError` rejection gates, add the `awaitingLeaderApproval` skip) that a separate change had already landed.
 That capture-hook fix is in. The hook dispatch it was waiting for is closed unbuilt, because the capture hook is the wrong seam and the native path already reaches Layer 2 without it.
 
-**At capture time there is nothing to dispatch.** The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id; a native plan has no `claims:` / `graph_node_id:`; and `.fno/.pending-plan.md` is no node's `plan_path`. All three of `autolaunch-on-ready.sh`'s resolution tiers therefore miss, so a ready-gate placed there could never see a ready node. The plan is not executable at that moment either: `/blueprint` hard-refuses a doc lacking `## Failure Modes` and a `status` of `design` or `ready`, and the backfill that supplies both runs inside a later `/target`, long after the hook has exited. See the chicken-and-egg section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
+**At capture time there is nothing to dispatch.**
+The sidecar frontmatter is hook-generated (`captured_at`, `session_id`, `slug`, `source`, `status`) and carries no node id, a native plan has no `claims:` / `graph_node_id:`, and the sidecar path is not a plan the backlog knows.
+Nothing the hook has written is resolvable to a node by any of `autolaunch-on-ready.sh`'s three tiers, so a ready-gate placed there has no ready node to see.
+The plan is not executable at that moment either: `/blueprint` hard-refuses a doc lacking `## Failure Modes` and a `status` of `design` or `ready`, and the backfill that supplies both runs inside a later `/target`, long after the hook has exited.
+See the chicken-and-egg section of [target-plan-mode-integration.md](target-plan-mode-integration.md).
 
-**The native path inherits Layer 2 for free.** The front door calls `/blueprint` on the enriched doc, and `/blueprint` runs `autolaunch-on-ready.sh` as its last action in every mode. An approved native plan reaches exactly the same ready-gated dispatch the blueprint path uses, with no hook involvement.
+**The native path inherits Layer 2 for free.**
+The front door calls `/blueprint` on the enriched doc, and `/blueprint` runs `autolaunch-on-ready.sh` as its last action in every mode.
+An approved native plan reaches exactly the same ready-gated dispatch the blueprint path uses, with no hook involvement.
 
-**That inheritance needed one guard, which is the real content of this task.** `/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6. With the gate ON, the dispatch fired while that confirm was still outstanding: answering `N` produced a bg worker the human had just declined, and answering `y` produced a second worker racing the front-door session, which executes the plan itself. Step 4b of `autolaunch-on-ready.sh` now parks with `plan-mode-confirm-owned` when the plan it is about to dispatch is the front door's own approved native plan.
+**That inheritance needed one guard, which is the real content of this task.**
+`/blueprint` is called at front-door step 5, before the human is asked "Execute autonomously? [y/N]" at step 6.
+With the gate ON the dispatch fired while that confirm was still outstanding: answering `N` produced a bg worker the human had just declined, and answering `y` produced a second worker racing the front-door session, which executes the plan itself.
+Step 4b of `autolaunch-on-ready.sh` now parks with `plan-mode-front-door-owns-it` when the plan is a native-plan-mode plan.
 
-The discriminator is **plan identity, not sidecar state**. Keying off "a `pending` sidecar exists" is wrong twice over: a declined confirm deliberately leaves the sidecar `pending` and re-offerable, so every unrelated `/blueprint` inside the sidecar's TTL would park and the configured auto-launch path would silently stop working; and the state answers nothing useful anyway, since awaiting-confirm, declined, and consumed all forbid launching *that* plan. Correlation is the sidecar's first body line, which the backfill preserves verbatim in the enriched doc. An unrelated plan does not contain it and launches as before, and an anchor too short to be distinctive declines to correlate rather than parking on a guess.
+**The plan states its own provenance, so the guard does not have to guess.**
+`backfill-plan.sh` stamps `source: claude-plan-mode` into the enriched doc's frontmatter, and `/blueprint` round-trips frontmatter, so the key is still there when the gate runs.
+Step 4b reads that one key from the plan's frontmatter only, because a `source:` line in a doc body is prose and treating body text as authority is the same trap the `graph_node_id` tiers above already guard against.
+Two rejected alternatives are worth recording, since both look reasonable and both are wrong.
+Keying off "a `pending` sidecar exists" fails because a declined confirm deliberately leaves the sidecar `pending` and re-offerable, so every unrelated `/blueprint` inside the sidecar's TTL would park and the configured auto-launch path would silently stop working.
+Correlating on the sidecar's first body line fails because that line is whatever heading the plan opens with: `## Overview` is a whole line in twelve docs in this repo, so a common heading parks unrelated plans, while a short heading correlates with nothing and silently restores the original bug.
+
+**Known residual: this closes the auto-launch path, not every path.**
+During the confirm window the node is `ready` and unclaimed, so anything else that dispatches a ready node (`fno backlog advance`, the megawalk walker, a direct `dispatch-node.sh`, another session's `/target`) can still start work the human has not approved.
+Closing that properly means not leaving the node ready-and-unclaimed while the front door is still asking, which is a change to the front door rather than to this gate.
 
 ## Components
 
@@ -91,11 +109,11 @@ The discriminator is **plan identity, not sidecar state**. Keying off "a `pendin
 |---|---|
 | `skills/target/scripts/dispatch-node.sh` | Layer 1 dispatch primitive (US5) |
 | `skills/target/SKILL.md` (`### 0a. Background Dispatch`) | `/target bg <node...>` subcommand |
-| `skills/blueprint/scripts/autolaunch-on-ready.sh` | Layer 2 ready-gated auto-launch (US6); step 4b parks while a native-plan confirm is outstanding |
+| `skills/blueprint/scripts/autolaunch-on-ready.sh` | Layer 2 ready-gated auto-launch (US6); step 4b parks a native-plan-mode plan (the front door owns it) |
 | `skills/blueprint/SKILL.md` (tail) | invokes the auto-launch helper after intake in every mode |
 | `skills/target/references/settings.md` | documents `config.target.auto_launch_on_blueprint` |
 | `tests/test-bg-dispatch.sh` | hermetic AC5 + AC6 regression harness (mock `fno` + `get_config` stub) |
-| `tests/test-autolaunch-gate.sh` | hermetic gate harness: caller-is-holder, node-resolution tiers, and the outstanding-confirm park |
+| `tests/test-autolaunch-gate.sh` | hermetic gate harness: caller-is-holder, node-resolution tiers, and the native-plan-mode park |
 
 ## Multi-CLI
 

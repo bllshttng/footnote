@@ -252,38 +252,24 @@ if [[ -f "$_MANIFEST" ]]; then
   fi
 fi
 
-# 4b. Outstanding native-plan-mode confirm: the /target front door owns this
-#     decision, not the gate. The front door calls /blueprint on the ENRICHED doc
-#     (skills/target/references/plan-mode-frontdoor.md step 5) BEFORE it asks the
-#     human "Execute autonomously? [y/N]" (step 6), and /blueprint runs this gate
-#     as its last action - so without this park a bg worker is dispatched while
-#     the confirm is still outstanding, and a human who answers N gets a worker
-#     they explicitly declined. A yes is no reason to launch either: the front-door
-#     session then executes the plan itself, so a bg dispatch would be a second
-#     worker on one node.
-#
-#     The discriminator is PLAN IDENTITY, not the sidecar's confirm state. A
-#     declined confirm deliberately leaves the sidecar `pending` and re-offerable
-#     (frontdoor step 6 N-branch), so "a pending sidecar exists" would park every
-#     unrelated /blueprint for the sidecar's whole TTL and silently disable the
-#     configured auto-launch path (codex P2). And the state adds nothing anyway:
-#     awaiting-confirm, declined, and consumed all forbid a launch of THIS plan,
-#     so only "is the plan being dispatched the sidecar's plan?" needs answering.
-#
-#     Correlate on the sidecar's first body line, which the backfill preserves
-#     verbatim in the enriched doc (frontdoor: "Preserve the native body verbatim
-#     - ADD sections only"). An unrelated plan does not contain it, so it launches
-#     as before. The anchor must be a whole line and long enough not to collide by
-#     accident; a too-short or missing anchor declines to correlate and launches
-#     rather than parking the world on a guess.
-_SIDECAR="${REPO_ROOT}/.fno/.pending-plan.md"
-if [[ -f "$_SIDECAR" ]] && grep -q '^source:[[:space:]]*claude-plan-mode[[:space:]]*$' "$_SIDECAR" 2>/dev/null; then
-  # First non-empty line after the frontmatter's closing fence.
-  _PM_ANCHOR="$(awk 'f>=2 && /[^[:space:]]/ {print; exit} /^---[[:space:]]*$/ {f++}' "$_SIDECAR" 2>/dev/null || true)"
-  if [[ "${#_PM_ANCHOR}" -ge 8 ]] && grep -Fqx -- "$_PM_ANCHOR" "$PLAN_PATH" 2>/dev/null; then
-    echo "parked $node reason=\"plan-mode-confirm-owned: this plan is the front door's approved native plan; /target executes it on the human's [y/N], never a bg worker\""
-    exit 0
-  fi
+# 4b. A native-plan-mode plan belongs to the /target front door, never to a bg
+#     worker. The front door calls /blueprint on the enriched doc BEFORE asking the
+#     human "Execute autonomously? [y/N]", and this gate is /blueprint's last
+#     action, so dispatching here launches a worker the human has not approved yet
+#     (and on a yes, a second worker racing the front-door session that executes
+#     the plan itself). backfill-plan.sh stamps `source: claude-plan-mode` into the
+#     enriched doc's frontmatter and /blueprint round-trips frontmatter, so the
+#     plan states its own provenance - no correlation guesswork, and nothing here
+#     depends on locating the session's sidecar. Frontmatter only: a `source:` line
+#     in a doc BODY is prose, never authority.
+_PLAN_SOURCE="$(awk '
+  NR==1 && $0 !~ /^---[[:space:]]*$/ { exit }
+  /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
+  fence==1 && /^source:[[:space:]]/ { print; exit }
+' "$PLAN_PATH" 2>/dev/null | sed -E 's/^source:[[:space:]]*//; s/[[:space:]]*$//; s/\r$//' || true)"
+if [[ "$_PLAN_SOURCE" == "claude-plan-mode" ]]; then
+  echo "parked $node reason=\"plan-mode-front-door-owns-it: /target executes this plan on the human's [y/N]; run 'target bg $node' to dispatch it unsupervised on purpose\""
+  exit 0
 fi
 
 # 5. Dispatch via the target dispatch primitive. Whether the worker may merge
