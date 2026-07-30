@@ -252,6 +252,40 @@ if [[ -f "$_MANIFEST" ]]; then
   fi
 fi
 
+# 4b. A native-plan-mode plan belongs to the /target front door, never to a bg
+#     worker. The front door calls /blueprint on the enriched doc BEFORE asking the
+#     human "Execute autonomously? [y/N]", and this gate is /blueprint's last
+#     action, so dispatching here launches a worker the human has not approved yet
+#     (and on a yes, a second worker racing the front-door session that executes
+#     the plan itself). backfill-plan.sh stamps `source: claude-plan-mode` into the
+#     enriched doc's frontmatter and /blueprint round-trips frontmatter, so the
+#     plan states its own provenance - no correlation guesswork, and nothing here
+#     depends on locating the session's sidecar. Frontmatter only: a `source:` line
+#     in a doc BODY is prose, never authority.
+#     A plan-mode plan reaches here via the plan_path tier, which resolves the node
+#     from the graph WITHOUT opening the plan, so an unreadable plan is not screened
+#     out by an earlier exit: capture awk's rc and park on a failed read the way the
+#     ready-gate above parks on a failed status read, rather than letting "could not
+#     read" masquerade as "not a plan-mode plan" and dispatch.
+_PLAN_FM="$(awk '
+  NR==1 && $0 !~ /^---[[:space:]]*$/ { exit }
+  /^---[[:space:]]*$/ { fence++; if (fence==2) exit; next }
+  fence==1 && /^source:[[:space:]]/ { print; exit }
+' "$PLAN_PATH" 2>/dev/null)"
+_FM_RC=$?
+if [[ "$_FM_RC" -ne 0 ]]; then
+  echo "parked $node reason=\"plan provenance read failed (rc=$_FM_RC) - not launched\""
+  exit 0
+fi
+# Strip quotes like the graph_node_id read above: this frontmatter is round-tripped
+# by /blueprint, and a quoted scalar must not read as a different provenance.
+_PLAN_SOURCE="$(printf '%s\n' "$_PLAN_FM" \
+  | sed -E 's/^source:[[:space:]]*//; s/[[:space:]]*$//' | tr -d '"' | tr -d "'")"
+if [[ "$_PLAN_SOURCE" == "claude-plan-mode" ]]; then
+  echo "parked $node reason=\"plan-mode-front-door-owns-it: /target executes this plan on the human's [y/N]; run 'target bg $node' to dispatch it unsupervised on purpose\""
+  exit 0
+fi
+
 # 5. Dispatch via the target dispatch primitive. Whether the worker may merge
 #    is not decided here: since x-4391 dispatch-node.sh resolves it per node
 #    from that node's own config.dispatch.auto_merge (default false), so an

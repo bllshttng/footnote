@@ -218,8 +218,12 @@ run_autolaunch() {
   output=$(
     cd "$sbx" &&
     export CALL_LOG="$log" REPO_ROOT="$sbx" PATH="$sbx/stub-bin:$PATH"
-    # Optional graph.json fixture for tier-c (plan_path) resolution tests.
-    [ -n "${GRAPH_JSON_FIXTURE:-}" ] && export GRAPH_JSON="$GRAPH_JSON_FIXTURE"
+    # Graph fixture for tier-c (plan_path) resolution tests. Default to a path
+    # that does not exist: unset, the script falls back to $HOME/.fno/graph.json
+    # and every case parses the developer's REAL graph, so an unrelated node
+    # parented to the fixture id silently flips the epic-redirect verdict.
+    export GRAPH_JSON="${GRAPH_JSON_FIXTURE:-$sbx/absent-graph.json}"
+    export GRAPH_JSON_PATH=""
     bash "$AUTOLAUNCH" "$plan" 2>&1
   )
   set -e
@@ -623,6 +627,168 @@ SBX12B="$(make_autolaunch_sandbox t12b claims)"
 OUT12B="$(run_autolaunch "$SBX12B" "$SBX12B/plan.md")"
 check_contains "T12b: claims: tier resolves x- node" "$NODE_ID" "$OUT12B"
 NODE_ID="$_SAVED_NODE_ID"
+
+# ---------------------------------------------------------------------------
+# Test 13: a native-plan-mode plan is never bg-dispatched.
+#
+# The /target plan-mode front door calls /blueprint on the enriched doc BEFORE
+# it asks the human "Execute autonomously? [y/N]". /blueprint runs this gate as
+# its last action, so without a suppression a bg worker is dispatched while the
+# confirm is still outstanding, and a human who answers N gets a worker they
+# declined.
+#
+# The plan states its own provenance: backfill-plan.sh stamps
+# `source: claude-plan-mode` into the enriched doc's frontmatter and /blueprint
+# round-trips frontmatter. Frontmatter ONLY - a `source:` line in a doc body is
+# prose, and treating it as authority is the same trap the graph_node_id tiers
+# above already guard against (T9).
+# ---------------------------------------------------------------------------
+
+# Rewrites the fixture plan with an explicit frontmatter `source:` value; pass
+# an empty value to omit the key entirely (the ordinary blueprint plan).
+_write_plan_source() {
+  local sbx="$1" src="${2:-}" body="${3:-# Test Plan}"
+  {
+    echo "---"
+    echo "title: Test plan"
+    echo "status: ready"
+    echo "claims: ${NODE_ID}"
+    [ -n "$src" ] && echo "source: $src"
+    echo "---"
+    printf '%s\n' "$body"
+  } > "$sbx/plan.md"
+}
+
+echo ""
+echo "--- Test 13: source: claude-plan-mode -> parked, no dispatch ---"
+SBX13="$(make_autolaunch_sandbox t13)"
+LOG13="$SBX13/call-log"
+_write_plan_source "$SBX13" claude-plan-mode
+
+OUT13="$(run_autolaunch "$SBX13" "$SBX13/plan.md")"
+check_contains "T13: parked line present" "parked" "$OUT13"
+check_contains "T13: names the front-door owner" "plan-mode-front-door-owns-it" "$OUT13"
+check_log_absent "T13: dispatch-node.sh NOT invoked" "$LOG13" "dispatch-node.sh"
+
+# 13b: the ordinary /blueprint plan (no source: key) must still dispatch. This is
+# the regression pin: an over-broad gate here silently disables the whole
+# configured auto-launch path.
+echo ""
+echo "--- Test 13b: no source: key -> dispatch proceeds (unchanged) ---"
+SBX13B="$(make_autolaunch_sandbox t13b)"
+LOG13B="$SBX13B/call-log"
+
+OUT13B="$(run_autolaunch "$SBX13B" "$SBX13B/plan.md")"
+check_contains "T13b: auto-launched line present" "auto-launched" "$OUT13B"
+check_log_present "T13b: dispatch-node.sh was invoked" "$LOG13B" "dispatch-node.sh"
+check_not_contains "T13b: not parked as plan-mode" "plan-mode-front-door" "$OUT13B"
+
+# 13c: a `source: claude-plan-mode` line in the BODY is prose, not authority.
+# Pins the frontmatter-only read: a whole-file grep parks this and is wrong.
+echo ""
+echo "--- Test 13c: body-only source: line ignored -> dispatch proceeds ---"
+SBX13C="$(make_autolaunch_sandbox t13c)"
+LOG13C="$SBX13C/call-log"
+_write_plan_source "$SBX13C" "" "$(printf '# Test Plan\n\nExample frontmatter:\nsource: claude-plan-mode\n')"
+
+OUT13C="$(run_autolaunch "$SBX13C" "$SBX13C/plan.md")"
+check_contains "T13c: auto-launched line present" "auto-launched" "$OUT13C"
+check_log_present "T13c: dispatch-node.sh was invoked" "$LOG13C" "dispatch-node.sh"
+
+# 13d: a different source: value is somebody else's provenance -> not our gate.
+echo ""
+echo "--- Test 13d: foreign source: value -> dispatch proceeds ---"
+SBX13D="$(make_autolaunch_sandbox t13d)"
+LOG13D="$SBX13D/call-log"
+_write_plan_source "$SBX13D" some-other-tool
+
+OUT13D="$(run_autolaunch "$SBX13D" "$SBX13D/plan.md")"
+check_contains "T13d: auto-launched line present" "auto-launched" "$OUT13D"
+check_log_present "T13d: dispatch-node.sh was invoked" "$LOG13D" "dispatch-node.sh"
+
+# 13e: trailing whitespace on the value still identifies the plan.
+echo ""
+echo "--- Test 13e: trailing space on the value -> still parked ---"
+SBX13E="$(make_autolaunch_sandbox t13e)"
+LOG13E="$SBX13E/call-log"
+_write_plan_source "$SBX13E" "claude-plan-mode  "
+
+OUT13E="$(run_autolaunch "$SBX13E" "$SBX13E/plan.md")"
+check_contains "T13e: parked for the right reason" "plan-mode-front-door-owns-it" "$OUT13E"
+check_log_absent "T13e: dispatch-node.sh NOT invoked" "$LOG13E" "dispatch-node.sh"
+
+# 13f: a CRLF-authored plan must not fail open into a dispatch.
+echo ""
+echo "--- Test 13f: CRLF line endings -> still parked ---"
+SBX13F="$(make_autolaunch_sandbox t13f)"
+LOG13F="$SBX13F/call-log"
+printf '%s\r\n' "---" "title: Test plan" "status: ready" "claims: ${NODE_ID}" "source: claude-plan-mode" "---" "# Test Plan" > "$SBX13F/plan.md"
+
+OUT13F="$(run_autolaunch "$SBX13F" "$SBX13F/plan.md")"
+check_contains "T13f: parked for the right reason" "plan-mode-front-door-owns-it" "$OUT13F"
+check_log_absent "T13f: dispatch-node.sh NOT invoked" "$LOG13F" "dispatch-node.sh"
+
+# 13g: a QUOTED value is the same provenance. /blueprint round-trips this
+# frontmatter, and the sibling graph_node_id read already strips quotes, so a
+# quoted scalar must not read as a different source and dispatch.
+echo ""
+echo "--- Test 13g: quoted source: value -> still parked ---"
+SBX13G="$(make_autolaunch_sandbox t13g)"
+LOG13G="$SBX13G/call-log"
+_write_plan_source "$SBX13G" '"claude-plan-mode"'
+
+OUT13G="$(run_autolaunch "$SBX13G" "$SBX13G/plan.md")"
+check_contains "T13g: parked for the right reason" "plan-mode-front-door-owns-it" "$OUT13G"
+check_log_absent "T13g: dispatch-node.sh NOT invoked" "$LOG13G" "dispatch-node.sh"
+
+# 13h: the shape a REAL plan-mode plan has. backfill-plan.sh writes no claims: and
+# no graph_node_id:, so the node resolves via the plan_path tier against the graph
+# and the plan file is never opened during resolution. Every other T13 fixture
+# carries claims:, i.e. the population where this gate cannot fail.
+echo ""
+echo "--- Test 13h: tier-c plan-mode plan (no frontmatter link) -> parked ---"
+SBX13H="$(make_autolaunch_sandbox t13h none)"
+LOG13H="$SBX13H/call-log"
+{
+  echo "---"
+  echo "title: Backfilled native plan"
+  echo "status: ready"
+  echo "source: claude-plan-mode"
+  echo "slug: some-approved-plan"
+  echo "---"
+  echo "# Some approved plan"
+} > "$SBX13H/plan.md"
+cat > "$SBX13H/graph.json" <<EOF
+{"entries":[{"id":"${NODE_ID}","status":"ready","plan_path":"$SBX13H/plan.md"}]}
+EOF
+
+OUT13H="$(GRAPH_JSON_FIXTURE="$SBX13H/graph.json" run_autolaunch "$SBX13H" "$SBX13H/plan.md")"
+check_contains "T13h: parked for the right reason" "plan-mode-front-door-owns-it" "$OUT13H"
+check_log_absent "T13h: dispatch-node.sh NOT invoked" "$LOG13H" "dispatch-node.sh"
+
+# 13i: an unreadable plan parks rather than dispatching. "Could not read the
+# provenance" must never masquerade as "not a plan-mode plan".
+echo ""
+echo "--- Test 13i: unreadable plan -> parked, not dispatched ---"
+if [ "$(id -u)" = "0" ]; then
+  echo "SKIP: T13i (running as root; chmod 000 is still readable)"
+else
+# The node must resolve WITHOUT reading the plan, or the run exits at node
+# resolution before ever reaching the gate. The plan_path tier does exactly that,
+# which is why this failure is reachable at all.
+SBX13I="$(make_autolaunch_sandbox t13i)"
+LOG13I="$SBX13I/call-log"
+_write_plan_source "$SBX13I" claude-plan-mode
+cat > "$SBX13I/graph.json" <<EOF
+{"entries":[{"id":"${NODE_ID}","status":"ready","plan_path":"$SBX13I/plan.md"}]}
+EOF
+chmod 000 "$SBX13I/plan.md"
+
+OUT13I="$(GRAPH_JSON_FIXTURE="$SBX13I/graph.json" run_autolaunch "$SBX13I" "$SBX13I/plan.md")"
+chmod 644 "$SBX13I/plan.md"
+check_contains "T13i: parked on a failed provenance read" "plan provenance read failed" "$OUT13I"
+check_log_absent "T13i: dispatch-node.sh NOT invoked" "$LOG13I" "dispatch-node.sh"
+fi
 
 # ---------------------------------------------------------------------------
 # Summary
