@@ -422,7 +422,9 @@ def test_tier2_stands_down_when_no_node_status_is_available(tmp_path, monkeypatc
 
     res = rs.sweep(tmp_path, apply=True)
 
-    assert res.superseded == 0 and res.skipped == 1
+    assert res.superseded == 0 and res.stood_down == 1
+    assert res.skipped == 0  # a refusal is not a no-op; it gets its own counter
+    assert "1 stood down" in res.summary()  # so a wedged graph cannot read as healthy
     assert p.read_text() == before  # byte-for-byte: no terminal written
     assert any("tier2 off" in w for w in res.warnings)  # and the operator is told
 
@@ -457,3 +459,38 @@ def test_an_explicit_signal_is_not_gated_by_an_empty_map(tmp_path, monkeypatch):
 
     assert res.normalized == 1
     assert 'status: "done"' in p.read_text()
+
+
+def test_a_corrupt_working_graph_does_not_hide_behind_a_readable_archive(tmp_path, monkeypatch):
+    """The stand-down keys on an EMPTY map, so the corrupt working graph must not
+    be topped up into a non-empty one by the archive read-through.
+
+    `read_graph` swallows corruption to [], and `entries_with_archive` would then
+    append the archive's terminal-only rows: a map that is non-empty while
+    covering no live node. Tier 2 would read every live node as "not closed" and
+    stamp `superseded`. `read_graph_strict` makes corruption reach the {} sentinel.
+    """
+    from fno import paths
+    from fno.plan import reconcile_status as rs
+
+    home = tmp_path / "fno"
+    home.mkdir()
+    (home / "graph.json").write_text("{ not json at all")
+    (home / "graph-archive.json").write_text(
+        json.dumps({"entries": [{"id": "x-archived", "status": "done"}]})
+    )
+    monkeypatch.setattr(paths, "graph_json", lambda: home / "graph.json")
+    monkeypatch.setattr(paths, "graph_archive_json", lambda: home / "graph-archive.json")
+
+    assert rs._node_status_map() == {}  # corruption is absent evidence, not archive-only truth
+
+    plans = tmp_path / "plans"
+    plans.mkdir()
+    p = plans / "live.md"
+    p.write_text(_linked_plan("implemented", node="x-live-and-active"))
+    before = p.read_text()
+
+    res = rs.sweep(plans, apply=True)
+
+    assert res.superseded == 0 and res.stood_down == 1
+    assert p.read_text() == before
