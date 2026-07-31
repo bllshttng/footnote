@@ -2476,7 +2476,7 @@ fn resolved_optional_bots(settings: &Settings) -> Vec<String> {
 /// Case-insensitive substring match so a configured short name ("codex") or a
 /// full login both match the review author, including gh's `[bot]`-suffixed
 /// form (reference_gh_bot_login_suffix_polling_trap).
-fn login_matches_bot(login: &str, bot: &str) -> bool {
+pub(crate) fn login_matches_bot(login: &str, bot: &str) -> bool {
     !bot.is_empty() && login.to_lowercase().contains(&bot.to_lowercase())
 }
 
@@ -2504,7 +2504,7 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// Unioned rather than scoped per-login to stay byte-identical to the old flat
 /// `USAGE_LIMIT_MARKERS` const it replaced: an under-match degrades to the safe
 /// old block behavior; an over-match risks a false drop.
-fn body_is_usage_limit(body: &str) -> bool {
+pub(crate) fn body_is_usage_limit(body: &str) -> bool {
     BOT_PROFILES
         .iter()
         .flat_map(|p| p.usage_markers.iter())
