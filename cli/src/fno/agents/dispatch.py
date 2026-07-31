@@ -2626,9 +2626,9 @@ _PID_STOP_POLL_S = 0.1
 def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     """Stop an agent that has no transport id by signalling its recorded pid.
 
-    The last resort in ``stop_agent``'s ``short_id -> session_id -> pid``
-    chain. A registry row can carry a live process and no transport id at
-    all when the spawn receipt never yielded one; refusing there left the
+    The last resort after ``stop_agent`` finds no ``short_id``. A registry
+    row can carry a live process and no transport id at all when the spawn
+    receipt never yielded one; refusing there left the
     operator holding a running worker with no verb that addressed it, which
     is the duplicate-worker half of the wave-boundary handoff failure --
     one had to be killed by hand to restore one-writer semantics.
@@ -2680,9 +2680,10 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
 
     _signal(signal.SIGTERM)
     escalated = False
-    if not _wait_gone():
-        # Only escalate while the process is still provably ours; _still_ours
-        # is re-checked inside _signal's guard chain via this call.
+    # Re-prove ownership before escalating rather than inferring it from
+    # _wait_gone's False: a pid recycled during the grace window must take no
+    # SIGKILL, and _signal itself does not check.
+    if not _wait_gone() and _still_ours():
         escalated = True
         _signal(signal.SIGKILL)
         _wait_gone()
