@@ -13,6 +13,7 @@ from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
 from fno.graph._intake import (
     UNSCOPED_LABEL,
     _project_key,
+    make_effective_priority,
     make_selection_sort_key,
 )
 from fno.graph.statuses import live_claimed_node_ids
@@ -78,6 +79,7 @@ def _kanban_column(
     entry: dict,
     in_progress_epics: frozenset[str] = frozenset(),
     live_claimed: frozenset[str] = frozenset(),
+    effective_priority: str | None = None,
 ) -> str | None:
     """Return the kanban column for a graph entry, or None to exclude.
 
@@ -128,7 +130,7 @@ def _kanban_column(
     # and stays in Now even when also queued.
     if entry.get("queued_at"):
         return "Triage"
-    priority = entry.get("priority") or "p2"
+    priority = effective_priority or entry.get("priority") or "p2"
     if priority in ("p0", "p1"):
         return "Now"
     if priority == "p3":
@@ -216,15 +218,17 @@ def render_graph_md(
     don't crash a successful JSON write. Programmer bugs like KeyError
     or TypeError propagate so they're visible in development.
     """
+    entries = [e for e in entries if isinstance(e, dict)]
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
     epics = in_progress_epic_ids(entries)
     live_claimed = frozenset(live_claimed_node_ids())
     orphans = _orphan_ids(entries)
     board_order = make_selection_sort_key(entries, orphans, swimlane=True)
+    priority_for = make_effective_priority(entries)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
-        col = _kanban_column(entry, epics, live_claimed)
+        col = _kanban_column(entry, epics, live_claimed, priority_for(entry))
         if col is None:
             continue
         columns[col].append(entry)

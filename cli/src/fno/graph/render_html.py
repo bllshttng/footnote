@@ -30,7 +30,7 @@ from fno.graph.render import (
     in_progress_epic_ids,
     live_claimed_node_ids,
 )
-from fno.graph._intake import make_selection_sort_key
+from fno.graph._intake import make_effective_priority, make_selection_sort_key
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -200,9 +200,10 @@ def _column_for(
     entry: dict,
     epics: frozenset[str] = frozenset(),
     live_claimed: frozenset[str] = frozenset(),
+    effective_priority: str | None = None,
 ) -> str | None:
     """Stable column name for an entry; None to exclude (roadmap type)."""
-    return _kanban_column(entry, epics, live_claimed)
+    return _kanban_column(entry, epics, live_claimed, effective_priority)
 
 
 def _bucket(
@@ -222,14 +223,16 @@ def _bucket(
     live_claimed = frozenset(live_claimed_node_ids())
     if orphans is None:
         orphans = _orphan_ids(entries)
+    ordering_source = ordering_entries if ordering_entries is not None else entries
     board_order = make_selection_sort_key(
-        ordering_entries if ordering_entries is not None else entries,
+        ordering_source,
         orphans,
         swimlane=True,
     )
+    priority_for = make_effective_priority(ordering_source)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
-        col = _column_for(e, epics, live_claimed)
+        col = _column_for(e, epics, live_claimed, priority_for(e))
         if col is None:
             continue
         cols[col].append(e)
@@ -714,6 +717,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     ``fno.graph._constants.GRAPH_HTML`` without having to also
     patch this module's import-cached reference.
     """
+    entries = [e for e in entries if isinstance(e, dict)]
     if path is None:
         from fno.graph._constants import GRAPH_HTML as _CURRENT_GRAPH_HTML
         path = _CURRENT_GRAPH_HTML

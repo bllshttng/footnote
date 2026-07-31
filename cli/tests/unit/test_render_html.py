@@ -585,6 +585,17 @@ def test_html_overlay_live_claim_bucketed_now(monkeypatch):
     assert all(e["id"] != "x-live" for e in cols["Later"])
 
 
+def test_html_live_epic_priority_promotes_child_to_now(monkeypatch):
+    from fno.graph.render_html import _bucket
+
+    monkeypatch.setattr("fno.graph.render_html.live_claimed_node_ids", lambda: set())
+    epic = _entry("epic", type="epic", priority="p1")
+    child = _entry("child", parent="epic", priority="p2")
+    cols = _bucket([epic, child])
+    assert any(e["id"] == "child" for e in cols["Now"])
+    assert all(e["id"] != "child" for e in cols["Next"])
+
+
 def test_html_overlay_degrades_on_empty_claims(tmp_path: Path, monkeypatch):
     """Claims unreadable -> empty overlay, HTML render still succeeds."""
     monkeypatch.setattr("fno.graph.render_html.live_claimed_node_ids", lambda: set())

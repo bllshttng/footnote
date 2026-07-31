@@ -17,7 +17,7 @@ from fno.graph.render import (
     _kanban_column,
     _project_key,
 )
-from fno.graph._intake import make_selection_sort_key
+from fno.graph._intake import make_effective_priority, make_selection_sort_key
 
 # Public-facing column set + labels. The internal Triage column (awaiting
 # human ack) is folded into Later for the public view; Done is relabeled
@@ -28,14 +28,15 @@ _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done"
 def _public_entries(entries: list[dict], project: str) -> list[dict]:
     return [
         e for e in entries
-        if e.get("public") is True and _project_key(e) == project
+        if isinstance(e, dict) and e.get("public") is True and _project_key(e) == project
     ]
 
 
 def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
     cols: dict[str, list[dict]] = {col: [] for col, _ in _PUBLIC_COLUMNS}
+    priority_for = make_effective_priority(entries)
     for e in _public_entries(entries, project):
-        col = _kanban_column(e)
+        col = _kanban_column(e, effective_priority=priority_for(e))
         if col == "Triage":  # fold the internal triage pile into Later
             col = "Later"
         if col in cols:

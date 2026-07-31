@@ -444,6 +444,39 @@ def test_md_board_uses_work_order_inside_project_lane(tmp_path):
     assert now_body.index("Child") < now_body.index("Loose")
 
 
+def test_live_epic_priority_promotes_child_column_without_mutation(tmp_path):
+    epic = _entry("epic", type="epic", priority="p1", status="ready")
+    child = _entry("child", parent="epic", priority="p2", status="ready")
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    content = output.read_text()
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    assert "`child`" in now_body
+    assert child["priority"] == "p2"
+
+
+def test_terminal_epic_priority_does_not_promote_child_column(tmp_path):
+    epic = _entry("epic", type="epic", priority="p1", status="superseded")
+    child = _entry("child", parent="epic", priority="p2", status="ready")
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    content = output.read_text()
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    next_body = content.split("## Next", 1)[1].split("\n## ", 1)[0]
+    assert "`child`" not in now_body
+    assert "`child`" in next_body
+
+
+def test_render_skips_non_dict_rows_without_aborting_write(tmp_path):
+    output = tmp_path / "graph.md"
+    render_graph_md([None, "poison", _entry("healthy", priority="p1")], output)
+    assert "`healthy`" in output.read_text()
+
+
 def test_ac3_fr_md_headings_stay_clean(tmp_path):
     """AC3-FR: column headings stay exactly `## Now` (no count), so the
     Obsidian Kanban plugin keeps per-column state across re-renders."""
