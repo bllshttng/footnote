@@ -17,11 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from fno.plan._stamp import read_plan_file, write_plan_file
-from fno.plan._status import (
-    GRAPH_TO_PLAN_STATUS,
-    canonical_status,
-    project_plan_status,
-)
+from fno.plan._status import canonical_status, project_plan_status
 from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 
 # Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
@@ -168,15 +164,16 @@ def project_node_to_plan(
             and graph_status != "superseded"
         ):
             # Reversal (unsupersede): the forward-only projector refuses to
-            # leave terminal `superseded`, so force the plan back to the graph's
-            # current rung or the doc stays terminal while the graph is active.
-            # A None-mapped graph status (blocked - the only one reachable right
-            # after unsupersede, since deferred_at was cleared) has no plan rung:
-            # fail closed to `design` (non-dispatchable) rather than `ready`,
-            # which would let unfinished planning work auto-dispatch once the
-            # blocker resolves. The prior rung was overwritten by the supersede
-            # and cannot be recovered, so conservative beats promotive.
-            forced = GRAPH_TO_PLAN_STATUS.get(graph_status) or "design"
+            # leave terminal `superseded`, so force the plan off it or the doc
+            # stays terminal while the graph is active. Only `in_review`
+            # (pr_number) and `in_progress` (lock) are safe to trust: they come
+            # from graph FIELDS, not the plan. Every other graph status here was
+            # derived from the stale superseded plan doc itself (`SUPERSEDED`
+            # rung -> graph `ready`) or has no plan rung (blocked), and the
+            # prior rung was overwritten by supersede so it cannot be recovered.
+            # Fail closed to non-dispatchable `design` rather than stamp
+            # `ready`, which would let unfinished planning work auto-dispatch.
+            forced = graph_status if graph_status in ("in_review", "in_progress") else "design"
             if forced != "superseded" and current_status != forced:
                 fields["status"] = forced
                 changed = True

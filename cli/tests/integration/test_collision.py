@@ -608,7 +608,9 @@ def test_unsupersede_resets_plan_status_off_terminal(tmp_graph, tmp_path):
 
     res = _invoke("backlog", "unsupersede", "ab-old")
     assert res.exit_code == 0, res.output
-    assert _plan_status(plan) != "superseded"
+    # `ready` was derived from the stale superseded plan doc; fail closed to
+    # non-dispatchable `design` rather than promote unfinished work to ready.
+    assert _plan_status(plan) == "design"
 
 
 def test_unsupersede_preserves_plain_deferral(tmp_graph, tmp_path):
