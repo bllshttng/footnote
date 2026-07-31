@@ -4273,7 +4273,11 @@ def _run_relay_loop(
             connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
             read_timeout=_SWITCHBOARD_READ_TIMEOUT,
         )
-        if not isinstance(hop, dict) or hop.get("delivered") is not True:
+        if (
+            not isinstance(hop, dict)
+            or hop.get("delivered") is not True
+            or hop.get("identity_verified") is not True
+        ):
             # peer is not a live stream thread (one-way) or a daemon hiccup;
             # the exchange ends here — B already received the original body.
             break
@@ -4504,7 +4508,11 @@ def _switchboard_exchange(
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
         read_timeout=_SWITCHBOARD_READ_TIMEOUT,
     )
-    if sb is None or sb.get("delivered") is not True:
+    if (
+        sb is None
+        or sb.get("delivered") is not True
+        or sb.get("identity_verified") is not True
+    ):
         return None  # not a live stream thread / daemon down -> caller demotes
     if not auto:
         return True  # observed: one hop, B's reply mirrored into A

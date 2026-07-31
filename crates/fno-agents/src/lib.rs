@@ -703,6 +703,7 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     // Deliver (daemon-emitted, Task 2.2 US4)
     "agent_deliver_injected",
     "agent_deliver_demoted",
+    "agent_deliver_status_write_failed",
     // Active-backlog mission drain supervisor (daemon-emitted): the drain tick
     // panicked and the supervisor is restarting it with backoff. The drain
     // decision events (active_backlog_dispatched / _parked / _skip) are

@@ -488,7 +488,13 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
 
     def _mock_rpc(method: str, params: dict, **kwargs):
         rpc_calls.append({"method": method, "params": params})
-        return {"delivered": True, "transport": "switchboard", "reply": "ack", "mirrored": True}
+        return {
+            "delivered": True,
+            "identity_verified": True,
+            "transport": "switchboard",
+            "reply": "ack",
+            "mirrored": True,
+        }
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _mock_rpc)
 
@@ -528,7 +534,7 @@ def test_switchboard_observed_single_hop(monkeypatch) -> None:
 
     def _rpc(method, params, **kw):
         calls.append(params)
-        return {"delivered": True, "reply": "r1"}
+        return {"delivered": True, "identity_verified": True, "reply": "r1"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
     assert dispatch_mod._switchboard_exchange(
@@ -554,7 +560,7 @@ def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -
 
     def _rpc(method, params, **kw):
         calls.append(params)
-        return {"delivered": True, "reply": "r1"}
+        return {"delivered": True, "identity_verified": True, "reply": "r1"}
 
     kicked: list = []
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
@@ -593,7 +599,9 @@ def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None
 
     monkeypatch.setattr(dispatch_mod, "_load_a2a_settings", lambda: (True, 6))
     monkeypatch.setattr(
-        dispatch_mod, "_daemon_rpc", lambda *a, **k: {"delivered": True, "reply": ""}
+        dispatch_mod,
+        "_daemon_rpc",
+        lambda *a, **k: {"delivered": True, "identity_verified": True, "reply": ""},
     )
     kicked: list = []
     monkeypatch.setattr(
@@ -619,7 +627,7 @@ def test_relay_loop_bounded_by_ceiling(monkeypatch, capsys) -> None:
 
     def _rpc(method, params, **kw):
         calls.append(params)
-        return {"delivered": True, "reply": "more"}
+        return {"delivered": True, "identity_verified": True, "reply": "more"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
     dispatch_mod._run_relay_loop(
@@ -642,7 +650,11 @@ def test_relay_loop_stops_on_empty_reply(monkeypatch, capsys) -> None:
 
     def _rpc(method, params, **kw):
         calls.append(params)
-        return {"delivered": True, "reply": ""}  # A replies empty on the first relay hop
+        return {
+            "delivered": True,
+            "identity_verified": True,
+            "reply": "",
+        }  # A replies empty on the first relay hop
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
     dispatch_mod._run_relay_loop(
@@ -679,6 +691,25 @@ def test_switchboard_demote_when_first_hop_not_delivered(monkeypatch) -> None:
         dispatch_mod,
         "_daemon_rpc",
         lambda *a, **k: {"delivered": False, "reason": "not-a-live-stream-thread"},
+    )
+    assert dispatch_mod._switchboard_exchange(
+        "B",
+        "A",
+        "msg",
+        to_identity=_sb_identity("B"),
+        from_identity=_sb_identity("A"),
+    ) is None
+
+
+def test_switchboard_demotes_legacy_success_without_identity_proof(monkeypatch) -> None:
+    """A pre-identity daemon's success cannot prove which registry row it drove."""
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "_load_a2a_settings", lambda: (False, 6))
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_daemon_rpc",
+        lambda *a, **k: {"delivered": True, "reply": "legacy daemon accepted unknown fields"},
     )
     assert dispatch_mod._switchboard_exchange(
         "B",
@@ -1284,7 +1315,11 @@ def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
 
     def _rpc(method, params, **kw):
         calls.append(params)
-        return {"delivered": True, "reply": ""}  # empty reply ends the loop
+        return {
+            "delivered": True,
+            "identity_verified": True,
+            "reply": "",
+        }  # empty reply ends the loop
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
 
@@ -1316,7 +1351,8 @@ def test_relay_loop_raw_without_mail_ctxs_chat_path(monkeypatch) -> None:
     calls: list = []
     monkeypatch.setattr(
         dispatch_mod, "_daemon_rpc",
-        lambda method, params, **kw: calls.append(params) or {"delivered": True, "reply": ""},
+        lambda method, params, **kw: calls.append(params)
+        or {"delivered": True, "identity_verified": True, "reply": ""},
     )
     # No mail ctxs (the chat path) -> body stays raw, no envelope.
     _run_relay_loop(

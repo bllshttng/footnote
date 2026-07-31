@@ -2521,28 +2521,31 @@ async fn mirror_into(worker_sock: &std::path::Path, text: &str) -> Result<(), St
     }
 }
 
-/// Best-effort flip a registry row to `Orphaned` (the worker is gone and did not
-/// self-stamp, e.g. it was SIGKILLed rather than hitting EOF). Offloaded so the
-/// async runtime is not blocked on file I/O; failures are swallowed (the
-/// reconcile sweep is the backstop).
-async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
-    let reg = home.registry_json();
-    let sid = short_id.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = state::update_registry(&reg, |r| {
-            if let Some(e) = r.entries.iter_mut().find(|e| e.short_id == sid) {
-                // Only flip a still-Live row. Do NOT clobber a terminal status
-                // the worker already set (a clean `Exited` from stream.shutdown,
-                // or `Failed`): clobbering Exited->Orphaned would make a
-                // deliberately-stopped session look adoptable (stream_worker.rs
-                // documents this hazard).
-                if e.status == AgentStatus::Live {
-                    e.status = AgentStatus::Orphaned;
-                }
-            }
-        });
+/// Flip the verified registry row to `Orphaned` after its drive fails. The
+/// recipient can be restamped while a turn is in flight, so the mutation is an
+/// identity CAS rather than a lookup by its reusable transport key.
+async fn stamp_orphaned(
+    home: &AgentsHome,
+    name: String,
+    identity: Value,
+) -> Result<bool, state::StateError> {
+    update_registry_offloaded(home.registry_json(), move |registry| {
+        let Some(entry) = registry.find_mut(&name) else {
+            return false;
+        };
+        if !switchboard_identity_matches(entry, &identity) {
+            return false;
+        }
+        // Only flip a still-Live row. Do NOT clobber a terminal status the
+        // worker already set (a clean `Exited` from stream.shutdown, or
+        // `Failed`): clobbering Exited->Orphaned would make a deliberately
+        // stopped session look adoptable (stream_worker.rs documents this hazard).
+        if entry.status == AgentStatus::Live {
+            entry.status = AgentStatus::Orphaned;
+        }
+        true
     })
-    .await;
+    .await
 }
 
 /// Handle the `agent.switchboard` RPC (Group 2, Task 3.1).
@@ -2686,7 +2689,34 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
             // B was a stream thread but the turn failed: the child is gone or the
             // pipe broke. Stamp B orphaned (AC2-ERR) and do NOT touch A — the
             // exchange did not complete, so A must not show a reply B never gave.
-            stamp_orphaned(&ctx.home, &to_entry.short_id).await;
+            match stamp_orphaned(&ctx.home, to.clone(), recipient_identity.clone()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = ctx.emitter.emit(
+                        "agent_deliver_status_write_failed",
+                        &json!({
+                            "name": to,
+                            "from_name": from,
+                            "provider": "claude",
+                            "transport": "switchboard",
+                            "reason": "recipient-identity-changed",
+                        }),
+                    );
+                }
+                Err(error) => {
+                    let _ = ctx.emitter.emit(
+                        "agent_deliver_status_write_failed",
+                        &json!({
+                            "name": to,
+                            "from_name": from,
+                            "provider": "claude",
+                            "transport": "switchboard",
+                            "reason": "registry-write-failed",
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+            }
             let _ = ctx.emitter.emit(
                 "agent_deliver_demoted",
                 &json!({
@@ -2754,6 +2784,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         req.id,
         json!({
             "delivered": true,
+            "identity_verified": true,
             "transport": "switchboard",
             "reply": outcome.reply,
             "is_error": outcome.is_error,
@@ -6980,6 +7011,7 @@ done
         assert_eq!(res["is_error"], false);
         assert_eq!(res["receipt"], true, "user-echo receipt not observed");
         assert_eq!(res["mirrored"], true, "B's reply was not mirrored into A");
+        assert_eq!(res["identity_verified"], true);
 
         // The injected-event reuse carries the switchboard transport discriminator.
         let events = read_events(&home);
@@ -7117,6 +7149,78 @@ done
         let result = response.result().expect("identity mismatch is a demotion");
         assert_eq!(result["delivered"], false);
         assert_eq!(result["reason"], "recipient-identity-changed");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_failed_drive_does_not_orphan_restamped_recipient() {
+        let home = short_home("failedrestamp");
+        seed_stream_row(&home, "B", "swB");
+        let turn_started = home.root().join("turn-started");
+        let restamp_done = home.root().join("restamp-done");
+        let script = format!(
+            r#"
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"s1"}}'
+while IFS= read -r line; do
+  touch '{}'
+  while [ ! -f '{}' ]; do sleep 0.01; done
+  exit 1
+done
+"#,
+            turn_started.display(),
+            restamp_done.display()
+        );
+        let _b = start_stream_worker(&home, "swB", &script).await;
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let registry_path = home.registry_json();
+        let restamp_signal = turn_started.clone();
+        let restamp_complete = restamp_done.clone();
+        let restamp = tokio::spawn(async move {
+            let start = Instant::now();
+            while !restamp_signal.exists() && start.elapsed() < Duration::from_secs(5) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(restamp_signal.exists(), "drive never reached the worker");
+            state::update_registry(&registry_path, |registry| {
+                let row = registry.find_mut("B").expect("recipient row missing");
+                row.harness_session_id = Some("uuid-replacement".into());
+                row.claude_session_uuid = Some("uuid-replacement".into());
+                row.created_at = "2026-06-09T00:00:01Z".into();
+            })
+            .unwrap();
+            std::fs::write(restamp_complete, b"done\n").unwrap();
+        });
+
+        let response = handle_switchboard(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard",
+                switchboard_params("B", "swB", "ghost", None, "fail after receipt"),
+            ),
+        )
+        .await;
+        restamp.await.unwrap();
+        let result = response.result().expect("failed drive is a demotion");
+        assert_eq!(result["delivered"], false);
+
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        let replacement = registry.find("B").expect("replacement row missing");
+        assert_eq!(replacement.status, AgentStatus::Live);
+        assert_eq!(
+            replacement.harness_session_id.as_deref(),
+            Some("uuid-replacement")
+        );
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "agent_deliver_status_write_failed"
+                    && event["data"]["name"] == "B"
+                    && event["data"]["reason"] == "recipient-identity-changed"
+            }),
+            "identity-CAS failure event missing: {events:?}"
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 
