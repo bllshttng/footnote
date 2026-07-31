@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -1229,3 +1230,52 @@ def test_parallel_recorders_collect_once_after_reversed_completion(
     ]
     assert snapshot["context_bytes"] == len(b"duplicateduplicatefast")
     assert snapshot["source_hashes"][0] == snapshot["source_hashes"][1]
+
+
+def test_helper_runs_under_a_bare_python_with_no_pythonpath(tmp_path: Path) -> None:
+    """The helper is executed BY PATH by context-observe-hook.sh.
+
+    Running a file by path puts its own directory on sys.path, not the package
+    root, so ``from fno.harness_identity import ...`` raised ModuleNotFoundError
+    under any interpreter without the package installed or on PYTHONPATH. The
+    hook ends every helper call with ``>/dev/null 2>&1 || true``, so the record
+    step no-opped in silence, collect then found no directory to lock, and no
+    snapshot was ever emitted.
+
+    The suite hid this because ``fno test`` exports an ABSOLUTE worktree
+    PYTHONPATH that the helper inherited. A relative one does not survive the
+    hook's ``cwd`` change, and a real session may have none at all - so this
+    strips it rather than trusting the runner's.
+    """
+    helper = Path(context_observation.__file__)
+    hook_input = tmp_path / "input.json"
+    hook_input.write_text(json.dumps({"session_id": "bare-python"}), encoding="utf-8")
+    output = tmp_path / "output"
+    output.write_text('{"additionalContext":"x"}\n', encoding="utf-8")
+
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    env["FNO_CONTEXT_OBSERVATION_DIR"] = str(tmp_path / "scratch")
+    env["FNO_REPO_ROOT"] = str(tmp_path)
+    # _write_record no-ops on an unrecognized harness, so without this the test
+    # would pass on an early return rather than on a successful import.
+    env["FNO_PLATFORM"] = "claude"
+
+    # The hook invokes a bare `python3` off PATH, NOT sys.executable. Using the
+    # test runner's interpreter would pass vacuously: it has fno installed, so
+    # the import succeeds with or without the fix.
+    python3 = shutil.which("python3")
+    assert python3, "no python3 on PATH; the hook would not run either"
+    if python3 == sys.executable:
+        pytest.skip("PATH python3 IS the test interpreter; cannot test the bare case")
+
+    result = subprocess.run(
+        [python3, str(helper), "record",
+         "--source-id", "solo", "--expected", "solo", "--carrier", "true",
+         "--input-file", str(hook_input), "--output-file", str(output),
+         "--hook-rc", "0"],
+        cwd=tmp_path, env=env, capture_output=True, text=True, timeout=60,
+    )
+
+    assert result.returncode == 0, f"helper failed without PYTHONPATH:\n{result.stderr}"
+    assert "ModuleNotFoundError" not in result.stderr
+    assert list((tmp_path / "scratch").rglob("*.json")), "record wrote nothing"

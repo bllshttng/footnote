@@ -15,6 +15,18 @@ import tempfile
 import time
 from pathlib import Path
 
+# This file is executed BY PATH from context-observe-hook.sh
+# (`python3 <plugin>/cli/src/fno/context_observation.py`), which puts its own
+# directory on sys.path but not the package root, so `import fno.*` fails under
+# any interpreter that does not already have the package installed or on
+# PYTHONPATH. The hook suppresses this helper's output and ends every call with
+# `|| true`, so that failure is SILENT: the record step no-ops, the collect step
+# then finds no directory to lock, and no snapshot is ever emitted. Add our own
+# package root so the helper works under a bare `python3` the same way it does
+# under `uv run --project cli`.
+if __package__ in (None, ""):  # executed as a script, not imported
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 
 ENTRY_STATES = {"startup", "resume", "clear", "post_compact"}
 
