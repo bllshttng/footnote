@@ -2898,9 +2898,23 @@ where
                 .as_deref()
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null);
+            // Same formatter as Python's `AgentEntry.crown_label`, so the two
+            // surfaces render an identical descriptor for the same row.
+            let crown: Value = match e.crown_level {
+                Some(level) => Value::String(format!(
+                    "L{level} {}",
+                    e.crown_scope.as_deref().unwrap_or("?")
+                )),
+                None => Value::Null,
+            };
             json!({
                 "name": e.name,
+                // `harness` is the canonical identity axis; `provider` is its
+                // legacy alias, still emitted for consumers that predate the
+                // rename. Both are in schemas/agents-list-row.json.
+                "harness": e.harness_name(),
                 "provider": e.harness_name(),
+                "harness_session_id": e.harness_session_id,
                 "short_id": short_id,
                 "session_id": session_id,
                 "cwd": e.cwd,
@@ -2918,9 +2932,20 @@ where
                 "pid": e.pid,
                 "last_reconciled_at": e.last_reconciled_at,
                 "log_path": log_path,
+                // The mux hosting ref ({session, pane_id}) for a pane-hosted row,
+                // else null. A pane row's short_id is empty, so this is the only
+                // key that says where such a worker actually lives; without it a
+                // caller reads a bound pane worker as unhosted.
+                "mux": e.mux,
+                // Crown (US9): the compact descriptor plus the raw fields, so a
+                // minion can resolve who to escalate to.
+                "crown": crown,
+                "crown_level": e.crown_level,
+                "crown_scope": e.crown_scope,
+                "crown_grantor": e.crown_grantor,
                 // Superset of Python's serialize_entry: project_root is retained
                 // as the daemon's native grouping key (existing daemon_e2e
-                // contract) alongside the 10 Python parity fields. Python list
+                // contract) alongside the shared parity fields. Python list
                 // has no project_root; the extra key is a harmless superset.
                 "project_root": e.project_root,
             })
@@ -6117,6 +6142,114 @@ done
             });
         })
         .unwrap();
+    }
+
+    /// The shared key-set contract. `handle_list` -- NOT Python's
+    /// `serialize_entry` -- is what serves `fno agents list`, and it had stayed
+    /// pinned to the pre-v10 key set: no `harness`, no `harness_session_id`, no
+    /// `mux`. A peer agent read that surface and nearly filed a wrong diagnosis
+    /// onto two nodes because two live pane-hosted workers looked unhosted.
+    ///
+    /// The guard has to live HERE. The `render_list_json` key assertion in
+    /// bin/client.rs cannot catch this: the client passes daemon rows through
+    /// verbatim, so that test only asserts against a row it built itself.
+    ///
+    /// `include_str!` is compile-time, so deleting or moving the contract file
+    /// breaks the build rather than silently disarming the check.
+    #[test]
+    fn list_row_key_set_matches_shared_contract() {
+        const CONTRACT: &str = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../schemas/agents-list-row.json"
+        ));
+        let contract: Value = serde_json::from_str(CONTRACT).expect("contract is valid JSON");
+        let mut expected: std::collections::BTreeSet<String> = contract["required"]
+            .as_array()
+            .expect("required is an array")
+            .iter()
+            .map(|k| k.as_str().unwrap().to_string())
+            .collect();
+        expected.extend(
+            contract["rust_only"]["keys"]
+                .as_array()
+                .expect("rust_only.keys is an array")
+                .iter()
+                .map(|k| k.as_str().unwrap().to_string()),
+        );
+
+        let home = short_home("listcontract");
+        seed_stream_row(&home, "worker-contract", "abc12345");
+        state::update_registry(&home.registry_json(), |r| {
+            let e = &mut r.entries[0];
+            // A pane-hosted row holds the mux ref INSTEAD of a transport key
+            // (mux XOR worker XOR bg), so short_id is empty -- which is why
+            // `session_id` resolves to null for exactly these rows and
+            // `harness_session_id` is the only identity they carry.
+            e.short_id = String::new();
+            e.harness = Some("claude".into());
+            e.harness_session_id = Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into());
+            e.claude_session_uuid = Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into());
+            e.mux = Some(crate::state::MuxRef {
+                session: "main".into(),
+                pane_id: 10,
+            });
+            e.crown_level = Some(1);
+            e.crown_scope = Some("epic-x".into());
+            e.crown_grantor = Some("king".into());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+        let row = &result["agents"][0];
+
+        let actual: std::collections::BTreeSet<String> =
+            row.as_object().unwrap().keys().cloned().collect();
+        assert_eq!(actual, expected, "list row key set drifted from contract");
+
+        // Presence in the key set is not the bug being guarded: a key that is
+        // always null is the same lie in a different shape. Assert the values
+        // reach the row.
+        assert_eq!(row["harness"], "claude");
+        assert_eq!(row["provider"], "claude", "legacy alias still emitted");
+        assert_eq!(row["harness_session_id"], "e6f78b98-e594-47ed-ad81-84f8a78b8bb7");
+        // The pre-fix surface reported this row as having no identity at all:
+        // session_id is legitimately null for a pane row (no transport key), so
+        // harness_session_id is what has to carry it.
+        assert!(row["session_id"].is_null());
+        assert_eq!(row["mux"]["session"], "main");
+        assert_eq!(row["mux"]["pane_id"], 10);
+        assert_eq!(row["crown"], "L1 epic-x", "same formatter as Python crown_label");
+        assert_eq!(row["crown_grantor"], "king");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// A row with no pane, no crown and no captured session id emits those keys
+    /// as null rather than omitting them -- consumers key off a stable shape.
+    #[test]
+    fn list_row_emits_absent_optional_fields_as_null() {
+        let home = short_home("listnulls");
+        seed_stream_row(&home, "worker-bare", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+        let row = &result["agents"][0];
+
+        // Index-then-is_null would also pass for an ABSENT key (serde_json
+        // returns Null for a missing index), which is the very defect being
+        // guarded. Assert presence first, then the value.
+        let obj = row.as_object().unwrap();
+        for key in ["mux", "crown", "crown_level"] {
+            assert!(obj.contains_key(key), "row omits key: {key}");
+            assert!(obj[key].is_null(), "key {key} should be null on a bare row");
+        }
+
+        std::fs::remove_dir_all(home.root()).ok();
     }
 
     #[test]

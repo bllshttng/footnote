@@ -1,0 +1,33 @@
+{
+  "$comment": "Canonical key set for ONE row of `fno agents list --json`. Two serializers produce this shape and they have drifted before (the Rust one stayed pinned to the pre-v10 keys and dropped harness, harness_session_id and mux for every live row, so operators and agents read a fully bound pane worker as unhosted and unidentified). Both are asserted against this file: cli/src/fno/agents/format.py::serialize_entry and the `agent.list` projection in crates/fno-agents/src/daemon.rs. Adding or removing a key means editing this file first; a serializer that disagrees fails its own test.",
+  "required": [
+    "name",
+    "harness",
+    "harness_session_id",
+    "provider",
+    "short_id",
+    "session_id",
+    "cwd",
+    "created_at",
+    "last_message_at",
+    "status",
+    "live_status",
+    "log_path",
+    "crown",
+    "crown_level",
+    "crown_scope",
+    "crown_grantor",
+    "mux"
+  ],
+  "deprecated": {
+    "provider": "Legacy alias of `harness`, still emitted for consumers that predate the harness-as-sole-identity-axis rename. Read `harness`."
+  },
+  "rust_only": {
+    "$comment": "Keys the Rust daemon projection emits on top of `required`. A harmless superset: the Python list surface has no equivalent source field.",
+    "keys": ["pid", "last_reconciled_at", "project_root"]
+  },
+  "python_only": {
+    "$comment": "Keys the Python serializer emits on top of `required`. Empty today.",
+    "keys": []
+  }
+}
