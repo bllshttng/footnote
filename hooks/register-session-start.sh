@@ -18,14 +18,6 @@ REPO_ROOT="${CLAUDE_PROJECT_DIR:-${GEMINI_PROJECT_DIR:-$(git rev-parse --show-to
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CLI_DIR="$(cd "$HOOK_DIR/.." && pwd)/cli"
 
-# Auto-join is opt-in (config.agents.auto_register_sessions, default false): a
-# session joins the roster deliberately via `/fno-me` (`fno agents register`),
-# so the roster stays the workers you coordinate with, not every terminal. Flip
-# the knob to auto-join every hand-started session. A failed/absent read is the
-# default (false) — never auto-register on a config we could not confirm.
-AUTO="$(fno config get agents.auto_register_sessions 2>/dev/null || true)"
-[[ "$AUTO" == "true" ]] || exit 0
-
 # Detect the harness and read the SAME session-id env the rest of fno resolves
 # on (harness_identity.HARNESS_SESSION_MARKERS): claude uses CLAUDE_CODE_SESSION_ID,
 # not CLAUDE_SESSION_ID (the old name here was unset, so claude never registered).
@@ -43,9 +35,21 @@ fi
 [[ -n "$SESSION_ID" ]] || exit 0
 
 cd "$REPO_ROOT" 2>/dev/null || true
-uv run --project "$CLI_DIR" python3 -m fno.agents.register_session \
-    --harness "$HARNESS" \
-    --session-id "$SESSION_ID" \
-    --cwd "$REPO_ROOT" 2>/dev/null || true
+
+ARGS=(--harness "$HARNESS" --session-id "$SESSION_ID" --cwd "$REPO_ROOT")
+
+# A footnote-SPAWNED worker (FNO_AGENT_SELF = its own row name) restamps rather
+# than registers: the session id we passed at spawn is not durable (claude has
+# been seen continuing under a different uuid ~35s in) while the row NAME is,
+# so the name is the key the correction lands on. Runs at any knob setting: the
+# opt-in below governs whether a hand-started terminal JOINS the roster (default
+# false; `/fno-me` is the deliberate join), and a spawned worker is already on it.
+if [[ -n "${FNO_AGENT_SELF:-}" ]]; then
+    ARGS+=(--agent-self "$FNO_AGENT_SELF")
+elif [[ "$(fno config get agents.auto_register_sessions 2>/dev/null || true)" != "true" ]]; then
+    exit 0
+fi
+
+uv run --project "$CLI_DIR" python3 -m fno.agents.register_session "${ARGS[@]}" 2>/dev/null || true
 
 exit 0
