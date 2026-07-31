@@ -21,6 +21,7 @@ from fno.graph.depends import (
     _resolve_depends_on,
     _derive_title,
 )
+from fno.graph.statuses import VALID_STATUSES
 
 
 # Source-field vocabulary for nodes intaked from a plan. Both spellings
@@ -271,7 +272,9 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     if not isinstance(epic_priority, str) or epic_priority not in PRIORITY_ORDER:
         return None
     status = epic.get("status")
-    if status is not None and not isinstance(status, str):
+    if status is not None and (
+        not isinstance(status, str) or status not in VALID_STATUSES
+    ):
         return None
     created_at = epic.get("created_at")
     if created_at is not None and not isinstance(created_at, str):

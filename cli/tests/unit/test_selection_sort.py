@@ -277,6 +277,7 @@ def test_each_malformed_epic_ordering_field_makes_child_loose_equivalent():
     for field, value in (
         ("priority", []),
         ("status", []),
+        ("status", "bogus"),
         ("created_at", []),
     ):
         epic = {
