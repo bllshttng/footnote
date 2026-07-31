@@ -10,6 +10,7 @@ from fno.graph.render import (
     render_graph_md,
     _graph_sort_key,
     in_progress_epic_ids,
+    make_kanban_column,
 )
 from fno.graph._intake import make_selection_sort_key
 
@@ -149,16 +150,41 @@ def test_ac1_hp_column_roadmap_excluded():
 
 def test_in_progress_epic_ids_detects_done_or_claimed_child():
     entries = [
-        _entry("ab-epic0001"),                                   # in-progress (claimed child)
+        _entry("ab-epic0001", type="epic"),                      # in-progress (claimed child)
         _entry("ab-kid00001", status="in_progress", parent="ab-epic0001"),
-        _entry("ab-epic0002"),                                   # in-progress (done child)
+        _entry("ab-epic0002", type="epic"),                      # in-progress (done child)
         _entry("ab-kid00002", completed_at="2026-01-01T00:00:00Z", parent="ab-epic0002"),
-        _entry("ab-epic0003"),                                   # NOT in progress (ready child)
+        _entry("ab-epic0003", type="epic"),                      # NOT in progress (ready child)
         _entry("ab-kid00003", parent="ab-epic0003"),
         _entry("ab-loose001"),                                   # not a parent at all
     ]
     ids = in_progress_epic_ids(entries)
     assert ids == frozenset({"ab-epic0001", "ab-epic0002"})
+
+
+def test_in_progress_epic_signal_requires_a_live_epic_parent():
+    feature_parent = _entry("feature-parent", type="feature", priority="p2")
+    feature_child = _entry(
+        "feature-child",
+        parent="feature-parent",
+        status="done",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    dead_epic = _entry(
+        "dead-epic", type="epic", status="superseded", priority="p2"
+    )
+    dead_child = _entry(
+        "dead-child",
+        parent="dead-epic",
+        status="done",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    entries = [feature_parent, feature_child, dead_epic, dead_child]
+
+    assert in_progress_epic_ids(entries) == frozenset()
+    column_for = make_kanban_column(entries)
+    assert column_for(feature_parent) == "Next"
+    assert column_for(dead_epic) is None
 
 
 def test_column_in_progress_epic_goes_now():

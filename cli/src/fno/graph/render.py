@@ -62,17 +62,9 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
     ``claimed => session_id`` invariant holds (x-33b2). Mirrors the epics-first
     in-progress signal in ``_intake.make_selection_sort_key``.
     """
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pid = e.get("parent")
-        if isinstance(pid, str):
-            children_by_parent.setdefault(pid, []).append(e)
-    return frozenset(
-        pid for pid, kids in children_by_parent.items()
-        if any(k.get("completed_at") or k.get("status") == "in_progress" for k in kids)
-    )
+    from fno.graph._intake import in_progress_epic_ids as _shared_epic_ids
+
+    return _shared_epic_ids(entries)
 
 
 def _kanban_column(

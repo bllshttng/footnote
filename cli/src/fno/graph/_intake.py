@@ -278,6 +278,29 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     return epic
 
 
+def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
+    """Return live epic ids with a completed or claimed child."""
+    id_to_entry = {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    result: set[str] = set()
+    for child in entries:
+        if not isinstance(child, dict):
+            continue
+        if not (
+            child.get("completed_at")
+            or child.get("status") in ("done", "in_progress")
+            or child.get("session_id")
+        ):
+            continue
+        epic = _live_epic_for(child, id_to_entry)
+        if epic is not None:
+            result.add(epic["id"])
+    return frozenset(result)
+
+
 def make_effective_priority(entries: list[dict]):
     """Build the board-priority projection shared with live-epic ordering.
 
@@ -354,21 +377,7 @@ def make_selection_sort_key(
             orphans = orphan_ids(entries)
         except Exception:  # noqa: BLE001 - ordering signal; never break selection
             orphans = frozenset()
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pid = e.get("parent")
-        if isinstance(pid, str) and pid:
-            children_by_parent.setdefault(pid, []).append(e)
-    # An epic is "in progress" when any of its children is done or claimed.
-    epic_in_progress: dict[str, bool] = {
-        pid: any(
-            kid.get("status") == "done" or kid.get("session_id")
-            for kid in kids
-        )
-        for pid, kids in children_by_parent.items()
-    }
+    epic_in_progress = in_progress_epic_ids(entries)
 
     def _prio(e: dict) -> int:
         return PRIORITY_ORDER[_priority_name(e)]
@@ -391,7 +400,7 @@ def make_selection_sort_key(
         pid = node.get("parent")
         epic = _live_epic_for(node, id_to_entry)
         if epic is not None:
-            in_progress_rank = 0 if (pid and epic_in_progress.get(pid)) else 1
+            in_progress_rank = 0 if pid in epic_in_progress else 1
             return lane + (
                 band,                    # curated rank band (ranked first)
                 0,                       # epic-children tier (before loose)
