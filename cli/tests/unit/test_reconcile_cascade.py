@@ -861,6 +861,63 @@ def test_release_helper_covers_every_way_a_unit_dies(world, dispatches):
     assert _release_contained_children(_world(Path("/tmp")), "") == []
 
 
+def test_release_parented_children_clears_live_only():
+    """The membership-axis sibling of _release_contained_children (x-6b60).
+
+    _release_parented_children clears `parent` on a dying unit's LIVE children
+    (done/deferred/superseded keep it as history). _live_child_ids - the guard's
+    read side - returns only parent-ONLY live children: a child also marked
+    contained_in is folded delivery work the contained release handles
+    routinely, so the guard must not refuse the supersede over it.
+    """
+    from fno.graph.cli import _live_child_ids, _release_parented_children
+
+    def _kid(
+        id_,
+        *,
+        parent=None,
+        contained_in=None,
+        completed_at=None,
+        deferred_at=None,
+        superseded_by=None,
+    ):
+        return {
+            "id": id_,
+            "parent": parent,
+            "contained_in": contained_in,
+            "completed_at": completed_at,
+            "deferred_at": deferred_at,
+            "superseded_by": superseded_by,
+        }
+
+    entries = [
+        _kid("live-a", parent="x-epic"),
+        _kid("live-b", parent="x-epic"),
+        _kid("cont-f", parent="x-epic", contained_in="x-epic"),  # folded work
+        _kid("done-c", parent="x-epic", completed_at="2026-07-01T00:00:00+00:00"),
+        _kid("def-d", parent="x-epic", deferred_at="2026-07-01T00:00:00+00:00"),
+        _kid("sup-e", parent="x-epic", superseded_by="x-other"),
+        _kid("unrelated", parent="x-someone-else"),
+    ]
+    # Guard sees parent-ONLY live children; cont-f (contained) is excluded.
+    assert sorted(_live_child_ids(entries, "x-epic")) == ["live-a", "live-b"]
+    # Release clears parent on every live child of the unit (cont-f too: it must
+    # not stay parented to a dead unit once the contained release un-folds it).
+    assert sorted(_release_parented_children(entries, "x-epic")) == ["cont-f", "live-a", "live-b"]
+
+    by_id = {e["id"]: e for e in entries}
+    assert by_id["live-a"]["parent"] is None
+    assert by_id["cont-f"]["parent"] is None
+    # Terminal children keep parent as history; unrelated nodes untouched.
+    assert by_id["done-c"]["parent"] == "x-epic"
+    assert by_id["def-d"]["parent"] == "x-epic"
+    assert by_id["sup-e"]["parent"] == "x-epic"
+    assert by_id["unrelated"]["parent"] == "x-someone-else"
+    # Idempotent + falsy owner frees nothing.
+    assert _release_parented_children(entries, "x-epic") == []
+    assert _release_parented_children(entries, None) == []
+
+
 def test_every_deferred_at_writer_releases_contained_children():
     """Pins the count so a SEVENTH writer cannot land without wiring the release.
 

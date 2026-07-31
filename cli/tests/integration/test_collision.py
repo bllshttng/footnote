@@ -485,6 +485,111 @@ def test_supersede_blank_reason_rejected(tmp_graph, tmp_path):
     assert "blank" in res.output.lower()
 
 
+def test_supersede_live_children_rejected(tmp_graph, tmp_path):
+    """Superseding a unit with live children strands them under a dead unit
+    (dead-ancestor guard + inherited priority). Refuse, name the children,
+    and leave the graph untouched. Gates on liveness, not type."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    for kid in ("ab-k1", "ab-k2"):
+        node = _seed_node(entries, id_=kid, plan_path=str(_write_quick_plan(tmp_path / f"{kid}.md", ["z.py"])))
+        node["parent"] = "ab-old"
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold")
+    assert res.exit_code != 0
+    assert "live child" in res.output.lower()
+    assert "ab-k1" in res.output and "ab-k2" in res.output
+    assert "--force" in res.output
+
+    # No mutation happened.
+    entries = _read_entries(tmp_graph)
+    by_id = {e["id"]: e for e in entries}
+    assert by_id["ab-old"].get("superseded_by") is None
+    assert by_id["ab-k1"]["parent"] == "ab-old"
+
+
+def test_supersede_force_orphans_live_children(tmp_graph, tmp_path):
+    """--force overrides the guard; live children have parent cleared so they
+    stay dispatchable instead of stranding under the dead unit."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    node = _seed_node(entries, id_="ab-k1", plan_path=str(_write_quick_plan(tmp_path / "k1.md", ["z.py"])))
+    node["parent"] = "ab-old"
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke(
+        "backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold", "--force"
+    )
+    assert res.exit_code == 0, res.output
+    assert "Orphaned" in res.output and "ab-k1" in res.output
+
+    entries = _read_entries(tmp_graph)
+    by_id = {e["id"]: e for e in entries}
+    assert by_id["ab-old"]["superseded_by"] == "ab-new"
+    assert by_id["ab-k1"]["parent"] is None
+
+
+def test_supersede_terminal_children_allowed(tmp_graph, tmp_path):
+    """A unit whose only children are terminal (done/deferred) can be
+    superseded without --force; those children keep parent as history."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    done = _seed_node(entries, id_="ab-done", plan_path=str(_write_quick_plan(tmp_path / "done.md", ["z.py"])))
+    done["parent"] = "ab-old"
+    done["completed_at"] = "2026-07-01T00:00:00+00:00"
+    done["status"] = "done"
+    deferred = _seed_node(entries, id_="ab-def", plan_path=str(_write_quick_plan(tmp_path / "def.md", ["z.py"])))
+    deferred["parent"] = "ab-old"
+    deferred["deferred_at"] = "2026-07-01T00:00:00+00:00"
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold")
+    assert res.exit_code == 0, res.output
+
+    entries = _read_entries(tmp_graph)
+    by_id = {e["id"]: e for e in entries}
+    assert by_id["ab-old"]["superseded_by"] == "ab-new"
+    assert by_id["ab-done"]["parent"] == "ab-old"
+    assert by_id["ab-def"]["parent"] == "ab-old"
+
+
+def test_unsupersede_restores_node_and_clears_backref(tmp_graph, tmp_path):
+    """unsupersede is the reverse cmd_supersede always needed: clears
+    superseded_by + the deferred markers it set, drops the backref on the
+    replacer, and lets status recompute off the superseded bucket."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold")
+    assert res.exit_code == 0, res.output
+    assert {e["id"]: e for e in _read_entries(tmp_graph)}["ab-old"]["status"] == "superseded"
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+    assert res.exit_code == 0, res.output
+
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    assert by_id["ab-old"].get("superseded_by") is None
+    assert by_id["ab-old"].get("deferred_at") is None
+    assert "ab-old" not in (by_id["ab-new"].get("supersedes") or [])
+    assert by_id["ab-old"]["status"] != "superseded"
+
+
+def test_unsupersede_not_superseded_is_idempotent(tmp_graph, tmp_path):
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+    assert res.exit_code == 0
+    assert "was not superseded" in res.output
+
+
 # ---------------------------------------------------------------------------
 # CLI: update --acknowledge-collisions
 # ---------------------------------------------------------------------------
