@@ -3356,6 +3356,59 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// Stop a Claude agent (AC7-EDGE). Claude is shellout-managed (LD8): there is no
 /// worker PTY to signal, so the daemon shells out to the claude supervisor's
 /// `stop` on the agent's short id and marks the registry row exited on success.
+/// Poll until `pid` is no longer our worker, or `budget` elapses. Ownership is
+/// re-proved each tick through `pid_is_ours`, so a pid recycled mid-wait reads
+/// as gone rather than as a still-running worker.
+async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
+    let start = Instant::now();
+    loop {
+        if !pid_is_ours(pid, recorded_start) {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+/// Stop a claude row that has a recorded pid but no transport id, with the same
+/// SIGTERM -> SIGKILL escalation `stop_worker_confirmed` uses. Returns true iff
+/// the process is confirmed gone.
+///
+/// A row can carry a live process and no short id at all when the spawn receipt
+/// never yielded one. Refusing there left the operator with a running worker and
+/// no verb that addressed it -- the duplicate-worker half of the wave-boundary
+/// handoff failure, which had to be killed by hand to restore one-writer
+/// semantics. Unlike a PTY worker there is no socket to probe, so `pid_is_ours`
+/// (which rejects pid <= 1, treats an unsignalable pid as not ours, and compares
+/// the recorded start time) is both the liveness oracle and the recycle guard.
+/// It is re-proved before EVERY signal so a pid recycled inside the grace window
+/// is never killed.
+async fn stop_claude_pid_confirmed(entry: &RegistryEntry) -> bool {
+    let Some(pid) = entry.pid else {
+        return false;
+    };
+    if !pid_is_ours(pid, entry.pid_start_time) {
+        return false;
+    }
+    // SAFETY: pid ownership proved directly above; SIGTERM to our own worker.
+    unsafe {
+        libc::kill(pid as libc::pid_t, libc::SIGTERM);
+    }
+    if pid_gone_within(pid, entry.pid_start_time, Duration::from_secs(5)).await {
+        return true;
+    }
+    if pid_is_ours(pid, entry.pid_start_time) {
+        // SAFETY: ownership re-proved after the grace window, so a pid recycled
+        // during it takes no signal.
+        unsafe {
+            libc::kill(pid as libc::pid_t, libc::SIGKILL);
+        }
+    }
+    pid_gone_within(pid, entry.pid_start_time, Duration::from_secs(2)).await
+}
+
 async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry) -> Response {
     let short = match entry
         .transport_short()
@@ -3364,11 +3417,40 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
     {
         Some(s) => s.to_string(),
         None => {
+            // No transport id: fall back to signalling the recorded pid rather
+            // than refusing a row whose process is still running.
+            if stop_claude_pid_confirmed(entry).await {
+                let claude_name = name.to_string();
+                if let Err(e) = update_registry_offloaded(ctx.home.registry_json(), move |r| {
+                    if let Some(e) = r.find_mut(&claude_name) {
+                        e.status = AgentStatus::Exited;
+                    }
+                })
+                .await
+                {
+                    return Response::err(
+                        req.id,
+                        ErrorCode::Internal,
+                        format!("claude {name} stopped but registry write failed: {e}"),
+                    );
+                }
+                let _ = ctx.emitter.emit(
+                    "agent_stopped",
+                    &json!({"name": name, "backend": "claude", "stopped_by": "pid"}),
+                );
+                return Response::ok(
+                    req.id,
+                    json!({"stopped": true, "backend": "claude", "pid": entry.pid}),
+                );
+            }
             return Response::err(
                 req.id,
                 ErrorCode::InvalidStatus,
-                format!("agent {name} is claude but has no short id to stop"),
-            )
+                format!(
+                    "agent {name} is claude but has no short id and no live process \
+                     to stop; note that `rm` clears the row but does not stop a session"
+                ),
+            );
         }
     };
     match tokio::process::Command::new("claude")
@@ -5269,6 +5351,62 @@ mod tests {
             pid_is_ours(me, None),
             "no recorded start time -> fall back to bare liveness (legacy)"
         );
+    }
+
+    #[tokio::test]
+    async fn stop_claude_pid_kills_a_real_child_and_spares_a_recycled_pid() {
+        // x-a4b2: a row with a pid and no transport id must actually be stopped
+        // (it used to be refused, leaving a live duplicate worker), and a pid
+        // whose start time no longer matches must be left alone.
+        let mut entry = ask_row("orphan", None);
+
+        // A row with no pid at all has nothing to signal.
+        assert!(
+            !stop_claude_pid_confirmed(&entry).await,
+            "no pid -> nothing to stop"
+        );
+
+        // Spawn the sleeper as a DETACHED grandchild: `sh` backgrounds it and
+        // exits, so it is reparented away and is never this test's child. A
+        // direct child would linger as a zombie after SIGTERM until reaped, and
+        // `pid_is_ours` (a bare `kill(pid, 0)` probe) reads a zombie as alive.
+        // The real claude worker is not the daemon's child either, so this also
+        // matches production.
+        let out = std::process::Command::new("sh")
+            .arg("-c")
+            // The redirect is load-bearing: a backgrounded child inherits sh's
+            // stdout pipe, so without it `.output()` blocks for the full sleep
+            // waiting on EOF instead of returning as soon as sh exits.
+            .arg("sleep 60 >/dev/null 2>&1 & echo $!")
+            .output()
+            .expect("spawn detached sleeper");
+        let pid: u32 = String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("sleeper pid");
+        let start = process_start_time(pid);
+
+        // Wrong incarnation token: the pid belongs to someone else now.
+        entry.pid = Some(pid);
+        entry.pid_start_time = start.map(|s| s.wrapping_add(1));
+        if start.is_some() {
+            assert!(
+                !stop_claude_pid_confirmed(&entry).await,
+                "recycled pid -> refuse"
+            );
+            assert!(
+                pid_is_ours(pid, start),
+                "an unrelated process must not be signalled"
+            );
+        }
+
+        // Correct token: the process is really killed, not merely reported.
+        entry.pid_start_time = start;
+        assert!(
+            stop_claude_pid_confirmed(&entry).await,
+            "owned live pid -> stopped"
+        );
+        assert!(!pid_is_ours(pid, start), "process is gone");
     }
 
     #[test]

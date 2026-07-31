@@ -2584,6 +2584,137 @@ def with_agent_lock_and_entry(
         yield (lock_handle, existing)
 
 
+def _mark_stopped_orphaned(name: str, existing: AgentEntry) -> None:
+    """Flip a stopped agent's registry status to ``orphaned``.
+
+    So ``fno agents list`` reflects the stop immediately rather than
+    carrying the stale ``live`` value until the next reconcile.
+    ``last_message_at_preserve=True`` keeps the historical timestamp -- the
+    stop doesn't invalidate it. "orphaned" matches the post-reconcile
+    state, so this pre-empts the eventual reconcile without introducing a
+    new status value (no schema bump).
+
+    The process is already dead by the time this runs, so a registry-write
+    failure is emitted to the events stream the caller already has open and
+    swallowed: it must never turn a successful stop into a raised error.
+    The next reconcile picks the orphan up via the live reachability probe.
+    """
+    try:
+        status_written = _update_registry_if_recipient_unchanged(
+            name,
+            _recipient_identity_key(existing),
+            _stamp_status(name, status="orphaned", last_message_at_preserve=True),
+        )
+        if not status_written:
+            events.emit(
+                "agent_stopped_status_write_failed",
+                name=name,
+                provider="claude",
+                reason="recipient_identity_changed",
+            )
+    except (OSError, RegistryVersionError):
+        events.emit("agent_stopped_status_write_failed", name=name, provider="claude")
+
+
+#: Seconds to wait for a signalled process to exit before escalating, and the
+#: poll interval used to notice a clean exit inside that window. Mirrors the
+#: 5s grace the daemon's ``stop_worker_confirmed`` allows a PTY worker.
+_PID_STOP_GRACE_S = 5.0
+_PID_STOP_POLL_S = 0.1
+
+
+def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
+    """Stop an agent that has no transport id by signalling its recorded pid.
+
+    The last resort after ``stop_agent`` finds no ``short_id``. A registry
+    row can carry a live process and no transport id at all when the spawn
+    receipt never yielded one; refusing there left the
+    operator holding a running worker with no verb that addressed it, which
+    is the duplicate-worker half of the wave-boundary handoff failure --
+    one had to be killed by hand to restore one-writer semantics.
+
+    Ownership is re-proved through ``_pid_alive`` before EVERY signal. It
+    compares the recorded process-start token, so a pid recycled by an
+    unrelated process is refused rather than killed, including a recycle
+    that happens inside the SIGTERM grace window. An unreadable verdict
+    (``None`` -- no psutil, or a process this uid cannot inspect) counts as
+    not-ours and also refuses: never signal a pid whose incarnation cannot
+    be proved.
+    """
+    import signal
+
+    from fno.agents.spawn_gate import _pid_alive
+
+    pid = existing.pid
+
+    def _still_ours() -> bool:
+        return _pid_alive(pid, existing.pid_start_time) is True
+
+    if not pid or not _still_ours():
+        raise DispatchAskError(
+            f"registry entry {name!r} has no short id and no live process on "
+            f"file; there is nothing to stop. Note that 'fno agents rm {name}' "
+            "clears the row but does NOT stop a running session.",
+            exit_code=12,
+        )
+
+    def _signal(sig: int) -> None:
+        """Send ``sig``, treating an already-exited process as success."""
+        try:
+            os.kill(pid, sig)
+        except ProcessLookupError:
+            pass
+        except PermissionError as exc:
+            raise DispatchAskError(
+                f"not permitted to signal pid {pid} for agent {name!r}: {exc}",
+                exit_code=13,
+            ) from exc
+
+    def _wait_gone() -> bool:
+        deadline = time.monotonic() + _PID_STOP_GRACE_S
+        while time.monotonic() < deadline:
+            if not _still_ours():
+                return True
+            time.sleep(_PID_STOP_POLL_S)
+        return not _still_ours()
+
+    _signal(signal.SIGTERM)
+    escalated = False
+    # Re-prove ownership before escalating rather than inferring it from
+    # _wait_gone's False: a pid recycled during the grace window must take no
+    # SIGKILL, and _signal itself does not check.
+    if not _wait_gone() and _still_ours():
+        escalated = True
+        _signal(signal.SIGKILL)
+        _wait_gone()
+
+    if _still_ours():
+        events.emit(
+            "agent_stop_error",
+            name=name,
+            provider=existing.harness,
+            pid=pid,
+            reason="survived_sigkill",
+        )
+        raise DispatchAskError(
+            f"pid {pid} for agent {name!r} survived SIGTERM and SIGKILL",
+            exit_code=1,
+        )
+
+    events.emit(
+        "agent_stopped",
+        name=name,
+        provider=existing.harness,
+        claude_exit=None,
+        pid=pid,
+        stopped_by="pid",
+        escalated=escalated,
+    )
+    _mark_stopped_orphaned(name, existing)
+    print(f"stopped: {name} (pid {pid})", flush=True)
+    return StopResult(name=name, provider=existing.harness, claude_exit=None)
+
+
 def stop_agent(
     name: str,
     *,
@@ -2658,13 +2789,15 @@ def stop_agent(
                     exit_code=2,
                 )
 
+            # `short_id` is the whole transport-id chain on this path: only
+            # claude rows reach here, and `AgentEntry.session_id` is a property
+            # that resolves to `short_id` for claude (HARNESS_SESSION_ID_FIELDS),
+            # so there is no second id to try. Falling back to the recorded pid
+            # is the last resort for a row carrying a live process and no
+            # transport id at all, which used to be refused outright.
             short_id = existing.short_id
             if not short_id:
-                raise DispatchAskError(
-                    f"registry entry {name!r} has no short id on file; "
-                    f"cannot stop. Run 'fno agents rm {name}' to clear.",
-                    exit_code=12,
-                )
+                return _stop_by_pid(name, existing)
 
             if not is_provider_available("claude"):
                 raise DispatchAskError("claude CLI not on PATH", exit_code=14)
@@ -2721,42 +2854,7 @@ def stop_agent(
                     exit_code=1,
                 )
 
-            # Success: flip registry status to "orphaned" so
-            # ``fno agents list`` reflects the stop immediately rather
-            # than carrying the stale ``live`` value until the next
-            # reconcile. ``last_message_at_preserve=True`` keeps the
-            # historical timestamp — the stop doesn't invalidate it.
-            # Per the handoff item, "orphaned" matches the post-reconcile
-            # state, so this pre-empts the eventual reconcile without
-            # introducing a new status value (no schema bump).
-            try:
-                status_written = _update_registry_if_recipient_unchanged(
-                    name,
-                    _recipient_identity_key(existing),
-                    _stamp_status(
-                        name,
-                        status="orphaned",
-                        last_message_at_preserve=True,
-                    ),
-                )
-                if not status_written:
-                    events.emit(
-                        "agent_stopped_status_write_failed",
-                        name=name,
-                        provider="claude",
-                        reason="recipient_identity_changed",
-                    )
-            except (OSError, RegistryVersionError):
-                # The stop subprocess already succeeded; a registry-write
-                # failure here is logged via the same events stream the
-                # caller already has open, but must not turn a successful
-                # stop into a raised error. The next reconcile will pick
-                # up the orphan state via the live reachability probe.
-                events.emit(
-                    "agent_stopped_status_write_failed",
-                    name=name,
-                    provider="claude",
-                )
+            _mark_stopped_orphaned(name, existing)
 
             print(
                 f"stopped: {name} ({short_id})",
