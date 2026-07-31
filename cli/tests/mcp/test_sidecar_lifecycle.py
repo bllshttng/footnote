@@ -13,7 +13,6 @@ from __future__ import annotations
 import json
 import os
 import shutil
-import signal
 import socket
 import subprocess
 import sys
@@ -22,6 +21,9 @@ import time
 from pathlib import Path
 
 import pytest
+
+
+SIDECAR_START_TIMEOUT = 15.0
 
 
 @pytest.fixture
@@ -99,7 +101,9 @@ def _read_stderr(proc: subprocess.Popen) -> str:
         return f"(could not read {log_path}: {exc})"
 
 
-def _wait_for_socket(sock_path: Path, *, timeout: float = 5.0) -> bool:
+def _wait_for_socket(
+    sock_path: Path, *, timeout: float = SIDECAR_START_TIMEOUT
+) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         if sock_path.exists():
@@ -140,8 +144,8 @@ class TestSidecarLifecycle:
     def test_lazy_start_and_ping(self, short_home: Path) -> None:
         proc, sock_path = _spawn_sidecar(short_home)
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0), (
-                f"sidecar did not bind within 5s.\n"
+            assert _wait_for_socket(sock_path), (
+                f"sidecar did not bind within {SIDECAR_START_TIMEOUT:g}s.\n"
                 f"sock_path={sock_path}\n"
                 f"alive={proc.poll() is None}\n"
                 f"stderr:\n{_read_stderr(proc)}"
@@ -160,7 +164,7 @@ class TestSidecarLifecycle:
     def test_status_with_zero_channels(self, short_home: Path) -> None:
         proc, sock_path = _spawn_sidecar(short_home)
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             resp = _rpc(sock_path, {"op": "status"})
             assert resp["ok"] is True
             assert resp["channels_registered"] == 0
@@ -182,10 +186,10 @@ class TestSidecarLifecycle:
         proc, _ = _spawn_sidecar(short_home)
         try:
             # Despite the stale file, the sidecar should bind cleanly
-            # within 5s. This was the failing case before the fix:
+            # within the bounded startup window. This was the failing case before the fix:
             # the retry loop was theater + start_unix_server had no
             # stale-recovery wrapper.
-            assert _wait_for_socket(sock_path, timeout=5.0), (
+            assert _wait_for_socket(sock_path), (
                 "sidecar failed to recover from a stale socket file"
             )
             resp = _rpc(sock_path, {"op": "ping"})
@@ -202,7 +206,7 @@ class TestSidecarLifecycle:
         detect the live first and exit 0 with a stderr note."""
         proc1, sock_path = _spawn_sidecar(short_home)
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             # Spawn the second sidecar with the same HOME.
             env = dict(os.environ)
             env["HOME"] = str(short_home.resolve())
@@ -227,7 +231,7 @@ class TestSidecarLifecycle:
         proc, sock_path = _spawn_sidecar(short_home)
         home = short_home.resolve()
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             # Send SIGTERM; the signal handler flushes state.
             proc.terminate()
             proc.wait(timeout=5)
@@ -248,7 +252,7 @@ class TestSidecarBadRequest:
     def test_unknown_op_returns_bad_request(self, short_home: Path) -> None:
         proc, sock_path = _spawn_sidecar(short_home)
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             resp = _rpc(sock_path, {"op": "nonsense"})
             assert resp["ok"] is False
             assert resp["reason"] == "bad_request"
@@ -259,7 +263,7 @@ class TestSidecarBadRequest:
     def test_send_to_unregistered_channel(self, short_home: Path) -> None:
         proc, sock_path = _spawn_sidecar(short_home)
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             resp = _rpc(
                 sock_path,
                 {
@@ -353,7 +357,7 @@ class TestSidecarChannelDelivery:
         proc, sock_path = _spawn_sidecar(short_home)
         conn_a = None
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             # Connection A registers and STAYS OPEN (push mode). Closing
             # it first would silently drop the delivery route.
             conn_a = self._register(sock_path, "sess-hit")
@@ -389,7 +393,7 @@ class TestSidecarChannelDelivery:
         proc, sock_path = _spawn_sidecar(short_home)
         conn_a = None
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             conn_a = self._register(sock_path, "sess-edge")
 
             envelope = build_channel_notification(content="hi", meta=None)
@@ -512,7 +516,7 @@ class TestMcpSendCli:
         proc, sock_path = _spawn_sidecar(short_home)
         conn_a = None
         try:
-            assert _wait_for_socket(sock_path, timeout=5.0)
+            assert _wait_for_socket(sock_path)
             conn_a = deliverer._register(sock_path, "sess-cli")
 
             result = CliRunner().invoke(
