@@ -15,13 +15,40 @@ pointed at the fixture. Skipped when the Rust binary is absent (sdist test env).
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+@functools.lru_cache(maxsize=1)
+def _fno_shim_dir() -> str | None:
+    """A PATH dir providing ``fno``, or ``None`` when the real one is present.
+
+    The Rust client resolves a short token by shelling out to
+    ``fno agents heal-token --all-sources`` (``client_verbs.rs``). ``fno`` is the
+    cargo-installed RUST binary; the Python package installs only ``fno-py``
+    (``[project.scripts]``). So a checkout that has never run ``cargo install``
+    -- CI, and any dev box that only built ``fno-agents`` -- has no ``fno`` on
+    PATH, the shellout dies with ENOENT, and every short-token case fails the
+    Rust/Python parity assertion for a reason that is purely environmental.
+
+    The shim resolves ``fno-py`` at exec time rather than install time, because
+    it is the surrounding ``uv run`` that puts the venv bin on PATH.
+    """
+    if shutil.which("fno"):
+        return None
+    d = tempfile.mkdtemp(prefix="fno-parity-shim-")
+    shim = Path(d) / "fno"
+    shim.write_text('#!/bin/sh\nexec fno-py "$@"\n')
+    shim.chmod(0o755)
+    return d
 
 
 def _find_rust_bin() -> Path | None:
@@ -69,6 +96,11 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
         "FNO_AGENTS_HOME": str(home),
         "PYTHONPATH": pythonpath,
     }
+    # Only when the real binary is absent, so a machine that HAS fno keeps
+    # exercising the genuine article rather than a shim.
+    shim_dir = _fno_shim_dir()
+    if shim_dir:
+        env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
     # A short-token parity case asks the Rust client to invoke the Python
     # all-source resolver. Keep that test hermetic instead of scanning the
     # operator's real Claude/OpenCode corpora; individual tests can still
