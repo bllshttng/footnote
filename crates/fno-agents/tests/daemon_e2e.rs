@@ -293,6 +293,50 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
     .unwrap();
 }
 
+/// Seed a pane-hosted row: the shape whose identity keys the list projection
+/// used to drop. Holds the mux ref INSTEAD of a transport key (mux XOR worker
+/// XOR bg), so `short_id` is empty and `harness_session_id` is the only id.
+fn seed_pane_row(home: &AgentsHome, name: &str) {
+    state::update_registry(&home.registry_json(), |r| {
+        r.entries.push(fno_agents::state::RegistryEntry {
+            name: name.into(),
+            short_id: String::new(),
+            legacy_provider: "claude".into(),
+            harness: Some("claude".into()),
+            harness_session_id: Some("e6f78b98-e594-47ed-ad81-84f8a78b8bb7".into()),
+            cwd: "/tmp".into(),
+            project_root: String::new(),
+            session_id: None,
+            legacy_claude_short_id: None,
+            claude_session_uuid: None,
+            messaging_socket_path: None,
+            codex_session_id: None,
+            gemini_session_id: None,
+            mcp_channel_id: None,
+            host_mode: None,
+            cc_session_id: None,
+            status: fno_agents::AgentStatus::Live,
+            last_message_at: None,
+            created_at: "2026-07-30T00:00:00Z".into(),
+            pid: None,
+            pid_start_time: None,
+            log_path: None,
+            last_reconciled_at: None,
+            inside_leg: None,
+            exited_at: None,
+            mux: Some(fno_agents::state::MuxRef {
+                session: "main".into(),
+                pane_id: 10,
+            }),
+            screen_state: None,
+            crown_level: None,
+            crown_scope: None,
+            crown_grantor: None,
+        });
+    })
+    .unwrap();
+}
+
 // ---------------------------------------------------------------------------
 // Daemon binary-version drift restart (ab-1891cdff): US2 (restart swaps the
 // daemon), US3 (PTY workers survive -- Outcome B), US1/US4 (drift warned on
@@ -328,6 +372,11 @@ async fn drift_warned_on_list_stderr_only() {
     // JSON.
     let home = short_home();
     home.ensure_root().unwrap();
+    // One real row, so this is also the only coverage of a row projection
+    // travelling the whole client -> socket -> daemon -> stdout path. The unit
+    // test calls the projection directly and so cannot see the client seam;
+    // with an empty registry this test proved only that stdout parses.
+    seed_pane_row(&home, "worker-pane-e2e");
 
     // A private copy of the daemon binary we can replace out from under the
     // running process (the running process keeps the old inode).
@@ -407,8 +456,21 @@ async fn drift_warned_on_list_stderr_only() {
     let stderr = String::from_utf8_lossy(&out.stderr);
 
     // AC4-HP: stdout is valid JSON with no warning text.
-    serde_json::from_str::<serde_json::Value>(stdout.trim())
-        .expect("list --json stdout is valid JSON");
+    let parsed: serde_json::Value =
+        serde_json::from_str(stdout.trim()).expect("list --json stdout is valid JSON");
+
+    // The identity + hosting keys survive the whole real path, not just the
+    // in-process projection: the client splices daemon rows verbatim today, and
+    // nothing else fails if a future change starts projecting a subset there.
+    let row = &parsed["agents"][0];
+    assert_eq!(row["name"], "worker-pane-e2e");
+    assert_eq!(row["harness"], "claude");
+    assert_eq!(
+        row["harness_session_id"],
+        "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
+    );
+    assert_eq!(row["mux"]["session"], "main");
+    assert_eq!(row["mux"]["pane_id"], 10);
     assert!(
         !stdout.contains("restart") && !stdout.contains("older build"),
         "warning leaked into stdout: {stdout}"

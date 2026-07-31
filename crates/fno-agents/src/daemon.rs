@@ -2861,7 +2861,9 @@ where
             true
         })
         .map(|(e, rendered_status)| {
-            // Task 3.1: return the full serialize_entry 10-key shape matching Python.
+            // Return the full row shape matching Python's serialize_entry. The
+            // key set is pinned by schemas/agents-list-row.json, asserted here
+            // and by the Python test; edit that file before adding a key.
             // Fields present in RegistryEntry are mapped directly; fields absent from
             // the Rust registry are emitted as null with a NOTE citing the carveout.
             //
@@ -2886,6 +2888,14 @@ where
                     .or_else(|| e.session_id.clone()),
                 "codex" => e.codex_session_id.clone().or_else(|| e.session_id.clone()),
                 "gemini" => e.gemini_session_id.clone().or_else(|| e.session_id.clone()),
+                // Python writes opencode ids to the canonical harness_session_id
+                // and drops `session_id` on write (it is Rust-set only), so
+                // falling through would report null for every opencode row. Same
+                // resolution as `to_agent_entry` and `client_verbs::session_id_field`.
+                "opencode" => e
+                    .harness_session_id
+                    .clone()
+                    .or_else(|| e.session_id.clone()),
                 _ => e.session_id.clone(),
             };
             let session_id: Value = resume_id.map(Value::String).unwrap_or(Value::Null);
@@ -2899,11 +2909,16 @@ where
                 .map(|s| Value::String(s.to_string()))
                 .unwrap_or(Value::Null);
             // Same formatter as Python's `AgentEntry.crown_label`, so the two
-            // surfaces render an identical descriptor for the same row.
+            // surfaces render an identical descriptor for the same row. Python
+            // tests the scope for falsiness (`self.crown_scope or '?'`), so the
+            // empty string has to fall back here too, not just None.
             let crown: Value = match e.crown_level {
                 Some(level) => Value::String(format!(
                     "L{level} {}",
-                    e.crown_scope.as_deref().unwrap_or("?")
+                    e.crown_scope
+                        .as_deref()
+                        .filter(|s| !s.is_empty())
+                        .unwrap_or("?")
                 )),
                 None => Value::Null,
             };
@@ -6228,7 +6243,41 @@ done
             row["crown"], "L1 epic-x",
             "same formatter as Python crown_label"
         );
+        // The raw crown fields need value assertions too, not just presence:
+        // hardcoding either to null passes a key-set check and the bare-row
+        // null check, which is the "present but always null" lie again.
+        assert_eq!(row["crown_level"], 1);
+        assert_eq!(row["crown_scope"], "epic-x");
         assert_eq!(row["crown_grantor"], "king");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// An opencode row resolves `session_id` from `harness_session_id`, the only
+    /// place its id is persisted. Without the arm it fell through to the generic
+    /// `session_id`, which is Rust-set only and so null for every Python-written
+    /// row -- the same "reports absent when the data exists" defect this row
+    /// projection was just fixed for, one field over.
+    #[test]
+    fn list_row_resolves_opencode_session_id_from_harness_session_id() {
+        let home = short_home("listopencode");
+        seed_stream_row(&home, "worker-opencode", "abc12345");
+        state::update_registry(&home.registry_json(), |r| {
+            let e = &mut r.entries[0];
+            e.harness = Some("opencode".into());
+            e.harness_session_id = Some("oc-sess-9f2".into());
+            e.session_id = None;
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+        let row = &result["agents"][0];
+
+        assert_eq!(row["harness"], "opencode");
+        assert_eq!(row["session_id"], "oc-sess-9f2");
 
         std::fs::remove_dir_all(home.root()).ok();
     }

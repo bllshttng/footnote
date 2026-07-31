@@ -8,8 +8,6 @@ from __future__ import annotations
 import json
 import pathlib
 
-import pytest
-
 from fno.agents.format import (
     JSON_SCHEMA_VERSION,
     render_json,

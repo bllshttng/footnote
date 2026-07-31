@@ -58,26 +58,40 @@ Returns a canonical object suitable for scripts:
   "agents": [
     {
       "name": "worker-frontend",
+      "harness": "claude",
       "provider": "claude",
+      "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
       "short_id": "abc123",
       "session_id": "abc123",
       "cwd": "/Users/foo/code/proj",
       "created_at": "2026-05-20T17:00:00Z",
       "last_message_at": "2026-05-20T17:30:12Z",
       "status": "live",
-      "live_status": "Working",
-      "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl"
+      "live_status": null,
+      "pid": 75742,
+      "last_reconciled_at": "2026-05-20T17:30:00Z",
+      "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl",
+      "mux": null,
+      "crown": null,
+      "crown_level": null,
+      "crown_scope": null,
+      "crown_grantor": null,
+      "project_root": "/Users/foo/code/proj"
     }
   ],
   "count": 1,
+  "discovered_sessions": [],
+  "discovered_count": 0,
   "filters_applied": { "cwd": null, "provider": null, "status": null },
-  "schema_version": 1
+  "schema_version": 2
 }
 ```
 
-Every entry has the same key set regardless of provider. Codex / gemini entries get `short_id: null` and `live_status: null` because the live-status axis is Claude-specific in this release. JSON is the default whenever stdout is a pipe — `fno agents list | jq .` Just Works without an explicit `--json`.
+The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on provider to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`session_id` is the unified, provider-resolving resume target: `claude_short_id` for claude, `codex_session_id` for codex, `gemini_session_id` for gemini. `short_id` stays claude-only for back-compat, so for a codex agent you get `short_id: null` but `session_id: "<uuid>"` — that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` only when the id was never captured.
+`harness` is the identity axis; `provider` is a legacy alias of it, retained for consumers written before the rename. `harness_session_id` is the worker's own session id in its harness's store, and it is the only id a pane-hosted row carries: such a row holds a `mux` ref (`{session, pane_id}`) instead of a transport key, so its `short_id` is empty and its `session_id` is `null`. Address that worker through `mux`, for example `fno mux pane kill "$(fno agents list --json | jq -r '.agents[0] | "\(.mux.session):\(.mux.pane_id)"')"`.
+
+`session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` stays claude-only for back-compat, so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` only when the id was never captured, or when the row is pane-hosted and so has no transport key at all.
 
 ### Common recipes
 
