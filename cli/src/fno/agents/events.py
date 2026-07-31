@@ -128,3 +128,6 @@ KIND_AGENT_ASK_STREAMING_CHUNK = "agent_ask_streaming_chunk"
 KIND_AGENT_ASK_STREAMING_COMPLETED = "agent_ask_streaming_completed"
 KIND_AGENT_ASK_STREAMING_CANCELLED = "agent_ask_streaming_cancelled"
 KIND_STREAMING_VIA_POLLING = "streaming_via_polling"
+
+# Autonomous switchboard continuation lifecycle.
+KIND_AGENT_RELAY_STOPPED = "agent_relay_stopped"

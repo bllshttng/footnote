@@ -676,10 +676,111 @@ def test_relay_loop_one_way_when_peer_not_stream(monkeypatch) -> None:
         return {"delivered": False, "reason": "not-a-live-stream-thread"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_ev",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
     dispatch_mod._run_relay_loop(
         "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
     )
     assert len(calls) == 1, "a single failed relay hop to A ends the exchange"
+    assert emitted[0][0] == "agent_relay_stopped"
+    assert emitted[0][1]["reason"] == "not-a-live-stream-thread"
+
+
+def test_relay_loop_emits_stop_when_identity_proof_is_missing(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_daemon_rpc",
+        lambda *a, **k: {"delivered": True, "reply": "unverified"},
+    )
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_ev",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+
+    turns = dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
+    )
+
+    assert turns == 1
+    assert emitted == [
+        (
+            "agent_relay_stopped",
+            {
+                "target": "A",
+                "peer": "B",
+                "turn": 2,
+                "turns_completed": 1,
+                "reason": "identity-unverified",
+            },
+        )
+    ]
+
+
+def test_relay_loop_emits_stop_when_hop_raises(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    def _raise(*args, **kwargs):
+        raise RuntimeError("daemon socket vanished")
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _raise)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_ev",
+        lambda kind, **data: emitted.append((kind, data)),
+    )
+
+    turns = dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
+    )
+
+    assert turns == 1
+    assert emitted == [
+        (
+            "agent_relay_stopped",
+            {
+                "target": "A",
+                "peer": "B",
+                "turn": 2,
+                "turns_completed": 1,
+                "reason": "relay-hop-error",
+                "error": "daemon socket vanished",
+                "error_type": "RuntimeError",
+            },
+        )
+    ]
+
+
+def test_relay_loop_persists_stop_event(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_daemon_rpc",
+        lambda *a, **k: {"delivered": False, "reason": "recipient-identity-changed"},
+    )
+
+    dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
+    )
+
+    records = [
+        json.loads(line)
+        for line in (tmp_path / ".fno/events.jsonl").read_text(encoding="utf-8").splitlines()
+    ]
+    assert records[-1]["kind"] == "agent_relay_stopped"
+    assert records[-1]["target"] == "A"
+    assert records[-1]["turn"] == 2
+    assert records[-1]["reason"] == "recipient-identity-changed"
 
 
 def test_switchboard_demote_when_first_hop_not_delivered(monkeypatch) -> None:

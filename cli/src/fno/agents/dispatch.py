@@ -4230,6 +4230,28 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     )
 
 
+def _emit_relay_stopped(
+    target: str,
+    peer: str,
+    turns_completed: int,
+    reason: str,
+    *,
+    error: Optional[BaseException | str] = None,
+) -> None:
+    data: dict[str, object] = {
+        "target": target,
+        "peer": peer,
+        "turn": turns_completed + 1,
+        "turns_completed": turns_completed,
+        "reason": reason,
+    }
+    if error is not None:
+        data["error"] = str(error)
+        if isinstance(error, BaseException):
+            data["error_type"] = type(error).__name__
+    _emit_ev(events.KIND_AGENT_RELAY_STOPPED, **data)
+
+
 def _run_relay_loop(
     to_name: str,
     from_name: str,
@@ -4260,28 +4282,39 @@ def _run_relay_loop(
     while turns < ceiling and cur.strip():
         target_identity = recipient_identities.get(target)
         if target_identity is None:
+            _emit_relay_stopped(target, peer, turns, "recipient-identity-missing")
             break
-        hop = _daemon_rpc(
-            _SWITCHBOARD_RPC_METHOD,
-            {
-                "to": target,
-                "from": peer,
-                # Wrap each continuation in the sending peer's <fno_mail> so the
-                # relay turn carries provenance, not just the seed (node x-1f23).
-                "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
-                "mirror": False,
-                "recipient_identity": target_identity,
-            },
-            connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-            read_timeout=_SWITCHBOARD_READ_TIMEOUT,
-        )
+        try:
+            hop = _daemon_rpc(
+                _SWITCHBOARD_RPC_METHOD,
+                {
+                    "to": target,
+                    "from": peer,
+                    # Wrap each continuation in the sending peer's <fno_mail> so the
+                    # relay turn carries provenance, not just the seed (node x-1f23).
+                    "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
+                    "mirror": False,
+                    "recipient_identity": target_identity,
+                },
+                connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
+                read_timeout=_SWITCHBOARD_READ_TIMEOUT,
+            )
+        except Exception as exc:
+            _emit_relay_stopped(target, peer, turns, "relay-hop-error", error=exc)
+            break
         if (
             not isinstance(hop, dict)
             or hop.get("delivered") is not True
             or hop.get("identity_verified") is not True
         ):
-            # peer is not a live stream thread (one-way) or a daemon hiccup;
-            # the exchange ends here — B already received the original body.
+            if not isinstance(hop, dict):
+                reason = "invalid-response"
+            elif hop.get("delivered") is not True:
+                reason = str(hop.get("reason") or "not-delivered")
+            else:
+                reason = "identity-unverified"
+            error = hop.get("error") if isinstance(hop, dict) else None
+            _emit_relay_stopped(target, peer, turns, reason, error=error)
             break
         turns += 1
         cur = hop.get("reply") or ""
@@ -4380,8 +4413,14 @@ def _kickoff_background_relay(
                 mail_ctxs,
                 recipient_identities=recipient_identities,
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-process-error",
+                error=exc,
+            )
     finally:
         # _exit (not sys.exit) so the child never runs atexit handlers or flushes
         # the parent's buffers a second time.
