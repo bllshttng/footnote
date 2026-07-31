@@ -473,3 +473,19 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
     assert "mygraph.json" in result.stdout, (
         f"read_graph default froze to the fallback, not the configured path:\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC4-ERR: the error-reporting path is not itself a lazy tenant
+# ---------------------------------------------------------------------------
+
+def test_app_disables_typer_pretty_exceptions():
+    """AC4-ERR: typer's pretty-exception hook imports `typer.rich_utils` at exception
+    time. During a `uv tool install --reinstall` the package is being replaced under
+    the running process, so that first-time import fails too and the operator is shown
+    `cannot import name 'rich_utils' from 'typer'` instead of the real cause. typer
+    checks this flag BEFORE the rich_utils import, so False means zero new imports on
+    the failure path."""
+    from fno.cli import app
+
+    assert app.pretty_exceptions_enable is False

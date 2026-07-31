@@ -313,6 +313,15 @@ app = typer.Typer(
     invoke_without_command=True,
     add_completion=False,
     cls=make_lazy_group_cls(LAZY_SUBCOMMANDS),
+    # Typer's pretty-exception hook does `from . import rich_utils` at EXCEPTION
+    # time, so the error-reporting path is itself a first-time import. When the
+    # thing being reported is "a lazy import failed because uv was reinstalling
+    # this package underneath us", that hook fails too and the operator sees
+    # `cannot import name 'rich_utils' from 'typer'` instead of the real cause.
+    # False is checked before that import, so we fall through to the standard
+    # excepthook with no new imports at all. Plain tracebacks are also the better
+    # default for a CLI whose stderr is read by agents.
+    pretty_exceptions_enable=False,
 )
 
 
