@@ -284,12 +284,15 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("placement-rule lint self-test", ".", "bash scripts/tests/test_check_placement_rule.sh"),
     ("Build fno-agents debug binary (for journey tests)", "crates/fno-agents", "cargo build"),
     # The debug binary is present here, so the @requires_rust parity suites run
-    # instead of skipping. Stub codex/gemini on PATH (test_rust_verb_parity
+    # instead of skipping. Stub the provider CLIs on PATH (test_rust_verb_parity
     # presence-checks them without faking); per-test fakes still win where a
     # provider is actually executed. Reuses the build above; no second compile.
+    # opencode belongs in this list for the same reason codex and gemini do:
+    # the OpenCode canonical-tail case resumes through it, and a runner without
+    # it fails on `opencode CLI not on PATH` rather than on any parity claim.
     ("Scoped @requires_rust parity suites (binary present; stubbed providers)", "cli",
      'FAKE_BIN="$(mktemp -d)"\n'
-     'for p in codex gemini; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
+     'for p in codex gemini opencode; do printf "%s\\n%s\\n" "#!/bin/sh" "exit 0" > "$FAKE_BIN/$p"; chmod +x "$FAKE_BIN/$p"; done\n'
      'PATH="$FAKE_BIN:$PATH" uv run pytest --tb=short -q '
      "tests/agents/test_rust_verb_parity.py tests/agents/test_ask_e2e_dispatch.py"),
     ("registry-miss heal across the Rust/Python seam", ".", "bash tests/test-agents-heal-token.sh"),
