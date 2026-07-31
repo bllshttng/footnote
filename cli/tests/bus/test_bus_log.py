@@ -8,6 +8,9 @@ at any body size) and the versioned envelope.
 from __future__ import annotations
 
 import json
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -162,6 +165,39 @@ def test_concurrent_appends_all_land_unintercalated(bus):
         idx, _, payload = m.body.partition(":")
         assert payload == big, f"body for {idx} was corrupted/interleaved"
     assert sorted(int(m.body.split(":", 1)[0]) for m in msgs) == list(range(n))
+
+
+def test_multiprocess_appends_survive_contention_and_rotation(bus):
+    """Independent send processes serialize without loss at a rotation edge."""
+    from fno.bus.log import iter_messages
+
+    worker = """
+import sys
+from fno.bus.log import Envelope, append
+
+prefix = sys.argv[1]
+for i in range(5):
+    append(Envelope.new(from_=prefix, to="peer", kind="send", body=f"{prefix}:{i}"))
+"""
+    env = os.environ.copy()
+    env["FNO_BUS_MAX_BYTES"] = "400"
+    env["FNO_BUS_RETAIN"] = "100"
+    processes = [
+        subprocess.Popen(
+            [sys.executable, "-c", worker, f"p{index}"],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        for index in range(4)
+    ]
+    results = [process.communicate(timeout=10) for process in processes]
+
+    for process, (stdout, stderr) in zip(processes, results):
+        assert process.returncode == 0, stdout + stderr
+    expected = {f"p{process}:{item}" for process in range(4) for item in range(5)}
+    assert {message.body for message in iter_messages()} == expected
 
 
 # ---------------------------------------------------------------------------

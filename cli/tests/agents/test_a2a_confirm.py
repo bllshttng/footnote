@@ -6,6 +6,7 @@ AC6-FR (answered once, never re-asks), and the observed/malformed pass-through.
 """
 from __future__ import annotations
 
+import fcntl
 import os
 import time
 
@@ -139,6 +140,69 @@ def test_ac3_err_unanswered_tty_times_out_without_persisting(tmp_path, monkeypat
     assert "conservative fallback" in err.text()
     assert not (paths.state_dir() / ".a2a-confirmed").exists()
     assert not (tmp_path / "config.toml").exists()
+
+
+def test_ac3_err_tty_eof_falls_back_without_persisting(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="")
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not be read" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_ac3_err_config_lock_contention_is_bounded_and_unconfirmed(
+    tmp_path, monkeypatch
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+
+    from fno.config import writer
+
+    target = writer._target_path("global", None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        effective = dispatch._a2a_first_use_gate(
+            True,
+            6,
+            config_lock_timeout_seconds=0.05,
+        )
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert time.monotonic() - started < 0.5
+    assert effective is False
+    assert "could not persist" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not target.exists()
+
+
+def test_ac3_err_config_write_failure_does_not_persist_marker(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="n\n")
+
+    from fno.config import writer
+
+    monkeypatch.setattr(
+        writer,
+        "set_config_value",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read only")),
+    )
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not persist" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
 
 
 def test_ac6_fr_marker_means_no_reask(tmp_path, monkeypatch):

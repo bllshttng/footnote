@@ -266,7 +266,7 @@ def _segment_paths_oldest_first(live: Path) -> list[Path]:
 # Locked append + rotation
 # ---------------------------------------------------------------------------
 
-class BusLockTimeout(OSError):
+class BusLockTimeout(TimeoutError):
     """The canonical bus sidecar stayed contended past its write budget."""
 
     def __init__(self, lock_path: Path, timeout_seconds: float):

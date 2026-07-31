@@ -2,7 +2,9 @@
 
 `fno mail send <name> "<message>"` is the async sibling of `ask`. It attempts a live inject first and falls back to a durable envelope only when that misses, returning without waiting for a reply. A live delivery writes nothing to the bus; a durable one is the recovery copy, not delivery, so read the receipt (`delivered (hosted)` vs `queued (durable)`) rather than the exit code. `queued (durable)` means the live inject was not CONFIRMED, which is not proof it failed: a busy recipient can record the turn past the confirm budget and receive it anyway, so `peek` before re-sending. Unlike `ask`, it does not require a registry row - it resolves a live session across the registry, the daemon roster, and disk - but a name that resolves to nothing exits 16 with a "spawn it first" hint (Locked Decision 1 from the cross-agent bus epic: ask and send never create peers).
 
-Only a terminal success receipt or independent evidence in the recipient transcript proves that a send occurred. A timeout, interruption, or command that returns no receipt is not coordination and must not be reported as such.
+Only a terminal success receipt or independent evidence in the recipient transcript proves that a send occurred.
+The hosted transcript envelope carries the same message ID reserved for a possible durable fallback even though a confirmed live delivery writes no bus record.
+A timeout, interruption, or command that returns no receipt is not coordination and must not be reported as such.
 
 Use this guide when a script or LLM session needs to hand off work to a peer without waiting for the response, or when the recipient may be offline and you want the message to land in their inbox for pickup at next turn-start.
 
@@ -29,7 +31,11 @@ or
 msg-3a7f1c2e queued (durable)
 ```
 
-`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded. `queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain. Both are exit 0. The `msg-<8hex>` id is stable, but it only exists in the bus log for a `queued (durable)` send: a `delivered (hosted)` send writes no bus entry and the live `<fno_mail>` envelope does not carry that id, so bus-log reply correlation by `msg-<id>` applies to the durable path only. For a delivered live turn, the history is the recipient transcript (`grep <fno_mail>`).
+`delivered (hosted)` means live PTY injection (codex/gemini) or the `control.sock` `op:'reply'` inject (claude, via the `fno-agents mail-inject` verb) succeeded.
+`queued (durable)` means the message is in the recipient's inbox store, waiting for their next drain.
+Both are exit 0.
+The `msg-<8hex>` id is stable and appears in the live `<fno_mail>` envelope, but it exists in the bus log only for a `queued (durable)` send.
+Bus-log reply lookup therefore applies only to durable delivery; hosted delivery is independently evidenced by the recipient transcript.
 
 ## Flags
 
@@ -82,6 +88,7 @@ Send resolves delivery in order:
 | Bus lock timeout before durable append | 12 | `bus lock timeout after 5s at <path>; no durable envelope was written` |
 | Durable envelope write failed | 12 | `durable envelope write failed: ...` |
 | Live delivery demoted | 0 | demotion notice on stderr; stdout says `queued (durable)` |
+| Post-delivery registry stamp timed out | 0 | delivery-success warning says not to retry; stdout preserves `delivered (hosted)` |
 
 The body cap (1 MiB) is enforced BEFORE any inbox store write, so a rejected oversized message leaves no partial record.
 

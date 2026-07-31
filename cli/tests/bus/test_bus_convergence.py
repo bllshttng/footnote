@@ -82,7 +82,7 @@ else:
             env=os.environ.copy(),
             capture_output=True,
             text=True,
-            timeout=1.0,
+            timeout=3.0,
             check=False,
         )
     except subprocess.TimeoutExpired:

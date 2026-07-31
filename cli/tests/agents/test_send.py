@@ -9,7 +9,9 @@ overhead, following the pattern in test_dispatch_ask.py.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -1015,6 +1017,45 @@ def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
     assert "do not retry" in stderr
 
 
+def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A completed hosted send cannot wait forever before returning its receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: True)
+    registry_path = paths.agents_registry_path()
+    lock_path = registry_mod._registry_lock_path(registry_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        result = dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            registry_stamp_timeout_seconds=0.05,
+        )
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert time.monotonic() - started < 2.0
+    assert result.delivery == "hosted"
+    stderr = capsys.readouterr().err
+    assert "registry stamp failed after hosted delivery" in stderr
+    assert "do not retry" in stderr
+
+
 def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(
     tmp_path: Path,
     monkeypatch,
@@ -1260,6 +1301,43 @@ def test_dispatch_send_bus_lock_timeout_is_explicit_exit12(
     assert "no durable envelope was written" in text
     assert "delivered" not in text
     assert "queued (durable)" not in text
+
+
+def test_cmd_send_real_bus_lock_timeout_has_no_success_receipt(
+    tmp_path: Path,
+    monkeypatch,
+    runner: CliRunner,
+) -> None:
+    """The command boundary preserves the real canonical-lock failure."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.bus import log as bus_log
+    from fno.inbox.store import read_all_threads
+    from fno.mail.cli import mail_app
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(bus_log, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(bus_log, "_LOCK_POLL_SECONDS", 0.005)
+    lock_path = bus_log._lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    try:
+        result = runner.invoke(mail_app, ["send", "red", "hello"])
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert result.exit_code == 12
+    output = result.stdout + (result.stderr or "")
+    assert "bus lock timeout" in output
+    assert "no durable envelope was written" in output
+    assert "delivered" not in result.stdout
+    assert "queued (durable)" not in result.stdout
+    assert not bus_log.bus_log_path().exists()
+    assert read_all_threads("abcd1234") == []
 
 
 def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypatch) -> None:

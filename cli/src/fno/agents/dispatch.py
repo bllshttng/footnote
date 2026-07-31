@@ -109,6 +109,7 @@ def _update_registry_if_recipient_unchanged(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     *,
     registry_path: Optional[Path] = None,
+    registry_lock_timeout: Optional[float] = None,
 ) -> bool:
     """Apply a post-side-effect write only to the selected recipient.
 
@@ -131,9 +132,13 @@ def _update_registry_if_recipient_unchanged(
         return updater(entries)
 
     if registry_path is None:
-        update_registry(_guarded)
+        update_registry(_guarded, lock_timeout=registry_lock_timeout)
     else:
-        update_registry(_guarded, path=registry_path)
+        update_registry(
+            _guarded,
+            path=registry_path,
+            lock_timeout=registry_lock_timeout,
+        )
     return applied
 
 
@@ -4557,6 +4562,7 @@ def _kickoff_background_relay(
 
 
 _A2A_CONFIRM_TIMEOUT_SECONDS = 5.0
+_A2A_CONFIG_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def _a2a_first_use_gate(
@@ -4564,6 +4570,7 @@ def _a2a_first_use_gate(
     ceiling: int,
     *,
     confirm_timeout_seconds: float = _A2A_CONFIRM_TIMEOUT_SECONDS,
+    config_lock_timeout_seconds: float = _A2A_CONFIG_LOCK_TIMEOUT_SECONDS,
 ) -> bool:
     """First-use confirm for the autonomous a2a relay (US6, ab-098967b4).
 
@@ -4621,7 +4628,10 @@ def _a2a_first_use_gate(
         )
         if not ready:
             raise TimeoutError
-        answer = sys.stdin.readline().strip().lower()
+        raw_answer = sys.stdin.readline()
+        if raw_answer == "":
+            raise EOFError
+        answer = raw_answer.strip().lower()
     except Exception:
         sys.stderr.write(
             "\nfno-agents a2a: confirmation timed out or could not be read; "
@@ -4635,9 +4645,20 @@ def _a2a_first_use_gate(
     try:
         from fno.config.writer import set_config_value
 
-        set_config_value("config.agents.a2a.auto", "true" if keep_on else "false", scope="global")
-    except Exception:
-        pass  # best-effort persist; the marker below still prevents re-asking.
+        set_config_value(
+            "config.agents.a2a.auto",
+            "true" if keep_on else "false",
+            scope="global",
+            lock_timeout=config_lock_timeout_seconds,
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"\nfno-agents a2a: could not persist confirmation ({exc}); "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("answered\n", encoding="utf-8")
@@ -5461,6 +5482,8 @@ def dispatch_send(
     cwd: "Path",
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     from_name: str = _FROM_NAME_DEFAULT,
+    *,
+    registry_stamp_timeout_seconds: float = 1.0,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -5851,6 +5874,7 @@ def dispatch_send(
                     selected_identity,
                     _stamp,
                     registry_path=registry_path,
+                    registry_lock_timeout=registry_stamp_timeout_seconds,
                 )
                 if not stamp_written:
                     warning = (

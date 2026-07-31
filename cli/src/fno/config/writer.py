@@ -21,6 +21,7 @@ from __future__ import annotations
 import copy
 import os
 import tempfile
+import time
 import tomllib
 import typing
 from dataclasses import dataclass
@@ -219,6 +220,9 @@ def _deep_set(d: dict[str, Any], parts: list[str], value: Any) -> dict[str, Any]
 def _locked_update(
     target: Path,
     mutate: Callable[[dict[str, Any]], dict[str, Any]],
+    *,
+    lock_timeout: Optional[float] = None,
+    lock_poll_seconds: float = 0.02,
 ) -> Path:
     """Read + mutate + atomic-write the settings file, all under one exclusive
     file lock (AC7-EDGE / AC7-FR). Returns the real path written.
@@ -250,7 +254,24 @@ def _locked_update(
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.with_suffix(target.suffix + ".lock")
     with open(lock_path, "w") as lock_fh:
-        fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        if lock_timeout is None:
+            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+        else:
+            deadline = time.monotonic() + lock_timeout
+            while True:
+                try:
+                    fcntl.flock(
+                        lock_fh.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            f"config lock timeout after {lock_timeout:g}s at {lock_path}"
+                        )
+                    time.sleep(min(lock_poll_seconds, remaining))
         try:
             existing: dict[str, Any] = {}
             if target.exists():
@@ -381,6 +402,7 @@ def set_config_values(
     *,
     scope: str = "global",
     repo_root: Optional[Path] = None,
+    lock_timeout: Optional[float] = None,
 ) -> list[SetResult]:
     """Set one or more dotted keys in one atomic, lock-serialized pass (US2).
 
@@ -435,7 +457,11 @@ def set_config_values(
         return data
 
     try:
-        written = _locked_update(target, _validate_and_merge)
+        written = _locked_update(
+            target,
+            _validate_and_merge,
+            lock_timeout=lock_timeout,
+        )
     except OSError as exc:
         # AC2-FR: the temp+rename already left the original intact; surface a
         # clean non-zero exit.
@@ -454,6 +480,7 @@ def set_config_value(
     *,
     scope: str = "global",
     repo_root: Optional[Path] = None,
+    lock_timeout: Optional[float] = None,
 ) -> SetResult:
     """Set a single dotted config key (the single-key facade over
     ``set_config_values``). The key may be a scalar/list leaf (coerced) or a
@@ -462,7 +489,10 @@ def set_config_value(
     type-mismatched / schema-invalid value, or a malformed existing file.
     """
     return set_config_values(
-        [(key, value)], scope=scope, repo_root=repo_root
+        [(key, value)],
+        scope=scope,
+        repo_root=repo_root,
+        lock_timeout=lock_timeout,
     )[0]
 
 

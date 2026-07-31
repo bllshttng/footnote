@@ -7,9 +7,11 @@ All existing test_send.py tests remain unchanged.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -547,6 +549,77 @@ def test_switchboard_observed_single_hop(monkeypatch) -> None:
     assert len(calls) == 1
     assert calls[0]["mirror"] is True
     assert calls[0]["to"] == "B" and calls[0]["from"] == "A"
+
+
+def test_unanswered_confirmation_continues_as_observed_switchboard_hop(
+    tmp_path, monkeypatch
+) -> None:
+    """A prompt timeout still reaches a terminal observed delivery."""
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_A2A_NO_CONFIRM", raising=False)
+    from fno.agents import dispatch as dispatch_mod
+
+    read_fd, write_fd = os.pipe()
+
+    class _UnansweredTTY:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return read_fd
+
+        def readline(self):
+            return os.read(read_fd, 4096).decode()
+
+    class _TTYErr:
+        def isatty(self):
+            return True
+
+        def write(self, _text):
+            return None
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(dispatch_mod.sys, "stdin", _UnansweredTTY())
+    monkeypatch.setattr(dispatch_mod.sys, "stderr", _TTYErr())
+    real_gate = dispatch_mod._a2a_first_use_gate
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_a2a_first_use_gate",
+        lambda auto, ceiling: real_gate(
+            auto,
+            ceiling,
+            confirm_timeout_seconds=0.05,
+        ),
+    )
+    monkeypatch.setattr(dispatch_mod, "_load_a2a_settings", lambda: (True, 6))
+    calls: list[dict] = []
+
+    def _rpc(_method, params, **_kwargs):
+        calls.append(params)
+        return {"delivered": True, "identity_verified": True, "reply": "r1"}
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+    started = time.monotonic()
+    try:
+        delivered = dispatch_mod._switchboard_exchange(
+            "B",
+            "A",
+            "msg",
+            to_identity=_sb_identity("B"),
+            from_identity=_sb_identity("A"),
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert time.monotonic() - started < 0.5
+    assert delivered is True
+    assert len(calls) == 1
+    assert calls[0]["mirror"] is True
+    assert not (tmp_path / ".fno" / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
 
 
 def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -> None:
