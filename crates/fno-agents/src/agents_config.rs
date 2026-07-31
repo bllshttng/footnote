@@ -146,6 +146,37 @@ fn table_mux_bool(t: &toml::Table, key: &str) -> Option<bool> {
     t.get("mux")?.as_table()?.get(key)?.as_bool()
 }
 
+/// Normalize one configured GitHub login without changing its case. This
+/// mirrors loop-check's TOML coercion: scalar strings/numbers/bools are legal
+/// login spellings, while structured values are not.
+fn review_login_scalar(v: &Value) -> Option<String> {
+    let raw = match v {
+        Value::String(s) => s.trim().to_string(),
+        Value::Integer(i) => i.to_string(),
+        Value::Float(f) => f.to_string(),
+        Value::Boolean(b) => b.to_string(),
+        _ => return None,
+    };
+    (!raw.is_empty()).then_some(raw)
+}
+
+/// `review.optional_apps` from one parsed config candidate.
+///
+/// Presence always returns `Some`, including an explicit empty list or a
+/// malformed structured value. That is the precedence boundary: project-local
+/// `[]` must mask a global list, and malformed optional configuration degrades
+/// to no optional reviewers instead of falling through to a lower tier.
+fn table_review_optional_apps(t: &toml::Table) -> Option<Vec<String>> {
+    let value = t.get("review")?.as_table()?.get("optional_apps")?;
+    Some(match value {
+        Value::Array(items) => items.iter().filter_map(review_login_scalar).collect(),
+        Value::String(_) | Value::Integer(_) | Value::Float(_) | Value::Boolean(_) => {
+            review_login_scalar(value).into_iter().collect()
+        }
+        _ => Vec::new(),
+    })
+}
+
 /// Normalize a scalar toml value to the raw string each caller re-coerces
 /// (mirrors the old scanner contract: strings lowercased, numbers stringified).
 ///
@@ -247,6 +278,17 @@ pub fn dispatch_auto_merge(cwd: &Path) -> bool {
         t.get("dispatch")?.as_table()?.get("auto_merge")?.as_bool()
     })
     .unwrap_or(false)
+}
+
+/// Resolve `review.optional_apps`, the GitHub App logins whose findings are
+/// honored when present but whose absence never blocks `DonePRGreen`.
+///
+/// Finalize reads this list only to decide whether it may arm GitHub's native
+/// auto-merge. Missing or malformed configuration resolves to an empty list;
+/// an explicit empty list remains a real project-level override and masks any
+/// lower-precedence global list.
+pub fn review_optional_apps(cwd: &Path) -> Vec<String> {
+    resolve(cwd, table_review_optional_apps).unwrap_or_default()
 }
 
 /// The `config.auto_merge.*` block, the knobs that shape the `gh pr merge`
@@ -648,6 +690,61 @@ mod tests {
         clear_config_env();
         let cwd = write_project_settings("am-false", "[dispatch]\nauto_merge = false\n");
         assert!(!dispatch_auto_merge(&cwd));
+    }
+
+    // --- review.optional_apps reader ---------------------------------------
+
+    #[test]
+    fn review_optional_apps_accepts_list_and_scalar_forms() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for (name, body, want) in [
+            (
+                "optional-list",
+                "[review]\noptional_apps = [\"chatgpt-codex-connector\", \"gemini-code-assist\"]\n",
+                vec!["chatgpt-codex-connector", "gemini-code-assist"],
+            ),
+            (
+                "optional-scalar",
+                "[review]\noptional_apps = \"chatgpt-codex-connector\"\n",
+                vec!["chatgpt-codex-connector"],
+            ),
+        ] {
+            clear_config_env();
+            let cwd = write_project_settings(name, body);
+            assert_eq!(review_optional_apps(&cwd), want);
+        }
+    }
+
+    #[test]
+    fn review_optional_apps_explicit_local_empty_masks_global() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let global = write_file(
+            "optional-global",
+            "[review]\noptional_apps = [\"chatgpt-codex-connector\"]\n",
+        );
+        std::env::set_var(
+            "FNO_GLOBAL_SETTINGS_PATH",
+            global.with_file_name("settings.json"),
+        );
+        let cwd = write_project_settings("optional-local-empty", "[review]\noptional_apps = []\n");
+        let got = review_optional_apps(&cwd);
+        clear_config_env();
+        assert!(
+            got.is_empty(),
+            "explicit local [] must mask the global list"
+        );
+    }
+
+    #[test]
+    fn review_optional_apps_malformed_value_degrades_to_empty() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        clear_config_env();
+        let cwd = write_project_settings(
+            "optional-malformed",
+            "[review]\noptional_apps = { login = \"chatgpt-codex-connector\" }\n",
+        );
+        assert!(review_optional_apps(&cwd).is_empty());
     }
 
     // --- auto_merge.{merge_strategy,delete_branch_on_merge} readers ---
