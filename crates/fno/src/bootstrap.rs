@@ -293,20 +293,32 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(BootErr::new(
-            s.code().unwrap_or(1),
-            format!(
-                "`uv tool install {}` failed. Check your network / PyPI access \
-                 and retry, or run it manually (re-supplying any credential your \
-                 FNO_BOOTSTRAP_WHEEL carries).",
-                redact_source(source)
-            ),
-        )),
+        Ok(s) => Err(BootErr::new(s.code().unwrap_or(1), install_failure_message(source))),
         Err(e) => Err(BootErr::new(
             1,
             format!("could not run uv to install the fno wheel: {e}"),
         )),
     }
+}
+
+/// Compose the install-failure message. Pure (uv has already printed its own
+/// error to the inherited stderr) so the wording is unit-testable, and
+/// `redact_source` is applied HERE so no caller can leak a credential-bearing
+/// source by forgetting to.
+///
+/// This used to say "Check your network / PyPI access". uv exits nonzero for
+/// plenty of reasons that are not the network -- the case that prompted this was
+/// `failed to remove directory .../lib: Directory not empty (os error 66)`,
+/// printed verbatim on the line immediately above -- and naming a subsystem we
+/// have not tested sends the reader off to diagnose the wrong one. uv's own
+/// error is right there and is the better pointer.
+fn install_failure_message(source: &str) -> String {
+    format!(
+        "`uv tool install {}` failed; uv's own error is printed above. \
+         Re-run it manually to reproduce it (re-supplying any credential your \
+         FNO_BOOTSTRAP_WHEEL carries).",
+        redact_source(source)
+    )
 }
 
 /// Choose the `uv tool install` source across three rungs of precedence, pure
@@ -1072,6 +1084,29 @@ mod tests {
         let m = locate_failure_message(Some(&p), false, "fno", None);
         assert!(m.contains("/u/.local/share/uv/tools/fno/bin/fno-py"), "{m}");
         assert!(m.contains("nothing exists at that path"), "{m}");
+    }
+
+    #[test]
+    fn install_failure_message_defers_to_uv_instead_of_blaming_the_network() {
+        // uv exits nonzero for plenty of non-network reasons (the case that
+        // prompted this was `Directory not empty (os error 66)`, printed verbatim
+        // one line above). Asserting a subsystem we have not tested sends the
+        // reader to diagnose the wrong one.
+        let m = install_failure_message("/home/me/footnote/cli");
+        assert!(m.contains("uv's own error is printed above"), "{m}");
+        assert!(!m.to_lowercase().contains("network"), "{m}");
+        assert!(!m.contains("PyPI"), "{m}");
+        // Still names what failed and how to reproduce it by hand.
+        assert!(m.contains("`uv tool install /home/me/footnote/cli` failed"), "{m}");
+        assert!(m.contains("FNO_BOOTSTRAP_WHEEL"), "{m}");
+    }
+
+    #[test]
+    fn install_failure_message_redacts_credentials_in_the_source() {
+        // Redaction lives inside the builder so no caller can leak by forgetting.
+        let m = install_failure_message("https://user:tok@example.com/wheels/fno.whl");
+        assert!(!m.contains("tok"), "{m}");
+        assert!(m.contains("<redacted>@example.com"), "{m}");
     }
 
     #[test]
