@@ -1547,6 +1547,31 @@ event_types:
           type: string
           description: "Machine-readable reason for the demotion (e.g. worker unreachable error text)."
 
+  - name: agent_deliver_status_write_failed
+    description: "A failed switchboard drive could not mark the verified recipient orphaned because its registry identity changed or the registry update failed."
+    sources: [daemon]
+    data:
+      required: []
+      properties:
+        name:
+          type: string
+          description: "Registry name of the intended recipient."
+        from_name:
+          type: string
+          description: "Registry name of the sender."
+        provider:
+          type: string
+          description: "Provider of the intended recipient."
+        transport:
+          type: string
+          description: "Delivery transport whose cleanup failed."
+        reason:
+          type: string
+          description: "Machine-readable failure class."
+        error:
+          type: string
+          description: "Registry or blocking-task error detail when available."
+
   - name: agent_stop_error
     description: "An error occurred while stopping an agent (e.g. registry write failure after SIGTERM)."
     sources: [daemon]
