@@ -97,6 +97,34 @@ def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
     assert "ab-bbbbbbbb" in ids
 
 
+def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
+    """Each serialized lane claims its pick before the next lane selects."""
+    max_lanes = 3
+    entries = [
+        {
+            "id": f"ab-0000000{i}", "title": f"Node {i}", "status": "ready",
+            "priority": "p1", "created_at": _RECENT_CREATED, "project": "p",
+            "blocked_by": [], "plan_path": f"{i}.md",
+        }
+        for i in range(1, max_lanes + 2)
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    selected: list[str] = []
+
+    for lane in range(max_lanes):
+        out = json.loads(_invoke("graph", "next", "--all").stdout)
+        assert out["id"] not in selected
+        selected.append(out["id"])
+        acquire_claim(
+            key=f"node:{out['id']}",
+            holder=f"target-session:lane-{lane}",
+            ttl_ms=3_600_000,
+            root=tmp_path,
+        )
+
+    assert len(set(selected)) == max_lanes
+
+
 def test_released_claim_does_not_block(tmp_graph, tmp_path):
     """After release the node is selectable again (only LIVE claims filter)."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")

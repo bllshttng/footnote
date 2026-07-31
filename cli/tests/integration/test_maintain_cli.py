@@ -178,6 +178,25 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
     assert all(n.get("deferred_at") is None for n in after)
 
 
+def test_maintain_wip_count_includes_live_epic_promoted_children(
+    tmp_graph, monkeypatch
+):
+    import fno.graph.render_html as render_html
+
+    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    _seed(tmp_graph, [
+        _node("ab-epic01", type="epic", status="ready", priority="p1"),
+        _node(
+            "ab-child1", status="ready", priority="p2", parent="ab-epic01"
+        ),
+    ])
+
+    result = _invoke(["--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["now_overflow"] == [2, 1]
+
+
 # --- AC1-UI: per-leg counts printed (no-op vs active distinguishable) -------
 
 

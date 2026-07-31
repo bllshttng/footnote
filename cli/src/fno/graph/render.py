@@ -9,9 +9,9 @@ import os
 import tempfile
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
+from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band as _rank_band
 from fno.graph._intake import (
-    UNSCOPED_LABEL,
+    UNSCOPED_LABEL as UNSCOPED_LABEL,
     _project_key,
     make_effective_priority,
     make_selection_sort_key,

@@ -1,10 +1,6 @@
 """Unit tests for fno.graph.render - kanban rendering."""
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from fno.graph.render import (
     UNSCOPED_LABEL,
     _kanban_column,

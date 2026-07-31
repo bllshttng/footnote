@@ -8,9 +8,6 @@ is never touched.
 from __future__ import annotations
 
 import json
-import os
-import tempfile
-import unittest.mock
 from pathlib import Path
 
 import pytest
@@ -730,6 +727,24 @@ def test_ac1_ui_ranked_card_leads_lane_after_before(tmp_graph):
     md = (tmp_graph.parent / "graph.md").read_text()
     now_body = md.split("## Now", 1)[1].split("\n## ", 1)[0]
     assert now_body.index("SecondCard") < now_body.index("FirstCard")
+
+
+def test_rank_uses_live_epic_promoted_board_lane(tmp_graph):
+    entries = [
+        {"id": "ab-epic001", "title": "Epic", "type": "epic",
+         "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-child01", "title": "Promoted child", "status": "ready",
+         "priority": "p2", "project": "fno", "parent": "ab-epic001"},
+        {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
+         "priority": "p1", "project": "fno", "rank": 5.0},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    result = _invoke("backlog", "rank", "ab-child01", "--before", "ab-anchor1")
+
+    assert result.exit_code == 0, result.output
+    assert "Now/fno" in result.output
+    assert _rank_of(tmp_graph, "ab-child01") < _rank_of(tmp_graph, "ab-anchor1")
 
 
 def test_ac1_after_ranked_anchor_places_behind(tmp_graph):
@@ -1499,7 +1514,8 @@ def _epics_first_entries():
     Epics-first must rank the p3 epic child ahead of the p0 loose node.
     """
     return [
-        {"id": "ab-epic", "title": "Epic", "status": "ready", "priority": "p2",
+        {"id": "ab-epic", "title": "Epic", "type": "epic",
+         "status": "ready", "priority": "p2",
          "created_at": _recent_iso(3), "project": "p", "blocked_by": [],
          "plan_path": "x.md"},
         {"id": "ab-child", "title": "Child", "status": "ready", "priority": "p3",

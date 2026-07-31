@@ -74,7 +74,11 @@ A hand-maintained list with a comment asking the next person to remember is the 
 
 `document-and-guard` is this doc's answer for a contract with **two implementations**. Plan readiness looked like a member of that class and is not, which is worth recording so the next design does not re-derive the wrong plan.
 
-A node's plan sits on a rung (`idea` -> `design` -> `ready` -> `in_progress` -> `in_review`, plus the `done`/`superseded` terminals). One Python function classifies it: `plan_rung` in `cli/src/fno/graph/ladder.py`, which also owns the two deliberately-opposite policies (`is_selectable` fails open, `is_dispatchable` fails closed). Bash asks it through `fno plan rung`. **Rust never parses it.**
+A node's plan sits on a rung (`idea` -> `design` -> `ready` -> `in_progress` -> `in_review`, plus the `done`/`superseded` terminals).
+One Python function classifies it: `plan_rung` in `cli/src/fno/graph/ladder.py`.
+Autonomous selection reads that classification through `selection_guards`, while `is_dispatchable` and `is_cold_dispatchable` own the plan-bearing and plan-less dispatch policies.
+Bash asks the classifier through `fno plan rung`.
+**Rust never parses it.**
 
 That last sentence is the finding. It reads as though `crates/fno-agents/src/loopcheck.rs` parses plan-frontmatter status, and it does parse a `status:` key - but out of `.fno/target-state.md`, whose vocabulary is `COMPLETE | BLOCKED | ABORTED`, a different axis entirely. Reading the rest of the Rust surface:
 
