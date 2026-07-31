@@ -5080,7 +5080,9 @@ def dispatch_send(
     registry_path = paths.agents_registry_path()
     requested_name = name
 
-    def _load_and_resolve_target() -> tuple[list[AgentEntry], AgentEntry]:
+    def _load_and_resolve_target(
+        expected_name: Optional[str] = None,
+    ) -> tuple[list[AgentEntry], AgentEntry]:
         try:
             entries = load_registry(registry_path)
         except (OSError, ValueError, RegistryVersionError) as exc:
@@ -5097,7 +5099,14 @@ def dispatch_send(
             existing = resolve_registered_agent_across_sources(
                 entries, requested_name
             ).entry
-            from fno.agents.discover import live_address_matches
+            if expected_name is not None and existing.name != expected_name:
+                raise DispatchAskError(
+                    f"agent address {requested_name!r} changed from "
+                    f"{expected_name!r} to {existing.name!r} while acquiring "
+                    "its lock; retry the send",
+                    exit_code=2,
+                )
+            from fno.agents.discover import discovery_address_matches
 
             registry_id = getattr(existing, "harness_session_id", None) or getattr(
                 existing, "session_id", None
@@ -5108,7 +5117,7 @@ def dispatch_send(
             )
             live_foreign = {
                 (session.agent, session_identity_key(session.session_id)): session
-                for session in live_address_matches(
+                for session in discovery_address_matches(
                     requested_name, registry_path=registry_path
                 )
                 if (
@@ -5179,7 +5188,7 @@ def dispatch_send(
             timeout=lock_timeout,
             on_wait=_on_wait,
         ):
-            entries, existing = _load_and_resolve_target()
+            entries, existing = _load_and_resolve_target(canonical_name)
             if existing.name != canonical_name:
                 raise DispatchAskError(
                     f"agent address {requested_name!r} changed from "

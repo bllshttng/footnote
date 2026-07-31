@@ -1022,8 +1022,9 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     assert "uuid-tgt" in res.output
 
 
-def test_registered_handle_colliding_with_live_discovery_sends_nothing(
-    runner, tmp_path, monkeypatch
+@pytest.mark.parametrize("truth_state", ["working", "unknown"])
+def test_registered_handle_colliding_with_discovery_sends_nothing(
+    runner, tmp_path, monkeypatch, truth_state
 ):
     """A registry-first hit cannot hide a different live canonical owner."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -1058,7 +1059,7 @@ def test_registered_handle_colliding_with_live_discovery_sends_nothing(
         project="right",
         status="idle",
         agent="claude",
-        truth_state="working",
+        truth_state=truth_state,
     )
     monkeypatch.setattr(
         discover_mod, "discover_live_sessions", lambda **_kwargs: [live]

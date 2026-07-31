@@ -771,12 +771,17 @@ def _exact_address_matches(
     )
 
 
-def live_address_matches(
+def discovery_address_matches(
     token: str, *, registry_path: Optional[Path] = None
 ) -> list[DiscoveredSession]:
-    """Exact live-discovery owners of one address, including registry rows."""
+    """Exact discovery owners of one address, independent of liveness truth.
+
+    ``unknown`` is unproven, not absent, and an asleep session remains
+    resumable. Address uniqueness therefore unions every enumerated identity;
+    liveness decides the transport only after one recipient is selected.
+    """
     sessions = discover_live_sessions(registry_path=registry_path)
-    return _exact_address_matches(token, (s for s in sessions if s.is_alive))
+    return _exact_address_matches(token, sessions)
 
 
 # --------------------------------------------------------------------------
