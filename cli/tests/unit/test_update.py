@@ -355,6 +355,54 @@ def test_await_binary_runs_post_install_when_the_binary_is_present(tmp_path: Pat
     assert "REFRESH1" in out.stdout and "REFRESH2" in out.stdout, out
 
 
+def test_await_binary_resolves_a_bare_name_through_path(tmp_path: Path) -> None:
+    """`_resolve_fno_binary` falls back to a BARE `fno-py` when no console script
+    exists yet (pr_watch/cli.py) -- exactly the cold-install case this refresh
+    matters most for. `[ -x fno-py ]` tests $PWD/fno-py and never PATH, so probing
+    a bare name with -x would wait the full ceiling and then skip both refreshes
+    even though the install had just put it on PATH. A bare name must be resolved
+    with `command -v`."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "abc", marker=marker, pid=1,
+        post_install="/bin/echo REFRESH1; /bin/echo REFRESH2",
+        # `echo` is on PATH but NOT in the cwd, so an -x probe would fail on it.
+        await_binary="echo",
+    )
+    assert "command -v" in line, f"a bare name must use PATH lookup:\n{line}"
+    out = _sp.run(["/bin/sh", "-c", line], capture_output=True, text=True, cwd=str(tmp_path))
+    assert "REFRESH1" in out.stdout and "REFRESH2" in out.stdout, out
+    assert "were NOT refreshed" not in out.stderr, out.stderr
+
+
+def test_await_binary_uses_an_executable_test_for_a_real_path(tmp_path: Path) -> None:
+    """A slash-bearing path is a filesystem location, not a PATH entry: `command -v`
+    on an absolute path that does not exist would still be the wrong question."""
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "abc", marker=marker, pid=1,
+        post_install="/bin/echo one", await_binary="/usr/local/bin/fno-py",
+    )
+    assert "[ -x " in line and "command -v" not in line, line
+
+
+def test_await_binary_warns_when_a_bare_name_never_lands_on_path(tmp_path: Path) -> None:
+    """The bare-name branch must still fail loudly rather than silently skipping."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "abc", marker=marker, pid=1,
+        post_install="/bin/echo REFRESH1", await_binary="fno-py-definitely-not-on-path",
+    )
+    out = _sp.run(["/bin/sh", "-c", line], capture_output=True, text=True, cwd=str(tmp_path))
+    assert "REFRESH1" not in out.stdout, out
+    assert "were NOT refreshed" in out.stderr, out.stderr
+    assert out.returncode == 0, out
+
+
 def test_await_binary_warns_actionably_when_the_binary_never_appears(tmp_path: Path) -> None:
     """During `uv tool install --reinstall` the console script is deleted and
     recreated (measured: ~0.5s), so an exec in that gap dies with

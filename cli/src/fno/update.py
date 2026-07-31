@@ -930,9 +930,18 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
         return f" {body} || true;"
     q = shlex.quote
     b = q(binary)
+    # Pick the probe from the shape of the path, because `-x` and PATH lookup are
+    # not interchangeable. `_resolve_fno_binary` falls back to a BARE `fno-py`
+    # when no console script exists yet (pr_watch/cli.py), which is exactly the
+    # cold-install case this refresh matters most for -- and `[ -x fno-py ]` tests
+    # `$PWD/fno-py`, never PATH. Probing that with `-x` would wait the full
+    # ceiling and then skip both refreshes even though the install had just put
+    # `fno-py` on PATH. Deciding here rather than in the shell keeps the emitted
+    # line simple and needs no shell function.
+    probe = f"[ -x {b} ]" if "/" in binary else f"command -v {b} >/dev/null 2>&1"
     # POSIX sh only: no `seq`, no bashisms. 15 * 0.2s = 3s ceiling.
     wait = (
-        f"_fno_n=0; while [ $_fno_n -lt 15 ] && [ ! -x {b} ]; "
+        f"_fno_n=0; while [ $_fno_n -lt 15 ] && ! {probe}; "
         f"do _fno_n=$((_fno_n+1)); sleep 0.2; done;"
     )
     warn = q(
@@ -941,7 +950,7 @@ def _await_binary(post_install: str, binary: Optional[str]) -> str:
         "fno pr-watch refresh; fno backlog groom --refresh-agent"
     )
     return (
-        f" {wait} if [ -x {b} ]; then {{ {body}; }} || true; "
+        f" {wait} if {probe}; then {{ {body}; }} || true; "
         f"else printf '%s\\n' {warn} >&2; fi;"
     )
 
