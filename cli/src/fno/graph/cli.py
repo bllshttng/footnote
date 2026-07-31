@@ -9558,6 +9558,18 @@ def cmd_supersede(
                 err=True,
             )
             raise typer.Exit(code=1)
+        if old_node.get("deferred_at"):
+            # A pre-existing deferral is an independent park supersede would
+            # overwrite, and unsupersede cannot tell that park from its own, so
+            # the deferral would be lost on reversal. Resolve it first - same
+            # shape as the done/already-superseded refusals above.
+            typer.echo(
+                f"Error: cannot supersede {replaces}: it is deferred. Undefer it "
+                f"first (`fno backlog undefer {replaces}`); superseding would "
+                f"overwrite that pause and an unsupersede could not restore it.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
         # Guard the death transition: a unit with live children cannot
         # be killed without orphaning them, and orphaning is a deliberate act.
@@ -9588,11 +9600,15 @@ def cmd_supersede(
         if canonical_old not in supersedes:
             supersedes.append(canonical_old)
         new_node["supersedes"] = supersedes
-        old_node["superseded_by"] = new_id
+        # Canonical replacement id, not the raw (possibly abbreviated) new_id:
+        # an abbreviation stored here can later turn ambiguous and make the
+        # replacer unresolvable on unsupersede, leaving a stale edge.
+        canonical_new = new_node["id"]
+        old_node["superseded_by"] = canonical_new
         old_node["locked_by"] = None
         old_node["claimed_at"] = None
         old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
-        old_node["deferred_reason"] = f"superseded by {new_id}: {cleaned_reason}"
+        old_node["deferred_reason"] = f"superseded by {canonical_new}: {cleaned_reason}"
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`

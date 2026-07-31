@@ -504,6 +504,26 @@ def test_supersede_blank_reason_rejected(tmp_graph, tmp_path):
     assert "blank" in res.output.lower()
 
 
+def test_supersede_deferred_node_rejected(tmp_graph, tmp_path):
+    """A deferred node carries an independent park. Superseding would overwrite
+    it and unsupersede could not restore it, so refuse - same shape as the
+    done and already-superseded refusals."""
+    entries = _read_entries(tmp_graph)
+    old = _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    old["deferred_at"] = "2026-07-01T00:00:00+00:00"
+    old["deferred_reason"] = "parked"
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold")
+    assert res.exit_code != 0
+    assert "deferred" in res.output.lower()
+    # No mutation; the park is preserved.
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    assert by_id["ab-old"]["deferred_at"] == "2026-07-01T00:00:00+00:00"
+    assert by_id["ab-old"].get("superseded_by") is None
+
+
 def test_supersede_live_children_rejected(tmp_graph, tmp_path):
     """Superseding a unit with live children strands them under a dead unit
     (dead-ancestor guard + inherited priority). Refuse, name the children,
