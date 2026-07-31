@@ -127,7 +127,11 @@ def _pid_alive(
     without a token retain the existence check and rely on their hosting
     substrate for the additional incarnation proof.
     """
-    if not pid or pid <= 1:
+    # Reject an out-of-range pid outright. Beyond being absurd, it is the value
+    # that turns a signal into a broadcast once it reaches a signed pid_t (the
+    # Rust probe's twin guard): 4294967295 wraps to -1, "every process I may
+    # signal". Nothing downstream should get the chance.
+    if not pid or pid <= 1 or pid > 0x7FFFFFFF:
         return False
     try:
         if _psutil is None:
