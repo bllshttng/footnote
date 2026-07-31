@@ -132,6 +132,23 @@ def score_findings(
     else:
         scores = [resolved(f) for f in findings_list]  # type: ignore[arg-type, misc]  # dynamic scorer return
 
+    # Systemic scorer failure: 0 is overloaded between a genuine
+    # false positive and a subprocess/parse failure, and the real batch scorer
+    # only returns all-zero on its failure paths (timeout, auth refusal, parse
+    # fallthrough - see claude_scorer_batch). Treat all-zero on a non-empty
+    # batch as "could not score" and pass the findings through unscored,
+    # mirroring pass_through_scorer when the claude binary is off PATH. A broken
+    # scorer must not manufacture a clean review by silently dropping every
+    # finding it was handed.
+    if findings_list and all(s == 0 for s in scores):
+        print(
+            f"review: confidence scorer returned all-zero for {len(findings_list)} "
+            "finding(s); preserving them unscored instead of dropping "
+            "(treat as a scorer failure, not a clean review)",
+            file=sys.stderr,
+        )
+        return list(findings_list)
+
     kept: list[Finding] = []
     for f, score in zip(findings_list, scores):
         if score < threshold:

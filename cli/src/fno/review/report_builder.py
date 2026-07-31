@@ -32,6 +32,16 @@ def _count_by(findings: list[Finding], severity: str) -> int:
     return sum(1 for f in findings if f.severity == severity)
 
 
+def _per_agent_findings_total(result: OrchestratorResult) -> int:
+    """Count of raw findings across all successful worker outcomes.
+
+    Distinct from ``len(result.findings)``, the scored/filtered aggregate.
+    The two diverge whenever the confidence scorer drops findings, which is
+    exactly the inconsistency the report must not paper over.
+    """
+    return sum(len(o.findings) for o in result.outcomes if o.ok)
+
+
 def _provider_tag(outcome) -> str:
     """Inline provider/model attribution for a per-agent line (ab-6c8f4c61).
 
@@ -63,6 +73,12 @@ def choose_verdict(
     if _count_by(result.findings, "high") > 0:
         return "done-with-concerns"
     if result.workers_failed > 0:
+        return "done-with-concerns"
+    # Aggregate contradiction: workers returned findings but the
+    # scored aggregate dropped them all. A review that lost its findings is a
+    # reliability failure, never clean, even if the caller forgot to set
+    # ``suspicious``.
+    if not result.findings and _per_agent_findings_total(result) > 0:
         return "done-with-concerns"
     if escalate_suspicious and result.suspicious:
         return "done-with-concerns"
@@ -162,14 +178,28 @@ def render_artifact_markdown(
             conf = f" [confidence {f.confidence}]" if f.confidence is not None else ""
             lines.append(f"- **{f.severity.upper()}** - {f.agent}{loc}{conf}: {f.message}")
 
-    if result.suspicious:
+    per_agent_total = _per_agent_findings_total(result)
+    if not result.findings and per_agent_total > 0:
+        # Contradiction: workers returned findings but the scored
+        # aggregate dropped them all (confidence scorer failure, or every finding
+        # below threshold). This is a reliability failure, NOT a clean review.
+        lines += [
+            "",
+            "## Aggregate contradiction",
+            "",
+            f"Workers returned {per_agent_total} finding(s) but this report's aggregate "
+            "is 0 (every finding was dropped after confidence scoring). This indicates a "
+            "scorer or parse failure, not a clean review. Do not treat this head as "
+            "reviewed - recover the findings from the per-agent outcomes above or re-run.",
+        ]
+    elif result.suspicious:
         lines += [
             "",
             "## Suspicious-clean note",
             "",
-            "All 6 workers returned zero findings. Treat this outcome with skepticism - "
-            "reviewers have been known to surface zero findings when prompts are truncated "
-            "or the diff is empty.",
+            f"All {result.workers_completed} workers returned zero findings. Treat this "
+            "outcome with skepticism - reviewers have been known to surface zero findings "
+            "when prompts are truncated or the diff is empty.",
         ]
 
     return "\n".join(lines) + "\n"
