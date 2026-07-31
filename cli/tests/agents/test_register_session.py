@@ -463,3 +463,39 @@ def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
         "--agent-self", "w1",
     ]) == 0
     assert "session_restamp_failed" in [e["kind"] for e in _events(tmp_path)]
+
+
+def test_restamp_corrects_a_mux_hosted_row(tmp_path: Path, monkeypatch) -> None:
+    """The reported row was PANE-hosted, and a mux row is the one shape where
+    filling short_id is illegal: `_validate_single_live_ref` enforces mux XOR
+    worker XOR bg, so synthesizing a transport key here makes write_registry
+    raise, the fail-open except swallow it, and the id change never persist --
+    a restamp that no-ops on precisely the row it exists to fix.
+
+    harness_session_id alone is enough to re-address a mux row: `resolve_agent`
+    matches the full id and the short derived FROM it, neither of which reads
+    the stored short_id.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="target-x-f0c2-pane-identity",
+            harness="claude",
+            harness_session_id=BIRTH,
+            cwd="/proj",
+            log_path="",
+            status="live",
+            mux={"session": "main", "pane_id": 10},
+        )
+    ])
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2-pane-identity", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert rows[0].harness_session_id == REMINT, "the id change must actually persist"
+    assert rows[0].short_id == "", "a mux row holds exactly one live ref"
+    assert rows[0].mux == {"session": "main", "pane_id": 10}

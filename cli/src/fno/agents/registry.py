@@ -948,6 +948,19 @@ def restamp_harness_session_id(
 
     Returns the updated entry, or ``None`` when there was nothing to do: no row
     under that name, a harness mismatch, or an id that already matches.
+
+    KNOWN LIMIT, deliberately not solved here. If a spawn ever produces two
+    descendants that are BOTH live, they inherit one ``FNO_AGENT_SELF`` and the
+    row ends up naming whichever restamped last. That is still strictly better
+    than the status quo it replaces -- a row pinned to the birth id addresses
+    NONE of them, where this addresses one -- so the fix stands on its own, but
+    it is not fork ownership. No such case has been observed: in the run that
+    reported this, the birth id went silent 35 seconds in while its successor
+    ran for three hours, with a 13/13 identical message prefix, so it was a
+    rename with carry-over. A genuine flap would not be silent either: every
+    correction emits ``session_id_restamped`` with the row name and the id it
+    moved to, so two live descendants read off events.jsonl as one name
+    alternating between two ids.
     """
     if not name or not session_id or not harness:
         return None
@@ -968,7 +981,16 @@ def restamp_harness_session_id(
             # itself derived that way, or absent: a short that does NOT match
             # the stale uuid's prefix is an independent transport key we have
             # no basis to rewrite.
-            if harness == "claude":
+            #
+            # NEVER on a mux row. `_validate_single_live_ref` enforces mux XOR
+            # worker XOR bg, so filling the deliberately-empty short_id of a
+            # pane-hosted row makes write_registry raise, the caller's fail-open
+            # except swallow it, and the id change never persist -- a restamp
+            # that no-ops on exactly the pane-spawned shape that reported this.
+            # Correcting harness_session_id is enough for a mux row anyway:
+            # resolve_agent matches the full id and the short DERIVED from it,
+            # neither of which reads the stored short_id.
+            if harness == "claude" and entry.mux is None:
                 lead = session_id.split("-", 1)[0].lower()
                 stale_lead = stale.split("-", 1)[0].lower()
                 if _DERIVED_SHORT_RE.match(lead) and entry.short_id in ("", stale_lead):
