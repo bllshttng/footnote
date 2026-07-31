@@ -315,3 +315,151 @@ def test_ac7_fr_unreachable_registered_session_orphaned(tmp_path: Path, monkeypa
     rows = load_registry()
     assert len(rows) == 1
     assert rows[0].status == "orphaned"
+
+
+# ---------------------------------------------------------------------------
+# x-1e34: a harness that re-mints the session id footnote passed at spawn
+#
+# Observed on claude: a worker launched as `claude --session-id <uuid>` carried
+# on under a DIFFERENT uuid ~35s in, taking its transcript with it (identical
+# message uuids on both sides -- a rename with carry-over, not a fork into two
+# live sessions). The row kept the birth id and stopped addressing anything.
+#
+# The row NAME survives that, which is why the restamp keys on it.
+# ---------------------------------------------------------------------------
+
+BIRTH = "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
+REMINT = "08054b1d-a907-47ab-a3d2-4a1e7a87eb4e"
+
+
+def _spawned_row(name: str = "target-x-f0c2", session_id: str = BIRTH):
+    """A footnote-spawned claude worker row as `fno agents spawn` writes it."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    write_registry([
+        AgentEntry(
+            name=name,
+            harness="claude",
+            harness_session_id=session_id,
+            short_id=session_id.split("-", 1)[0],
+            cwd="/proj",
+            log_path="",
+            status="live",
+        )
+    ])
+
+
+def test_restamp_repoints_row_at_the_reminted_id(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _spawned_row()
+    entry = restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    # One worker, one row: the correction lands in place, never as a second row.
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == REMINT
+    # claude addresses by the 8-hex jobId in short_id, so a restamp that fixed
+    # only harness_session_id would leave attach/resume on the dead id.
+    assert rows[0].short_id == "08054b1d"
+    # Untouched: the restamp corrects identity, not lifecycle.
+    assert rows[0].status == "live"
+    assert rows[0].name == "target-x-f0c2"
+
+
+def test_restamp_is_a_noop_when_the_id_already_matches(tmp_path: Path, monkeypatch) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import restamp_harness_session_id
+
+    _spawned_row()
+    assert restamp_harness_session_id(
+        name="target-x-f0c2", harness="claude", session_id=BIRTH
+    ) is None
+
+
+def test_restamp_ignores_an_unknown_name_or_a_harness_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The name is a PK, not a search: a miss corrects nothing and creates nothing."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import load_registry, restamp_harness_session_id
+
+    _spawned_row()
+    assert restamp_harness_session_id(
+        name="someone-else", harness="claude", session_id=REMINT
+    ) is None
+    assert restamp_harness_session_id(
+        name="target-x-f0c2", harness="codex", session_id=REMINT
+    ) is None
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == BIRTH
+
+
+def test_restamp_keeps_an_independent_short_id(tmp_path: Path, monkeypatch) -> None:
+    """A short that is NOT the stale uuid's prefix is a transport key of its own
+    (a bg jobId minted separately), so we have no basis to re-derive it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="w1",
+            harness="claude",
+            harness_session_id=BIRTH,
+            short_id="deadbeef",  # unrelated to BIRTH's leading segment
+            cwd="/proj",
+            log_path="",
+        )
+    ])
+    restamp_harness_session_id(name="w1", harness="claude", session_id=REMINT)
+
+    rows = load_registry()
+    assert rows[0].harness_session_id == REMINT
+    assert rows[0].short_id == "deadbeef"
+
+
+def test_main_agent_self_restamps_instead_of_registering(tmp_path: Path, monkeypatch) -> None:
+    """The whole point of the --agent-self branch: registration keys its upsert
+    on harness_session_id, so routing a re-minted worker through it would MISS
+    and append a second row for one worker."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.register_session import main
+    from fno.agents.registry import load_registry
+
+    _spawned_row()
+    assert main([
+        "--harness", "claude",
+        "--session-id", REMINT,
+        "--cwd", "/proj",
+        "--agent-self", "target-x-f0c2",
+    ]) == 0
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].name == "target-x-f0c2"
+    assert rows[0].harness_session_id == REMINT
+    assert "session_id_restamped" in [e["kind"] for e in _events(tmp_path)]
+
+
+def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
+    """SessionStart must never block on a locked or unwritable registry."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import register_session
+
+    def _boom(**kwargs):
+        raise OSError("registry unwritable")
+
+    monkeypatch.setattr(register_session, "restamp_harness_session_id", _boom)
+    assert register_session.main([
+        "--harness", "claude",
+        "--session-id", REMINT,
+        "--cwd", "/proj",
+        "--agent-self", "w1",
+    ]) == 0
+    assert "session_restamp_failed" in [e["kind"] for e in _events(tmp_path)]
