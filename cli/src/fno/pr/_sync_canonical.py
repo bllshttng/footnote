@@ -18,9 +18,11 @@ Load-bearing constraints, each with its own guard below:
   (written only on success) is the cross-session record; a single-flight claim
   serializes concurrent runs so two ``fno restart``s never overlap.
 
-Every outcome prints exactly one status line (AC1-UI); no outcome is silent.
-Failure is non-fatal to callers (reconcile/ritual): a non-zero exit withholds
-the marker so the next reconcile retries.
+Every outcome prints a status line (AC1-UI); no outcome is silent. A failure
+also surfaces the command that ran plus its captured stdout/stderr - the exit
+code alone has hidden a one-word typo for days - while staying non-fatal to
+callers (reconcile/ritual): a non-zero exit withholds the marker so the next
+reconcile retries.
 """
 from __future__ import annotations
 
@@ -84,7 +86,7 @@ def run_sync_canonical(
     canonical_root: Optional[Path] = None,
     runner: Callable[..., Result] = _run,
     gh_json: Optional[Callable[[list[str], Optional[str]], dict[str, Any]]] = None,
-    shell_runner: Optional[Callable[[str, str], int]] = None,
+    shell_runner: Optional[Callable[[str, str], Result]] = None,
 ) -> int:
     """Run the canonical-sync for a merged PR. Returns a process exit code.
 
@@ -207,13 +209,24 @@ def run_sync_canonical(
         typer.echo(f"post-merge sync: running in {canonical} for {sha[:12]}")
         if shell_runner is None:
             shell_runner = _default_shell_runner
-        rc = shell_runner(cmd, str(canonical))
-        if rc == 0:
+        result = shell_runner(cmd, str(canonical))
+        if result.ok:
             _write_marker(marker)
             typer.echo(f"post-merge sync: synced {sha[:12]}")
             return 0
-        typer.echo(f"post-merge sync: failed (exit {rc}); marker withheld, will retry", err=True)
-        return rc
+        # Surface the command and its output, not just the exit code: a real
+        # failure here was a one-word typo the receipt hid for days. The marker
+        # stays withheld, so retry behaviour is unchanged.
+        parts = [
+            f"post-merge sync: failed (exit {result.returncode}); marker withheld, will retry",
+            f"  command: {cmd}",
+        ]
+        if result.stderr.strip():
+            parts.append(f"  stderr: {_tail(result.stderr)}")
+        if result.stdout.strip():
+            parts.append(f"  stdout: {_tail(result.stdout)}")
+        typer.echo("\n".join(parts), err=True)
+        return result.returncode
     finally:
         try:
             claims.release_claim(lock_key, holder, root=canonical)
@@ -485,7 +498,7 @@ def run_sync_catchup(
     # the shell_runner seam the function already exposes.
     pulled: list[int] = []
 
-    def _tracking_shell(command: str, cwd: str) -> int:
+    def _tracking_shell(command: str, cwd: str) -> Result:
         pulled.append(1)
         return _default_shell_runner(command, cwd)
 
@@ -581,35 +594,71 @@ def _default_gh_json(args: list[str], cwd: Optional[str]) -> dict[str, Any]:
     return obj if isinstance(obj, dict) else {}
 
 
-def _default_shell_runner(command: str, cwd: str) -> int:
-    """Run ``command`` via a login shell in ``cwd``; return its exit code.
+# Cap captured output echoed in a failure receipt: a pull/update/build can spew
+# megabytes, and the receipt is a diagnostic line, not a log sink. The tail is
+# where a shell error (e.g. a misspelled git subcommand) lands.
+_CAPTURE_TAIL_CHARS = 2000
 
-    Pipes are redirected to DEVNULL and the run is bounded by a timeout
-    (x-adf9): a ``sync_command`` ending in ``fno restart`` detaches a daemon
-    that otherwise INHERITS this process's stdout/stderr and never closes them,
-    so a bare ``subprocess.run`` blocks on ``wait()`` forever (the pipe never
-    EOFs). Closing the inheritance detaches the daemon cleanly; the timeout is
-    the backstop for a genuinely stuck command. ``sync_command``'s own output
-    is discarded - only its exit code is load-bearing (the surrounding echoes
-    in ``run_sync_canonical`` still reach the caller for the receipt).
+
+def _tail(text: str, n: int = _CAPTURE_TAIL_CHARS) -> str:
+    return text if len(text) <= n else "..." + text[-n:]
+
+
+def _read_tail_text(path: Path) -> str:
+    # Read only the tail off disk (bounded memory): a sync_command can emit for
+    # the full _SYNC_COMMAND_TIMEOUT_S window, and loading the whole capture
+    # would OOM the long-lived watcher for a receipt that discards all but the
+    # tail. On-disk growth during the run is bounded by that timeout and the
+    # temp files are removed on exit; capping the child's own write rate would
+    # take a sidecar process, out of scope for a diagnostic.
+    max_bytes = _CAPTURE_TAIL_CHARS * 4  # UTF-8 worst case covers the char budget
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - max_bytes))
+        return f.read().decode("utf-8", "replace")
+
+
+def _default_shell_runner(command: str, cwd: str) -> Result:
+    """Run ``command`` via a login shell in ``cwd``; return its captured result.
+
+    Output is captured to temp FILES, never ``subprocess.PIPE`` (x-adf9): a
+    ``sync_command`` ending in ``fno restart`` detaches a daemon that INHERITS
+    the child's stdout/stderr and never closes them, and with PIPE the parent's
+    ``communicate()`` would block on the EOF that live daemon never sends (the
+    wedge this runner exists to avoid). A plain file has no EOF-reader, so the
+    parent's ``wait()`` returns as soon as the shell child exits, daemon or no;
+    a detached grandchild merely keeps appending to a file we have already
+    read. Only the tail of each captured stream is loaded onto the returned
+    ``Result`` (see :func:`_read_tail_text`) so a failing ``sync_command`` can
+    be diagnosed from the receipt without dragging its full output into the
+    watcher's memory. The run is still bounded by ``_SYNC_COMMAND_TIMEOUT_S`` as the
+    stuck-command backstop.
     """
     import subprocess
+    import tempfile
 
     try:
-        proc = subprocess.run(
-            ["bash", "-lc", command],
-            cwd=cwd,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=_SYNC_COMMAND_TIMEOUT_S,
-            check=False,
-        )
+        with tempfile.TemporaryDirectory() as td:
+            out_path = Path(td) / "stdout"
+            err_path = Path(td) / "stderr"
+            with out_path.open("w") as outf, err_path.open("w") as errf:
+                proc = subprocess.run(
+                    ["bash", "-lc", command],
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=outf,
+                    stderr=errf,
+                    timeout=_SYNC_COMMAND_TIMEOUT_S,
+                    check=False,
+                )
+            stdout = _read_tail_text(out_path)
+            stderr = _read_tail_text(err_path)
     except subprocess.TimeoutExpired:
         typer.echo(
             f"post-merge sync: sync_command timed out after {int(_SYNC_COMMAND_TIMEOUT_S)}s; "
             "marker withheld, will retry",
             err=True,
         )
-        return 124
-    return proc.returncode
+        return Result(124, "", "")
+    return Result(proc.returncode, stdout, stderr)
