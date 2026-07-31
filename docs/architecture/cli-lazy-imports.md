@@ -176,6 +176,18 @@ launchd agents plus live sessions nearly always has an `fno` process mid-flight
 during the few seconds `uv tool install --reinstall` takes, so every `fno update`
 was hitting it.
 
+**The exposure gap (symptom 3).** `/bin/sh: .../fno-py: No such file or directory`
+fails in the shell before any interpreter starts, so no import-level retry can
+reach it. Measured by sampling every 5ms across a reinstall: the venv's `python3`
+is present in every sample, so the shebang interpreter is never the cause; what
+vanishes is the console script `<tools>/fno/bin/fno-py`, for ~490ms, taking the
+`~/.local/bin` exposure symlink with it. That gap closed only ~40ms before uv
+exited on an idle machine, so `fno update`'s `&&`-gated post-install chain is
+correct in principle and much too tight in practice. `update.py` now waits up to
+3s for the console script before running the refresh, and if it never returns,
+skips loudly with the manual commands rather than leaving a launchd agent pinned
+to the old binary.
+
 Not fixed, and unfixable at this layer: the window itself. A process whose import
 lands while the file is genuinely still absent still fails. Closing that would
 require quiescing running `fno` processes or new cross-process state, both of
