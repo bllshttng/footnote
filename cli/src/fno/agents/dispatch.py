@@ -52,7 +52,11 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.harness_identity import resolve_harness_identity, session_identity_key
+from fno.harness_identity import (
+    canonical_handle,
+    resolve_harness_identity,
+    session_identity_key,
+)
 
 DispatchKind = Literal["create", "followup"]
 RecipientIdentity = tuple[
@@ -5208,7 +5212,7 @@ def dispatch_send(
        c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
        d. Attempt live delivery via _deliver_live (fire-and-forget).
        e. On non-hosted, write the durable fallback envelope (the <fno_mail>
-          body), kind=send, recipient=name.
+          body), kind=send, addressed to the selected session's canonical handle.
        f. Emit agent_send_started / agent_send_done (delivery field).
        g. Bump last_message_at + status stamps via update_registry.
     5. Return DispatchSendResult(msg_id, delivery).
@@ -5355,8 +5359,9 @@ def dispatch_send(
                     exit_code=2,
                 )
             selected_identity = _recipient_identity_key(existing)
-            # All later transport, event, durable-recipient, and stamp paths use
-            # the registry primary key, never the caller's alias or short token.
+            # Live routing and events use the registry primary key, never the
+            # caller's alias. Durable routing below binds to this selected
+            # session's canonical handle so later name reuse cannot inherit it.
             name = canonical_name
 
             # 4b. Provider mismatch check (mirrors dispatch_ask).
@@ -5399,17 +5404,24 @@ def dispatch_send(
                     getattr(sender_entry, "harness_session_id", None)
                     or getattr(sender_entry, "short_id", None)
                 )
-            # A `fno mail send <name>` is always directed -> stamp the recipient's
-            # short id as the envelope `to` (node x-1f23: optional, set when known).
+            # A `fno mail send <name>` is always directed -> stamp the selected
+            # session's canonical handle as the envelope `to`. A transport short
+            # id is retained only for hosted delivery when the legacy row has no
+            # full session id; such a row cannot safely receive durable mail.
             # Mint the id BEFORE building the ctx so the SAME id rides the live
             # inject, the durable fallback, AND the durable thread record (US1 /
             # Locked Decision 8: both _name_lane_send and _deliver_live carry it).
             msg_id = generate_msg_id()
+            durable_recipient = (
+                canonical_handle(existing.harness_session_id)
+                if existing.harness_session_id
+                else None
+            )
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
                 provider_from,
-                to=(existing.short_id or None),
+                to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
             )
 
@@ -5426,6 +5438,18 @@ def dispatch_send(
                 thread render unchanged (no unwrap, so mark_thread_read does not
                 strip it); summaries surface the open tag, which identifies the
                 message as a2a from its `from` sender."""
+                if durable_recipient is None:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="durable-address",
+                        name=name,
+                        reason="missing_harness_session_id",
+                    )
+                    raise DispatchAskError(
+                        f"cannot queue durable mail for {name!r}: registry row has "
+                        "no full harness session id",
+                        exit_code=12,
+                    )
                 durable_body = message
                 if mail_ctx is not None:
                     from fno.mail.envelope import wrap_fno_mail
@@ -5441,12 +5465,12 @@ def dispatch_send(
                     )
                 try:
                     write_new_thread(
-                        recipient=name,
+                        recipient=durable_recipient,
                         sender=from_name,
                         kind="send",
                         body=durable_body,
                         msg_id=msg_id,
-                        to_kind="name",
+                        to_kind="session",
                         provider_to=existing.harness,
                         provider_from=provider_from,
                         from_session=from_session,

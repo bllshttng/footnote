@@ -51,6 +51,7 @@ def _register_claude_peer(name: str = "red", short_id: str = "abcd1234") -> None
         AgentEntry(
             name=name,
             harness="claude",
+            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id=short_id,
@@ -170,7 +171,7 @@ def test_dispatch_send_happy_path_live_claude(
 
     # Bus demotion: a hosted delivery is NOT also written to the durable store.
     from fno.inbox.store import read_all_threads
-    assert read_all_threads("red") == [], "hosted delivery must not queue durable"
+    assert read_all_threads("abcd1234") == [], "hosted delivery must not queue durable"
 
 
 def test_cmd_send_happy_path_stdout_format(
@@ -405,7 +406,7 @@ def test_dispatch_send_refuses_same_name_identity_change_under_lock(
 
     assert calls["count"] == 2
     assert delivered == []
-    assert read_all_threads("red") == []
+    assert read_all_threads("abcd1234") == []
 
 
 @pytest.mark.parametrize(
@@ -488,7 +489,7 @@ def test_dispatch_send_refuses_same_name_route_change_under_lock(
 
     assert calls["count"] == 2
     assert delivered == []
-    assert read_all_threads("red") == []
+    assert read_all_threads("abcd1234") == []
 
 
 def test_cmd_send_lock_timeout_surfaces_on_stderr(
@@ -578,6 +579,7 @@ def test_dispatch_send_offline_peer_queued(tmp_path: Path, monkeypatch) -> None:
         AgentEntry(
             name="red",
             harness="claude",
+            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",
@@ -682,6 +684,7 @@ def test_cmd_send_queued_stdout_format(tmp_path: Path, monkeypatch, runner: CliR
         AgentEntry(
             name="red",
             harness="claude",
+            harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
             cwd="/tmp",
             log_path="/tmp/red.log",
             short_id="abcd1234",
@@ -742,7 +745,7 @@ def test_dispatch_send_200kb_body_round_trip(tmp_path: Path, monkeypatch) -> Non
     )
 
     assert result.msg_id.startswith("msg-")
-    threads = read_all_threads("red")
+    threads = read_all_threads("abcd1234")
     assert len(threads) == 1
     stored_body = threads[0].messages[0].body
     # The durable body is <fno_mail>-wrapped now (node x-1f23); the 200KB message
@@ -775,7 +778,7 @@ def test_dispatch_send_rejects_over_1mib_body(tmp_path: Path, monkeypatch) -> No
 
     assert exc_info.value.exit_code == 2
     # No envelope should have been written
-    threads = read_all_threads("red")
+    threads = read_all_threads("abcd1234")
     assert len(threads) == 0, "No envelope should be written on body-size rejection"
 
 
@@ -823,7 +826,7 @@ def test_dispatch_send_demotion_preserves_envelope(tmp_path: Path, monkeypatch) 
     assert inject_attempt_count[0] == 1, f"Expected 1 inject attempt, got {inject_attempt_count[0]}"
 
     # Envelope is in the store (survived the failed inject)
-    threads = read_all_threads("red")
+    threads = read_all_threads("abcd1234")
     assert len(threads) == 1, f"Envelope must survive inject failure; got {len(threads)} threads"
     assert "important message" in threads[0].messages[0].body
 
@@ -909,7 +912,7 @@ def test_dispatch_send_codex_peer_queued_durable(tmp_path: Path, monkeypatch) ->
     assert result.msg_id.startswith("msg-")
 
     # Envelope is in the store
-    threads = read_all_threads("codex-agent")
+    threads = read_all_threads("00000001")
     assert len(threads) == 1
 
 
@@ -1000,7 +1003,7 @@ def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
     )
 
     assert result.delivery == "hosted"
-    assert read_all_threads("red") == []
+    assert read_all_threads("abcd1234") == []
     assert any(
         kind == "agent_send_failed"
         and data.get("stage") == "registry-write"
@@ -1078,6 +1081,102 @@ def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(
     stderr = capsys.readouterr().err
     assert "recipient identity changed" in stderr
     assert "do not retry" in stderr
+
+
+def test_dispatch_send_queues_to_selected_session_when_live_miss_restamps(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A live miss queues to A's canonical mailbox even when A restamps to B."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import registry as registry_mod
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import read_all_threads
+
+    registry_mod.write_registry([
+        registry_mod.AgentEntry(
+            name="victim",
+            harness="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+            cwd="/tmp",
+            log_path="/tmp/victim.log",
+            status="live",
+        )
+    ])
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "working"
+    )
+
+    def restamp_then_miss(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return False
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", restamp_then_miss)
+
+    result = dispatch_mod.dispatch_send(
+        name=original_id,
+        message="secret for A",
+        provider=None,
+        cwd=tmp_path,
+    )
+
+    assert result.delivery == "durable"
+    original_threads = read_all_threads(canonical_handle(original_id))
+    assert len(original_threads) == 1
+    assert original_threads[0].messages[0].body.endswith("secret for A\n</fno_mail>")
+    assert f'to="{canonical_handle(original_id)}"' in original_threads[0].messages[0].body
+    assert read_all_threads(canonical_handle(replacement_id)) == []
+    assert read_all_threads("victim") == []
+    row = registry_mod.load_registry()[0]
+    assert row.harness_session_id == replacement_id
+    assert row.last_message_at is None
+
+
+def test_dispatch_send_refuses_durable_fallback_without_full_session_id(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A mutable name or transport key is not a durable session address."""
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import registry as registry_mod
+    from fno.inbox.store import read_all_threads
+
+    registry_mod.write_registry([
+        registry_mod.AgentEntry(
+            name="legacy",
+            harness="claude",
+            short_id="transportA",
+            cwd="/tmp",
+            log_path="/tmp/legacy.log",
+            status="orphaned",
+        )
+    ])
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "done"
+    )
+
+    with pytest.raises(dispatch_mod.DispatchAskError, match="no full harness session id") as exc:
+        dispatch_mod.dispatch_send(
+            name="legacy",
+            message="do not misaddress",
+            provider=None,
+            cwd=tmp_path,
+        )
+
+    assert exc.value.exit_code == 12
+    assert read_all_threads("legacy") == []
+    assert read_all_threads("transportA") == []
 
 
 # ---------------------------------------------------------------------------

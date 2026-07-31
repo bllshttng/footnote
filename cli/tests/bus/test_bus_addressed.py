@@ -85,8 +85,8 @@ def test_unset_fields_serialize_byte_identical_to_pre_change():
 
 
 # ---------------------------------------------------------------------------
-# AC2-HP: `fno agents send <name>` writes an addressed (to_kind=name) envelope
-# carrying the sender's session, so the read side can exclude the sender.
+# AC2-HP: `fno agents send <name>` resolves the mutable name and writes a
+# session-addressed envelope carrying the sender's session.
 # ---------------------------------------------------------------------------
 
 @pytest.fixture
@@ -112,13 +112,17 @@ def _register(name, project_cwd, *, status="live"):
     existing.append(
         AgentEntry(
             name=name, harness="claude", cwd=str(project_cwd),
-            log_path=f"/tmp/{name}.log", short_id=f"id-{name}", status=status,
+            log_path=f"/tmp/{name}.log", short_id=f"id-{name}",
+            harness_session_id=(
+                f"aaaaaaaa-1111-7222-8333-{name[-4:]:0>4}0001"
+            ),
+            status=status,
         )
     )
     write_registry(existing)
 
 
-def test_dispatch_send_writes_addressed_name_envelope(env, tmp_path):
+def test_dispatch_send_writes_addressed_session_envelope(env, tmp_path):
     from fno.agents.dispatch import dispatch_send
     from fno.bus.log import iter_messages
 
@@ -131,13 +135,13 @@ def test_dispatch_send_writes_addressed_name_envelope(env, tmp_path):
         cwd=cwd, from_name="alice",
     )
 
-    addressed = [m for m in iter_messages() if m.to == "bob"]
+    addressed = [m for m in iter_messages() if m.to == "0bob0001"]
     assert len(addressed) == 1
     env_ = addressed[0]
-    assert env_.to_kind == "name"
+    assert env_.to_kind == "session"
     assert env_.from_ == "alice"
     # sender session recorded (best-effort) so a project-broadcast read can exclude it
-    assert env_.from_session == "id-alice"
+    assert env_.from_session == "aaaaaaaa-1111-7222-8333-lice0001"
     # The durable bus body is <fno_mail>-wrapped now (node x-1f23): the same
     # envelope the live path injects, so grep <fno_mail> finds durable mail too.
     assert env_.body.startswith("<fno_mail "), env_.body[:40]

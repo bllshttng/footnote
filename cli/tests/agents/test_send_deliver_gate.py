@@ -191,7 +191,7 @@ def test_deliver_live_codex_daemon_delivered_true(
 
     # Bus demotion (node x-1f23): a hosted delivery is self-recording (transcript),
     # NOT also queued durable.
-    assert read_all_threads("codex-agent") == [], "hosted delivery must not queue durable"
+    assert read_all_threads("00000001") == [], "hosted delivery must not queue durable"
 
     # The deliver RPC carried the <fno_mail>-wrapped turn (codex/gemini share the
     # envelope now), not the raw body.
@@ -236,7 +236,7 @@ def test_deliver_live_codex_daemon_delivered_false(
     assert result.delivery == "durable"
     assert result.msg_id.startswith("msg-")
 
-    threads = read_all_threads("codex-agent")
+    threads = read_all_threads("00000001")
     assert len(threads) == 1
 
 
@@ -277,7 +277,7 @@ def test_deliver_live_codex_daemon_unreachable(
     assert result.delivery == "durable"
     assert result.msg_id.startswith("msg-")
 
-    threads = read_all_threads("codex-agent")
+    threads = read_all_threads("00000001")
     assert len(threads) == 1
 
     captured = capsys.readouterr()
@@ -351,7 +351,7 @@ def test_deliver_live_codex_daemon_rpc_error_still_durable(
     )
 
     assert result.delivery == "durable"
-    threads = read_all_threads("codex-agent")
+    threads = read_all_threads("00000001")
     assert len(threads) == 1, "envelope must survive RPC error"
 
 
