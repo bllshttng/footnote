@@ -1602,6 +1602,36 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     assert [s.session_id for s in sessions] == [sid]
 
 
+def test_legacy_claude_transport_projection_is_provisional(tmp_path, monkeypatch):
+    """A transport-only registry row cannot masquerade as a full session id."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                harness="claude",
+                cwd="/x",
+                log_path="/tmp/legacy.log",
+                short_id="footnote-56",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    sessions = discover.discover_live_sessions(
+        registry_path=reg,
+        **_empty_seams(tmp_path),
+    )
+
+    assert [(session.session_id, session.identity_provisional) for session in sessions] == [
+        ("footnote-56", True)
+    ]
+
+
 def test_opencode_row_without_captured_id_yields_no_live_recipient(tmp_path, monkeypatch):
     """AC3-EDGE: opencode joining HARNESS_SESSION_ID_FIELDS must not widen discovery.
 

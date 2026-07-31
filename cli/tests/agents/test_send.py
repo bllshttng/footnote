@@ -222,7 +222,7 @@ def test_dispatch_send_lock_timeout(tmp_path: Path, monkeypatch) -> None:
     @contextmanager
     def _timeout_lock(*args, **kwargs):
         raise AgentLockTimeout(name="red", timeout=0.1)
-        yield  # noqa: unreachable
+        yield
 
     monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_lock)
 
@@ -408,6 +408,89 @@ def test_dispatch_send_refuses_same_name_identity_change_under_lock(
     assert read_all_threads("red") == []
 
 
+@pytest.mark.parametrize(
+    ("original_fields", "replacement_fields"),
+    [
+        (
+            {"mcp_channel_id": "mcp-original"},
+            {"mcp_channel_id": "mcp-replacement"},
+        ),
+        (
+            {"mux": {"session": "main", "pane_id": 11}},
+            {"mux": {"session": "main", "pane_id": 12}},
+        ),
+    ],
+)
+def test_dispatch_send_refuses_same_name_route_change_under_lock(
+    tmp_path: Path,
+    monkeypatch,
+    original_fields: dict,
+    replacement_fields: dict,
+) -> None:
+    """Replacing an MCP or mux route under one name cannot redirect send."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from contextlib import contextmanager
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.registry import AgentEntry, ResolvedAgent, write_registry
+    from fno.inbox.store import read_all_threads
+
+    original = AgentEntry(
+        name="red",
+        harness="claude",
+        cwd="/tmp",
+        log_path="/tmp/red.log",
+        status="live",
+        created_at="2026-07-30T10:00:00Z",
+        **original_fields,
+    )
+    replacement = AgentEntry(
+        name="red",
+        harness="claude",
+        cwd="/tmp",
+        log_path="/tmp/red-new.log",
+        status="live",
+        created_at="2026-07-30T10:00:01Z",
+        **replacement_fields,
+    )
+    write_registry([original])
+    calls = {"count": 0}
+
+    def staged(_entries, _token):
+        calls["count"] += 1
+        return ResolvedAgent(
+            entry=original if calls["count"] == 1 else replacement,
+            matched_by="name",
+        )
+
+    @contextmanager
+    def unlocked(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(dispatch_mod, "resolve_registered_agent_across_sources", staged)
+    monkeypatch.setattr(dispatch_mod, "hold_agent_lock", unlocked)
+    monkeypatch.setattr(discover_mod, "discovery_address_matches", lambda *_a, **_k: [])
+    monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_deliver_live",
+        lambda entry, *_a, **_k: delivered.append(entry.name) or True,
+    )
+
+    with pytest.raises(dispatch_mod.DispatchAskError, match="recipient identity changed"):
+        dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+        )
+
+    assert calls["count"] == 2
+    assert delivered == []
+    assert read_all_threads("red") == []
+
+
 def test_cmd_send_lock_timeout_surfaces_on_stderr(
     tmp_path: Path, monkeypatch, runner: CliRunner
 ) -> None:
@@ -422,7 +505,7 @@ def test_cmd_send_lock_timeout_surfaces_on_stderr(
     @contextmanager
     def _timeout_lock(*args, **kwargs):
         raise AgentLockTimeout(name="red", timeout=0.1)
-        yield  # noqa: unreachable
+        yield
 
     monkeypatch.setattr(dispatch_mod, "hold_agent_lock", _timeout_lock)
 
@@ -1185,6 +1268,7 @@ def test_legacy_registry_row_does_not_collide_with_its_live_projection(
         agent="claude",
         truth_state="working",
         name="legacy",
+        identity_provisional=True,
     )
     monkeypatch.setattr(
         discover_mod, "discover_live_sessions", lambda **_kwargs: [live]
@@ -1242,6 +1326,7 @@ def test_legacy_pseudo_id_does_not_hide_foreign_canonical_owner(
         agent="claude",
         truth_state="working",
         name="legacy",
+        identity_provisional=True,
     )
     foreign = DiscoveredSession(
         session_id="bbbbbbbb-1111-7222-8333-4444deadbeef",

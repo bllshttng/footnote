@@ -5082,18 +5082,45 @@ def dispatch_send(
 
     def _recipient_identity_key(
         entry: AgentEntry,
-    ) -> tuple[str, str, Optional[str]]:
+    ) -> tuple[
+        str,
+        str,
+        Optional[str],
+        str,
+        Optional[str],
+        Optional[tuple[object, object]],
+        str,
+    ]:
         session_id = getattr(entry, "harness_session_id", None) or getattr(
             entry, "session_id", None
         )
+        mux = entry.mux
         return (
             entry.name,
             entry.harness,
             session_identity_key(session_id) if session_id else None,
+            entry.short_id,
+            entry.mcp_channel_id,
+            (
+                (mux.get("session"), mux.get("pane_id"))
+                if mux is not None
+                else None
+            ),
+            entry.created_at,
         )
 
     def _load_and_resolve_target(
-        expected_identity: Optional[tuple[str, str, Optional[str]]] = None,
+        expected_identity: Optional[
+            tuple[
+                str,
+                str,
+                Optional[str],
+                str,
+                Optional[str],
+                Optional[tuple[object, object]],
+                str,
+            ]
+        ] = None,
     ) -> tuple[list[AgentEntry], AgentEntry]:
         try:
             entries = load_registry(registry_path)
@@ -5126,7 +5153,7 @@ def dispatch_send(
             from fno.agents.discover import discovery_address_matches
 
             registry_id = resolved_identity[2]
-            registry_key = resolved_identity[1:]
+            registry_key = (resolved_identity[1], registry_id)
             live_foreign = {
                 (session.agent, session_identity_key(session.session_id)): session
                 for session in discovery_address_matches(

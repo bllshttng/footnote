@@ -668,11 +668,14 @@ def _discover_from_registry(
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
             short_val = getattr(e, "short_id", "") or None
-            sid = getattr(e, "harness_session_id", None) or short_val
+            harness_session_id = getattr(e, "harness_session_id", None)
+            sid = harness_session_id or short_val
             short = short_val or (canonical_handle(sid) if sid else None)
+            identity_provisional = harness_session_id is None
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
             short = canonical_handle(sid) if sid else None
+            identity_provisional = False
         if not sid or sid in exclude or sid in seen:
             continue
         seen.add(sid)
@@ -685,6 +688,7 @@ def _discover_from_registry(
                 "status": None,
                 "agent": harness,
                 "name": getattr(e, "name", None),
+                "identity_provisional": identity_provisional,
             }
         )
     return rows
@@ -705,6 +709,11 @@ class DiscoveredSession:
     truth_state: str = "unknown"
     transcript_path: Optional[str] = None
     name: Optional[str] = None  # registered spawn name (address axis, distinct from handle/alias)
+    # True only when a legacy Claude row lacks a full harness session id and its
+    # transport short_id temporarily stands in as session_id. Such a projection
+    # participates in short-address ambiguity, but can never claim full-id
+    # precedence over another candidate.
+    identity_provisional: bool = False
 
     @property
     def is_alive(self) -> bool:
@@ -749,18 +758,13 @@ def _exact_address_matches(
     """Union every exact live address category before selecting a session."""
     if not token:
         return []
-    from fno.agents.store_fallback import is_full_session_id
-
     rows = list(sessions)
-    full = (
-        [
-            session
-            for session in rows
-            if session_handle_tier(token, session.session_id) == 0
-        ]
-        if is_full_session_id(token)
-        else []
-    )
+    full = [
+        session
+        for session in rows
+        if not session.identity_provisional
+        and session_handle_tier(token, session.session_id) == 0
+    ]
     candidates = full or [
         session
         for session in rows
@@ -2012,6 +2016,7 @@ def discover_live_sessions(
             agent=r["agent"],
             transcript_path=r.get("transcript_path"),
             name=r.get("name"),
+            identity_provisional=bool(r.get("identity_provisional")),
         )
         for r in live
     ]
