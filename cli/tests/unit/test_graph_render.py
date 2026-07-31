@@ -162,6 +162,20 @@ def test_in_progress_epic_ids_detects_done_or_claimed_child():
     assert ids == frozenset({"ab-epic0001", "ab-epic0002"})
 
 
+def test_live_claimed_child_promotes_parent_epic_to_now(monkeypatch):
+    epic = _entry("ab-epic0004", type="epic", priority="p3")
+    child = _entry("ab-kid00004", parent=epic["id"], priority="p3")
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda: {child["id"]}
+    )
+
+    column_for = make_kanban_column([epic, child])
+
+    assert column_for(epic) == "Now"
+    assert column_for(child) == "Now"
+    assert epic["status"] == "ready"
+
+
 def test_in_progress_epic_signal_requires_a_live_epic_parent():
     feature_parent = _entry("feature-parent", type="feature", priority="p2")
     feature_child = _entry(

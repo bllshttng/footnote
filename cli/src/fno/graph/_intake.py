@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal, Optional, TypedDict, Union
+from typing import Collection, Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
     LEDGER_JSON, PRIORITY_ORDER, is_wellformed_node_id, mint_node_id, _rank_band,
@@ -254,9 +254,9 @@ def _sort_text(value: object) -> str:
     return value if isinstance(value, str) else ""
 
 
-def _has_text_marker(entry: dict, field: str) -> bool:
-    value = entry.get(field)
-    return isinstance(value, str) and bool(value)
+def _has_terminal_marker(entry: dict, field: str) -> bool:
+    """Match the graph's truthy terminal-marker semantics for malformed rows."""
+    return bool(entry.get(field))
 
 
 def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
@@ -270,15 +270,18 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     status = epic.get("status")
     if (
         (isinstance(status, str) and status in _TERMINAL_EPIC_STATUSES)
-        or _has_text_marker(epic, "completed_at")
-        or _has_text_marker(epic, "superseded_by")
-        or _has_text_marker(epic, "deferred_at")
+        or _has_terminal_marker(epic, "completed_at")
+        or _has_terminal_marker(epic, "superseded_by")
+        or _has_terminal_marker(epic, "deferred_at")
     ):
         return None
     return epic
 
 
-def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
+def in_progress_epic_ids(
+    entries: list[dict],
+    live_claimed: Collection[str] = frozenset(),
+) -> frozenset[str]:
     """Return live epic ids with a completed or claimed child."""
     id_to_entry = {
         entry["id"]: entry
@@ -293,6 +296,7 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
             child.get("completed_at")
             or child.get("status") in ("done", "in_progress")
             or child.get("session_id")
+            or child.get("id") in live_claimed
         ):
             continue
         epic = _live_epic_for(child, id_to_entry)
@@ -334,6 +338,7 @@ def make_selection_sort_key(
     orphans: Optional[frozenset[str]] = None,
     *,
     swimlane: bool = False,
+    live_claimed: Collection[str] = frozenset(),
 ):
     """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3).
 
@@ -377,7 +382,7 @@ def make_selection_sort_key(
             orphans = orphan_ids(entries)
         except Exception:  # noqa: BLE001 - ordering signal; never break selection
             orphans = frozenset()
-    epic_in_progress = in_progress_epic_ids(entries)
+    epic_in_progress = in_progress_epic_ids(entries, live_claimed)
 
     def _prio(e: dict) -> int:
         return PRIORITY_ORDER[_priority_name(e)]

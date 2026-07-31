@@ -29,6 +29,7 @@ Named projects sort alphabetically and `(unscoped)` sorts last, preserving conti
 Ranked cards precede unranked cards, ascending by rank, and NaN, infinity, booleans, and overflowing integers degrade to unranked so the key remains a total order.
 
 An epic contributes its tier, in-progress signal, priority, and grouping timestamp only while it is a real `type: epic` row that is not completed, done, superseded, or deferred.
+Its in-progress signal includes a child with persisted completion/session state or a live lockfile claim, and each consumer binds one claim snapshot into both ordering and column routing.
 Terminal field markers (`completed_at`, `superseded_by`, and `deferred_at`) also win over a stale persisted `ready` status.
 A child of a missing, malformed, or terminal parent is a loose-node equivalent and sorts on its own priority.
 

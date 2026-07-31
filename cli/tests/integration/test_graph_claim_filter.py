@@ -97,6 +97,38 @@ def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
     assert "ab-bbbbbbbb" in ids
 
 
+def test_next_prefers_sibling_of_live_claimed_epic(tmp_graph, tmp_path):
+    entries = [
+        {"id": "ab-epic001", "title": "Active epic", "type": "epic",
+         "status": "ready", "priority": "p2", "created_at": "2026-02-01",
+         "project": "p", "blocked_by": []},
+        {"id": "ab-epic002", "title": "Idle epic", "type": "epic",
+         "status": "ready", "priority": "p2", "created_at": "2026-01-01",
+         "project": "p", "blocked_by": []},
+        {"id": "ab-claimed1", "title": "Claimed child", "status": "ready",
+         "parent": "ab-epic001", "priority": "p2", "created_at": _RECENT_CREATED,
+         "project": "p", "blocked_by": [], "plan_path": "claimed.md"},
+        {"id": "ab-sibling1", "title": "Active sibling", "status": "ready",
+         "parent": "ab-epic001", "priority": "p2", "created_at": _RECENT_CREATED,
+         "project": "p", "blocked_by": [], "plan_path": "sibling.md"},
+        {"id": "ab-idlekid1", "title": "Idle child", "status": "ready",
+         "parent": "ab-epic002", "priority": "p2", "created_at": _RECENT_CREATED,
+         "project": "p", "blocked_by": [], "plan_path": "idle.md"},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    acquire_claim(
+        key="node:ab-claimed1",
+        holder="target-session:other",
+        ttl_ms=3_600_000,
+        root=tmp_path,
+    )
+
+    result = _invoke("graph", "next", "--all")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["id"] == "ab-sibling1"
+
+
 def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
     """Each serialized lane claims its pick before the next lane selects."""
     max_lanes = 3
@@ -146,6 +178,12 @@ def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
 
     assert result.exit_code == 0, result.output
     assert "Now/p" in result.output
+    persisted = {
+        entry["id"]: entry
+        for entry in json.loads(tmp_graph.read_text())["entries"]
+    }
+    assert persisted["ab-anchor1"]["rank"] == 5.0
+    assert persisted["ab-claimed1"]["rank"] < persisted["ab-anchor1"]["rank"]
 
 
 def test_released_claim_does_not_block(tmp_graph, tmp_path):

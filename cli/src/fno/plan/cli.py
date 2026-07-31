@@ -402,7 +402,7 @@ def folder_audit(
     "rung",
     hidden=True,
     help=(
-        "Print a plan's readiness rung and both policy verdicts. Exit 0 when the "
+        "Print a plan's readiness rung and dispatch-policy verdict. Exit 0 when the "
         "plan is dispatchable, 1 when it is not (including unreadable), 2 on a "
         "usage error. The single readiness authority for shell callers."
     ),

@@ -763,6 +763,7 @@ def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
 
     assert result.exit_code == 0, result.output
     assert "Now/fno" in result.output
+    assert _rank_of(tmp_graph, "ab-epic002") < _rank_of(tmp_graph, "ab-anchor2")
 
 
 def test_ac1_after_ranked_anchor_places_behind(tmp_graph):

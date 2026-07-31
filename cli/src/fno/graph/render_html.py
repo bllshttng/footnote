@@ -27,9 +27,8 @@ from fno.graph.render import (
     _kanban_column,
     _orphan_ids,
     _project_key,
-    make_kanban_column,
+    make_kanban_classifiers,
 )
-from fno.graph._intake import make_selection_sort_key
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -221,12 +220,7 @@ def _bucket(
     if orphans is None:
         orphans = _orphan_ids(entries)
     ordering_source = ordering_entries if ordering_entries is not None else entries
-    board_order = make_selection_sort_key(
-        ordering_source,
-        orphans,
-        swimlane=True,
-    )
-    column_for = make_kanban_column(ordering_source)
+    board_order, column_for = make_kanban_classifiers(ordering_source, orphans)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
         col = column_for(e)

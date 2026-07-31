@@ -3702,7 +3702,7 @@ def cmd_next(
         # Epics-first, then flat priority (C3, Locked Decision 7). Build the
         # key from the FULL graph so epic parents resolve even when filtered
         # out of the candidate set.
-        candidates.sort(key=make_selection_sort_key(entries))
+        candidates.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
         return candidates
 
     def _node_summary(e):
@@ -3901,7 +3901,7 @@ def cmd_ready(
     ]
     # Epics-first, then flat priority (C3, Locked Decision 7); key built
     # from the full graph so epic parents always resolve.
-    ready.sort(key=make_selection_sort_key(entries))
+    ready.sort(key=make_selection_sort_key(entries, live_claimed=claimed))
 
     output = [{
         # slug leads (ab-f82e8083) so a `ready` list / clipboard is readable.

@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Collection
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band as _rank_band
@@ -52,7 +53,10 @@ def _orphan_ids(entries: list[dict]) -> frozenset[str]:
         return frozenset()
 
 
-def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
+def in_progress_epic_ids(
+    entries: list[dict],
+    live_claimed: Collection[str] = frozenset(),
+) -> frozenset[str]:
     """Parent ids whose work is underway: an epic with a done or claimed child.
 
     Sessions claim the leaf CHILDREN of an epic, never the container, so an
@@ -64,7 +68,7 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
     """
     from fno.graph._intake import in_progress_epic_ids as _shared_epic_ids
 
-    return _shared_epic_ids(entries)
+    return _shared_epic_ids(entries, live_claimed)
 
 
 def _kanban_column(
@@ -130,10 +134,16 @@ def _kanban_column(
     return "Next"
 
 
-def make_kanban_column(entries: list[dict]):
+def make_kanban_column(
+    entries: list[dict],
+    live_claimed: Collection[str] | None = None,
+):
     """Bind whole-graph overlays into the sole kanban column authority."""
-    in_progress_epics = in_progress_epic_ids(entries)
-    live_claimed = frozenset(live_claimed_node_ids())
+    if live_claimed is None:
+        live_claimed = frozenset(live_claimed_node_ids())
+    else:
+        live_claimed = frozenset(live_claimed)
+    in_progress_epics = in_progress_epic_ids(entries, live_claimed)
     priority_for = make_effective_priority(entries)
 
     def column_for(entry: dict) -> str | None:
@@ -145,6 +155,23 @@ def make_kanban_column(entries: list[dict]):
         )
 
     return column_for
+
+
+def make_kanban_classifiers(
+    entries: list[dict],
+    orphans: frozenset[str] | None = None,
+    *,
+    swimlane: bool = True,
+):
+    """Bind one live-claim snapshot into board ordering and column routing."""
+    live_claimed = frozenset(live_claimed_node_ids())
+    board_order = make_selection_sort_key(
+        entries,
+        orphans,
+        swimlane=swimlane,
+        live_claimed=live_claimed,
+    )
+    return board_order, make_kanban_column(entries, live_claimed)
 
 
 def _kanban_card(
@@ -232,8 +259,7 @@ def render_graph_md(
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
     orphans = _orphan_ids(entries)
-    board_order = make_selection_sort_key(entries, orphans, swimlane=True)
-    column_for = make_kanban_column(entries)
+    board_order, column_for = make_kanban_classifiers(entries, orphans)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
         col = column_for(entry)

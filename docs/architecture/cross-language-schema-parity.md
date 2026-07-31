@@ -92,7 +92,7 @@ That last sentence is the finding. It reads as though `crates/fno-agents/src/loo
 
 So there is no second implementation. A fixture-corpus parity harness would have frozen a contract with one participant, and its green would have meant nothing.
 
-What can actually regress is someone **adding** a Rust plan-status reader, so that is what `scripts/ci/check-plan-rung-authority.sh` guards: it freezes the set of Rust sources that open a plan document (`kill_criteria.rs` alone), asserts that file never grows a frontmatter `status` extraction, asserts the rung table lives in exactly one Python module, asserts both named policies still exist, and fails on any shell script that classifies a plan status itself.
+What can actually regress is someone **adding** a Rust plan-status reader, so that is what `scripts/ci/check-plan-rung-authority.sh` guards: it freezes the set of Rust sources that open a plan document (`kill_criteria.rs` alone), asserts that file never grows a frontmatter `status` extraction, asserts the rung table lives in exactly one Python module, requires the real dispatch policies while rejecting the removed decorative `is_selectable` policy, and fails on any shell script that classifies a plan status itself.
 
 **The rule this generalizes to:** before writing a parity check, enumerate the implementations. Parity is for two or more that must agree. One implementation plus N delegating callers needs a *uniqueness* guard instead - it is a cheaper artifact and it fails for the right reason.
 

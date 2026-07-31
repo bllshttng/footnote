@@ -15,9 +15,8 @@ import html as _html
 
 from fno.graph.render import (
     _project_key,
-    make_kanban_column,
+    make_kanban_classifiers,
 )
-from fno.graph._intake import make_selection_sort_key
 
 # Public-facing column set + labels. The internal Triage column (awaiting
 # human ack) is folded into Later for the public view; Done is relabeled
@@ -34,14 +33,13 @@ def _public_entries(entries: list[dict], project: str) -> list[dict]:
 
 def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
     cols: dict[str, list[dict]] = {col: [] for col, _ in _PUBLIC_COLUMNS}
-    column_for = make_kanban_column(entries)
+    board_order, column_for = make_kanban_classifiers(entries)
     for e in _public_entries(entries, project):
         col = column_for(e)
         if col == "Triage":  # fold the internal triage pile into Later
             col = "Later"
         if col in cols:
             cols[col].append(e)
-    board_order = make_selection_sort_key(entries, swimlane=True)
     for items in cols.values():
         items.sort(key=board_order)
     return cols

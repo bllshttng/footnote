@@ -52,6 +52,24 @@ def test_in_progress_epic_preferred_over_unstarted_same_priority():
     assert _ids_sorted(entries, [ready_y, ready_x]) == ["xr", "yr"]
 
 
+def test_live_claimed_child_marks_epic_in_progress_for_selection():
+    epic_x = {"id": "epicX", "type": "epic", "priority": "p2",
+              "created_at": "2026-02-01"}
+    epic_y = {"id": "epicY", "type": "epic", "priority": "p2",
+              "created_at": "2026-01-01"}
+    claimed_x = {"id": "xclaimed", "parent": "epicX", "priority": "p2",
+                 "status": "ready", "created_at": "2026-02-01"}
+    ready_x = {"id": "xr", "parent": "epicX", "priority": "p2",
+               "created_at": "2026-02-02"}
+    ready_y = {"id": "yr", "parent": "epicY", "priority": "p2",
+               "created_at": "2026-01-02"}
+    entries = [epic_x, epic_y, claimed_x, ready_x, ready_y]
+
+    key = make_selection_sort_key(entries, live_claimed={"xclaimed"})
+
+    assert [e["id"] for e in sorted([ready_y, ready_x], key=key)] == ["xr", "yr"]
+
+
 def test_loose_nodes_flat_priority_then_created_at():
     a = {"id": "a", "priority": "p2", "created_at": "2026-01-02"}
     b = {"id": "b", "priority": "p0", "created_at": "2026-01-03"}
@@ -185,6 +203,9 @@ def test_terminal_epic_markers_override_stale_ready_status():
         ("completed_at", "2026-01-02"),
         ("superseded_by", "replacement"),
         ("deferred_at", "2026-01-02"),
+        ("completed_at", 1),
+        ("superseded_by", True),
+        ("deferred_at", {"malformed": True}),
     ):
         epic = {
             "id": "epic", "type": "epic", "status": "ready",
