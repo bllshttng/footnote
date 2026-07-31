@@ -424,7 +424,7 @@ def rung(
     dependency; the exit code carries the dispatchable verdict so the common
     case stays a one-liner with no parsing at all.
     """
-    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     if not plan_path:
         typer.echo("fno plan rung: a plan path is required", err=True)
@@ -438,7 +438,6 @@ def rung(
 
     r = plan_rung(entry)
     typer.echo(f"rung={r.value}")
-    typer.echo(f"selectable={'true' if is_selectable(entry) else 'false'}")
     typer.echo(f"dispatchable={'true' if is_dispatchable(entry) else 'false'}")
     if r is Rung.UNREADABLE:
         typer.echo(

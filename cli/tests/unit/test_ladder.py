@@ -461,18 +461,12 @@ def test_an_absent_status_is_not_the_same_defect_as_a_stub_status(tmp_path):
     assert is_dispatchable(stubbed) is False
 
 
-def test_AC3_ERR_the_two_policies_disagree_on_unreadable(tmp_path):
-    """Permanent, deliberate disagreement - a future merge must fail here.
-
-    Selection fails OPEN because plans live in a symlinked vault and demoting
-    on a read failure would quarantine the backlog on unmount. Dispatch fails
-    CLOSED because building against an unreadable plan is worse than parking.
-    """
-    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+def test_AC3_ERR_dispatch_fails_closed_on_unreadable(tmp_path):
+    """An unreadable plan parks rather than launching a worker."""
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     entry = _undecodable(tmp_path)
     assert plan_rung(entry) is Rung.UNREADABLE
-    assert is_selectable(entry) is True
     assert is_dispatchable(entry) is False
 
 
@@ -485,32 +479,29 @@ def test_AC3_ERR_the_two_policies_disagree_on_unreadable(tmp_path):
         "---\nstatus: brand_new_word\n---\n",  # newer vocabulary, or corrupt
     ],
 )
-def test_uncertain_documents_park_but_stay_selectable(tmp_path, body):
-    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+def test_uncertain_documents_park(tmp_path, body):
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     entry = _plan(tmp_path, body)
     assert plan_rung(entry) is Rung.UNREADABLE
-    assert is_selectable(entry) is True
     assert is_dispatchable(entry) is False
 
 
-def test_missing_file_is_unreadable_and_stays_selectable(tmp_path):
-    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+def test_missing_file_is_unreadable_and_not_dispatchable(tmp_path):
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     entry = {"id": "x-test", "plan_path": str(tmp_path / "gone.md")}
     assert plan_rung(entry) is Rung.UNREADABLE
-    assert is_selectable(entry) is True
     assert is_dispatchable(entry) is False
 
 
 @pytest.mark.parametrize("status", ["idea", "stub", "design"])
 def test_AC2_EDGE_a_linked_pre_design_plan_is_not_dispatchable(tmp_path, status):
     """The case that read `ready` before this change."""
-    from fno.graph.ladder import is_dispatchable, is_selectable
+    from fno.graph.ladder import is_dispatchable
 
     entry = _plan(tmp_path, f"---\nstatus: {status}\n---\n")
     assert is_dispatchable(entry) is False
-    assert is_selectable(entry) is False
 
 
 @pytest.mark.parametrize("status", ["ready", "in_progress", "in_review", "shipped"])

@@ -294,11 +294,10 @@ def test_unresolvable_plan_path_stays_ready_not_idea():
     Folding those together would demote every foreign relative-path node to
     `idea` and hide it from the board.
     """
-    from fno.graph.ladder import Rung, is_selectable, plan_rung
+    from fno.graph.ladder import Rung, plan_rung
 
     e = _entry("ab-norelat1", plan_path="plans/somewhere.md")  # no cwd anchor
     assert plan_rung(e) is Rung.UNREADABLE
-    assert is_selectable(e) is True
     assert recompute_statuses([e])[0]["status"] == "ready"
 
 
