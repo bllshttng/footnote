@@ -12,12 +12,21 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # The cost helpers moved into the fno package (cli/src/fno/cost/). Run them as
-# `python3 -m fno.cost.<mod>`; in a checkout point PYTHONPATH at the package
-# source so it works pre-install, otherwise rely on the installed `fno`.
+# `"$FNO_PYTHON" -m fno.cost.<mod>`: a bare `python3` is whatever is first on
+# PATH, and one without fno's deps drops the ledger row silently (the failures
+# below are non-blocking by design).
 _REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-if [[ -f "${_REPO_ROOT}/cli/src/fno/cost/_session_cost.py" ]]; then
+# Package source on PYTHONPATH so a checkout works pre-install. Inline, not in
+# the resolver: it must still happen when a partial deploy dropped the helper.
+if [[ -f "${_REPO_ROOT}/cli/src/fno/__init__.py" ]]; then
     export PYTHONPATH="${_REPO_ROOT}/cli/src${PYTHONPATH:+:${PYTHONPATH}}"
 fi
+# shellcheck source=../lib/fno-python.sh
+source "${_REPO_ROOT}/scripts/lib/fno-python.sh" 2>/dev/null || true
+declare -F fno_python_init >/dev/null && fno_python_init "${_REPO_ROOT}"
+# A missing helper degrades to the old behavior rather than tripping `set -u`
+# on an unset FNO_PYTHON in this non-blocking path.
+FNO_PYTHON="${FNO_PYTHON:-python3}"
 
 # Find current session ID from most recent JSONL in this project's Claude dir
 find_session_id() {
@@ -37,10 +46,10 @@ if [[ -z "$SESSION_ID" ]]; then
 fi
 
 # Get cost JSON
-COST_JSON=$(python3 -m fno.cost._session_cost --json "$SESSION_ID" 2>/dev/null || echo "{}")
+COST_JSON=$("$FNO_PYTHON" -m fno.cost._session_cost --json "$SESSION_ID" 2>/dev/null || echo "{}")
 
 # Pass all args through to fno.cost._register + add session and cost
-python3 -m fno.cost._register \
+"$FNO_PYTHON" -m fno.cost._register \
     --session "$SESSION_ID" \
     --cost-json "$COST_JSON" \
     "$@" 2>/dev/null || {
