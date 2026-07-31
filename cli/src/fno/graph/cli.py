@@ -9488,7 +9488,7 @@ def cmd_supersede(
     replaces: str = typer.Option(..., "--replaces", help="The old node ID being superseded"),
     reason: str = typer.Option(..., "--reason", "-R", help="Why supersede (free text, surfaces in triage)"),
     force: bool = typer.Option(
-        False, "--force", help="Supersede even if the target still has live children (orphaning them)"
+        False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
     ),
 ) -> None:
     """Mark ``replaces`` as superseded by ``new_id``; defer ``replaces`` automatically.
