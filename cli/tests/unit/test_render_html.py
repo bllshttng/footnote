@@ -588,17 +588,37 @@ def test_html_overlay_live_claim_bucketed_now(monkeypatch):
     lockfile-held node lands in Now even at p3, without a graph session_id."""
     from fno.graph.render_html import _bucket
 
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: {"x-live"})
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {"x-live"}
+    )
     entries = [_entry("x-live", priority="p3")]
     cols = _bucket(entries)
     assert any(e["id"] == "x-live" for e in cols["Now"])
     assert all(e["id"] != "x-live" for e in cols["Later"])
 
 
+def test_html_render_binds_one_live_claim_snapshot(tmp_path, monkeypatch):
+    calls = 0
+
+    def claims(**_kwargs):
+        nonlocal calls
+        calls += 1
+        return {"x-live"} if calls == 1 else set()
+
+    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", claims)
+    entries = [_entry("x-live", priority="p3", project="web")]
+
+    render_graph_html(entries, tmp_path / "graph.html")
+
+    assert calls == 1
+
+
 def test_html_live_epic_priority_promotes_child_to_now(monkeypatch):
     from fno.graph.render_html import _bucket
 
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
+    )
     epic = _entry("epic", type="epic", priority="p1")
     child = _entry("child", parent="epic", priority="p2")
     cols = _bucket([epic, child])
@@ -608,7 +628,9 @@ def test_html_live_epic_priority_promotes_child_to_now(monkeypatch):
 
 def test_html_overlay_degrades_on_empty_claims(tmp_path: Path, monkeypatch):
     """Claims unreadable -> empty overlay, HTML render still succeeds."""
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
+    )
     entries = [_entry("x-none", priority="p2")]
     out = tmp_path / "graph.html"
     render_graph_html(entries, out)

@@ -21,6 +21,7 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
+import fno.graph.render as graph_render
 from fno.graph.render import (
     KANBAN_COLUMNS,
     UNSCOPED_LABEL,
@@ -209,6 +210,7 @@ def _bucket(
     orphans: frozenset[str] | None = None,
     *,
     ordering_entries: list[dict] | None = None,
+    live_claimed: frozenset[str] | None = None,
 ) -> dict[str, list[dict]]:
     """Partition entries into the kanban columns, sorted per column.
 
@@ -220,7 +222,11 @@ def _bucket(
     if orphans is None:
         orphans = _orphan_ids(entries)
     ordering_source = ordering_entries if ordering_entries is not None else entries
-    board_order, column_for = make_kanban_classifiers(ordering_source, orphans)
+    board_order, column_for = make_kanban_classifiers(
+        ordering_source,
+        orphans,
+        live_claimed=live_claimed,
+    )
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
         col = column_for(e)
@@ -716,6 +722,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     statuses, projects = _stats(entries)
     vault = _load_obsidian_vault()
     caps = _load_wip_caps()
+    live_claimed = frozenset(graph_render.live_claimed_node_ids())
 
     parts: list[str] = []
     parts.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">")
@@ -739,7 +746,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     parts.append('<label class="toggle"><input type="checkbox" id="show-done"> Show done</label>')
     parts.append("</header>")
 
-    master = _bucket(entries)
+    master = _bucket(entries, live_claimed=live_claimed)
     master_total = sum(len(items) for items in master.values())
     parts.append(
         f'<details class="board-section" id="master" open>'
@@ -759,7 +766,12 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
-        cols = _bucket(proj_entries, all_orphans, ordering_entries=entries)
+        cols = _bucket(
+            proj_entries,
+            all_orphans,
+            ordering_entries=entries,
+            live_claimed=live_claimed,
+        )
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (
             f'<summary><span class="chip" style="background:{chip_color}">'

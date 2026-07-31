@@ -165,9 +165,13 @@ def make_kanban_classifiers(
     orphans: frozenset[str] | None = None,
     *,
     swimlane: bool = True,
+    live_claimed: Collection[str] | None = None,
 ):
     """Bind one live-claim snapshot into board ordering and column routing."""
-    live_claimed = frozenset(live_claimed_node_ids())
+    if live_claimed is None:
+        live_claimed = frozenset(live_claimed_node_ids())
+    else:
+        live_claimed = frozenset(live_claimed)
     board_order = make_selection_sort_key(
         entries,
         orphans,

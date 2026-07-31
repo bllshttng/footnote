@@ -166,7 +166,7 @@ def test_live_claimed_child_promotes_parent_epic_to_now(monkeypatch):
     epic = _entry("ab-epic0004", type="epic", priority="p3")
     child = _entry("ab-kid00004", parent=epic["id"], priority="p3")
     monkeypatch.setattr(
-        "fno.graph.render.live_claimed_node_ids", lambda: {child["id"]}
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {child["id"]}
     )
 
     column_for = make_kanban_column([epic, child])
@@ -601,7 +601,9 @@ def test_overlay_does_not_resurrect_offboard():
 def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
     """AC: claims subsystem unreadable -> the helper returns an empty overlay
     (it swallows faults), so render still succeeds with status-only placement."""
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
+    )
     entries = [_entry("x-eeee", priority="p2")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
@@ -611,7 +613,9 @@ def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
 def test_render_md_places_live_claimed_in_now(tmp_path, monkeypatch):
     """End-to-end: render_graph_md consults live_claimed_node_ids and places the
     claimed node under the Now column even though its priority is p3."""
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: {"x-ffff"})
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {"x-ffff"}
+    )
     entries = [_entry("x-ffff", title="LiveNode", priority="p3")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
