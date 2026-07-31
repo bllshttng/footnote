@@ -230,7 +230,9 @@ def test_maintain_wip_count_matches_live_claim_overlay(
 
     monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
     monkeypatch.setattr(
-        render, "live_claimed_node_ids", lambda: {"ab-claim01", "ab-claim02"}
+        render,
+        "live_claimed_node_ids",
+        lambda **_kwargs: {"ab-claim01", "ab-claim02"},
     )
     _seed(tmp_graph, [
         _node("ab-claim01", status="ready", priority="p3"),
