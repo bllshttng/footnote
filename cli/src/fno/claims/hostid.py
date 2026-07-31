@@ -119,7 +119,7 @@ def machine_id() -> str:
     return resolved or hostname()
 
 
-def is_same_machine(host: Optional[str], machine: Optional[str] = None) -> bool:
+def is_same_machine(host: Optional[str], machine: Optional[str]) -> bool:
     """Was this claim written on THIS machine?
 
     ``machine`` is the claim's ``machine_id`` and is authoritative whenever it
@@ -130,6 +130,10 @@ def is_same_machine(host: Optional[str], machine: Optional[str] = None) -> bool:
 
     Dispatching on field presence rather than OR-ing the two candidates keeps a
     hostname that happens to equal some other machine's id from matching.
+
+    ``machine`` is REQUIRED and deliberately has no default. A default let two
+    callers keep compiling while silently taking the pre-change fallback for
+    every claim, which is the fix quietly not applying on those paths.
     """
     if machine:
         return machine == machine_id()

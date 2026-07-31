@@ -13,7 +13,8 @@ def _wire(monkeypatch, status, *, own_pid=None):
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
     )
-    # The claim's host is compared through hostid, not a raw gethostname() (x-588d).
+    # Ownership compares the claim's machine_id, not a raw gethostname() (x-588d).
+    # Fixtures below carry machine_id="h" to match.
     monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "h")
 
 
@@ -31,7 +32,7 @@ def test_ours_proceeds(monkeypatch):
     # AC5-EDGE: the sole incarnation holding its own claim is never fenced.
     _wire(
         monkeypatch,
-        {"state": "live", "holder": "me", "pid": 123, "host": "h"},
+        {"state": "live", "holder": "me", "pid": 123, "host": "h", "machine_id": "h"},
         own_pid=123,
     )
     assert incarnation_fence_blocks("uuid1") == (False, "")

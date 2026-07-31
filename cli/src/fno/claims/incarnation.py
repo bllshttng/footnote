@@ -90,7 +90,8 @@ def incarnation_fence_blocks(
     if state not in ("live", "suspect"):
         return False, ""  # free / stale / dead -> no live contender
     own_pid = _own_session_pid()
-    if own_pid and info.get("pid") == own_pid and is_same_machine(info.get("host")):
+    same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
+    if own_pid and info.get("pid") == own_pid and same_machine:
         return False, ""  # ours
     holder = info.get("holder", "?")
     pid = info.get("pid", "?")

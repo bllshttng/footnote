@@ -545,6 +545,9 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         "holder": claim.holder,
         "pid": claim.pid,
         "host": claim.host,
+        # Callers classify ownership from this dict, so it has to carry what
+        # liveness actually compares; host alone sends them down the fallback.
+        "machine_id": claim.machine_id,
         "acquired_at": claim.acquired_at,
         "expires_at": claim.expires_at,
     }

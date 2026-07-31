@@ -2140,7 +2140,8 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         own_pid = None
     from fno.claims.hostid import is_same_machine
 
-    return bool(own_pid and info.get("pid") == own_pid and is_same_machine(info.get("host")))
+    same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
+    return bool(own_pid and info.get("pid") == own_pid and same_machine)
 
 
 def _read_node_claim(node_id: str) -> Optional[dict]:

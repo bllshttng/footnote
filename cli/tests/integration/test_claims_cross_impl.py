@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ import pytest
 import yaml
 
 from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status, release_claim
+from fno.claims.hostid import machine_id as py_machine_id
 from fno.claims.io import claim_path, encode_key, read_claim_file, serialize_claim
 from fno.claims.types import Claim
 
@@ -457,7 +459,18 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
         "acquired_at",
         "pid",
         "host",
+        # x-588d: asserted, not excluded like `harness`. Both writers emit it
+        # unconditionally, and liveness compares it - a writer that stopped
+        # emitting it would send every reader down the pre-change hostname
+        # fallback and silently restore the bug.
+        "machine_id",
     }
+    # Parity on the VALUE, not just the key: the two implementations must derive
+    # the same identity or each reads the other's claims as cross-machine.
+    assert data["machine_id"] == py_machine_id()
+    assert data["host"] == socket.gethostname(), (
+        "host stays the hostname a pre-change reader compares against"
+    )
 
 
 # --------------------------------------------------------------------------
