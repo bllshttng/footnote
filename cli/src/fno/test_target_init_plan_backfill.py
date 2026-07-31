@@ -27,7 +27,7 @@ from typer.testing import CliRunner
 
 from fno import target_cli
 from fno.config import BlastConfig
-from fno.target_cli import _plan_pointer_exists, target_app
+from fno.target_cli import _resolve_plan_pointer, target_app
 
 runner = CliRunner()
 
@@ -196,7 +196,11 @@ def test_dangling_node_plan_is_not_backfilled(stub_exec, monkeypatch, tmp_path):
 
     assert res.exit_code == 0
     assert "TARGET_PLAN_PATH" not in stub_exec[0]
-    assert "does not exist" in res.stderr
+    assert "does not resolve" in res.stderr
+    # names BOTH repairs: this session's first-fill and the node itself, since
+    # fixing only the manifest leaves every future start on the node repeating.
+    assert "fno state set --field plan_path" in res.stderr
+    assert "fno backlog update" in res.stderr
 
 
 def test_ambiguous_node_tokens_leave_plan_empty(stub_exec, monkeypatch, tmp_path):
@@ -226,28 +230,59 @@ def test_node_without_plan_leaves_plan_empty(stub_exec, monkeypatch):
     assert "TARGET_PLAN_PATH" not in stub_exec[0]
 
 
-# ------------------------- the existence predicate ------------------------- #
-def test_plan_pointer_exists_matrix(tmp_path, monkeypatch):
+# -------------------------- the pointer resolver --------------------------- #
+def test_resolve_plan_pointer_matrix(tmp_path):
     real = tmp_path / "plan.md"
     real.write_text("# Plan\n", encoding="utf-8")
 
-    assert _plan_pointer_exists(str(real)) is True
-    assert _plan_pointer_exists(f"{real}#group-3") is True  # anchor stripped
-    assert _plan_pointer_exists(str(tmp_path / "gone.md")) is False
-    assert _plan_pointer_exists("") is False
-    assert _plan_pointer_exists("#group-1") is False  # anchor only, no file
+    assert _resolve_plan_pointer(str(real)) == str(real)
+    # anchor stripped for the stat, preserved on the way out
+    assert _resolve_plan_pointer(f"{real}#group-3") == f"{real}#group-3"
+    assert _resolve_plan_pointer(str(tmp_path / "gone.md")) is None
+    assert _resolve_plan_pointer("") is None
+    assert _resolve_plan_pointer("#group-1") is None  # anchor only, no file
 
-    # `~` is expanded here even though init-target-state.sh does not expand it;
-    # graph entries do carry ~-prefixed plan_paths.
+
+def test_resolve_plan_pointer_returns_expanded_tilde(tmp_path, monkeypatch):
+    """A `~` pointer is bound EXPANDED, never raw.
+
+    bash does not tilde-expand a variable's value, so init-target-state.sh and
+    every downstream plan read would see a raw `~/...` string as missing. Storing
+    the raw form would pass this gate and then wedge the write-once manifest -
+    the exact harm the gate exists to prevent - so the resolver must hand back
+    the path it actually proved.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
-    assert _plan_pointer_exists("~/plan.md") is True
-    assert _plan_pointer_exists("~/absent.md") is False
+    (tmp_path / "plan.md").write_text("# Plan\n", encoding="utf-8")
+
+    got = _resolve_plan_pointer("~/plan.md")
+
+    assert got == str(tmp_path / "plan.md")
+    assert "~" not in got
+    assert _resolve_plan_pointer("~/absent.md") is None
 
 
-def test_plan_pointer_exists_fails_safe(monkeypatch):
-    """An unreadable filesystem must not strip a plan binding that is fine."""
+def test_tilde_node_plan_reaches_writer_expanded(stub_exec, monkeypatch, tmp_path):
+    """End-to-end: the env handed to the bash writer carries no raw `~`."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    (tmp_path / "plan.md").write_text("# Plan\n", encoding="utf-8")
+    _graph(monkeypatch, [{"id": "x-39c0", "plan_path": "~/plan.md"}])
+    _blast(monkeypatch, False)
+
+    res = _invoke(["--input", "x-39c0"])
+
+    assert res.exit_code == 0
+    assert stub_exec[0].get("TARGET_PLAN_PATH") == str(tmp_path / "plan.md")
+
+
+def test_resolve_plan_pointer_fails_closed(monkeypatch):
+    """Under an unreadable path, prefer the recoverable empty field.
+
+    Fail-CLOSED on purpose: an unverified pointer lands in a write-once field
+    that can never be corrected, while an empty one keeps the first-fill escape.
+    """
     def _boom(self):
         raise OSError("filesystem unavailable")
 
     monkeypatch.setattr(Path, "exists", _boom)
-    assert _plan_pointer_exists("some/plan.md") is True
+    assert _resolve_plan_pointer("some/plan.md") is None

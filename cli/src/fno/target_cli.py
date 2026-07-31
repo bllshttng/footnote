@@ -281,23 +281,35 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     return None
 
 
-def _plan_pointer_exists(plan_path: str) -> bool:
-    """True when a graph plan pointer names a file that is actually on disk.
+def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
+    """The plan pointer to bind, NORMALIZED, or None when it does not resolve.
 
-    Strips a ``#group-N`` anchor the same way init-target-state.sh does
-    (``${INITIAL_PLAN_PATH%%#*}``) so an anchored plan is not read as missing,
-    and expands ``~`` (the shell helper does not, but graph entries carry
-    ``~``-prefixed paths). A relative pointer resolves against the cwd, which is
-    the worktree init runs from. Fail-safe to True on any error: an unreadable
-    filesystem must not strip a plan binding that is probably fine.
+    Returns the resolved pointer rather than a bool because the value written to
+    the write-once manifest must be the one whose existence was proven. ``~`` is
+    expanded here but NOT by init-target-state.sh - bash does not tilde-expand a
+    variable's value - so admitting a ``~``-prefixed pointer and then storing the
+    raw string would pass this check and read as missing in every consumer, which
+    is the exact wedge this gate exists to prevent. A ``#group-N`` anchor is
+    stripped for the stat the way the shell does (``${INITIAL_PLAN_PATH%%#*}``)
+    and preserved on the way out. A relative pointer resolves against the cwd,
+    which is the worktree init runs from, matching the shell's own plan reads.
+
+    Fail-CLOSED to None, the opposite of ``_resolve_plan_for_blast`` above and
+    deliberately so: an unresolved blast read only forgoes ceremony modulation,
+    while an unverified pointer here lands in a field that can never be
+    corrected. Under uncertainty the recoverable empty beats the permanent guess.
     """
     try:
-        bare = plan_path.split("#", 1)[0].strip()
+        bare, sep, anchor = plan_path.partition("#")
+        bare = bare.strip()
         if not bare:
-            return False
-        return Path(bare).expanduser().exists()
+            return None
+        resolved = Path(bare).expanduser()
+        if not resolved.exists():
+            return None
+        return f"{resolved}{sep}{anchor}"
     except Exception:
-        return True
+        return None
 
 
 _TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$", re.IGNORECASE)
@@ -1121,23 +1133,29 @@ def init(
     # resolves no node and stays empty for the legitimate blueprint-then-first-fill
     # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
     #
-    # Gated on the plan existing on disk, because the manifest is WRITE-ONCE and
-    # `fno state set --field plan_path` accepts a first-fill only while the field
-    # is EMPTY (else exit 5). Back-filling a dangling pointer would therefore not
-    # just record a bad path, it would close the only legal repair route; leaving
-    # it empty keeps the blueprint-then-first-fill escape open. An explicit
-    # --plan-path is NOT gated: the operator named that path, so a typo must
-    # surface as a plan error rather than be silently dropped.
+    # Gated on the plan resolving to a file, because the manifest is WRITE-ONCE
+    # and `fno state set --field plan_path` accepts a first-fill only while the
+    # field is EMPTY (else exit 5). Back-filling a dangling pointer would
+    # therefore not just record a bad path, it would close the only legal repair
+    # route; leaving it empty keeps the blueprint-then-first-fill escape open.
+    # What gets bound is the NORMALIZED pointer the gate proved, never the raw
+    # graph string - see _resolve_plan_pointer for why storing the raw form
+    # re-opens the wedge on a `~` path. An explicit --plan-path is NOT gated: the
+    # operator named that path, so a typo must surface as a plan error rather
+    # than be silently dropped.
     if not plan_path:
         resolved_plan = _resolve_plan_for_blast(None, input_)
         if resolved_plan:
-            if _plan_pointer_exists(resolved_plan):
-                plan_path = resolved_plan
+            bound = _resolve_plan_pointer(resolved_plan)
+            if bound:
+                plan_path = bound
             else:
                 typer.echo(
-                    f"fno target init: node's bound plan_path does not exist "
-                    f"({resolved_plan}); leaving the manifest plan_path empty so it "
-                    f"can still be first-filled (fno state set --field plan_path).",
+                    f"fno target init: the node's bound plan_path does not resolve "
+                    f"to a file ({resolved_plan}); leaving the manifest plan_path "
+                    f"empty so it stays first-fillable this session "
+                    f"(fno state set --field plan_path). Repair the node itself "
+                    f"with: fno backlog update <id> --plan-path <path>",
                     err=True,
                 )
 
