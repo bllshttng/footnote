@@ -2547,8 +2547,8 @@ async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
 
 /// Handle the `agent.switchboard` RPC (Group 2, Task 3.1).
 ///
-/// Params: `{to: string, from: string, body: string, mirror?: bool,
-/// timeout_ms?: u64}`.
+/// Params: `{to: string, from: string, body: string, recipient_identity: object,
+/// from_identity?: object, mirror?: bool, timeout_ms?: u64}`.
 ///
 /// Result (Ok unless `to` is unknown or params invalid):
 /// - `{delivered: true, reply, is_error, mirrored, receipt, transport:
@@ -2561,6 +2561,30 @@ async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
 ///   and A is NOT touched (the exchange did not complete).
 ///
 /// Errors: `AgentNotFound` (unknown `to`), `InvalidParams` (missing/oversized).
+fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool {
+    let Some(expected) = identity.as_object() else {
+        return false;
+    };
+    let Some(harness) = expected.get("harness").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(short_id) = expected.get("short_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(created_at) = expected.get("created_at").and_then(Value::as_str) else {
+        return false;
+    };
+    let session_id = match expected.get("session_id") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        _ => return false,
+    };
+    entry.harness_name() == harness
+        && entry.harness_session_id.as_deref() == session_id
+        && entry.short_id == short_id
+        && entry.created_at == created_at
+}
+
 async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
     let to = match req.params.get("to").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -2581,6 +2605,24 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         .get("mirror")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let recipient_identity = match req.params.get("recipient_identity") {
+        Some(value) if value.is_object() => value,
+        _ => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "missing `recipient_identity`",
+            )
+        }
+    };
+    let from_identity = req.params.get("from_identity");
+    if mirror && !from_identity.is_some_and(Value::is_object) {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "missing `from_identity` for mirrored switchboard turn",
+        );
+    }
     let timeout_ms = req
         .params
         .get("timeout_ms")
@@ -2609,6 +2651,12 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
             )
         }
     };
+    if !switchboard_identity_matches(&to_entry, recipient_identity) {
+        return Response::ok(
+            req.id,
+            json!({"delivered": false, "reason": "recipient-identity-changed"}),
+        );
+    }
 
     // B must be a held stream-json thread. A non-claude peer (PTY lane) or a
     // claude session with no live stream worker demotes to the durable path.
@@ -2663,7 +2711,9 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         // during which A may have been restarted with a new short_id. The pre-turn
         // snapshot could point at A's old socket (gemini-review HIGH).
         let fresh = load_registry_offloaded(ctx.home.registry_json()).await;
-        if let Some(from_entry) = fresh.find(&from) {
+        if let Some(from_entry) = fresh.find(&from).filter(|entry| {
+            from_identity.is_some_and(|identity| switchboard_identity_matches(entry, identity))
+        }) {
             let from_sock = ctx.home.worker_sock(&from_entry.short_id);
             if from_entry.harness_name() == "claude" && is_live_stream_thread(&from_sock).await {
                 match mirror_into(&from_sock, &outcome.reply).await {
@@ -6391,6 +6441,33 @@ done
         }
 
         std::fs::remove_dir_all(home.root()).ok();
+    fn stream_identity(short_id: &str) -> Value {
+        json!({
+            "harness": "claude",
+            "session_id": format!("uuid-{short_id}"),
+            "short_id": short_id,
+            "created_at": "2026-06-09T00:00:00Z",
+        })
+    }
+
+    fn switchboard_params(
+        to: &str,
+        to_short: &str,
+        from: &str,
+        from_short: Option<&str>,
+        body: &str,
+    ) -> Value {
+        let mut params = json!({
+            "to": to,
+            "from": from,
+            "body": body,
+            "mirror": from_short.is_some(),
+            "recipient_identity": stream_identity(to_short),
+        });
+        if let Some(short_id) = from_short {
+            params["from_identity"] = stream_identity(short_id);
+        }
+        params
     }
 
     #[test]
@@ -6894,7 +6971,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "A", "body": "hello"}),
+            switchboard_params("B", "swB", "A", Some("swA"), "hello"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp.result().expect("switchboard errored");
@@ -6941,7 +7018,7 @@ done
             &Request::new(
                 1,
                 "agent.switchboard",
-                json!({"to": "B", "from": "ghost", "body": "first"}),
+                switchboard_params("B", "swB", "ghost", None, "first"),
             ),
         )
         .await;
@@ -6952,7 +7029,7 @@ done
             &Request::new(
                 2,
                 "agent.switchboard",
-                json!({"to": "B", "from": "ghost", "body": "second"}),
+                switchboard_params("B", "swB", "ghost", None, "second"),
             ),
         )
         .await;
@@ -6975,7 +7052,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "A", "body": "hi"}),
+            switchboard_params("B", "swB", "A", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp
@@ -6998,7 +7075,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "ghost", "body": "hi"}),
+            switchboard_params("B", "swB", "ghost", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp.result().expect("switchboard errored");
@@ -7016,7 +7093,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "nope", "from": "A", "body": "hi"}),
+            switchboard_params("nope", "swNope", "A", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         if let crate::protocol::ResponsePayload::Err(ref e) = resp.payload {
@@ -7024,6 +7101,42 @@ done
         } else {
             panic!("expected AgentNotFound, got {resp:?}");
         }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_refuses_replaced_recipient_identity() {
+        let home = short_home("replaced");
+        seed_stream_row(&home, "victim", "swB");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let mut params = switchboard_params("victim", "swB", "ghost", None, "secret");
+        params["recipient_identity"]["session_id"] = json!("uuid-swA");
+
+        let response =
+            handle_switchboard(&ctx, &Request::new(1, "agent.switchboard", params)).await;
+        let result = response.result().expect("identity mismatch is a demotion");
+        assert_eq!(result["delivered"], false);
+        assert_eq!(result["reason"], "recipient-identity-changed");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_requires_recipient_identity() {
+        let home = short_home("identity-required");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let response = handle_switchboard(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard",
+                json!({"to": "victim", "from": "ghost", "body": "secret", "mirror": false}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.error().expect("missing identity must fail").code,
+            ErrorCode::InvalidParams
+        );
         std::fs::remove_dir_all(home.root()).ok();
     }
 

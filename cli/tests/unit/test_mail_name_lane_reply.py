@@ -122,6 +122,33 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
+def test_session_lane_reply_uses_full_sender_provenance(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A session-addressed durable message replies to its immutable sender."""
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import write_new_thread
+
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    sender_id = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    msg = write_new_thread(
+        recipient="recipient",
+        sender="mutable-alias",
+        kind="send",
+        body="ping",
+        to_kind="session",
+        from_session=sender_id,
+    ).thread_id
+
+    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert result.exit_code == 0, result.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    assert replies[0].to == canonical_handle(sender_id)
+    assert replies[0].to != "mutable-alias"
+
+
 def test_reply_refuses_when_unreadable_transcripts_hide_a_short_id_collision(
     runner, mailbox, monkeypatch, tmp_path
 ):

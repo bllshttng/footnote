@@ -73,6 +73,19 @@ def _register_gemini_peer(name: str = "gemini-agent") -> None:
     ])
 
 
+def _sb_identity(name: str) -> dict:
+    return {
+        "harness": "claude",
+        "session_id": f"session-{name}",
+        "short_id": f"short-{name}",
+        "created_at": f"created-{name}",
+    }
+
+
+def _sb_identities(*names: str) -> dict[str, dict]:
+    return {name: _sb_identity(name) for name in names}
+
+
 # ---------------------------------------------------------------------------
 # Minimal fake daemon (4-byte-LE-u32 + JSON framing) using a short /tmp path
 # ---------------------------------------------------------------------------
@@ -377,7 +390,16 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
             log_path="/tmp/claude-peer.log",
             short_id="abcd1234",
             status="live",
-        )
+        ),
+        AgentEntry(
+            name="fno",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/fno.log",
+            short_id="fno12345",
+            harness_session_id="aaaaaaaa-2222-3333-4444-555555555555",
+            status="live",
+        ),
     ])
 
     from fno.agents import dispatch as dispatch_mod
@@ -420,6 +442,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     assert len(rpc_calls) == 1, "claude must probe the switchboard RPC"
     assert rpc_calls[0]["method"] == "agent.switchboard"
     assert rpc_calls[0]["params"]["to"] == "claude-peer"
+    assert rpc_calls[0]["params"]["recipient_identity"]["short_id"] == "abcd1234"
 
 
 def test_deliver_live_claude_switchboard_delivered_skips_socket(
@@ -439,7 +462,16 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
             short_id="abcd1234",
             harness_session_id="11111111-2222-3333-4444-555555555555",
             status="live",
-        )
+        ),
+        AgentEntry(
+            name="fno",
+            harness="claude",
+            cwd="/tmp",
+            log_path="/tmp/fno.log",
+            short_id="fno12345",
+            harness_session_id="aaaaaaaa-2222-3333-4444-666666666666",
+            status="live",
+        ),
     ])
 
     from fno.agents.providers import claude as claude_mod
@@ -475,6 +507,11 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
     assert len(rpc_calls) == 1
     assert rpc_calls[0]["method"] == "agent.switchboard"
     assert rpc_calls[0]["params"]["mirror"] is True, "observed mode mirrors into A"
+    assert (
+        rpc_calls[0]["params"]["recipient_identity"]["session_id"]
+        == "11111111-2222-3333-4444-555555555555"
+    )
+    assert rpc_calls[0]["params"]["from_identity"]["short_id"] == "fno12345"
     assert len(send_calls) == 0, "a delivered switchboard turn must skip the socket path"
 
 
@@ -494,7 +531,13 @@ def test_switchboard_observed_single_hop(monkeypatch) -> None:
         return {"delivered": True, "reply": "r1"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    assert dispatch_mod._switchboard_exchange("B", "A", "msg") is True
+    assert dispatch_mod._switchboard_exchange(
+        "B",
+        "A",
+        "msg",
+        to_identity=_sb_identity("B"),
+        from_identity=_sb_identity("A"),
+    ) is True
     assert len(calls) == 1
     assert calls[0]["mirror"] is True
     assert calls[0]["to"] == "B" and calls[0]["from"] == "A"
@@ -518,15 +561,30 @@ def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -
     monkeypatch.setattr(
         dispatch_mod,
         "_kickoff_background_relay",
-        lambda to_name, from_name, seed, ceiling, mail_ctxs=None: kicked.append(
-            (to_name, from_name, seed, ceiling, mail_ctxs)
+        lambda to_name, from_name, seed, ceiling, mail_ctxs=None, **kwargs: kicked.append(
+            (to_name, from_name, seed, ceiling, mail_ctxs, kwargs)
         ),
     )
-    assert dispatch_mod._switchboard_exchange("B", "A", "msg") is True
+    assert dispatch_mod._switchboard_exchange(
+        "B",
+        "A",
+        "msg",
+        to_identity=_sb_identity("B"),
+        from_identity=_sb_identity("A"),
+    ) is True
     assert len(calls) == 1, "only the first hop (drive B) runs inline; the relay is detached"
     assert calls[0]["to"] == "B" and calls[0]["mirror"] is False
     # No mail ctxs on this bare _switchboard_exchange call -> chat-style raw relay.
-    assert kicked == [("B", "A", "r1", 6, None)], "the relay is handed off with B's reply as the seed"
+    assert kicked == [
+        (
+            "B",
+            "A",
+            "r1",
+            6,
+            None,
+            {"recipient_identities": _sb_identities("B", "A")},
+        )
+    ], "the relay is handed off with B's reply as the seed"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
@@ -541,7 +599,13 @@ def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None
     monkeypatch.setattr(
         dispatch_mod, "_kickoff_background_relay", lambda *a: kicked.append(a)
     )
-    assert dispatch_mod._switchboard_exchange("B", "A", "msg") is True
+    assert dispatch_mod._switchboard_exchange(
+        "B",
+        "A",
+        "msg",
+        to_identity=_sb_identity("B"),
+        from_identity=_sb_identity("A"),
+    ) is True
     assert kicked == [], "an empty first reply has no relay to run"
 
 
@@ -558,10 +622,14 @@ def test_relay_loop_bounded_by_ceiling(monkeypatch, capsys) -> None:
         return {"delivered": True, "reply": "more"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    dispatch_mod._run_relay_loop("B", "A", "r1", 4)
+    dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 4, recipient_identities=_sb_identities("A", "B")
+    )
     # ceiling=4 total; the first hop (drive B) is the caller's, so the loop runs 3.
     assert [c["to"] for c in calls] == ["A", "B", "A"]
     assert all(c["mirror"] is False for c in calls)
+    identities = _sb_identities("A", "B")
+    assert all(c["recipient_identity"] == identities[c["to"]] for c in calls)
     assert "loop ceiling reached" in capsys.readouterr().err
 
 
@@ -577,7 +645,9 @@ def test_relay_loop_stops_on_empty_reply(monkeypatch, capsys) -> None:
         return {"delivered": True, "reply": ""}  # A replies empty on the first relay hop
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    dispatch_mod._run_relay_loop("B", "A", "r1", 8)
+    dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 8, recipient_identities=_sb_identities("A", "B")
+    )
     assert len(calls) == 1, "relay should stop when a side replies empty"
     assert "loop ceiling reached" not in capsys.readouterr().err
 
@@ -594,7 +664,9 @@ def test_relay_loop_one_way_when_peer_not_stream(monkeypatch) -> None:
         return {"delivered": False, "reason": "not-a-live-stream-thread"}
 
     monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
-    dispatch_mod._run_relay_loop("B", "A", "r1", 6)
+    dispatch_mod._run_relay_loop(
+        "B", "A", "r1", 6, recipient_identities=_sb_identities("A", "B")
+    )
     assert len(calls) == 1, "a single failed relay hop to A ends the exchange"
 
 
@@ -608,7 +680,13 @@ def test_switchboard_demote_when_first_hop_not_delivered(monkeypatch) -> None:
         "_daemon_rpc",
         lambda *a, **k: {"delivered": False, "reason": "not-a-live-stream-thread"},
     )
-    assert dispatch_mod._switchboard_exchange("B", "A", "msg") is None
+    assert dispatch_mod._switchboard_exchange(
+        "B",
+        "A",
+        "msg",
+        to_identity=_sb_identity("B"),
+        from_identity=_sb_identity("A"),
+    ) is None
 
 
 def test_a2a_config_defaults_and_validation() -> None:
@@ -1216,7 +1294,14 @@ def test_relay_loop_wraps_continuations_with_mail_ctxs(monkeypatch) -> None:
     }
     # seed = bob's reply; first continuation drives alice with bob's turn, so the
     # hop body is wrapped as BOB (the peer who just spoke).
-    _run_relay_loop("bob", "alice", "bob says hi", ceiling=3, mail_ctxs=ctxs)
+    _run_relay_loop(
+        "bob",
+        "alice",
+        "bob says hi",
+        ceiling=3,
+        mail_ctxs=ctxs,
+        recipient_identities=_sb_identities("alice", "bob"),
+    )
     assert len(calls) == 1
     body = calls[0]["body"]
     assert body.startswith('<fno_mail from="bbbb2222"'), body
@@ -1234,7 +1319,13 @@ def test_relay_loop_raw_without_mail_ctxs_chat_path(monkeypatch) -> None:
         lambda method, params, **kw: calls.append(params) or {"delivered": True, "reply": ""},
     )
     # No mail ctxs (the chat path) -> body stays raw, no envelope.
-    _run_relay_loop("bob", "alice", "bob says hi", ceiling=3)
+    _run_relay_loop(
+        "bob",
+        "alice",
+        "bob says hi",
+        ceiling=3,
+        recipient_identities=_sb_identities("alice", "bob"),
+    )
     assert calls[0]["body"] == "bob says hi"
 
 

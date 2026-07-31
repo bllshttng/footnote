@@ -68,6 +68,7 @@ RecipientIdentity = tuple[
     Optional[tuple[object, object]],
     str,
 ]
+SwitchboardIdentity = dict[str, object]
 
 
 def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
@@ -89,6 +90,16 @@ def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
         ),
         entry.created_at,
     )
+
+
+def _switchboard_identity(entry: AgentEntry) -> SwitchboardIdentity:
+    """Identity fields the daemon must match before driving a named stream."""
+    return {
+        "harness": entry.harness,
+        "session_id": entry.harness_session_id,
+        "short_id": entry.short_id,
+        "created_at": entry.created_at,
+    }
 
 
 def _update_registry_if_recipient_unchanged(
@@ -4223,6 +4234,8 @@ def _run_relay_loop(
     seed: str,
     ceiling: int,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    recipient_identities: "Mapping[str, SwitchboardIdentity]",
 ) -> int:
     """Drive the bounded A2A relay AFTER the first hop (B already replied
     ``seed``). Alternate driving A then B with each other's reply — the drive IS
@@ -4243,6 +4256,9 @@ def _run_relay_loop(
     target, peer = from_name, to_name  # next: drive A (from) with B's reply
     turns = 1  # the first hop (drive B) already happened in the caller
     while turns < ceiling and cur.strip():
+        target_identity = recipient_identities.get(target)
+        if target_identity is None:
+            break
         hop = _daemon_rpc(
             "agent.switchboard",
             {
@@ -4252,6 +4268,7 @@ def _run_relay_loop(
                 # relay turn carries provenance, not just the seed (node x-1f23).
                 "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
                 "mirror": False,
+                "recipient_identity": target_identity,
             },
             connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
             read_timeout=_SWITCHBOARD_READ_TIMEOUT,
@@ -4301,6 +4318,8 @@ def _kickoff_background_relay(
     seed: str,
     ceiling: int,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    recipient_identities: "Mapping[str, SwitchboardIdentity]",
 ) -> None:
     """Run the A2A relay in a DETACHED background process so the caller returns
     immediately (ab-3bd520ab).
@@ -4319,7 +4338,14 @@ def _kickoff_background_relay(
     try:
         pid = os.fork()
     except OSError:
-        _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
+        _run_relay_loop(
+            to_name,
+            from_name,
+            seed,
+            ceiling,
+            mail_ctxs,
+            recipient_identities=recipient_identities,
+        )
         return
     if pid > 0:
         # Parent: reap the intermediate child (it exits at once) and return.
@@ -4340,7 +4366,14 @@ def _kickoff_background_relay(
             os._exit(0)
         _detach_stdio()
         try:
-            _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
+            _run_relay_loop(
+                to_name,
+                from_name,
+                seed,
+                ceiling,
+                mail_ctxs,
+                recipient_identities=recipient_identities,
+            )
         except Exception:
             pass
     finally:
@@ -4422,6 +4455,9 @@ def _switchboard_exchange(
     from_name: str,
     body: str,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    to_identity: SwitchboardIdentity,
+    from_identity: "Optional[SwitchboardIdentity]" = None,
 ) -> Optional[bool]:
     """Drive a stream-json switchboard exchange (Group 2, Tasks 3.1 + 4.1).
 
@@ -4452,9 +4488,19 @@ def _switchboard_exchange(
     # First hop: drive B. In observed mode (auto off) ask the daemon to mirror
     # B's reply into A's view; in auto mode the relay's next hop injects it (so
     # mirror=False avoids a double-injection).
+    mirror = not auto and from_identity is not None
+    params: dict[str, object] = {
+        "to": to_name,
+        "from": from_name,
+        "body": body,
+        "mirror": mirror,
+        "recipient_identity": to_identity,
+    }
+    if from_identity is not None:
+        params["from_identity"] = from_identity
     sb = _daemon_rpc(
         "agent.switchboard",
-        {"to": to_name, "from": from_name, "body": body, "mirror": not auto},
+        params,
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
         read_timeout=_SWITCHBOARD_READ_TIMEOUT,
     )
@@ -4467,8 +4513,23 @@ def _switchboard_exchange(
     # caller is not blocked for the whole exchange. A self-send (from == to) or an
     # empty first reply has no relay to run.
     cur = sb.get("reply") or ""
-    if ceiling > 1 and from_name != to_name and cur.strip():
-        _kickoff_background_relay(to_name, from_name, cur, ceiling, mail_ctxs)
+    if (
+        ceiling > 1
+        and from_name != to_name
+        and cur.strip()
+        and from_identity is not None
+    ):
+        _kickoff_background_relay(
+            to_name,
+            from_name,
+            cur,
+            ceiling,
+            mail_ctxs,
+            recipient_identities={
+                to_name: to_identity,
+                from_name: from_identity,
+            },
+        )
     return True
 
 
@@ -5037,6 +5098,7 @@ def _deliver_live(
     body: str,
     from_name: str,
     mail: "Optional[_MailCtx]" = None,
+    sender_entry: "Optional[AgentEntry]" = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node x-1f23).
@@ -5137,7 +5199,16 @@ def _deliver_live(
                 model="unknown",
                 to=mail.from_,
             )
-    if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
+    if _switchboard_exchange(
+        entry.name,
+        from_name,
+        wrapped,
+        relay_ctxs,
+        to_identity=_switchboard_identity(entry),
+        from_identity=(
+            _switchboard_identity(sender_entry) if sender_entry is not None else None
+        ),
+    ):
         return True
 
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
@@ -5521,7 +5592,11 @@ def dispatch_send(
                 # decide; failure falls through to the durable bus.
                 family1_attemptable = family1_live or family1_state == "unknown"
                 if family1_attemptable and _deliver_live(
-                    existing, message, from_name, mail_ctx
+                    existing,
+                    message,
+                    from_name,
+                    mail_ctx,
+                    sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
                 else:

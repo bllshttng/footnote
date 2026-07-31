@@ -462,26 +462,24 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    Looks ``to_msg`` up on the durable bus. A name-lane message (``to_kind ==
-    "name"``) is answered by sending back to its original sender -- no re-typed
-    handle -- with the correlation threaded via ``in_reply_to`` (and the wire
-    ``reply_to`` attr). Any other target falls through to the thread-store reply
-    (append to the existing thread, or a ``replies_to``-linked new thread). A
-    ``to_msg`` absent from the bus is a hard error.
+    Looks ``to_msg`` up on the durable bus. A directed message (``to_kind`` is
+    ``name`` or ``session``) is answered by sending back to its original sender
+    -- no re-typed handle -- with the correlation threaded via ``in_reply_to``
+    (and the wire ``reply_to`` attr). Any other target falls through to the
+    thread-store reply. A ``to_msg`` absent from the bus is a hard error.
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file)
 
-    # Name-lane routing (x-8045): look the --to msg-id up on the durable bus and
-    # branch on its addressing. A name-lane message is answered by sending back to
-    # its original sender (no re-typed handle) with the correlation threaded via
-    # in_reply_to. Anything else falls through to the thread-store reply below.
+    # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
+    # and answer name/session mail back to its original sender. Anything else
+    # falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
     from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
-    if orig is not None and orig.to_kind == "name":
+    if orig is not None and orig.to_kind in {"name", "session"}:
         # A stored sender predating the address flip carries the retired
         # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
         # mistake by whoever is replying, and the address it would carry today is
@@ -491,8 +489,19 @@ def cmd_reply(
         # (Not the harness-parsing this scheme forbids: the harness is discarded,
         # the short-id is what routes, and routing is still a roster lookup.)
         target = orig.from_ or ""
-        migrated_legacy = False
-        if LEGACY_HANDLE_RE.match(target):
+        require_resolution = False
+        if orig.to_kind == "session":
+            from fno.agents.store_fallback import is_full_session_id
+            from fno.harness_identity import canonical_handle
+
+            if orig.from_session and is_full_session_id(orig.from_session):
+                target = canonical_handle(orig.from_session)
+            else:
+                # A session-addressed record without full sender provenance may
+                # use its stored sender only when current discovery proves that
+                # token uniquely. Never demote an unverified mutable alias.
+                require_resolution = True
+        elif LEGACY_HANDLE_RE.match(target):
             migrated = legacy_prefix_handle(target.split("-", 1)[1])
             print(
                 f"note: stored sender {target!r} is a retired address form "
@@ -500,14 +509,14 @@ def cmd_reply(
                 file=sys.stderr,
             )
             target = migrated
-            migrated_legacy = True
+            require_resolution = True
 
         _reply_to_name_handle(
             body_text,
             from_project=from_project,
             target=target,
             to_msg=to_msg,
-            require_resolution=migrated_legacy,
+            require_resolution=require_resolution,
         )
         return
     if orig is None:
