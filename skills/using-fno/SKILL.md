@@ -49,7 +49,8 @@ No receipt is no coordination: only terminal success or recipient-transcript evi
 A bus-lock timeout exits 12 before durable append.
 Before re-sending queued mail, `peek` because a busy recipient may still receive it; `resume` or `attach` if needed.
 
-**Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer a specific one with `fno mail reply --to <id> "..."` (threads `in_reply_to`). A live-injected message has no bus id - use `send <from>` for those.
+**Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer one with `fno mail reply --to <id> "..."`.
+A live injection has no bus record, but `reply --to <id>` resolves its envelope id from this session transcript.
 
 **Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project; if you will hold for the answer, add `--from-self`. The `mail:` line of `fno whoami` is the only valid `--from-name`.
 
