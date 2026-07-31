@@ -43,6 +43,32 @@ if TYPE_CHECKING:
     pass
 
 
+def _import_failure_hint(exc: ImportError) -> str:
+    """Suffix explaining a missing ``fno`` submodule, or "" for anything else.
+
+    Because imports here happen at INVOCATION time, a subcommand's module is
+    read off disk long after startup -- so ``uv tool install --reinstall``
+    (which ``fno update`` runs) replaces the package underneath a running
+    process and every not-yet-imported subcommand fails for the length of the
+    install.  Two very different things produce that same ModuleNotFoundError
+    and they need opposite responses: a reinstall in flight (transient, retry)
+    or a stale/incomplete install (persistent, reinstall properly).  Naming only
+    the flattering transient one would assert a cause we have not established,
+    so name both and let the reader discriminate by whether it recurs.
+
+    Gated on the missing module being ours: a missing third-party dependency is
+    a genuinely broken install and must not collect reinstall speculation.
+    """
+    name = getattr(exc, "name", None) or ""
+    if name != "fno" and not name.startswith("fno."):
+        return ""
+    return (
+        f" ({name} is part of fno itself: either this package was being "
+        "reinstalled underneath the running process, in which case retry, or "
+        "the install is stale, in which case run `fno update` then `fno doctor`)"
+    )
+
+
 # ---------------------------------------------------------------------------
 # _LazyStub
 # ---------------------------------------------------------------------------
@@ -94,7 +120,7 @@ class _LazyStub(click.Group):
         except ImportError as exc:
             raise click.ClickException(
                 f"Failed to import {self._import_path!r} for command "
-                f"{self.name!r}: {exc}"
+                f"{self.name!r}: {exc}{_import_failure_hint(exc)}"
             ) from exc
         attr = getattr(module, attr_name, None)
         if attr is None:
