@@ -180,6 +180,24 @@ def test_terminal_epic_child_sorts_exactly_like_a_loose_node():
         assert key(child) == key(loose_equivalent), status
 
 
+def test_terminal_epic_markers_override_stale_ready_status():
+    for marker, value in (
+        ("completed_at", "2026-01-02"),
+        ("superseded_by", "replacement"),
+        ("deferred_at", "2026-01-02"),
+    ):
+        epic = {
+            "id": "epic", "type": "epic", "status": "ready",
+            "priority": "p0", marker: value,
+        }
+        child = {"id": "child", "parent": "epic", "priority": "p2"}
+        loose_equivalent = {**child, "id": "loose", "parent": None}
+        key = make_selection_sort_key([epic, child, loose_equivalent])
+
+        assert key(child) == key(loose_equivalent), marker
+        assert make_effective_priority([epic, child])(child) == "p2", marker
+
+
 def test_live_epic_effective_priority_only_promotes_children():
     epic = {
         "id": "epic", "type": "epic", "status": "ready",
@@ -199,4 +217,24 @@ def test_completed_epic_does_not_confer_effective_priority():
         "completed_at": "2026-01-01", "priority": "p0",
     }
     child = {"id": "child", "parent": "epic", "priority": "p2"}
+    assert make_effective_priority([epic, child])(child) == "p2"
+
+
+def test_malformed_epic_enrichment_degrades_to_safe_defaults():
+    epic = {
+        "id": "epic", "type": "epic", "status": [],
+        "priority": [], "created_at": [],
+    }
+    child = {
+        "id": "child", "parent": "epic", "priority": [],
+        "created_at": [],
+    }
+    loose = {
+        "id": "loose", "parent": ["not", "hashable"], "priority": "p2",
+        "created_at": "",
+    }
+
+    key = make_selection_sort_key([epic, child, loose])
+
+    assert sorted([loose, child], key=key) == [child, loose]
     assert make_effective_priority([epic, child])(child) == "p2"

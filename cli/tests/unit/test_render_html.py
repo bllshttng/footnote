@@ -479,6 +479,16 @@ def test_ac2_err_malformed_node_does_not_break_grouping(tmp_path: Path):
     assert "ab-sl000021" in text  # the bad node is tolerated, not dropped
 
 
+def test_malformed_epic_enrichment_does_not_break_html_render(tmp_path: Path):
+    epic = _entry("epic", type="epic", status=[], priority=[], created_at=[])
+    child = _entry("child", parent="epic", priority=[], created_at=[])
+    out = tmp_path / "graph.html"
+
+    render_graph_html([epic, child], out)
+
+    assert "child" in out.read_text()
+
+
 def test_ac3_hp_wip_count_and_cap_shown(tmp_path: Path, monkeypatch):
     """AC3-HP: with a configured cap, the master column header shows count / cap."""
     settings = _make_kanban_settings(tmp_path, "      now: 20\n")

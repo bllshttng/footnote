@@ -243,6 +243,22 @@ def _lane_order_key(project: str) -> tuple:
 _TERMINAL_EPIC_STATUSES = frozenset({"done", "superseded", "deferred"})
 
 
+def _priority_name(entry: dict) -> str:
+    """Return a canonical priority, degrading malformed values to p2."""
+    priority = entry.get("priority")
+    return priority if isinstance(priority, str) and priority in PRIORITY_ORDER else "p2"
+
+
+def _sort_text(value: object) -> str:
+    """Normalize a graph value into a comparable sort-key string."""
+    return value if isinstance(value, str) else ""
+
+
+def _has_text_marker(entry: dict, field: str) -> bool:
+    value = entry.get(field)
+    return isinstance(value, str) and bool(value)
+
+
 def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     """Return the node's live epic parent, or None when it has none."""
     if not isinstance(node, dict):
@@ -251,7 +267,13 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     epic = id_to_entry.get(parent_id) if isinstance(parent_id, str) else None
     if epic is None or epic.get("type") != "epic":
         return None
-    if epic.get("completed_at") or epic.get("status") in _TERMINAL_EPIC_STATUSES:
+    status = epic.get("status")
+    if (
+        (isinstance(status, str) and status in _TERMINAL_EPIC_STATUSES)
+        or _has_text_marker(epic, "completed_at")
+        or _has_text_marker(epic, "superseded_by")
+        or _has_text_marker(epic, "deferred_at")
+    ):
         return None
     return epic
 
@@ -272,12 +294,12 @@ def make_effective_priority(entries: list[dict]):
     def priority_for(node: object) -> str:
         if not isinstance(node, dict):
             return "p2"
-        child_priority = node.get("priority") or "p2"
+        child_priority = _priority_name(node)
         epic = _live_epic_for(node, id_to_entry)
         if epic is None:
             return child_priority
-        epic_priority = epic.get("priority") or "p2"
-        if PRIORITY_ORDER.get(epic_priority, 2) < PRIORITY_ORDER.get(child_priority, 2):
+        epic_priority = _priority_name(epic)
+        if PRIORITY_ORDER[epic_priority] < PRIORITY_ORDER[child_priority]:
             return epic_priority
         return child_priority
 
@@ -337,7 +359,7 @@ def make_selection_sort_key(
         if not isinstance(e, dict):
             continue
         pid = e.get("parent")
-        if pid:
+        if isinstance(pid, str) and pid:
             children_by_parent.setdefault(pid, []).append(e)
     # An epic is "in progress" when any of its children is done or claimed.
     epic_in_progress: dict[str, bool] = {
@@ -349,7 +371,7 @@ def make_selection_sort_key(
     }
 
     def _prio(e: dict) -> int:
-        return PRIORITY_ORDER.get(e.get("priority", "p2"), 2)
+        return PRIORITY_ORDER[_priority_name(e)]
 
     def key(node: object) -> tuple:
         # Curated rank leads: the SAME `_rank_band` the board uses,
@@ -363,8 +385,9 @@ def make_selection_sort_key(
         lane = (_lane_order_key(_project_key(node)),) if swimlane else ()
         band = _rank_band(node)
         child_prio = _prio(node)
-        child_orphan = node.get("id") in orphans
-        child_created = node.get("created_at", "") or ""
+        node_id = node.get("id")
+        child_orphan = isinstance(node_id, str) and node_id in orphans
+        child_created = _sort_text(node.get("created_at"))
         pid = node.get("parent")
         epic = _live_epic_for(node, id_to_entry)
         if epic is not None:
@@ -374,7 +397,7 @@ def make_selection_sort_key(
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
                 _prio(epic),             # highest-priority epic first
-                epic.get("created_at", "") or "",  # group one epic together
+                _sort_text(epic.get("created_at")),  # group one epic together
                 child_prio,
                 child_orphan,        # in-band: after priority, before created_at
                 child_created,

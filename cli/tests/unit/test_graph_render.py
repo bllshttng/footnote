@@ -477,6 +477,16 @@ def test_render_skips_non_dict_rows_without_aborting_write(tmp_path):
     assert "`healthy`" in output.read_text()
 
 
+def test_render_degrades_malformed_epic_enrichment_without_aborting(tmp_path):
+    epic = _entry("epic", type="epic", status=[], priority=[], created_at=[])
+    child = _entry("child", parent="epic", priority=[], created_at=[])
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    assert "child" in output.read_text()
+
+
 def test_ac3_fr_md_headings_stay_clean(tmp_path):
     """AC3-FR: column headings stay exactly `## Now` (no count), so the
     Obsidian Kanban plugin keeps per-column state across re-renders."""
