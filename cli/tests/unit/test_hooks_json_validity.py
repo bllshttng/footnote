@@ -221,3 +221,37 @@ def test_drain_hook_wired_into_claude_and_codex_sessionstart() -> None:
     ss = json.loads(claude)["hooks"]["SessionStart"]
     cmds = [h["command"] for entry in ss for h in entry.get("hooks", [])]
     assert any("inject-mail-drain-session-start.sh" in c for c in cmds)
+
+
+def test_plan_location_guard_wired_into_claude_and_codex_pretooluse() -> None:
+    """The plan-save-location gate must fire on BOTH harnesses.
+
+    A guard registered on one of N reachable paths is decorative: a codex
+    session writing a plan never loads claude's hooks.json, and vice versa.
+    Nothing else asserts these registrations, so dropping either one would
+    leave the guard's own harness green while silently disabling it for half
+    the fleet.
+    """
+    guard = "hooks/plan-location-guard.sh"
+    assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
+
+    for path, root_var, matcher in (
+        (HOOKS_JSON, "CLAUDE_PLUGIN_ROOT", "Write"),
+        (CODEX_HOOKS_JSON, "PLUGIN_ROOT", "Edit|Write"),
+    ):
+        registrations = json.loads(path.read_text(encoding="utf-8"))["hooks"][
+            "PreToolUse"
+        ]
+        wired = [
+            registration
+            for registration in registrations
+            if registration.get("matcher") == matcher
+            and any(
+                hook.get("command") == f"bash ${{{root_var}}}/{guard}"
+                for hook in registration.get("hooks", [])
+            )
+        ]
+        assert len(wired) == 1, (
+            f"{path.name} must carry exactly one PreToolUse registration "
+            f"routing matcher {matcher!r} through {guard}"
+        )

@@ -32,17 +32,29 @@ ln -s "$TMP/vault" "$TMP/repo/internal"
 PLANS_PHYS="$(cd -P "$PLANS" && pwd -P)"
 
 # Fake `fno`: only `plan path --slug X` is used by the resolver.
+#
+# The stub ASSERTS --slug because the real CLI requires it (`fno plan path` exits
+# on `Missing option '--slug'`). A stub that ignored argv would let a caller drop
+# the flag and still go green here, while in production the resolver would fail
+# forever and both guards would degrade to fail-open with no test noticing.
 FAKEBIN="$TMP/bin"
 mkdir -p "$FAKEBIN"
-cat > "$FAKEBIN/fno" <<EOF
+write_fake_fno() {
+    cat > "$FAKEBIN/fno" <<EOF
 #!/usr/bin/env bash
 if [[ "\$1" == "plan" && "\$2" == "path" ]]; then
-  echo "$PLANS/20260730-x.md"
+  case " \$* " in
+    *" --slug "*) ;;
+    *) echo "Missing option '--slug'." >&2; exit 2 ;;
+  esac
+  echo "$1/20260730-x.md"
   exit 0
 fi
 exit 1
 EOF
-chmod +x "$FAKEBIN/fno"
+    chmod +x "$FAKEBIN/fno"
+}
+write_fake_fno "$PLANS"
 FAKE_PATH="$FAKEBIN:$PATH"
 
 PLAN_FM='---\nnode: x-5349\nslug: some-plan\ntype: feature\nstatus: ready\n---\n\n# Plan\n'
@@ -107,8 +119,25 @@ expect "C3: test fixture plan approved" approve \
 expect "C4: Edit is not gated (location is already history)" approve \
   "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/my-plan.md\",\"old_string\":\"a\",\"new_string\":\"b\"}}"
 
+# C4 alone does not prove the exclusion: its payload has no content AND its path
+# is not a plans path, so it would pass even if Edit were gated. This one is on a
+# path B1 blocks, so it goes red the moment the Write-only condition is dropped -
+# load-bearing because codex wires this guard on `Edit|Write`.
+expect "C4b: Edit on a plans path outside the plans dir still approved" approve \
+  "{\"tool_name\":\"Edit\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/plans/thing.md\",\"old_string\":\"a\",\"new_string\":\"b\"}}"
+
 expect "C5: non-md write approved" approve \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$TMP/repo/src/main.py\",\"content\":\"print(1)\"}}"
+
+# ── C6/C7: relative targets anchor to the PAYLOAD cwd, not the hook's own ────
+# Chosen so the two anchorings disagree: relative to the payload cwd this lands
+# INSIDE the plans dir, while against any other cwd it lands outside and the
+# frontmatter condition fires. A guard reading its own `pwd` goes red on C6.
+expect "C6: relative path under the payload cwd approved" approve \
+  "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/vault\",\"tool_input\":{\"file_path\":\"fno/plans/rel.md\",\"content\":\"$PLAN_FM\"}}"
+
+expect "C7: same relative path from another cwd blocked" block \
+  "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"fno/plans/rel.md\",\"content\":\"$PLAN_FM\"}}"
 
 # ── D. fails open when the plans dir cannot be resolved ──────────────────────
 # Without `fno` the convention cannot be stated, so the guard must not block.
@@ -135,14 +164,19 @@ if [[ "$CANON_BRANCH" != "main" ]]; then
 else
     pass "E0: fixture canonical repo on main"
 
-    expect_wp "E1: plan write to plans dir from any cwd approved" approve \
-      "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
+    # Every case below uses cwd=$CANON. An earlier version ran E1/E2 from a
+    # non-git temp dir, where _block_if_canonical returns before reaching any
+    # verdict - so both passed with the carve-out deleted and proved nothing.
+    expect_wp "E1: canonical-main plan write approved (the bug)" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
 
-    expect_wp "E2: plan write via file_path payload approved" approve \
-      "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}"
+    # The file_path half of the carve-out. Distinct from E1: that payload shape
+    # was not parsed at all before this change, so nothing else covers it.
+    expect_wp "E2: canonical-main plan write via file_path approved" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}"
 
     # Positive control: without the carve-out this cwd blocks everything, so a
-    # blocked source write proves the gate is live and E5 is a real change.
+    # blocked source write proves the gate is live and E1/E2 are real changes.
     expect_wp "E3: canonical-main source write still blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
 
@@ -151,13 +185,55 @@ else
     expect_wp "E4: mixed plan+source patch still blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
 
-    expect_wp "E5: canonical-main plan write approved (the bug)" approve \
-      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
-
     # An unparseable payload keeps the old blunt behavior rather than opening a
     # hole: no known targets means no carve-out.
-    expect_wp "E6: no parseable target keeps the blunt block" block \
+    expect_wp "E5: no parseable target keeps the blunt block" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"echo hi\"}}"
+
+    # All four apply_patch header kinds feed the carve-out, not just Add File.
+    # Pinned in both directions so a header-set change cannot drift unnoticed.
+    expect_wp "E6: Update File inside the plans dir approved" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
+
+    expect_wp "E7: Update File on canonical source still blocked" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: src/thing.py\\n*** End Patch\"}}"
+
+    # Parsing file_path widened this guard: a write whose TARGET lands in a
+    # canonical checkout is now judged even from a safe cwd. Previously only
+    # apply_patch paths were, so this is new behavior and is pinned here.
+    expect_wp "E8: file_path into a canonical checkout blocked from a safe cwd" block \
+      "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}"
+
+    # ── F. the carve-out cannot disable the gate it carves out of ────────────
+    # A plans dir that is an ancestor of the checkout ("." is legal config) would
+    # otherwise exempt every write, and a TRACKED plans dir inside the checkout
+    # would let plan writes land on the shared branch like any source file.
+    write_fake_fno "$CANON"
+    expect_wp "F1: plans dir == repo root does not bypass the gate" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
+
+    mkdir -p "$CANON/docs/plans"
+    : > "$CANON/docs/plans/keep.md"
+    git -C "$CANON" add -A >/dev/null 2>&1
+    git -C "$CANON" -c user.email=t@t -c user.name=t commit -q -m plans >/dev/null 2>&1
+    write_fake_fno "$CANON/docs/plans"
+    expect_wp "F2: tracked in-repo plans dir does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/docs/plans/20260730-p.md\"}}"
+
+    # ── G. a plans dir that does not exist yet ───────────────────────────────
+    # The first plan saved in any fresh clone or worktree. Resolving a path to
+    # its deepest EXISTING ancestor lands on the plans dir's PARENT, which made
+    # the guard call the one correct destination "outside" itself and made the
+    # carve-out silently never fire.
+    ABSENT="$TMP/never-created/fno/plans"
+    write_fake_fno "$ABSENT"
+    expect "G1: correct save into an absent plans dir approved" approve \
+      "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$ABSENT/20260730-my-plan.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect_wp "G2: carve-out still fires for an absent plans dir" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$ABSENT/20260730-p.md\"}}"
+
+    write_fake_fno "$PLANS"
 fi
 
 printf '\n[plg] %d passed, %d failed\n' "$PASS" "$FAIL"

@@ -74,26 +74,28 @@ PAYLOAD="$(cat)"
 [[ "$PAYLOAD" == *".md"* ]] || _approve
 
 # ── 2. Parse (jq -> python3 -> approve) ───────────────────────────────────────
-# Four newline-separated fields; `content` and `command` are flattened to one
+# Five newline-separated fields; `content` and `command` are flattened to one
 # line each with \x1f standing in for the newlines we still need to inspect
 # (tab and space are IFS-whitespace and would collapse empty fields).
-TOOL="" FILE_PATH="" CONTENT="" COMMAND=""
+TOOL="" FILE_PATH="" PAYLOAD_CWD="" CONTENT="" COMMAND=""
 if command -v jq >/dev/null 2>&1; then
-    { read -r TOOL; read -r FILE_PATH; read -r CONTENT; read -r COMMAND; } < <(
+    { read -r TOOL; read -r FILE_PATH; read -r PAYLOAD_CWD; read -r CONTENT; read -r COMMAND; } < <(
         printf '%s' "$PAYLOAD" | jq -r '
             .tool_name // "",
             (.tool_input.file_path // ""),
+            (.cwd // ""),
             (.tool_input.content // "" | gsub("\n";"")),
             (.tool_input.command // "" | gsub("\n";""))' 2>/dev/null
     )
 elif command -v python3 >/dev/null 2>&1; then
-    { read -r TOOL; read -r FILE_PATH; read -r CONTENT; read -r COMMAND; } < <(
+    { read -r TOOL; read -r FILE_PATH; read -r PAYLOAD_CWD; read -r CONTENT; read -r COMMAND; } < <(
         printf '%s' "$PAYLOAD" | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin); ti = d.get("tool_input") or {}
     print(d.get("tool_name") or "")
     print(ti.get("file_path") or "")
+    print(d.get("cwd") or "")
     print((ti.get("content") or "").replace("\n", "\x1f"))
     print((ti.get("command") or "").replace("\n", "\x1f"))
 except Exception:
@@ -107,7 +109,12 @@ fi
 # Write contributes its file_path; an apply_patch command contributes each
 # `*** Add File:` path (a create). Updates and deletes are not location
 # decisions and are skipped.
-CWD="$(pwd)"
+# Anchor relative targets to the SESSION cwd from the payload, not the cwd the
+# harness happened to spawn this hook in - they differ for a worktree or
+# multi-repo dispatch, and the containment test would then be decided against
+# the wrong tree in silence. `pwd` only as a fallback.
+CWD="$PAYLOAD_CWD"
+[[ -n "$CWD" && -d "$CWD" ]] || CWD="$(pwd)"
 TARGETS=()
 if [[ "$TOOL" == "Write" && -n "$FILE_PATH" ]]; then
     TARGETS+=("$FILE_PATH")

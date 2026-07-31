@@ -108,14 +108,36 @@ fi
 # of a plan into the configured plans dir, which is usually reached through the
 # internal/ symlink and is not the shared checkout at all. That denial is what
 # drove the .fno/drafts-then-mv workaround. A write whose targets all land in
-# the configured plans dir is always allowed: that directory is the sanctioned
-# destination, and nothing there can clobber the shared branch.
+# the configured plans dir is allowed, PROVIDED that directory cannot itself
+# reach the shared checkout (fno_plans_dir_carveout_safe decides; a plans dir
+# that is an ancestor of the cwd, or a tracked dir inside it, would otherwise
+# turn this exemption into a blanket bypass of the gate below).
 #
-# Requires targets to be known AND resolvable. An unparseable payload keeps the
-# old blunt behavior rather than opening a hole.
-if [[ ${#TARGETS[@]} -gt 0 ]] && declare -F fno_plans_dir >/dev/null 2>&1; then
-    PLANS_DIR="$(fno_plans_dir 2>/dev/null || true)"
-    if [[ -n "$PLANS_DIR" ]]; then
+# Gated on a `.md` target first: resolving the plans dir shells a Python CLI
+# (~0.5s), and every Edit/Write reaches here. A plan is always markdown, so the
+# cheap test keeps that cost off the source-edit path, mirroring the payload
+# pre-filter plan-location-guard.sh carries for the same reason.
+#
+# Requires targets to be known AND resolvable, and requires the WHOLE helper to
+# have sourced - bash defines functions as it parses, so a truncated helper
+# leaves the first one defined and the rest missing. An unparseable payload or a
+# half-sourced helper keeps the old blunt behavior rather than opening a hole.
+_has_md_target() {
+    local t
+    for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
+        [[ "$t" == *.md ]] && return 0
+    done
+    return 1
+}
+
+if [[ ${#TARGETS[@]} -gt 0 ]] && _has_md_target \
+   && declare -F fno_plans_dir fno_resolve_dir fno_under_plans_dir \
+        fno_plans_dir_carveout_safe >/dev/null 2>&1; then
+    # Resolve from the SESSION cwd, not the cwd the harness happened to spawn
+    # this hook in: `fno plan path` is repo-anchored, so an ambient cwd names a
+    # different project's plans dir and the carve-out silently never fires.
+    PLANS_DIR="$(cd "$CWD" 2>/dev/null && fno_plans_dir 2>/dev/null || true)"
+    if [[ -n "$PLANS_DIR" ]] && fno_plans_dir_carveout_safe "$PLANS_DIR" "$CWD"; then
         all_in_plans=1
         for t in "${TARGETS[@]}"; do
             fno_under_plans_dir "$PLANS_DIR" "$(_absolute "$t")" || { all_in_plans=0; break; }
@@ -126,9 +148,16 @@ fi
 
 _block_if_canonical "$CWD"
 
+# A path that resolves to nothing is an anomaly, not a pass: falling through to
+# `continue` here would skip the canonical check for that target entirely, which
+# is the wrong direction for a guard (the carve-out above fails closed on the
+# same resolver failure). Fall back to the session cwd's verdict instead.
 for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
-    target_dir="$(_target_directory "$(_absolute "$t")")" || continue
-    _block_if_canonical "$target_dir"
+    if target_dir="$(_target_directory "$(_absolute "$t")")" && [[ -n "$target_dir" ]]; then
+        _block_if_canonical "$target_dir"
+    else
+        _block_if_canonical "$CWD"
+    fi
 done
 
 _approve
