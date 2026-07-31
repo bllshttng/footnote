@@ -6,8 +6,7 @@ stability), AC3-UI (jq round-trip parseable).
 from __future__ import annotations
 
 import json
-
-import pytest
+import pathlib
 
 from fno.agents.format import (
     JSON_SCHEMA_VERSION,
@@ -255,3 +254,53 @@ def test_render_table_does_not_crash_on_missing_last_message_at() -> None:
 
     # The renderer must handle None and emit a placeholder (e.g. '-').
     assert entry.name in out
+
+
+# ---------------------------------------------------------------------------
+# Shared key-set contract
+#
+# `serialize_entry` is NOT what serves `fno agents list` — the Rust daemon's
+# `agent.list` projection is — so the two serializers drifted and the stale one
+# was the reachable one. These tests pin the Python side to
+# schemas/agents-list-row.json; crates/fno-agents/src/daemon.rs pins the Rust
+# side to the same file, so a key added to one and not the other fails CI.
+# ---------------------------------------------------------------------------
+
+_SCHEMA_PATH = (
+    pathlib.Path(__file__).resolve().parents[3] / "schemas" / "agents-list-row.json"
+)
+
+
+def _contract() -> dict:
+    return json.loads(_SCHEMA_PATH.read_text())
+
+
+def test_serialize_entry_key_set_matches_shared_contract() -> None:
+    contract = _contract()
+    expected = set(contract["required"]) | set(contract["python_only"]["keys"])
+
+    row = serialize_entry(_claude_entry(), live_status="Working")
+
+    assert set(row) == expected
+
+
+def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
+    """The three keys whose absence made a bound pane worker read as unhosted
+    and unidentified. Presence in the contract is not enough — assert the
+    values actually reach the row."""
+    entry = _claude_entry(
+        harness_session_id="e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+        mux={"session": "main", "pane_id": 10},
+        crown_level=1,
+        crown_scope="epic-x",
+        crown_grantor="king",
+    )
+
+    row = serialize_entry(entry, live_status=None)
+
+    assert row["harness"] == "claude"
+    assert row["harness_session_id"] == "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
+    assert row["mux"] == {"session": "main", "pane_id": 10}
+    assert row["crown"] == "L1 epic-x"
+    # The legacy alias keeps working for consumers that predate the rename.
+    assert row["provider"] == "claude"

@@ -17,10 +17,10 @@ fno agents list
 A typical human-table view:
 
 ```
-NAME              PROVIDER  STATUS    LIVE         LAST MESSAGE     CWD
-worker-frontend   claude    live      Working      17:30:12 (2m)    ~/code/proj
-worker-migration  codex     live      -            17:15:43 (16m)   ~/code/proj
-worker-design     claude    orphaned  -            17:00:00 (32m)   ~/code/proj
+NAME              PROVIDER  STATUS    CHECKED  PID     LAST MESSAGE          CWD
+worker-frontend   claude    live      4m       75742   2026-05-20T17:30:12Z  /Users/foo/code/proj
+worker-migration  codex     live      18s      75810   2026-05-20T17:15:43Z  /Users/foo/code/proj
+worker-design     claude    orphaned  2h       -       2026-05-20T17:00:00Z  /Users/foo/code/proj
 ```
 
 Columns:
@@ -28,11 +28,12 @@ Columns:
 | Column | Meaning |
 |---|---|
 | NAME | Agent name (the identifier you pass to `ask` / `logs`). |
-| PROVIDER | `claude`, `codex`, or `gemini`. |
-| STATUS | fno's view: `live` (registry healthy) or `orphaned` (marked on a failed follow-up). |
-| LIVE | claude's supervisor view: `Working`, `Needs input`, `Idle`, or `-` (non-Claude or shellout failed). |
-| LAST MESSAGE | Wall-clock time of the most recent successful `ask` follow-up, plus a relative-time suffix. |
-| CWD | Working directory the agent was created in (`~` collapses your $HOME). |
+| PROVIDER | The harness: `claude`, `codex`, `gemini`, `opencode`, or `agy`. |
+| STATUS | The transcript verdict: `live`, `orphaned` (the transcript reads done or stalled), or `unknown` (the probe could not answer). Stored registry status is lifecycle metadata and does not decide this column. |
+| CHECKED | Relative age since the last reconcile probe (`never` when never probed, `?` when the stored timestamp will not parse). |
+| PID | Worker pid for a PTY agent; `-` for a one-shot ask, which has no managed process. |
+| LAST MESSAGE | Timestamp of the most recent successful `ask` follow-up, printed raw (RFC3339). |
+| CWD | Working directory the agent was created in, printed in full. |
 
 ### Filters
 
@@ -58,32 +59,54 @@ Returns a canonical object suitable for scripts:
   "agents": [
     {
       "name": "worker-frontend",
+      "harness": "claude",
       "provider": "claude",
-      "short_id": "abc123",
-      "session_id": "abc123",
+      "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
+      "short_id": "e6f78b98",
+      "session_id": "e6f78b98",
       "cwd": "/Users/foo/code/proj",
       "created_at": "2026-05-20T17:00:00Z",
       "last_message_at": "2026-05-20T17:30:12Z",
       "status": "live",
-      "live_status": "Working",
-      "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl"
+      "live_status": null,
+      "pid": 75742,
+      "last_reconciled_at": "2026-05-20T17:30:00Z",
+      "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl",
+      "mux": null,
+      "crown": null,
+      "crown_level": null,
+      "crown_scope": null,
+      "crown_grantor": null,
+      "project_root": "/Users/foo/code/proj"
     }
   ],
   "count": 1,
+  "discovered_sessions": [],
+  "discovered_count": 0,
   "filters_applied": { "cwd": null, "provider": null, "status": null },
-  "schema_version": 1
+  "schema_version": 2
 }
 ```
 
-Every entry has the same key set regardless of provider. Codex / gemini entries get `short_id: null` and `live_status: null` because the live-status axis is Claude-specific in this release. JSON is the default whenever stdout is a pipe — `fno agents list | jq .` Just Works without an explicit `--json`.
+The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on provider to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`session_id` is the unified, provider-resolving resume target: `claude_short_id` for claude, `codex_session_id` for codex, `gemini_session_id` for gemini. `short_id` stays claude-only for back-compat, so for a codex agent you get `short_id: null` but `session_id: "<uuid>"` — that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` only when the id was never captured.
+`harness` is the identity axis; `provider` is a legacy alias of it, retained for consumers written before the rename. `harness_session_id` is the worker's own session id in its harness's store.
+
+`session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` is the transport key and stays claude-only for back-compat (the claude jobId, by construction the leading 8 hex of the session uuid), so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` when the id was never captured, and for a claude pane row, which has no transport key for it to resolve from.
+
+`mux` is the hosting ref (`{session, pane_id}`) for a pane-hosted row, `null` otherwise. Such a row holds that ref INSTEAD of a transport key (one live ref per row: mux, worker, or bg), so its `short_id` is `null`. Do not use `session_id == null` to detect a pane row: a codex or opencode pane still resolves one from `harness_session_id`. Test `mux != null`, and address the worker through it:
+
+```bash
+fno agents list --json | jq -r '.agents[] | select(.mux != null) | "\(.mux.session):\(.mux.pane_id)"'
+```
 
 ### Common recipes
 
 ```bash
-# How many claude agents are working right now?
-fno agents list --harness claude --json | jq '[.agents[] | select(.live_status == "Working")] | length'
+# How many claude agents are live right now?
+# `status` carries the transcript verdict; `live_status` is always null on this
+# path (see below), so selecting on it would silently always return 0.
+fno agents list --harness claude --json | jq '[.agents[] | select(.status == "live")] | length'
 
 # Names of every orphaned entry (script can stop or rm them):
 fno agents list --status orphaned --json | jq -r '.agents[].name'
@@ -104,9 +127,9 @@ fno agents list --json | jq -r '
 
 `list` is deliberately best-effort:
 
-- If `claude agents --json` is missing or times out (3-second budget), the call still succeeds with `live_status: null` on every claude entry and a `WARN:` line on stderr. Your orchestrator sees the fleet shape; it just doesn't get the live-status augmentation that run.
-- If the registry file is malformed or schema-mismatched, the call exits 1 with the file path + parser error on stderr and an empty stdout. This is a real error — fix the file before continuing.
-- If the registry is empty, you get `{"agents": [], "count": 0, ...}` and exit 0. No special-casing needed in your script.
+- `live_status` is always `null` on the served path. The daemon does not duplicate the harness supervisor view, so read `status` for liveness. The key is retained so the row shape stays stable for existing consumers.
+- If the registry file is malformed or schema-mismatched, the served path currently returns an empty roster and exit 0 rather than an error, so an empty result is not proof of an empty fleet. Distinguish the two by reading the registry file directly. This is a known gap, filed for a fix that has to decide what a version-skewed daemon should do.
+- If the registry is genuinely empty, you get `{"agents": [], "count": 0, ...}` and exit 0. No special-casing needed in your script.
 
 ## `fno agents whoami` — this worker's own name
 
@@ -190,9 +213,11 @@ $ fno agents logs worker-X --tail -3
 
 **`agent not found: <name>`** — the name isn't in your registry. Run `fno agents list` to see what's actually there. Names are case-sensitive.
 
-**LIVE column always shows `-` for claude entries** — the `claude agents --json` shellout failed. Check the stderr `WARN:` for the specific reason (likely: `claude` binary not on PATH, or timeout). The list itself is still correct — only the live-status augmentation is missing.
+**Looking for the LIVE column** — it was removed. `CHECKED` (probe age) and `PID` replaced it, and `STATUS` now carries the transcript verdict that LIVE used to approximate.
 
-**`fno agents list` is slow** — each invocation shells out to `claude agents --json` (capped at 3 seconds). If you're polling in a tight loop, the bottleneck is claude's response time, not fno.
+**A row shows `harness: null` or `mux: null` for a worker you know is pane-hosted** — you are on a build that predates the row projection carrying those keys. Confirm against the registry file itself before concluding a worker is unbound; that mistake has produced a wrong diagnosis before.
+
+**`fno agents list` is slow** — a reconcile probe runs per row. If you're polling in a tight loop, that probe is the bottleneck, not the registry read.
 
 **`--follow` printed everything at once then exited** — you're on an older fno build. The streaming path is in current builds; the buffered behavior was a bug in an early cut.
 

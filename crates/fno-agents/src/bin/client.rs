@@ -3910,6 +3910,13 @@ mod tests {
         assert_eq!(parsed["schema_version"], 2);
         assert_eq!(parsed["count"], 1);
 
+        // NOT the key-set guard, despite appearances: this row is hand-built in
+        // this test, so the list below only asserts against its own input. The
+        // real projection lives in the daemon and is pinned to
+        // schemas/agents-list-row.json by daemon.rs's
+        // `list_row_key_set_matches_shared_contract`. Adding a key here proves
+        // nothing about what `fno agents list` emits.
+        //
         // The client passes rows through verbatim: the 10 Python parity keys
         // (incl. live_status, retained for back-compat -- AC4-FR) plus the
         // additive Architecture C keys pid + last_reconciled_at (AC4-HP) survive.

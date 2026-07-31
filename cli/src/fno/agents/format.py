@@ -30,6 +30,10 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
 
     Returns the same key set for every provider so JSON consumers can
     iterate a list of agents without per-provider branching (AC3-HP).
+    The key set is pinned by ``schemas/agents-list-row.json``, which the
+    Rust daemon's ``agent.list`` projection is asserted against too — this
+    function is NOT what serves ``fno agents list``, so the two have drifted
+    before and only the shared contract file keeps them honest.
     ``short_id`` is the provider transport key (claude jobId or daemon
     worker key; null when absent). ``session_id`` is the unified,
     provider-resolving resume-target id: ``short_id`` for claude, ``codex_session_id``
@@ -44,7 +48,14 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
     """
     return {
         "name": entry.name,
+        # `harness` is the canonical identity axis; `provider` is its legacy
+        # alias, still emitted for consumers that predate the rename.
+        "harness": entry.harness,
         "provider": entry.harness,
+        # The worker's own session id in its harness's store. Distinct from
+        # `session_id` (the resume-target id, which is the 8-hex jobId for
+        # claude) and from `short_id` (the transport key).
+        "harness_session_id": entry.harness_session_id,
         "short_id": entry.short_id or None,
         "session_id": entry.session_id,
         "cwd": entry.cwd,
