@@ -17,10 +17,10 @@ fno agents list
 A typical human-table view:
 
 ```
-NAME              PROVIDER  STATUS    CHECKED  PID     LAST MESSAGE     CWD
-worker-frontend   claude    live      4m       75742   17:30:12 (2m)    ~/code/proj
-worker-migration  codex     live      18s      75810   17:15:43 (16m)   ~/code/proj
-worker-design     claude    orphaned  2h       -       17:00:00 (32m)   ~/code/proj
+NAME              PROVIDER  STATUS    CHECKED  PID     LAST MESSAGE          CWD
+worker-frontend   claude    live      4m       75742   2026-05-20T17:30:12Z  /Users/foo/code/proj
+worker-migration  codex     live      18s      75810   2026-05-20T17:15:43Z  /Users/foo/code/proj
+worker-design     claude    orphaned  2h       -       2026-05-20T17:00:00Z  /Users/foo/code/proj
 ```
 
 Columns:
@@ -32,8 +32,8 @@ Columns:
 | STATUS | The transcript verdict: `live`, `orphaned` (the transcript reads done or stalled), or `unknown` (the probe could not answer). Stored registry status is lifecycle metadata and does not decide this column. |
 | CHECKED | Relative age since the last reconcile probe (`never` when never probed, `?` when the stored timestamp will not parse). |
 | PID | Worker pid for a PTY agent; `-` for a one-shot ask, which has no managed process. |
-| LAST MESSAGE | Wall-clock time of the most recent successful `ask` follow-up, plus a relative-time suffix. |
-| CWD | Working directory the agent was created in (`~` collapses your $HOME). |
+| LAST MESSAGE | Timestamp of the most recent successful `ask` follow-up, printed raw (RFC3339). |
+| CWD | Working directory the agent was created in, printed in full. |
 
 ### Filters
 
@@ -92,7 +92,7 @@ The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/ag
 
 `harness` is the identity axis; `provider` is a legacy alias of it, retained for consumers written before the rename. `harness_session_id` is the worker's own session id in its harness's store.
 
-`session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` is the transport key and stays claude-only for back-compat (it is the leading 8 hex of the session uuid), so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` when the id was never captured, and for a claude pane row, which has no transport key for it to resolve from.
+`session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` is the transport key and stays claude-only for back-compat (the claude jobId, by construction the leading 8 hex of the session uuid), so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` when the id was never captured, and for a claude pane row, which has no transport key for it to resolve from.
 
 `mux` is the hosting ref (`{session, pane_id}`) for a pane-hosted row, `null` otherwise. Such a row holds that ref INSTEAD of a transport key (one live ref per row: mux, worker, or bg), so its `short_id` is `null`. Do not use `session_id == null` to detect a pane row: a codex or opencode pane still resolves one from `harness_session_id`. Test `mux != null`, and address the worker through it:
 
