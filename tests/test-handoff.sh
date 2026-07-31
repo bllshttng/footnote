@@ -36,10 +36,29 @@ CONTEXT_PROBE="$REPO_ROOT/skills/target/scripts/context-probe.sh"
 # it needs this checkout's sources and an interpreter that can import them.
 # Prefer the worktree venv; a bare python3 works when the deps are present.
 export FNO_SRC="$REPO_ROOT/cli/src"
-if [ -x "$REPO_ROOT/cli/.venv/bin/python" ]; then
-  export FNO_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
-else
-  export FNO_PYTHON="$(command -v python3 || command -v python)"
+# Pick an interpreter that can actually IMPORT the CLI, and refuse to run if
+# none can. Choosing one that merely exists is how this suite silently went
+# ~60% vacuous: a linked worktree has no cli/.venv, the bare-python3 fallback
+# lacked typer, `fno plan rung` died, and every scenario parked at that gate
+# while still matching its loose "parked" assertion (x-f804).
+export FNO_PYTHON=""
+for _cand in \
+  "$REPO_ROOT/cli/.venv/bin/python" \
+  "$(dirname "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")/cli/.venv/bin/python" \
+  "$(command -v python3 || true)" \
+  "$(command -v python || true)"
+do
+  [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+  if PYTHONPATH="$FNO_SRC" "$_cand" -c 'import fno.cli' >/dev/null 2>&1; then
+    export FNO_PYTHON="$_cand"
+    break
+  fi
+done
+if [ -z "$FNO_PYTHON" ]; then
+  echo "test-handoff: no interpreter can import fno.cli (tried the worktree venv," >&2
+  echo "  the canonical checkout's venv, and python3/python on PATH)." >&2
+  echo "  Fix: create cli/.venv (cd cli && uv sync) - refusing to run vacuously." >&2
+  exit 1
 fi
 
 pass=0
