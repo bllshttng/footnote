@@ -208,17 +208,55 @@ else
     # A plans dir that is an ancestor of the checkout ("." is legal config) would
     # otherwise exempt every write, and a TRACKED plans dir inside the checkout
     # would let plan writes land on the shared branch like any source file.
+    # The target MUST be `.md`: the carve-out short-circuits on a non-markdown
+    # target before the safety predicate is ever consulted, so a `.py` target
+    # here would pass no matter what the predicate said.
     write_fake_fno "$CANON"
     expect_wp "F1: plans dir == repo root does not bypass the gate" block \
-      "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.md\"}}"
 
-    mkdir -p "$CANON/docs/plans"
+    # ...and a plans dir that is a strict ANCESTOR of the checkout.
+    write_fake_fno "$TMP"
+    expect_wp "F1b: plans dir above the checkout does not bypass the gate" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.md\"}}"
+
+    mkdir -p "$CANON/docs/plans" "$CANON/sub"
     : > "$CANON/docs/plans/keep.md"
     git -C "$CANON" add -A >/dev/null 2>&1
     git -C "$CANON" -c user.email=t@t -c user.name=t commit -q -m plans >/dev/null 2>&1
     write_fake_fno "$CANON/docs/plans"
     expect_wp "F2: tracked in-repo plans dir does not carve out" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/docs/plans/20260730-p.md\"}}"
+
+    # Same repo, cwd one directory deep. Keyed on the cwd instead of the
+    # checkout root, the tracked plans dir reads as "outside the checkout" and
+    # the hole reopens - F2 alone cannot see that, since it runs at the root.
+    expect_wp "F2b: tracked plans dir still blocked from a subdirectory cwd" block \
+      "{\"cwd\":\"$CANON/sub\",\"tool_input\":{\"file_path\":\"$CANON/docs/plans/20260730-p.md\"}}"
+
+    # The DEFAULT config shape: plans dir inside the checkout but git-ignored.
+    # Nothing else reaches the check-ignore success branch, so without this a
+    # guard that never carved out for default installs would look green.
+    mkdir -p "$CANON/.fno/plans"
+    printf '.fno/\nfno/\n' > "$CANON/.gitignore"
+    git -C "$CANON" add .gitignore >/dev/null 2>&1
+    git -C "$CANON" -c user.email=t@t -c user.name=t commit -q -m ignore >/dev/null 2>&1
+    write_fake_fno "$CANON/.fno/plans"
+    expect_wp "F3: git-ignored in-repo plans dir still carves out" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/20260730-p.md\"}}"
+
+    # A non-markdown write into the plans dir gets no carve-out. This is the
+    # documented behavior of the .md gate, not an accident of ordering.
+    expect_wp "F4: non-md write into the plans dir is not carved out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/notes.txt\"}}"
+
+    # `/` as a plans dir must never carve out. Belt-and-braces: the explicit
+    # refusal in the safety predicate and the containment test (which compares
+    # against the literal prefix `//`) each reject it independently, so this
+    # pins the OUTCOME rather than either mechanism.
+    write_fake_fno ""
+    expect_wp "F5: plans dir of / does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.md\"}}"
 
     # ── G. a plans dir that does not exist yet ───────────────────────────────
     # The first plan saved in any fresh clone or worktree. Resolving a path to
@@ -232,6 +270,100 @@ else
 
     expect_wp "G2: carve-out still fires for an absent plans dir" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$ABSENT/20260730-p.md\"}}"
+
+    # ── H. containment cannot be talked around ──────────────────────────────
+    write_fake_fno "$PLANS"
+
+    # A `..` component sits under the prefix textually while resolving outside.
+    # Without the guard against it, one `..` walks straight out of the plans dir.
+    expect "H1: a .. path out of the plans dir is blocked" block \
+      "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$PLANS/../../repo/docs/evil.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect_wp "H1b: a .. path out of the plans dir does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/../../../$(basename "$CANON")/src/thing.md\"}}"
+
+    # H1/H1b run where every intermediate directory exists, so `cd -P` folds the
+    # `..` correctly and they pass either way. The refusal is load-bearing only
+    # when the `..` sits in the MISSING tail: there is nothing on disk to resolve
+    # it against, so it is carried into the compared string and the path reads as
+    # inside the plans dir while resolving one level above it.
+    write_fake_fno "$ABSENT"
+    expect "H1c: a .. inside an absent plans dir tail is blocked" block \
+      "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$ABSENT/../escape.md\",\"content\":\"$PLAN_FM\"}}"
+
+    expect_wp "H1d: the same .. tail does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$ABSENT/../escape.md\"}}"
+
+    write_fake_fno "$PLANS"
+
+    # A symlink LEADING OUT of an existing plans dir must not carve itself out:
+    # the lexical shortcut exists only for a plans dir that does not exist yet.
+    ln -s "$CANON/src" "$PLANS/sneak" 2>/dev/null
+    expect_wp "H2: symlink out of the plans dir does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/sneak/evil.md\"}}"
+
+    # A sibling sharing the prefix is not inside it (the trailing-slash rule).
+    mkdir -p "${PLANS}-archive"
+    expect "H3: a prefix-sharing sibling dir is still outside" block \
+      "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"${PLANS}-archive/p.md\",\"content\":\"$PLAN_FM\"}}"
+
+    # ── I. the plans dir is resolved from the SESSION cwd ────────────────────
+    # The default stub is cwd-blind, so nothing above can tell "resolved from
+    # the payload cwd" from "resolved from wherever the hook was spawned" - the
+    # same class of hole as an argv-blind stub. This one answers by $PWD.
+    cat > "$FAKEBIN/fno" <<'STUBEOF'
+#!/usr/bin/env bash
+if [[ "$1" == "plan" && "$2" == "path" ]]; then
+  case " $* " in
+    *" --slug "*) ;;
+    *) echo "Missing option '--slug'." >&2; exit 2 ;;
+  esac
+  echo "$PWD/fno/plans/20260730-x.md"
+  exit 0
+fi
+exit 1
+STUBEOF
+    chmod +x "$FAKEBIN/fno"
+    mkdir -p "$TMP/projB/fno/plans"
+
+    # Correct save for projB. Resolved from the payload cwd this is inside the
+    # plans dir; resolved from the harness cwd it is outside and gets denied.
+    expect "I1: positive guard resolves from the payload cwd" approve \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/projB\",\"tool_input\":{\"file_path\":\"$TMP/projB/fno/plans/p.md\",\"content\":\"$PLAN_FM\"}}"
+
+    mkdir -p "$CANON/fno/plans"
+    expect_wp "I2: carve-out resolves from the payload cwd" approve \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/fno/plans/p.md\"}}"
+
+    # ── J. a half-sourced helper degrades, never opens ───────────────────────
+    # bash defines functions as it parses, so a truncated helper leaves the
+    # first defined and the rest missing. The guard must fall back to the blunt
+    # behavior, not lose its per-target check.
+    HALF="$TMP/half"
+    mkdir -p "$HALF/helpers"
+    cp hooks/worktree-write-protect.sh "$HALF/"
+    cp hooks/helpers/check-impl-location.sh "$HALF/helpers/"
+    sed -n '/^fno_plans_dir()/,/^}/p' hooks/helpers/plans-dir.sh > "$HALF/helpers/plans-dir.sh"
+    out=$(printf '%s' "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}" \
+        | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
+    if printf '%s' "$out" | grep -q '"block"'; then
+        pass "J1: half-sourced helper falls back to the blunt block"
+    else
+        fail "J1: half-sourced helper approved: $out"
+    fi
+
+    # J1 blocks on the cwd gate alone, so it cannot see whether the PER-TARGET
+    # check survived. From a SAFE cwd only the per-target check can block, so
+    # this is what proves the degraded mode is not weaker than the guard was
+    # before the helper existed - without the dirname fallback, every target
+    # exits 127 and is silently skipped.
+    out=$(printf '%s' "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}" \
+        | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
+    if printf '%s' "$out" | grep -q '"block"'; then
+        pass "J2: half-sourced helper keeps the per-target check"
+    else
+        fail "J2: per-target check lost with a half-sourced helper: $out"
+    fi
 
     write_fake_fno "$PLANS"
 fi

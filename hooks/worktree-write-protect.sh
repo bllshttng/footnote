@@ -73,10 +73,15 @@ _block_if_canonical() {
 }
 
 # _target_directory delegates to the shared resolver so this guard and
-# plan-location-guard.sh agree on where a not-yet-created path lives.
-_target_directory() {
-    fno_resolve_dir "$1"
-}
+# plan-location-guard.sh agree on where a not-yet-created path lives. The
+# fallback matters: the source above is swallowed, and without it a missing
+# helper would make every per-target check exit 127 and skip - leaving the
+# degraded mode WEAKER than the guard was before the helper existed.
+if declare -F fno_resolve_dir >/dev/null 2>&1; then
+    _target_directory() { fno_resolve_dir "$1"; }
+else
+    _target_directory() { dirname "$1"; }
+fi
 
 # _absolute PATH -> PATH anchored against the session cwd when relative.
 _absolute() {
@@ -116,7 +121,9 @@ fi
 # Gated on a `.md` target first: resolving the plans dir shells a Python CLI
 # (~0.5s), and every Edit/Write reaches here. A plan is always markdown, so the
 # cheap test keeps that cost off the source-edit path, mirroring the payload
-# pre-filter plan-location-guard.sh carries for the same reason.
+# pre-filter plan-location-guard.sh carries for the same reason. It is
+# BEHAVIORAL, not merely a speed-up: a non-markdown write into the plans dir
+# gets no carve-out and faces the gate like any other file.
 #
 # Requires targets to be known AND resolvable, and requires the WHOLE helper to
 # have sourced - bash defines functions as it parses, so a truncated helper
@@ -132,7 +139,7 @@ _has_md_target() {
 
 if [[ ${#TARGETS[@]} -gt 0 ]] && _has_md_target \
    && declare -F fno_plans_dir fno_resolve_dir fno_under_plans_dir \
-        fno_plans_dir_carveout_safe >/dev/null 2>&1; then
+        fno_physical_path fno_plans_dir_carveout_safe >/dev/null 2>&1; then
     # Resolve from the SESSION cwd, not the cwd the harness happened to spawn
     # this hook in: `fno plan path` is repo-anchored, so an ambient cwd names a
     # different project's plans dir and the carve-out silently never fires.
@@ -148,16 +155,15 @@ fi
 
 _block_if_canonical "$CWD"
 
-# A path that resolves to nothing is an anomaly, not a pass: falling through to
-# `continue` here would skip the canonical check for that target entirely, which
-# is the wrong direction for a guard (the carve-out above fails closed on the
-# same resolver failure). Fall back to the session cwd's verdict instead.
+# Known ceiling: a target that resolves to nothing is skipped. Re-asking about
+# $CWD here would be dead code, since the unconditional call above already
+# exited on that verdict, and only an absolute path with a symlink loop deeper
+# than the resolver's hop cap can reach it. The `dirname` fallback above is what
+# keeps a missing helper from routing EVERY target down this branch.
 for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
-    if target_dir="$(_target_directory "$(_absolute "$t")")" && [[ -n "$target_dir" ]]; then
-        _block_if_canonical "$target_dir"
-    else
-        _block_if_canonical "$CWD"
-    fi
+    target_dir="$(_target_directory "$(_absolute "$t")")" || continue
+    [[ -n "$target_dir" ]] || continue
+    _block_if_canonical "$target_dir"
 done
 
 _approve

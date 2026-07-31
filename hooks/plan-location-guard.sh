@@ -171,7 +171,13 @@ _has_plan_frontmatter() {
 }
 
 # ── 5. Verdict ────────────────────────────────────────────────────────────────
-PLANS_DIR="$(fno_plans_dir)" || _approve
+# Resolve from the SESSION cwd, exactly as the sibling carve-out does.
+# `fno plan path` is repo-anchored, so resolving from whatever cwd the
+# harness spawned this hook in names a DIFFERENT project's plans dir on a
+# worktree or multi-repo dispatch - which would deny a correct save while
+# naming the wrong directory as the right one. Sharing a resolver is not
+# enough; the two halves have to share the anchor too.
+PLANS_DIR="$(cd "$CWD" 2>/dev/null && fno_plans_dir 2>/dev/null || true)"
 [[ -n "$PLANS_DIR" ]] || _approve
 
 for t in "${TARGETS[@]}"; do
