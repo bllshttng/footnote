@@ -78,16 +78,19 @@ PY
 before=$(cat "$REGISTRY")
 err=$("$BIN" logs reviewer 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "name miss exited $rc, want 13"
-[[ "$err" == "no agent matching 'reviewer'; accepted forms: name, 8-hex short id, or full session id" ]] \
+[[ "$err" == "no agent matching 'reviewer'; accepted forms: name, canonical handle, transport short id, or full session id" ]] \
   || fail "name miss message drifted: $err"
 [[ "$(cat "$REGISTRY")" == "$before" ]] || fail "a name-shaped miss mutated the registry"
 
-# 3. A broken heal path degrades to the ORIGINAL not-found error, never a new
-#    error class -- here by taking `fno` off PATH entirely.
+# 3. A broken all-source identity path fails closed with the full-session-id
+#    remedy rather than treating an unchecked short token as a safe miss -- here
+#    by taking `fno` off PATH entirely.
 err=$(PATH=/usr/bin:/bin "$BIN" logs deadbeef 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "degraded heal exited $rc, want 13"
-[[ "$err" == "no agent matching 'deadbeef'; accepted forms:"* ]] \
-  || fail "degraded heal did not reproduce today's error: $err"
+[[ "$err" == "cannot safely resolve token 'deadbeef' because the all-source identity helper could not run:"* ]] \
+  || fail "broken identity helper did not fail closed: $err"
+[[ "$err" == *"Use the full session id." ]] \
+  || fail "broken identity helper omitted the full-id remedy: $err"
 
 # 4. A registry write failure does not block the verb, and does not hide either:
 #    reaching the session wins, but the operator must see that the roster did not
@@ -137,33 +140,37 @@ EOF
 }
 ROW='{"name":"x","harness":"claude","cwd":"/w","log_path":"","short_id":"c655c326","harness_session_id":"'$CLAUDE_UUID'","status":"orphaned"}'
 
-# 7a. Exit code is read BEFORE stdout: a failed heal that prints parseable JSON
-#     must still degrade, never yield a half-resolved row.
+# 7a. Exit code is read BEFORE stdout: a failed helper that prints parseable JSON
+#     must still fail closed, never yield a half-resolved row.
 rm -f "$REGISTRY"   # step 6 adopted the row; the token must be a MISS again
 stub_fno "echo '$ROW'; exit 1"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "nonzero heal with parseable JSON exited $rc, want 13"
-grep -q "no agent matching" <<<"$err" || fail "nonzero heal did not degrade: $err"
+grep -q "all-source identity helper failed (exit 1)" <<<"$err" \
+  || fail "nonzero identity helper did not fail closed: $err"
+grep -q "Use the full session id" <<<"$err" \
+  || fail "nonzero identity helper omitted the full-id remedy: $err"
 
 # 7a-bis. An off-contract exit relays ONE labelled line, never the child's raw
 #         stderr: a traceback ahead of the refusal is a new error class.
 stub_fno "echo 'Traceback (most recent call last):' >&2; echo '  File \"x.py\", line 1' >&2; exit 70"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "off-contract heal exit gave $rc, want 13"
-grep -q "no agent matching" <<<"$err" || fail "off-contract heal lost the refusal: $err"
-grep -q "heal probe failed (exit 70)" <<<"$err" || fail "off-contract heal hid the cause: $err"
+grep -q "all-source identity helper failed (exit 70): Traceback" <<<"$err" \
+  || fail "off-contract identity helper hid the refusal or cause: $err"
 [[ "$(grep -c 'File "x.py"' <<<"$err")" -eq 0 ]] || fail "off-contract heal dumped a raw traceback: $err"
 
 # 7b. A banner ahead of the payload (a first-run `fno` prints setup lines) must
 #     not defeat the parse.
 # 7c. An exit-0 helper returning a JSON object that is not a usable row must
-#     degrade, not resolve: a bare {} would otherwise surface as a confusing
-#     missing-cwd failure instead of the clean not-found.
+#     fail closed, not resolve: a bare {} would otherwise surface as a confusing
+#     missing-cwd failure after incomplete identity coverage.
 rm -f "$REGISTRY"
 stub_fno "echo '{}'; exit 0"
 err=$("$BIN" logs c655c326 2>&1); rc=$?
 [[ $rc -eq 13 ]] || fail "empty JSON object from an exit-0 heal exited $rc, want 13"
-grep -q "no agent matching" <<<"$err" || fail "empty-object heal did not degrade: $err"
+grep -q "all-source identity helper returned an incomplete row" <<<"$err" \
+  || fail "empty-object identity helper did not fail closed: $err"
 
 rm -f "$REGISTRY"
 stub_fno "case \"\$*\" in

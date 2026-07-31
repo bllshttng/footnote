@@ -1120,11 +1120,14 @@ fn heal_token(token: &str, registry_path: &Path) -> Result<Option<Value>, String
     // The healer adopts best-effort: a failed registry write still returns the
     // row, with the reason on stderr. Swallowing that would make the degradation
     // invisible -- the verb works, the roster silently does not.
-    let warn = String::from_utf8_lossy(&out.stderr);
-    if !warn.trim().is_empty() {
-        eprint!("{warn}");
+    let parsed = parse_heal_token_output(token, &out);
+    if matches!(&parsed, Ok(Some(_))) {
+        let warn = String::from_utf8_lossy(&out.stderr);
+        if !warn.trim().is_empty() {
+            eprint!("{warn}");
+        }
     }
-    parse_heal_token_output(token, &out)
+    parsed
 }
 
 /// Enforce the Python helper's output contract without collapsing unavailable
