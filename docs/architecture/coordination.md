@@ -113,19 +113,29 @@ not support multi-host coordination - operators running two hosts on the same
 shared filesystem will see both claims as "opaque, not mine to release."
 
 "Same machine" is decided by `claims/hostid.py` (`is_same_machine`), NOT by a
-raw `gethostname()` compare. The `host` field is scoping PID-reuse detection,
-so it has to be as stable as the pid namespace it scopes, and `gethostname()`
-is not: on macOS with `scutil --get HostName` unset it is derived from whatever
-DHCP/DNS last supplied and flips on network join, VPN, and sleep/wake. A name
-that moved mid-session made a live holder read as cross-host, which
-short-circuits `is_live` before the pid check and drops the claim to `stale` -
-and `stale` is recoverable, so the node became stealable out from under a
-working session. The field now carries a stable machine id (IOPlatformUUID on
-macOS, `/etc/machine-id` on Linux, `gethostname()` where neither is readable);
-`is_same_machine` also accepts a bare hostname so claims written before the
-change stay classifiable. Both Rust mirrors (`claims.rs`, `agents_view.rs`)
-carry the same pair - all three writers must agree or each reads the others'
-claims as cross-machine.
+raw `gethostname()` compare. Identity scopes PID-reuse detection, so it has to
+be as stable as the pid namespace it scopes, and `gethostname()` is not: on
+macOS with `scutil --get HostName` unset it is derived from whatever DHCP/DNS
+last supplied and flips on network join, VPN, and sleep/wake. A name that moved
+mid-session made a live holder read as cross-host, which short-circuits
+`is_live` before the pid check and drops the claim to `stale` - and `stale` is
+recoverable, so the node became stealable out from under a working session.
+
+Liveness therefore compares a `machine_id` field: IOPlatformUUID on macOS,
+`/etc/machine-id` on Linux, `gethostname()` where neither is readable. On Linux
+it also carries the `/proc/self/ns/pid` inode, because containers built from one
+image share `/etc/machine-id` while holding independent pid namespaces; without
+it, two such containers sharing a claims root would read each other's pids as
+local and a dead foreign claim would classify live forever.
+
+`machine_id` is ADDITIVE and `host` still holds `gethostname()`. Overwriting
+`host` would break the reverse direction of a rolling upgrade: a still-running
+pre-change reader compares `host` to its own `gethostname()`, would miss, and
+would call a live claim stale - stealable, the same bug from the other side.
+Absent `machine_id` (a pre-change claim) falls back to the host compare, so such
+claims classify exactly as they always did. This mirrors how `harness` was
+added. Both Rust mirrors (`claims.rs`, `agents_view.rs`) carry the same pair -
+all three writers must agree or each reads the others' claims as cross-machine.
 
 ### Atomic write
 

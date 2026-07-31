@@ -60,7 +60,7 @@ def is_live(claim: Claim) -> bool:
         (PID reuse: a new process took over the slot).
       - We cannot read the process info (AccessDenied counts as dead).
     """
-    if not is_same_machine(claim.host):
+    if not is_same_machine(claim.host, claim.machine_id):
         return False
 
     create_ms = _process_create_time_ms(claim.pid)

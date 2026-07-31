@@ -17,6 +17,7 @@ writes are best-effort: the YAML lock file write is authoritative.
 from __future__ import annotations
 
 import os
+import socket
 import time
 from pathlib import Path
 from typing import Any, Optional
@@ -145,9 +146,11 @@ def _make_claim(
         acquired_at=acquired,
         expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
         pid=pid if pid is not None else os.getpid(),
-        # x-588d: a STABLE machine id, not gethostname() - a name that flips
-        # mid-session made a live holder read cross-host, then stale, then stealable.
-        host=host if host is not None else machine_id(),
+        host=host if host is not None else socket.gethostname(),
+        # x-588d: liveness compares THIS, not host - a name that flips mid-session
+        # made a live holder read cross-host, then stale, then stealable. Additive
+        # so a pre-change reader still reads host and behaves exactly as today.
+        machine_id=machine_id(),
         reason=reason,
         # x-3e70: tag the claim with the acquiring harness so the dispatch guard
         # can read a foreign owner off the claim. This is the PRODUCTION writer

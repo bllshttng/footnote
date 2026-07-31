@@ -1,4 +1,4 @@
-"""Stable machine identity for the claim ``host`` field.
+"""Stable machine identity for claim liveness.
 
 ``socket.gethostname()`` is not a stable machine identity. On macOS with
 ``scutil --get HostName`` unset, it is derived from whatever DHCP/DNS most
@@ -13,8 +13,17 @@ and drops the claim to STALE. STALE is recoverable, so the claim became
 stealable out from under a working session: duplicate work, duplicate PR.
 
 ``machine_id()`` prefers the OS's own stable identifier (IOPlatformUUID on
-macOS, ``/etc/machine-id`` on Linux) and falls back to ``gethostname()`` where
-neither is readable, which is no worse than the previous behavior.
+macOS, ``/etc/machine-id`` plus the pid-namespace inode on Linux) and falls
+back to ``gethostname()`` where neither is readable, which is no worse than
+the previous behavior.
+
+It travels in its OWN claim field rather than replacing ``host``. Overwriting
+``host`` would make a pre-change reader - a still-running old binary during a
+rolling upgrade - compare a machine id against its ``gethostname()``, miss, and
+classify a LIVE claim as stale, which is stealable: exactly the bug this fixes,
+reintroduced from the other side. An additive field reads as absent on old
+readers, so they behave precisely as they do today. This mirrors how ``harness``
+was added.
 
 Cross-host opacity is preserved deliberately: a claim filed on a genuinely
 different machine carries that machine's id, matches neither arm of
@@ -24,6 +33,7 @@ Mirrored by ``machine_id`` / ``is_same_machine`` in ``crates/fno-agents/src/clai
 """
 from __future__ import annotations
 
+import os
 import platform
 import re
 import socket
@@ -67,14 +77,28 @@ def _macos_platform_uuid() -> str:
 
 
 def _linux_machine_id() -> str:
+    base = ""
     for path in _LINUX_MACHINE_ID_FILES:
         try:
             value = Path(path).read_text(encoding="utf-8").strip()
         except OSError:
             continue
         if value:
-            return value
-    return ""
+            base = value
+            break
+    if not base:
+        return ""
+    # Containers built from one image share /etc/machine-id while holding
+    # INDEPENDENT pid namespaces. Identity scopes PID-reuse detection, so
+    # without the namespace two such containers sharing a claims root would
+    # read each other's pids as local: a dead foreign claim would classify
+    # LIVE forever (a wedge) instead of staying opaque, which is the
+    # cross-machine guarantee coordination.md states.
+    try:
+        namespace = os.stat("/proc/self/ns/pid").st_ino
+    except OSError:
+        return base
+    return f"{base}:{namespace}"
 
 
 @lru_cache(maxsize=1)
@@ -95,16 +119,20 @@ def machine_id() -> str:
     return resolved or hostname()
 
 
-def is_same_machine(recorded: Optional[str]) -> bool:
-    """Was ``recorded`` (a claim's ``host``) written on THIS machine?
+def is_same_machine(host: Optional[str], machine: Optional[str] = None) -> bool:
+    """Was this claim written on THIS machine?
 
-    Two arms. The first is the real one: the stable machine id. The second
-    accepts a bare hostname for claims written before this field carried a
-    machine id - additive, so a legacy claim is never worse off than it was,
-    and a genuinely remote host matches neither.
+    ``machine`` is the claim's ``machine_id`` and is authoritative whenever it
+    is present. It is absent only on a claim written before that field existed,
+    and those fall back to the old hostname compare - which is the buggy
+    comparison this module exists to replace, but reproducing it exactly is the
+    point: a pre-change claim must classify exactly as it does today, no worse.
+
+    Dispatching on field presence rather than OR-ing the two candidates keeps a
+    hostname that happens to equal some other machine's id from matching.
     """
-    if not recorded:
+    if machine:
+        return machine == machine_id()
+    if not host:
         return False
-    if recorded == machine_id():
-        return True
-    return recorded == hostname()
+    return host == hostname()

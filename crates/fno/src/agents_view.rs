@@ -595,15 +595,24 @@ fn platform_machine_id() -> String {
 /// Linux machine id (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "linux")]
 fn platform_machine_id() -> String {
+    let mut base = String::new();
     for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
         if let Ok(text) = std::fs::read_to_string(path) {
             let value = text.trim();
             if !value.is_empty() {
-                return value.to_string();
+                base = value.to_string();
+                break;
             }
         }
     }
-    String::new()
+    if base.is_empty() {
+        return base;
+    }
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata("/proc/self/ns/pid") {
+        Ok(md) => format!("{base}:{}", md.ino()),
+        Err(_) => base,
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -629,20 +638,24 @@ fn machine_id() -> String {
         .clone()
 }
 
-/// Was `recorded` written on THIS machine? (mirror of
-/// `claims.rs::is_same_machine`). Second arm accepts pre-machine-id claims.
-fn is_same_machine(recorded: &str) -> bool {
-    if recorded.is_empty() {
+/// Was this claim written on THIS machine? (mirror of
+/// `claims.rs::is_same_machine`). `machine` wins when present; `host` is the
+/// pre-change fallback.
+fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+    if let Some(m) = machine.filter(|m| !m.is_empty()) {
+        return m == machine_id();
+    }
+    if host.is_empty() {
         return false;
     }
-    recorded == machine_id() || recorded == hostname()
+    host == hostname()
 }
 
 /// Verifiably-running claim holder (mirror of `claims.rs::is_live`): same
 /// machine AND the pid's process started at/before `acquired_at` (rejects a
 /// reused pid).
-fn holder_is_live(host: &str, pid: i32, acquired_at: i64) -> bool {
-    if !is_same_machine(host) {
+fn holder_is_live(host: &str, machine: Option<&str>, pid: i32, acquired_at: i64) -> bool {
+    if !is_same_machine(host, machine) {
         return false;
     }
     matches!(process_create_time_ms(pid), Some(create_ms) if create_ms <= acquired_at)
@@ -660,19 +673,24 @@ fn live_claim_session(claims_dir: &Path, node_id: &str) -> Option<String> {
     let mut pid: Option<i32> = None;
     let mut acquired_at: Option<i64> = None;
     let mut host: Option<&str> = None;
+    let mut machine: Option<&str> = None;
     let mut holder: Option<&str> = None;
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("pid:") {
             pid = v.trim().parse().ok();
         } else if let Some(v) = line.strip_prefix("acquired_at:") {
             acquired_at = v.trim().parse().ok();
+        } else if let Some(v) = line.strip_prefix("machine_id:") {
+            // Checked BEFORE `host:` would not matter (distinct prefixes), but the
+            // field is what liveness compares; `host` is only the legacy fallback.
+            machine = Some(v.trim());
         } else if let Some(v) = line.strip_prefix("host:") {
             host = Some(v.trim());
         } else if let Some(v) = line.strip_prefix("holder:") {
             holder = Some(v.trim());
         }
     }
-    if !holder_is_live(host?, pid?, acquired_at?) {
+    if !holder_is_live(host?, machine, pid?, acquired_at?) {
         return None;
     }
     holder?

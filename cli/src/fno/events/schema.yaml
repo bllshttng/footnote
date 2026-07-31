@@ -752,7 +752,7 @@ event_types:
           description: "Holder process PID at acquire time."
         host:
           type: string
-          description: "Stable machine id (claims.hostid.machine_id) at acquire time."
+          description: "Host (socket.gethostname) at acquire time; liveness compares the claim's machine_id, not this."
         acquired_at:
           type: integer
           description: "Epoch milliseconds, UTC."

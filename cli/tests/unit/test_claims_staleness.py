@@ -228,7 +228,7 @@ def test_is_live_survives_hostname_flip(monkeypatch):
     NOT read as cross-host when the name moves - the host check short-circuits
     is_live before the pid check, and the resulting STALE is stealable."""
     _requires_stable_machine_id()
-    claim = _live_claim(host=hostid.machine_id())
+    claim = _live_claim(machine_id=hostid.machine_id())
     monkeypatch.setattr(hostid, "hostname", lambda: "BB16s-MBP")
     hostid.machine_id.cache_clear()
     assert is_live(claim) is True
@@ -240,27 +240,58 @@ def test_classify_live_ttl_expired_after_hostname_flip(monkeypatch):
     was short-circuited by the host mismatch, so the claim read STALE and any
     re-dispatch could steal the node out from under the live session."""
     _requires_stable_machine_id()
-    claim = _live_claim(host=hostid.machine_id(), expires_at=now_ms() - 1000)
+    claim = _live_claim(machine_id=hostid.machine_id(), expires_at=now_ms() - 1000)
     monkeypatch.setattr(hostid, "hostname", lambda: "BB16s-MBP")
     hostid.machine_id.cache_clear()
     assert classify(claim) == ClaimState.LIVE
 
 
-def test_classify_stale_remote_machine_id_still_opaque(monkeypatch):
-    """Cross-host opacity is preserved: a claim carrying ANOTHER machine's id
-    matches neither arm of is_same_machine, so it stays recoverable. Widening
-    this would be a different bug (a remote claim wedged forever)."""
-    claim = _live_claim(host="00000000-0000-0000-0000-000000000000", expires_at=now_ms() - 1000)
+def test_classify_stale_remote_machine_id_still_opaque():
+    """Cross-machine opacity is preserved: a claim carrying ANOTHER machine's id
+    is not ours, so it stays recoverable. Widening this would be a different bug
+    (a remote claim wedged live forever)."""
+    claim = _live_claim(
+        machine_id="00000000-0000-0000-0000-000000000000", expires_at=now_ms() - 1000
+    )
     assert classify(claim) == ClaimState.STALE
 
 
-def test_is_same_machine_accepts_legacy_hostname_claims():
-    """Claims written before the host field carried a machine id record a bare
-    hostname. The legacy arm keeps them classifiable while the name holds - no
-    worse than before, and strictly additive to the machine-id arm."""
+def test_machine_id_wins_over_a_matching_host():
+    """machine_id is authoritative when present. A claim from another machine
+    that happens to share this one's hostname must NOT read as ours; OR-ing the
+    two candidates instead of dispatching on presence would let it through."""
+    _requires_stable_machine_id()
+    claim = _live_claim(host=hostid.hostname(), machine_id="not-this-machine")
+    assert is_live(claim) is False
+
+
+def test_pre_change_claim_falls_back_to_the_host_compare():
+    """A claim written before machine_id existed carries no such field. It must
+    classify exactly as it did before - no worse - via the hostname compare."""
+    claim = _live_claim(host=hostid.hostname(), machine_id=None)
+    assert is_live(claim) is True
+    assert is_live(_live_claim(host="some-other-host", machine_id=None)) is False
+
+
+def test_new_claims_stay_readable_by_a_pre_change_reader():
+    """Rolling-upgrade guard. A pre-change reader compares `host` against its own
+    gethostname() and knows nothing of machine_id, so writing the machine id INTO
+    host would make it call a live claim stale - which is stealable, i.e. this
+    very bug from the other side. host must stay the hostname."""
+    from fno.claims.core import _make_claim
+
+    claim = _make_claim("node:x", "h", None, None, None, os.getpid(), None)
+    assert claim.host == socket.gethostname(), "a pre-change reader still matches host"
+    assert claim.machine_id == hostid.machine_id()
+
+
+def test_is_same_machine_arms():
     hostid.machine_id.cache_clear()
-    assert hostid.is_same_machine(hostid.hostname()) is True
-    assert hostid.is_same_machine(hostid.machine_id()) is True
-    assert hostid.is_same_machine("some-other-host-that-does-not-exist") is False
-    assert hostid.is_same_machine(None) is False
-    assert hostid.is_same_machine("") is False
+    # machine arm (authoritative when present)
+    assert hostid.is_same_machine("irrelevant", hostid.machine_id()) is True
+    assert hostid.is_same_machine(hostid.hostname(), "other-machine") is False
+    # host arm (only when no machine id was recorded)
+    assert hostid.is_same_machine(hostid.hostname(), None) is True
+    assert hostid.is_same_machine("some-other-host-that-does-not-exist", None) is False
+    assert hostid.is_same_machine(None, None) is False
+    assert hostid.is_same_machine("", "") is False

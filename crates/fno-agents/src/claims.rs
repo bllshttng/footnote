@@ -29,9 +29,9 @@
 //! - hybrid liveness: an expired-TTL claim whose recorded pid is a live
 //!   process on this machine is still LIVE; PID-reuse is detected by comparing
 //!   the process create time (epoch ms) against `acquired_at`;
-//! - the `host` field carries a STABLE machine id (`hostid.machine_id`), not
-//!   `gethostname(2)` - both implementations must agree on it or each reads the
-//!   other's claims as cross-machine.
+//! - liveness compares the additive `machine_id` field (`hostid.machine_id`),
+//!   NOT `host`/`gethostname(2)`; both implementations must write and compare
+//!   it identically or each reads the other's claims as cross-machine.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -123,6 +123,13 @@ pub struct ClaimRecord {
     /// a foreign-harness owner from a native one without parsing the holder id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Stable machine identity (mirrors `fno.claims.hostid.machine_id`).
+    /// Additive for the same reason `harness` is: absent on pre-change records
+    /// (reads as `None`, never a parse error). Overwriting `host` instead would
+    /// make a still-running pre-change reader compare a machine id against its
+    /// `gethostname(2)`, miss, and call a LIVE claim stale, which is stealable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     /// Opaque; preserved byte-for-byte through idempotent re-acquires.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Value>,
@@ -308,15 +315,28 @@ fn platform_machine_id() -> String {
 /// Linux: systemd writes `/etc/machine-id`; dbus the second path.
 #[cfg(target_os = "linux")]
 fn platform_machine_id() -> String {
+    let mut base = String::new();
     for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
         if let Ok(text) = std::fs::read_to_string(path) {
             let value = text.trim();
             if !value.is_empty() {
-                return value.to_string();
+                base = value.to_string();
+                break;
             }
         }
     }
-    String::new()
+    if base.is_empty() {
+        return base;
+    }
+    // Containers from one image share /etc/machine-id but hold INDEPENDENT pid
+    // namespaces; without the namespace two of them sharing a claims root read
+    // each other's pids as local, so a dead foreign claim classifies LIVE
+    // forever instead of staying opaque.
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata("/proc/self/ns/pid") {
+        Ok(md) => format!("{base}:{}", md.ino()),
+        Err(_) => base,
+    }
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -350,17 +370,20 @@ fn machine_id() -> String {
         .clone()
 }
 
-/// Was `recorded` (a claim's `host`) written on THIS machine? (mirrors
+/// Was this claim written on THIS machine? (mirrors
 /// `fno.claims.hostid.is_same_machine`)
 ///
-/// The second arm accepts a bare hostname for claims written before this field
-/// carried a machine id — additive, so a legacy claim is never worse off, and a
-/// genuinely remote machine matches neither.
-fn is_same_machine(recorded: &str) -> bool {
-    if recorded.is_empty() {
+/// `machine` is authoritative whenever present. It is absent only on a claim
+/// written before the field existed; those reproduce the old hostname compare
+/// exactly, so a pre-change claim classifies no worse than it does today.
+fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+    if let Some(m) = machine.filter(|m| !m.is_empty()) {
+        return m == machine_id();
+    }
+    if host.is_empty() {
         return false;
     }
-    recorded == machine_id() || recorded == hostname()
+    host == hostname()
 }
 
 /// Process create time in EPOCH MILLISECONDS, or `None` if the pid is gone or
@@ -445,7 +468,7 @@ pub fn process_create_time_ms(_pid: i32) -> Option<i64> {
 /// False when: cross-machine, pid gone/uninspectable, or the current occupant
 /// of the pid slot started AFTER the claim was filed (PID reuse).
 fn is_live(rec: &ClaimRecord) -> bool {
-    if !is_same_machine(&rec.host) {
+    if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
         return false;
     }
     match process_create_time_ms(rec.pid) {
@@ -980,7 +1003,8 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         holder: holder.into(),
         acquired_at: acquired,
         pid: opts.pid.unwrap_or_else(std::process::id) as i32,
-        host: machine_id(),
+        host: hostname(),
+        machine_id: Some(machine_id()),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
         harness: resolve_harness(),
@@ -1740,6 +1764,7 @@ mod tests {
             expires_at: None,
             reason: Some("why".into()),
             harness: Some("codex".into()),
+            machine_id: Some("mid".into()),
             metadata: meta,
         };
         let text = serialize_claim(&rec).unwrap();
@@ -1810,6 +1835,9 @@ mod tests {
             expires_at,
             reason: None,
             harness: None,
+            // None on purpose: these fixtures pass a HOST, so they exercise the
+            // pre-change fallback arm. The machine-id arm has its own tests.
+            machine_id: None,
             metadata: Map::new(),
         }
     }
@@ -1942,10 +1970,14 @@ mod tests {
     fn is_same_machine_matches_machine_id_and_legacy_hostname() {
         // Both arms are "this machine"; the machine-id arm is the stable one,
         // the hostname arm keeps pre-machine-id claims classifiable.
-        assert!(is_same_machine(&machine_id()));
-        assert!(is_same_machine(&hostname()));
-        assert!(!is_same_machine(""));
-        assert!(!is_same_machine("00000000-0000-0000-0000-000000000000"));
+        // machine_id wins when present; host is the pre-change fallback.
+        assert!(is_same_machine("anything", Some(&machine_id())));
+        assert!(is_same_machine(&hostname(), None));
+        assert!(!is_same_machine("", None));
+        assert!(!is_same_machine(
+            &hostname(),
+            Some("00000000-0000-0000-0000-000000000000")
+        ));
     }
 
     #[test]
@@ -1964,7 +1996,14 @@ mod tests {
         // cross-machine and silently treats live claims as recoverable.
         let td = TempDir::new().unwrap();
         match acquire("session:mid", "pty:owner", opts_in(&td)) {
-            AcquireOutcome::Acquired(rec) => assert_eq!(rec.host, machine_id()),
+            AcquireOutcome::Acquired(rec) => {
+                assert_eq!(rec.machine_id.as_deref(), Some(machine_id().as_str()));
+                assert_eq!(
+                    rec.host,
+                    hostname(),
+                    "host stays the hostname a pre-change reader expects"
+                );
+            }
             other => panic!("{other:?}"),
         }
     }

@@ -65,9 +65,13 @@ class Claim(BaseModel):
             PID-liveness claims (the absence is meaningful; do not serialize
             as null).
         pid: holder process PID (host-local).
-        host: stable machine id at acquire time (``hostid.machine_id``, NOT
-            ``socket.gethostname()`` - see that module); cross-machine claims
-            are intentionally treated as opaque (see staleness.is_live).
+        host: socket.gethostname() at acquire time. Descriptive only - it is
+            NOT a stable identity (see hostid); machine_id is what liveness
+            compares. Kept so a pre-change reader still sees what it expects.
+        machine_id: stable machine identity (``hostid.machine_id``). Additive:
+            absent on pre-change records (reads as None, never a parse error),
+            which fall back to the host compare. Cross-machine claims are
+            intentionally treated as opaque (see staleness.is_live).
         reason: optional human-readable context string.
         metadata: optional dict; treated opaquely.
 
@@ -86,6 +90,7 @@ class Claim(BaseModel):
     expires_at: Optional[int] = Field(default=None, description="epoch ms; absent => PID-liveness")
     pid: int
     host: str
+    machine_id: Optional[str] = None
     reason: Optional[str] = None
     harness: Optional[str] = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -134,6 +139,8 @@ class Claim(BaseModel):
             "pid": self.pid,
             "host": self.host,
         }
+        if self.machine_id is not None:
+            out["machine_id"] = self.machine_id
         if self.expires_at is not None:
             out["expires_at"] = self.expires_at
         if self.reason is not None:
