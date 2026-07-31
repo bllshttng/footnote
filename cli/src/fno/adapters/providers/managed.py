@@ -197,18 +197,37 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
             return None
 
     # claude
-    cfg = config_dir or _claude_slot_config_dir()
+    default_cfg = _claude_slot_config_dir()
+    cfg = config_dir or default_cfg
     if sys.platform == "darwin":
         acct = _claude_keychain_account()
-        for service in (_claude_scoped_service(cfg), _CLAUDE_KEYCHAIN_SERVICE):
+        # The unscoped Keychain item belongs to the default ~/.claude account
+        # (account_env._login_present reads the scoped item ONLY, never the
+        # unscoped fallback, for exactly this reason). Fall back to it only when
+        # reading that account; for an alternate config_dir the credential lives
+        # only in its scoped item, so falling through would return the default
+        # account's credential under the alternate dir (a misattribution).
+        services = [_claude_scoped_service(cfg)]
+        if cfg == default_cfg:
+            services.append(_CLAUDE_KEYCHAIN_SERVICE)
+        for service in services:
             out = _run_security(["find-generic-password", "-s", service, "-a", acct, "-w"])
             if out.returncode == 0 and out.stdout.strip():
-                return out.stdout.strip()
+                blob = out.stdout.strip()
+                # A logged-out residue is non-empty JSON (scopes/subscriptionType/
+                # rateLimitTier survive while accessToken/refreshToken clear to ''),
+                # so a presence check alone returns it as a live login. Require a
+                # real credential and fall through to the next service - the scoped
+                # item may hold the residue while the unscoped fallback holds the
+                # live token - else None, so register refuses rather than stores it.
+                if _token_present(blob):
+                    return blob
         return None
     try:
-        return (cfg / ".credentials.json").read_text(encoding="utf-8")
+        blob = (cfg / ".credentials.json").read_text(encoding="utf-8")
     except OSError:
         return None
+    return blob if _token_present(blob) else None
 
 
 def _write_slot_blob(cli: str, blob: str, config_dir: Path | None = None) -> None:
@@ -296,10 +315,13 @@ def _codex_login_ok() -> _CodexLoginResult:
 
 
 def _token_present(blob: str) -> bool:
-    """A materialized blob must decode to something with an access token.
+    """A materialized blob must carry a usable credential (access OR refresh token).
 
     Mirrors usage.py's tolerance for Claude credentials: the token can sit at
-    a couple of known paths, and an opaque non-JSON keychain blob counts."""
+    a couple of known paths, and an opaque non-JSON keychain blob counts. A
+    logged-out residue (non-empty JSON whose accessToken/refreshToken cleared to
+    '') does NOT count: returning it as a login is the register-logged-out-blob
+    bug, so the dict fallback is a real token field, not 'any non-empty dict'."""
     try:
         data = json.loads(blob)
     except (ValueError, TypeError):
@@ -307,9 +329,9 @@ def _token_present(blob: str) -> bool:
     if not isinstance(data, dict):
         return bool(blob.strip())
     oauth = data.get("claudeAiOauth")
-    if isinstance(oauth, dict) and oauth.get("accessToken"):
+    if isinstance(oauth, dict) and (oauth.get("accessToken") or oauth.get("refreshToken")):
         return True
-    return bool(data.get("accessToken") or data.get("access_token") or data)
+    return bool(data.get("accessToken") or data.get("access_token"))
 
 
 def _codex_auth_present(blob: str) -> bool:

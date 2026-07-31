@@ -974,7 +974,7 @@ def dispatch_spawn_pane(
         )
 
         try:
-            route_env = resolve_spawn_route(role, route_env)
+            route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
 

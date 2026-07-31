@@ -318,7 +318,7 @@ def headless_create(
     if route_env:
         from fno.agents.model_routing import resolve_spawn_route
 
-        route_env = resolve_spawn_route(None, route_env)
+        route_env = resolve_spawn_route(None, route_env, account_overlay=bool(account_env))
     argv = ["claude", "-p"]
     # x-6de8: apply an explicit --route via --settings, same as bg_create. A
     # direct `claude -p` subprocess would inherit route env too, but --settings
@@ -463,6 +463,7 @@ def bg_create(
             role,
             route_env,
             notice=lambda note: print(note, file=sys.stderr),
+            account_overlay=bool(account_env),
         )
     msg_bytes = message.encode("utf-8")
     use_stdin = len(msg_bytes) > _ARGV_OVERFLOW_THRESHOLD
@@ -470,8 +471,10 @@ def bg_create(
     # fork; write it to a --settings file the session process reads itself.
     # An --account spawn has the same problem: the env scrub below is dropped at
     # the fork too, so the scrub (and an api_key account's resolved ANTHROPIC_*)
-    # rides a settings file as well. --account and --route/--role are mutually
-    # exclusive (refused at the CLI), so the two branches never co-occur.
+    # rides a settings file as well. --account and --route compose (x-5ed4):
+    # when both are present the route wins the settings file (route-wins
+    # atomicity - endpoint+auth+model as one unit), and the account overlay
+    # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
     settings_path: Optional[str] = None
     if route_env:
         from fno.agents.model_routing import materialize_route_settings

@@ -224,7 +224,7 @@ class TestRoutedSpawnsAreNotPicked:
         monkeypatch.setattr(dispatch_mod, "_emit_ev", lambda *a, **k: None)
         monkeypatch.setattr(
             "fno.agents.model_routing.resolve_spawn_route",
-            lambda role, route_env, notice=None: route_env,
+            lambda role, route_env, notice=None, **kw: route_env,
         )
         dispatch_mod.dispatch_spawn(
             name="w3", message="hi", provider="claude", cwd=armed,

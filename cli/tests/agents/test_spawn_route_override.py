@@ -688,3 +688,101 @@ def test_provider_bearing_spawn_stays_python_side() -> None:
     for args in (["spawn", "w", "--provider", "zai"], ["spawn", "w", "-P", "zai"],
                  ["spawn", "w", "--provider=zai"]):
         assert _is_route_bearing_spawn("spawn", args), args
+
+
+# ---------------------------------------------------------------------------
+# x-3db9 P1: the managed-OAuth refusal stays armed for a bare route (no account
+# overlay), and only relaxes when an account overlay makes the composition atomic.
+# ---------------------------------------------------------------------------
+
+
+def test_route_under_managed_without_account_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression guard: a bare route under an inherited FNO_PROVIDER_AUTH=managed
+    (no --account) is still refused - the half-composition guard stays armed
+    unless an account overlay pins a profile."""
+    from fno.agents import spawn_gate
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--route", "zai,glm-5.2"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "managed oauth" in result.output.lower()
+
+
+# ---------------------------------------------------------------------------
+# x-3db9 P1 (codex): the managed-OAuth bypass needs the route to carry its own
+# auth, not just any account overlay. A direct dispatch_spawn caller can pass a
+# hand-built partial route_env (base-URL-only); under managed + account that
+# would pair the foreign endpoint with the account's Keychain OAuth, so the
+# guard stays armed until the route is self-sufficient.
+# ---------------------------------------------------------------------------
+
+
+def test_managed_bypass_requires_route_self_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents.model_routing import RouteCompositionError, resolve_spawn_route
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    partial = {"ANTHROPIC_BASE_URL": "https://foreign.example/anthropic"}  # no auth token
+    # Account present, but the route brings no own credential -> still refused.
+    with pytest.raises(RouteCompositionError):
+        resolve_spawn_route(None, partial, account_overlay=True)
+    # A self-authed route + account composes (no refusal).
+    complete = {**partial, "ANTHROPIC_AUTH_TOKEN": "route-key"}
+    assert resolve_spawn_route(None, complete, account_overlay=True) == complete
+
+
+# ---------------------------------------------------------------------------
+# x-3db9 P2: a route-bearing --account spawn must not scrub the route key at the
+# seam. A vendor may name a SCRUB_AUTH_VARS member (e.g. ANTHROPIC_AUTH_TOKEN) as
+# its api_key_env; resolve_explicit_route reads it from os.environ, so scrubbing
+# first reports a valid route keyless only when --account is also present.
+# Routed spawns are Python-only and the create lane scrubs + applies route-wins
+# itself, so the seam scrub is skipped entirely for them.
+# ---------------------------------------------------------------------------
+
+
+def test_seam_scrub_skips_route_bearing_account_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import os
+
+    from fno.agents import rust_runtime
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "route-key")
+    args = ["spawn", "--name", "w", "hi", "--account", "acct", "--route", "zai,glm-5.2"]
+    rust_runtime._scrub_account_auth_at_seam(args)
+    assert os.environ.get("ANTHROPIC_AUTH_TOKEN") == "route-key"  # not scrubbed
+
+
+def test_seam_scrub_runs_for_account_only_spawn(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scrub still runs (and the overlay is applied) for an account spawn
+    with no route: that is the Rust-path case the seam exists for."""
+    import os
+
+    from fno.agents import account_env as ae, rust_runtime
+
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "inherited")
+    # Track CLAUDE_CONFIG_DIR so the value the scrub applies is restored after.
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", "pre")
+    monkeypatch.setattr(
+        ae,
+        "resolve_account_overlay",
+        lambda aid: ae.AccountOverlay(aid, {"CLAUDE_CONFIG_DIR": "/x/.claude"}, "config-dir"),
+    )
+    args = ["spawn", "--name", "w", "hi", "--account", "acct"]
+    rust_runtime._scrub_account_auth_at_seam(args)
+    assert "ANTHROPIC_AUTH_TOKEN" not in os.environ  # scrubbed
+    assert os.environ.get("CLAUDE_CONFIG_DIR") == "/x/.claude"  # overlay applied
