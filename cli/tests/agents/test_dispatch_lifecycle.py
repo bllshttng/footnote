@@ -590,6 +590,99 @@ def test_stop_claude_timeout_maps_to_exit_15(
 
 
 # ---------------------------------------------------------------------------
+# stop_agent — transport-id fallback chain (x-a4b2)
+# ---------------------------------------------------------------------------
+
+
+def _spawn_sleeper():
+    """Start a real, harmless child process and return (popen, start_token).
+
+    These tests signal a genuine process rather than asserting on a mocked
+    ``os.kill``: the defect they cover is a live worker surviving ``stop``,
+    so the assertion has to be that the process actually died.
+    """
+    import sys
+
+    from fno.agents.spawn_gate import _process_start_time
+
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    return proc, _process_start_time(proc.pid)
+
+
+def test_stop_kills_pid_when_no_transport_id(tmp_path: Path, monkeypatch, capsys) -> None:
+    """A row with a live pid and no transport id is stopped, not refused.
+
+    The duplicate-worker half of the wave-boundary handoff failure: the
+    orphan had a pid and no short_id/session_id, so `stop` refused and it
+    had to be killed by hand to restore one-writer semantics.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, start_token = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="orphan",
+                provider="claude",
+                short_id="",
+                pid=proc.pid,
+                pid_start_time=start_token,
+            ),
+        )
+
+        from fno.agents import dispatch
+        from fno.agents.registry import load_registry
+
+        result = dispatch.stop_agent("orphan")
+
+        assert result.name == "orphan"
+        # The process is really gone, not merely reported stopped.
+        assert proc.wait(timeout=10) is not None
+        assert "stopped: orphan (pid " in capsys.readouterr().out
+        assert load_registry()[0].status == "orphaned"
+
+        stop_events = [e for e in _read_events(tmp_path) if e.get("kind") == "agent_stopped"]
+        assert len(stop_events) == 1
+        assert stop_events[0]["stopped_by"] == "pid"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_stop_refuses_recycled_pid(tmp_path: Path, monkeypatch) -> None:
+    """A pid whose start token no longer matches belongs to someone else.
+
+    Signalling it would kill an unrelated process, so the row is refused
+    and the live process must survive untouched.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, start_token = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(
+                name="recycled",
+                provider="claude",
+                short_id="",
+                pid=proc.pid,
+                pid_start_time=(start_token or 0) + 1,
+            ),
+        )
+
+        from fno.agents import dispatch
+
+        with pytest.raises(dispatch.DispatchAskError) as exc_info:
+            dispatch.stop_agent("recycled")
+
+        assert exc_info.value.exit_code == 12
+        # The refusal must not point at `rm`, which clears the row and
+        # leaves the process running.
+        assert "does NOT stop" in str(exc_info.value)
+        assert proc.poll() is None, "unrelated process must not be signalled"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+# ---------------------------------------------------------------------------
 # rm_agent — AC2-*
 # ---------------------------------------------------------------------------
 
