@@ -75,10 +75,22 @@ os.environ["FNO_E2E"] = "1"
 #
 # Scrubbed at module load like the gates above. Tests that exercise capture arm
 # what they need per-test via monkeypatch.setenv.
+#
+# The harness-marker half is DERIVED from harness_identity's own tuples, never
+# retyped: a hand-maintained copy stops covering a marker the moment one is added,
+# and the miss stays invisible until a suite run on a box that exports it. The
+# legacy CLAUDE_SESSION_ID - which current_session_id() and current_session_ids()
+# genuinely read - was already missing from the literal this replaces. The import
+# is safe here despite the import-time-constant hazard above: harness_identity
+# pulls only os/re/typing plus the typing-only harness_map, never fno.graph.
+from fno.harness_identity import (  # noqa: E402
+    HARNESS_SESSION_MARKERS,
+    LEGACY_HARNESS_SESSION_MARKERS,
+)
+
 for _ambient_key in (
     "FNO_NODE", "FNO_SLUG", "FNO_PLAN",
-    "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
-    "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "OPENCODE_SESSION_ID",
+    *(m for m, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)),
 ):
     os.environ.pop(_ambient_key, None)
 
