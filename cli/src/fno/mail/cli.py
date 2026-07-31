@@ -1093,6 +1093,7 @@ def _name_lane_send(
     from fno.agents.provider_resolve import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.agents.store_fallback import is_full_session_id
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import (
         classify_durable_owner,
@@ -1129,11 +1130,14 @@ def _name_lane_send(
             if self_recipient is not None:
                 token_reachable, token_lane = None, "self-send"
         self_send = token_lane == "self-send"
-        recipient = self_recipient or (
-            canonical_handle(token_reachable.session_id)
-            if token_reachable is not None
-            else token
-        )
+        if self_recipient is not None:
+            recipient = self_recipient
+        elif token_reachable is not None:
+            recipient = canonical_handle(token_reachable.session_id)
+        elif is_full_session_id(token):
+            recipient = canonical_handle(token)
+        else:
+            recipient = token
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"

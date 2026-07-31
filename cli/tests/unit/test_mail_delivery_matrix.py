@@ -677,6 +677,49 @@ def test_unreadable_store_still_allows_an_exact_full_session_id(
     assert "queued (durable)" not in res.output
 
 
+@pytest.mark.parametrize(
+    "session_id",
+    [
+        pytest.param(ASLEEP_SID, id="uuid"),
+        pytest.param("ses_AaBbCcDdEeFf001122", id="opencode"),
+    ],
+)
+def test_unreadable_store_full_id_live_miss_queues_to_drainable_canonical_handle(
+    runner, mailbox, monkeypatch, tmp_path, session_id
+):
+    """A full-id live miss persists under the same address drain-self reads."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            discover.StoreReadError(["registry"])
+        ),
+    )
+    attempted: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda target, _message: (attempted.append(("claude", target)), False)[1],
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda target, _message: (attempted.append(("codex", target)), False)[1],
+    )
+
+    res = runner.invoke(
+        app,
+        ["mail", "send", session_id, "hi", "--from-name", "web"],
+    )
+
+    assert res.exit_code == 0, res.output
+    assert attempted == [("claude", session_id), ("codex", session_id)]
+    assert f"queued (durable) for {session_id[-8:]}" in res.output
+    drained = _drain_as(runner, monkeypatch, session_id)
+    assert len(drained) == 1
+    assert drained[0]["to"] == session_id[-8:]
+
+
 def test_a_non_claude_session_is_not_woken_as_claude(
     runner, mailbox, monkeypatch, tmp_path
 ):

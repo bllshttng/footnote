@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
+from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.harness_identity import canonical_handle, legacy_prefix_handle, session_handle_tier
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
@@ -1445,7 +1446,11 @@ def _alias_to_session_ids(
     only addressable by its alias to exit 16 with nothing queued.
     """
     path = name_map_path or default_name_map_path()
-    if not path.exists():
+    try:
+        exists = path_exists_strict(path)
+    except OSError:
+        return [], False
+    if not exists:
         return [], True
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
@@ -1481,7 +1486,15 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
     """
     hits: _Hits = []
     try:
-        entries = list(projects_dir.glob("*/*.jsonl"))
+        entries = [
+            path
+            for path in scan_files(
+                projects_dir,
+                max_depth=1,
+                include=lambda name: name.endswith(".jsonl"),
+            )
+            if path.parent != projects_dir
+        ]
     except OSError:
         return [], False
     seen: set[str] = set()
@@ -1579,12 +1592,17 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
     if base is None:
         override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
         base = Path(override) if override else Path.home() / ".claude" / "daemon"
-    if not (base / "roster.json").exists():
+    roster = base / "roster.json"
+    try:
+        exists = path_exists_strict(roster)
+    except OSError:
+        return [], False
+    if not exists:
         # No roster file is a real, readable answer: the claude daemon is not
         # running, so it hosts nothing. Distinct from an unreadable one.
         return [], True
     try:
-        raw = json.loads((base / "roster.json").read_text(encoding="utf-8"))
+        raw = json.loads(roster.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return [], False
     if not isinstance(raw, dict):
@@ -1762,14 +1780,14 @@ def resolve_reachable(
             # Exactly one hit, but a store we could not read might hold a
             # colliding session. Uniqueness is therefore unproven, and waking on
             # an unproven-unique short id is the guess this refuses to make.
-            # StoreReadError demotes durably to a real recipient rather than
-            # waking a possible stranger.
+            # StoreReadError makes short-address callers refuse before any
+            # delivery side effect rather than waking a possible stranger.
             raise StoreReadError(degraded, resolved=next(iter(found.values())))
         return next(iter(found.values())), []
     if degraded:
         # Every source that COULD be read came back empty, but at least one
-        # could not be read at all -- so absence is unproven. Refusing here
-        # would exit 16 and queue nothing; the caller demotes durably instead.
+        # could not be read at all -- so absence is unproven. The caller may
+        # still address a collision-free full id, but must refuse a short one.
         raise StoreReadError(degraded)
     return None, []
 

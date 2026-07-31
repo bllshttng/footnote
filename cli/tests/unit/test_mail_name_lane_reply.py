@@ -10,6 +10,7 @@ plus AC1-HP / AC1-ERR / AC2-ERR routing.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
@@ -119,6 +120,59 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
     assert replies[0].to == "0164189c"  # sender resolved to its canonical handle
     assert replies[0].from_ == "66667777"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
+
+
+def test_reply_refuses_when_unreadable_transcripts_hide_a_short_id_collision(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A hidden transcript candidate cannot make a visible row look unique."""
+    from fno.agents import discover
+
+    visible_sid = "aaaaaaaa-1111-2222-3333-4444deadbeef"
+    hidden_sid = "bbbbbbbb-1111-2222-3333-4444deadbeef"
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    blocked = projects / "blocked"
+    blocked.mkdir(parents=True)
+    (blocked / f"{hidden_sid}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+
+    class _ExitedRow:
+        harness_session_id = visible_sid
+        harness = "claude"
+        cwd = "/visible"
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_ExitedRow()]
+    )
+    monkeypatch.setattr(
+        discover,
+        "resolve_or_suggest",
+        lambda *_a, **_k: (None, []),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *_a, **_k: pytest.fail("unproven reply recipient was injected"),
+    )
+    monkeypatch.setattr(
+        "fno.mail.cli._wake_rung",
+        lambda *_a, **_k: pytest.fail("unproven reply recipient was woken"),
+    )
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="deadbeef", body="ping")
+
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("test user can still enumerate mode-000 directories")
+        result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    finally:
+        blocked.chmod(0o700)
+
+    assert result.exit_code != 0
+    assert "unreadable stores: transcript" in result.output
+    assert "delivered (hosted)" not in result.output
+    assert "queued (durable)" not in result.output
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
 
 
 def test_ac1err_unknown_msg_id_is_rejected_sending_nothing(runner, mailbox):
