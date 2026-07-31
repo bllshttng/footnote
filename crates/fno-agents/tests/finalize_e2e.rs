@@ -723,6 +723,13 @@ const GH_OPTIONAL_USAGE_LIMITED: &str = "#!/bin/sh\n\
        *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
      esac\n";
 
+const GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\"}],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
 const GH_OPTIONAL_READ_FAILS: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$*\" in\n\
@@ -857,6 +864,19 @@ fn finalize_usage_limit_comment_is_not_clean_optional_review() {
             .and_then(|v| v.as_str()),
         Some("optional-review-usage-limited:chatgpt-codex-connector")
     );
+}
+
+#[test]
+fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
+    let env = setup("S-optional-recovered", false);
+    set_posture(&env, "S-optional-recovered", true);
+    configure_optional_codex(&env);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT);
+    assert!(out.status.success());
+    assert!(calls(&env).contains("gh pr merge 358 --auto --merge"));
+    let event = finalized_event(&env, "S-optional-recovered");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
 }
 
 #[test]
