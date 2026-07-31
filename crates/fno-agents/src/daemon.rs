@@ -3391,7 +3391,12 @@ fn pid_confirmed_dead(pid: u32) -> bool {
 async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
     let start = Instant::now();
     loop {
-        if pid_confirmed_dead(pid) || !pid_is_ours(pid, recorded_start) && recorded_start.is_some() {
+        // Parenthesised deliberately: `&&` binds tighter than `||`, so the
+        // intent should not rest on the reader knowing that. Two distinct ways
+        // the wait is over -- the process died, or it was replaced by a
+        // different incarnation, which only a recorded token can establish.
+        let recycled = recorded_start.is_some() && !pid_is_ours(pid, recorded_start);
+        if pid_confirmed_dead(pid) || recycled {
             return true;
         }
         if start.elapsed() >= budget {
@@ -5491,7 +5496,10 @@ mod tests {
             !pid_is_ours(i32::MAX as u32 + 1, Some(123)),
             "anything past i32::MAX wraps negative"
         );
-        assert!(pid_confirmed_dead(u32::MAX), "out-of-range is never running");
+        assert!(
+            pid_confirmed_dead(u32::MAX),
+            "out-of-range is never running"
+        );
     }
 
     #[test]
