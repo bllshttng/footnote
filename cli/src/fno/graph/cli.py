@@ -9565,7 +9565,10 @@ def cmd_supersede(
         # would strand under a dead unit. Gates on liveness, not type - the
         # `type` field is not maintained reliably enough to guard on (the epic
         # that prompted this was itself typed `feature`).
-        live_kids = _live_child_ids(entries, replaces)
+        # Use the canonical resolved id, not the raw `replaces` argument: an
+        # abbreviated id (ab-9728) resolves via _find_node but would never
+        # equal a child's full canonical `parent`, silently bypassing the guard.
+        live_kids = _live_child_ids(entries, old_node.get("id"))
         if live_kids and not force:
             typer.echo(
                 f"Error: cannot supersede {replaces}: it still has "
@@ -9679,6 +9682,7 @@ def cmd_unsupersede(
         raise typer.Exit(code=1)
 
     was_superseded_holder: list[bool] = [False]
+    canonical_id_box: list[str] = [node_id]
 
     def mutator(entries):
         node = _find_node(entries, node_id)
@@ -9687,6 +9691,7 @@ def cmd_unsupersede(
             raise typer.Exit(code=1)
         replacer = node.get("superseded_by")
         was_superseded_holder[0] = bool(replacer)
+        canonical_id_box[0] = node.get("id", node_id)
         if not replacer:
             # Not superseded: nothing to reverse. Return WITHOUT touching
             # deferred_at, so a node that is merely deferred (not superseded)
@@ -9694,11 +9699,12 @@ def cmd_unsupersede(
             return entries
         # Drop the backref so the replacer's `supersedes` list no longer claims
         # a node it no longer supersedes - a stale claim would make the chain
-        # read as live after we just broke it.
+        # read as live after we just broke it. Compare against the canonical id,
+        # not the (possibly abbreviated) argument: the backref stores the full id.
         new_node = _find_node(entries, replacer)
         if new_node is not None:
             new_node["supersedes"] = [
-                s for s in (new_node.get("supersedes") or []) if s != node_id
+                s for s in (new_node.get("supersedes") or []) if s != node["id"]
             ]
         node["superseded_by"] = None
         node["deferred_at"] = None
@@ -9709,12 +9715,32 @@ def cmd_unsupersede(
 
     if not was_superseded_holder[0]:
         typer.echo(f"warning: {node_id} was not superseded", err=True)
+    else:
+        # Give a revived node the same streak-reset boundary cmd_undefer gives a
+        # human-recovered one: a superseded node is often auto-deferred first, so
+        # without this the next maintain pass could re-defer it from stale
+        # failure history without a single fresh failure. Best-effort, like undefer.
+        try:
+            from fno.agents.events import emit as _emit_event
+            from fno.graph.failure import events_path as _events_path
+
+            _emit_event("node_undeferred", path=_events_path(), unit_id=canonical_id_box[0])
+        except Exception:
+            pass
     typer.echo(f"Unsuperseded {node_id}")
     # Force the revived node's plan status off terminal `superseded` (the
     # forward-only projector refuses to leave a terminal): without this the
     # graph is active while the plan doc stays superseded. Scoped to the revived
     # node only, not the ancestors/siblings the converger also repaints.
-    _project_plans_from_graph([node_id], force_status_off_terminal_for=node_id)
+    cid = canonical_id_box[0]
+    _project_plans_from_graph([cid], force_status_off_terminal_for=cid)
+    # The graph status was persisted during the mutation above while the plan
+    # still read `superseded` (so it derived `ready`). Projection has now
+    # corrected the plan, so recompute+persist: otherwise `backlog get` and the
+    # board keep reporting `ready` and a fail-closed `design` never makes the
+    # revived node non-dispatchable. A no-op mutator still triggers recompute.
+    if was_superseded_holder[0]:
+        locked_mutate_graph(_graph_path(), lambda entries: entries)
 
 
 def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:

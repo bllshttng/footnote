@@ -62,6 +62,14 @@ def _plan_status(path: Path):
     return fields.get("status")
 
 
+def _set_plan_status(path: Path, status: str) -> None:
+    from fno.plan._stamp import read_plan_file, write_plan_file
+
+    target, fields, rest = read_plan_file(path)
+    fields["status"] = status
+    write_plan_file(target, fields, rest)
+
+
 def _write_quick_plan(path: Path, files: list[str], title: str = "Test plan") -> Path:
     """Write a single-file quick plan with a Files to Modify table."""
     rows = "\n".join(f"| `{f}` | edit |" for f in files)
@@ -677,6 +685,44 @@ def test_force_supersede_does_not_corrupt_shared_plan(tmp_graph, tmp_path):
     from fno.plan._stamp import read_plan_file
     _t, fields, _r = read_plan_file(shared)
     assert fields.get("priority") == "p0", f"shared plan corrupted to {fields.get('priority')!r}"
+
+
+def test_supersede_guard_not_bypassed_by_abbreviated_id(tmp_graph, tmp_path):
+    """The guard must compare against the canonical resolved id, not the raw
+    --replaces argument: an abbreviated id resolves via _find_node but never
+    equals a child's full canonical parent, which would silently bypass it."""
+    entries = _read_entries(tmp_graph)
+    _seed_node(entries, id_="ab-aabbccdd", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
+    _seed_node(entries, id_="ab-eeffffff", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    kid = _seed_node(entries, id_="ab-11223344", plan_path=str(_write_quick_plan(tmp_path / "kid.md", ["z.py"])))
+    kid["parent"] = "ab-aabbccdd"
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    # Abbreviated --replaces (resolves to ab-aabbccdd); the live child must
+    # still trip the guard.
+    res = _invoke("backlog", "supersede", "ab-eeffffff", "--replaces", "ab-aabbcc", "--reason", "fold")
+    assert res.exit_code != 0
+    assert "live child" in res.output.lower()
+    assert "ab-11223344" in res.output
+
+
+def test_unsupersede_preserves_done_plan(tmp_graph, tmp_path):
+    """A node with both completed_at and superseded_by (e.g. `done --force` on
+    a superseded advisory) stays done through unsupersede: done is read from
+    completed_at, not the stale plan rung, so it must not regress to design."""
+    plan = _write_quick_plan(tmp_path / "old.md", ["x.py"])
+    entries = _read_entries(tmp_graph)
+    node = _seed_node(entries, id_="ab-old", plan_path=str(plan))
+    node["completed_at"] = "2026-07-01T00:00:00+00:00"
+    node["superseded_by"] = "ab-new"
+    node["status"] = "done"
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+    _set_plan_status(plan, "superseded")
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+    assert res.exit_code == 0, res.output
+    assert _plan_status(plan) == "done"
 
 
 def test_unsupersede_not_superseded_is_idempotent(tmp_graph, tmp_path):

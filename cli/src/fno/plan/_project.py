@@ -165,15 +165,16 @@ def project_node_to_plan(
         ):
             # Reversal (unsupersede): the forward-only projector refuses to
             # leave terminal `superseded`, so force the plan off it or the doc
-            # stays terminal while the graph is active. Only `in_review`
-            # (pr_number) and `in_progress` (lock) are safe to trust: they come
-            # from graph FIELDS, not the plan. Every other graph status here was
-            # derived from the stale superseded plan doc itself (`SUPERSEDED`
-            # rung -> graph `ready`) or has no plan rung (blocked), and the
-            # prior rung was overwritten by supersede so it cannot be recovered.
-            # Fail closed to non-dispatchable `design` rather than stamp
-            # `ready`, which would let unfinished planning work auto-dispatch.
-            forced = graph_status if graph_status in ("in_review", "in_progress") else "design"
+            # stays terminal while the graph is active. Only the field-derived
+            # statuses are safe to trust: done (completed_at), in_review
+            # (pr_number), in_progress (lock) come from graph FIELDS, not the
+            # plan. Every other graph status here was derived from the stale
+            # superseded plan doc itself (`SUPERSEDED` rung -> graph `ready`) or
+            # has no plan rung (blocked), and the prior rung was overwritten by
+            # supersede so it cannot be recovered. Fail closed to
+            # non-dispatchable `design` rather than stamp `ready`, which would
+            # let unfinished planning work auto-dispatch.
+            forced = graph_status if graph_status in ("done", "in_review", "in_progress") else "design"
             if forced != "superseded" and current_status != forced:
                 fields["status"] = forced
                 changed = True
