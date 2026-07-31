@@ -8714,8 +8714,8 @@ def cmd_rank(
 ) -> None:
     """Curate a node's position within its (column, project) board lane.
 
-    Rank is a nullable float ordered ahead of the (priority, created_at)
-    fallback within a lane; it never changes a node's column. ``--before`` /
+    Rank is a nullable float ordered ahead of the shared epic-aware work-order
+    suffix within a lane; it never changes a node's column. ``--before`` /
     ``--after`` require a *ranked* anchor in the same lane - seed one with
     ``--top`` first. Float midpoints mean inserts never renumber siblings.
     """
