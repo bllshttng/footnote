@@ -20,17 +20,13 @@ Lock-release semantics:
   `handle.detach()` BEFORE re-raising so the `finally` branch skips
   `LOCK_UN`. A stale lock signals "manual cleanup needed" to the next
   caller because a successful `claude --bg` left a supervisor session the
-  registry doesn't know about. The file handle is still closed; the lock
-  persists only until the process exits or another holder acquires it
-  (file-handle close drops POSIX flocks, but the orphan supervisor is the
-  real signal — see AC1-FR "registry write fails after subprocess
-  success").
+  registry doesn't know about. The process retains the file handle so the
+  POSIX flock remains held until that process exits.
 
-For cross-process visibility of `detach()`, callers using subprocess
-spawning or PTY supervisors typically hold the lock across the entire
-operation in one process, so the file-handle-close-drops-flock semantic
-is acceptable. If a future US needs true persistence of the lock past
-process exit, switch from `fcntl.flock` to a PID-file or sentinel file.
+This detached lock is a process-lifetime signal, not a durable sentinel:
+process exit closes the retained file descriptor and releases the flock.
+If a future use needs persistence past process exit, switch from
+`fcntl.flock` to a PID-file or sentinel file.
 """
 from __future__ import annotations
 
@@ -41,6 +37,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from fno.agents.registry import _agent_lock_path
+from fno.time_budget import validate_timeout_budget
 
 # Threshold above which the on_wait callback fires (AC1-UI lock-wait).
 _ON_WAIT_THRESHOLD_SECONDS = 1.0
@@ -130,6 +127,11 @@ def hold_agent_lock(
         A :class:`_LockHandle` whose `detach()` method suppresses the
         finally-release. Default behavior releases on exit.
     """
+    validate_timeout_budget(
+        timeout,
+        label="agent lock",
+        poll=_POLL_INTERVAL_SECONDS,
+    )
     lock_file = _agent_lock_path(name, registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 

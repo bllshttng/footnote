@@ -88,11 +88,18 @@ adopted headless threads. It previously had zero command surface.
   isolation (so `turn_ceiling >= 1` fires while unrelated keys like `work:` are
   untouched), then written atomically (temp + `os.replace`) under a file lock.
   An invalid value leaves the file unchanged and exits non-zero.
-- **First-use confirm** (`dispatch._a2a_first_use_gate`): the first time the
-  relay would fire its first autonomous hop, an interactive run asks once and
-  persists the answer (so it never re-asks). A headless / no-TTY run applies
-  the CONSERVATIVE fallback (autonomous relay OFF, a single observed hop)
-  **regardless of the configured `auto` default** and is never blocked (Locked
-  Decision 7 / F4) — headless must never inherit `auto:true` and silently burn
-  plan credit. Only the autonomous relay is gated; the single first hop still
-  runs.
+- **First-use confirm** (`dispatch._a2a_first_use_gate`): the first time the relay would fire its first autonomous hop, an interactive run asks once and persists the answer (so it never re-asks).
+  The TTY read has a five-second deadline; an unanswered or unreadable prompt applies observed mode for that send without persisting a marker or setting.
+  Confirmation persistence uses a bounded config-lock wait; a timeout or write failure applies the same observed mode without writing the marker.
+  A marker-write failure is loud and keeps the current send in observed mode even when the setting was already saved.
+  A headless / no-TTY run applies the CONSERVATIVE fallback (autonomous relay OFF, a single observed hop) **regardless of the configured `auto` default** and is never blocked (Locked Decision 7 / F4) — headless must never inherit `auto:true` and silently burn plan credit.
+  Only the autonomous relay is gated; the single first hop still runs.
+
+## Send evidence invariant
+
+A peer-mail caller may claim coordination only after `delivered (hosted)`, `delivered (woken)`, a durable `msg-* queued` receipt, or independent recipient-transcript evidence.
+A timeout, interruption, or command with no terminal receipt proves no send outcome; the canonical bus lock is bounded and reports exit 12 with `no durable envelope was written` when it cannot append.
+A completed live delivery cannot be undone by a bounded post-delivery registry-stamp timeout; the command preserves the hosted receipt and warns the caller not to retry.
+Discovery alias-map contention is bounded and falls back to canonical handles before delivery.
+After a confirmed first switchboard hop, fork or standard-stream detachment failure stops only the optional continuation and cannot delay the hosted receipt.
+Every timeout and polling seam added to these paths rejects non-finite or out-of-range values before constructing a deadline or performing delivery.

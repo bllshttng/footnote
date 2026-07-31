@@ -10,6 +10,7 @@ host-independent.
 """
 from __future__ import annotations
 
+import fcntl
 import json
 import subprocess
 import time
@@ -324,6 +325,44 @@ def test_alias_write_failure_exposes_only_canonical_handle(tmp_path, monkeypatch
         classify_truth=False,
     )
 
+    assert [session.handle for session in sessions] == ["cafefeed"]
+    assert not name_map.exists()
+
+
+def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypatch):
+    """A busy UX alias map cannot block canonical mail addressing."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    session_id = "aaaaaaaa-1111-7222-8333-4444cafefeed"
+    transcript = _write_session(
+        sdir,
+        913,
+        session_id=session_id,
+        job_id="deadbeef",
+        cwd="/Users/x/code/project",
+    )
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(discover, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
+    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "w") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        started = time.monotonic()
+        sessions = discover.discover_live_sessions(
+            sessions_dir=sdir,
+            projects_dir=tmp_path / "no-projects",
+            codex_sessions_dir=tmp_path / "no-codex",
+            opencode_storage_dir=tmp_path / "no-opencode",
+            name_map_path=name_map,
+            registry_path=tmp_path / "no-registry.json",
+            psutil_mod=_FakePsutil({913: transcript}),
+            project_resolver=lambda _cwd: "project",
+            classify_truth=False,
+        )
+
+    assert time.monotonic() - started < 0.5
     assert [session.handle for session in sessions] == ["cafefeed"]
     assert not name_map.exists()
 

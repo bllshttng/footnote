@@ -6,8 +6,12 @@ AC6-FR (answered once, never re-asks), and the observed/malformed pass-through.
 """
 from __future__ import annotations
 
-import pytest
+import fcntl
+import os
+import time
 import tomllib
+
+import pytest
 
 from fno import paths
 from fno.agents import dispatch
@@ -16,14 +20,19 @@ from fno.paths_testing import use_tmpdir
 
 class _FakeIn:
     def __init__(self, line: str, tty: bool = True):
-        self._line = line
         self._tty = tty
+        self._read_fd, write_fd = os.pipe()
+        os.write(write_fd, line.encode())
+        os.close(write_fd)
 
     def isatty(self) -> bool:
         return self._tty
 
+    def fileno(self) -> int:
+        return self._read_fd
+
     def readline(self) -> str:
-        return self._line
+        return os.read(self._read_fd, 4096).decode()
 
 
 class _FakeErr:
@@ -93,6 +102,145 @@ def test_ac6_edge_no_tty_conservative_off(tmp_path, monkeypatch):
     assert "conservative fallback" in err.text()
     # NOT persisted -> no marker, so an interactive run later still asks.
     assert not (paths.state_dir() / ".a2a-confirmed").exists()
+
+
+def test_ac3_err_unanswered_tty_times_out_without_persisting(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    read_fd, write_fd = os.pipe()
+
+    class _UnansweredTTY:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return read_fd
+
+        def readline(self):
+            return os.read(read_fd, 4096).decode()
+
+    err = _FakeErr()
+    monkeypatch.setattr(dispatch.sys, "stdin", _UnansweredTTY())
+    monkeypatch.setattr(dispatch.sys, "stderr", err)
+    monkeypatch.delenv("FNO_A2A_NO_CONFIRM", raising=False)
+
+    started = time.monotonic()
+    try:
+        effective = dispatch._a2a_first_use_gate(
+            True,
+            6,
+            confirm_timeout_seconds=0.05,
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert time.monotonic() - started < 0.5
+    assert effective is False
+    assert "timed out" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
+
+
+def test_ac3_err_tty_eof_falls_back_without_persisting(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="")
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not be read" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_ac3_err_invalid_prompt_timeout_falls_back(tmp_path, monkeypatch, timeout):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+
+    assert (
+        dispatch._a2a_first_use_gate(
+            True,
+            6,
+            confirm_timeout_seconds=timeout,
+        )
+        is False
+    )
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+
+
+def test_ac3_err_config_lock_contention_is_bounded_and_unconfirmed(
+    tmp_path, monkeypatch
+):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+
+    from fno.config import writer
+
+    target = writer._target_path("global", None)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    lock_path = target.with_suffix(target.suffix + ".lock")
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        effective = dispatch._a2a_first_use_gate(
+            True,
+            6,
+            config_lock_timeout_seconds=0.05,
+        )
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert time.monotonic() - started < 0.5
+    assert effective is False
+    assert "could not persist" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not target.exists()
+
+
+def test_ac3_err_config_write_failure_does_not_persist_marker(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="n\n")
+
+    from fno.config import writer
+
+    monkeypatch.setattr(
+        writer,
+        "set_config_value",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read only")),
+    )
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not persist" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+
+
+def test_ac4_hp_marker_write_failure_is_visible(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+    marker = paths.state_dir() / ".a2a-confirmed"
+    original_write_text = type(marker).write_text
+
+    def _write_text(path, *args, **kwargs):
+        if path == marker:
+            raise OSError("marker read only")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(marker), "write_text", _write_text)
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not write confirmation marker" in err.text()
+    assert not marker.exists()
 
 
 def test_ac6_fr_marker_means_no_reask(tmp_path, monkeypatch):

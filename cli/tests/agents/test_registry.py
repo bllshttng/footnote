@@ -12,9 +12,7 @@ from __future__ import annotations
 import fcntl
 import json
 import multiprocessing as mp
-import os
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -36,6 +34,15 @@ def _minimal_entry(name: str = "test-agent", **overrides) -> dict:
     }
     base.update(overrides)
     return base
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_registry_lock_rejects_nonterminating_timeout(tmp_path, timeout) -> None:
+    from fno.agents.registry import _hold_registry_lock
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        with _hold_registry_lock(tmp_path / "registry.json", timeout=timeout):
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -148,8 +155,6 @@ def test_ac2_err_atomic_write_on_exception(tmp_path: Path, monkeypatch) -> None:
     # Now simulate a write that raises mid-way by patching json.dumps
     import fno.agents.registry as reg_module
 
-    original_dumps = json.dumps
-
     def _exploding_dumps(*args, **kwargs):
         raise RuntimeError("simulated kill -9 mid-write")
 
@@ -183,7 +188,7 @@ def _write_agent_with_held_lock(
 ) -> None:
     """Child-process: hold the per-agent flock for hold_seconds, then write."""
     from pathlib import Path as P
-    from fno.agents.registry import AgentEntry, write_registry, _agent_lock_path
+    from fno.agents.registry import AgentEntry, _agent_lock_path, write_registry
 
     registry_path = P(registry_path_str)
     lock_path = _agent_lock_path(agent_name, registry_path)
@@ -208,7 +213,7 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
     """AC3-HP: concurrent writes to the same agent name are serialized by flock."""
     use_tmpdir(monkeypatch, tmp_path)
 
-    from fno.agents.registry import AgentEntry, write_registry, _agent_lock_path
+    from fno.agents.registry import _agent_lock_path
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
@@ -548,8 +553,6 @@ def test_write_registry_cleans_orphan_tmp_on_failure(tmp_path: Path, monkeypatch
 
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
-
-    original_replace = os.replace
 
     def _explode_replace(*args, **kwargs):
         raise OSError("simulated disk full during rename")

@@ -7,9 +7,13 @@ All existing test_send.py tests remain unchanged.
 from __future__ import annotations
 
 import json
+import os
 import socket
 import struct
+import subprocess
+import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -549,6 +553,77 @@ def test_switchboard_observed_single_hop(monkeypatch) -> None:
     assert calls[0]["to"] == "B" and calls[0]["from"] == "A"
 
 
+def test_unanswered_confirmation_continues_as_observed_switchboard_hop(
+    tmp_path, monkeypatch
+) -> None:
+    """A prompt timeout still reaches a terminal observed delivery."""
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_A2A_NO_CONFIRM", raising=False)
+    from fno.agents import dispatch as dispatch_mod
+
+    read_fd, write_fd = os.pipe()
+
+    class _UnansweredTTY:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return read_fd
+
+        def readline(self):
+            return os.read(read_fd, 4096).decode()
+
+    class _TTYErr:
+        def isatty(self):
+            return True
+
+        def write(self, _text):
+            return None
+
+        def flush(self):
+            return None
+
+    monkeypatch.setattr(dispatch_mod.sys, "stdin", _UnansweredTTY())
+    monkeypatch.setattr(dispatch_mod.sys, "stderr", _TTYErr())
+    real_gate = dispatch_mod._a2a_first_use_gate
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_a2a_first_use_gate",
+        lambda auto, ceiling: real_gate(
+            auto,
+            ceiling,
+            confirm_timeout_seconds=0.05,
+        ),
+    )
+    monkeypatch.setattr(dispatch_mod, "_load_a2a_settings", lambda: (True, 6))
+    calls: list[dict] = []
+
+    def _rpc(_method, params, **_kwargs):
+        calls.append(params)
+        return {"delivered": True, "identity_verified": True, "reply": "r1"}
+
+    monkeypatch.setattr(dispatch_mod, "_daemon_rpc", _rpc)
+    started = time.monotonic()
+    try:
+        delivered = dispatch_mod._switchboard_exchange(
+            "B",
+            "A",
+            "msg",
+            to_identity=_sb_identity("B"),
+            from_identity=_sb_identity("A"),
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert time.monotonic() - started < 0.5
+    assert delivered is True
+    assert len(calls) == 1
+    assert calls[0]["mirror"] is True
+    assert not (tmp_path / ".fno" / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
+
+
 def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -> None:
     """ab-3bd520ab: auto=True drives B synchronously (hop 1 = the actual delivery)
     then KICKS OFF the relay in the background and returns immediately. The caller
@@ -591,6 +666,259 @@ def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -
             {"recipient_identities": _sb_identities("B", "A")},
         )
     ], "the relay is handed off with B's reply as the seed"
+
+
+def test_background_relay_first_fork_failure_drops_continuation_without_inline_wait(
+    monkeypatch,
+) -> None:
+    """A resource-exhausted launcher cannot run the relay before the receipt."""
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "fork",
+        lambda: (_ for _ in ()).throw(OSError("fork unavailable")),
+    )
+    relay_calls: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    dispatch_mod._kickoff_background_relay(
+        "B",
+        "A",
+        "reply",
+        6,
+        recipient_identities=_sb_identities("A", "B"),
+    )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-detach-failed"
+
+
+def test_background_relay_second_fork_failure_exits_intermediate_without_relay(
+    monkeypatch,
+) -> None:
+    """The parent wait stays short when the grandchild cannot be created."""
+    from fno.agents import dispatch as dispatch_mod
+
+    forks = iter((0, OSError("grandchild unavailable")))
+
+    def _fork():
+        result = next(forks)
+        if isinstance(result, OSError):
+            raise result
+        return result
+
+    class _ChildExit(BaseException):
+        pass
+
+    monkeypatch.setattr(dispatch_mod.os, "fork", _fork)
+    monkeypatch.setattr(dispatch_mod.os, "setsid", lambda: None)
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "_exit",
+        lambda _code: (_ for _ in ()).throw(_ChildExit()),
+    )
+    relay_calls: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    with pytest.raises(_ChildExit):
+        dispatch_mod._kickoff_background_relay(
+            "B",
+            "A",
+            "reply",
+            6,
+            recipient_identities=_sb_identities("A", "B"),
+        )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-detach-failed"
+
+
+def test_detach_stdio_reports_devnull_open_failure(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            dispatch_mod.os,
+            "open",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fd exhausted")),
+        )
+        assert dispatch_mod._detach_stdio() is False
+
+
+def test_detach_stdio_reports_partial_dup_failure_and_closes_source(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    def _dup2(_source, destination):
+        duplicated.append(destination)
+        if destination == 1:
+            raise OSError("stdout read only")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dispatch_mod.os, "open", lambda *_args, **_kwargs: 9)
+        patch.setattr(dispatch_mod.os, "dup2", _dup2)
+        patch.setattr(dispatch_mod.os, "close", lambda fd: closed.append(fd))
+        assert dispatch_mod._detach_stdio() is False
+    assert duplicated == [0, 1, 2]
+    assert closed == [9]
+
+
+def test_background_relay_stdio_detach_failure_exits_without_relay(monkeypatch) -> None:
+    """A grandchild retaining capture pipes cannot withhold the CLI terminal."""
+    from fno.agents import dispatch as dispatch_mod
+
+    forks = iter((0, 0))
+
+    class _ChildExit(BaseException):
+        pass
+
+    monkeypatch.setattr(dispatch_mod.os, "fork", lambda: next(forks))
+    monkeypatch.setattr(dispatch_mod.os, "setsid", lambda: None)
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "_exit",
+        lambda _code: (_ for _ in ()).throw(_ChildExit()),
+    )
+    monkeypatch.setattr(dispatch_mod, "_detach_stdio", lambda: False)
+    relay_calls: list[tuple] = []
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    with pytest.raises(_ChildExit):
+        dispatch_mod._kickoff_background_relay(
+            "B",
+            "A",
+            "reply",
+            6,
+            recipient_identities=_sb_identities("A", "B"),
+        )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-stdio-detach-failed"
+
+
+def test_real_relay_descendant_releases_captured_receipt_pipes(
+    tmp_path, monkeypatch
+) -> None:
+    """A real double-forked relay cannot delay the hosted CLI-style receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import bus_log_path
+
+    write_registry(
+        [
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
+                cwd=str(tmp_path),
+                log_path=str(tmp_path / "red.log"),
+                short_id="abcd1234",
+                status="live",
+            )
+        ]
+    )
+    relay_marker = tmp_path / "relay-started"
+    script = """
+import os
+import time
+from pathlib import Path
+from fno.agents import dispatch
+
+dispatch._load_a2a_settings = lambda: (True, 6)
+dispatch._registered_family1_state = lambda _entry: "working"
+
+def run_relay(*_args, **_kwargs):
+    Path(os.environ["FNO_TEST_RELAY_MARKER"]).write_text("started")
+    time.sleep(4)
+
+dispatch._run_relay_loop = run_relay
+dispatch._daemon_rpc = lambda *_args, **_kwargs: {
+    "delivered": True,
+    "identity_verified": True,
+    "reply": "continue",
+}
+
+def deliver(entry, body, from_name, mail=None, sender_entry=None):
+    return dispatch._switchboard_exchange(
+        entry.name,
+        from_name,
+        body,
+        to_identity={
+            "harness": "claude",
+            "session_id": entry.harness_session_id,
+            "short_id": entry.short_id,
+            "created_at": entry.created_at,
+        },
+        from_identity={
+            "harness": "codex",
+            "session_id": "sender-session",
+            "short_id": "sender01",
+            "created_at": "sender-created",
+        },
+    )
+
+dispatch._deliver_live = deliver
+result = dispatch.dispatch_send(
+    name="red",
+    message="hello",
+    provider=None,
+    cwd=Path.cwd(),
+)
+print(f"{result.msg_id} delivered ({result.delivery})")
+"""
+    env = os.environ.copy()
+    env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=8,
+        check=False,
+    )
+
+    assert time.monotonic() - started < 2.5
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(result.stdout.splitlines()) == 1
+    assert result.stdout.strip().endswith("delivered (hosted)")
+    assert not bus_log_path().exists()
+    marker_deadline = time.monotonic() + 2.0
+    while not relay_marker.exists() and time.monotonic() < marker_deadline:
+        time.sleep(0.01)
+    assert relay_marker.read_text() == "started"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:

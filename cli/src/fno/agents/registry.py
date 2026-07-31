@@ -30,6 +30,7 @@ import json
 import os
 import re
 import sys
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -43,6 +44,7 @@ from fno.harness_identity import (
     session_identity_key,
     sync_harness_aliases,
 )
+from fno.time_budget import validate_timeout_budget
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
@@ -638,13 +640,41 @@ def _registry_lock_path(registry_path: Path) -> Path:
     return registry_path.parent / "locks" / "_registry.lock"
 
 
+class RegistryLockTimeout(TimeoutError):
+    """The registry-wide lock stayed contended past a caller's budget."""
+
+
 @contextlib.contextmanager
-def _hold_registry_lock(registry_path: Path) -> Iterator[None]:
-    """Block-acquire the registry-wide flock for the duration of the with-block."""
+def _hold_registry_lock(
+    registry_path: Path,
+    *,
+    timeout: Optional[float] = None,
+    poll_seconds: float = 0.02,
+) -> Iterator[None]:
+    """Acquire the registry-wide flock, optionally within a caller budget."""
     lock_file = _registry_lock_path(registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
     with open(lock_file, "w") as fh:
-        fcntl.flock(fh, fcntl.LOCK_EX)
+        if timeout is None:
+            fcntl.flock(fh, fcntl.LOCK_EX)
+        else:
+            validate_timeout_budget(
+                timeout,
+                label="registry lock",
+                poll=poll_seconds,
+            )
+            deadline = time.monotonic() + timeout
+            while True:
+                try:
+                    fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise RegistryLockTimeout(
+                            f"registry lock timeout after {timeout:g}s at {lock_file}"
+                        )
+                    time.sleep(min(poll_seconds, remaining))
         try:
             yield
         finally:
@@ -1138,6 +1168,8 @@ def restamp_harness_session_id(
 def update_registry(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     path: Optional[Path] = None,
+    *,
+    lock_timeout: Optional[float] = None,
 ) -> list[AgentEntry]:
     """Atomically load -> apply ``updater`` -> write the registry.
 
@@ -1154,7 +1186,7 @@ def update_registry(
     lock (test fixtures, repair tooling).
     """
     target = _registry_path(path)
-    with _hold_registry_lock(target):
+    with _hold_registry_lock(target, timeout=lock_timeout):
         current = load_registry(path=target)
         before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))

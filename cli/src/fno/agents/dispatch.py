@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextvars
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -108,6 +109,7 @@ def _update_registry_if_recipient_unchanged(
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
     *,
     registry_path: Optional[Path] = None,
+    registry_lock_timeout: Optional[float] = None,
 ) -> bool:
     """Apply a post-side-effect write only to the selected recipient.
 
@@ -130,9 +132,19 @@ def _update_registry_if_recipient_unchanged(
         return updater(entries)
 
     if registry_path is None:
-        update_registry(_guarded)
+        if registry_lock_timeout is None:
+            update_registry(_guarded)
+        else:
+            update_registry(_guarded, lock_timeout=registry_lock_timeout)
     else:
-        update_registry(_guarded, path=registry_path)
+        if registry_lock_timeout is None:
+            update_registry(_guarded, path=registry_path)
+        else:
+            update_registry(
+                _guarded,
+                path=registry_path,
+                lock_timeout=registry_lock_timeout,
+            )
     return applied
 
 
@@ -4455,28 +4467,26 @@ def _run_relay_loop(
     return turns
 
 
-def _detach_stdio() -> None:
-    """Redirect fd 0/1/2 to /dev/null so a detached relay cannot wedge on (or
-    spew to) a closed terminal."""
+def _detach_stdio() -> bool:
+    """Detach every standard fd, returning false if any still stays inherited."""
     import os
 
     try:
         devnull = os.open(os.devnull, os.O_RDWR)
     except OSError:
-        # fd limits / permissions: nothing we can redirect to. The detached
-        # grandchild proceeds without redirection rather than crashing on an
-        # unbound `devnull` (gemini review).
-        return
+        return False
+    detached = True
     for fd in (0, 1, 2):
         try:
             os.dup2(devnull, fd)
         except OSError:
-            pass
+            detached = False
     if devnull > 2:
         try:
             os.close(devnull)  # the dup2'd copies remain; don't leak the original
         except OSError:
             pass
+    return detached
 
 
 def _kickoff_background_relay(
@@ -4497,21 +4507,20 @@ def _kickoff_background_relay(
     happened synchronously in :func:`_switchboard_exchange`; this only continues
     the autonomous A<->B exchange. Double-fork + ``setsid`` so the relay outlives
     the short-lived CLI process and reparents to init (no zombie). A fork failure
-    degrades to running the relay INLINE (blocking, but the turns still happen)
-    rather than dropping them.
+    stops only this optional continuation and stays visible; hop one is already
+    delivered, so running inline would suppress its receipt and make retry unsafe.
     """
     import os
 
     try:
         pid = os.fork()
-    except OSError:
-        _run_relay_loop(
-            to_name,
+    except OSError as exc:
+        _emit_relay_stopped(
             from_name,
-            seed,
-            ceiling,
-            mail_ctxs,
-            recipient_identities=recipient_identities,
+            to_name,
+            1,
+            "relay-detach-failed",
+            error=exc,
         )
         return
     if pid > 0:
@@ -4527,11 +4536,25 @@ def _kickoff_background_relay(
         os.setsid()
         try:
             grandchild = os.fork()
-        except OSError:
-            grandchild = 0  # fork failed; run the relay in THIS child
+        except OSError as exc:
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-detach-failed",
+                error=exc,
+            )
+            return
         if grandchild > 0:
             os._exit(0)
-        _detach_stdio()
+        if not _detach_stdio():
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-stdio-detach-failed",
+            )
+            return
         try:
             _run_relay_loop(
                 to_name,
@@ -4555,7 +4578,17 @@ def _kickoff_background_relay(
         os._exit(0)
 
 
-def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
+_A2A_CONFIRM_TIMEOUT_SECONDS = 5.0
+_A2A_CONFIG_LOCK_TIMEOUT_SECONDS = 1.0
+
+
+def _a2a_first_use_gate(
+    auto: bool,
+    ceiling: int,
+    *,
+    confirm_timeout_seconds: float = _A2A_CONFIRM_TIMEOUT_SECONDS,
+    config_lock_timeout_seconds: float = _A2A_CONFIG_LOCK_TIMEOUT_SECONDS,
+) -> bool:
     """First-use confirm for the autonomous a2a relay (US6, ab-098967b4).
 
     Returns the EFFECTIVE ``auto`` after gating. Only the autonomous relay
@@ -4604,22 +4637,62 @@ def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
     )
     sys.stderr.flush()
     try:
-        answer = sys.stdin.readline().strip().lower()
+        from fno.time_budget import validate_timeout_budget
+
+        validate_timeout_budget(
+            confirm_timeout_seconds,
+            label="a2a confirmation",
+        )
+        ready, _, _ = select.select(
+            [sys.stdin],
+            [],
+            [],
+            confirm_timeout_seconds,
+        )
+        if not ready:
+            raise TimeoutError
+        raw_answer = sys.stdin.readline()
+        if raw_answer == "":
+            raise EOFError
+        answer = raw_answer.strip().lower()
     except Exception:
-        return False  # cannot read an answer -> conservative
+        sys.stderr.write(
+            "\nfno-agents a2a: confirmation timed out or could not be read; "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     keep_on = answer in ("", "y", "yes")
 
     try:
         from fno.config.writer import set_config_value
 
-        set_config_value("config.agents.a2a.auto", "true" if keep_on else "false", scope="global")
-    except Exception:
-        pass  # best-effort persist; the marker below still prevents re-asking.
+        set_config_value(
+            "config.agents.a2a.auto",
+            "true" if keep_on else "false",
+            scope="global",
+            lock_timeout=config_lock_timeout_seconds,
+        )
+    except Exception as exc:
+        sys.stderr.write(
+            f"\nfno-agents a2a: could not persist confirmation ({exc}); "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("answered\n", encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as exc:
+        sys.stderr.write(
+            f"\nfno-agents a2a: could not write confirmation marker ({exc}); "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     return keep_on
 
 
@@ -5438,6 +5511,8 @@ def dispatch_send(
     cwd: "Path",
     lock_timeout: float = _DEFAULT_LOCK_TIMEOUT,
     from_name: str = _FROM_NAME_DEFAULT,
+    *,
+    registry_stamp_timeout_seconds: float = 1.0,
 ) -> "DispatchSendResult":
     """Dispatch an async ``send`` to an already-registered agent.
 
@@ -5475,6 +5550,13 @@ def dispatch_send(
     # than being refused as a badly-shaped name.
     _validate_inputs(
         name=name, message=message, from_name=from_name, name_is_address=True
+    )
+
+    from fno.time_budget import validate_timeout_budget
+
+    validate_timeout_budget(
+        registry_stamp_timeout_seconds,
+        label="post-delivery registry stamp",
     )
 
     # 2. Body size cap (exit 2 BEFORE any write).
@@ -5828,6 +5910,7 @@ def dispatch_send(
                     selected_identity,
                     _stamp,
                     registry_path=registry_path,
+                    registry_lock_timeout=registry_stamp_timeout_seconds,
                 )
                 if not stamp_written:
                     warning = (

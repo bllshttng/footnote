@@ -19,10 +19,13 @@ import json
 import os
 import secrets
 import sys
+import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
+
+from fno.time_budget import validate_timeout_budget
 
 
 ENVELOPE_VERSION = 1
@@ -32,6 +35,8 @@ ENVELOPE_VERSION = 1
 # and operators; a malformed override degrades to the default rather than raising.
 _DEFAULT_MAX_BYTES = 5 * 1024 * 1024  # 5 MB
 _DEFAULT_RETAIN = 5  # rotated segments kept; cursors must resolve into these
+_LOCK_TIMEOUT_SECONDS = 5.0
+_LOCK_POLL_SECONDS = 0.05
 
 
 def _max_bytes() -> int:
@@ -263,6 +268,18 @@ def _segment_paths_oldest_first(live: Path) -> list[Path]:
 # Locked append + rotation
 # ---------------------------------------------------------------------------
 
+class BusLockTimeout(TimeoutError):
+    """The canonical bus sidecar stayed contended past its write budget."""
+
+    def __init__(self, lock_path: Path, timeout_seconds: float):
+        self.lock_path = lock_path
+        self.timeout_seconds = timeout_seconds
+        super().__init__(
+            f"bus lock timeout after {timeout_seconds:g}s at {lock_path}; "
+            "no durable envelope was written"
+        )
+
+
 class _Flock:
     """Context manager holding an exclusive flock on the sidecar lockfile.
 
@@ -270,18 +287,42 @@ class _Flock:
     rotation rename of ``messages.jsonl``.
     """
 
-    def __init__(self, lock_path: Path):
+    def __init__(
+        self,
+        lock_path: Path,
+        *,
+        timeout_seconds: Optional[float] = None,
+        poll_seconds: Optional[float] = None,
+    ):
         self._lock_path = lock_path
         self._fd: Optional[int] = None
+        self._timeout_seconds = (
+            _LOCK_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        )
+        self._poll_seconds = _LOCK_POLL_SECONDS if poll_seconds is None else poll_seconds
 
     def __enter__(self) -> "_Flock":
+        validate_timeout_budget(
+            self._timeout_seconds,
+            label="bus lock",
+            poll=self._poll_seconds,
+        )
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:
-            # If flock raises (e.g. KeyboardInterrupt, EINTR) __exit__ is never
-            # called because __enter__ did not complete; close the fd here so it
-            # is not leaked.
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            deadline = time.monotonic() + self._timeout_seconds
+            while True:
+                try:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise BusLockTimeout(
+                            self._lock_path,
+                            self._timeout_seconds,
+                        )
+                    time.sleep(min(self._poll_seconds, remaining))
         except BaseException:
             os.close(fd)
             raise

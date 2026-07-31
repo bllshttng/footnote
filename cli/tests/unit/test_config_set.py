@@ -37,6 +37,18 @@ def test_set_int_coercion(tmp_path):
     assert _read(tmp_path)["agents"]["a2a"]["turn_ceiling"] == 10
 
 
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_config_set_rejects_nonterminating_lock_timeout(tmp_path, timeout):
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        set_config_value(
+            "config.agents.a2a.auto",
+            "true",
+            scope="project",
+            repo_root=tmp_path,
+            lock_timeout=timeout,
+        )
+
+
 def test_ac7_err_invalid_rejected_unchanged(tmp_path):
     # Seed an existing valid value.
     set_config_value(

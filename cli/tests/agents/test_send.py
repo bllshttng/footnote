@@ -9,7 +9,9 @@ overhead, following the pattern in test_dispatch_ask.py.
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -1015,6 +1017,45 @@ def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
     assert "do not retry" in stderr
 
 
+def test_dispatch_send_registry_stamp_lock_is_bounded_after_hosted_delivery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A completed hosted send cannot wait forever before returning its receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno import paths
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import registry as registry_mod
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: True)
+    registry_path = paths.agents_registry_path()
+    lock_path = registry_mod._registry_lock_path(registry_path)
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    started = time.monotonic()
+    try:
+        result = dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            registry_stamp_timeout_seconds=0.05,
+        )
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert time.monotonic() - started < 2.0
+    assert result.delivery == "hosted"
+    stderr = capsys.readouterr().err
+    assert "registry stamp failed after hosted delivery" in stderr
+    assert "do not retry" in stderr
+
+
 def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(
     tmp_path: Path,
     monkeypatch,
@@ -1228,6 +1269,171 @@ def test_dispatch_send_envelope_write_oserror_exit12(tmp_path: Path, monkeypatch
     assert any(e[1].get("stage") == "envelope-write" for e in failed_events), (
         f"agent_send_failed must carry stage='envelope-write'; got {failed_events}"
     )
+
+
+def test_dispatch_send_bus_lock_timeout_is_explicit_exit12(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-ERR: a pre-append timeout is loud and never resembles a receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.bus.log import BusLockTimeout
+    from fno.inbox import store as store_mod
+
+    timeout = BusLockTimeout(tmp_path / "messages.jsonl.lock", 5.0)
+    monkeypatch.setattr(
+        store_mod,
+        "write_new_thread",
+        lambda **_kw: (_ for _ in ()).throw(timeout),
+    )
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_send(name="red", message="hello", provider=None, cwd=cwd)
+
+    text = str(exc_info.value)
+    assert exc_info.value.exit_code == 12
+    assert "bus lock timeout" in text
+    assert "no durable envelope was written" in text
+    assert "delivered" not in text
+    assert "queued (durable)" not in text
+
+
+def test_cmd_send_real_bus_lock_timeout_has_no_success_receipt(
+    tmp_path: Path,
+    monkeypatch,
+    runner: CliRunner,
+) -> None:
+    """The command boundary preserves the real canonical-lock failure."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.bus import log as bus_log
+    from fno.inbox.store import read_all_threads
+    from fno.mail.cli import mail_app
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(bus_log, "_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(bus_log, "_LOCK_POLL_SECONDS", 0.005)
+    lock_path = bus_log._lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = open(lock_path, "w")
+    fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+    try:
+        result = runner.invoke(mail_app, ["send", "red", "hello"])
+    finally:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_UN)
+        holder.close()
+
+    assert result.exit_code == 12
+    output = result.stdout + (result.stderr or "")
+    assert "bus lock timeout" in output
+    assert "no durable envelope was written" in output
+    assert "delivered" not in result.stdout
+    assert "queued (durable)" not in result.stdout
+    assert not bus_log.bus_log_path().exists()
+    assert read_all_threads("abcd1234") == []
+
+
+def test_dispatch_send_alias_lock_contention_falls_back_before_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Discovery's UX lock cannot withhold a peer-send terminal."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(discover_mod, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(discover_mod, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
+    name_map = discover_mod.default_name_map_path()
+    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "w") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        started = time.monotonic()
+        result = dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+        )
+
+    assert time.monotonic() - started < 2.0
+    assert result.delivery == "durable"
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_dispatch_send_rejects_nonterminating_registry_stamp_timeout(
+    tmp_path: Path,
+    monkeypatch,
+    timeout: float,
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.bus.log import bus_log_path
+
+    delivered: list[bool] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_deliver_live",
+        lambda *_args, **_kwargs: delivered.append(True) or True,
+    )
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            registry_stamp_timeout_seconds=timeout,
+        )
+
+    assert delivered == []
+    assert not bus_log_path().exists()
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_dispatch_send_rejects_nonterminating_agent_lock_timeout(
+    tmp_path: Path,
+    monkeypatch,
+    timeout: float,
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.bus.log import bus_log_path
+
+    delivered: list[bool] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_deliver_live",
+        lambda *_args, **_kwargs: delivered.append(True) or True,
+    )
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=timeout,
+        )
+
+    assert delivered == []
+    assert not bus_log_path().exists()
 
 
 def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypatch) -> None:
