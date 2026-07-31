@@ -8128,8 +8128,8 @@ def cmd_maintain(
     """
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph.statuses import recompute_statuses
-    from fno.graph._intake import _find_node, make_effective_priority
-    from fno.graph.render import _kanban_column
+    from fno.graph._intake import _find_node
+    from fno.graph.render import make_kanban_column
     from fno.graph.render_html import _load_wip_caps
     from fno.graph import maintain as _maintain
 
@@ -8188,13 +8188,11 @@ def cmd_maintain(
         stale_ready_cands = stale_ready_cands[: _maintain.AUTO_DEFER_BLAST_CAP]
 
     now_cap = _load_wip_caps().get("now", 20)
-    priority_for = make_effective_priority(entries)
+    column_for = make_kanban_column(entries)
     overflow = _maintain.now_overflow(
         entries,
         now_cap,
-        lambda entry: _kanban_column(
-            entry, effective_priority=priority_for(entry)
-        ),
+        column_for,
     )
 
     # Leg 7: auto-defer failure-prone nodes (#34). Derive the streak from the
@@ -8725,8 +8723,8 @@ def cmd_rank(
 
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
-    from fno.graph._intake import _find_node, make_effective_priority
-    from fno.graph.render import _kanban_column, _project_key
+    from fno.graph._intake import _find_node
+    from fno.graph.render import make_kanban_column, _project_key
 
     if not has_node_id_prefix(task_id):
         typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
@@ -8772,13 +8770,10 @@ def cmd_rank(
             return False
 
     def mutator(entries):
-        priority_for = make_effective_priority(entries)
+        column_for = make_kanban_column(entries)
 
         def _lane(e: dict) -> tuple:
-            return (
-                _kanban_column(e, effective_priority=priority_for(e)),
-                _project_key(e),
-            )
+            return (column_for(e), _project_key(e))
 
         def _lane_label(e: dict) -> str:
             col, proj = _lane(e)

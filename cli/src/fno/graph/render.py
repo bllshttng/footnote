@@ -138,6 +138,23 @@ def _kanban_column(
     return "Next"
 
 
+def make_kanban_column(entries: list[dict]):
+    """Bind whole-graph overlays into the sole kanban column authority."""
+    in_progress_epics = in_progress_epic_ids(entries)
+    live_claimed = frozenset(live_claimed_node_ids())
+    priority_for = make_effective_priority(entries)
+
+    def column_for(entry: dict) -> str | None:
+        return _kanban_column(
+            entry,
+            in_progress_epics,
+            live_claimed,
+            priority_for(entry),
+        )
+
+    return column_for
+
+
 def _kanban_card(
     entry: dict, id_to_entry: dict[str, dict], orphans: frozenset[str] = frozenset()
 ) -> str:
@@ -222,14 +239,12 @@ def render_graph_md(
     entries = [e for e in entries if isinstance(e, dict)]
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
-    epics = in_progress_epic_ids(entries)
-    live_claimed = frozenset(live_claimed_node_ids())
     orphans = _orphan_ids(entries)
     board_order = make_selection_sort_key(entries, orphans, swimlane=True)
-    priority_for = make_effective_priority(entries)
+    column_for = make_kanban_column(entries)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
-        col = _kanban_column(entry, epics, live_claimed, priority_for(entry))
+        col = column_for(entry)
         if col is None:
             continue
         columns[col].append(entry)

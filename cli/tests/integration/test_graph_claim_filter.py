@@ -125,6 +125,29 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
     assert len(set(selected)) == max_lanes
 
 
+def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
+    entries = [
+        {"id": "ab-claimed1", "title": "Claimed", "status": "ready",
+         "priority": "p3", "project": "p"},
+        {"id": "ab-anchor1", "title": "Now anchor", "status": "ready",
+         "priority": "p1", "project": "p", "rank": 5.0},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+    acquire_claim(
+        key="node:ab-claimed1",
+        holder="target-session:other",
+        ttl_ms=3_600_000,
+        root=tmp_path,
+    )
+
+    result = _invoke(
+        "backlog", "rank", "ab-claimed1", "--before", "ab-anchor1"
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Now/p" in result.output
+
+
 def test_released_claim_does_not_block(tmp_graph, tmp_path):
     """After release the node is selectable again (only LIVE claims filter)."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")

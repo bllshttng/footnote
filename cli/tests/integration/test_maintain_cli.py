@@ -197,6 +197,52 @@ def test_maintain_wip_count_includes_live_epic_promoted_children(
     assert json.loads(result.output)["now_overflow"] == [2, 1]
 
 
+def test_maintain_wip_count_matches_in_progress_epic_overlay(
+    tmp_graph, monkeypatch
+):
+    import fno.graph.render_html as render_html
+
+    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    _seed(tmp_graph, [
+        _node("ab-epic02", type="epic", status="ready", priority="p2"),
+        _node(
+            "ab-done02", status="done", priority="p2", parent="ab-epic02",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+        _node("ab-epic03", type="epic", status="ready", priority="p2"),
+        _node(
+            "ab-done03", status="done", priority="p2", parent="ab-epic03",
+            completed_at="2026-01-01T00:00:00Z",
+        ),
+    ])
+
+    result = _invoke(["--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["now_overflow"] == [2, 1]
+
+
+def test_maintain_wip_count_matches_live_claim_overlay(
+    tmp_graph, monkeypatch
+):
+    import fno.graph.render as render
+    import fno.graph.render_html as render_html
+
+    monkeypatch.setattr(render_html, "_load_wip_caps", lambda: {"now": 1})
+    monkeypatch.setattr(
+        render, "live_claimed_node_ids", lambda: {"ab-claim01", "ab-claim02"}
+    )
+    _seed(tmp_graph, [
+        _node("ab-claim01", status="ready", priority="p3"),
+        _node("ab-claim02", status="ready", priority="p3"),
+    ])
+
+    result = _invoke(["--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["now_overflow"] == [2, 1]
+
+
 # --- AC1-UI: per-leg counts printed (no-op vs active distinguishable) -------
 
 

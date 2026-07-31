@@ -35,6 +35,7 @@ A child of a missing, malformed, or terminal parent is a loose-node equivalent a
 Rank remains scoped per `(column, project)` lane: "web's #1 in Now" is independent of "etl's #1 in Now".
 Rank never changes a node's column.
 `render._kanban_column` remains the sole column authority, while the renderer supplies an effective priority that may promote a child to its live epic's higher priority but never demote a child already above its epic.
+`render.make_kanban_column(entries)` binds that projection together with the in-progress-epic and live-claim overlays so renderers, rank lane validation, and WIP counts delegate the same whole-graph context to `_kanban_column`.
 
 ## Board order == work order
 

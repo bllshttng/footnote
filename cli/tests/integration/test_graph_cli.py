@@ -747,6 +747,24 @@ def test_rank_uses_live_epic_promoted_board_lane(tmp_graph):
     assert _rank_of(tmp_graph, "ab-child01") < _rank_of(tmp_graph, "ab-anchor1")
 
 
+def test_rank_uses_in_progress_epic_board_lane(tmp_graph):
+    entries = [
+        {"id": "ab-epic002", "title": "Epic", "type": "epic",
+         "status": "ready", "priority": "p2", "project": "fno"},
+        {"id": "ab-done001", "title": "Done child", "status": "done",
+         "priority": "p2", "project": "fno", "parent": "ab-epic002",
+         "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-anchor2", "title": "Now anchor", "status": "ready",
+         "priority": "p1", "project": "fno", "rank": 5.0},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    result = _invoke("backlog", "rank", "ab-epic002", "--before", "ab-anchor2")
+
+    assert result.exit_code == 0, result.output
+    assert "Now/fno" in result.output
+
+
 def test_ac1_after_ranked_anchor_places_behind(tmp_graph):
     """--after a ranked anchor places the card behind it (own midpoint branch)."""
     a = _add("LeadCard", project="fno", priority="p1")

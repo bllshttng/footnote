@@ -27,10 +27,9 @@ from fno.graph.render import (
     _kanban_column,
     _orphan_ids,
     _project_key,
-    in_progress_epic_ids,
-    live_claimed_node_ids,
+    make_kanban_column,
 )
-from fno.graph._intake import make_effective_priority, make_selection_sort_key
+from fno.graph._intake import make_selection_sort_key
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -219,8 +218,6 @@ def _bucket(
     whose parent epic sits in another project has no reachable ancestor inside
     a project-scoped slice, so computing it from the subset invents orphans.
     """
-    epics = in_progress_epic_ids(entries)
-    live_claimed = frozenset(live_claimed_node_ids())
     if orphans is None:
         orphans = _orphan_ids(entries)
     ordering_source = ordering_entries if ordering_entries is not None else entries
@@ -229,10 +226,10 @@ def _bucket(
         orphans,
         swimlane=True,
     )
-    priority_for = make_effective_priority(ordering_source)
+    column_for = make_kanban_column(ordering_source)
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
-        col = _column_for(e, epics, live_claimed, priority_for(e))
+        col = column_for(e)
         if col is None:
             continue
         cols[col].append(e)
