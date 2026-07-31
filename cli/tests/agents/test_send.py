@@ -1012,6 +1012,74 @@ def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
     assert "do not retry" in stderr
 
 
+def test_dispatch_send_does_not_stamp_recipient_restamped_during_delivery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A delivered send cannot stamp a replacement row selected after delivery."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import registry as registry_mod
+
+    registry_mod.write_registry([
+        registry_mod.AgentEntry(
+            name="victim",
+            harness="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+            cwd="/tmp",
+            log_path="/tmp/victim.log",
+            status="orphaned",
+        )
+    ])
+    monkeypatch.setattr(
+        dispatch_mod, "_registered_family1_state", lambda _entry: "working"
+    )
+
+    def restamp_during_delivery(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", restamp_during_delivery)
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod.events,
+        "emit",
+        lambda kind, **data: captured.append((kind, data)),
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="victim",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+    )
+
+    assert result.delivery == "hosted"
+    rows = registry_mod.load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == replacement_id
+    assert rows[0].status == "orphaned"
+    assert rows[0].last_message_at is None
+    assert any(
+        kind == "agent_send_failed"
+        and data.get("stage") == "registry-write"
+        and data.get("reason") == "recipient_identity_changed"
+        for kind, data in captured
+    )
+    stderr = capsys.readouterr().err
+    assert "recipient identity changed" in stderr
+    assert "do not retry" in stderr
+
+
 # ---------------------------------------------------------------------------
 # F1 (sigma HIGH): envelope write failure -> exit 12, agent_send_failed event
 # ---------------------------------------------------------------------------

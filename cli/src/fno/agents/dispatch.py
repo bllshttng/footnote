@@ -91,6 +91,8 @@ def _update_registry_if_recipient_unchanged(
     name: str,
     expected_identity: RecipientIdentity,
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
+    *,
+    registry_path: Optional[Path] = None,
 ) -> bool:
     """Apply a post-side-effect write only to the selected recipient.
 
@@ -112,7 +114,10 @@ def _update_registry_if_recipient_unchanged(
         applied = True
         return updater(entries)
 
-    update_registry(_guarded)
+    if registry_path is None:
+        update_registry(_guarded)
+    else:
+        update_registry(_guarded, path=registry_path)
     return applied
 
 
@@ -5349,6 +5354,7 @@ def dispatch_send(
                     "its lock; retry the send",
                     exit_code=2,
                 )
+            selected_identity = _recipient_identity_key(existing)
             # All later transport, event, durable-recipient, and stamp paths use
             # the registry primary key, never the caller's alias or short token.
             name = canonical_name
@@ -5541,7 +5547,31 @@ def dispatch_send(
                             out.append(e)
                     return out
 
-                update_registry(_stamp, path=registry_path)
+                stamp_written = _update_registry_if_recipient_unchanged(
+                    name,
+                    selected_identity,
+                    _stamp,
+                    registry_path=registry_path,
+                )
+                if not stamp_written:
+                    warning = (
+                        f"registry stamp failed after {delivery} delivery for "
+                        f"{name!r}: recipient identity changed; delivery succeeded; "
+                        "do not retry"
+                    )
+                    print(warning, file=sys.stderr)
+                    try:
+                        events.emit(
+                            "agent_send_failed",
+                            stage="registry-write",
+                            name=name,
+                            delivery=delivery,
+                            reason="recipient_identity_changed",
+                            error="recipient identity changed after delivery",
+                            error_type="RecipientIdentityChanged",
+                        )
+                    except (OSError, ValueError):
+                        pass  # stderr already carries the non-retryable degradation
             except (OSError, ValueError, RegistryVersionError) as exc:
                 print(
                     f"registry stamp failed after {delivery} delivery for "
