@@ -966,6 +966,52 @@ def test_dispatch_send_emits_send_events(tmp_path: Path, monkeypatch) -> None:
         pytest.fail("agent_send_done event not found in events.jsonl")
 
 
+def test_dispatch_send_reports_registry_stamp_failure_after_hosted_delivery(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    """A post-delivery stamp failure stays successful but cannot be silent."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.inbox.store import read_all_threads
+
+    monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(
+        dispatch_mod,
+        "update_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(ValueError("corrupt registry")),
+    )
+    captured: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod.events,
+        "emit",
+        lambda kind, **data: captured.append((kind, data)),
+    )
+
+    result = dispatch_mod.dispatch_send(
+        name="red",
+        message="hello",
+        provider=None,
+        cwd=tmp_path,
+    )
+
+    assert result.delivery == "hosted"
+    assert read_all_threads("red") == []
+    assert any(
+        kind == "agent_send_failed"
+        and data.get("stage") == "registry-write"
+        and data.get("delivery") == "hosted"
+        for kind, data in captured
+    )
+    stderr = capsys.readouterr().err
+    assert "registry stamp failed after hosted delivery" in stderr
+    assert "do not retry" in stderr
+
+
 # ---------------------------------------------------------------------------
 # F1 (sigma HIGH): envelope write failure -> exit 12, agent_send_failed event
 # ---------------------------------------------------------------------------

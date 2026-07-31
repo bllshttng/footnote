@@ -5410,8 +5410,10 @@ def dispatch_send(
             if demotion_notice:
                 print(demotion_notice, file=sys.stderr)
 
-            # 4f. Bump registry stamps (best-effort; not fatal if registry
-            # write fails here since envelope is already durable).
+            # 4f. Bump registry stamps. Delivery is already complete, so a
+            # failure cannot make the send retryable, but it must stay visible:
+            # hosted sends intentionally have no durable envelope to expose the
+            # degradation later.
             try:
 
                 def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
@@ -5427,8 +5429,23 @@ def dispatch_send(
                     return out
 
                 update_registry(_stamp, path=registry_path)
-            except (OSError, ValueError, RegistryVersionError):
-                pass  # envelope is durable; stamp failure is non-fatal
+            except (OSError, ValueError, RegistryVersionError) as exc:
+                print(
+                    f"registry stamp failed after {delivery} delivery for "
+                    f"{name!r}: {exc}; delivery succeeded; do not retry",
+                    file=sys.stderr,
+                )
+                try:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="registry-write",
+                        name=name,
+                        delivery=delivery,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                except (OSError, ValueError):
+                    pass  # stderr already carries the non-retryable degradation
 
             return DispatchSendResult(msg_id=msg_id, delivery=delivery)
 
