@@ -952,8 +952,13 @@ def main():
         register_entry(entry)
         return
 
-    # Legacy mode: positional args (target-state-path session-id)
-    if not args.state_or_session or not args.session_id:
+    # Legacy mode: positional args (target-state-path session-id).
+    # An EMPTY session id is legal and distinct from an absent one: `fno-agents
+    # finalize` passes "" when no transcript UUID resolved (non-claude harness,
+    # or no --transcript), and build_entry already drops falsy session
+    # candidates. Rejecting "" here failed the ledger step of every such
+    # finalize, contradicting its documented "the row still lands" contract.
+    if not args.state_or_session or args.session_id is None:
         parser.print_usage()
         print("Error: provide <target-state-path> <session-id> or use --type", file=sys.stderr)
         sys.exit(1)
