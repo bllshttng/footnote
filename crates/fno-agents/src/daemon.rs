@@ -3382,21 +3382,43 @@ fn pid_confirmed_dead(pid: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
+/// Whether `pid` is PROVABLY a different incarnation than the one recorded.
+///
+/// Not the negation of `pid_is_ours`. That returns false for three different
+/// situations -- dead, recycled, and alive-but-unsignalable (EPERM) -- so using
+/// it as a recycle test folds EPERM back into "gone" and reinstates the very
+/// clean-stop-over-a-live-process bug `pid_confirmed_dead` exists to prevent.
+/// A recycle claim needs positive evidence: the pid is reachable AND its start
+/// token is readable AND it differs from the recorded one. Anything less is no
+/// verdict, which leaves the caller waiting and, ultimately, reporting failure.
+fn pid_recycled(pid: u32, recorded_start: Option<u64>) -> bool {
+    let Some(recorded) = recorded_start else {
+        return false; // nothing to compare against
+    };
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: signal 0 is an existence/permission probe only, no signal is sent.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        return false; // dead or unsignalable: not a positive recycle finding
+    }
+    match process_start_time(pid) {
+        Some(now) => now != recorded,
+        None => false, // unreadable: no verdict
+    }
+}
+
 /// Poll until `pid` is confirmed dead, or `budget` elapses.
 ///
 /// A pid that got RECYCLED mid-wait also ends the wait: the process we signalled
 /// is gone, which is what the caller asked about, and the new occupant is not
-/// ours to keep waiting on. That case is distinguished from death by the
-/// start-token check, not by reachability.
+/// ours to keep waiting on. Both arms demand positive evidence, so an
+/// alive-but-unsignalable process satisfies neither and the wait runs out --
+/// reporting failure, which is the honest answer when we cannot see.
 async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
     let start = Instant::now();
     loop {
-        // Parenthesised deliberately: `&&` binds tighter than `||`, so the
-        // intent should not rest on the reader knowing that. Two distinct ways
-        // the wait is over -- the process died, or it was replaced by a
-        // different incarnation, which only a recorded token can establish.
-        let recycled = recorded_start.is_some() && !pid_is_ours(pid, recorded_start);
-        if pid_confirmed_dead(pid) || recycled {
+        if pid_confirmed_dead(pid) || pid_recycled(pid, recorded_start) {
             return true;
         }
         if start.elapsed() >= budget {
@@ -5499,6 +5521,42 @@ mod tests {
         assert!(
             pid_confirmed_dead(u32::MAX),
             "out-of-range is never running"
+        );
+    }
+
+    #[test]
+    fn recycle_and_death_each_demand_positive_evidence() {
+        // The distinction `pid_gone_within` rests on. `!pid_is_ours` is NOT a
+        // recycle test: it is also false for a live-but-unsignalable process, and
+        // treating that as "gone" reports a clean stop over a running worker.
+        let me = std::process::id();
+        let Some(st) = process_start_time(me) else {
+            return; // platform without start-time support
+        };
+
+        // Alive and ours: neither dead nor recycled.
+        assert!(!pid_confirmed_dead(me), "a live pid is not dead");
+        assert!(
+            !pid_recycled(me, Some(st)),
+            "matching token is not a recycle"
+        );
+
+        // Alive with a mismatched token: a positive recycle finding.
+        assert!(
+            pid_recycled(me, Some(st.wrapping_add(1))),
+            "reachable + differing token is a recycle"
+        );
+
+        // No recorded token: no basis to claim a recycle either way.
+        assert!(!pid_recycled(me, None), "no token -> no recycle verdict");
+
+        // A dead pid is dead, and is never *also* reported as recycled -- the
+        // caller must not be able to reach "gone" through an unproven path.
+        let dead = 0x7fff_fff0u32;
+        assert!(pid_confirmed_dead(dead), "unused high pid reads as dead");
+        assert!(
+            !pid_recycled(dead, Some(st)),
+            "dead is not a recycle finding"
         );
     }
 
