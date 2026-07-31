@@ -9528,6 +9528,7 @@ def cmd_supersede(
 
     _freed_box: list[list] = [[]]
     _parent_freed_box: list[list] = [[]]
+    _proj_kids_box: list[list] = [[]]
     def mutator(entries):
         new_node = _find_node(entries, new_id)
         old_node = _find_node(entries, replaces)
@@ -9600,7 +9601,19 @@ def cmd_supersede(
         # one later revived strands under the dead-ancestor selection guard - the
         # same unbuildable, uncloseable, invisible shape the contained release
         # exists to end. Non-done children only: done keeps the link as history.
-        _parent_freed_box[0] = _release_parented_children(entries, old_node.get("id"))
+        parent_freed = _release_parented_children(entries, old_node.get("id"))
+        _parent_freed_box[0] = parent_freed
+        # Projection targets: freed children that have their OWN plan doc. A
+        # child sharing the owner's plan_path (an adopted delivery child) is
+        # excluded: the owner is already a target, and re-projecting the one
+        # shared doc per child would let the last child's mirrored metadata
+        # overwrite the owner's.
+        owner_plan = old_node.get("plan_path")
+        by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
+        _proj_kids_box[0] = [
+            k for k in parent_freed
+            if (by_id.get(k, {}).get("plan_path") != owner_plan)
+        ]
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
@@ -9612,12 +9625,12 @@ def cmd_supersede(
             f"(revive-safe; a later undefer/unsupersede cannot strand them): "
             f"{', '.join(_parent_freed_box[0])}"
         )
-    # Repaint the freed children's plan docs too: the converger expands
-    # ancestors, not descendants, so naming only the old + replacement nodes
-    # would leave the orphaned children's parent/parent_slug/wave stale.
-    _project_plans_from_graph(
-        [replaces, new_id] + _freed_box[0] + _parent_freed_box[0]
-    )
+    # Repaint the orphaned children's OWN plan docs (the converger expands
+    # ancestors, not descendants, so naming only old + replacement would leave a
+    # member child's parent/parent_slug/wave stale). _proj_kids already excluded
+    # any child sharing the owner's plan_path, so this cannot rewrite the
+    # owner's doc per child.
+    _project_plans_from_graph([replaces, new_id] + _proj_kids_box[0])
 
 
 # ---------------------------------------------------------------------------

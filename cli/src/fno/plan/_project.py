@@ -170,9 +170,13 @@ def project_node_to_plan(
             # Reversal (unsupersede): the forward-only projector refuses to
             # leave terminal `superseded`, so force the plan back to the graph's
             # current rung or the doc stays terminal while the graph is active.
-            # None-mapped graph statuses (blocked/deferred) fall back to `ready`,
-            # the neutral rung a plan-with-path sits at.
-            forced = GRAPH_TO_PLAN_STATUS.get(graph_status) or "ready"
+            # A None-mapped graph status (blocked - the only one reachable right
+            # after unsupersede, since deferred_at was cleared) has no plan rung:
+            # fail closed to `design` (non-dispatchable) rather than `ready`,
+            # which would let unfinished planning work auto-dispatch once the
+            # blocker resolves. The prior rung was overwritten by the supersede
+            # and cannot be recovered, so conservative beats promotive.
+            forced = GRAPH_TO_PLAN_STATUS.get(graph_status) or "design"
             if forced != "superseded" and current_status != forced:
                 fields["status"] = forced
                 changed = True

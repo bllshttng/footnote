@@ -629,6 +629,54 @@ def test_unsupersede_preserves_plain_deferral(tmp_graph, tmp_path):
     assert by_id["ab-old"]["deferred_reason"] == "parked"
 
 
+def test_unsupersede_blocked_plan_fails_closed_to_design(tmp_graph, tmp_path):
+    """A revived node that is still blocked has no plan rung to restore to (the
+    prior rung was overwritten by supersede). Fail closed to a non-dispatchable
+    rung rather than `ready`, which would auto-dispatch unfinished planning work
+    the moment its blocker resolves."""
+    plan = _write_quick_plan(tmp_path / "old.md", ["x.py"])
+    entries = _read_entries(tmp_graph)
+    old = _seed_node(entries, id_="ab-old", plan_path=str(plan))
+    old["blocked_by"] = ["ab-blk"]
+    _seed_node(entries, id_="ab-blk", plan_path=str(_write_quick_plan(tmp_path / "blk.md", ["z.py"])))
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    _invoke("backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold")
+    assert _plan_status(plan) == "superseded"
+
+    res = _invoke("backlog", "unsupersede", "ab-old")
+    assert res.exit_code == 0, res.output
+    # blocked -> no plan rung -> fail closed to design (non-dispatchable), NOT ready.
+    assert _plan_status(plan) == "design"
+
+
+def test_force_supersede_does_not_corrupt_shared_plan(tmp_graph, tmp_path):
+    """Adopted children share the delivery unit's plan_path. Force-supersede
+    must not project each such child: that would rewrite the one shared doc per
+    child and the last pass would overwrite the owner's mirrored metadata."""
+    shared = _write_quick_plan(tmp_path / "shared.md", ["x.py"])
+    entries = _read_entries(tmp_graph)
+    owner = _seed_node(entries, id_="ab-old", plan_path=str(shared))
+    owner["priority"] = "p0"
+    for kid in ("ab-c1", "ab-c2"):
+        adopted = _seed_node(entries, id_=kid, plan_path=str(shared))
+        adopted["contained_in"] = "ab-old"
+        adopted["parent"] = "ab-old"
+        adopted["priority"] = "p3"
+    _seed_node(entries, id_="ab-new", plan_path=str(_write_quick_plan(tmp_path / "new.md", ["y.py"])))
+    tmp_graph.write_text(json.dumps({"entries": entries}, indent=2))
+
+    res = _invoke(
+        "backlog", "supersede", "ab-new", "--replaces", "ab-old", "--reason", "fold", "--force"
+    )
+    assert res.exit_code == 0, res.output
+    # The shared plan keeps the OWNER's priority, not a child's p3.
+    from fno.plan._stamp import read_plan_file
+    _t, fields, _r = read_plan_file(shared)
+    assert fields.get("priority") == "p0", f"shared plan corrupted to {fields.get('priority')!r}"
+
+
 def test_unsupersede_not_superseded_is_idempotent(tmp_graph, tmp_path):
     entries = _read_entries(tmp_graph)
     _seed_node(entries, id_="ab-old", plan_path=str(_write_quick_plan(tmp_path / "old.md", ["x.py"])))
