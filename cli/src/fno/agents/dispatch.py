@@ -132,13 +132,19 @@ def _update_registry_if_recipient_unchanged(
         return updater(entries)
 
     if registry_path is None:
-        update_registry(_guarded, lock_timeout=registry_lock_timeout)
+        if registry_lock_timeout is None:
+            update_registry(_guarded)
+        else:
+            update_registry(_guarded, lock_timeout=registry_lock_timeout)
     else:
-        update_registry(
-            _guarded,
-            path=registry_path,
-            lock_timeout=registry_lock_timeout,
-        )
+        if registry_lock_timeout is None:
+            update_registry(_guarded, path=registry_path)
+        else:
+            update_registry(
+                _guarded,
+                path=registry_path,
+                lock_timeout=registry_lock_timeout,
+            )
     return applied
 
 

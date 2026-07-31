@@ -129,8 +129,21 @@ def test_hold_agent_lock_releases_on_exception(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
+def _try_agent_lock(lock_path: str, result_queue) -> None:
+    """Child-process probe for whether an existing detached flock is held."""
+    with open(lock_path, "a") as fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            result_queue.put("blocked")
+            return
+        result_queue.put("acquired")
+        fcntl.flock(fh, fcntl.LOCK_UN)
+
+
 def test_hold_agent_lock_detach_suppresses_release(tmp_path: Path) -> None:
     """When the yielded handle.detach() is called, the finally branch does NOT release."""
+    import fno.agents.lock as lock_mod
     from fno.agents.lock import hold_agent_lock
     from fno.agents.registry import _agent_lock_path
 
@@ -141,24 +154,30 @@ def test_hold_agent_lock_detach_suppresses_release(tmp_path: Path) -> None:
     with hold_agent_lock("delta", registry_path, timeout=5) as handle:
         handle.detach()
 
-    # The previous holder's file handle was closed on exit (close drops the
-    # flock implicitly on POSIX), but detach() releases the fcntl lock
-    # BEFORE close. We assert the documented invariant: a separate process
-    # cannot acquire the lock.
-    #
-    # Note: This subtest is bookkeeping — the core invariant is that
-    # detach() prevents the finally branch from calling LOCK_UN. We assert
-    # that directly via a second hold_agent_lock attempt in the SAME
-    # process; if detach didn't suppress release, the second attempt would
-    # succeed immediately. Cross-process verification is covered by the
-    # process-level concurrency test below.
-    #
-    # Force-release any lingering file handles by reopening + LOCK_UN.
-    with open(lock_file, "w") as fh:
-        try:
-            fcntl.flock(fh, fcntl.LOCK_UN)
-        except OSError:
-            pass
+    context = multiprocessing.get_context("spawn")
+    blocked_queue = context.Queue()
+    blocked_probe = context.Process(
+        target=_try_agent_lock,
+        args=(str(lock_file), blocked_queue),
+    )
+    blocked_probe.start()
+    assert blocked_queue.get(timeout=5) == "blocked"
+    blocked_probe.join(timeout=5)
+    assert blocked_probe.exitcode == 0
+
+    retained = lock_mod._detached_handles.pop()
+    fcntl.flock(retained, fcntl.LOCK_UN)
+    retained.close()
+
+    acquired_queue = context.Queue()
+    acquired_probe = context.Process(
+        target=_try_agent_lock,
+        args=(str(lock_file), acquired_queue),
+    )
+    acquired_probe.start()
+    assert acquired_queue.get(timeout=5) == "acquired"
+    acquired_probe.join(timeout=5)
+    assert acquired_probe.exitcode == 0
 
 
 # ---------------------------------------------------------------------------
