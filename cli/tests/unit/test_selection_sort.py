@@ -269,5 +269,28 @@ def test_malformed_epic_enrichment_degrades_to_safe_defaults():
 
     key = make_selection_sort_key([epic, child, loose])
 
-    assert sorted([loose, child], key=key) == [child, loose]
+    assert key(child) == key(loose)
     assert make_effective_priority([epic, child])(child) == "p2"
+
+
+def test_each_malformed_epic_ordering_field_makes_child_loose_equivalent():
+    for field, value in (
+        ("priority", []),
+        ("status", []),
+        ("created_at", []),
+    ):
+        epic = {
+            "id": "epic", "type": "epic", "status": "ready",
+            "priority": "p1", "created_at": "2026-01-01",
+            field: value,
+        }
+        child = {
+            "id": "child", "parent": "epic", "priority": "p2",
+            "created_at": "2026-02-01",
+        }
+        loose = {**child, "id": "loose", "parent": None}
+
+        key = make_selection_sort_key([epic, child, loose])
+
+        assert key(child) == key(loose), field
+        assert make_effective_priority([epic, child])(child) == "p2", field

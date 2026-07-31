@@ -35,7 +35,7 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
     # No live claims unless a test says so.
     import fno.graph.cli as gcli
 
-    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **_kwargs: set())
     # Hermetic workspace map (no settings.yaml leakage); tests that exercise
     # re-scope override this.
     import fno.graph.maintain as gm
@@ -143,13 +143,35 @@ def test_maintain_cli_skips_claimed_node(tmp_graph, monkeypatch):
     import fno.graph.cli as gcli
 
     _seed(tmp_graph, [_node("ab-leak02", cwd="/tmp/pytest-of-x/pytest-9/p")])
-    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda: {"ab-leak02"})
+    monkeypatch.setattr(
+        gcli, "_live_claimed_node_ids", lambda **_kwargs: {"ab-leak02"}
+    )
 
     result = _invoke(["--apply"])
     assert result.exit_code == 0, result.output
     # The leak node is claimed -> NOT pruned.
     assert {n["id"] for n in _read(tmp_graph)} == {"ab-leak02"}
     assert "skipped-claimed 1" in result.output
+
+
+def test_maintain_apply_refuses_when_live_claim_state_is_unavailable(
+    tmp_graph, monkeypatch
+):
+    import fno.graph.cli as gcli
+
+    entries = [_node("ab-leak03", cwd="/tmp/pytest-of-x/pytest-9/p")]
+    _seed(tmp_graph, entries)
+
+    def unavailable(*args, **kwargs):
+        raise OSError("claims unavailable")
+
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", unavailable)
+
+    result = _invoke(["--apply"])
+
+    assert result.exit_code == 1
+    assert "live claim state is unavailable" in result.output
+    assert _read(tmp_graph) == entries
 
 
 # --- AC2-HP / AC2-ERR: judgment legs propose, never mutate -----------------
@@ -353,7 +375,9 @@ def test_maintain_cli_auto_defer_skips_live_claim(tmp_graph, monkeypatch):
 
     _seed(tmp_graph, [_ready("ab-fail03")])
     _seed_events([_ev_fail("ab-fail03")] * 4)
-    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda: {"ab-fail03"})
+    monkeypatch.setattr(
+        gcli, "_live_claimed_node_ids", lambda **_kwargs: {"ab-fail03"}
+    )
 
     result = _invoke(["--apply"])
     assert result.exit_code == 0, result.output

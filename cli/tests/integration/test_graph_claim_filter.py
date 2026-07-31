@@ -223,6 +223,25 @@ def test_released_claim_does_not_block(tmp_graph, tmp_path):
     assert "ab-aaaaaaaa" in ids
 
 
+@pytest.mark.parametrize("command", [("next", "--all"), ("ready", "--all")])
+def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
+    tmp_graph, monkeypatch, command
+):
+    entries = _two_ready_entries()
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    def unavailable(*args, **kwargs):
+        raise OSError("claims unavailable")
+
+    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
+
+    result = _invoke("graph", *command)
+
+    assert result.exit_code == 1
+    assert "live claim state is unavailable" in result.output
+    assert json.loads(tmp_graph.read_text())["entries"] == entries
+
+
 def test_expired_claim_does_not_block(tmp_graph, tmp_path):
     """A stale (expired TTL) claim must not exclude its node from selection."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")

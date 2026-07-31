@@ -267,7 +267,15 @@ def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
     epic = id_to_entry.get(parent_id) if isinstance(parent_id, str) else None
     if epic is None or epic.get("type") != "epic":
         return None
+    epic_priority = epic.get("priority")
+    if not isinstance(epic_priority, str) or epic_priority not in PRIORITY_ORDER:
+        return None
     status = epic.get("status")
+    if status is not None and not isinstance(status, str):
+        return None
+    created_at = epic.get("created_at")
+    if created_at is not None and not isinstance(created_at, str):
+        return None
     if (
         (isinstance(status, str) and status in _TERMINAL_EPIC_STATUSES)
         or _has_terminal_marker(epic, "completed_at")

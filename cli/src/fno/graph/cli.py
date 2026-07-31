@@ -57,6 +57,18 @@ cli.add_typer(_batch_cli, name="batch", hidden=True)
 from fno.graph.statuses import live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
 
 
+def _require_live_claimed_node_ids(operation: str) -> set[str]:
+    """Read live claims for a dispatch or mutation path, failing closed."""
+    try:
+        return _live_claimed_node_ids(strict=True)
+    except Exception as exc:
+        typer.echo(
+            f"Error: live claim state is unavailable; {operation} refused.",
+            err=True,
+        )
+        raise typer.Exit(code=1) from exc
+
+
 def _has_unmerged_open_pr(e: dict) -> bool:
     """True when a node already carries a PR but is not yet closed (done) -
     i.e. work is in flight / in review, so it must NOT be re-selected for
@@ -3647,7 +3659,7 @@ def cmd_next(
         candidates = filter_by_project(candidates, project_filter, all_)
         # Selection-time claim enforcement (ab-fcf9cec5): drop nodes a live
         # session already holds so a second pickup is impossible.
-        claimed = _live_claimed_node_ids()
+        claimed = _require_live_claimed_node_ids("backlog selection")
         if claimed:
             candidates = [e for e in candidates if e.get("id") not in claimed]
         # Drop READY nodes that already carry an unmerged open PR so a successor
@@ -3854,7 +3866,7 @@ def cmd_ready(
         ready = [e for e in ready if e.get("id") in scope]
     # Selection-time claim enforcement (ab-fcf9cec5): hide nodes a live
     # session already holds (same rule as `graph next`).
-    claimed = _live_claimed_node_ids()
+    claimed = _require_live_claimed_node_ids("backlog ready")
     if claimed:
         ready = [e for e in ready if e.get("id") not in claimed]
     # Same in-flight guard as `next` (ab-372130f6): a human / megawalk `ready`
@@ -8138,7 +8150,11 @@ def cmd_maintain(
     entries = recompute_statuses(read_graph(_graph_path()))
 
     # Apply legs must never touch a node a live target session is driving.
-    claimed = _live_claimed_node_ids()
+    claimed = (
+        _require_live_claimed_node_ids("backlog maintain --apply")
+        if apply
+        else _live_claimed_node_ids()
+    )
 
     # --- detect (all read-only) ---
     workspaces = _maintain.load_workspaces()
@@ -8225,6 +8241,9 @@ def cmd_maintain(
         # not per node (Domain Pitfall). Each item is guarded so one failure
         # never strands the rest (AC1-ERR).
         def mutator(ents):
+            current_claimed = claimed | _require_live_claimed_node_ids(
+                "backlog maintain --apply"
+            )
             applied_rescope.clear()
             applied_prune.clear()
             applied_defers.clear()
@@ -8233,7 +8252,7 @@ def cmd_maintain(
             skipped_claimed.clear()
             prune_set: set[str] = set()
             for fix in rescope_fixes:
-                if fix.node_id in claimed:
+                if fix.node_id in current_claimed:
                     skipped_claimed.append(fix.node_id)
                     continue
                 try:
@@ -8249,7 +8268,7 @@ def cmd_maintain(
                         f"warning: re-scope of {fix.node_id} failed: {exc}", err=True
                     )
             for nid in prune_ids:
-                if nid in claimed:
+                if nid in current_claimed:
                     skipped_claimed.append(nid)
                     continue
                 prune_set.add(nid)
@@ -8265,7 +8284,7 @@ def cmd_maintain(
             # Re-check inside the lock so a url written since the pre-lock scan
             # is never overwritten (a present url always outranks a derived one).
             for fix in pr_url_writable:
-                if fix.node_id in claimed:
+                if fix.node_id in current_claimed:
                     skipped_claimed.append(fix.node_id)
                     continue
                 try:
@@ -8288,8 +8307,8 @@ def cmd_maintain(
             # touch-ups), so it also RE-SAMPLES live claims inside the lock - a
             # node a session claimed between the pre-lock read and now must not
             # be deferred ("claimed between read and write", Failure Modes /
-            # Concurrency). Best-effort: union with the pre-lock set.
-            defer_claimed = claimed | _live_claimed_node_ids()
+            # Concurrency). The strict in-lock snapshot above covers every leg.
+            defer_claimed = current_claimed
             for cand in defer_cands:
                 if cand.node_id in defer_claimed:
                     skipped_claimed.append(cand.node_id)
@@ -8323,7 +8342,7 @@ def cmd_maintain(
             # node abandoned past the threshold. Same in-lock re-sample as the
             # failure leg (a node claimed/done/deferred since the read is left
             # alone - the "quarantine racing a live claim must lose" race rule).
-            sr_claimed = claimed | _live_claimed_node_ids()
+            sr_claimed = current_claimed
             for cand in stale_ready_cands:
                 if cand.node_id in sr_claimed:
                     skipped_claimed.append(cand.node_id)
@@ -8405,7 +8424,14 @@ def cmd_maintain(
                 validity_days=v_days,
                 batch_size=v_batch,
                 out_dir=_deck_dir,
-                claimed_ids=frozenset(claimed | _live_claimed_node_ids()),
+                claimed_ids=frozenset(
+                    claimed
+                    | (
+                        _require_live_claimed_node_ids("backlog maintain --apply")
+                        if apply
+                        else _live_claimed_node_ids()
+                    )
+                ),
                 recheck=recheck,
                 exists_factory=_exists_factory,
                 search=_validity_rg_search,
