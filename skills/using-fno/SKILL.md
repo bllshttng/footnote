@@ -44,10 +44,10 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **Replying to a2a mail (the one rule).** A message arrives as `<fno_mail from="H" ...>`. Reply with `fno mail send H "..."` - pass back the exact `from` handle, nothing else; the CLI resolves it across every live source and falls back to the durable bus. Never inspect `harness`/`model` to pick a transport. Replying is optional for FYIs.
 
-**A durable receipt is not delivery.** Read the send receipt: `delivered (hosted)` = confirmed into the peer's session; `queued (durable)` = NOT confirmed, waiting on a drain that may never run. Don't wait on a durable send: `fno agents peek <handle>` (landed? alive?), `resume <handle>` then re-send, or `attach <handle>`. Check with `peek` before re-sending - a busy recipient can still receive the queued turn, so a blind re-send double-delivers.
-
-**No receipt is no coordination.** Only a terminal success receipt or independent recipient-transcript evidence proves a send occurred.
-A timeout, interruption, or command that returns no receipt must not be reported as coordination; a bus-lock timeout exits 12 and states that no durable envelope was written.
+**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` is not confirmed and may never drain.
+No receipt is no coordination: only terminal success or recipient-transcript evidence proves a send.
+A bus-lock timeout exits 12 before durable append.
+Before re-sending queued mail, `peek` because a busy recipient may still receive it; `resume` or `attach` if needed.
 
 **Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer a specific one with `fno mail reply --to <id> "..."` (threads `in_reply_to`). A live-injected message has no bus id - use `send <from>` for those.
 

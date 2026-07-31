@@ -1340,6 +1340,38 @@ def test_cmd_send_real_bus_lock_timeout_has_no_success_receipt(
     assert read_all_threads("abcd1234") == []
 
 
+def test_dispatch_send_alias_lock_contention_falls_back_before_delivery(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Discovery's UX lock cannot withhold a peer-send terminal."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", lambda *_args, **_kwargs: False)
+    monkeypatch.setattr(discover_mod, "_ALIAS_LOCK_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(discover_mod, "_ALIAS_LOCK_POLL_SECONDS", 0.005)
+    name_map = discover_mod.default_name_map_path()
+    lock_path = name_map.with_suffix(name_map.suffix + ".lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(lock_path, "w") as holder:
+        fcntl.flock(holder.fileno(), fcntl.LOCK_EX)
+        started = time.monotonic()
+        result = dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+        )
+
+    assert time.monotonic() - started < 2.0
+    assert result.delivery == "durable"
+
+
 def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypatch) -> None:
     """F1: write_new_thread raises ValueError -> DispatchAskError exit 12."""
     use_tmpdir(monkeypatch, tmp_path)

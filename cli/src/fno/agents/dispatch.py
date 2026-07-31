@@ -4503,21 +4503,20 @@ def _kickoff_background_relay(
     happened synchronously in :func:`_switchboard_exchange`; this only continues
     the autonomous A<->B exchange. Double-fork + ``setsid`` so the relay outlives
     the short-lived CLI process and reparents to init (no zombie). A fork failure
-    degrades to running the relay INLINE (blocking, but the turns still happen)
-    rather than dropping them.
+    stops only this optional continuation and stays visible; hop one is already
+    delivered, so running inline would suppress its receipt and make retry unsafe.
     """
     import os
 
     try:
         pid = os.fork()
-    except OSError:
-        _run_relay_loop(
-            to_name,
+    except OSError as exc:
+        _emit_relay_stopped(
             from_name,
-            seed,
-            ceiling,
-            mail_ctxs,
-            recipient_identities=recipient_identities,
+            to_name,
+            1,
+            "relay-detach-failed",
+            error=exc,
         )
         return
     if pid > 0:
@@ -4533,8 +4532,15 @@ def _kickoff_background_relay(
         os.setsid()
         try:
             grandchild = os.fork()
-        except OSError:
-            grandchild = 0  # fork failed; run the relay in THIS child
+        except OSError as exc:
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-detach-failed",
+                error=exc,
+            )
+            return
         if grandchild > 0:
             os._exit(0)
         _detach_stdio()
@@ -4662,8 +4668,14 @@ def _a2a_first_use_gate(
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
         marker.write_text("answered\n", encoding="utf-8")
-    except OSError:
-        pass
+    except OSError as exc:
+        sys.stderr.write(
+            f"\nfno-agents a2a: could not write confirmation marker ({exc}); "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     return keep_on
 
 

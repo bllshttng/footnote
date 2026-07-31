@@ -51,6 +51,8 @@ _CLAUDE_UUID_RE = re.compile(
 # The hex handle is the addressable id (== jobId == CC's ``name`` default,
 # verified present on 2.1.169). The friendly alias is UX layered on top.
 NAME_MAP_FILENAME = "session-names.json"
+_ALIAS_LOCK_TIMEOUT_SECONDS = 1.0
+_ALIAS_LOCK_POLL_SECONDS = 0.02
 
 
 # Test/operator seam: point discovery at a different registry dir. The agents
@@ -1129,7 +1131,22 @@ def _resolve_aliases(
     aliases: dict[str, str] = {}
     try:
         with open(lock_path, "w") as lock_fh:
-            fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
+            deadline = time.monotonic() + _ALIAS_LOCK_TIMEOUT_SECONDS
+            while True:
+                try:
+                    fcntl.flock(
+                        lock_fh.fileno(),
+                        fcntl.LOCK_EX | fcntl.LOCK_NB,
+                    )
+                    break
+                except BlockingIOError:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError(
+                            "session alias lock timeout after "
+                            f"{_ALIAS_LOCK_TIMEOUT_SECONDS:g}s at {lock_path}"
+                        )
+                    time.sleep(min(_ALIAS_LOCK_POLL_SECONDS, remaining))
             try:
                 stored = _load_name_map(name_map_path)
                 # Retire any alias whose session is no longer live.

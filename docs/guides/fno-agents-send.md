@@ -89,6 +89,8 @@ Send resolves delivery in order:
 | Durable envelope write failed | 12 | `durable envelope write failed: ...` |
 | Live delivery demoted | 0 | demotion notice on stderr; stdout says `queued (durable)` |
 | Post-delivery registry stamp timed out | 0 | delivery-success warning says not to retry; stdout preserves `delivered (hosted)` |
+| Discovery alias lock timed out | unchanged | resolution falls back to canonical handles within its fixed budget |
+| Autonomous relay could not detach after hop one | 0 | the optional continuation stops; stdout still says `delivered (hosted)` |
 
 The body cap (1 MiB) is enforced BEFORE any inbox store write, so a rejected oversized message leaves no partial record.
 

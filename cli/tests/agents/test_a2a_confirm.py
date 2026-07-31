@@ -205,6 +205,25 @@ def test_ac3_err_config_write_failure_does_not_persist_marker(tmp_path, monkeypa
     assert not (paths.state_dir() / ".a2a-confirmed").exists()
 
 
+def test_ac4_hp_marker_write_failure_is_visible(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+    marker = paths.state_dir() / ".a2a-confirmed"
+    original_write_text = type(marker).write_text
+
+    def _write_text(path, *args, **kwargs):
+        if path == marker:
+            raise OSError("marker read only")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(type(marker), "write_text", _write_text)
+
+    assert dispatch._a2a_first_use_gate(True, 6) is False
+    assert "could not write confirmation marker" in err.text()
+    assert not marker.exists()
+
+
 def test_ac6_fr_marker_means_no_reask(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     marker = paths.state_dir() / ".a2a-confirmed"

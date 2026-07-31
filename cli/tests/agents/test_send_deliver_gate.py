@@ -666,6 +666,92 @@ def test_switchboard_auto_is_nonblocking_kicks_off_detached_relay(monkeypatch) -
     ], "the relay is handed off with B's reply as the seed"
 
 
+def test_background_relay_first_fork_failure_drops_continuation_without_inline_wait(
+    monkeypatch,
+) -> None:
+    """A resource-exhausted launcher cannot run the relay before the receipt."""
+    from fno.agents import dispatch as dispatch_mod
+
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "fork",
+        lambda: (_ for _ in ()).throw(OSError("fork unavailable")),
+    )
+    relay_calls: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    dispatch_mod._kickoff_background_relay(
+        "B",
+        "A",
+        "reply",
+        6,
+        recipient_identities=_sb_identities("A", "B"),
+    )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-detach-failed"
+
+
+def test_background_relay_second_fork_failure_exits_intermediate_without_relay(
+    monkeypatch,
+) -> None:
+    """The parent wait stays short when the grandchild cannot be created."""
+    from fno.agents import dispatch as dispatch_mod
+
+    forks = iter((0, OSError("grandchild unavailable")))
+
+    def _fork():
+        result = next(forks)
+        if isinstance(result, OSError):
+            raise result
+        return result
+
+    class _ChildExit(BaseException):
+        pass
+
+    monkeypatch.setattr(dispatch_mod.os, "fork", _fork)
+    monkeypatch.setattr(dispatch_mod.os, "setsid", lambda: None)
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "_exit",
+        lambda _code: (_ for _ in ()).throw(_ChildExit()),
+    )
+    relay_calls: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    with pytest.raises(_ChildExit):
+        dispatch_mod._kickoff_background_relay(
+            "B",
+            "A",
+            "reply",
+            6,
+            recipient_identities=_sb_identities("A", "B"),
+        )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-detach-failed"
+
+
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
     """B delivered but replied empty -> nothing to relay, so no background kickoff."""
     from fno.agents import dispatch as dispatch_mod
