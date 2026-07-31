@@ -1404,6 +1404,38 @@ def test_dispatch_send_rejects_nonterminating_registry_stamp_timeout(
     assert not bus_log_path().exists()
 
 
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_dispatch_send_rejects_nonterminating_agent_lock_timeout(
+    tmp_path: Path,
+    monkeypatch,
+    timeout: float,
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.bus.log import bus_log_path
+
+    delivered: list[bool] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_deliver_live",
+        lambda *_args, **_kwargs: delivered.append(True) or True,
+    )
+
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        dispatch_mod.dispatch_send(
+            name="red",
+            message="hello",
+            provider=None,
+            cwd=tmp_path,
+            lock_timeout=timeout,
+        )
+
+    assert delivered == []
+    assert not bus_log_path().exists()
+
+
 def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypatch) -> None:
     """F1: write_new_thread raises ValueError -> DispatchAskError exit 12."""
     use_tmpdir(monkeypatch, tmp_path)

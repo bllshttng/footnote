@@ -849,14 +849,21 @@ def test_real_relay_descendant_releases_captured_receipt_pipes(
             )
         ]
     )
+    relay_marker = tmp_path / "relay-started"
     script = """
+import os
 import time
 from pathlib import Path
 from fno.agents import dispatch
 
 dispatch._load_a2a_settings = lambda: (True, 6)
 dispatch._registered_family1_state = lambda _entry: "working"
-dispatch._run_relay_loop = lambda *_args, **_kwargs: time.sleep(4)
+
+def run_relay(*_args, **_kwargs):
+    Path(os.environ["FNO_TEST_RELAY_MARKER"]).write_text("started")
+    time.sleep(4)
+
+dispatch._run_relay_loop = run_relay
 dispatch._daemon_rpc = lambda *_args, **_kwargs: {
     "delivered": True,
     "identity_verified": True,
@@ -891,12 +898,14 @@ result = dispatch.dispatch_send(
 )
 print(f"{result.msg_id} delivered ({result.delivery})")
 """
+    env = os.environ.copy()
+    env["FNO_TEST_RELAY_MARKER"] = str(relay_marker)
     started = time.monotonic()
     result = subprocess.run(
         [sys.executable, "-c", script],
         capture_output=True,
         text=True,
-        env=os.environ.copy(),
+        env=env,
         timeout=8,
         check=False,
     )
@@ -906,6 +915,10 @@ print(f"{result.msg_id} delivered ({result.delivery})")
     assert len(result.stdout.splitlines()) == 1
     assert result.stdout.strip().endswith("delivered (hosted)")
     assert not bus_log_path().exists()
+    marker_deadline = time.monotonic() + 2.0
+    while not relay_marker.exists() and time.monotonic() < marker_deadline:
+        time.sleep(0.01)
+    assert relay_marker.read_text() == "started"
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:

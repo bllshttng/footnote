@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Callable, Iterator, Optional
 
 from fno.agents.registry import _agent_lock_path
+from fno.time_budget import validate_timeout_budget
 
 # Threshold above which the on_wait callback fires (AC1-UI lock-wait).
 _ON_WAIT_THRESHOLD_SECONDS = 1.0
@@ -130,6 +131,11 @@ def hold_agent_lock(
         A :class:`_LockHandle` whose `detach()` method suppresses the
         finally-release. Default behavior releases on exit.
     """
+    validate_timeout_budget(
+        timeout,
+        label="agent lock",
+        poll=_POLL_INTERVAL_SECONDS,
+    )
     lock_file = _agent_lock_path(name, registry_path)
     lock_file.parent.mkdir(parents=True, exist_ok=True)
 

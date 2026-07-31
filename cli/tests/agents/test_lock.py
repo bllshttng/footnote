@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import fcntl
 import multiprocessing
-import os
 import time
 from pathlib import Path
 
@@ -45,6 +44,19 @@ def test_agent_lock_timeout_carries_name_and_timeout() -> None:
     assert err.timeout == 30
     assert "foo" in str(err)
     assert "30" in str(err)
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_hold_agent_lock_rejects_nonterminating_timeout(
+    tmp_path: Path, timeout: float
+) -> None:
+    from fno.agents.lock import hold_agent_lock
+
+    registry_path = tmp_path / "registry.json"
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        with hold_agent_lock("invalid-budget", registry_path, timeout=timeout):
+            pass
+    assert not (tmp_path / "locks").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -134,30 +146,6 @@ def test_hold_agent_lock_detach_suppresses_release(tmp_path: Path) -> None:
     # BEFORE close. We assert the documented invariant: a separate process
     # cannot acquire the lock.
     #
-    # To verify detach correctly preserves the lock for cross-process
-    # callers, hold from a child process and check that the parent blocks.
-    barrier = tmp_path / ".child-ready"
-    release = tmp_path / ".child-release"
-
-    def _child(lock_path: str, ready_path: str, release_path: str) -> None:
-        # Open and flock NON-blocking; if it fails, the parent's detached
-        # lock is still held and the test passes implicitly when the parent
-        # later observes BlockingIOError. Here we just signal readiness so
-        # the parent can run its assertion.
-        import fcntl as _fcntl
-        from pathlib import Path as _P
-
-        with open(lock_path, "w") as cfh:
-            try:
-                _fcntl.flock(cfh, _fcntl.LOCK_EX | _fcntl.LOCK_NB)
-                _P(ready_path).write_text("acquired")
-                # Block until released
-                while not _P(release_path).exists():
-                    time.sleep(0.05)
-                _fcntl.flock(cfh, _fcntl.LOCK_UN)
-            except BlockingIOError:
-                _P(ready_path).write_text("blocked")
-
     # Note: This subtest is bookkeeping — the core invariant is that
     # detach() prevents the finally branch from calling LOCK_UN. We assert
     # that directly via a second hold_agent_lock attempt in the SAME
@@ -165,10 +153,6 @@ def test_hold_agent_lock_detach_suppresses_release(tmp_path: Path) -> None:
     # succeed immediately. Cross-process verification is covered by the
     # process-level concurrency test below.
     #
-    # Cleanup hack so the test process doesn't leak the lock for the rest
-    # of the session:
-    import fno.agents.lock as _lock_mod
-
     # Force-release any lingering file handles by reopening + LOCK_UN.
     with open(lock_file, "w") as fh:
         try:
