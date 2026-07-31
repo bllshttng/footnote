@@ -10,6 +10,8 @@ import json
 import os
 import socket
 import struct
+import subprocess
+import sys
 import threading
 import time
 from pathlib import Path
@@ -824,6 +826,86 @@ def test_background_relay_stdio_detach_failure_exits_without_relay(monkeypatch) 
 
     assert relay_calls == []
     assert stopped[0][0][3] == "relay-stdio-detach-failed"
+
+
+def test_real_relay_descendant_releases_captured_receipt_pipes(
+    tmp_path, monkeypatch
+) -> None:
+    """A real double-forked relay cannot delay the hosted CLI-style receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import bus_log_path
+
+    write_registry(
+        [
+            AgentEntry(
+                name="red",
+                harness="claude",
+                harness_session_id="aaaaaaaa-1111-7222-8333-4444abcd1234",
+                cwd=str(tmp_path),
+                log_path=str(tmp_path / "red.log"),
+                short_id="abcd1234",
+                status="live",
+            )
+        ]
+    )
+    script = """
+import time
+from pathlib import Path
+from fno.agents import dispatch
+
+dispatch._load_a2a_settings = lambda: (True, 6)
+dispatch._registered_family1_state = lambda _entry: "working"
+dispatch._run_relay_loop = lambda *_args, **_kwargs: time.sleep(4)
+dispatch._daemon_rpc = lambda *_args, **_kwargs: {
+    "delivered": True,
+    "identity_verified": True,
+    "reply": "continue",
+}
+
+def deliver(entry, body, from_name, mail=None, sender_entry=None):
+    return dispatch._switchboard_exchange(
+        entry.name,
+        from_name,
+        body,
+        to_identity={
+            "harness": "claude",
+            "session_id": entry.harness_session_id,
+            "short_id": entry.short_id,
+            "created_at": entry.created_at,
+        },
+        from_identity={
+            "harness": "codex",
+            "session_id": "sender-session",
+            "short_id": "sender01",
+            "created_at": "sender-created",
+        },
+    )
+
+dispatch._deliver_live = deliver
+result = dispatch.dispatch_send(
+    name="red",
+    message="hello",
+    provider=None,
+    cwd=Path.cwd(),
+)
+print(f"{result.msg_id} delivered ({result.delivery})")
+"""
+    started = time.monotonic()
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=os.environ.copy(),
+        timeout=8,
+        check=False,
+    )
+
+    assert time.monotonic() - started < 2.5
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert len(result.stdout.splitlines()) == 1
+    assert result.stdout.strip().endswith("delivered (hosted)")
+    assert not bus_log_path().exists()
 
 
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
