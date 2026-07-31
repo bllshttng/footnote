@@ -648,6 +648,32 @@ def test_stop_kills_pid_when_no_transport_id(tmp_path: Path, monkeypatch, capsys
         proc.wait()
 
 
+def test_stop_refuses_pid_without_start_token(tmp_path: Path, monkeypatch) -> None:
+    """Bare liveness is not enough to justify a SIGKILL.
+
+    Without the recorded start token there is no way to tell our worker from an
+    unrelated process that inherited the pid after it died, so the row is
+    refused and the process is left alone.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    proc, _ = _spawn_sleeper()
+    try:
+        _seed_registry(
+            dict(name="tokenless", provider="claude", short_id="", pid=proc.pid),
+        )
+
+        from fno.agents import dispatch
+
+        with pytest.raises(dispatch.DispatchAskError) as exc_info:
+            dispatch.stop_agent("tokenless")
+
+        assert exc_info.value.exit_code == 12
+        assert proc.poll() is None, "a refused row must not be signalled"
+    finally:
+        proc.kill()
+        proc.wait()
+
+
 def test_stop_refuses_recycled_pid(tmp_path: Path, monkeypatch) -> None:
     """A pid whose start token no longer matches belongs to someone else.
 
