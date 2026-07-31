@@ -862,6 +862,7 @@ def _install_then_mark(
     marker: Path,
     pid: int,
     post_install: Optional[str] = None,
+    await_binary: Optional[str] = None,
 ) -> str:
     """Build a shell line that installs, then writes the marker iff install succeeds.
 
@@ -894,8 +895,64 @@ def _install_then_mark(
     )
     line = f"{shlex.join(install_cmd)} && {{ {marker_write} || true; }}"
     if post_install:
-        line += f" && {{ {post_install} || true; }}"
+        line += f" && {{ {_await_binary(post_install, await_binary)} }}"
     return line
+
+
+def _await_binary(post_install: str, binary: Optional[str]) -> str:
+    """Wrap ``post_install`` in a bounded wait for ``binary`` to exist.
+
+    Measured, not assumed: during ``uv tool install --reinstall`` the console
+    script ``<tools>/fno/bin/fno-py`` is deleted and recreated, and the
+    ``~/.local/bin`` exposure dangles with it, for roughly half a second. (The
+    venv's python3 never disappears, so the shebang interpreter is not the
+    problem and pointing at it would fix nothing.) That gap closed only ~40ms
+    before uv exited in an idle measurement, so the ``&&`` that already gates
+    this chain on uv's exit is technically correct and practically far too tight:
+    on a loaded machine the exec still lands in the tail of the gap and dies with
+    ``/bin/sh: .../fno-py: No such file or directory``.
+
+    Waiting here is not speculation about an unknown cause. We just ran the
+    install ourselves, so the binary is expected to appear; this waits for our
+    own artifact rather than guessing at someone else's. If it never shows up,
+    say what did not happen and give the two commands to run by hand, because
+    silently skipping the refresh is what leaves a launchd agent pinned to the
+    old binary - the exact wedge this chain exists to prevent.
+    """
+    # A brace group needs a terminator before `}`, and a doubled `;;` is a
+    # syntax error in sh (it is the case-arm terminator), so normalise exactly
+    # one. `sh -n` catches both mistakes; there is a test that runs it.
+    body = post_install.rstrip().rstrip(";")
+    if not binary:
+        # Unchanged pre-existing shape: the trailing `|| true` binds to the last
+        # command only, which is what makes each refresh independently
+        # best-effort.
+        return f" {body} || true;"
+    q = shlex.quote
+    b = q(binary)
+    # Pick the probe from the shape of the path, because `-x` and PATH lookup are
+    # not interchangeable. `_resolve_fno_binary` falls back to a BARE `fno-py`
+    # when no console script exists yet (pr_watch/cli.py), which is exactly the
+    # cold-install case this refresh matters most for -- and `[ -x fno-py ]` tests
+    # `$PWD/fno-py`, never PATH. Probing that with `-x` would wait the full
+    # ceiling and then skip both refreshes even though the install had just put
+    # `fno-py` on PATH. Deciding here rather than in the shell keeps the emitted
+    # line simple and needs no shell function.
+    probe = f"[ -x {b} ]" if "/" in binary else f"command -v {b} >/dev/null 2>&1"
+    # POSIX sh only: no `seq`, no bashisms. 15 * 0.2s = 3s ceiling.
+    wait = (
+        f"_fno_n=0; while [ $_fno_n -lt 15 ] && ! {probe}; "
+        f"do _fno_n=$((_fno_n+1)); sleep 0.2; done;"
+    )
+    warn = q(
+        "fno update: fno-py never reappeared after the install, so the launchd "
+        "agents were NOT refreshed onto the new binary. Run by hand: "
+        "fno pr-watch refresh; fno backlog groom --refresh-agent"
+    )
+    return (
+        f" {wait} if {probe}; then {{ {body}; }} || true; "
+        f"else printf '%s\\n' {warn} >&2; fi;"
+    )
 
 
 def update_command(
@@ -1017,8 +1074,10 @@ def update_command(
             [_fno, "pr-watch", "refresh"],
             [_fno, "backlog", "groom", "--refresh-agent"],
         ]
+        _await_bin = _fno
     except Exception:
         refresh_cmds = []
+        _await_bin = None
 
     if sys.platform == "win32":
         # On Windows, os.execvp does NOT replace the process: it spawns the
@@ -1052,7 +1111,7 @@ def update_command(
                 "/bin/sh", "-c",
                 _install_then_mark(
                     cmd, rev, marker=_INSTALLED_REV_FILE, pid=os.getpid(),
-                    post_install=post_install,
+                    post_install=post_install, await_binary=_await_bin,
                 ),
             ],
         )
@@ -1061,7 +1120,8 @@ def update_command(
         # chain the refresh after a successful install via a shell.
         os.execvp(
             "/bin/sh",
-            ["/bin/sh", "-c", f"{shlex.join(cmd)} && {{ {post_install} || true; }}"],
+            ["/bin/sh", "-c",
+             f"{shlex.join(cmd)} && {{ {_await_binary(post_install, _await_bin)} }}"],
         )
     else:
         os.execvp(cmd[0], cmd)

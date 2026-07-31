@@ -248,7 +248,11 @@ def test_update_without_source_rev_skips_marker_chain(
     # The marker-write chain (printf rev > tmp && mv) must be absent with no rev.
     joined = " ".join(captured.get("args") or [])
     assert "installed-rev" not in joined
-    assert "printf" not in joined
+    # NOT `"printf" not in joined`: printf is no longer a marker-write signature,
+    # because the post-install guard uses it to warn when fno-py never reappears
+    # after the install. Assert the atomic rename that actually lands the marker,
+    # which is both specific to the marker chain and a stronger claim.
+    assert "mv " not in joined
     # The pr-watch refresh still rides the successful install (best-effort).
     assert "pr-watch refresh" in joined
 

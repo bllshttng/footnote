@@ -563,3 +563,184 @@ def test_third_party_import_failure_has_no_reinstall_hint():
         ModuleNotFoundError("boom", name="fno.graph._reconcile")
     )
     assert "retry" in _import_failure_hint(ModuleNotFoundError("boom", name="fno"))
+
+
+# ---------------------------------------------------------------------------
+# AC8-WIN: verify-then-retry across a tree that changed mid-run
+# ---------------------------------------------------------------------------
+
+def test_module_is_now_on_disk_sees_a_file_written_after_the_dir_was_listed(tmp_path):
+    """The retry gate must read the PRESENT, not a cached past: a module written
+    into an already-imported package must be visible, because that is exactly what
+    a reinstall does to a running process.
+
+    Scope note, so this docstring does not overclaim: it passes with or without the
+    invalidate_caches() call inside, because FileFinder re-lists a directory whose
+    mtime changed and APFS mtimes are fine-grained enough to notice. What it pins is
+    the BEHAVIOR the retry depends on, not that one implementation detail."""
+    import sys as _sys
+    from fno._lazy_group import _module_is_now_on_disk
+
+    pkg = tmp_path / "winpkg"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text("", encoding="utf-8")
+    _sys.path.insert(0, str(tmp_path))
+    try:
+        import winpkg  # noqa: F401  (populates the finder cache for pkg/)
+
+        assert _module_is_now_on_disk("winpkg.late") is False
+        # Write the module AFTER the directory has been listed and cached.
+        (pkg / "late.py").write_text("x = 1\n", encoding="utf-8")
+        assert _module_is_now_on_disk("winpkg.late") is True
+    finally:
+        _sys.path.remove(str(tmp_path))
+        _sys.modules.pop("winpkg", None)
+        _sys.modules.pop("winpkg.late", None)
+
+
+def _counting_import(monkeypatch, target: str, results: list):
+    """Patch import_module so calls to `target` pop from `results`; count the calls."""
+    import importlib as _il
+    from fno import _lazy_group as lg
+
+    calls: list[str] = []
+    real = _il.import_module
+
+    def fake(name, package=None):
+        if name == target:
+            calls.append(name)
+            outcome = results.pop(0)
+            if isinstance(outcome, BaseException):
+                raise outcome
+            return outcome
+        return real(name, package)
+
+    monkeypatch.setattr(lg.importlib, "import_module", fake)
+    return calls
+
+
+def test_lazy_import_retries_once_when_the_tree_changed_underneath(monkeypatch):
+    """AC8-WIN: a reinstall can replace the package between process start and the
+    lazy import. When the missing module is present again on re-check, the command
+    must succeed rather than surface a transient failure to the operator."""
+    from fno import _lazy_group as lg
+    from fno._lazy_group import make_lazy_group_cls
+    import typer
+    from typer.testing import CliRunner
+
+    real_target = importlib.import_module("fno.state.cli")
+    calls = _counting_import(
+        monkeypatch,
+        "fno.state.cli",
+        [ModuleNotFoundError("gone", name="fno.state._mid_reinstall"), real_target],
+    )
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+
+    app = typer.Typer(
+        cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
+        no_args_is_help=True,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @app.callback()
+    def _cb() -> None:
+        pass
+
+    result = CliRunner().invoke(app, ["state", "--help"])
+    assert len(calls) == 2, f"expected exactly one retry, got {len(calls)} imports"
+    assert result.exit_code == 0, result.output
+
+
+def test_lazy_import_does_not_retry_when_the_module_is_really_missing(monkeypatch):
+    """AC8-WIN, the half that keeps this honest: a genuinely stale or broken install
+    answers 'absent' on re-check, so it is NOT retried and still fails with the
+    message it fails with today. Without this the retry would be a blind sleep."""
+    from fno import _lazy_group as lg
+    from fno._lazy_group import make_lazy_group_cls
+    import typer
+    from typer.testing import CliRunner
+
+    calls = _counting_import(
+        monkeypatch,
+        "fno.state.cli",
+        [ModuleNotFoundError("gone", name="fno.state._really_gone")],
+    )
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: False)
+
+    app = typer.Typer(
+        cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
+        no_args_is_help=True,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @app.callback()
+    def _cb() -> None:
+        pass
+
+    result = CliRunner().invoke(app, ["state", "--help"])
+    assert len(calls) == 1, f"a missing module must not be retried; got {len(calls)}"
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
+    flat = " ".join(combined.replace("│", " ").split())
+    assert "fno doctor" in flat, combined
+
+
+def _run_one_lazy_command(monkeypatch, results):
+    """Invoke a lazy 'state' command whose import outcomes come from `results`."""
+    from fno._lazy_group import make_lazy_group_cls
+    import typer
+    from typer.testing import CliRunner
+
+    calls = _counting_import(monkeypatch, "fno.state.cli", results)
+    app = typer.Typer(
+        cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
+        no_args_is_help=True,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @app.callback()
+    def _cb() -> None:
+        pass
+
+    return calls, CliRunner().invoke(app, ["state", "--help"])
+
+
+def test_plain_import_error_is_never_retried(monkeypatch):
+    """A 'cannot import name X from Y' names a module that EXISTS, so the on-disk
+    check would say yes and the whole module tree would re-execute for nothing,
+    running every import-time side effect twice. Only ModuleNotFoundError proves a
+    module was absent, so only it earns a retry."""
+    from fno import _lazy_group as lg
+
+    # on_disk deliberately True: the guard must be the exception TYPE, not this.
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    boom = ImportError("cannot import name 'gone' from 'fno.config'", name="fno.config")
+    calls, result = _run_one_lazy_command(monkeypatch, [boom])
+
+    assert len(calls) == 1, f"a plain ImportError must not be retried; got {len(calls)}"
+    assert result.exit_code != 0
+
+
+def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch):
+    """The retry gets further through the import tree, so it can surface a different
+    and more truthful cause. Reporting the original would bury a real missing
+    dependency under an fno reinstall hint and send the operator to `fno update` for
+    something `fno update` cannot fix."""
+    from fno import _lazy_group as lg
+
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    first = ModuleNotFoundError("gone", name="fno.state._mid_reinstall")
+    second = ModuleNotFoundError("No module named 'some_third_party'", name="some_third_party")
+    calls, result = _run_one_lazy_command(monkeypatch, [first, second])
+
+    assert len(calls) == 2
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
+    flat = " ".join(combined.replace("│", " ").split())
+    assert "some_third_party" in flat, combined
+    # The stale fno hint must NOT be attached to a third-party failure.
+    assert "fno doctor" not in flat, combined
+    assert "_mid_reinstall" not in flat, combined

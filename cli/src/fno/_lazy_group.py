@@ -43,6 +43,47 @@ if TYPE_CHECKING:
     pass
 
 
+def _is_fno_module(name: str) -> bool:
+    """True for our own package, false for a third-party dependency.
+
+    The discriminator for every reinstall-window behavior below: a missing
+    third-party dependency is a genuinely broken install and must neither be
+    retried nor collect reinstall speculation.  Written as an exact-or-dotted
+    match so a package merely BEGINNING with those three letters (``fnord``)
+    is not mistaken for ours.
+    """
+    return name == "fno" or name.startswith("fno.")
+
+
+def _module_is_now_on_disk(name: str) -> bool:
+    """True when ``name`` resolves RIGHT NOW, after dropping the finder caches.
+
+    The import that just failed proves nothing about the present: a reinstall
+    replaces the package tree between two statements, so a module absent one
+    moment is present the next.  Re-checking is what keeps the retry in
+    ``_load_real`` falsifiable rather than a hopeful sleep -- a genuinely
+    missing module answers False here and fails exactly as it does today.
+
+    ``invalidate_caches()`` is belt-and-braces, and the honest scope is small:
+    ``FileFinder`` memoizes a directory listing but re-lists when the directory
+    mtime changes, which covers a reinstall on any filesystem with fine mtime
+    granularity (measured: APFS self-invalidates, so this call is not what makes
+    the check work there).  It is kept for the cases that granularity does not
+    cover -- a coarse-mtime filesystem where the rewrite lands inside one mtime
+    tick -- and because it is the documented thing to do when files change
+    underneath a running process.  It costs microseconds, on an error path only.
+    """
+    import importlib.util
+
+    importlib.invalidate_caches()
+    try:
+        return importlib.util.find_spec(name) is not None
+    except (ImportError, AttributeError, ValueError):
+        # A parent package that is itself mid-replacement cannot answer the
+        # question; treat "cannot tell" as "no" so we never retry on a guess.
+        return False
+
+
 def _import_failure_hint(exc: ImportError) -> str:
     """Suffix explaining a missing ``fno`` submodule, or "" for anything else.
 
@@ -60,7 +101,7 @@ def _import_failure_hint(exc: ImportError) -> str:
     a genuinely broken install and must not collect reinstall speculation.
     """
     name = getattr(exc, "name", None) or ""
-    if name != "fno" and not name.startswith("fno."):
+    if not _is_fno_module(name):
         return ""
     return (
         f" ({name} is part of fno itself: either this package was being "
@@ -118,10 +159,48 @@ class _LazyStub(click.Group):
         try:
             module = importlib.import_module(module_path)
         except ImportError as exc:
-            raise click.ClickException(
-                f"Failed to import {self._import_path!r} for command "
-                f"{self.name!r}: {exc}{_import_failure_hint(exc)}"
-            ) from exc
+            # Imports here happen at INVOCATION time, so `uv tool install
+            # --reinstall` (what `fno update` runs) can delete and rewrite this
+            # package between process start and this line. On a box with several
+            # launchd agents and live sessions, some `fno` process is nearly
+            # always mid-flight during that window, so this is routine rather
+            # than exotic.
+            #
+            # Retry ONCE, and only after confirming on disk that what was
+            # missing is present now. That check is the whole difference between
+            # this and a hopeful sleep-retry: a genuinely stale or broken
+            # install still answers "absent" and still fails below with the same
+            # message, so nothing is masked. A second failure is reported
+            # normally rather than retried again.
+            # ModuleNotFoundError specifically, not ImportError generally: only
+            # that subclass proves a module was ABSENT. A plain "cannot import
+            # name X from Y" names a module that exists, so the on-disk check
+            # below would say yes and we would re-execute the whole module tree
+            # for nothing, running every import-time side effect a second time.
+            name = getattr(exc, "name", None) or ""
+            module = None
+            failure: ImportError = exc
+            if (
+                isinstance(exc, ModuleNotFoundError)
+                and _is_fno_module(name)
+                and _module_is_now_on_disk(name)
+            ):
+                try:
+                    module = importlib.import_module(module_path)
+                except ImportError as retry_exc:
+                    # Report what the RETRY hit, never the stale first failure.
+                    # The retry gets further through the tree, so it can surface
+                    # a different and more truthful cause (a genuinely missing
+                    # third-party dependency, say). Reporting the original would
+                    # bury that under an fno reinstall hint and send the operator
+                    # to `fno update` for a problem `fno update` cannot fix.
+                    failure = retry_exc
+                    module = None
+            if module is None:
+                raise click.ClickException(
+                    f"Failed to import {self._import_path!r} for command "
+                    f"{self.name!r}: {failure}{_import_failure_hint(failure)}"
+                ) from failure
         attr = getattr(module, attr_name, None)
         if attr is None:
             raise click.ClickException(

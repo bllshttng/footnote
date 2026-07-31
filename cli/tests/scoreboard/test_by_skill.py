@@ -11,6 +11,7 @@ AC-EDGE a skill file with no git history at the timestamp -> version "unknown",
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta, timezone
 
 import typer
 from typer.testing import CliRunner
@@ -19,6 +20,29 @@ from fno.scoreboard import cli as sb_cli
 from fno.scoreboard.fold import build_skill_scoreboard
 
 runner = CliRunner()
+_RECENT_BASE = datetime.now(timezone.utc) - timedelta(days=1)
+
+
+def _recent(delta_minutes: int = 0) -> str:
+    """A `completed` timestamp inside the CLI's REAL 28-day window.
+
+    Unit tests inject `now=`, so their fixture dates never expire. CLI-path tests
+    invoke the real command and cannot inject anything, so a hardcoded fixture
+    date is a time bomb: these were pinned to 2026-07-03 and started failing on
+    2026-07-31, exactly 28 days later, with "no terminal sessions in window".
+    Anchored to now so the window can never age out again.
+
+    Built from a UTC base and emitted naive, matching how the pinned fixtures
+    read (naive values were UTC wall time), so relative gaps are preserved.
+    """
+    return (_RECENT_BASE + timedelta(minutes=delta_minutes)).replace(
+        tzinfo=None, microsecond=0
+    ).isoformat()
+
+
+def _recent_z(delta_minutes: int = 0) -> str:
+    """`_recent` in the Z-suffixed UTC form the loop-event fixtures use."""
+    return (_RECENT_BASE + timedelta(minutes=delta_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _app():
@@ -58,7 +82,7 @@ def test_hp_transcript_attribution_prints_runs_and_coverage():
         {"completed": "2026-07-02T10:00:00", "termination_reason": "DonePRGreen", "graph_node_id": "x-2",
          "cost_usd": 2.0, "sessions": [UUID_B]},
     ]
-    from datetime import datetime
+    from datetime import datetime, timedelta, timezone
 
     sb = build_skill_scoreboard(
         rows, [{"id": "x-1", "reverted": False}, {"id": "x-2", "reverted": False}], [],
@@ -146,7 +170,7 @@ def test_default_hooks_real_path_never_crashes(tmp_path, monkeypatch):
 def test_hp_cli_renders_coverage_and_table(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _recent(), "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "phases_completed": ["do", "review"]},
     ]}))
     _wire(monkeypatch, tmp_path, ledger)
@@ -373,7 +397,7 @@ def test_revert_rate_is_na_when_node_missing_from_graph():
 def test_cli_renders_na_for_unjudgeable_revert_rate(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _recent(), "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "phases_completed": ["do"]},
     ]}))
     _wire(monkeypatch, tmp_path, ledger)  # no graph.json -> no causal telemetry
