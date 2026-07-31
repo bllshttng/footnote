@@ -473,3 +473,93 @@ def test_config_first_import_does_not_freeze_graph_path_to_fallback(tmp_path):
     assert "mygraph.json" in result.stdout, (
         f"read_graph default froze to the fallback, not the configured path:\n{result.stdout}"
     )
+
+
+# ---------------------------------------------------------------------------
+# AC4-ERR: the error-reporting path is not itself a lazy tenant
+# ---------------------------------------------------------------------------
+
+def test_error_path_never_first_imports_rich_utils():
+    """AC4-ERR: typer defers `from . import rich_utils` to exception time in TWO
+    places -- typer.main.except_hook (gated by pretty_exceptions_enable) and the
+    ClickException arm of typer.core._main (gated by rich_markup_mode). During a
+    `uv tool install --reinstall` the package is being replaced under the running
+    process, so that first-time import fails too and the operator is shown
+    `cannot import name 'rich_utils' from 'typer'` instead of the real cause.
+    Setting only one of these leaves the other path live, which is why both are
+    asserted here."""
+    from fno.cli import app
+
+    assert app.pretty_exceptions_enable is False
+    assert app.rich_markup_mode is None
+
+
+def test_building_the_command_does_not_import_rich_utils():
+    """AC4-ERR, the behavioral half: the flags above are only worth their comment if
+    typer.rich_utils actually stays unimported through command construction. Run in a
+    subprocess so an earlier test's imports cannot mask a regression."""
+    code = (
+        "import sys, typer.main\n"
+        "from fno.cli import app\n"
+        "typer.main.get_command(app)\n"
+        "print('typer.rich_utils' in sys.modules)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", code], capture_output=True, text=True, timeout=60
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "False", (
+        f"typer.rich_utils became resident during command construction:\n{result.stdout}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# AC5-ERR / AC6-EDGE: a missing fno submodule names the reinstall window
+# ---------------------------------------------------------------------------
+
+def test_fno_module_import_failure_names_reinstall_window():
+    """AC5-ERR: imports happen at invocation time, so `uv tool install --reinstall`
+    replaces the package underneath a running process and any not-yet-imported
+    subcommand fails for the length of the install. The operator-facing message must
+    name both candidate causes (reinstall in flight, stale install) and the fix for
+    each, not just the transient one."""
+    from fno._lazy_group import make_lazy_group_cls
+    import typer
+    from typer.testing import CliRunner
+
+    bad_cls = make_lazy_group_cls({"bad": "fno.does_not_exist_module_xyz:cli"})
+    # Mirror the real app's error-path config (see fno.cli.app), so this exercises
+    # the rendering the operator actually gets.
+    test_app = typer.Typer(
+        cls=bad_cls,
+        no_args_is_help=True,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @test_app.callback()
+    def _cb() -> None:
+        pass
+
+    result = CliRunner().invoke(test_app, ["bad"])
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
+    # Collapse whitespace: any renderer is free to wrap the message across lines.
+    flat = " ".join(combined.replace("│", " ").split())
+    assert "reinstalled underneath the running process" in flat, combined
+    assert "fno doctor" in flat, combined
+
+
+def test_third_party_import_failure_has_no_reinstall_hint():
+    """AC6-EDGE: a missing third-party dependency is a genuinely broken install. It
+    must not collect reinstall speculation, and the prefix test must not match a
+    package that merely starts with the letters 'fno'."""
+    from fno._lazy_group import _import_failure_hint
+
+    assert _import_failure_hint(ModuleNotFoundError("boom", name="rich")) == ""
+    assert _import_failure_hint(ModuleNotFoundError("boom", name="fnord")) == ""
+    assert _import_failure_hint(ModuleNotFoundError("boom")) == ""  # name unset
+    assert "retry" in _import_failure_hint(
+        ModuleNotFoundError("boom", name="fno.graph._reconcile")
+    )
+    assert "retry" in _import_failure_hint(ModuleNotFoundError("boom", name="fno"))

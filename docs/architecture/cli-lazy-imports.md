@@ -114,22 +114,95 @@ shipped at 51% drop.
 Re-bench guidance: run `rm -rf cli/.venv && uv sync` first to avoid
 `__pycache__` confounds, then `python cli/benchmarks/measure_cli_help.py`.
 
+## The reinstall-window hazard
+
+Deferring an import is deferring a **disk read**. A running `fno` process holds a
+partially-imported package and reaches back into `site-packages` at an arbitrary
+later moment, so `uv tool install --reinstall` (what `fno update` runs) deletes
+and rewrites the very tree that process is executing from. For the length of the
+install, every subcommand the process has not yet imported fails.
+
+This is a real, reproduced operator failure, not a theoretical one, and it took
+three sessions to identify because it presents as three unrelated symptoms that
+are one event:
+
+| Symptom | Who the tenant is |
+|---|---|
+| `ModuleNotFoundError: No module named 'fno.graph._reconcile'` | the invoked subcommand's first-time import |
+| `ImportError: cannot import name 'rich_utils' from 'typer'` | the **error-reporting path itself** |
+| `/bin/sh: .../fno-py: No such file or directory` | the post-install chain's exec, same window |
+
+The second one is what made this expensive. Typer defers `from . import
+rich_utils` to exception time in two places: `typer.main.except_hook` (gated by
+`pretty_exceptions_enable`) and the `ClickException` arm of `typer.core._main`
+(gated by `rich_markup_mode`, which defaults to `"rich"`). Both are first-time
+imports on the failure path, so the reporter died inside the same window and the
+operator saw the reporter's own error instead of the cause. `cli.py` disables
+both. Disabling only one leaves the live carrier untouched: the `ClickException`
+arm is the path a lazy-import failure actually travels.
+
+Eagerly importing `typer.rich_utils` to make it resident is not an option: it
+costs ~237ms, which is more than the entire startup budget this refactor bought.
+Disabling it is also a small win on the help path, which was paying that import.
+
+### Reproducing it
+
+Start `uv tool install --reinstall --refresh <repo>/cli` against the tool dir,
+and inside that window invoke an `fno` subcommand whose module the running
+process has not yet imported. The lazy group guarantees the import lands in the
+window.
+
+A synthetic loop that re-imports modules already resident in `sys.modules` will
+**not** reproduce it: a cached import never touches the disk. That false negative
+is what kept this misdiagnosed. There is no automated test for this; racing a
+multi-second 18-package install to re-prove an understood mechanism buys less
+than it costs, so the recipe lives here for hand-running instead.
+
+### What is and is not fixed
+
+Fixed: the failure is legible. The error path performs no first-time import, and
+a missing module under the `fno` package says so and names both candidate causes
+(a reinstall in flight, retry; a stale install, `fno update` then `fno doctor`).
+
+Not fixed, deliberately: the window itself. A command invoked mid-reinstall still
+fails. Closing it would require quiescing running `fno` processes or new
+cross-process state, both of which cost more than a transient, self-healing
+few-second failure. Specifically rejected:
+
+- **A provision lock.** uv already serializes tool installs (measured: 8 rounds
+  of concurrent `--reinstall --refresh` against `--force` on the real
+  18-package source, 0 failures, `bin/fno-py` exposure intact every round).
+  There is one installer here, not two. A lock would serialize nothing.
+- **Eager-importing subcommand modules.** That deletes the lazy group to avoid a
+  transient failure.
+- **Retrying the failed import after a sleep.** That hides a genuinely stale or
+  broken install behind a delay.
+
 ## Contracts (do not break)
 
 A future refactor must preserve:
 
 1. `fno --help` does not import sub-app bodies. Test:
    `tests/test_lazy_imports.py::test_fno_help_does_not_import_sub_app_modules`.
-2. `fno paths state-dir` does not import `megawalk` or `megatron`.
-   Test: `test_fno_paths_does_not_import_megawalk`.
+2. `fno paths state-dir` does not import the heavy sub-apps. Test:
+   `test_fno_paths_does_not_import_heavy_subapps`.
 3. Single-command sub-apps keep their group shape. Test:
    `test_executor_resolve_group_shape_preserved`.
-4. Megawalk and megatron's extended exit-code documentation appears in
-   `fno <verb> --help`. Tests:
-   `test_megawalk_help_carries_exit_codes`,
-   `test_megatron_help_carries_exit_codes`.
+4. Parent-side `add_typer` overrides survive lazy loading (see
+   `info_overrides` above). Test:
+   `test_executor_resolve_group_shape_preserved` covers the group shape;
+   the overrides themselves are exercised by the `--help` tests.
 5. Misconfigured lazy entries fail loudly with the bad path in stderr.
    Tests: `test_bad_lazy_entry_fails_loud`, `test_bad_module_path_fails_loud`.
+6. The error path never first-imports `typer.rich_utils` (see the
+   reinstall-window hazard above). Tests:
+   `test_error_path_never_first_imports_rich_utils`,
+   `test_building_the_command_does_not_import_rich_utils`.
+7. A missing module under the `fno` package explains itself and names both
+   causes; a missing third-party dependency collects no reinstall
+   speculation. Tests:
+   `test_fno_module_import_failure_names_reinstall_window`,
+   `test_third_party_import_failure_has_no_reinstall_hint`.
 
 Adding a new sub-app: add one line to `LAZY_SUBCOMMANDS` in `cli.py`
 with the import path and a short help string. Run the test suite to

@@ -313,6 +313,23 @@ app = typer.Typer(
     invoke_without_command=True,
     add_completion=False,
     cls=make_lazy_group_cls(LAZY_SUBCOMMANDS),
+    # Both of these keep `typer.rich_utils` off the error path. typer defers that
+    # import to exception time in TWO places -- `typer.main.except_hook` (gated by
+    # pretty_exceptions_enable) and the ClickException arm of `typer.core._main`
+    # (gated by rich_markup_mode) -- so the error-REPORTING path is itself a
+    # first-time import. When what it is reporting is "a lazy subcommand import
+    # failed because uv was reinstalling this package underneath us", that import
+    # fails too and the operator gets `cannot import name 'rich_utils' from
+    # 'typer'` instead of the cause. Setting only one of these leaves the other
+    # path live.
+    # Not free of consequence, and both consequences are wanted: help and errors
+    # render as plain click rather than rich boxes. Every lazily-loaded subgroup
+    # ALREADY passes rich_markup_mode=None (see _lazy_group._load_real), so this
+    # makes the top level consistent with the rest of the CLI instead of an
+    # exception to it, and it stops `fno --help` paying the 237ms rich_utils
+    # import that the lazy group exists to avoid.
+    pretty_exceptions_enable=False,
+    rich_markup_mode=None,
 )
 
 
