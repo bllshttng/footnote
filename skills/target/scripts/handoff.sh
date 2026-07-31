@@ -106,6 +106,12 @@ else
   HANDOFF_ENABLED="true"
 fi
 
+# Both are the config-side operand of an integer `[` test whose failure mode is
+# OPEN (see the _USED_PCT guard below), so a typo'd config value would spawn a
+# handoff instead of parking. Fall back to the documented default.
+case "$GENERATION_CAP"   in ''|*[!0-9]*) GENERATION_CAP="4"    ;; esac
+case "$USED_PCT_TRIGGER" in ''|*[!0-9]*) USED_PCT_TRIGGER="50" ;; esac
+
 # ---------------------------------------------------------------------------
 # Helper: emit an event to events.jsonl
 # Accepts: emit_event <type> <json-data>
@@ -372,8 +378,12 @@ if [ "$BOUNDARY" = "wave" ]; then
   _PROBE_EXIT=3
   _PROBE_OUT=""
   if [ -n "$_PROBE_SCRIPT" ] && [ -f "$_PROBE_SCRIPT" ] && [ -n "$_TRANSCRIPT_PATH" ]; then
-    _PROBE_OUT="$(bash "$_PROBE_SCRIPT" "$_TRANSCRIPT_PATH" 2>/dev/null)" || true
-    _PROBE_EXIT=$?
+    # Capture the probe's OWN status. A trailing `|| true` here makes the next
+    # `$?` read that `true` (always 0), swallowing the probe's exit 3 - an
+    # unreadable transcript then skipped the park below and fell through to a
+    # spawn it should never have attempted (x-f804).
+    _PROBE_OUT="$(bash "$_PROBE_SCRIPT" "$_TRANSCRIPT_PATH" 2>/dev/null)" \
+      && _PROBE_EXIT=0 || _PROBE_EXIT=$?
   fi
 
   if [ "$_PROBE_EXIT" -ne 0 ]; then
@@ -387,6 +397,12 @@ if [ "$BOUNDARY" = "wave" ]; then
   set +o pipefail
   _USED_PCT="$(printf '%s' "$_PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
   set -o pipefail
+  # jq prints NOTHING (rc 0) on empty stdin - `// 0` defaults a null FIELD, not
+  # absent INPUT - so `|| echo 0` never fires and a blank value reaches `[`.
+  # `[ "" -lt N ]` errors and returns 2, which `if` reads as "else": the park
+  # is skipped and the failure is OPEN. Same integer-shape guard the probe
+  # applies to its own inputs.
+  case "$_USED_PCT" in ''|*[!0-9]*) _USED_PCT=0 ;; esac
   if [ "$_USED_PCT" -lt "$USED_PCT_TRIGGER" ]; then
     echo "parked $NODE_ID reason=\"no-pressure: used_pct=$_USED_PCT < trigger=$USED_PCT_TRIGGER\""
     exit "$_EXIT_PARKED"

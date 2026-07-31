@@ -36,10 +36,29 @@ CONTEXT_PROBE="$REPO_ROOT/skills/target/scripts/context-probe.sh"
 # it needs this checkout's sources and an interpreter that can import them.
 # Prefer the worktree venv; a bare python3 works when the deps are present.
 export FNO_SRC="$REPO_ROOT/cli/src"
-if [ -x "$REPO_ROOT/cli/.venv/bin/python" ]; then
-  export FNO_PYTHON="$REPO_ROOT/cli/.venv/bin/python"
-else
-  export FNO_PYTHON="$(command -v python3 || command -v python)"
+# Pick an interpreter that can actually IMPORT the CLI, and refuse to run if
+# none can. Choosing one that merely exists is how this suite silently went
+# ~60% vacuous: a linked worktree has no cli/.venv, the bare-python3 fallback
+# lacked typer, `fno plan rung` died, and every scenario parked at that gate
+# while still matching its loose "parked" assertion (x-f804).
+export FNO_PYTHON=""
+for _cand in \
+  "$REPO_ROOT/cli/.venv/bin/python" \
+  "$(dirname "$(git -C "$REPO_ROOT" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)")/cli/.venv/bin/python" \
+  "$(command -v python3 || true)" \
+  "$(command -v python || true)"
+do
+  [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+  if PYTHONPATH="$FNO_SRC" "$_cand" -c 'import fno.cli' >/dev/null 2>&1; then
+    export FNO_PYTHON="$_cand"
+    break
+  fi
+done
+if [ -z "$FNO_PYTHON" ]; then
+  echo "test-handoff: no interpreter can import fno.cli (tried the worktree venv," >&2
+  echo "  the canonical checkout's venv, and python3/python on PATH)." >&2
+  echo "  Fix: create cli/.venv (cd cli && uv sync) - refusing to run vacuously." >&2
+  exit 1
 fi
 
 pass=0
@@ -360,6 +379,7 @@ run_handoff() {
       FNO_DIR=".fno" \
       HANDOFF_VERIFY_TIMEOUT="${HANDOFF_VERIFY_TIMEOUT:-10}" \
       HANDOFF_VERIFY_INTERVAL="${HANDOFF_VERIFY_INTERVAL:-1}" \
+      HOME="${HANDOFF_TEST_HOME:-$HOME}" \
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
@@ -373,6 +393,7 @@ run_handoff() {
       FNO_DIR=".fno" \
       HANDOFF_VERIFY_TIMEOUT="${HANDOFF_VERIFY_TIMEOUT:-10}" \
       HANDOFF_VERIFY_INTERVAL="${HANDOFF_VERIFY_INTERVAL:-1}" \
+      HOME="${HANDOFF_TEST_HOME:-$HOME}" \
       CLAUDE_CODE_SESSION_ID="test-claude-sid" \
       CODEX_THREAD_ID="" CODEX_SESSION_ID="" GEMINI_SESSION_ID="" \
       PATH="$sbx/stub-bin:$PATH" \
@@ -586,49 +607,96 @@ check_contains "gen-cap: reason mentions chain-exhausted" "chain-exhausted" "$ou
 check_log_absent "gen-cap: no claim acquire" "$CALL_LOG" "claim acquire"
 
 # ---------------------------------------------------------------------------
-# Scenario 7: no-pressure park (--boundary wave, probe reports used_pct 30)
+# Probe-path scenarios (7, 7b, 8).
+#
+# These drive the REAL skills/target/scripts/context-probe.sh, not a stub:
+# handoff.sh resolves the probe as "$_SCRIPT_DIR/context-probe.sh" first and
+# only falls back to PATH, so the sibling script always wins and a stub-bin
+# copy is never consulted. Behavior is steered through the probe's own input
+# instead - the transcript file - which means HOME must point at the sandbox,
+# since the probe path is "$HOME/.claude/projects/<encoded-cwd>/<id>.jsonl".
+#
+# Reaching the probe at all needs claude_session_id in the manifest; without it
+# TRANSCRIPT_ID is empty and the whole block is skipped (scenario 8b).
+# ---------------------------------------------------------------------------
+
+# arm_probe <sandbox> [transcript-json-line]
+# Gives the manifest a transcript id and, when a line is supplied, writes the
+# transcript the real probe will read. Omit the line to leave it absent, which
+# is what makes the probe exit 3.
+arm_probe() {
+  local sbx="$1" line="${2:-}"
+  printf 'claude_session_id: probe-sid\n' >> "$sbx/.fno/target-state.md"
+  if [ -n "$line" ]; then
+    local enc="${sbx//[\/.]/-}"
+    mkdir -p "$sbx/.claude/projects/$enc"
+    printf '%s\n' "$line" > "$sbx/.claude/projects/$enc/probe-sid.jsonl"
+  fi
+}
+
+# A transcript line the probe understands: usage sums to used_tokens, and the
+# window is 200000 unless the model name carries [1m].
+probe_line() {  # probe_line <input_tokens>
+  printf '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":%s,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}' "$1"
+}
+
+# ---------------------------------------------------------------------------
+# Scenario 7: no-pressure park (real probe reports used_pct 30 < trigger 50)
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Scenario 7: no-pressure park ==="
 SBX="$(make_sandbox s7)"
+arm_probe "$SBX" "$(probe_line 60000)"   # 60000/200000 = 30%
 
-# Create a fake context-probe.sh in stub-bin that returns low pressure
-cat > "$SBX/stub-bin/context-probe.sh" <<'PROBEEOF'
-#!/usr/bin/env bash
-printf '{"used_tokens":60000,"window_tokens":200000,"used_pct":30,"model":"claude-sonnet-4-6"}\n'
-exit 0
-PROBEEOF
-chmod +x "$SBX/stub-bin/context-probe.sh"
-
-# We need the manifest to have a transcript id for the probe path
-# (the stub returns immediately regardless)
 CALL_LOG="$SBX/call-log"
-run_handoff "$SBX" "wave"
+HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
 
 check_exit "no-pressure: exits 10 (parked)" "10" "$handoff_rc"
 check_contains "no-pressure: output contains 'parked'" "parked" "$output"
 check_contains "no-pressure: reason mentions no-pressure" "no-pressure" "$output"
+# The reason must quote the real measurement, proving the probe actually ran
+# rather than the block being skipped (which parks with the same word).
+check_contains "no-pressure: reason quotes measured used_pct=30" "used_pct=30" "$output"
 check_log_absent "no-pressure: no claim acquire" "$CALL_LOG" "claim acquire"
 
 # ---------------------------------------------------------------------------
-# Scenario 8: probe unreadable (probe exits 3)
+# Scenario 7b: pressure present (real probe reports 70 >= trigger) -> delegates.
+# The opposite-direction control for scenario 8: a fix that simply always
+# parked would satisfy every park assertion here, and this is what catches it.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 7b: pressure -> delegate ==="
+SBX="$(make_sandbox s7b)"
+arm_probe "$SBX" "$(probe_line 140000)"  # 140000/200000 = 70%
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_TEST_HOME="$SBX" HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 \
+  run_handoff "$SBX" "wave"
+
+check_exit "pressure: exits 0 (delegated)" "0" "$handoff_rc"
+check_contains "pressure: output contains 'delegated'" "delegated" "$output"
+check_contains "pressure: child was spawned" "agents spawn" "$(cat "$CALL_LOG")"
+
+# ---------------------------------------------------------------------------
+# Scenario 8: probe ran and failed (transcript absent -> real probe exits 3).
+#
+# Regression for x-f804: handoff.sh read $? AFTER a `|| true`, so the probe's
+# exit 3 was captured as 0. The park below was skipped, the empty _PROBE_OUT
+# reached `[ "" -lt 50 ]` ("integer expression expected", which returns 2 and
+# so reads as "else"), and the run FELL THROUGH TO A SPAWN. Assert the park,
+# the event, the silence, and above all the absence of that spawn.
 # ---------------------------------------------------------------------------
 echo ""
 echo "=== Scenario 8: probe unreadable ==="
 SBX="$(make_sandbox s8)"
-
-# Create a context-probe stub that exits 3
-cat > "$SBX/stub-bin/context-probe.sh" <<'PROBEEOF'
-#!/usr/bin/env bash
-exit 3
-PROBEEOF
-chmod +x "$SBX/stub-bin/context-probe.sh"
+arm_probe "$SBX"   # no transcript written -> probe exits 3
 
 CALL_LOG="$SBX/call-log"
-run_handoff "$SBX" "wave"
+HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
 
 check_exit "probe-unreadable: exits 10 (parked)" "10" "$handoff_rc"
 check_contains "probe-unreadable: output contains 'parked'" "parked" "$output"
+check_contains "probe-unreadable: reason names probe exit 3" "exit 3" "$output"
 
 # handoff_probe_unreadable event must be in events.jsonl
 set +e
@@ -636,6 +704,21 @@ probe_events=$(grep '"type":"handoff_probe_unreadable"' "$SBX/.fno/events.jsonl"
 set -e
 check_eq "probe-unreadable: handoff_probe_unreadable event emitted" "1" "$probe_events"
 check_log_absent "probe-unreadable: no claim acquire" "$CALL_LOG" "claim acquire"
+check_log_absent "probe-unreadable: NO spawn on a failed probe" "$CALL_LOG" "agents spawn"
+check_not_contains "probe-unreadable: no integer-expression error" "integer expression" "$output"
+
+# ---------------------------------------------------------------------------
+# Scenario 8b: no transcript id -> probe block skipped entirely, still parks.
+# ---------------------------------------------------------------------------
+echo ""
+echo "=== Scenario 8b: no transcript id ==="
+SBX="$(make_sandbox s8b)"   # manifest deliberately carries no claude_session_id
+
+CALL_LOG="$SBX/call-log"
+HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
+
+check_exit "no-transcript: exits 10 (parked)" "10" "$handoff_rc"
+check_log_absent "no-transcript: no spawn" "$CALL_LOG" "agents spawn"
 
 # ---------------------------------------------------------------------------
 # Scenario 9: restore_failed
