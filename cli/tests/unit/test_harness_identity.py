@@ -177,3 +177,36 @@ def test_claude_transport_key_is_named_separately_from_mailbox_address():
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     assert claude_transport_short_id(sid) == "019f48e1"
     assert claude_transport_short_id(sid) != canonical_handle(sid)
+
+
+def test_rust_marker_mirror_matches_the_python_tuple():
+    """The Rust claim writer's marker copy must equal HARNESS_SESSION_MARKERS.
+
+    claims.rs carries a hand-maintained mirror because it cannot import Python,
+    and its own doc comment promises the Rust writer tags a claim with the same
+    harness the Python resolver would. Nothing enforced that promise: a marker
+    added to the tuple leaves the Rust writer silently tagging the older harness,
+    and a Python/Rust disagreement on ambient identity is the shape that already
+    produced false-STALE claims once.
+
+    Names AND order are compared: the tuple is a precedence list, so two copies
+    holding the same names in a different order still resolve differently when a
+    session exports more than one marker.
+    """
+    import re
+    from pathlib import Path
+
+    claims_rs = (
+        Path(__file__).resolve().parents[3] / "crates" / "fno-agents" / "src" / "claims.rs"
+    )
+    source = claims_rs.read_text()
+    block = re.search(
+        r"const HARNESS_SESSION_MARKERS:[^=]*=\s*&\[(.*?)\];", source, re.S
+    )
+    assert block, f"no HARNESS_SESSION_MARKERS const found in {claims_rs}"
+    mirrored = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))
+
+    assert mirrored == list(HARNESS_SESSION_MARKERS), (
+        "claims.rs HARNESS_SESSION_MARKERS drifted from harness_identity.py; "
+        f"rust={mirrored} python={list(HARNESS_SESSION_MARKERS)}"
+    )
