@@ -39,8 +39,8 @@ cd "$REPO_ROOT" 2>/dev/null || true
 ARGS=(--harness "$HARNESS" --session-id "$SESSION_ID" --cwd "$REPO_ROOT")
 
 # A footnote-SPAWNED worker (FNO_AGENT_SELF = its own row name) restamps rather
-# than registers: the session id we passed at spawn is not durable — claude has
-# been seen continuing under a different uuid ~35s in — while the row NAME is,
+# than registers: the session id we passed at spawn is not durable (claude has
+# been seen continuing under a different uuid ~35s in) while the row NAME is,
 # so the name is the key the correction lands on. Runs at any knob setting: the
 # opt-in below governs whether a hand-started terminal JOINS the roster (default
 # false; `/fno-me` is the deliberate join), and a spawned worker is already on it.
