@@ -293,7 +293,10 @@ fn install_wheel(uv: &Path, source: &str) -> BootResult<()> {
         .status();
     match status {
         Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(BootErr::new(s.code().unwrap_or(1), install_failure_message(source))),
+        Ok(s) => Err(BootErr::new(
+            s.code().unwrap_or(1),
+            install_failure_message(source),
+        )),
         Err(e) => Err(BootErr::new(
             1,
             format!("could not run uv to install the fno wheel: {e}"),
@@ -1097,7 +1100,10 @@ mod tests {
         assert!(!m.to_lowercase().contains("network"), "{m}");
         assert!(!m.contains("PyPI"), "{m}");
         // Still names what failed and how to reproduce it by hand.
-        assert!(m.contains("`uv tool install /home/me/footnote/cli` failed"), "{m}");
+        assert!(
+            m.contains("`uv tool install /home/me/footnote/cli` failed"),
+            "{m}"
+        );
         assert!(m.contains("FNO_BOOTSTRAP_WHEEL"), "{m}");
     }
 
