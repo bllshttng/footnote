@@ -6,8 +6,8 @@ titles + priority + size grouped into Now / Next / Later / Shipped.
 No node IDs, no plan paths, no cwd - nothing internal leaks. Safe to
 commit to a public OSS repo or host on a marketing site.
 
-Reuses the existing column mapping + lane ordering from ``render`` so
-the public roadmap can never drift from the real board.
+Reuses the existing column mapping and the shared board/work ordering function
+so the public roadmap cannot drift from the real board.
 """
 from __future__ import annotations
 

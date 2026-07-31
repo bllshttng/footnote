@@ -203,9 +203,10 @@ def render_graph_md(
 
     Columns: Now (claimed / p0-p1), Next (p2), Later (p3),
     Triage (queued, awaiting human ack), Done (completed). Within each
-    non-Done column, cards sort by the shared lane key (project, then
-    ranked-before-unranked, then priority, then created_at) so per-project
-    clusters are contiguous. Done sorts by completed_at (capped at 10).
+    non-Done column, cards use the same selection key as the walker with an
+    added project-lane prefix, so per-project clusters are contiguous without
+    maintaining a second work-order suffix. Done sorts by completed_at (capped
+    at 10).
 
     ``obsidian`` (default True, preserving prior behavior) controls the
     Obsidian Kanban plugin scaffolding: the ``kanban-plugin: board``

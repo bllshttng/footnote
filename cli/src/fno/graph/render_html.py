@@ -430,7 +430,7 @@ def _board_html(
     per-project sections pass None for a plain count). ``sublanes`` emits a
     per-project divider before each project's run of cards, but only in a
     multi-project column (a single-project column emits none - AC2-EDGE).
-    Cards are pre-sorted by the shared lane key, so a divider on each
+    Cards are pre-sorted by the shared work-order key, so a divider on each
     project change yields contiguous, labeled runs.
     """
     orphans = _orphan_ids(list(id_to_entry.values()))
