@@ -171,9 +171,17 @@ def test_explicit_plan_path_is_not_existence_gated(stub_exec, monkeypatch, tmp_p
     assert stub_exec[0].get("TARGET_PLAN_PATH") == missing
 
 
-def test_free_text_input_leaves_plan_empty(stub_exec, monkeypatch):
-    """Idea-first runs stay empty for the blueprint-then-first-fill flow."""
-    _graph(monkeypatch, [{"id": "x-39c0", "plan_path": "some/plan.md"}])
+def test_free_text_input_leaves_plan_empty(stub_exec, monkeypatch, tmp_path):
+    """Idea-first runs stay empty for the blueprint-then-first-fill flow.
+
+    The node's plan must be a REAL file: with a non-existent one the existence
+    gate drops the pointer no matter what, so the test would pass even if a
+    free-text description mis-resolved to a node - the exact regression it
+    exists to catch. An on-disk plan makes token matching the only thing
+    keeping this empty.
+    """
+    plan = _real_plan(tmp_path)
+    _graph(monkeypatch, [{"id": "x-39c0", "plan_path": plan}])
     _blast(monkeypatch, False)
 
     res = _invoke(["--input", "fix the login redirect bug"])
@@ -260,10 +268,12 @@ def test_resolve_plan_pointer_accepts_folder_plan(tmp_path):
 def test_resolve_plan_pointer_relative_uses_repo_root(tmp_path, monkeypatch):
     """A relative pointer resolves against the repo root, not the process cwd.
 
-    The graph stores plan_path unnormalized and init-target-state.sh resolves a
-    relative one against the repo root. Statting against the process cwd would
-    report a plan that is on disk as missing whenever init runs from a
-    subdirectory, dropping a valid binding and printing a false diagnosis.
+    The graph is global, so a relative plan_path in it is repo-root-relative by
+    convention. Statting against the process cwd would report a plan that is on
+    disk as missing whenever init runs from a subdirectory, dropping a valid
+    binding and printing a false diagnosis. init-target-state.sh does not anchor
+    relative paths either (its plan stats are bare), so normalizing to absolute
+    here is what keeps the shell correct too.
     """
     root = tmp_path / "repo"
     (root / "internal" / "plans").mkdir(parents=True)

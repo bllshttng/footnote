@@ -292,10 +292,13 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
     is the exact wedge this gate exists to prevent. A ``#group-N`` anchor is
     stripped for the stat the way the shell does (``${INITIAL_PLAN_PATH%%#*}``)
     and preserved on the way out. A RELATIVE pointer resolves against the repo
-    root, not the process cwd, matching init-target-state.sh's own relative
-    resolution; the graph stores plan_path unnormalized, so a relative pointer
-    read against a subdirectory cwd would report a plan that is on disk as
-    missing and drop a valid binding.
+    root, not the process cwd: the graph is global (one graph.json spans every
+    project), so a relative plan_path in it is repo-root-relative by convention
+    and is meaningless against a caller's cwd. Normalizing it to absolute here is
+    also what makes the shell safe, because init-target-state.sh does NOT anchor
+    relative paths - both of its plan stats are bare and cwd-relative - so
+    handing it a still-relative pointer is what would break it from a
+    subdirectory. Do not "simplify" this back to passing the raw string through.
 
     Existence, not is_file: a footnote plan is routinely a DIRECTORY (the folder
     plan whose entry point is 00-INDEX.md, see target/blast.py), so tightening
