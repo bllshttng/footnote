@@ -320,6 +320,63 @@ def test_install_then_mark_runs_as_valid_shell_marker_write(tmp_path: Path) -> N
     assert marker.read_text(encoding="utf-8").strip() == "feedface"
 
 
+def _sh_syntax_ok(line: str) -> bool:
+    """`sh -n` parses without executing. The composed chain is nested brace groups
+    and a while loop, where one missing `;` before a `}` (or a doubled `;;`, which
+    is the case-arm terminator) is a syntax error that would break every update."""
+    import subprocess as _sp
+
+    return _sp.run(["/bin/sh", "-n", "-c", line], capture_output=True).returncode == 0
+
+
+def test_await_binary_chain_is_valid_sh_in_every_shape(tmp_path: Path) -> None:
+    """All three await_binary shapes must parse as POSIX sh."""
+    marker = tmp_path / "state" / "installed-rev"
+    post = "/bin/echo one; /bin/echo two"
+    for await_binary in ("/bin/echo", None, "/nonexistent/fno-py"):
+        line = update._install_then_mark(
+            ["true"], "abc", marker=marker, pid=1,
+            post_install=post, await_binary=await_binary,
+        )
+        assert _sh_syntax_ok(line), f"invalid sh for await_binary={await_binary!r}:\n{line}"
+
+
+def test_await_binary_runs_post_install_when_the_binary_is_present(tmp_path: Path) -> None:
+    """Present binary: both refresh commands run, with no wait."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "abc", marker=marker, pid=1,
+        post_install="/bin/echo REFRESH1; /bin/echo REFRESH2",
+        await_binary="/bin/echo",
+    )
+    out = _sp.run(["/bin/sh", "-c", line], capture_output=True, text=True)
+    assert "REFRESH1" in out.stdout and "REFRESH2" in out.stdout, out
+
+
+def test_await_binary_warns_actionably_when_the_binary_never_appears(tmp_path: Path) -> None:
+    """During `uv tool install --reinstall` the console script is deleted and
+    recreated (measured: ~0.5s), so an exec in that gap dies with
+    `/bin/sh: .../fno-py: No such file or directory`. If it never comes back, the
+    refresh must NOT silently skip: a launchd agent left pinned to the old binary
+    is the wedge this chain exists to prevent, so say so and name the manual fix."""
+    import subprocess as _sp
+
+    marker = tmp_path / "state" / "installed-rev"
+    line = update._install_then_mark(
+        ["true"], "abc", marker=marker, pid=1,
+        post_install="/bin/echo REFRESH1; /bin/echo REFRESH2",
+        await_binary=str(tmp_path / "never-appears"),
+    )
+    out = _sp.run(["/bin/sh", "-c", line], capture_output=True, text=True)
+    assert "REFRESH1" not in out.stdout, "must not run the refresh without a binary"
+    assert "were NOT refreshed" in out.stderr, out.stderr
+    assert "fno pr-watch refresh" in out.stderr, out.stderr
+    # Best-effort: a missing binary must never fail the update itself.
+    assert out.returncode == 0, out
+
+
 def test_install_then_mark_skips_marker_on_install_failure(tmp_path: Path) -> None:
     """A non-zero install (`false`) must leave no marker behind AND propagate the
     failure (the install gates the marker write)."""
