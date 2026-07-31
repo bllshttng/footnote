@@ -17,7 +17,7 @@ from __future__ import annotations
 import os
 import re
 from pathlib import Path
-from typing import Optional, Union
+from typing import Optional, Tuple, Union
 
 from .hostid import is_same_machine
 
