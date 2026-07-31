@@ -37,6 +37,7 @@ from fno.harness_identity import (
     session_handle_tier,
     session_identity_key,
 )
+from fno.time_budget import validate_timeout_budget
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
@@ -1131,6 +1132,11 @@ def _resolve_aliases(
     aliases: dict[str, str] = {}
     try:
         with open(lock_path, "w") as lock_fh:
+            validate_timeout_budget(
+                _ALIAS_LOCK_TIMEOUT_SECONDS,
+                label="session alias lock",
+                poll=_ALIAS_LOCK_POLL_SECONDS,
+            )
             deadline = time.monotonic() + _ALIAS_LOCK_TIMEOUT_SECONDS
             while True:
                 try:

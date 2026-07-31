@@ -44,6 +44,7 @@ from fno.harness_identity import (
     session_identity_key,
     sync_harness_aliases,
 )
+from fno.time_budget import validate_timeout_budget
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
@@ -657,6 +658,11 @@ def _hold_registry_lock(
         if timeout is None:
             fcntl.flock(fh, fcntl.LOCK_EX)
         else:
+            validate_timeout_budget(
+                timeout,
+                label="registry lock",
+                poll=poll_seconds,
+            )
             deadline = time.monotonic() + timeout
             while True:
                 try:

@@ -200,6 +200,28 @@ for i in range(5):
     assert {message.body for message in iter_messages()} == expected
 
 
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_bus_lock_rejects_nonterminating_timeout_budget(bus, timeout):
+    from fno.bus.log import _Flock
+
+    lock_path = bus / "invalid.lock"
+    with pytest.raises(ValueError, match="finite and non-negative"):
+        with _Flock(lock_path, timeout_seconds=timeout):
+            pass
+    assert not lock_path.exists()
+
+
+@pytest.mark.parametrize("poll", [0.0, -0.1, float("inf"), float("nan")])
+def test_bus_lock_rejects_nonterminating_poll_budget(bus, poll):
+    from fno.bus.log import _Flock
+
+    lock_path = bus / "invalid.lock"
+    with pytest.raises(ValueError, match="finite and positive"):
+        with _Flock(lock_path, timeout_seconds=0.1, poll_seconds=poll):
+            pass
+    assert not lock_path.exists()
+
+
 # ---------------------------------------------------------------------------
 # AC5-EDGE: rotation boundary - messages in a rotated segment still read
 # ---------------------------------------------------------------------------

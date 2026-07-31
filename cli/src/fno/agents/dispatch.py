@@ -4631,6 +4631,12 @@ def _a2a_first_use_gate(
     )
     sys.stderr.flush()
     try:
+        from fno.time_budget import validate_timeout_budget
+
+        validate_timeout_budget(
+            confirm_timeout_seconds,
+            label="a2a confirmation",
+        )
         ready, _, _ = select.select(
             [sys.stdin],
             [],
@@ -5538,6 +5544,13 @@ def dispatch_send(
     # than being refused as a badly-shaped name.
     _validate_inputs(
         name=name, message=message, from_name=from_name, name_is_address=True
+    )
+
+    from fno.time_budget import validate_timeout_budget
+
+    validate_timeout_budget(
+        registry_stamp_timeout_seconds,
+        label="post-delivery registry stamp",
     )
 
     # 2. Body size cap (exit 2 BEFORE any write).

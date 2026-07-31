@@ -38,6 +38,7 @@ from fno.config import (
     _migrate_yaml_to_toml,
     _strip_none,
 )
+from fno.time_budget import validate_timeout_budget
 
 
 class ConfigSetError(Exception):
@@ -257,6 +258,11 @@ def _locked_update(
         if lock_timeout is None:
             fcntl.flock(lock_fh.fileno(), fcntl.LOCK_EX)
         else:
+            validate_timeout_budget(
+                lock_timeout,
+                label="config lock",
+                poll=lock_poll_seconds,
+            )
             deadline = time.monotonic() + lock_timeout
             while True:
                 try:

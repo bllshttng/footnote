@@ -25,6 +25,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Iterator, Optional
 
+from fno.time_budget import validate_timeout_budget
+
 
 ENVELOPE_VERSION = 1
 
@@ -300,6 +302,11 @@ class _Flock:
         self._poll_seconds = _LOCK_POLL_SECONDS if poll_seconds is None else poll_seconds
 
     def __enter__(self) -> "_Flock":
+        validate_timeout_budget(
+            self._timeout_seconds,
+            label="bus lock",
+            poll=self._poll_seconds,
+        )
         self._lock_path.parent.mkdir(parents=True, exist_ok=True)
         fd = os.open(str(self._lock_path), os.O_CREAT | os.O_RDWR, 0o644)
         try:

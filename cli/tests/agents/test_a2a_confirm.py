@@ -9,8 +9,9 @@ from __future__ import annotations
 import fcntl
 import os
 import time
-
 import tomllib
+
+import pytest
 
 from fno import paths
 from fno.agents import dispatch
@@ -152,6 +153,24 @@ def test_ac3_err_tty_eof_falls_back_without_persisting(tmp_path, monkeypatch):
     assert "conservative fallback" in err.text()
     assert not (paths.state_dir() / ".a2a-confirmed").exists()
     assert not (tmp_path / "config.toml").exists()
+
+
+@pytest.mark.parametrize("timeout", [float("inf"), float("nan"), -0.1])
+def test_ac3_err_invalid_prompt_timeout_falls_back(tmp_path, monkeypatch, timeout):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    err = _wire(monkeypatch, answer="y\n")
+
+    assert (
+        dispatch._a2a_first_use_gate(
+            True,
+            6,
+            confirm_timeout_seconds=timeout,
+        )
+        is False
+    )
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
 
 
 def test_ac3_err_config_lock_contention_is_bounded_and_unconfirmed(
