@@ -294,6 +294,40 @@ def test_empty_scan_preserves_alias_map(tmp_path, monkeypatch):
     assert name_map.read_text(encoding="utf-8") == before
 
 
+def test_alias_write_failure_exposes_only_canonical_handle(tmp_path, monkeypatch):
+    """An alias is addressable only after its name-map write succeeds."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    session_id = "aaaaaaaa-1111-7222-8333-4444cafefeed"
+    transcript = _write_session(
+        sdir,
+        912,
+        session_id=session_id,
+        job_id="deadbeef",
+        cwd="/Users/x/code/project",
+    )
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(discover, "_atomic_write_json", fail_write)
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir,
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=tmp_path / "no-codex",
+        opencode_storage_dir=tmp_path / "no-opencode",
+        name_map_path=name_map,
+        registry_path=tmp_path / "no-registry.json",
+        psutil_mod=_FakePsutil({912: transcript}),
+        project_resolver=lambda _cwd: "project",
+        classify_truth=False,
+    )
+
+    assert [session.handle for session in sessions] == ["cafefeed"]
+    assert not name_map.exists()
+
+
 def _resolve(handle, sdir, alive, tmp_path):
     return discover.resolve_or_suggest(
         handle,

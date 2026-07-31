@@ -1043,7 +1043,8 @@ def _resolve_aliases(
     interleave a half-written file (Concurrency / Invariant). Retires entries
     whose session_id is no longer live so an exited/restarted session never
     resurfaces under a stale alias (AC1-EDGE2). Best-effort: a write failure
-    falls back to the in-memory aliases rather than crashing the list.
+    falls back to canonical handles rather than exposing an alias that the send
+    path cannot include in its persisted collision check.
     """
     import fcntl
     from fno.harness_identity import LEGACY_HANDLE_RE
@@ -1085,14 +1086,9 @@ def _resolve_aliases(
             finally:
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
     except OSError:
-        # Lock / write failed — fall back to fresh in-memory aliases so the
-        # hex handle still addresses every session (overlay is UX, not a
-        # correctness requirement).
-        for r in live:
-            aliases.setdefault(
-                r["session_id"], _default_alias(r.get("project"), r["short_id"])
-            )
-        aliases = _disambiguate(aliases, live)
+        # An alias is an address only after it is durable. An in-memory alias
+        # would be invisible to the send path's persisted namespace guard.
+        return {}
     return aliases
 
 
@@ -2002,7 +1998,7 @@ def discover_live_sessions(
         DiscoveredSession(
             session_id=r["session_id"],
             short_id=r["short_id"],
-            handle=aliases.get(r["session_id"], r["short_id"]),
+            handle=aliases.get(r["session_id"], canonical_handle(r["session_id"])),
             pid=r["pid"],
             cwd=r["cwd"],
             project=r.get("project"),

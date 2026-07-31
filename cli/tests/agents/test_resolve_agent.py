@@ -269,6 +269,53 @@ def test_registry_name_and_persisted_alias_share_one_namespace(
         resolve_agent("friendly", path=reg)
 
 
+def test_registry_and_alias_same_uuid_different_case_are_one_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """UUID-family identity is case-insensitive across registry and alias stores."""
+    from fno.agents import discover
+
+    registered = _claude("friendly", "transport", UUID.lower())
+    alias_map = tmp_path / "session-names.json"
+    alias_map.write_text(
+        json.dumps({UUID.upper(): "friendly"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discover, "default_name_map_path", lambda: alias_map)
+    reg = _write(tmp_path, registered)
+
+    assert resolve_agent("friendly", path=reg).entry.name == "friendly"
+
+
+def test_registry_and_store_same_uuid_different_case_are_one_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A store echo of one UUID cannot become a false ambiguity by case alone."""
+    from fno.agents import discover
+    from fno.agents import store_fallback
+    from fno.agents.store_fallback import StoreHit
+
+    session_id = "aaaaaaaa-1111-7222-8333-444455556666"
+    registered = AgentEntry(
+        name="worker",
+        cwd="/w",
+        log_path="/tmp/worker.log",
+        harness="codex",
+        harness_session_id=session_id.upper(),
+    )
+    monkeypatch.setattr(
+        discover, "default_name_map_path", lambda: tmp_path / "missing-aliases.json"
+    )
+    monkeypatch.setattr(
+        store_fallback,
+        "complete_store_hits",
+        lambda _token: [StoreHit("codex", session_id.lower(), "/w")],
+    )
+    reg = _write(tmp_path, registered)
+
+    assert resolve_agent("55556666", path=reg).entry.name == "worker"
+
+
 def test_no_transport_row_resolves_but_worker_short_is_none(tmp_path: Path) -> None:
     """AC1-FR seed: a claude row with an empty short_id resolves by uuid, and
     worker_short_id is None so the verb can raise its own explicit error."""

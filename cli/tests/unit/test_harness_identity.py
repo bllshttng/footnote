@@ -13,6 +13,7 @@ from fno.harness_identity import (
     current_session_id,
     current_session_ids,
     resolve_harness_identity,
+    session_identity_key,
 )
 
 
@@ -73,6 +74,14 @@ def test_ac1_hp_canonical_handle_is_random_tail():
     assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
     assert canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"
     assert canonical_handle("ses_7f3a9b2cAbCd1234") == "AbCd1234"
+
+
+def test_session_identity_key_normalizes_uuid_case_but_preserves_opencode():
+    assert (
+        session_identity_key("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4")
+        == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    )
+    assert session_identity_key("ses_7f3a9b2cAbCd1234") == "ses_7f3a9b2cAbCd1234"
 
 
 def test_canonical_handle_takes_no_harness():

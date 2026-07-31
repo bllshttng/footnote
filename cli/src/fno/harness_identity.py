@@ -36,10 +36,17 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # carries a parity-tested mirror because it cannot import Python. If those two
 # rules differ, a durable send can address one handle while its recipient drains
 # another and silently strand on the bus.
+def session_identity_key(session_id: str) -> str:
+    """Normalize one session id for identity comparison across stores.
+
+    UUID-family ids are case-insensitive. OpenCode's ``ses_`` ids are not.
+    """
+    return session_id if session_id.startswith("ses_") else session_id.lower()
+
+
 def canonical_handle(session_id: str) -> str:
     """The mailbox address: the final eight characters of the session id."""
-    tail = session_id[-8:]
-    return tail if session_id.startswith("ses_") else tail.lower()
+    return session_identity_key(session_id)[-8:]
 
 
 def legacy_prefix_handle(session_id: str) -> str:

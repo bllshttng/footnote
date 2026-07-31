@@ -39,6 +39,7 @@ from fno.harness_identity import (
     canonical_handle,
     legacy_prefix_handle,
     session_handle_tier,
+    session_identity_key,
     sync_harness_aliases,
 )
 
@@ -529,10 +530,11 @@ def _ensure_unique_across_aliases(
 
     entry = resolved.entry
     registry_id = getattr(entry, "harness_session_id", None)
+    registry_identity = session_identity_key(registry_id) if registry_id else None
     foreign = sorted(
         sid
         for sid in set(alias_ids)
-        if registry_id is None or sid != registry_id
+        if registry_identity is None or session_identity_key(sid) != registry_identity
     )
     if not foreign:
         return resolved
@@ -558,16 +560,20 @@ def _ensure_unique_across_stores(
         return resolved
 
     entry = resolved.entry
-    registry_key = (entry.harness, entry.harness_session_id)
+    registry_id = getattr(entry, "harness_session_id", None)
+    registry_key = (
+        entry.harness,
+        session_identity_key(registry_id) if registry_id else None,
+    )
     foreign = {
-        (hit.harness, hit.session_id): hit
+        (hit.harness, session_identity_key(hit.session_id)): hit
         for hit in complete_store_hits(token)
-        if (hit.harness, hit.session_id) != registry_key
+        if (hit.harness, session_identity_key(hit.session_id)) != registry_key
     }
     if not foreign:
         return resolved
 
-    registry_id = entry.harness_session_id or entry.name
+    registry_id = registry_id or entry.name
     candidates = [
         f"{registry_id} ({entry.harness}, registry name={entry.name})",
         *(
