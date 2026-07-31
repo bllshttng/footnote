@@ -643,7 +643,11 @@ def _discover_from_registry(
 
     exclude = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
-    seen: set[str] = set()
+    # Identity is (harness, normalized id), never the raw string. The registry
+    # holds rows for every provider, so a raw-sid dedup silently drops a real
+    # second session whenever two harnesses carry the same id string -- before
+    # the tuple-aware ambiguity check downstream ever sees it.
+    seen: set[tuple[str, str, bool]] = set()
     try:
         entries = load_registry(registry_path)
     except Exception:  # noqa: BLE001 — a torn/version-drifted registry contributes no rows
@@ -676,9 +680,14 @@ def _discover_from_registry(
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
             short = canonical_handle(sid) if sid else None
             identity_provisional = False
-        if not sid or sid in exclude or sid in seen:
+        if not sid or sid in exclude:
             continue
-        seen.add(sid)
+        # The provisional flag stays in the key so a legacy short-id projection
+        # can never merge with a full-uuid identity for the same harness.
+        key = (harness, session_identity_key(sid), identity_provisional)
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append(
             {
                 "session_id": sid,
@@ -1357,9 +1366,9 @@ def resolve_or_suggest(
                 return None, [exact[0].session_id]
             if ambiguous:
                 return None, sorted({exact[0].session_id, *ambiguous})
-            if durable is not None and _fold_token(durable.session_id) != _fold_token(
-                exact[0].session_id
-            ):
+            if durable is not None and session_identity_key(
+                durable.session_id
+            ) != session_identity_key(exact[0].session_id):
                 return None, sorted({exact[0].session_id, durable.session_id})
         return exact[0], []
     if len(exact) > 1:
@@ -1552,15 +1561,6 @@ def _token_matches(token: str, session_id: str) -> bool:
     return session_handle_tier(token, session_id) is not None
 
 
-_OPENCODE_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
-
-
-def _fold_token(value: str) -> str:
-    """Lowercase a hex-shaped id; leave a mixed-case opencode id untouched."""
-    v = (value or "").strip()
-    return v if _OPENCODE_ID_RE.match(v) else v.lower()
-
-
 def _reachable_from_registry(
     token: str, registry_path: Optional[Path]
 ) -> tuple[_Hits, bool]:
@@ -1583,7 +1583,11 @@ def _reachable_from_registry(
         # is unknown" from "we could not look".
         return [], False
     hits: _Hits = []
-    seen: set[str] = set()
+    # (harness, normalized id), not the raw string: this source spans every
+    # provider, so a raw-sid dedup would hide one of two real sessions that
+    # share an id string -- and the merge in ``resolve_reachable`` can only see
+    # what each source emits.
+    seen: set[tuple[str, str]] = set()
     for e in entries:
         # NOT ``AgentEntry.session_id``: that property is harness-polymorphic
         # and resolves to ``short_id`` for claude -- the 8-hex daemon transport
@@ -1593,13 +1597,15 @@ def _reachable_from_registry(
         sid = getattr(e, "harness_session_id", None)
         if not isinstance(sid, str):
             continue
-        if _token_matches(token, sid) and sid not in seen:
-            seen.add(sid)
-            harness = getattr(e, "harness", None)
+        raw_harness = getattr(e, "harness", None)
+        harness = raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
+        key = (harness, session_identity_key(sid))
+        if _token_matches(token, sid) and key not in seen:
+            seen.add(key)
             cwd = getattr(e, "cwd", None)
             hits.append((
                 sid,
-                harness if isinstance(harness, str) and harness else "claude",
+                harness,
                 cwd if isinstance(cwd, str) and cwd else None,
                 True,
             ))
@@ -1681,7 +1687,8 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         # nothing" and drop the mail.
         return [], False
     hits: _Hits = []
-    seen: set[str] = set()
+    # Node stamps carry their own harness, so identity is the pair (x-c670).
+    seen: set[tuple[str, str]] = set()
     malformed = False
     for node in entries or []:
         if not isinstance(node, dict):
@@ -1704,13 +1711,17 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
             if not isinstance(sid, str):
                 malformed = True
                 continue
-            if _token_matches(token, sid) and sid not in seen:
-                seen.add(sid)
-                harness = entry.get("harness")
+            raw_harness = entry.get("harness")
+            harness = (
+                raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
+            )
+            key = (harness, session_identity_key(sid))
+            if _token_matches(token, sid) and key not in seen:
+                seen.add(key)
                 cwd = node.get("cwd")
                 hits.append((
                     sid,
-                    harness if isinstance(harness, str) and harness else "claude",
+                    harness,
                     cwd if isinstance(cwd, str) and cwd else None,
                     True,
                 ))
@@ -1780,11 +1791,16 @@ def resolve_reachable(
     tokens = [token, *alias_sids]
 
     degraded: list[str] = [] if alias_ok else ["alias-map"]
-    # UUID-family ids fold across source spelling; mixed-case OpenCode ids do
-    # not. Using plain ``lower()`` here would merge two real OpenCode sessions
-    # even though the identity matcher correctly treats them as distinct.
-    found: dict[str, ReachableSession] = {}
-    cwd_verbatim: dict[str, bool] = {}
+    # Keyed on (harness, normalized id). Harness is load-bearing: an id string
+    # is only unique WITHIN a harness, so folding on the id alone merges a
+    # claude session with a codex one that happens to share it, and the merged
+    # row then reports a single unambiguous hit -- a wake that resumes a
+    # stranger's session, which is precisely what the ambiguity return exists to
+    # prevent. ``session_identity_key`` is the one normalization rule (UUID
+    # families fold across source spelling; mixed-case OpenCode ids do not);
+    # a second local copy of it is how the two drift apart.
+    found: dict[tuple[str, str], ReachableSession] = {}
+    cwd_verbatim: dict[tuple[str, str], bool] = {}
     for source, lookup in sources:
         for tok in tokens:
             hits, read_ok = lookup(tok)
@@ -1793,7 +1809,7 @@ def resolve_reachable(
                     degraded.append(source)
                 continue
             for sid, agent, cwd, verbatim in hits:
-                key = _fold_token(sid)
+                key = (agent, session_identity_key(sid))
                 prior = found.get(key)
                 if prior is None:
                     found[key] = ReachableSession(
@@ -1985,12 +2001,18 @@ def discover_live_sessions(
             continue
         candidates.append(r)
 
-    # Dedup on session_id (Invariant: one row per live sessionId, not per pid).
-    # Source order preserves daemon liveness precedence; later rows only enrich
-    # missing metadata on the primary candidate.
-    by_sid: dict[str, dict] = {}
+    # Dedup on (harness, normalized session_id) -- Invariant: one row per live
+    # session, not per pid. ``candidates`` is the union of every harness's
+    # source, so the id alone is not an identity here: keying it merged a claude
+    # row into a codex one sharing the string, and the survivor then absorbed
+    # the other's cwd/name as if they were the same session. Source order
+    # preserves daemon liveness precedence; later rows only enrich missing
+    # metadata on the primary candidate.
+    by_sid: dict[tuple[str, str], dict] = {}
     for r in candidates:
-        existing = by_sid.setdefault(r["session_id"], r)
+        existing = by_sid.setdefault(
+            (r["agent"], session_identity_key(r["session_id"])), r
+        )
         if existing is not r:
             if not existing.get("cwd") and r.get("cwd"):
                 existing["cwd"] = r["cwd"]

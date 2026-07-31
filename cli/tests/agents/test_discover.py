@@ -2593,6 +2593,116 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
     assert ambiguous == sorted([upper, lower])
 
 
+# An id string is unique only WITHIN a harness. The three regression tests below
+# pin that on each structure that deduplicates independently: collapsing them
+# would resolve a two-session token to one unambiguous hit and wake a stranger's
+# session. Fixing one structure alone is decorative -- an upstream source that
+# still folds on the raw id drops the second row before the merge ever sees it.
+_SHARED_SID = "019fb417-2222-7333-8444-5555cafebabe"
+
+
+def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(
+    tmp_path, monkeypatch
+):
+    """One uuid string under two harnesses is two sessions, never one."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_transcripts",
+        lambda *_a: (
+            [
+                (_SHARED_SID, "claude", "/claude-cwd", True),
+                (_SHARED_SID, "codex", "/codex-cwd", True),
+            ],
+            True,
+        ),
+    )
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        _SHARED_SID, projects_dir=tmp_path / "projects"
+    )
+
+    assert found is None, "a cross-harness id collision must never resolve uniquely"
+    assert ambiguous == [_SHARED_SID, _SHARED_SID]
+
+
+def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
+    """The registry spans providers, so its own dedup must carry harness."""
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+
+    hits, read_ok = discover._reachable_from_registry(_SHARED_SID, reg)
+
+    assert read_ok
+    assert sorted(harness for _sid, harness, _cwd, _v in hits) == ["claude", "codex"]
+
+
+def test_discover_live_sessions_keeps_cross_harness_rows_distinct(
+    tmp_path, monkeypatch
+):
+    """Candidates are the union of every harness's source; the merge must not
+    fold two of them into one row that absorbs the other's cwd."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    sessions = discover.discover_live_sessions(
+        registry_path=reg, **_empty_seams(tmp_path)
+    )
+
+    assert sorted((s.agent, s.cwd) for s in sessions) == [
+        ("claude", "/claude-cwd"),
+        ("codex", "/codex-cwd"),
+    ]
+
+
 def test_resolve_reachable_includes_complete_harness_store_hits(
     tmp_path, monkeypatch
 ):
