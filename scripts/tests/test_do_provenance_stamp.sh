@@ -40,10 +40,14 @@ fi
 # ---- fixture ----
 T=$(mktemp -d)
 trap 'rm -rf "$T"' EXIT
-mkdir -p "$T/bin" "$T/repo/.fno"
+mkdir -p "$T/bin" "$T/repo/.fno" "$T/home"
 printf '#!/usr/bin/env bash\nprintf "%%s\\n" "$*" >> "$CAPTURE"\n' > "$T/bin/fno"
 chmod +x "$T/bin/fno"
-export PATH="$T/bin:$PATH" CAPTURE="$T/capture.txt"
+# HOME is sandboxed: finalize's ledger step runs the real fno.cost._register,
+# which writes ~/.fno/ledger.json. Without this the suite appends fixture rows
+# to the developer's own ledger, and then DEDUPES against it -- so a rerun takes
+# a different branch than the first run and the suite stops being reproducible.
+export PATH="$T/bin:$PATH" CAPTURE="$T/capture.txt" HOME="$T/home"
 
 cd "$T/repo" || exit 1
 git init -q . && git config user.email t@t && git config user.name t
@@ -65,10 +69,25 @@ printf -- '---\nstatus: ready\nclaims: ab-e2e0001\n---\n' > "$T/repo/plan.md"
 # --state path, and the immutable-manifest guard rejects writes to that name.
 CREATED="2026-07-20T00:00:00Z"
 M="$T/repo/.fno/manifest-fixture.md"
-printf -- '---\nfno_id: run-1\ncreated_at: %s\ninitial_head: %s\nharness_session_id: SESSION-LIVE\nplan_path: "%s"\n---\n# Target Session State\ngraph_node_id: ab-e2e0001\n' \
-    "$CREATED" "$BASE" "$T/repo/plan.md" > "$M"
+write_manifest() {  # path session_id
+    printf -- '---\nfno_id: %s\ncreated_at: %s\ninitial_head: %s\nharness_session_id: SESSION-LIVE\nplan_path: "%s"\n---\n# Target Session State\ngraph_node_id: ab-e2e0001\n' \
+        "$2" "$CREATED" "$BASE" "$T/repo/plan.md" > "$1"
+}
 
+# Each scenario below is an independent guard test, so each needs its OWN
+# session. finalize is idempotent per session_id: the first SHIP terminal emits
+# `session_finalized{ship:true}` and every later fire for that id early-returns
+# before it reaches the stamp. Sharing one id therefore starves every scenario
+# after the first of the "do stamp" line it asserts on.
+# Every caller uses `OUT=$(run_finalize ...)`, so this body runs in a SUBSHELL:
+# a shell-variable counter would reset to 1 on every call and hand out the same
+# id again. Keep the sequence on disk, where the subshell's write survives.
+printf '0' > "$T/seq"
 run_finalize() {  # reason -> stderr lines mentioning the do stamp
+    local n
+    n=$(( $(cat "$T/seq") + 1 ))
+    printf '%s' "$n" > "$T/seq"
+    write_manifest "$M" "run-1-$n"
     "$BIN" finalize --state "$M" --cwd "$T/repo" --reason "$1" 2>&1 | grep -i 'do stamp' || true
 }
 
