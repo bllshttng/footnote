@@ -5080,8 +5080,20 @@ def dispatch_send(
     registry_path = paths.agents_registry_path()
     requested_name = name
 
+    def _recipient_identity_key(
+        entry: AgentEntry,
+    ) -> tuple[str, str, Optional[str]]:
+        session_id = getattr(entry, "harness_session_id", None) or getattr(
+            entry, "session_id", None
+        )
+        return (
+            entry.name,
+            entry.harness,
+            session_identity_key(session_id) if session_id else None,
+        )
+
     def _load_and_resolve_target(
-        expected_name: Optional[str] = None,
+        expected_identity: Optional[tuple[str, str, Optional[str]]] = None,
     ) -> tuple[list[AgentEntry], AgentEntry]:
         try:
             entries = load_registry(registry_path)
@@ -5099,22 +5111,22 @@ def dispatch_send(
             existing = resolve_registered_agent_across_sources(
                 entries, requested_name
             ).entry
-            if expected_name is not None and existing.name != expected_name:
+            resolved_identity = _recipient_identity_key(existing)
+            if (
+                expected_identity is not None
+                and resolved_identity != expected_identity
+            ):
                 raise DispatchAskError(
                     f"agent address {requested_name!r} changed from "
-                    f"{expected_name!r} to {existing.name!r} while acquiring "
-                    "its lock; retry the send",
+                    f"{expected_identity[0]!r} to {existing.name!r} while acquiring "
+                    "its lock; recipient identity changed from "
+                    f"{expected_identity!r} to {resolved_identity!r}; retry the send",
                     exit_code=2,
                 )
             from fno.agents.discover import discovery_address_matches
 
-            registry_id = getattr(existing, "harness_session_id", None) or getattr(
-                existing, "session_id", None
-            )
-            registry_key = (
-                existing.harness,
-                session_identity_key(registry_id) if registry_id else None,
-            )
+            registry_id = resolved_identity[2]
+            registry_key = resolved_identity[1:]
             live_foreign = {
                 (session.agent, session_identity_key(session.session_id)): session
                 for session in discovery_address_matches(
@@ -5172,6 +5184,7 @@ def dispatch_send(
     # race and refuses if the address changed owners while we waited.
     _, initial = _load_and_resolve_target()
     canonical_name = initial.name
+    canonical_identity = _recipient_identity_key(initial)
 
     def _on_wait() -> None:
         print(
@@ -5188,7 +5201,7 @@ def dispatch_send(
             timeout=lock_timeout,
             on_wait=_on_wait,
         ):
-            entries, existing = _load_and_resolve_target(canonical_name)
+            entries, existing = _load_and_resolve_target(canonical_identity)
             if existing.name != canonical_name:
                 raise DispatchAskError(
                     f"agent address {requested_name!r} changed from "
