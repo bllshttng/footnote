@@ -6472,6 +6472,8 @@ done
         }
 
         std::fs::remove_dir_all(home.root()).ok();
+    }
+
     fn stream_identity(short_id: &str) -> Value {
         json!({
             "harness": "claude",
