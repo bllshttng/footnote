@@ -374,9 +374,11 @@ def test_destructive_lifecycle_pins_full_id_across_name_lock(
     assert shellouts == []
 
 
-def test_rm_full_id_retains_row_restamped_during_shellout(
+@pytest.mark.parametrize("address_by_name", [False, True])
+def test_rm_retains_row_restamped_during_shellout(
     tmp_path: Path,
     monkeypatch,
+    address_by_name: bool,
 ) -> None:
     """A restamp after rm's side effect cannot make a replacement inherit deletion."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -407,7 +409,7 @@ def test_rm_full_id_retains_row_restamped_during_shellout(
     monkeypatch.setattr(claude_mod, "claude_rm", restamp_during_rm)
 
     with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm") as exc:
-        dispatch.rm_agent(original_id)
+        dispatch.rm_agent("victim" if address_by_name else original_id)
 
     assert exc.value.exit_code == 12
     rows = registry_mod.load_registry()
@@ -415,9 +417,11 @@ def test_rm_full_id_retains_row_restamped_during_shellout(
     assert rows[0].harness_session_id == replacement_id
 
 
-def test_stop_full_id_does_not_stamp_row_restamped_during_shellout(
+@pytest.mark.parametrize("address_by_name", [False, True])
+def test_stop_does_not_stamp_row_restamped_during_shellout(
     tmp_path: Path,
     monkeypatch,
+    address_by_name: bool,
 ) -> None:
     """A successful stop reports success without stamping a replacement row."""
     use_tmpdir(monkeypatch, tmp_path)
@@ -448,7 +452,7 @@ def test_stop_full_id_does_not_stamp_row_restamped_during_shellout(
 
     monkeypatch.setattr(claude_mod, "claude_stop", restamp_during_stop)
 
-    result = dispatch.stop_agent(original_id)
+    result = dispatch.stop_agent("victim" if address_by_name else original_id)
 
     assert result.claude_exit == 0
     rows = registry_mod.load_registry()
@@ -460,6 +464,55 @@ def test_stop_full_id_does_not_stamp_row_restamped_during_shellout(
         and event.get("reason") == "recipient_identity_changed"
         for event in _read_events(tmp_path)
     )
+
+
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A newly ambiguous name cannot inherit a selected row's lifecycle write."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original = _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+            short_id="transportA",
+            status="live",
+        ),
+    )[0]
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from dataclasses import replace
+    from fno.agents import dispatch
+    from fno.agents.providers import claude as claude_mod
+
+    replacement = replace(
+        original,
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transportB",
+        created_at="2026-07-30T10:00:01Z",
+    )
+    persisted: list = []
+
+    def update_with_duplicate(updater):
+        persisted[:] = updater([original, replacement])
+        return persisted
+
+    monkeypatch.setattr(dispatch, "update_registry", update_with_duplicate)
+    monkeypatch.setattr(claude_mod, "claude_stop", lambda *_a, **_k: (0, ""))
+    monkeypatch.setattr(claude_mod, "claude_rm", lambda *_a, **_k: (0, ""))
+
+    if verb == "rm":
+        with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm"):
+            dispatch.rm_agent("victim")
+    else:
+        assert dispatch.stop_agent("victim").claude_exit == 0
+
+    assert len(persisted) == 2
+    assert {entry.status for entry in persisted} == {"live"}
 
 
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:

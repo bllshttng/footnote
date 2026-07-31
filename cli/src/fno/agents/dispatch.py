@@ -89,28 +89,27 @@ def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
 
 def _update_registry_if_recipient_unchanged(
     name: str,
-    expected_identity: Optional[RecipientIdentity],
+    expected_identity: RecipientIdentity,
     updater: Callable[[list[AgentEntry]], list[AgentEntry]],
 ) -> bool:
-    """Apply a post-side-effect write only to the address-selected recipient.
+    """Apply a post-side-effect write only to the selected recipient.
 
-    Exact-name lifecycle calls intentionally follow the current owner of that
-    name. Address-bound calls carry the originally resolved identity through
+    Exact-name lifecycle calls follow the current owner until the per-name lock
+    selects a concrete row. Every call then carries that row's identity through
     the final registry-wide lock so a writer that does not honor the per-name
     lock cannot make a replacement inherit the registry mutation.
     """
-    applied = expected_identity is None
+    applied = False
 
     def _guarded(entries: list[AgentEntry]) -> list[AgentEntry]:
         nonlocal applied
-        if expected_identity is not None:
-            matches = [entry for entry in entries if entry.name == name]
-            if (
-                len(matches) != 1
-                or _recipient_identity_key(matches[0]) != expected_identity
-            ):
-                return entries
-            applied = True
+        matches = [entry for entry in entries if entry.name == name]
+        if (
+            len(matches) != 1
+            or _recipient_identity_key(matches[0]) != expected_identity
+        ):
+            return entries
+        applied = True
         return updater(entries)
 
     update_registry(_guarded)
@@ -2713,7 +2712,7 @@ def stop_agent(
             try:
                 status_written = _update_registry_if_recipient_unchanged(
                     name,
-                    expected_identity,
+                    _recipient_identity_key(existing),
                     _stamp_status(
                         name,
                         status="orphaned",
@@ -3015,7 +3014,7 @@ def rm_agent(
             try:
                 registry_changed = _update_registry_if_recipient_unchanged(
                     name,
-                    expected_identity,
+                    _recipient_identity_key(existing),
                     lambda entries: [e for e in entries if e.name != name],
                 )
             except (OSError, RegistryVersionError) as exc:
