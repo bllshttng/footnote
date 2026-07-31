@@ -160,14 +160,26 @@ than it costs, so the recipe lives here for hand-running instead.
 
 ### What is and is not fixed
 
-Fixed: the failure is legible. The error path performs no first-time import, and
-a missing module under the `fno` package says so and names both candidate causes
-(a reinstall in flight, retry; a stale install, `fno update` then `fno doctor`).
+Fixed, in two layers.
 
-Not fixed, deliberately: the window itself. A command invoked mid-reinstall still
-fails. Closing it would require quiescing running `fno` processes or new
-cross-process state, both of which cost more than a transient, self-healing
-few-second failure. Specifically rejected:
+**Legibility.** The error path performs no first-time import, and a missing
+module under the `fno` package says so and names both candidate causes (a
+reinstall in flight, retry; a stale install, `fno update` then `fno doctor`).
+
+**Verify-then-retry.** On an `ImportError` for a module under the `fno` package,
+`_load_real` re-checks whether that module is on disk *now* and, if it is,
+retries the import exactly once. The disk re-check is what separates this from a
+hopeful sleep-retry: a genuinely stale or broken install answers "absent", is not
+retried, and fails with the same message as before, so nothing is masked. This
+matters because the window is not rare on a real machine. A box running several
+launchd agents plus live sessions nearly always has an `fno` process mid-flight
+during the few seconds `uv tool install --reinstall` takes, so every `fno update`
+was hitting it.
+
+Not fixed, and unfixable at this layer: the window itself. A process whose import
+lands while the file is genuinely still absent still fails. Closing that would
+require quiescing running `fno` processes or new cross-process state, both of
+which cost more than a transient, self-healing failure. Specifically rejected:
 
 - **A provision lock.** uv already serializes tool installs (measured: 8 rounds
   of concurrent `--reinstall --refresh` against `--force` on the real
@@ -175,8 +187,10 @@ few-second failure. Specifically rejected:
   There is one installer here, not two. A lock would serialize nothing.
 - **Eager-importing subcommand modules.** That deletes the lazy group to avoid a
   transient failure.
-- **Retrying the failed import after a sleep.** That hides a genuinely stale or
-  broken install behind a delay.
+- **Retrying the failed import after a sleep.** A blind delay hides a genuinely
+  stale or broken install. The shipped retry is a different thing and the
+  distinction is the point: it retries only after confirming on disk that the
+  module is present, so an absent module is never waited on and never masked.
 
 ## Contracts (do not break)
 
