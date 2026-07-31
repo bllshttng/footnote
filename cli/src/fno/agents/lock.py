@@ -20,17 +20,13 @@ Lock-release semantics:
   `handle.detach()` BEFORE re-raising so the `finally` branch skips
   `LOCK_UN`. A stale lock signals "manual cleanup needed" to the next
   caller because a successful `claude --bg` left a supervisor session the
-  registry doesn't know about. The file handle is still closed; the lock
-  persists only until the process exits or another holder acquires it
-  (file-handle close drops POSIX flocks, but the orphan supervisor is the
-  real signal — see AC1-FR "registry write fails after subprocess
-  success").
+  registry doesn't know about. The process retains the file handle so the
+  POSIX flock remains held until that process exits.
 
-For cross-process visibility of `detach()`, callers using subprocess
-spawning or PTY supervisors typically hold the lock across the entire
-operation in one process, so the file-handle-close-drops-flock semantic
-is acceptable. If a future US needs true persistence of the lock past
-process exit, switch from `fcntl.flock` to a PID-file or sentinel file.
+This detached lock is a process-lifetime signal, not a durable sentinel:
+process exit closes the retained file descriptor and releases the flock.
+If a future use needs persistence past process exit, switch from
+`fcntl.flock` to a PID-file or sentinel file.
 """
 from __future__ import annotations
 
