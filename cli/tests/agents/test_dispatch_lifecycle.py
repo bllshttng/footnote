@@ -303,6 +303,77 @@ def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
     assert shellouts == []
 
 
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_destructive_lifecycle_pins_full_id_across_name_lock(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A same-name replacement cannot inherit a full-id lifecycle request."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from contextlib import contextmanager
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    original = registry_mod.AgentEntry(
+        name="victim",
+        harness="claude",
+        harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="transportA",
+        cwd="/one",
+        log_path="/tmp/one.log",
+        created_at="2026-07-30T10:00:00Z",
+    )
+    replacement = registry_mod.AgentEntry(
+        name="victim",
+        harness="claude",
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transportB",
+        cwd="/two",
+        log_path="/tmp/two.log",
+        created_at="2026-07-30T10:00:01Z",
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "resolve_agent",
+        lambda *_a, **_k: registry_mod.ResolvedAgent(
+            entry=original,
+            matched_by="full_session_id",
+        ),
+    )
+    reads = {"count": 0}
+
+    def staged_read(*_args, **_kwargs):
+        reads["count"] += 1
+        return original if reads["count"] == 1 else replacement
+
+    @contextmanager
+    def unlocked(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(dispatch, "_resolve_registry_entry", staged_read)
+    monkeypatch.setattr(dispatch, "hold_agent_lock", unlocked)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+
+    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    with pytest.raises(dispatch.DispatchAskError, match="recipient identity changed"):
+        action(original.harness_session_id)
+
+    assert reads["count"] == 2
+    assert shellouts == []
+
+
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-EDGE: codex agents print info on stderr and exit 0; no subprocess."""
     use_tmpdir(monkeypatch, tmp_path)

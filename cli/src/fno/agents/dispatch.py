@@ -55,6 +55,36 @@ from fno.agents.registry import (
 from fno.harness_identity import resolve_harness_identity, session_identity_key
 
 DispatchKind = Literal["create", "followup"]
+RecipientIdentity = tuple[
+    str,
+    str,
+    Optional[str],
+    str,
+    Optional[str],
+    Optional[tuple[object, object]],
+    str,
+]
+
+
+def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
+    """Snapshot every field that can select or replace a live recipient."""
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    mux = entry.mux
+    return (
+        entry.name,
+        entry.harness,
+        session_identity_key(session_id) if session_id else None,
+        entry.short_id,
+        entry.mcp_channel_id,
+        (
+            (mux.get("session"), mux.get("pane_id"))
+            if mux is not None
+            else None
+        ),
+        entry.created_at,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2326,27 +2356,37 @@ def _validate_lifecycle_name(name: str) -> None:
         )
 
 
-def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -> str:
-    """Translate a lifecycle token (name | 8-hex short | full session id) to the
-    canonical registry name, so ``stop``/``rm`` address a session by any of the
-    three forms (x-1b1e) while still locking + acting on the canonical name.
+def _resolve_lifecycle_target(
+    token: str,
+    *,
+    registry_path: Optional[Path] = None,
+) -> tuple[AgentEntry, Optional[RecipientIdentity]]:
+    """Resolve a lifecycle token without discarding address-bound identity.
 
-    Falls back to the token UNCHANGED on a genuine miss so the downstream name
-    lookup raises its familiar ``agent {name!r} not found in registry`` error.
+    A genuine miss falls through to the exact-name lookup so the downstream
+    error remains ``agent {name!r} not found in registry``.
+    Exact names intentionally follow the current owner of that name under the
+    lock; full ids and short handles remain pinned to the selected session.
     Ambiguity and unavailable identity evidence are refusals: falling back could
     make a token that also happens to be a row name select that row and act on
     the wrong session."""
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
-        return resolve_agent(token, path=registry_path).entry.name
+        resolved = resolve_agent(token, path=registry_path)
+        expected_identity = (
+            None
+            if resolved.matched_by == "name"
+            else _recipient_identity_key(resolved.entry)
+        )
+        return resolved.entry, expected_identity
     except AgentResolutionError as exc:
         if exc.ambiguous or exc.unavailable:
             raise DispatchAskError(
                 str(exc),
                 exit_code=12 if exc.unavailable else 2,
             ) from exc
-        return token
+        return _resolve_registry_entry(token, registry_path=registry_path), None
 
 
 def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) -> AgentEntry:
@@ -2399,6 +2439,7 @@ def with_agent_lock_and_entry(
     registry_path: Optional[Path] = None,
     timeout: float = 30.0,
     on_wait: Optional[Callable[[], None]] = None,
+    expected_identity: Optional[RecipientIdentity] = None,
 ) -> Iterator[tuple[object, AgentEntry]]:
     """Acquire per-agent flock AND re-load the registry entry under it.
 
@@ -2434,6 +2475,9 @@ def with_agent_lock_and_entry(
             the timeout event.
         on_wait: Optional callback fired at the standard 1s
             blocked-acquire threshold by ``hold_agent_lock``.
+        expected_identity: Recipient selected from the caller's original token.
+            Both registry reads must still match it; a same-name replacement is
+            refused before any lifecycle side effect.
 
     Yields:
         ``(lock_handle, existing)`` where ``existing`` is the AgentEntry
@@ -2454,14 +2498,23 @@ def with_agent_lock_and_entry(
             shape its tests expect.
     """
     # Pre-flock validation. The returned snapshot is intentionally NOT
-    # passed out of this scope; we re-read post-lock below so any
-    # concurrent rm/recreate between the two reads is absorbed. The
+    # passed out of this scope; we re-read post-lock below so a name-addressed
+    # call observes the current owner, while an address-bound call compares the
+    # snapshot with expected_identity and refuses a replacement. The
     # ``registry_path`` override (Codex P2 on PR #317) forwards to BOTH
     # the lock acquisition AND the registry read so a test or future
     # caller cannot accidentally lock one file while reading another.
     if registry_path is None:
         registry_path = paths.agents_registry_path()
-    _resolve_registry_entry(name, registry_path=registry_path)
+    pre_existing = _resolve_registry_entry(name, registry_path=registry_path)
+    if (
+        expected_identity is not None
+        and _recipient_identity_key(pre_existing) != expected_identity
+    ):
+        raise DispatchAskError(
+            f"agent {name!r} recipient identity changed before lock acquisition; retry",
+            exit_code=2,
+        )
     with hold_agent_lock(name, registry_path, timeout=timeout, on_wait=on_wait) as lock_handle:
         # Post-lock re-read. If another process deleted the entry between
         # the pre-flock validation and the flock acquisition, this raises
@@ -2471,6 +2524,14 @@ def with_agent_lock_and_entry(
         # missing-entry flow. The lock is released as the context
         # manager unwinds (AC2-ERR).
         existing = _resolve_registry_entry(name, registry_path=registry_path)
+        if (
+            expected_identity is not None
+            and _recipient_identity_key(existing) != expected_identity
+        ):
+            raise DispatchAskError(
+                f"agent {name!r} recipient identity changed while acquiring its lock; retry",
+                exit_code=2,
+            )
         yield (lock_handle, existing)
 
 
@@ -2498,9 +2559,10 @@ def stop_agent(
             PATH, claude shellout timeout, lock timeout.
     """
     _validate_lifecycle_name(name)
-    # Accept any of the three address forms (x-1b1e): translate to the canonical
-    # name before the flock, which keys on it.
-    name = _canonical_agent_name(name)
+    # Resolve any address form once, then carry that identity through the
+    # canonical-name flock. A same-name replacement cannot inherit this action.
+    pre_existing, expected_identity = _resolve_lifecycle_target(name)
+    name = pre_existing.name
     # Pre-flock fast-fail + capture provider for the lock-timeout event
     # payload. The authoritative load happens inside
     # ``with_agent_lock_and_entry`` below; this pre-read exists ONLY so
@@ -2508,14 +2570,18 @@ def stop_agent(
     # emit. The lint script `scripts/lint-flock-pattern.sh` allows this
     # because we do NOT call ``hold_agent_lock`` directly in this function
     # body — the helper encapsulates the lock acquisition.
-    pre_existing = _resolve_registry_entry(name)
     pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+        with with_agent_lock_and_entry(
+            name,
+            timeout=lock_timeout,
+            on_wait=_on_wait,
+            expected_identity=expected_identity,
+        ) as (
             _lock_handle,
             existing,
         ):
@@ -2771,20 +2837,26 @@ def rm_agent(
 
     """
     _validate_lifecycle_name(name)
-    # Accept any of the three address forms (x-1b1e); lock on the canonical name.
-    name = _canonical_agent_name(name)
+    # Resolve any address form once, then carry that identity through the
+    # canonical-name flock. A same-name replacement cannot inherit this action.
+    pre_existing, expected_identity = _resolve_lifecycle_target(name)
+    name = pre_existing.name
     # Pre-flock fast-fail + capture provider for lock-timeout event
     # payload. See ``stop_agent`` for the lint-pattern rationale: the
     # body does NOT call ``hold_agent_lock`` directly — that lives inside
     # ``with_agent_lock_and_entry``, which the lint script allowlists.
-    pre_existing = _resolve_registry_entry(name)
     pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+        with with_agent_lock_and_entry(
+            name,
+            timeout=lock_timeout,
+            on_wait=_on_wait,
+            expected_identity=expected_identity,
+        ) as (
             _lock_handle,
             existing,
         ):
@@ -5101,47 +5173,8 @@ def dispatch_send(
     registry_path = paths.agents_registry_path()
     requested_name = name
 
-    def _recipient_identity_key(
-        entry: AgentEntry,
-    ) -> tuple[
-        str,
-        str,
-        Optional[str],
-        str,
-        Optional[str],
-        Optional[tuple[object, object]],
-        str,
-    ]:
-        session_id = getattr(entry, "harness_session_id", None) or getattr(
-            entry, "session_id", None
-        )
-        mux = entry.mux
-        return (
-            entry.name,
-            entry.harness,
-            session_identity_key(session_id) if session_id else None,
-            entry.short_id,
-            entry.mcp_channel_id,
-            (
-                (mux.get("session"), mux.get("pane_id"))
-                if mux is not None
-                else None
-            ),
-            entry.created_at,
-        )
-
     def _load_and_resolve_target(
-        expected_identity: Optional[
-            tuple[
-                str,
-                str,
-                Optional[str],
-                str,
-                Optional[str],
-                Optional[tuple[object, object]],
-                str,
-            ]
-        ] = None,
+        expected_identity: Optional[RecipientIdentity] = None,
     ) -> tuple[list[AgentEntry], AgentEntry]:
         try:
             entries = load_registry(registry_path)
