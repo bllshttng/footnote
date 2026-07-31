@@ -197,10 +197,20 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
             return None
 
     # claude
-    cfg = config_dir or _claude_slot_config_dir()
+    default_cfg = _claude_slot_config_dir()
+    cfg = config_dir or default_cfg
     if sys.platform == "darwin":
         acct = _claude_keychain_account()
-        for service in (_claude_scoped_service(cfg), _CLAUDE_KEYCHAIN_SERVICE):
+        # The unscoped Keychain item belongs to the default ~/.claude account
+        # (account_env._login_present reads the scoped item ONLY, never the
+        # unscoped fallback, for exactly this reason). Fall back to it only when
+        # reading that account; for an alternate config_dir the credential lives
+        # only in its scoped item, so falling through would return the default
+        # account's credential under the alternate dir (a misattribution).
+        services = [_claude_scoped_service(cfg)]
+        if cfg == default_cfg:
+            services.append(_CLAUDE_KEYCHAIN_SERVICE)
+        for service in services:
             out = _run_security(["find-generic-password", "-s", service, "-a", acct, "-w"])
             if out.returncode == 0 and out.stdout.strip():
                 blob = out.stdout.strip()

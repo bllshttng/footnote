@@ -124,28 +124,35 @@ def resolve_spawn_route(
     otherwise the normal fail-safe role resolver decides whether routing is
     active. Managed OAuth owns the default Claude credential slot, so applying
     a secondary endpoint/model over that snapshot is refused as one unit -
-    unless an account overlay is present (``account_overlay``). The overlay
-    pins a profile and the route composes atomically (route wins
-    endpoint+auth+model, account keeps CLAUDE_CONFIG_DIR); the route is
-    fail-closed and always carries its own token, and claude prefers an env
-    credential over Keychain OAuth, so the split-brain the guard exists to
-    prevent cannot recur.
+    unless an account overlay is present AND the route carries its own auth
+    (``account_overlay``). The overlay pins CLAUDE_CONFIG_DIR (Keychain OAuth),
+    so a route without its own credential would send that OAuth token to the
+    route's foreign endpoint; a resolved route is fail-closed and always
+    carries ANTHROPIC_AUTH_TOKEN, but a hand-built partial route_env (e.g.
+    base-URL-only from a direct dispatch_spawn caller) does not, so the guard
+    stays armed for it. With a self-authed route the composition is atomic
+    (route wins endpoint+auth+model), and claude prefers an env credential
+    over Keychain OAuth, so the split-brain the guard exists to prevent cannot
+    recur.
     """
     route = dict(route_env) if route_env else resolve_route(role, notice=notice)
-    if (
-        route
-        and not account_overlay
-        and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed"
-    ):
-        overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
-        route_intent = intent or (
-            f"routed role {role!r}" if role is not None else "pre-resolved route"
+    if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
+        # An account overlay relaxes the refusal only when the route is
+        # self-sufficient (see docstring): without its own auth the route's
+        # foreign endpoint would be paired with the account's Keychain OAuth.
+        route_self_authed = bool(
+            route.get("ANTHROPIC_AUTH_TOKEN") or route.get("ANTHROPIC_API_KEY")
         )
-        raise RouteCompositionError(
-            f"refusing {route_intent} over managed OAuth provider {overlay_id!r}: "
-            "endpoint, auth, and model must be selected as one provider route; "
-            "no worker launched."
-        )
+        if not (account_overlay and route_self_authed):
+            overlay_id = os.environ.get("FNO_PROVIDER_ID", "").strip() or "unknown"
+            route_intent = intent or (
+                f"routed role {role!r}" if role is not None else "pre-resolved route"
+            )
+            raise RouteCompositionError(
+                f"refusing {route_intent} over managed OAuth provider {overlay_id!r}: "
+                "endpoint, auth, and model must be selected as one provider route; "
+                "no worker launched."
+            )
     return route
 
 

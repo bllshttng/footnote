@@ -720,6 +720,29 @@ def test_route_under_managed_without_account_still_refused(
 
 
 # ---------------------------------------------------------------------------
+# x-3db9 P1 (codex): the managed-OAuth bypass needs the route to carry its own
+# auth, not just any account overlay. A direct dispatch_spawn caller can pass a
+# hand-built partial route_env (base-URL-only); under managed + account that
+# would pair the foreign endpoint with the account's Keychain OAuth, so the
+# guard stays armed until the route is self-sufficient.
+# ---------------------------------------------------------------------------
+
+
+def test_managed_bypass_requires_route_self_auth(monkeypatch: pytest.MonkeyPatch) -> None:
+    from fno.agents.model_routing import RouteCompositionError, resolve_spawn_route
+
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "makers")
+    partial = {"ANTHROPIC_BASE_URL": "https://foreign.example/anthropic"}  # no auth token
+    # Account present, but the route brings no own credential -> still refused.
+    with pytest.raises(RouteCompositionError):
+        resolve_spawn_route(None, partial, account_overlay=True)
+    # A self-authed route + account composes (no refusal).
+    complete = {**partial, "ANTHROPIC_AUTH_TOKEN": "route-key"}
+    assert resolve_spawn_route(None, complete, account_overlay=True) == complete
+
+
+# ---------------------------------------------------------------------------
 # x-3db9 P2: a route-bearing --account spawn must not scrub the route key at the
 # seam. A vendor may name a SCRUB_AUTH_VARS member (e.g. ANTHROPIC_AUTH_TOKEN) as
 # its api_key_env; resolve_explicit_route reads it from os.environ, so scrubbing

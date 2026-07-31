@@ -77,12 +77,15 @@ class TestTokenPresent:
 # ---------------------------------------------------------------------------
 
 
-def _darwin_slot(monkeypatch, services: dict[str, str]) -> None:
+def _darwin_slot(monkeypatch, services: dict[str, str], *, default_dir) -> None:
     """Pin the claude/darwin read path to a {service: stdout} fake and force the
-    darwin branch regardless of host platform."""
+    darwin branch regardless of host platform. ``default_dir`` is what
+    _claude_slot_config_dir() reports, so a test can read the default slot
+    (fall-through to unscoped applies) or an alternate dir (scoped-only)."""
     monkeypatch.setattr(managed.sys, "platform", "darwin")
     monkeypatch.setattr(managed, "_claude_keychain_account", lambda: "acct")
     monkeypatch.setattr(managed, "_claude_scoped_service", lambda cfg: "scoped")
+    monkeypatch.setattr(managed, "_claude_slot_config_dir", lambda: default_dir)
 
     def _run(argv: list[str]) -> subprocess.CompletedProcess:
         svc = argv[argv.index("-s") + 1]
@@ -93,24 +96,41 @@ def _darwin_slot(monkeypatch, services: dict[str, str]) -> None:
 
 
 class TestReadSlotBlobResidue:
-    def test_falls_through_scoped_residue_to_unscoped_live(self, tmp_path, monkeypatch) -> None:
-        # The observed state: scoped item holds the residue, unscoped holds the
-        # live token. The reader must NOT stop at the scoped residue.
+    def test_default_slot_falls_through_scoped_residue_to_unscoped_live(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # Default account: scoped item holds the residue, unscoped holds the live
+        # token. The reader must NOT stop at the scoped residue.
         _darwin_slot(
             monkeypatch,
             {"scoped": _residue(), managed._CLAUDE_KEYCHAIN_SERVICE: _live()},
+            default_dir=tmp_path,
         )
         assert managed._read_slot_blob("claude", config_dir=tmp_path) == _live()
 
     def test_residue_only_returns_none(self, tmp_path, monkeypatch) -> None:
         # No live token anywhere: register must refuse, not store the residue.
-        _darwin_slot(monkeypatch, {"scoped": _residue()})
+        _darwin_slot(monkeypatch, {"scoped": _residue()}, default_dir=tmp_path)
         assert managed._read_slot_blob("claude", config_dir=tmp_path) is None
 
     def test_live_in_scoped_is_returned(self, tmp_path, monkeypatch) -> None:
-        _darwin_slot(monkeypatch, {"scoped": _live()})
+        _darwin_slot(monkeypatch, {"scoped": _live()}, default_dir=tmp_path)
         assert managed._read_slot_blob("claude", config_dir=tmp_path) == _live()
 
     def test_empty_slot_returns_none(self, tmp_path, monkeypatch) -> None:
-        _darwin_slot(monkeypatch, {})
+        _darwin_slot(monkeypatch, {}, default_dir=tmp_path)
+        assert managed._read_slot_blob("claude", config_dir=tmp_path) is None
+
+    def test_alternate_config_dir_does_not_fall_through_to_default_credential(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        # An alternate config_dir's credential lives only in its scoped item; the
+        # unscoped item is the DEFAULT ~/.claude account's. A scoped residue must
+        # NOT fall through to the default's live token (misattribution) - refuse,
+        # matching account_env._login_present's scoped-only read of a dir.
+        _darwin_slot(
+            monkeypatch,
+            {"scoped": _residue(), managed._CLAUDE_KEYCHAIN_SERVICE: _live("default-token")},
+            default_dir=tmp_path / "default-claude",  # a different dir
+        )
         assert managed._read_slot_blob("claude", config_dir=tmp_path) is None
