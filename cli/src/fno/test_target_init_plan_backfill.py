@@ -91,7 +91,7 @@ def test_node_input_backfills_bound_plan(stub_exec, monkeypatch, tmp_path):
     """A node input with a bound, on-disk plan reaches the manifest writer."""
     plan = _real_plan(tmp_path)
     _graph(monkeypatch, [{"id": "x-39c0", "plan_path": plan}])
-    _blast(monkeypatch, False)
+    _blast(monkeypatch, True)
 
     res = _invoke(["--input", "x-39c0"])
 
@@ -241,6 +241,42 @@ def test_resolve_plan_pointer_matrix(tmp_path):
     assert _resolve_plan_pointer(str(tmp_path / "gone.md")) is None
     assert _resolve_plan_pointer("") is None
     assert _resolve_plan_pointer("#group-1") is None  # anchor only, no file
+
+
+def test_resolve_plan_pointer_accepts_folder_plan(tmp_path):
+    """A folder plan resolves: the gate is existence, never is_file.
+
+    footnote plans are routinely directories whose entry point is 00-INDEX.md,
+    so an is_file() "tightening" would silently drop the back-fill for every one
+    of them with a fully green suite.
+    """
+    folder = tmp_path / "plan-folder"
+    folder.mkdir()
+    (folder / "00-INDEX.md").write_text("# Index\n", encoding="utf-8")
+
+    assert _resolve_plan_pointer(str(folder)) == str(folder)
+
+
+def test_resolve_plan_pointer_relative_uses_repo_root(tmp_path, monkeypatch):
+    """A relative pointer resolves against the repo root, not the process cwd.
+
+    The graph stores plan_path unnormalized and init-target-state.sh resolves a
+    relative one against the repo root. Statting against the process cwd would
+    report a plan that is on disk as missing whenever init runs from a
+    subdirectory, dropping a valid binding and printing a false diagnosis.
+    """
+    root = tmp_path / "repo"
+    (root / "internal" / "plans").mkdir(parents=True)
+    (root / "internal" / "plans" / "p.md").write_text("# Plan\n", encoding="utf-8")
+    monkeypatch.setattr(target_cli, "_repo_root_or_none", lambda: str(root))
+
+    sub = root / "cli"
+    sub.mkdir()
+    monkeypatch.chdir(sub)  # a cwd where the relative pointer does NOT resolve
+
+    got = _resolve_plan_pointer("internal/plans/p.md")
+
+    assert got == str(root / "internal" / "plans" / "p.md")
 
 
 def test_resolve_plan_pointer_returns_expanded_tilde(tmp_path, monkeypatch):

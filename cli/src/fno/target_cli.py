@@ -291,8 +291,15 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
     raw string would pass this check and read as missing in every consumer, which
     is the exact wedge this gate exists to prevent. A ``#group-N`` anchor is
     stripped for the stat the way the shell does (``${INITIAL_PLAN_PATH%%#*}``)
-    and preserved on the way out. A relative pointer resolves against the cwd,
-    which is the worktree init runs from, matching the shell's own plan reads.
+    and preserved on the way out. A RELATIVE pointer resolves against the repo
+    root, not the process cwd, matching init-target-state.sh's own relative
+    resolution; the graph stores plan_path unnormalized, so a relative pointer
+    read against a subdirectory cwd would report a plan that is on disk as
+    missing and drop a valid binding.
+
+    Existence, not is_file: a footnote plan is routinely a DIRECTORY (the folder
+    plan whose entry point is 00-INDEX.md, see target/blast.py), so tightening
+    this to is_file() would silently drop the back-fill for every folder plan.
 
     Fail-CLOSED to None, the opposite of ``_resolve_plan_for_blast`` above and
     deliberately so: an unresolved blast read only forgoes ceremony modulation,
@@ -305,6 +312,10 @@ def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
         if not bare:
             return None
         resolved = Path(bare).expanduser()
+        if not resolved.is_absolute():
+            root = _repo_root_or_none()
+            if root:
+                resolved = Path(root) / resolved
         if not resolved.exists():
             return None
         return f"{resolved}{sep}{anchor}"
@@ -1152,7 +1163,7 @@ def init(
             else:
                 typer.echo(
                     f"fno target init: the node's bound plan_path does not resolve "
-                    f"to a file ({resolved_plan}); leaving the manifest plan_path "
+                    f"to an existing path ({resolved_plan}); leaving the manifest plan_path "
                     f"empty so it stays first-fillable this session "
                     f"(fno state set --field plan_path). Repair the node itself "
                     f"with: fno backlog update <id> --plan-path <path>",
