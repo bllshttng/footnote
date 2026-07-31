@@ -138,10 +138,12 @@ def _kanban_column(
 def make_kanban_column(
     entries: list[dict],
     live_claimed: Collection[str] | None = None,
+    *,
+    strict_claims: bool = False,
 ):
     """Bind whole-graph overlays into the sole kanban column authority."""
     if live_claimed is None:
-        live_claimed = frozenset(live_claimed_node_ids())
+        live_claimed = frozenset(live_claimed_node_ids(strict=strict_claims))
     else:
         live_claimed = frozenset(live_claimed)
     in_progress_epics = in_progress_epic_ids(entries, live_claimed)

@@ -186,6 +186,33 @@ def test_rank_uses_live_claim_board_lane(tmp_graph, tmp_path):
     assert persisted["ab-claimed1"]["rank"] < persisted["ab-anchor1"]["rank"]
 
 
+def test_rank_refuses_when_live_claim_state_is_unavailable(
+    tmp_graph, monkeypatch
+):
+    entries = [
+        {"id": "ab-target01", "title": "Target", "status": "ready",
+         "priority": "p3", "project": "p"},
+        {"id": "ab-anchor01", "title": "Anchor", "status": "ready",
+         "priority": "p3", "project": "p", "rank": 5.0},
+    ]
+    tmp_graph.write_text(json.dumps({"entries": entries}) + "\n")
+
+    def unavailable(*args, **kwargs):
+        raise OSError("claims unavailable")
+
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", unavailable
+    )
+
+    result = _invoke(
+        "backlog", "rank", "ab-target01", "--before", "ab-anchor01"
+    )
+
+    assert result.exit_code == 1
+    assert "live claim state is unavailable" in result.output
+    assert json.loads(tmp_graph.read_text())["entries"] == entries
+
+
 def test_released_claim_does_not_block(tmp_graph, tmp_path):
     """After release the node is selectable again (only LIVE claims filter)."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")

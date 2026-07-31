@@ -8770,7 +8770,15 @@ def cmd_rank(
             return False
 
     def mutator(entries):
-        column_for = make_kanban_column(entries)
+        try:
+            column_for = make_kanban_column(entries, strict_claims=True)
+        except Exception as exc:
+            typer.echo(
+                "Error: live claim state is unavailable; rank refused without "
+                "changing the graph.",
+                err=True,
+            )
+            raise typer.Exit(code=1) from exc
 
         def _lane(e: dict) -> tuple:
             return (column_for(e), _project_key(e))

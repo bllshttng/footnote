@@ -5,7 +5,11 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from fno.graph.statuses import recompute_statuses, is_stale_lock
+from fno.graph.statuses import (
+    is_stale_lock,
+    live_claimed_node_ids,
+    recompute_statuses,
+)
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -52,6 +56,17 @@ def test_ac2_err_is_stale_lock_bad_timestamp():
     """AC2-ERR: unparseable timestamp is treated as stale."""
     e = _entry("ab-44444444", session_id="sess-001", claimed_at="not-a-date")
     assert is_stale_lock(e) is True
+
+
+def test_live_claim_read_can_fail_open_for_display_or_raise_for_mutation(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("claims unavailable")
+
+    monkeypatch.setattr("fno.claims.core.list_claims", unavailable)
+
+    assert live_claimed_node_ids() == set()
+    with pytest.raises(OSError, match="claims unavailable"):
+        live_claimed_node_ids(strict=True)
 
 
 # -- recompute_statuses --
