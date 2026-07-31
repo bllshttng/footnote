@@ -1292,7 +1292,8 @@ def test_foreign_live_holder_ours_by_pid_host(monkeypatch):
     }
     _wire_claim(monkeypatch, status, own_pid=555)
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
-    monkeypatch.setattr(target_cli.socket, "gethostname", lambda: "myhost")
+    # Ownership keys on the stable machine id, not gethostname() (x-588d).
+    monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "myhost")
     assert target_cli._foreign_live_holder("N") is None
 
 
@@ -1320,6 +1321,8 @@ def test_foreign_live_holder_uncapturable_pid_parks(monkeypatch):
 def test_foreign_live_holder_gethostname_raises_parks(monkeypatch):
     # Contract: never raises. socket.gethostname() can OSError in a sandbox ->
     # own identity is uncapturable -> a foreign live claim parks (AC2-FR).
+    # hostid swallows the OSError and reports "" (never this machine), so the
+    # park still happens; the contract is the outcome, not the exception path.
     status = {
         "key": "node:N", "state": "live",
         "holder": "target-session:A", "pid": 555, "host": "h",
@@ -1330,7 +1333,8 @@ def test_foreign_live_holder_gethostname_raises_parks(monkeypatch):
     def boom():
         raise OSError("no hostname in sandbox")
 
-    monkeypatch.setattr(target_cli.socket, "gethostname", boom)
+    monkeypatch.setattr("fno.claims.hostid.socket.gethostname", boom)
+    monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "")
     assert target_cli._foreign_live_holder("N") == status
 
 

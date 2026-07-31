@@ -9,6 +9,7 @@ from unittest.mock import patch
 import psutil
 import pytest
 
+from fno.claims import hostid
 from fno.claims.staleness import (
     classify,
     is_expired,
@@ -203,3 +204,63 @@ def test_now_ms_increases_over_time():
     time.sleep(0.01)
     b = now_ms()
     assert b >= a
+
+
+# ---------------------------------------------------------------------------
+# machine identity (x-588d): a hostname flip must not stale a live claim
+# ---------------------------------------------------------------------------
+
+
+def _requires_stable_machine_id():
+    """Skip when this box has no OS machine id and machine_id() == hostname().
+
+    In that fallback mode the two are the same string by construction, so the
+    flip these tests simulate is indistinguishable from a real machine change.
+    """
+    hostid.machine_id.cache_clear()
+    if hostid.machine_id() == hostid.hostname():
+        pytest.skip("no stable OS machine id on this platform; fallback mode")
+
+
+def test_is_live_survives_hostname_flip(monkeypatch):
+    """x-588d: gethostname() is derived from DHCP/DNS on macOS with HostName
+    unset, so it flips on network join, VPN, and sleep/wake. A live holder must
+    NOT read as cross-host when the name moves - the host check short-circuits
+    is_live before the pid check, and the resulting STALE is stealable."""
+    _requires_stable_machine_id()
+    claim = _live_claim(host=hostid.machine_id())
+    monkeypatch.setattr(hostid, "hostname", lambda: "BB16s-MBP")
+    hostid.machine_id.cache_clear()
+    assert is_live(claim) is True
+
+
+def test_classify_live_ttl_expired_after_hostname_flip(monkeypatch):
+    """The observed failure: a TTL claim whose clock lapsed while its holder
+    kept working. The hybrid-liveness rescue (pid is the live original holder)
+    was short-circuited by the host mismatch, so the claim read STALE and any
+    re-dispatch could steal the node out from under the live session."""
+    _requires_stable_machine_id()
+    claim = _live_claim(host=hostid.machine_id(), expires_at=now_ms() - 1000)
+    monkeypatch.setattr(hostid, "hostname", lambda: "BB16s-MBP")
+    hostid.machine_id.cache_clear()
+    assert classify(claim) == ClaimState.LIVE
+
+
+def test_classify_stale_remote_machine_id_still_opaque(monkeypatch):
+    """Cross-host opacity is preserved: a claim carrying ANOTHER machine's id
+    matches neither arm of is_same_machine, so it stays recoverable. Widening
+    this would be a different bug (a remote claim wedged forever)."""
+    claim = _live_claim(host="00000000-0000-0000-0000-000000000000", expires_at=now_ms() - 1000)
+    assert classify(claim) == ClaimState.STALE
+
+
+def test_is_same_machine_accepts_legacy_hostname_claims():
+    """Claims written before the host field carried a machine id record a bare
+    hostname. The legacy arm keeps them classifiable while the name holds - no
+    worse than before, and strictly additive to the machine-id arm."""
+    hostid.machine_id.cache_clear()
+    assert hostid.is_same_machine(hostid.hostname()) is True
+    assert hostid.is_same_machine(hostid.machine_id()) is True
+    assert hostid.is_same_machine("some-other-host-that-does-not-exist") is False
+    assert hostid.is_same_machine(None) is False
+    assert hostid.is_same_machine("") is False

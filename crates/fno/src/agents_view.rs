@@ -512,6 +512,8 @@ fn encode_claim_key(key: &str) -> String {
 /// `gethostname(2)`, matching Python `socket.gethostname()` (mirror of
 /// `claims.rs::hostname`). Empty on failure -> never equals a recorded host, so
 /// an unreadable hostname fails toward "not live".
+///
+/// NOT an identity: see `is_same_machine` below. This is only the legacy arm.
 fn hostname() -> String {
     let mut buf = [0u8; 256];
     let rc = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) };
@@ -574,10 +576,73 @@ fn process_create_time_ms(_pid: i32) -> Option<i64> {
     None
 }
 
-/// Verifiably-running claim holder (mirror of `claims.rs::is_live`): same host
-/// AND the pid's process started at/before `acquired_at` (rejects a reused pid).
+/// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
+#[cfg(target_os = "macos")]
+fn platform_machine_id() -> String {
+    let out = match std::process::Command::new("ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(_) => return String::new(),
+    };
+    out.split_once("\"IOPlatformUUID\" = \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(id, _)| id.to_string())
+        .unwrap_or_default()
+}
+
+/// Linux machine id (mirror of `claims.rs::platform_machine_id`).
+#[cfg(target_os = "linux")]
+fn platform_machine_id() -> String {
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let value = text.trim();
+            if !value.is_empty() {
+                return value.to_string();
+            }
+        }
+    }
+    String::new()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_machine_id() -> String {
+    String::new()
+}
+
+/// Stable machine identity, falling back to `hostname()` (mirror of
+/// `claims.rs::machine_id` / `fno.claims.hostid.machine_id`). `gethostname(2)`
+/// moves under a roaming laptop, which read as cross-host and dropped a live
+/// claim to stale — and stale is stealable (x-588d).
+fn machine_id() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let id = platform_machine_id();
+            if id.is_empty() {
+                hostname()
+            } else {
+                id
+            }
+        })
+        .clone()
+}
+
+/// Was `recorded` written on THIS machine? (mirror of
+/// `claims.rs::is_same_machine`). Second arm accepts pre-machine-id claims.
+fn is_same_machine(recorded: &str) -> bool {
+    if recorded.is_empty() {
+        return false;
+    }
+    recorded == machine_id() || recorded == hostname()
+}
+
+/// Verifiably-running claim holder (mirror of `claims.rs::is_live`): same
+/// machine AND the pid's process started at/before `acquired_at` (rejects a
+/// reused pid).
 fn holder_is_live(host: &str, pid: i32, acquired_at: i64) -> bool {
-    if host != hostname() {
+    if !is_same_machine(host) {
         return false;
     }
     matches!(process_create_time_ms(pid), Some(create_ms) if create_ms <= acquired_at)

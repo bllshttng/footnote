@@ -65,8 +65,9 @@ class Claim(BaseModel):
             PID-liveness claims (the absence is meaningful; do not serialize
             as null).
         pid: holder process PID (host-local).
-        host: socket.gethostname() at acquire time; cross-host claims are
-            intentionally treated as opaque (see staleness.is_live).
+        host: stable machine id at acquire time (``hostid.machine_id``, NOT
+            ``socket.gethostname()`` - see that module); cross-machine claims
+            are intentionally treated as opaque (see staleness.is_live).
         reason: optional human-readable context string.
         metadata: optional dict; treated opaquely.
 

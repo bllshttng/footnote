@@ -13,7 +13,8 @@ def _wire(monkeypatch, status, *, own_pid=None):
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
     )
-    monkeypatch.setattr("fno.claims.incarnation.socket.gethostname", lambda: "h")
+    # The claim's host is compared through hostid, not a raw gethostname() (x-588d).
+    monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "h")
 
 
 def test_no_uuid_is_invisible():

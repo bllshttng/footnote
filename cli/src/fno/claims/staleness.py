@@ -14,18 +14,20 @@ PID-reuse detection compares ``acquired_at`` against
 time is *after* acquired_at, the PID has been reused by a different
 process since the claim was filed.
 
-Cross-host claims (claim.host != socket.gethostname()) are treated as
-opaque: is_live returns False so the local actor can recover them. The
-design doc accepts this as a limitation of the no-shared-state model.
+Cross-machine claims are treated as opaque: is_live returns False so the
+local actor can recover them. The design doc accepts this as a limitation of
+the no-shared-state model. "Same machine" is decided by ``hostid``, NOT by
+``socket.gethostname()`` directly - see that module for why the hostname is
+not a stable identity (x-588d).
 """
 from __future__ import annotations
 
-import socket
 import time
 from typing import Optional
 
 import psutil
 
+from .hostid import is_same_machine
 from .types import Claim, ClaimState
 
 
@@ -52,13 +54,13 @@ def is_live(claim: Claim) -> bool:
     """Return True iff the claim's holder is verifiably running.
 
     Returns False if:
-      - The claim is on another host (we cannot remotely verify).
+      - The claim is on another machine (we cannot remotely verify).
       - The OS does not report claim.pid.
       - The OS-reported create_time for claim.pid is AFTER claim.acquired_at
         (PID reuse: a new process took over the slot).
       - We cannot read the process info (AccessDenied counts as dead).
     """
-    if claim.host != socket.gethostname():
+    if not is_same_machine(claim.host):
         return False
 
     create_ms = _process_create_time_ms(claim.pid)
