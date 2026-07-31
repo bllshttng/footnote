@@ -292,11 +292,12 @@ def in_progress_epic_ids(
     for child in entries:
         if not isinstance(child, dict):
             continue
+        child_id = child.get("id")
         if not (
             child.get("completed_at")
             or child.get("status") in ("done", "in_progress")
             or child.get("session_id")
-            or child.get("id") in live_claimed
+            or (isinstance(child_id, str) and child_id in live_claimed)
         ):
             continue
         epic = _live_epic_for(child, id_to_entry)

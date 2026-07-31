@@ -104,11 +104,12 @@ def _kanban_column(
         return None
     if status == "in_progress":
         return "Now"
+    entry_id = entry.get("id")
     # In-progress epic (x-33b2): a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
     # so surface it in Now. The set is derived from children by the caller; the
     # epic's `status` stays honest (never a claim without a session_id).
-    if entry.get("id") in in_progress_epics:
+    if isinstance(entry_id, str) and entry_id in in_progress_epics:
         return "Now"
     # Live-claim overlay (x-4845): a node another session is actively driving
     # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
@@ -117,7 +118,7 @@ def _kanban_column(
     # graph `status` is never mutated (x-33b2: claimed => session_id stays a
     # pure derivation). Additive: placed below the exclusions so a dead/off-board
     # node is never resurrected, and it only ever promotes to Now.
-    if entry.get("id") in live_claimed:
+    if isinstance(entry_id, str) and entry_id in live_claimed:
         return "Now"
     # Queued is orthogonal to status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting

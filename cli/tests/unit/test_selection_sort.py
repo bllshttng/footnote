@@ -70,6 +70,18 @@ def test_live_claimed_child_marks_epic_in_progress_for_selection():
     assert [e["id"] for e in sorted([ready_y, ready_x], key=key)] == ["xr", "yr"]
 
 
+def test_live_claim_signal_ignores_unhashable_malformed_child_id():
+    epic = {"id": "epic", "type": "epic", "priority": "p2"}
+    malformed = {"id": [], "parent": "epic", "priority": "p2"}
+    loose = {"id": "loose", "priority": "p2"}
+
+    key = make_selection_sort_key(
+        [epic, malformed, loose], live_claimed={"claimed"}
+    )
+
+    assert sorted([malformed, loose], key=key)
+
+
 def test_loose_nodes_flat_priority_then_created_at():
     a = {"id": "a", "priority": "p2", "created_at": "2026-01-02"}
     b = {"id": "b", "priority": "p0", "created_at": "2026-01-03"}

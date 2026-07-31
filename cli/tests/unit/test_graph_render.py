@@ -217,6 +217,17 @@ def test_column_epic_not_in_progress_rides_priority():
     assert _kanban_column(epic, frozenset()) == "Next"
 
 
+def test_column_overlays_ignore_unhashable_malformed_id():
+    malformed = _entry("placeholder", priority="p2")
+    malformed["id"] = []
+
+    assert _kanban_column(
+        malformed,
+        frozenset({"active-epic"}),
+        frozenset({"claimed-node"}),
+    ) == "Next"
+
+
 def test_column_done_epic_stays_done_even_if_in_progress_set():
     """A completed epic is Done; the in-progress-epic override never resurrects a
     done container into Now (done precedence wins)."""
