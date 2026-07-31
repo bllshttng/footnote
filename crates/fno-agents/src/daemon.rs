@@ -6214,14 +6214,20 @@ done
         // reach the row.
         assert_eq!(row["harness"], "claude");
         assert_eq!(row["provider"], "claude", "legacy alias still emitted");
-        assert_eq!(row["harness_session_id"], "e6f78b98-e594-47ed-ad81-84f8a78b8bb7");
+        assert_eq!(
+            row["harness_session_id"],
+            "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
+        );
         // The pre-fix surface reported this row as having no identity at all:
         // session_id is legitimately null for a pane row (no transport key), so
         // harness_session_id is what has to carry it.
         assert!(row["session_id"].is_null());
         assert_eq!(row["mux"]["session"], "main");
         assert_eq!(row["mux"]["pane_id"], 10);
-        assert_eq!(row["crown"], "L1 epic-x", "same formatter as Python crown_label");
+        assert_eq!(
+            row["crown"], "L1 epic-x",
+            "same formatter as Python crown_label"
+        );
         assert_eq!(row["crown_grantor"], "king");
 
         std::fs::remove_dir_all(home.root()).ok();
