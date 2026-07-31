@@ -6076,7 +6076,8 @@ def cmd_undefer(
 # -- done --
 
 def _project_plans_from_graph(
-    node_ids: list[str], *, mirror_type_for: str | None = None
+    node_ids: list[str], *, mirror_type_for: str | None = None,
+    force_status_off_terminal_for: str | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
@@ -6102,7 +6103,10 @@ def _project_plans_from_graph(
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    project_graph_nodes(entries, ids, mirror_type_for=mirror_type_for)
+    project_graph_nodes(
+        entries, ids, mirror_type_for=mirror_type_for,
+        force_status_off_terminal_for=force_status_off_terminal_for,
+    )
 
 
 def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:
@@ -6252,11 +6256,11 @@ def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
     Membership children only (``parent == owner``), EXCLUDING contained
     children (``contained_in == owner``). The two axes are released differently:
     a contained child is folded delivery work, and superseding the unit
-    releases it routinely (x-e957) - that release IS the safety, so it is not a
-    reason to refuse. A parent-only child is epic membership; superseding
-    orphans it (clearing ``parent``), a structural change the guard exists to
-    consent to. This is also why the guard reads liveness, not ``type``: the
-    epic that prompted this was itself typed ``feature``.
+    releases it routinely - that release IS the safety, so it is not a reason
+    to refuse. A parent-only child is epic membership; superseding orphans it
+    (clearing ``parent``), a structural change the guard exists to consent to.
+    This is also why the guard reads liveness, not ``type``: the epic that
+    prompted this was itself typed ``feature``.
     """
     if not owner_id:
         return []
@@ -6277,24 +6281,27 @@ def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
 
 
 def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
-    """Clear ``parent`` on the owner's LIVE children; return the ids freed.
+    """Clear ``parent`` on the owner's non-done children; return the ids freed.
 
-    The membership-axis sibling of ``_release_contained_children`` (x-6b60).
-    That helper covers ``contained_in`` (delivery: ships inside this PR); this
-    one covers ``parent`` (epic membership). A permanently dead unit's live
-    children would otherwise stay parented to it, inheriting its priority and
-    caught by the dead-ancestor selection guard.
+    The membership-axis sibling of ``_release_contained_children``. That helper
+    covers ``contained_in`` (delivery: ships inside this PR); this one covers
+    ``parent`` (epic membership). A permanently dead unit's children would
+    otherwise stay parented to it: any one later revived (undeferred or
+    unsuperseded) then hits the dead-ancestor selection guard and strands - the
+    exact state this release exists to prevent.
 
-    Two deliberate limits, both load-bearing:
+    NON-DONE children only. ``completed_at`` is the one truly terminal marker
+    (done never reactivates), so a shipped child keeps ``parent`` as history.
+    Live, deferred, and superseded children can all return to dispatch, so all
+    get cleared: leaving a deferred child parented to a dead unit would strand
+    it the moment it is undeferred. This is the gap a release keyed on liveness
+    alone misses - the supersede guard refuses only over currently-dispatchable
+    children, so deferred/superseded children pass it and must be released here.
 
-    - LIVE children only. Done/deferred children keep ``parent`` as history:
-      they shipped or were parked under that unit, and erasing the link would
-      rewrite provenance. The contained release clears unconditionally because
-      containment is purely a delivery relation; membership is not.
-    - Lives in ``cmd_supersede``, not the shared release helper, because
-      ``cmd_defer`` also calls that helper and defer is a pause (undefer
-      exists): a deferred epic's children must keep their membership through
-      the pause. Supersede is permanent, so only it orphans.
+    Lives in ``cmd_supersede``, not the shared release helper, because
+    ``cmd_defer`` also calls that helper and defer is a pause (undefer exists):
+    a deferred epic's children must keep their membership through the pause.
+    Supersede is permanent, so only it orphans.
 
     Nothing re-parents on ``unsupersede``: re-adoption is decompose's job, the
     same policy the contained release states for un-containment.
@@ -6305,8 +6312,8 @@ def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> 
     for e in entries:
         if not isinstance(e, dict) or e.get("parent") != owner_id:
             continue
-        if not _is_live(e):
-            continue
+        if e.get("completed_at"):
+            continue  # done is truly terminal - keep parent as history
         # Set None (key kept) rather than pop, matching the supported un-adopt
         # path (`update --parent null`) and every other parent writer; readers
         # use .get(), so a present-None reads identically to absent.
@@ -9551,7 +9558,7 @@ def cmd_supersede(
             )
             raise typer.Exit(code=1)
 
-        # Guard the death transition (x-6b60): a unit with live children cannot
+        # Guard the death transition: a unit with live children cannot
         # be killed without orphaning them, and orphaning is a deliberate act.
         # Refuse unless forced, naming the children so the operator sees what
         # would strand under a dead unit. Gates on liveness, not type - the
@@ -9587,14 +9594,12 @@ def cmd_supersede(
         # invisible to every sweep. Un-contained rather than closed: superseding
         # the unit is not a claim that its children shipped.
         _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
-        # Release the membership axis too (x-6b60). contained_in covers nodes
-        # shipping inside this unit's PR; epic children carry `parent`, a
-        # different field. Without this they stay parented to a unit that will
-        # never ship, inheriting its priority and caught by the dead-ancestor
-        # selection guard - the same unbuildable, uncloseable, invisible shape
-        # the contained release exists to end. Live children only: done/deferred
-        # children keep the link as history. The guard above ensured there are
-        # none unless --force, so under a normal supersede this is a no-op.
+        # Release the membership axis too. contained_in covers nodes shipping
+        # inside this unit's PR; epic children carry `parent`, a different field.
+        # Without this they stay parented to a unit that will never ship, and any
+        # one later revived strands under the dead-ancestor selection guard - the
+        # same unbuildable, uncloseable, invisible shape the contained release
+        # exists to end. Non-done children only: done keeps the link as history.
         _parent_freed_box[0] = _release_parented_children(entries, old_node.get("id"))
         return entries
 
@@ -9603,11 +9608,16 @@ def cmd_supersede(
     _echo_freed(_freed_box[0], replaces)
     if _parent_freed_box[0]:
         typer.echo(
-            f"Orphaned {len(_parent_freed_box[0])} live child(ren) from {replaces} "
-            f"(parent cleared); they are dispatchable again: "
+            f"Cleared parent on {len(_parent_freed_box[0])} child(ren) of {replaces} "
+            f"(revive-safe; a later undefer/unsupersede cannot strand them): "
             f"{', '.join(_parent_freed_box[0])}"
         )
-    _project_plans_from_graph([replaces, new_id])
+    # Repaint the freed children's plan docs too: the converger expands
+    # ancestors, not descendants, so naming only the old + replacement nodes
+    # would leave the orphaned children's parent/parent_slug/wave stale.
+    _project_plans_from_graph(
+        [replaces, new_id] + _freed_box[0] + _parent_freed_box[0]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -9621,18 +9631,24 @@ def cmd_supersede(
 def cmd_unsupersede(
     node_id: str = typer.Argument(..., help="The superseded node ID to revive"),
 ) -> None:
-    """Reverse a supersede on ``node_id``. Idempotent.
+    """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
 
     Clears ``superseded_by``, ``deferred_at``, and ``deferred_reason`` (the
     latter two were set by ``cmd_supersede`` and must go together, else the
     status precedence drops the node from ``superseded`` straight into
     ``deferred``) and removes ``node_id`` from the replacer's ``supersedes``
-    list. The status then recomputes to the node's underlying state.
+    list. The status then recomputes to the node's underlying state, and the
+    plan doc is forced off terminal ``superseded`` (the forward-only projector
+    will not leave a terminal on its own).
+
+    A node that is merely deferred (no ``superseded_by``) is left untouched:
+    reactivating parked work is ``undefer``'s job, and clearing a deferral here
+    would silently make deferred work dispatchable.
 
     Reactivation is a separate verb from ``undefer`` on purpose: reviving a
     plan that another plan supplanted is a conscious act. ``recompute_statuses``
-    has always named this verb as the only route back from ``superseded`` -
-    it just did not exist (x-6b60).
+    has always named this verb as the only route back from ``superseded`` - it
+    just did not exist.
 
     Does NOT re-contain or re-parent children released when the node was
     superseded: re-adoption is decompose's job, the same policy ``cmd_undefer``
@@ -9658,15 +9674,19 @@ def cmd_unsupersede(
             raise typer.Exit(code=1)
         replacer = node.get("superseded_by")
         was_superseded_holder[0] = bool(replacer)
-        if replacer:
-            # Drop the backref so the replacer's `supersedes` list no longer
-            # claims a node it no longer supersedes - a stale claim would make
-            # the chain read as live after we just broke it.
-            new_node = _find_node(entries, replacer)
-            if new_node is not None:
-                new_node["supersedes"] = [
-                    s for s in (new_node.get("supersedes") or []) if s != node_id
-                ]
+        if not replacer:
+            # Not superseded: nothing to reverse. Return WITHOUT touching
+            # deferred_at, so a node that is merely deferred (not superseded)
+            # keeps its park. Clearing it here would reactivate parked work.
+            return entries
+        # Drop the backref so the replacer's `supersedes` list no longer claims
+        # a node it no longer supersedes - a stale claim would make the chain
+        # read as live after we just broke it.
+        new_node = _find_node(entries, replacer)
+        if new_node is not None:
+            new_node["supersedes"] = [
+                s for s in (new_node.get("supersedes") or []) if s != node_id
+            ]
         node["superseded_by"] = None
         node["deferred_at"] = None
         node["deferred_reason"] = None
@@ -9677,7 +9697,11 @@ def cmd_unsupersede(
     if not was_superseded_holder[0]:
         typer.echo(f"warning: {node_id} was not superseded", err=True)
     typer.echo(f"Unsuperseded {node_id}")
-    _project_plans_from_graph([node_id])
+    # Force the revived node's plan status off terminal `superseded` (the
+    # forward-only projector refuses to leave a terminal): without this the
+    # graph is active while the plan doc stays superseded. Scoped to the revived
+    # node only, not the ancestors/siblings the converger also repaints.
+    _project_plans_from_graph([node_id], force_status_off_terminal_for=node_id)
 
 
 def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:

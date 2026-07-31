@@ -17,7 +17,11 @@ from pathlib import Path
 from typing import Any
 
 from fno.plan._stamp import read_plan_file, write_plan_file
-from fno.plan._status import project_plan_status
+from fno.plan._status import (
+    GRAPH_TO_PLAN_STATUS,
+    canonical_status,
+    project_plan_status,
+)
 from fno.plan._rollup import ROLLUP_KEYS, compute_rollup, compute_waves
 
 # Graph-authoritative fields mirrored into frontmatter. `parent_slug` is not a
@@ -53,7 +57,8 @@ CLEARABLE_KEYS: frozenset[str] = frozenset({"size", "parent", "parent_slug"})
 
 
 def project_node_to_plan(
-    node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False
+    node: dict[str, Any], plan_path: Path, *, mirror_type: bool = False,
+    force_status_off_terminal: bool = False,
 ) -> bool:
     """Upsert the mirror fields from ``node`` into ``plan_path``'s frontmatter.
 
@@ -66,6 +71,11 @@ def project_node_to_plan(
     that took the type from the operator (``backlog update --type``) may set it;
     every other path leaves the doc's own ``type`` alone, because the graph's
     value there is a mint-time default nobody chose.
+
+    ``force_status_off_terminal`` is the one legitimate backward move: an
+    ``unsupersede`` reviving a node whose plan the supersede stamped terminal
+    ``superseded``. The projector is forward-only by design, so without this the
+    revived node's graph is active while its plan doc stays terminal.
     """
     try:
         target, fields, rest = read_plan_file(plan_path)
@@ -146,20 +156,35 @@ def project_node_to_plan(
         del fields["waves"]
         changed = True
 
-    # Status projection (x-f34f): map the graph derived `status` onto the plan,
+    # Status projection: map the graph derived `status` onto the plan,
     # forward-only. Kept out of MIRROR_KEYS because it is a mapped, monotonic
     # write (not a straight mirror) and stamps done_at on the terminal write.
     graph_status = node.get("status")
     if graph_status:
         current_status = fields.get("status")
-        projected = project_plan_status(current_status, graph_status)
-        if projected is not None and current_status != projected:
-            fields["status"] = projected
-            changed = True
-            if projected == "done" and not fields.get("done_at"):
-                fields["done_at"] = datetime.now(timezone.utc).strftime(
-                    "%Y-%m-%dT%H:%M:%SZ"
-                )
+        if (
+            force_status_off_terminal
+            and canonical_status(current_status) == "superseded"
+            and graph_status != "superseded"
+        ):
+            # Reversal (unsupersede): the forward-only projector refuses to
+            # leave terminal `superseded`, so force the plan back to the graph's
+            # current rung or the doc stays terminal while the graph is active.
+            # None-mapped graph statuses (blocked/deferred) fall back to `ready`,
+            # the neutral rung a plan-with-path sits at.
+            forced = GRAPH_TO_PLAN_STATUS.get(graph_status) or "ready"
+            if forced != "superseded" and current_status != forced:
+                fields["status"] = forced
+                changed = True
+        else:
+            projected = project_plan_status(current_status, graph_status)
+            if projected is not None and current_status != projected:
+                fields["status"] = projected
+                changed = True
+                if projected == "done" and not fields.get("done_at"):
+                    fields["done_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
 
     if changed:
         write_plan_file(target, fields, rest)
@@ -172,6 +197,7 @@ def project_graph_nodes(
     root: str | None = None,
     *,
     mirror_type_for: str | None = None,
+    force_status_off_terminal_for: str | None = None,
 ) -> int:
     """Project each named node's mirror fields onto its linked plan.
 
@@ -242,7 +268,9 @@ def project_graph_nodes(
             # every one of those sibling docs - the exact corruption the opt-in
             # exists to prevent. Only the node the operator named opts in.
             if project_node_to_plan(
-                augmented, p, mirror_type=(nid == mirror_type_for)
+                augmented, p,
+                mirror_type=(nid == mirror_type_for),
+                force_status_off_terminal=(nid == force_status_off_terminal_for),
             ):
                 rewritten += 1
         except Exception as e:  # noqa: BLE001 - per-node best-effort

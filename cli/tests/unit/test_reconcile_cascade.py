@@ -861,14 +861,16 @@ def test_release_helper_covers_every_way_a_unit_dies(world, dispatches):
     assert _release_contained_children(_world(Path("/tmp")), "") == []
 
 
-def test_release_parented_children_clears_live_only():
-    """The membership-axis sibling of _release_contained_children (x-6b60).
+def test_release_parented_children_clears_non_done_revivable():
+    """The membership-axis sibling of _release_contained_children.
 
-    _release_parented_children clears `parent` on a dying unit's LIVE children
-    (done/deferred/superseded keep it as history). _live_child_ids - the guard's
-    read side - returns only parent-ONLY live children: a child also marked
-    contained_in is folded delivery work the contained release handles
-    routinely, so the guard must not refuse the supersede over it.
+    _release_parented_children clears `parent` on a dying unit's NON-DONE
+    children (live, deferred, superseded - all can revive and strand); only a
+    done child keeps it as history. _live_child_ids - the guard's read side -
+    returns only parent-ONLY LIVE children: a child also marked contained_in is
+    folded delivery work the contained release handles routinely, so the guard
+    must not refuse the supersede over it, and a deferred/superseded child is
+    not currently dispatchable so it must not block the supersede either.
     """
     from fno.graph.cli import _live_child_ids, _release_parented_children
 
@@ -899,19 +901,22 @@ def test_release_parented_children_clears_live_only():
         _kid("sup-e", parent="x-epic", superseded_by="x-other"),
         _kid("unrelated", parent="x-someone-else"),
     ]
-    # Guard sees parent-ONLY live children; cont-f (contained) is excluded.
+    # Guard sees parent-ONLY LIVE children: cont-f (contained), def-d (deferred),
+    # sup-e (superseded) are all excluded - they do not block the supersede.
     assert sorted(_live_child_ids(entries, "x-epic")) == ["live-a", "live-b"]
-    # Release clears parent on every live child of the unit (cont-f too: it must
-    # not stay parented to a dead unit once the contained release un-folds it).
-    assert sorted(_release_parented_children(entries, "x-epic")) == ["cont-f", "live-a", "live-b"]
+    # Release clears parent on every NON-DONE child of the unit (cont-f, def-d,
+    # sup-e too: each can revive later and would strand under a dead parent).
+    assert sorted(_release_parented_children(entries, "x-epic")) == [
+        "cont-f", "def-d", "live-a", "live-b", "sup-e",
+    ]
 
     by_id = {e["id"]: e for e in entries}
     assert by_id["live-a"]["parent"] is None
     assert by_id["cont-f"]["parent"] is None
-    # Terminal children keep parent as history; unrelated nodes untouched.
+    assert by_id["def-d"]["parent"] is None
+    assert by_id["sup-e"]["parent"] is None
+    # Done keeps parent as history; unrelated nodes untouched.
     assert by_id["done-c"]["parent"] == "x-epic"
-    assert by_id["def-d"]["parent"] == "x-epic"
-    assert by_id["sup-e"]["parent"] == "x-epic"
     assert by_id["unrelated"]["parent"] == "x-someone-else"
     # Idempotent + falsy owner frees nothing.
     assert _release_parented_children(entries, "x-epic") == []
