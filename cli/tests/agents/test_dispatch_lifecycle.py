@@ -199,6 +199,59 @@ def test_stop_agent_not_found(tmp_path: Path, monkeypatch) -> None:
     assert spawn_called is False
 
 
+@pytest.mark.parametrize("verb", ["stop", "rm", "attach"])
+def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """Unreadable identity stores cannot degrade into exact-name selection."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="victim", provider="claude", short_id="7c5dcf5d"),
+    )
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def unavailable(*_args, **_kwargs):
+        raise registry_mod.AgentResolutionError(
+            "identity evidence unavailable",
+            unavailable=True,
+        )
+
+    monkeypatch.setattr(registry_mod, "resolve_agent", unavailable)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda *_args, **_kwargs: shellouts.append("stop") or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda *_args, **_kwargs: shellouts.append("rm") or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_attach",
+        lambda *_args, **_kwargs: shellouts.append("attach") or 0,
+    )
+
+    action = {
+        "stop": dispatch.stop_agent,
+        "rm": dispatch.rm_agent,
+        "attach": dispatch.attach_agent,
+    }[verb]
+    with pytest.raises(dispatch.DispatchAskError, match="identity evidence unavailable") as exc:
+        action("victim")
+
+    assert exc.value.exit_code == 12
+    assert shellouts == []
+    assert [entry.name for entry in registry_mod.load_registry()] == ["victim"]
+
+
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-EDGE: codex agents print info on stderr and exit 0; no subprocess."""
     use_tmpdir(monkeypatch, tmp_path)

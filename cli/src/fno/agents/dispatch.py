@@ -2333,15 +2333,19 @@ def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -
 
     Falls back to the token UNCHANGED on a genuine miss so the downstream name
     lookup raises its familiar ``agent {name!r} not found in registry`` error.
-    Ambiguity is a refusal: falling back could make a token that also happens to
-    be a row name select that row and act on the wrong session."""
+    Ambiguity and unavailable identity evidence are refusals: falling back could
+    make a token that also happens to be a row name select that row and act on
+    the wrong session."""
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
         return resolve_agent(token, path=registry_path).entry.name
     except AgentResolutionError as exc:
-        if exc.ambiguous:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
+        if exc.ambiguous or exc.unavailable:
+            raise DispatchAskError(
+                str(exc),
+                exit_code=12 if exc.unavailable else 2,
+            ) from exc
         return token
 
 
@@ -3671,18 +3675,25 @@ def attach_agent(name: str) -> AttachResult:
     # heal (x-9cc5) synthesizes a row it could not persist, re-reading the
     # registry by name would miss it and report not-found - defeating the
     # best-effort recovery in exactly the registry-unwritable case it exists for.
-    # Falls back to today's name lookup on any resolution failure, so the
-    # familiar not-found/exit-2 contract is unchanged.
+    # A genuine miss falls back to today's exact-name lookup, preserving the
+    # familiar not-found/exit-2 contract. Ambiguous or unavailable identity
+    # evidence must refuse before any attach side effect.
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
         resolved = resolve_agent(name)
     except AgentResolutionError as exc:
-        if exc.ambiguous:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
+        if exc.ambiguous or exc.unavailable:
+            raise DispatchAskError(
+                str(exc),
+                exit_code=12 if exc.unavailable else 2,
+            ) from exc
         existing = _resolve_registry_entry(name)
-    except (OSError, RegistryVersionError):
-        existing = _resolve_registry_entry(name)
+    except (OSError, RegistryVersionError) as exc:
+        raise DispatchAskError(
+            f"registry read failed: {exc}",
+            exit_code=12,
+        ) from exc
     else:
         existing, name = resolved.entry, resolved.entry.name
 
