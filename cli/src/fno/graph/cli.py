@@ -9580,9 +9580,13 @@ def cmd_supersede(
             )
             raise typer.Exit(code=1)
 
+        # Store the canonical id, not the raw (possibly abbreviated) --replaces:
+        # unsupersede removes the backref by canonical id, so a stored
+        # abbreviation would survive the reverse as a stale forward edge.
+        canonical_old = old_node["id"]
         supersedes = list(new_node.get("supersedes") or [])
-        if replaces not in supersedes:
-            supersedes.append(replaces)
+        if canonical_old not in supersedes:
+            supersedes.append(canonical_old)
         new_node["supersedes"] = supersedes
         old_node["superseded_by"] = new_id
         old_node["locked_by"] = None
@@ -9734,13 +9738,15 @@ def cmd_unsupersede(
     # node only, not the ancestors/siblings the converger also repaints.
     cid = canonical_id_box[0]
     _project_plans_from_graph([cid], force_status_off_terminal_for=cid)
-    # The graph status was persisted during the mutation above while the plan
-    # still read `superseded` (so it derived `ready`). Projection has now
-    # corrected the plan, so recompute+persist: otherwise `backlog get` and the
-    # board keep reporting `ready` and a fail-closed `design` never makes the
-    # revived node non-dispatchable. A no-op mutator still triggers recompute.
-    if was_superseded_holder[0]:
-        locked_mutate_graph(_graph_path(), lambda entries: entries)
+    # Recompute+persist after projection. The graph status was derived during
+    # the mutation while the plan still read `superseded`, so it must follow the
+    # now-corrected plan or `backlog get`/the board keep reporting `ready` and a
+    # fail-closed `design` never makes the node non-dispatchable. Always, not
+    # only on a fresh reverse: an interrupted earlier unsupersede can leave the
+    # plan reading `superseded` after superseded_by is already clear, and this
+    # rerun heals that plan through the no-replacer branch too. A no-op mutator
+    # still triggers the recompute+write; idempotent on a clean call.
+    locked_mutate_graph(_graph_path(), lambda entries: entries)
 
 
 def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:

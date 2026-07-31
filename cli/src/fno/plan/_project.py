@@ -178,6 +178,10 @@ def project_node_to_plan(
             if forced != "superseded" and current_status != forced:
                 fields["status"] = forced
                 changed = True
+                if forced == "done" and not fields.get("done_at"):
+                    fields["done_at"] = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%dT%H:%M:%SZ"
+                    )
         else:
             projected = project_plan_status(current_status, graph_status)
             if projected is not None and current_status != projected:

@@ -723,6 +723,10 @@ def test_unsupersede_preserves_done_plan(tmp_graph, tmp_path):
     res = _invoke("backlog", "unsupersede", "ab-old")
     assert res.exit_code == 0, res.output
     assert _plan_status(plan) == "done"
+    # The force path stamps done_at just like a normal done promotion.
+    from fno.plan._stamp import read_plan_file
+    _t, fields, _r = read_plan_file(plan)
+    assert fields.get("done_at"), "done promotion must carry done_at"
 
 
 def test_unsupersede_not_superseded_is_idempotent(tmp_graph, tmp_path):
