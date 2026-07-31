@@ -5099,7 +5099,9 @@ def dispatch_send(
             ).entry
             from fno.agents.discover import live_address_matches
 
-            registry_id = getattr(existing, "harness_session_id", None)
+            registry_id = getattr(existing, "harness_session_id", None) or getattr(
+                existing, "session_id", None
+            )
             registry_key = (
                 existing.harness,
                 session_identity_key(registry_id) if registry_id else None,

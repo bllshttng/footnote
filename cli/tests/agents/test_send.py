@@ -1082,6 +1082,63 @@ def test_registered_handle_colliding_with_live_discovery_sends_nothing(
     assert read_all_threads("deadbeef") == []
 
 
+def test_legacy_registry_row_does_not_collide_with_its_live_projection(
+    runner, tmp_path, monkeypatch
+):
+    """A Claude row whose only session identity is short_id remains sendable."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.discover import DiscoveredSession
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.inbox.store import read_all_threads
+    from fno.mail.cli import mail_app
+
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                cwd="/same",
+                log_path="/tmp/same.log",
+                harness="claude",
+                harness_session_id=None,
+                short_id="deadbeef",
+                status="live",
+            )
+        ]
+    )
+    live = DiscoveredSession(
+        session_id="deadbeef",
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=123,
+        cwd="/same",
+        project="same",
+        status="idle",
+        agent="claude",
+        truth_state="working",
+        name="legacy",
+    )
+    monkeypatch.setattr(
+        discover_mod, "discover_live_sessions", lambda **_kwargs: [live]
+    )
+    monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
+    delivered: list[str] = []
+
+    def capture_delivery(entry, *_args, **_kwargs):
+        delivered.append(entry.name)
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", capture_delivery)
+
+    result = runner.invoke(mail_app, ["send", "deadbeef", "same owner"])
+
+    assert result.exit_code == 0
+    assert "delivered (hosted)" in result.output
+    assert delivered == ["legacy"]
+    assert read_all_threads("legacy") == []
+
+
 def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatch):
     """AC2-ERR: an unknown handle errors with the closest live handles, sending
     nothing (dispatch_send_to_project is never called)."""
