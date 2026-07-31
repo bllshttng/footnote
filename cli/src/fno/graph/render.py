@@ -10,6 +10,11 @@ import tempfile
 from pathlib import Path
 
 from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
+from fno.graph._intake import (
+    UNSCOPED_LABEL,
+    _project_key,
+    make_selection_sort_key,
+)
 from fno.graph.statuses import live_claimed_node_ids
 
 # Canonical Kanban column order, left to right. Single source of truth for both
@@ -18,12 +23,6 @@ from fno.graph.statuses import live_claimed_node_ids
 # board. Now leads (genuine today-work), Triage holds the awaiting-ack queue,
 # Done is terminal.
 KANBAN_COLUMNS = ("Now", "Next", "Later", "Triage", "Done")
-
-# Lane label for a node with no project. Shared single source of truth for both
-# renderers (render_html imports it) so the swimlane grouping label can never
-# drift between the markdown board and the HTML board.
-UNSCOPED_LABEL = "(unscoped)"
-
 
 def _graph_sort_key(e: dict) -> tuple:
     """Sort key for graph entries: priority (p0 first), then creation time.
@@ -35,23 +34,6 @@ def _graph_sort_key(e: dict) -> tuple:
     never backfills created_at, so null values reach here from real graph.json rows.
     """
     return (PRIORITY_ORDER.get(e.get("priority", "p2"), 2), e.get("created_at") or "")
-
-
-def _project_key(entry: dict) -> str:
-    """Normalize a node's project for swimlane grouping.
-
-    Missing/empty/whitespace -> UNSCOPED_LABEL. Shared by both renderers
-    (hoisted from render_html so render.py can reuse it for the lane key).
-    """
-    proj = entry.get("project")
-    if isinstance(proj, str) and proj.strip():
-        return proj
-    return UNSCOPED_LABEL
-
-
-def _lane_order_key(project: str) -> tuple:
-    """Order lanes within a column: named projects alphabetical, unscoped last."""
-    return (project == UNSCOPED_LABEL, project)
 
 
 def _orphan_ids(entries: list[dict]) -> frozenset[str]:
@@ -67,30 +49,6 @@ def _orphan_ids(entries: list[dict]) -> frozenset[str]:
         return orphan_ids(entries)
     except Exception:  # noqa: BLE001 - display signal; never break a mutation
         return frozenset()
-
-
-def _lane_sort_key(entry: dict, orphans: frozenset[str] = frozenset()) -> tuple:
-    """Shared within-column ordering key, consumed by both renderers.
-
-    Orders a column's cards by ``(project_lane, rank_band, priority,
-    orphan_last, created_at)``: cluster by project, then ranked-before-unranked
-    (ascending rank), then priority, then mission-linked before orphan, then
-    ``created_at``. Rank is therefore scoped per ``(column, project)`` lane.
-
-    The orphan term sits AFTER priority, so it only ever breaks a tie within a
-    priority band - a p0 orphan still outranks a p1 mission-linked node. Pass
-    ``orphans`` (from ``rollup.orphan_ids``) to enable it; the default empty set
-    reproduces the pre-rollup ordering exactly, which is what callers that do
-    not care about rollup get.
-    """
-    priority, created_at = _graph_sort_key(entry)
-    return (
-        _lane_order_key(_project_key(entry)),
-        _rank_band(entry),
-        priority,
-        entry.get("id") in orphans,
-        created_at,
-    )
 
 
 def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
@@ -263,6 +221,7 @@ def render_graph_md(
     epics = in_progress_epic_ids(entries)
     live_claimed = frozenset(live_claimed_node_ids())
     orphans = _orphan_ids(entries)
+    board_order = make_selection_sort_key(entries, orphans, swimlane=True)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
         col = _kanban_column(entry, epics, live_claimed)
@@ -277,7 +236,7 @@ def render_graph_md(
             items.sort(key=lambda e: e.get("completed_at") or "", reverse=True)
             del items[10:]
         else:
-            items.sort(key=lambda e: _lane_sort_key(e, orphans))
+            items.sort(key=board_order)
 
     lines: list[str] = ["---", "kanban-plugin: board", "---", ""] if obsidian else []
     for col in KANBAN_COLUMNS:

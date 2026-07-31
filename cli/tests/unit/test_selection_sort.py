@@ -134,3 +134,32 @@ def test_rank_band_is_single_source():
     from fno.graph._intake import _rank_band as intake_band
     from fno.graph.render import _rank_band as render_band
     assert intake_band is render_band
+
+
+def test_swimlane_mode_preserves_work_order_inside_each_project():
+    """The board may group projects, but its per-project suffix is work order."""
+    epic = {
+        "id": "epic", "type": "epic", "project": "fno",
+        "priority": "p1", "created_at": "2026-01-01",
+    }
+    child = {
+        "id": "child", "parent": "epic", "project": "fno",
+        "priority": "p1", "created_at": "2026-03-01",
+    }
+    loose = {
+        "id": "loose", "project": "fno", "priority": "p1",
+        "created_at": "2026-01-01",
+    }
+    web = {
+        "id": "web", "project": "web", "priority": "p0",
+        "created_at": "2026-01-01",
+    }
+    entries = [epic, child, loose, web]
+
+    work_key = make_selection_sort_key(entries)
+    board_key = make_selection_sort_key(entries, swimlane=True)
+
+    assert [e["id"] for e in sorted([loose, child], key=work_key)] == ["child", "loose"]
+    assert [e["id"] for e in sorted([web, loose, child], key=board_key)] == [
+        "child", "loose", "web",
+    ]

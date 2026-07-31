@@ -224,16 +224,37 @@ def _graph_sort_key_fn(e: dict) -> tuple:
     return (PRIORITY_ORDER.get(e.get("priority", "p2"), 2), e.get("created_at", ""))
 
 
-def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str]] = None):
+UNSCOPED_LABEL = "(unscoped)"
+
+
+def _project_key(entry: dict) -> str:
+    """Normalize a node's project for swimlane grouping."""
+    proj = entry.get("project")
+    if isinstance(proj, str) and proj.strip():
+        return proj
+    return UNSCOPED_LABEL
+
+
+def _lane_order_key(project: str) -> tuple:
+    """Order named project lanes alphabetically and the unscoped lane last."""
+    return (project == UNSCOPED_LABEL, project)
+
+
+def make_selection_sort_key(
+    entries: list[dict],
+    orphans: Optional[frozenset[str]] = None,
+    *,
+    swimlane: bool = False,
+):
     """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3).
 
-    Returns a key function for sorting *ready candidates* by selection
-    precedence: curated ``rank`` first, then epics-first, then flat priority.
-    The key prepends the SAME ``_rank_band`` term the board lane key uses
-    (``render._lane_sort_key``), so a ``fno backlog rank --top`` node is
-    *worked* next, not merely floated on the board - board order and work
-    order share one rank definition and cannot drift (Locked
-    Decision 4). A ranked node (band 0, ascending rank) outranks every
+    Returns the one key function for sorting board cards and ready candidates.
+    ``swimlane=True`` prepends the project lane used by renderers; the remaining
+    suffix is byte-identical to selection precedence: curated ``rank`` first,
+    then epics-first, then flat priority.
+    The key always includes the same ``_rank_band`` term, so a ``fno backlog
+    rank --top`` node is *worked* next, not merely floated on the board.
+    A ranked node (band 0, ascending rank) outranks every
     unranked node, so an explicit rank overrides the epics-first heuristic;
     with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
     byte-for-byte today's epics-first behavior. A node is an "epic child"
@@ -293,6 +314,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
         # children, so an explicit rank overrides the epics-first heuristic
         # (Locked Decision 1). Unranked nodes all share the `(1, 0.0)` band, so
         # the existing epics-first key below decides their order byte-for-byte.
+        lane = (_lane_order_key(_project_key(node)),) if swimlane else ()
         band = _rank_band(node)
         child_prio = _prio(node)
         child_orphan = node.get("id") in orphans
@@ -301,7 +323,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
         epic = id_to_entry.get(pid) if pid else None
         if epic is not None:
             in_progress_rank = 0 if (pid and epic_in_progress.get(pid)) else 1
-            return (
+            return lane + (
                 band,                    # curated rank band (ranked first)
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
@@ -318,7 +340,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
         # Decision fields lead: priority, then orphan-last, then created_at.
         # The trailing pair only pads the tuple to the epic branch's arity;
         # tier (index 1) already separates the two, so it is never compared.
-        return (
+        return lane + (
             band, 1, 0, child_prio, child_orphan, child_created,
             child_prio, child_created,
         )

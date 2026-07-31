@@ -15,9 +15,9 @@ import html as _html
 
 from fno.graph.render import (
     _kanban_column,
-    _lane_sort_key,
     _project_key,
 )
+from fno.graph._intake import make_selection_sort_key
 
 # Public-facing column set + labels. The internal Triage column (awaiting
 # human ack) is folded into Later for the public view; Done is relabeled
@@ -40,8 +40,9 @@ def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
             col = "Later"
         if col in cols:
             cols[col].append(e)
+    board_order = make_selection_sort_key(entries, swimlane=True)
     for items in cols.values():
-        items.sort(key=_lane_sort_key)
+        items.sort(key=board_order)
     return cols
 
 

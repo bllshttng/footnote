@@ -9,13 +9,13 @@ from fno.graph.render import (
     UNSCOPED_LABEL,
     _kanban_column,
     _kanban_card,
-    _lane_sort_key,
     _project_key,
     _rank_band,
     render_graph_md,
     _graph_sort_key,
     in_progress_epic_ids,
 )
+from fno.graph._intake import make_selection_sort_key
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -34,6 +34,10 @@ def _entry(eid: str, **kwargs) -> dict:
     }
     base.update(kwargs)
     return base
+
+
+def _lane_key(entries, orphans=frozenset()):
+    return make_selection_sort_key(entries, orphans, swimlane=True)
 
 
 # -- _kanban_column --
@@ -256,7 +260,8 @@ def test_lane_sort_key_clusters_by_project():
     web1 = _entry("ab-la000001", project="web")
     web2 = _entry("ab-la000002", project="web")
     etl1 = _entry("ab-la000003", project="etl")
-    ordered = sorted([web1, etl1, web2], key=_lane_sort_key)
+    entries = [web1, etl1, web2]
+    ordered = sorted(entries, key=_lane_key(entries))
     projs = [_project_key(e) for e in ordered]
     # each project's cards are contiguous (no interleaving)
     assert projs == ["etl", "web", "web"]
@@ -266,7 +271,8 @@ def test_lane_sort_key_unscoped_lane_sorts_last():
     """AC2-UI: the (unscoped) lane orders after every named project lane."""
     named = _entry("ab-la000010", project="zeta")
     unscoped = _entry("ab-la000011", project=None)
-    ordered = sorted([unscoped, named], key=_lane_sort_key)
+    entries = [unscoped, named]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [_project_key(e) for e in ordered] == ["zeta", UNSCOPED_LABEL]
 
 
@@ -275,7 +281,8 @@ def test_lane_sort_key_ranked_precedes_unranked_within_lane():
     even when the unranked card has higher priority."""
     ranked = _entry("ab-la000020", project="web", priority="p3", rank=0.0)
     unranked_hi = _entry("ab-la000021", project="web", priority="p0")
-    ordered = sorted([unranked_hi, ranked], key=_lane_sort_key)
+    entries = [unranked_hi, ranked]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [e["id"] for e in ordered] == ["ab-la000020", "ab-la000021"]
 
 
@@ -305,7 +312,8 @@ def test_lane_sort_key_total_order_with_nan_rank():
     """A NaN-ranked card does not break sorting (degrades to unranked band)."""
     nan_card = _entry("ab-rb000010", project="web", rank=float("nan"))
     ranked = _entry("ab-rb000011", project="web", rank=1.0)
-    ordered = sorted([nan_card, ranked], key=_lane_sort_key)  # must not raise
+    entries = [nan_card, ranked]
+    ordered = sorted(entries, key=_lane_key(entries))  # must not raise
     # the genuinely-ranked card leads; the NaN card falls to the unranked flow
     assert ordered[0]["id"] == "ab-rb000011"
 
@@ -313,7 +321,8 @@ def test_lane_sort_key_total_order_with_nan_rank():
 def test_lane_sort_key_ranked_orders_by_rank_ascending():
     a = _entry("ab-la000030", project="web", rank=2.0)
     b = _entry("ab-la000031", project="web", rank=1.0)
-    ordered = sorted([a, b], key=_lane_sort_key)
+    entries = [a, b]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [e["id"] for e in ordered] == ["ab-la000031", "ab-la000030"]
 
 
@@ -409,6 +418,30 @@ def test_ac2_hp_md_clusters_cards_by_project(tmp_path):
     # Both web cards appear on the same side of the etl card (contiguous run).
     iw1, iw2, ie1 = now_body.index("W1"), now_body.index("W2"), now_body.index("E1")
     assert (iw1 < iw2 < ie1) or (ie1 < iw1 < iw2)
+
+
+def test_md_board_uses_work_order_inside_project_lane(tmp_path):
+    """An epic child leads a loose peer exactly as selection orders them."""
+    entries = [
+        _entry(
+            "epic", title="Epic", type="epic", project="fno", priority="p1",
+            created_at="2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "child", title="Child", parent="epic", project="fno", priority="p1",
+            created_at="2026-03-01T00:00:00Z",
+        ),
+        _entry(
+            "loose", title="Loose", project="fno", priority="p1", orphan_ok="infra",
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    output = tmp_path / "graph.md"
+
+    render_graph_md(entries, output)
+
+    now_body = output.read_text().split("## Now", 1)[1].split("\n## ", 1)[0]
+    assert now_body.index("Child") < now_body.index("Loose")
 
 
 def test_ac3_fr_md_headings_stay_clean(tmp_path):

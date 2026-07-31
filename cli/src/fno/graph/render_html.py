@@ -25,12 +25,12 @@ from fno.graph.render import (
     KANBAN_COLUMNS,
     UNSCOPED_LABEL,
     _kanban_column,
-    _lane_sort_key,
     _orphan_ids,
     _project_key,
     in_progress_epic_ids,
     live_claimed_node_ids,
 )
+from fno.graph._intake import make_selection_sort_key
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
 # so the column set + order can never drift between the two boards.
@@ -206,7 +206,10 @@ def _column_for(
 
 
 def _bucket(
-    entries: list[dict], orphans: frozenset[str] | None = None
+    entries: list[dict],
+    orphans: frozenset[str] | None = None,
+    *,
+    ordering_entries: list[dict] | None = None,
 ) -> dict[str, list[dict]]:
     """Partition entries into the kanban columns, sorted per column.
 
@@ -219,6 +222,11 @@ def _bucket(
     live_claimed = frozenset(live_claimed_node_ids())
     if orphans is None:
         orphans = _orphan_ids(entries)
+    board_order = make_selection_sort_key(
+        ordering_entries if ordering_entries is not None else entries,
+        orphans,
+        swimlane=True,
+    )
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
         col = _column_for(e, epics, live_claimed)
@@ -232,9 +240,7 @@ def _bucket(
             # so revealing it via the toggle should show the full history.
             items.sort(key=lambda e: e.get("completed_at", ""), reverse=True)
         else:
-            # Shared lane key: cluster by project, ranked-before-unranked, then
-            # the (priority, created_at) fallback - same order as the md board.
-            items.sort(key=lambda e: _lane_sort_key(e, orphans))
+            items.sort(key=board_order)
     return cols
 
 
@@ -758,7 +764,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
-        cols = _bucket(proj_entries, all_orphans)
+        cols = _bucket(proj_entries, all_orphans, ordering_entries=entries)
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (
             f'<summary><span class="chip" style="background:{chip_color}">'

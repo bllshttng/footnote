@@ -283,10 +283,9 @@ def _rank_band(entry: dict) -> tuple:
     ALL unranked nodes (band 1). ``bool`` is excluded (it subclasses ``int``
     but is never a real rank).
 
-    This is the SINGLE source of truth for "what counts as ranked, in what
-    order" (Locked Decision 4): ``render._lane_sort_key`` (the board)
-    and ``_intake.make_selection_sort_key`` (``fno backlog next`` / the walker)
-    both prepend this term, so the board can never disagree with work order.
+    This is the single source of truth for what counts as ranked and in what
+    order inside ``_intake.make_selection_sort_key``, the key shared by the
+    board renderers and the walker.
 
     Degrades NaN/inf AND huge-int ranks (from a hand-edited graph.json) to
     unranked: ``float()`` guards the ``OverflowError`` a giant int raises, and

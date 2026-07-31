@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import pytest
 
-from fno.graph.render import _kanban_card, _lane_sort_key, _orphan_ids
+from fno.graph._intake import make_selection_sort_key
+from fno.graph.render import _kanban_card, _orphan_ids
 from fno.graph.rollup import orphan_ids
 
 
@@ -25,7 +26,8 @@ def node(nid, **kw):
 
 def _order(entries):
     orphans = orphan_ids(entries)
-    return [e["id"] for e in sorted(entries, key=lambda e: _lane_sort_key(e, orphans))]
+    key = make_selection_sort_key(entries, orphans, swimlane=True)
+    return [e["id"] for e in sorted(entries, key=key)]
 
 
 def test_orphan_sorts_after_linked_peer_in_the_same_band():
@@ -41,15 +43,15 @@ def test_orphan_sorts_after_linked_peer_in_the_same_band():
     )
 
 
-def test_priority_outranks_the_orphan_tiebreaker():
-    """AC5: a p0 orphan still beats a p1 mission-linked node."""
+def test_epic_child_tier_outranks_loose_orphan_priority():
+    """Board parity: the shared epic-child tier leads loose-node priority."""
     entries = [
         node("x-epic", type="epic", title="mission"),
         node("x-p0-orphan", priority="p0"),
         node("x-p1-linked", priority="p1", parent="x-epic"),
     ]
     order = [i for i in _order(entries) if i != "x-epic"]
-    assert order == ["x-p0-orphan", "x-p1-linked"]
+    assert order == ["x-p1-linked", "x-p0-orphan"]
 
 
 def test_created_at_still_breaks_ties_among_orphans():
@@ -60,21 +62,22 @@ def test_created_at_still_breaks_ties_among_orphans():
     assert _order(entries) == ["x-old", "x-new"]
 
 
-def test_exempt_nodes_are_not_demoted():
-    """AC6: a bug and a deliberate orphan sort as if rollup did not exist."""
+def test_epic_child_tier_outranks_exempt_loose_node():
+    """Orphan exemption does not bypass the shared epic-child tier."""
     entries = [
         node("x-epic", type="epic", title="mission"),
         node("x-bug", type="bug", created_at="2026-01-01T00:00:00+00:00"),
         node("x-linked", parent="x-epic", created_at="2026-06-01T00:00:00+00:00"),
     ]
     order = [i for i in _order(entries) if i != "x-epic"]
-    assert order == ["x-bug", "x-linked"], "a bug must keep its created_at order"
+    assert order == ["x-linked", "x-bug"]
 
 
 def test_default_orphan_set_reproduces_pre_rollup_ordering():
     """Callers that pass no orphan set get byte-for-byte the old behavior."""
     entries = [node("x-b", priority="p1"), node("x-a", priority="p0")]
-    assert [e["id"] for e in sorted(entries, key=_lane_sort_key)] == ["x-a", "x-b"]
+    key = make_selection_sort_key(entries, swimlane=True)
+    assert [e["id"] for e in sorted(entries, key=key)] == ["x-a", "x-b"]
 
 
 # -- board flag --
