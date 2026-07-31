@@ -454,17 +454,23 @@ TMPHOME="$(mktemp -d)"
 #     candidate. See docs/preflight.md.
 
 # Derive the ambient harness marker names from the Python single source of truth
-# (HARNESS_SESSION_MARKERS) so the scrub list never drifts from the tuple. Fail
-# closed on EITHER a nonzero exit OR empty output (a broken venv that prints a
-# partial line before erroring must not slip past an emptiness-only check), warn,
-# and fall back to a hardcoded literal list - never silently skip the scrub.
+# so the scrub list never drifts from the tuples. BOTH tuples are read: the
+# legacy CLAUDE_SESSION_ID is not in HARNESS_SESSION_MARKERS, yet
+# current_session_id() and current_session_ids() read it, so deriving from the
+# canonical tuple alone leaves a live claude session resolvable. Fail closed on
+# EITHER a nonzero exit OR empty output (a broken venv that prints a partial line
+# before erroring must not slip past an emptiness-only check), warn, and fall
+# back to a hardcoded literal list - never silently skip the scrub. The fallback
+# is a literal because it exists for the case where Python cannot run at all;
+# cli/tests/smoke/test_preflight_hermetic.sh fails when it stops matching the
+# tuples, which is the only thing that keeps a last-resort copy honest.
 if HARNESS_MARKERS="$(PYTHONPATH="$PREFLIGHT_WT/cli/src" python3 -c \
-    'from fno.harness_identity import HARNESS_SESSION_MARKERS; print(" ".join(m[0] for m in HARNESS_SESSION_MARKERS))' 2>/dev/null)" \
+    'from fno.harness_identity import HARNESS_SESSION_MARKERS, LEGACY_HARNESS_SESSION_MARKERS; print(" ".join(m[0] for m in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)))' 2>/dev/null)" \
    && [[ -n "$HARNESS_MARKERS" ]]; then
     :
 else
     echo "preflight: WARN harness-marker fetch failed; using hardcoded fallback list" >&2
-    HARNESS_MARKERS="CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID"
+    HARNESS_MARKERS="CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID"
 fi
 
 run_hermetic() {
