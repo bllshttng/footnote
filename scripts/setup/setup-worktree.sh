@@ -145,10 +145,14 @@ link_file ".fno/config.toml"
 # link_file for it here - a link would re-share exactly the keys it exists to
 # diverge. Absent by default (= shared behavior); seed one only when a worktree
 # needs its own value.
-link_file ".fno/ledger.json"
-# ledger.md is the kanban rendering paired with ledger.json. Skip-if-missing
-# until the renderer has run at least once on the canonical.
-link_file ".fno/ledger.md"
+# ledger.json / ledger.md are deliberately NOT linked: paths.ledger_json() is
+# pinned GLOBAL (~/.fno/ledger.json), so a project-local copy is a stray fork,
+# not a share. The former dual-write was the split-brain that corrupted
+# node-level joins; linking it here re-created the stray in canonical AND every
+# worktree, and a setup run whose WORKTREE was canonical linked the file to
+# itself (an ELOOP that every .exists() probe reads as simply "absent").
+# Do not add a link_file for either - tests/test-register-task.sh cB-AC5-FR
+# asserts neither the worktree nor the canonical repo grows a stray ledger.
 # carveouts.jsonl: a worktree-local carveout (deferred decision / out-of-scope
 # bug) must be visible to the canonical retro-triage harvest at merge, so link
 # it to canonical alongside the other shared ledgers. Skip-if-missing until the
