@@ -1344,7 +1344,7 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
     match Namespace::verb(&req.method) {
         Some("spawn") => handle_spawn(ctx, req).await,
         Some("ask") => handle_ask(ctx, req).await,
-        Some("switchboard") => handle_switchboard(ctx, req).await,
+        Some("switchboard") | Some("switchboard_v2") => handle_switchboard(ctx, req).await,
         Some("stop") => handle_stop(ctx, req).await,
         Some("rm") => handle_rm(ctx, req).await,
         Some("list") => run_blocking(ctx, req, handle_list).await,
@@ -2309,7 +2309,7 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
 const MAX_INJECT_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// handle_switchboard (agent.switchboard RPC) — Group 2, Task 3.1
+// handle_switchboard (agent.switchboard_v2 RPC; legacy alias agent.switchboard)
 // ---------------------------------------------------------------------------
 //
 // The session-to-session switchboard: `send A->B` where B is a held stream-json
@@ -2548,15 +2548,15 @@ async fn stamp_orphaned(
     .await
 }
 
-/// Handle the `agent.switchboard` RPC (Group 2, Task 3.1).
+/// Handle the identity-bound switchboard RPC.
 ///
 /// Params: `{to: string, from: string, body: string, recipient_identity: object,
 /// from_identity?: object, mirror?: bool, timeout_ms?: u64}`.
 ///
 /// Result (Ok unless `to` is unknown or params invalid):
-/// - `{delivered: true, reply, is_error, mirrored, receipt, transport:
-///   "switchboard"}` — the turn was driven against B and (when `mirror` and A is
-///   a held stream thread) B's reply was written into A.
+/// - `{delivered: true, identity_verified: true, reply, is_error, mirrored,
+///   receipt, transport: "switchboard"}` — the turn was driven against B and
+///   (when `mirror` and A is a held stream thread) B's reply was written into A.
 /// - `{delivered: false, reason: "not-a-live-stream-thread"}` — B is not a held
 ///   stream-json thread; the caller demotes to the durable/socket path.
 /// - `{delivered: false, reason: "<drive error>"}` — B was a stream thread but
@@ -7241,6 +7241,25 @@ done
             response.error().expect("missing identity must fail").code,
             ErrorCode::InvalidParams
         );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_v2_routes_to_identity_guard() {
+        let home = short_home("v2route");
+        let ctx = Arc::new(test_ctx(home.clone(), PathBuf::from("/nonexistent-worker")));
+        let response = dispatch_agent(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard_v2",
+                json!({"to": "victim", "from": "ghost", "body": "secret"}),
+            ),
+        )
+        .await;
+        let error = response.error().expect("missing identity must fail");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.message.contains("recipient_identity"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 

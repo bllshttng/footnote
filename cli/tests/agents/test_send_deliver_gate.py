@@ -370,7 +370,7 @@ def test_deliver_live_codex_daemon_rpc_error_still_durable(
 
 # ---------------------------------------------------------------------------
 # Claude peer + switchboard (Group 2, Task 3.1): claude now probes the
-# `agent.switchboard` RPC first; a non-stream-thread demotes to socket/MCP
+# versioned switchboard RPC first; a non-stream-thread demotes to socket/MCP
 # (purely additive over the 2.1 socket/MCP contract).
 # ---------------------------------------------------------------------------
 
@@ -440,7 +440,7 @@ def test_deliver_live_claude_switchboard_demotes_to_socket(
     assert result.delivery == "hosted"
     assert len(inject_calls) == 1, "demote must fall through to the control.sock inject"
     assert len(rpc_calls) == 1, "claude must probe the switchboard RPC"
-    assert rpc_calls[0]["method"] == "agent.switchboard"
+    assert rpc_calls[0]["method"] == "agent.switchboard_v2"
     assert rpc_calls[0]["params"]["to"] == "claude-peer"
     assert rpc_calls[0]["params"]["recipient_identity"]["short_id"] == "abcd1234"
 
@@ -511,7 +511,7 @@ def test_deliver_live_claude_switchboard_delivered_skips_socket(
 
     assert result.delivery == "hosted"
     assert len(rpc_calls) == 1
-    assert rpc_calls[0]["method"] == "agent.switchboard"
+    assert rpc_calls[0]["method"] == "agent.switchboard_v2"
     assert rpc_calls[0]["params"]["mirror"] is True, "observed mode mirrors into A"
     assert (
         rpc_calls[0]["params"]["recipient_identity"]["session_id"]
@@ -701,8 +701,8 @@ def test_switchboard_demote_when_first_hop_not_delivered(monkeypatch) -> None:
     ) is None
 
 
-def test_switchboard_demotes_legacy_success_without_identity_proof(monkeypatch) -> None:
-    """A pre-identity daemon's success cannot prove which registry row it drove."""
+def test_switchboard_demotes_success_without_identity_proof(monkeypatch) -> None:
+    """A success without the current daemon's identity proof fails closed."""
     from fno.agents import dispatch as dispatch_mod
 
     monkeypatch.setattr(dispatch_mod, "_load_a2a_settings", lambda: (False, 6))

@@ -4191,6 +4191,8 @@ _SWITCHBOARD_READ_TIMEOUT = 130.0
 # the connect fast and demote, rather than burn the 3s default before the
 # existing MCP/socket path runs.
 _SWITCHBOARD_CONNECT_TIMEOUT = 1.0
+# A pre-identity daemon rejects this verb before it can act on the message body.
+_SWITCHBOARD_RPC_METHOD = "agent.switchboard_v2"
 
 
 def _load_a2a_settings() -> tuple[bool, int]:
@@ -4260,7 +4262,7 @@ def _run_relay_loop(
         if target_identity is None:
             break
         hop = _daemon_rpc(
-            "agent.switchboard",
+            _SWITCHBOARD_RPC_METHOD,
             {
                 "to": target,
                 "from": peer,
@@ -4503,7 +4505,7 @@ def _switchboard_exchange(
     if from_identity is not None:
         params["from_identity"] = from_identity
     sb = _daemon_rpc(
-        "agent.switchboard",
+        _SWITCHBOARD_RPC_METHOD,
         params,
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
         read_timeout=_SWITCHBOARD_READ_TIMEOUT,
