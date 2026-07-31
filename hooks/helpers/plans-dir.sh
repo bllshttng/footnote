@@ -2,8 +2,8 @@
 # plans-dir.sh - shared plans-dir resolution for the PreToolUse write guards.
 #
 # `fno plan path` IS the save-location convention: it walks the config
-# precedence (.claude/settings.local.json plansDirectory -> .claude/settings.json
-# -> config.plans_dir in .fno/config.toml -> ~/.fno/config.toml) and joins the
+# precedence (Claude Code settings.local.json plansDirectory -> settings.json ->
+# config.plans_dir in .fno/config.toml -> ~/.fno/config.toml) and joins the
 # plans_filename template. Taking `dirname` of a probe path reuses that chain
 # instead of reimplementing it in shell twice - one resolver, so the positive
 # guard (plan-location-guard.sh) and the negative-guard carve-out

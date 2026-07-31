@@ -188,7 +188,7 @@ for t in "${TARGETS[@]}"; do
     fi
     [[ -n "$reason" ]] || continue
 
-    _block "$reason Resolve the save path with \`fno plan path --slug \"<slug>\" [--node \"<node-id>\"]\` and write there - it joins the configured plans dir with the plans_filename template. Change the destination with \`fno config\` (plans_dir) or \`.claude/settings.json\` plansDirectory, not by writing elsewhere."
+    _block "$reason Resolve the save path with \`fno plan path --slug \"<slug>\" [--node \"<node-id>\"]\` and write there - it joins the configured plans dir with the plans_filename template. Change the destination with \`fno config\` (plans_dir) or the plansDirectory setting, not by writing elsewhere."
 done
 
 _approve
