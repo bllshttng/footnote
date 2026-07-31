@@ -604,6 +604,21 @@ def _tail(text: str, n: int = _CAPTURE_TAIL_CHARS) -> str:
     return text if len(text) <= n else "..." + text[-n:]
 
 
+def _read_tail_text(path: Path) -> str:
+    # Read only the tail off disk (bounded memory): a sync_command can emit for
+    # the full _SYNC_COMMAND_TIMEOUT_S window, and loading the whole capture
+    # would OOM the long-lived watcher for a receipt that discards all but the
+    # tail. On-disk growth during the run is bounded by that timeout and the
+    # temp files are removed on exit; capping the child's own write rate would
+    # take a sidecar process, out of scope for a diagnostic.
+    max_bytes = _CAPTURE_TAIL_CHARS * 4  # UTF-8 worst case covers the char budget
+    with path.open("rb") as f:
+        f.seek(0, 2)
+        size = f.tell()
+        f.seek(max(0, size - max_bytes))
+        return f.read().decode("utf-8", "replace")
+
+
 def _default_shell_runner(command: str, cwd: str) -> Result:
     """Run ``command`` via a login shell in ``cwd``; return its captured result.
 
@@ -614,9 +629,10 @@ def _default_shell_runner(command: str, cwd: str) -> Result:
     wedge this runner exists to avoid). A plain file has no EOF-reader, so the
     parent's ``wait()`` returns as soon as the shell child exits, daemon or no;
     a detached grandchild merely keeps appending to a file we have already
-    read. The captured stdout/stderr ride the returned ``Result`` so a failing
-    ``sync_command`` can be diagnosed from the receipt instead of reproduced by
-    hand. The run is still bounded by ``_SYNC_COMMAND_TIMEOUT_S`` as the
+    read. Only the tail of each captured stream is loaded onto the returned
+    ``Result`` (see :func:`_read_tail_text`) so a failing ``sync_command`` can
+    be diagnosed from the receipt without dragging its full output into the
+    watcher's memory. The run is still bounded by ``_SYNC_COMMAND_TIMEOUT_S`` as the
     stuck-command backstop.
     """
     import subprocess
@@ -636,8 +652,8 @@ def _default_shell_runner(command: str, cwd: str) -> Result:
                     timeout=_SYNC_COMMAND_TIMEOUT_S,
                     check=False,
                 )
-            stdout = out_path.read_text(errors="replace")
-            stderr = err_path.read_text(errors="replace")
+            stdout = _read_tail_text(out_path)
+            stderr = _read_tail_text(err_path)
     except subprocess.TimeoutExpired:
         typer.echo(
             f"post-merge sync: sync_command timed out after {int(_SYNC_COMMAND_TIMEOUT_S)}s; "

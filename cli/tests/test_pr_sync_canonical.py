@@ -310,3 +310,18 @@ def test_default_shell_runner_captures_failing_output(tmp_path):
     assert res.returncode == 3
     assert "on-stdout" in res.stdout
     assert "on-stderr" in res.stderr
+
+
+def test_default_shell_runner_bounds_captured_output(tmp_path):
+    # A runaway sync_command must not load its full output into the watcher's
+    # memory: only the tail is retained on the Result (the head is discarded),
+    # even though the command emitted well past the capture budget.
+    from fno.pr._sync_canonical import _default_shell_runner
+
+    cmd = "for i in $(seq 1 2000); do echo line$i-END; done"
+    res = _default_shell_runner(cmd, str(tmp_path))
+    assert res.returncode == 0
+    assert "line2000-END" in res.stdout  # tail retained
+    assert "line1-END" not in res.stdout  # head discarded
+    from fno.pr._sync_canonical import _CAPTURE_TAIL_CHARS
+    assert len(res.stdout) <= _CAPTURE_TAIL_CHARS * 4  # bounded, not the full ~34KB
