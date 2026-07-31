@@ -8,7 +8,7 @@ import io
 import json
 import sys
 import tempfile
-from contextlib import redirect_stderr
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -386,6 +386,63 @@ def test_build_entry_pr_none_when_no_artifact_and_no_gh():
 def test_pr_number_from_ship_artifact_absent_returns_none():
     with tempfile.TemporaryDirectory() as td:
         assert register_task._pr_number_from_ship_artifact(td, "no-such-sid") is None
+
+
+def test_main_legacy_accepts_empty_session_id():
+    # x-3001: `fno-agents finalize` passes "" as the session positional when no
+    # transcript UUID resolved. The guard used to reject it (`Error: provide
+    # <target-state-path> <session-id>`), failing the ledger step of every such
+    # finalize. Empty means "unknown", not "missing" -- the row must still land.
+    with tempfile.TemporaryDirectory() as td:
+        root = Path(td)
+        state_file = root / "target-state.md"
+        state_file.write_text("---\nsession_id: sid-x3001\nstatus: IN_PROGRESS\n---\n")
+
+        captured = []
+        orig = (
+            register_task.git_cmd,
+            register_task._pr_number_from_gh,
+            register_task.register_entry,
+            sys.argv,
+        )
+        register_task.git_cmd = lambda *a: (str(root) if a[:1] == ("rev-parse",) else "")
+        register_task._pr_number_from_gh = lambda cwd: None
+        register_task.register_entry = captured.append
+        sys.argv = ["_register", str(state_file), "", "--termination-reason", "DonePRGreen"]
+        try:
+            register_task.main()
+        finally:
+            (
+                register_task.git_cmd,
+                register_task._pr_number_from_gh,
+                register_task.register_entry,
+                sys.argv,
+            ) = orig
+
+        assert len(captured) == 1, "empty session id must still append a ledger row"
+        assert captured[0]["session_id"] == "sid-x3001"
+        assert captured[0]["termination_reason"] == "DonePRGreen"
+        assert captured[0]["sessions"] == ["sid-x3001"]  # the empty id is dropped, not stored
+
+
+def test_main_legacy_still_rejects_missing_session_id():
+    # The arity contract is unchanged: an ABSENT second positional is still an
+    # error. Only an explicitly-empty one is accepted.
+    with tempfile.TemporaryDirectory() as td:
+        state_file = Path(td) / "target-state.md"
+        state_file.write_text("---\nsession_id: sid\n---\n")
+        orig_argv = sys.argv
+        sys.argv = ["_register", str(state_file)]
+        try:
+            with redirect_stderr(io.StringIO()), redirect_stdout(io.StringIO()):
+                try:
+                    register_task.main()
+                except SystemExit as exc:
+                    assert exc.code == 1
+                else:
+                    raise AssertionError("missing session id must exit 1")
+        finally:
+            sys.argv = orig_argv
 
 
 def _run_standalone() -> int:

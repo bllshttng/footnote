@@ -17,6 +17,12 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 export PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:${PYTHONPATH}}"
 REGISTER_PY="$REPO_ROOT/cli/src/fno/cost/_register.py"
 SESSION_COST_PY="$REPO_ROOT/cli/src/fno/cost/_session_cost.py"
+# _register imports fno.config, which needs tomli_w/pydantic. Ambient python3
+# has neither, so every invocation must use the project interpreter. A worktree
+# has no .venv of its own; fall back to uv, which resolves the shared one.
+PY="$REPO_ROOT/cli/.venv/bin/python"
+[[ -x "$PY" ]] || PY="$(cd "$REPO_ROOT/cli" 2>/dev/null && uv run python -c 'import sys; print(sys.executable)' 2>/dev/null)"
+[[ -n "${PY:-}" && -x "$PY" ]] || PY="python3"
 TMP=$(mktemp -d -t register-task-provider-test.XXXXXX)
 trap 'rm -rf "$TMP"' EXIT
 
@@ -71,7 +77,7 @@ run_ac04_4() {
         "account_id: account-secondary"
 
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-ac044" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -83,14 +89,14 @@ run_ac04_4() {
     fi
 
     local provider_val
-    provider_val=$(python3 -c "
+    provider_val=$("$PY" -c "
 import json, sys
 e = json.load(open(sys.argv[1]))['entries'][-1]
 print(e.get('provider_id', '__MISSING__'))
 " "$ledger")
 
     local account_val
-    account_val=$(python3 -c "
+    account_val=$("$PY" -c "
 import json, sys
 e = json.load(open(sys.argv[1]))['entries'][-1]
 print(e.get('account_id', '__MISSING__'))
@@ -125,7 +131,7 @@ run_ac04_5() {
         "20260504T110000Z-test-ac045"
 
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-ac045" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -138,14 +144,14 @@ run_ac04_5() {
 
     # Verify provider_id key is entirely absent (not null, not empty)
     local has_provider
-    has_provider=$(python3 -c "
+    has_provider=$("$PY" -c "
 import json, sys
 e = json.load(open(sys.argv[1]))['entries'][-1]
 print('yes' if 'provider_id' in e else 'no')
 " "$ledger")
 
     local has_account
-    has_account=$(python3 -c "
+    has_account=$("$PY" -c "
 import json, sys
 e = json.load(open(sys.argv[1]))['entries'][-1]
 print('yes' if 'account_id' in e else 'no')
@@ -155,7 +161,7 @@ print('yes' if 'account_id' in e else 'no')
         pass "AC04.5-FR: provider_id key absent from entry when not in target-state.md"
     else
         local raw_val
-        raw_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('provider_id')))" "$ledger")
+        raw_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('provider_id')))" "$ledger")
         fail "AC04.5-FR: provider_id present in entry when it should be absent (value=$raw_val)"
     fi
 
@@ -163,7 +169,7 @@ print('yes' if 'account_id' in e else 'no')
         pass "AC04.5-FR: account_id key absent from entry when not in target-state.md"
     else
         local raw_val
-        raw_val=$(python3 -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('account_id')))" "$ledger")
+        raw_val=$("$PY" -c "import json,sys; e=json.load(open(sys.argv[1]))['entries'][-1]; print(repr(e.get('account_id')))" "$ledger")
         fail "AC04.5-FR: account_id present in entry when it should be absent (value=$raw_val)"
     fi
 
@@ -220,7 +226,7 @@ JSONEOF
         "account_id: account-secondary"
 
     HOME="$sandbox" \
-        python3 "$REGISTER_PY" \
+        "$PY" "$REGISTER_PY" \
         "$sandbox/.fno/target-state.md" \
         "transcript-uuid-mixed" \
         > "$sandbox/output.json" 2> "$sandbox/stderr.log"
@@ -232,7 +238,7 @@ JSONEOF
     fi
 
     local entry_count
-    entry_count=$(python3 -c "
+    entry_count=$("$PY" -c "
 import json, sys
 d = json.load(open(sys.argv[1]))
 print(len(d.get('entries', [])))
@@ -246,7 +252,7 @@ print(len(d.get('entries', [])))
 
     # Verify old entry still lacks provider_id
     local old_has_provider
-    old_has_provider=$(python3 -c "
+    old_has_provider=$("$PY" -c "
 import json, sys
 entries = json.load(open(sys.argv[1]))['entries']
 # find the old entry by session_id
@@ -329,7 +335,7 @@ JSONEOF
 
     # Run with --by-provider against the synthetic ledger
     local result
-    if ! result=$(HOME="$sandbox" python3 "$SESSION_COST_PY" --by-provider 2>&1); then
+    if ! result=$(HOME="$sandbox" "$PY" "$SESSION_COST_PY" --by-provider 2>&1); then
         fail "SC-by-provider: --by-provider flag returned non-zero exit code"
         echo "    Output: $result"
         return
@@ -399,7 +405,7 @@ run_session_cost_render_compat() {
 JSONEOF
 
     local output
-    if output=$(HOME="$sandbox" python3 "$SESSION_COST_PY" --render 2>&1); then
+    if output=$(HOME="$sandbox" "$PY" "$SESSION_COST_PY" --render 2>&1); then
         pass "SC-render-compat-HP: --render exits 0 with mixed-schema ledger"
     else
         fail "SC-render-compat-HP: --render failed with mixed-schema ledger"
