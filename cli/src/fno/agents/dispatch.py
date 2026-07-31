@@ -52,7 +52,7 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.harness_identity import resolve_harness_identity
+from fno.harness_identity import resolve_harness_identity, session_identity_key
 
 DispatchKind = Literal["create", "followup"]
 
@@ -5097,6 +5097,42 @@ def dispatch_send(
             existing = resolve_registered_agent_across_sources(
                 entries, requested_name
             ).entry
+            from fno.agents.discover import live_address_matches
+
+            registry_id = getattr(existing, "harness_session_id", None)
+            registry_key = (
+                existing.harness,
+                session_identity_key(registry_id) if registry_id else None,
+            )
+            live_foreign = {
+                (session.agent, session_identity_key(session.session_id)): session
+                for session in live_address_matches(
+                    requested_name, registry_path=registry_path
+                )
+                if (
+                    session.agent,
+                    session_identity_key(session.session_id),
+                )
+                != registry_key
+            }
+            if live_foreign:
+                candidates = [
+                    f"{registry_id or existing.name} "
+                    f"({existing.harness}, registry name={existing.name})",
+                    *(
+                        f"{session.session_id} ({session.agent}, live discovery)"
+                        for session in sorted(
+                            live_foreign.values(),
+                            key=lambda value: (value.agent, value.session_id),
+                        )
+                    ),
+                ]
+                raise AgentResolutionError(
+                    f"token {requested_name!r} is ambiguous across "
+                    f"{len(candidates)} sessions: {', '.join(candidates)}. "
+                    "Disambiguate with the full session id.",
+                    ambiguous=True,
+                )
         except AgentResolutionError as exc:
             events.emit(
                 "agent_send_failed",

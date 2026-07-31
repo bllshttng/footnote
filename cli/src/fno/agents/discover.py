@@ -31,7 +31,12 @@ from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
-from fno.harness_identity import canonical_handle, legacy_prefix_handle, session_handle_tier
+from fno.harness_identity import (
+    canonical_handle,
+    legacy_prefix_handle,
+    session_handle_tier,
+    session_identity_key,
+)
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
@@ -738,6 +743,42 @@ def _session_handle_matches(
     ]
 
 
+def _exact_address_matches(
+    token: Optional[str], sessions: Iterable[DiscoveredSession]
+) -> list[DiscoveredSession]:
+    """Union every exact live address category before selecting a session."""
+    if not token:
+        return []
+    rows = list(sessions)
+    full = [
+        session
+        for session in rows
+        if session_handle_tier(token, session.session_id) == 0
+    ]
+    candidates = full or [
+        session
+        for session in rows
+        if session.name == token
+        or session.handle == token
+        or session.short_id == token
+        or session_handle_tier(token, session.session_id) in {1, 2}
+    ]
+    return list(
+        {
+            (session.agent, session_identity_key(session.session_id)): session
+            for session in candidates
+        }.values()
+    )
+
+
+def live_address_matches(
+    token: str, *, registry_path: Optional[Path] = None
+) -> list[DiscoveredSession]:
+    """Exact live-discovery owners of one address, including registry rows."""
+    sessions = discover_live_sessions(registry_path=registry_path)
+    return _exact_address_matches(token, (s for s in sessions if s.is_alive))
+
+
 # --------------------------------------------------------------------------
 # Registry file iteration + liveness
 # --------------------------------------------------------------------------
@@ -1268,26 +1309,7 @@ def resolve_or_suggest(
             **discovery_kwargs,
             resolve_metadata=False,
         )
-        bare_full = [
-            session
-            for session in bare_sessions
-            if handle and session_handle_tier(handle, session.session_id) == 0
-        ]
-        if len(bare_full) == 1:
-            return bare_full[0], []
-        if len(bare_full) > 1:
-            return None, sorted(session.session_id for session in bare_full)
-        bare_explicit = [
-            session for session in bare_sessions if handle and session.short_id == handle
-        ]
-        bare_identity = [
-            session
-            for session in _session_handle_matches(handle, bare_sessions)
-            if session_handle_tier(handle, session.session_id) in {1, 2}
-        ]
-        bare_exact = list(
-            {session.session_id: session for session in [*bare_explicit, *bare_identity]}.values()
-        )
+        bare_exact = _exact_address_matches(handle, bare_sessions)
         if len(bare_exact) == 1:
             return bare_exact[0], []
         if len(bare_exact) > 1:
@@ -1298,37 +1320,10 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
-    full = [
-        session
-        for session in sessions
-        if handle and session_handle_tier(handle, session.session_id) == 0
-    ]
-    if len(full) == 1:
-        return full[0], []
-    if len(full) > 1:
-        return None, sorted(session.session_id for session in full)
-
-    # Exact-match the address BEFORE the retired-syntax rejection: a registered
-    # name matching the retired <harness>-<short8> shape (e.g. codex-deadbeef,
-    # which validate_spawn_name permits) remains a valid address when unique.
-    by_name = [s for s in sessions if handle and s.name == handle]
-    aliases = [
-        session
-        for session in sessions
-        if handle and session.handle == handle and session.handle != session.short_id
-    ]
-    explicit = [session for session in sessions if handle and session.short_id == handle]
-    identity = [
-        session
-        for session in _session_handle_matches(handle, sessions)
-        if session_handle_tier(handle, session.session_id) in {1, 2}
-    ]
-    exact = list(
-        {
-            session.session_id: session
-            for session in [*by_name, *aliases, *explicit, *identity]
-        }.values()
-    )
+    # Exact-match every address category BEFORE the retired-syntax rejection: a
+    # registered name matching the retired <harness>-<short8> shape remains a
+    # valid address when unique.
+    exact = _exact_address_matches(handle, sessions)
     if len(exact) == 1:
         from fno.agents.store_fallback import is_full_session_id
 

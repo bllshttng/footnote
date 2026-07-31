@@ -1022,6 +1022,66 @@ def test_us2_send_by_handle_is_session_addressed(runner, tmp_path, monkeypatch):
     assert "uuid-tgt" in res.output
 
 
+def test_registered_handle_colliding_with_live_discovery_sends_nothing(
+    runner, tmp_path, monkeypatch
+):
+    """A registry-first hit cannot hide a different live canonical owner."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.discover import DiscoveredSession
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.inbox.store import read_all_threads
+    from fno.mail.cli import mail_app
+
+    registered_sid = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    live_sid = "bbbbbbbb-1111-7222-8333-4444deadbeef"
+    write_registry(
+        [
+            AgentEntry(
+                name="deadbeef",
+                cwd="/wrong",
+                log_path="/tmp/wrong.log",
+                harness="claude",
+                harness_session_id=registered_sid,
+                short_id="transport",
+                status="live",
+            )
+        ]
+    )
+    live = DiscoveredSession(
+        session_id=live_sid,
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=123,
+        cwd="/right",
+        project="right",
+        status="idle",
+        agent="claude",
+        truth_state="working",
+    )
+    monkeypatch.setattr(
+        discover_mod, "discover_live_sessions", lambda **_kwargs: [live]
+    )
+    monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
+
+    injected: list[str] = []
+
+    def capture_wrong_injection(entry, *_args, **_kwargs):
+        injected.append(entry.harness_session_id or entry.name)
+        return True
+
+    monkeypatch.setattr(dispatch_mod, "_deliver_live", capture_wrong_injection)
+
+    result = runner.invoke(mail_app, ["send", "deadbeef", "must not guess"])
+
+    assert result.exit_code == 2
+    assert "ambiguous" in result.output
+    assert "delivered" not in result.output and "queued" not in result.output
+    assert injected == []
+    assert read_all_threads("deadbeef") == []
+
+
 def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatch):
     """AC2-ERR: an unknown handle errors with the closest live handles, sending
     nothing (dispatch_send_to_project is never called)."""
