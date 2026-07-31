@@ -1000,6 +1000,47 @@ def test_resolver_only_short_collision_checks_every_store(tmp_path):
     assert suggestions == ["deadbeef-registry", "deadbeef-transcript"]
 
 
+def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
+    tmp_path,
+    monkeypatch,
+):
+    """The full-id fast path must not promote a legacy transport projection."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                harness="claude",
+                cwd="/legacy",
+                log_path="/tmp/legacy.log",
+                short_id="deadbeef",
+            )
+        ],
+        path=registry,
+    )
+    foreign = "bbbbbbbb-1111-7222-8333-4444deadbeef"
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id=foreign, cwd="/foreign")
+
+    match, suggestions = discover.resolve_or_suggest(
+        "deadbeef",
+        registry_path=registry,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: None,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == [foreign, "deadbeef"]
+
+
 @pytest.mark.parametrize(
     "truth_state,expected",
     [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],

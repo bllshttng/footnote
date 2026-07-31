@@ -1244,7 +1244,9 @@ def resolve_or_suggest(
         registry_full = [
             row
             for row in registry_rows
-            if handle and session_handle_tier(handle, row["session_id"]) == 0
+            if handle
+            and not row.get("identity_provisional")
+            and session_handle_tier(handle, row["session_id"]) == 0
         ]
         if len(registry_full) == 1:
             row = registry_full[0]
@@ -1266,6 +1268,7 @@ def resolve_or_suggest(
                     transcript_path if transcript_path is not None else None
                 ),
                 name=row.get("name"),
+                identity_provisional=bool(row.get("identity_provisional")),
             ), []
         if len(registry_full) > 1:
             return None, sorted(row["session_id"] for row in registry_full)
