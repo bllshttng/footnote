@@ -2373,9 +2373,19 @@ def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) 
             f"registry read failed: {exc}",
             exit_code=12,
         ) from exc
-    for entry in entries:
-        if entry.name == name:
-            return entry
+    matches = [entry for entry in entries if entry.name == name]
+    if len(matches) > 1:
+        candidates = ", ".join(
+            f"{entry.harness_session_id or entry.short_id or '-'} ({entry.harness})"
+            for entry in matches
+        )
+        raise DispatchAskError(
+            f"registry name {name!r} is ambiguous across {len(matches)} rows: "
+            f"{candidates}. Repair the duplicate registry rows before retrying.",
+            exit_code=2,
+        )
+    if matches:
+        return matches[0]
     raise DispatchAskError(
         f"agent {name!r} not found in registry",
         exit_code=2,

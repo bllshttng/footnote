@@ -252,6 +252,57 @@ def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
     assert [entry.name for entry in registry_mod.load_registry()] == ["victim"]
 
 
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A full id cannot be collapsed back to a corrupt shared registry name."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    first = registry_mod.AgentEntry(
+        name="same",
+        harness="claude",
+        harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="transport1",
+        cwd="/one",
+        log_path="/tmp/one.log",
+    )
+    second = registry_mod.AgentEntry(
+        name="same",
+        harness="claude",
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transport2",
+        cwd="/two",
+        log_path="/tmp/two.log",
+    )
+    rows = [first, second]
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *_a, **_k: rows)
+    monkeypatch.setattr(dispatch, "load_registry", lambda *_a, **_k: rows)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+
+    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    with pytest.raises(dispatch.DispatchAskError, match="ambiguous") as exc:
+        action(second.harness_session_id)
+
+    assert exc.value.exit_code == 2
+    assert shellouts == []
+
+
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-EDGE: codex agents print info on stderr and exit 0; no subprocess."""
     use_tmpdir(monkeypatch, tmp_path)
