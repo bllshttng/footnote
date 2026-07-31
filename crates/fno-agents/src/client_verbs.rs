@@ -733,13 +733,17 @@ fn trace_logic(args: &TraceArgs, events_path: &Path, registry_path: &Path) -> Tr
                             };
                         }
                     },
-                    Err(_) => {
+                    Err(err) => {
+                        let detail = match err {
+                            ResolveError::Ambiguous(_) => err.message(),
+                            ResolveError::NotFound(_) => {
+                                format!("agent '{token}' not found in registry")
+                            }
+                        };
                         return TraceResult {
                             exit_code: 13,
                             output: String::new(),
-                            stderr: format!(
-                                "fno agents trace: agent '{token}' not found in registry\n"
-                            ),
+                            stderr: format!("fno agents trace: {detail}\n"),
                         };
                     }
                 },
@@ -982,18 +986,22 @@ fn entry_session_tier(entry: &Value, token: &str) -> Option<u8> {
     session_handle_tier(token, session_id)
 }
 
-/// Return the single matched row, or an ambiguity error. Dedups by `name` (the
-/// PK), so the SAME row matching a tier via multiple rules is not ambiguous.
+/// Return the single matched row, or an ambiguity error. Dedup only repeated
+/// references to the same loaded row: a corrupt registry may contain one name
+/// on two distinct session rows, and the intended PK cannot prove identity.
 fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, ResolveError> {
-    let mut by_name: std::collections::BTreeMap<&str, &'a Value> =
-        std::collections::BTreeMap::new();
-    for e in hits {
-        let n = e.get("name").and_then(Value::as_str).unwrap_or("?");
-        by_name.entry(n).or_insert(e);
+    let mut distinct: Vec<&Value> = Vec::new();
+    for entry in hits {
+        if !distinct
+            .iter()
+            .any(|existing| std::ptr::eq(*existing, entry))
+        {
+            distinct.push(entry);
+        }
     }
-    if by_name.len() > 1 {
-        let cands = by_name
-            .values()
+    if distinct.len() > 1 {
+        let cands = distinct
+            .iter()
             .map(|e| {
                 let n = e.get("name").and_then(Value::as_str).unwrap_or("?");
                 let s = e
@@ -1013,10 +1021,10 @@ fn one_or_ambiguous<'a>(hits: Vec<&'a Value>, token: &str) -> Result<&'a Value, 
         return Err(ResolveError::Ambiguous(format!(
             "token {} is ambiguous across {} agents: {cands}. Disambiguate with the name or full session id.",
             py_repr_str(token),
-            by_name.len()
+            distinct.len()
         )));
     }
-    Ok(*by_name.values().next().unwrap())
+    Ok(distinct[0])
 }
 
 /// Resolve a name, full session id, transport short id, canonical handle, or
@@ -2695,6 +2703,19 @@ mod tests {
     }
 
     #[test]
+    fn find_agent_entry_duplicate_name_distinct_sessions_is_ambiguous() {
+        let rows = vec![
+            claude_row("same", "transport1", "aaaaaaaa-1111-7222-8333-4444deadbeef"),
+            claude_row("same", "transport2", "bbbbbbbb-1111-7222-8333-4444cafefeed"),
+        ];
+
+        assert!(matches!(
+            find_agent_entry(&rows, "same"),
+            Err(ResolveError::Ambiguous(_))
+        ));
+    }
+
+    #[test]
     fn find_agent_entry_ambiguous_same_tier_short_collision() {
         // AC2-ERR: two rows sharing a short_id error as ambiguous, never first-match.
         let rows = vec![
@@ -3044,6 +3065,52 @@ mod tests {
         );
         assert_eq!(r.exit_code, 0);
         assert_eq!(r.output, "no events yet\n");
+    }
+
+    #[test]
+    fn trace_surfaces_registry_ambiguity_instead_of_not_found() {
+        let td = tempfile::TempDir::new().unwrap();
+        let registry = td.path().join("registry.json");
+        fs::write(
+            &registry,
+            serde_json::to_vec(&json!({
+                "schema_version": REGISTRY_SCHEMA_VERSION,
+                "agents": [
+                    {
+                        "name": "one",
+                        "harness": "codex",
+                        "cwd": "/one",
+                        "log_path": "/tmp/one.log",
+                        "harness_session_id": "aaaaaaaa-1111-7222-8333-4444deadbeef"
+                    },
+                    {
+                        "name": "two",
+                        "harness": "opencode",
+                        "cwd": "/two",
+                        "log_path": "/tmp/two.log",
+                        "harness_session_id": "ses_1111111111111111deadbeef"
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let args = TraceArgs {
+            name: Some("deadbeef".to_string()),
+            request_id: None,
+            all_agents: false,
+            json_out: false,
+            limit: 200,
+            since: None,
+        };
+
+        let result = trace_logic(&args, &td.path().join("events.jsonl"), &registry);
+
+        assert_eq!(result.exit_code, 13);
+        assert!(result.stderr.contains("ambiguous across 2 agents"));
+        assert!(result.stderr.contains("one"));
+        assert!(result.stderr.contains("two"));
+        assert!(!result.stderr.contains("not found"));
     }
 
     #[test]

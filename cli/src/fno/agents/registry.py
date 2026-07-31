@@ -32,7 +32,7 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 
 from fno import paths
 from fno.harness_identity import (
@@ -408,22 +408,26 @@ def _session_tier(entry: object, token: str) -> Optional[int]:
 def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
     """Return the single matched entry, or raise on a real ambiguity.
 
-    Dedups by ``name`` (the PK), so the SAME entry matching a tier via multiple
-    rules is not ambiguous; two DISTINCT entries are (git's ambiguous-short-SHA
-    behavior — never silently pick one)."""
-    distinct = {getattr(e, "name", None): e for e in hits}
+    Dedup only repeated references to the same loaded row. A corrupt or legacy
+    registry can contain two rows with one name but different sessions; treating
+    the intended primary key as proof of identity would silently pick one.
+    """
+    distinct: list[Any] = []
+    for entry in hits:
+        if not any(entry is existing for existing in distinct):
+            distinct.append(entry)
     if len(distinct) > 1:
         cands = ", ".join(
             f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
             f"{getattr(e, 'harness', '?')})"
-            for e in distinct.values()
+            for e in distinct
         )
         raise AgentResolutionError(
             f"token {token!r} is ambiguous across {len(distinct)} agents: "
             f"{cands}. Disambiguate with the name or full session id.",
             ambiguous=True,
         )
-    return ResolvedAgent(entry=next(iter(distinct.values())), matched_by=matched_by)
+    return ResolvedAgent(entry=distinct[0], matched_by=matched_by)
 
 
 def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:

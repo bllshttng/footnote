@@ -172,6 +172,18 @@ def test_same_row_matching_multiple_address_categories_is_not_ambiguous() -> Non
     assert resolved.matched_by == "name"
 
 
+def test_duplicate_name_rows_with_distinct_sessions_are_ambiguous() -> None:
+    first = _claude(
+        "same", "transport1", "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    )
+    second = _claude(
+        "same", "transport2", "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    )
+
+    with pytest.raises(AgentResolutionError, match="ambiguous across 2 agents"):
+        resolve_agent_in([first, second], "same")
+
+
 def test_exact_full_session_id_wins_over_short_address_categories() -> None:
     full = _claude("full", "transport1", "deadbeef")
     named = _claude(
