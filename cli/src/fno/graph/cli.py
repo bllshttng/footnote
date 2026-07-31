@@ -6076,7 +6076,8 @@ def cmd_undefer(
 # -- done --
 
 def _project_plans_from_graph(
-    node_ids: list[str], *, mirror_type_for: str | None = None
+    node_ids: list[str], *, mirror_type_for: str | None = None,
+    force_status_off_terminal_for: str | None = None,
 ) -> None:
     """Project each named node's mirror fields + forward status onto its plan.
 
@@ -6102,7 +6103,10 @@ def _project_plans_from_graph(
     except Exception as e:  # noqa: BLE001 - additive; never wedge the mutation
         sys.stderr.write(f"warning: plan projection setup failed: {e}\n")
         return
-    project_graph_nodes(entries, ids, mirror_type_for=mirror_type_for)
+    project_graph_nodes(
+        entries, ids, mirror_type_for=mirror_type_for,
+        force_status_off_terminal_for=force_status_off_terminal_for,
+    )
 
 
 def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) -> None:
@@ -6228,6 +6232,95 @@ def _release_contained_children(entries: list[dict], owner_id: Optional[str]) ->
             nid = e.get("id")
             if isinstance(nid, str) and nid:
                 freed.append(nid)
+    return freed
+
+
+def _is_live(entry: dict) -> bool:
+    """A child is LIVE when it is not terminal: it would strand if its owner died.
+
+    Terminal is the precedence floor in `recompute_statuses` (done > superseded
+    > deferred): a node with ``completed_at`` is done, one with
+    ``superseded_by`` is superseded, one with ``deferred_at`` is deferred.
+    Everything else (idea, ready, blocked, in_review, in_progress) is live and
+    dispatchable, so killing its owner without releasing it leaves it
+    unbuildable under the dead-ancestor guard.
+    """
+    return not (
+        entry.get("completed_at") or entry.get("superseded_by") or entry.get("deferred_at")
+    )
+
+
+def _live_child_ids(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Ids of the owner's live children that the supersede guard refuses over.
+
+    Membership children only (``parent == owner``), EXCLUDING contained
+    children (``contained_in == owner``). The two axes are released differently:
+    a contained child is folded delivery work, and superseding the unit
+    releases it routinely - that release IS the safety, so it is not a reason
+    to refuse. A parent-only child is epic membership; superseding orphans it
+    (clearing ``parent``), a structural change the guard exists to consent to.
+    This is also why the guard reads liveness, not ``type``: the epic that
+    prompted this was itself typed ``feature``.
+    """
+    if not owner_id:
+        return []
+    live: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict):
+            continue
+        if e.get("contained_in") == owner_id:
+            continue  # folded work - the contained release handles it, not the guard
+        if e.get("parent") != owner_id:
+            continue
+        if not _is_live(e):
+            continue
+        nid = e.get("id")
+        if isinstance(nid, str) and nid:
+            live.append(nid)
+    return live
+
+
+def _release_parented_children(entries: list[dict], owner_id: Optional[str]) -> list[str]:
+    """Clear ``parent`` on the owner's non-done children; return the ids freed.
+
+    The membership-axis sibling of ``_release_contained_children``. That helper
+    covers ``contained_in`` (delivery: ships inside this PR); this one covers
+    ``parent`` (epic membership). A permanently dead unit's children would
+    otherwise stay parented to it: any one later revived (undeferred or
+    unsuperseded) then hits the dead-ancestor selection guard and strands - the
+    exact state this release exists to prevent.
+
+    NON-DONE children only. ``completed_at`` is the one truly terminal marker
+    (done never reactivates), so a shipped child keeps ``parent`` as history.
+    Live, deferred, and superseded children can all return to dispatch, so all
+    get cleared: leaving a deferred child parented to a dead unit would strand
+    it the moment it is undeferred. This is the gap a release keyed on liveness
+    alone misses - the supersede guard refuses only over currently-dispatchable
+    children, so deferred/superseded children pass it and must be released here.
+
+    Lives in ``cmd_supersede``, not the shared release helper, because
+    ``cmd_defer`` also calls that helper and defer is a pause (undefer exists):
+    a deferred epic's children must keep their membership through the pause.
+    Supersede is permanent, so only it orphans.
+
+    Nothing re-parents on ``unsupersede``: re-adoption is decompose's job, the
+    same policy the contained release states for un-containment.
+    """
+    if not owner_id:
+        return []
+    freed: list[str] = []
+    for e in entries:
+        if not isinstance(e, dict) or e.get("parent") != owner_id:
+            continue
+        if e.get("completed_at"):
+            continue  # done is truly terminal - keep parent as history
+        # Set None (key kept) rather than pop, matching the supported un-adopt
+        # path (`update --parent null`) and every other parent writer; readers
+        # use .get(), so a present-None reads identically to absent.
+        e["parent"] = None
+        nid = e.get("id")
+        if isinstance(nid, str) and nid:
+            freed.append(nid)
     return freed
 
 
@@ -9401,12 +9494,18 @@ def cmd_supersede(
     new_id: str = typer.Argument(..., help="The new node ID that replaces the old"),
     replaces: str = typer.Option(..., "--replaces", help="The old node ID being superseded"),
     reason: str = typer.Option(..., "--reason", "-R", help="Why supersede (free text, surfaces in triage)"),
+    force: bool = typer.Option(
+        False, "--force", "-F", help="Supersede even if the target still has live children (orphaning them)"
+    ),
 ) -> None:
     """Mark ``replaces`` as superseded by ``new_id``; defer ``replaces`` automatically.
 
     Sets ``superseded_by`` on the old node and appends to ``supersedes`` on
     the new node. Also sets ``deferred_at`` + ``deferred_reason`` on the old
-    node so it stops appearing in active lists.
+    node so it stops appearing in active lists. Refuses if ``replaces`` still
+    has live children unless ``--force`` is given; under ``--force`` the live
+    children's ``parent`` is cleared so they stay dispatchable instead of
+    stranding under a dead unit. Reverse with ``unsupersede``.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
@@ -9428,6 +9527,8 @@ def cmd_supersede(
         raise typer.Exit(code=1)
 
     _freed_box: list[list] = [[]]
+    _parent_freed_box: list[list] = [[]]
+    _proj_kids_box: list[list] = [[]]
     def mutator(entries):
         new_node = _find_node(entries, new_id)
         old_node = _find_node(entries, replaces)
@@ -9457,16 +9558,57 @@ def cmd_supersede(
                 err=True,
             )
             raise typer.Exit(code=1)
+        if old_node.get("deferred_at"):
+            # A pre-existing deferral is an independent park supersede would
+            # overwrite, and unsupersede cannot tell that park from its own, so
+            # the deferral would be lost on reversal. Resolve it first - same
+            # shape as the done/already-superseded refusals above.
+            typer.echo(
+                f"Error: cannot supersede {replaces}: it is deferred. Undefer it "
+                f"first (`fno backlog undefer {replaces}`); superseding would "
+                f"overwrite that pause and an unsupersede could not restore it.",
+                err=True,
+            )
+            raise typer.Exit(code=1)
 
+        # Guard the death transition: a unit with live children cannot
+        # be killed without orphaning them, and orphaning is a deliberate act.
+        # Refuse unless forced, naming the children so the operator sees what
+        # would strand under a dead unit. Gates on liveness, not type - the
+        # `type` field is not maintained reliably enough to guard on (the epic
+        # that prompted this was itself typed `feature`).
+        # Use the canonical resolved id, not the raw `replaces` argument: an
+        # abbreviated id (ab-9728) resolves via _find_node but would never
+        # equal a child's full canonical `parent`, silently bypassing the guard.
+        live_kids = _live_child_ids(entries, old_node.get("id"))
+        if live_kids and not force:
+            typer.echo(
+                f"Error: cannot supersede {replaces}: it still has "
+                f"{len(live_kids)} live child(ren): {', '.join(live_kids)}. "
+                f"Superseding would strand them under a dead unit. Re-run with "
+                f"--force to supersede anyway (their parent is cleared so they "
+                f"stay dispatchable).",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+
+        # Store the canonical id, not the raw (possibly abbreviated) --replaces:
+        # unsupersede removes the backref by canonical id, so a stored
+        # abbreviation would survive the reverse as a stale forward edge.
+        canonical_old = old_node["id"]
         supersedes = list(new_node.get("supersedes") or [])
-        if replaces not in supersedes:
-            supersedes.append(replaces)
+        if canonical_old not in supersedes:
+            supersedes.append(canonical_old)
         new_node["supersedes"] = supersedes
-        old_node["superseded_by"] = new_id
+        # Canonical replacement id, not the raw (possibly abbreviated) new_id:
+        # an abbreviation stored here can later turn ambiguous and make the
+        # replacer unresolvable on unsupersede, leaving a stale edge.
+        canonical_new = new_node["id"]
+        old_node["superseded_by"] = canonical_new
         old_node["locked_by"] = None
         old_node["claimed_at"] = None
         old_node["deferred_at"] = datetime.now(timezone.utc).isoformat()
-        old_node["deferred_reason"] = f"superseded by {new_id}: {cleaned_reason}"
+        old_node["deferred_reason"] = f"superseded by {canonical_new}: {cleaned_reason}"
         # Release anything that was shipping inside it (x-e957, sigma). Same
         # trap `cmd_remove` was fixed for, one step short of deletion: a
         # superseded unit will never merge, so `_strandable_contained_ids`
@@ -9476,12 +9618,151 @@ def cmd_supersede(
         # invisible to every sweep. Un-contained rather than closed: superseding
         # the unit is not a claim that its children shipped.
         _freed_box[0] = _release_contained_children(entries, old_node.get("id"))
+        # Release the membership axis too. contained_in covers nodes shipping
+        # inside this unit's PR; epic children carry `parent`, a different field.
+        # Without this they stay parented to a unit that will never ship, and any
+        # one later revived strands under the dead-ancestor selection guard - the
+        # same unbuildable, uncloseable, invisible shape the contained release
+        # exists to end. Non-done children only: done keeps the link as history.
+        parent_freed = _release_parented_children(entries, old_node.get("id"))
+        _parent_freed_box[0] = parent_freed
+        # Projection targets: freed children that have their OWN plan doc. A
+        # child sharing the owner's plan_path (an adopted delivery child) is
+        # excluded: the owner is already a target, and re-projecting the one
+        # shared doc per child would let the last child's mirrored metadata
+        # overwrite the owner's.
+        owner_plan = old_node.get("plan_path")
+        by_id = {e.get("id"): e for e in entries if isinstance(e, dict)}
+        _proj_kids_box[0] = [
+            k for k in parent_freed
+            if (by_id.get(k, {}).get("plan_path") != owner_plan)
+        ]
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"superseded {replaces} with {new_id}")
     _echo_freed(_freed_box[0], replaces)
-    _project_plans_from_graph([replaces, new_id])
+    if _parent_freed_box[0]:
+        typer.echo(
+            f"Cleared parent on {len(_parent_freed_box[0])} child(ren) of {replaces} "
+            f"(revive-safe; a later undefer/unsupersede cannot strand them): "
+            f"{', '.join(_parent_freed_box[0])}"
+        )
+    # Repaint the orphaned children's OWN plan docs (the converger expands
+    # ancestors, not descendants, so naming only old + replacement would leave a
+    # member child's parent/parent_slug/wave stale). _proj_kids already excluded
+    # any child sharing the owner's plan_path, so this cannot rewrite the
+    # owner's doc per child.
+    _project_plans_from_graph([replaces, new_id] + _proj_kids_box[0])
+
+
+# ---------------------------------------------------------------------------
+# unsupersede: reverse a supersede (the death transition was reversible only
+# by hand-editing graph.json before this; cmd_undefer clears deferred_at but
+# leaves superseded_by set, so a superseded node stayed superseded)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("unsupersede", hidden=True)
+def cmd_unsupersede(
+    node_id: str = typer.Argument(..., help="The superseded node ID to revive"),
+) -> None:
+    """Reverse a supersede on ``node_id``. Idempotent in the safe direction.
+
+    Clears ``superseded_by``, ``deferred_at``, and ``deferred_reason`` (the
+    latter two were set by ``cmd_supersede`` and must go together, else the
+    status precedence drops the node from ``superseded`` straight into
+    ``deferred``) and removes ``node_id`` from the replacer's ``supersedes``
+    list. The status then recomputes to the node's underlying state, and the
+    plan doc is forced off terminal ``superseded`` (the forward-only projector
+    will not leave a terminal on its own).
+
+    A node that is merely deferred (no ``superseded_by``) is left untouched:
+    reactivating parked work is ``undefer``'s job, and clearing a deferral here
+    would silently make deferred work dispatchable.
+
+    Reactivation is a separate verb from ``undefer`` on purpose: reviving a
+    plan that another plan supplanted is a conscious act. ``recompute_statuses``
+    has always named this verb as the only route back from ``superseded`` - it
+    just did not exist.
+
+    Does NOT re-contain or re-parent children released when the node was
+    superseded: re-adoption is decompose's job, the same policy ``cmd_undefer``
+    applies to un-containment.
+    """
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import locked_mutate_graph
+    from fno.graph._intake import _find_node
+
+    if not has_node_id_prefix(node_id):
+        typer.echo(
+            f"Error: node_id must be a <prefix>-<4..8 hex> node id, got '{node_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    was_superseded_holder: list[bool] = [False]
+    canonical_id_box: list[str] = [node_id]
+
+    def mutator(entries):
+        node = _find_node(entries, node_id)
+        if node is None:
+            typer.echo(f"Error: node {node_id} not found", err=True)
+            raise typer.Exit(code=1)
+        replacer = node.get("superseded_by")
+        was_superseded_holder[0] = bool(replacer)
+        canonical_id_box[0] = node.get("id", node_id)
+        if not replacer:
+            # Not superseded: nothing to reverse. Return WITHOUT touching
+            # deferred_at, so a node that is merely deferred (not superseded)
+            # keeps its park. Clearing it here would reactivate parked work.
+            return entries
+        # Drop the backref so the replacer's `supersedes` list no longer claims
+        # a node it no longer supersedes - a stale claim would make the chain
+        # read as live after we just broke it. Compare against the canonical id,
+        # not the (possibly abbreviated) argument: the backref stores the full id.
+        new_node = _find_node(entries, replacer)
+        if new_node is not None:
+            new_node["supersedes"] = [
+                s for s in (new_node.get("supersedes") or []) if s != node["id"]
+            ]
+        node["superseded_by"] = None
+        node["deferred_at"] = None
+        node["deferred_reason"] = None
+        return entries
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    if not was_superseded_holder[0]:
+        typer.echo(f"warning: {node_id} was not superseded", err=True)
+    else:
+        # Give a revived node the same streak-reset boundary cmd_undefer gives a
+        # human-recovered one: a superseded node is often auto-deferred first, so
+        # without this the next maintain pass could re-defer it from stale
+        # failure history without a single fresh failure. Best-effort, like undefer.
+        try:
+            from fno.agents.events import emit as _emit_event
+            from fno.graph.failure import events_path as _events_path
+
+            _emit_event("node_undeferred", path=_events_path(), unit_id=canonical_id_box[0])
+        except Exception:
+            pass
+    typer.echo(f"Unsuperseded {node_id}")
+    # Force the revived node's plan status off terminal `superseded` (the
+    # forward-only projector refuses to leave a terminal): without this the
+    # graph is active while the plan doc stays superseded. Scoped to the revived
+    # node only, not the ancestors/siblings the converger also repaints.
+    cid = canonical_id_box[0]
+    _project_plans_from_graph([cid], force_status_off_terminal_for=cid)
+    # Recompute+persist after projection. The graph status was derived during
+    # the mutation while the plan still read `superseded`, so it must follow the
+    # now-corrected plan or `backlog get`/the board keep reporting `ready` and a
+    # fail-closed `design` never makes the node non-dispatchable. Always, not
+    # only on a fresh reverse: an interrupted earlier unsupersede can leave the
+    # plan reading `superseded` after superseded_by is already clear, and this
+    # rerun heals that plan through the no-replacer branch too. A no-op mutator
+    # still triggers the recompute+write; idempotent on a clean call.
+    locked_mutate_graph(_graph_path(), lambda entries: entries)
 
 
 def _relevant_exec_scope(root: str, by_id: dict) -> set[str]:
