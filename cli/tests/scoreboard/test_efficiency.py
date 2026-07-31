@@ -12,7 +12,7 @@ AC6-FR   an unrecognized ci value surfaces as ci_unparsed, ci_reds None.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import typer
 from typer.testing import CliRunner
@@ -21,6 +21,29 @@ from fno.scoreboard import cli as sb_cli
 from fno.scoreboard.fold import build_efficiency
 
 runner = CliRunner()
+_RECENT_BASE = datetime.now(timezone.utc) - timedelta(days=1)
+
+
+def _recent(delta_minutes: int = 0) -> str:
+    """A `completed` timestamp inside the CLI's REAL 28-day window.
+
+    Unit tests inject `now=`, so their fixture dates never expire. CLI-path tests
+    invoke the real command and cannot inject anything, so a hardcoded fixture
+    date is a time bomb: these were pinned to 2026-07-03 and started failing on
+    2026-07-31, exactly 28 days later, with "no terminal sessions in window".
+    Anchored to now so the window can never age out again.
+
+    Built from a UTC base and emitted naive, matching how the pinned fixtures
+    read (naive values were UTC wall time), so relative gaps are preserved.
+    """
+    return (_RECENT_BASE + timedelta(minutes=delta_minutes)).replace(
+        tzinfo=None, microsecond=0
+    ).isoformat()
+
+
+def _recent_z(delta_minutes: int = 0) -> str:
+    """`_recent` in the Z-suffixed UTC form the loop-event fixtures use."""
+    return (_RECENT_BASE + timedelta(minutes=delta_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
 NOW = datetime(2026, 7, 3, 20, 0, 0)
 
 
@@ -102,13 +125,13 @@ def test_hp_two_distinct_red_episodes_count_twice():
 def test_err_corrupt_events_line_never_crashes(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _recent(), "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 1.0, "sessions": ["s-a"]},
     ]}))
     events = [
-        _loop("s-a", "FAILURE:smoke", "2026-07-03T09:00:00Z"),
+        _loop("s-a", "FAILURE:smoke", _recent_z(-60)),
         "{ this is not valid json",  # corrupt line between valid ones
-        _loop("s-a", "SUCCESS", "2026-07-03T09:01:00Z"),
+        _loop("s-a", "SUCCESS", _recent_z(-59)),
     ]
     _wire(monkeypatch, tmp_path, ledger, events)
     res = runner.invoke(_app(), ["--efficiency", "--json"])
@@ -151,10 +174,10 @@ def test_ui_efficiency_conflicts_with_by_skill(tmp_path, monkeypatch):
 def test_ui_cli_renders_coverage_first(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _recent(), "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "tokens_total": 10, "duration_minutes": 5, "sessions": ["s-a"]},
     ]}))
-    _wire(monkeypatch, tmp_path, ledger, [_loop("s-a", "SUCCESS", "2026-07-03T09:00:00Z")])
+    _wire(monkeypatch, tmp_path, ledger, [_loop("s-a", "SUCCESS", _recent_z(-60))])
     res = runner.invoke(_app(), ["--efficiency"])
     assert res.exit_code == 0, res.output
     body = res.output
