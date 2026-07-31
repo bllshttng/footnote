@@ -2633,13 +2633,18 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     is the duplicate-worker half of the wave-boundary handoff failure --
     one had to be killed by hand to restore one-writer semantics.
 
-    Ownership is re-proved through ``_pid_alive`` before EVERY signal. It
-    compares the recorded process-start token, so a pid recycled by an
-    unrelated process is refused rather than killed, including a recycle
-    that happens inside the SIGTERM grace window. An unreadable verdict
-    (``None`` -- no psutil, or a process this uid cannot inspect) counts as
-    not-ours and also refuses: never signal a pid whose incarnation cannot
-    be proved.
+    Ownership is re-proved through ``_pid_alive`` immediately before every
+    signal. It compares the recorded process-start token, so a pid recycled by
+    an unrelated process is refused rather than killed, including a recycle
+    inside the SIGTERM grace window. A row with no token at all is refused
+    outright, and so is an unreadable verdict (``None`` -- no psutil, or a
+    process this uid cannot inspect): never signal a pid whose incarnation
+    cannot be proved.
+
+    The probe and the signal remain two syscalls, so a recycle landing in that
+    microsecond gap is not excluded -- closing it needs pidfd, which is neither
+    portable here nor worth it against a window this size. The guarantee is
+    "proved ours as late as possible", not "proved ours atomically".
     """
     import signal
 
@@ -2650,11 +2655,26 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     def _still_ours() -> bool:
         return _pid_alive(pid, existing.pid_start_time) is True
 
-    if not pid or not _still_ours():
+    def _confirmed_gone() -> bool:
+        """True only when the process is KNOWN dead.
+
+        ``_pid_alive`` returns ``None`` for "cannot tell" (no psutil, or a
+        process this uid cannot inspect). Folding that into "gone" would report
+        a clean stop over a process that is still running, so only an explicit
+        ``False`` counts.
+        """
+        return _pid_alive(pid, existing.pid_start_time) is False
+
+    # Require the incarnation token before signalling anything. Without it
+    # ``_pid_alive`` degrades to bare liveness, which cannot distinguish our
+    # worker from an unrelated process that inherited the pid. Good enough to
+    # probe with, not good enough to kill on.
+    if not pid or existing.pid_start_time is None or not _still_ours():
         raise DispatchAskError(
-            f"registry entry {name!r} has no short id and no live process on "
-            f"file; there is nothing to stop. Note that 'fno agents rm {name}' "
-            "clears the row but does NOT stop a running session.",
+            f"registry entry {name!r} has no short id and no process this row "
+            f"can prove it owns; there is nothing safe to stop. Note that "
+            f"'fno agents rm {name}' clears the row but does NOT stop a "
+            "running session.",
             exit_code=12,
         )
 
@@ -2673,10 +2693,10 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
     def _wait_gone() -> bool:
         deadline = time.monotonic() + _PID_STOP_GRACE_S
         while time.monotonic() < deadline:
-            if not _still_ours():
+            if _confirmed_gone():
                 return True
             time.sleep(_PID_STOP_POLL_S)
-        return not _still_ours()
+        return _confirmed_gone()
 
     _signal(signal.SIGTERM)
     escalated = False
@@ -2688,16 +2708,26 @@ def _stop_by_pid(name: str, existing: AgentEntry) -> StopResult:
         _signal(signal.SIGKILL)
         _wait_gone()
 
-    if _still_ours():
+    # Success demands a CONFIRMED death, not the absence of a positive liveness
+    # answer. An unreadable probe means we do not know, and reporting a clean
+    # stop there is the silent failure this whole path exists to avoid.
+    if not _confirmed_gone():
+        still_ours = _still_ours()
+        reason = "survived_sigkill" if still_ours else "liveness_unconfirmed"
         events.emit(
             "agent_stop_error",
             name=name,
             provider=existing.harness,
             pid=pid,
-            reason="survived_sigkill",
+            reason=reason,
+        )
+        detail = (
+            "survived SIGTERM and SIGKILL"
+            if still_ours
+            else "could not be confirmed dead after SIGTERM and SIGKILL"
         )
         raise DispatchAskError(
-            f"pid {pid} for agent {name!r} survived SIGTERM and SIGKILL",
+            f"pid {pid} for agent {name!r} {detail}",
             exit_code=1,
         )
 

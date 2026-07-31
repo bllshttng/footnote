@@ -882,7 +882,14 @@ pub fn pid_is_ours(pid: u32, recorded: Option<u64>) -> bool {
     // (kill(0,0)==0) and fall through to the `_ => true` arm, so a later
     // `send_sigterm(0)` would SIGTERM the client's own process group. A real
     // worker/daemon pid is never <= 1, so this only ever rejects a malformed pid.
-    if pid <= 1 {
+    // An out-of-range pid is not merely absurd, it is dangerous: `pid_t` is
+    // signed, so a u32 above i32::MAX wraps negative, and 4294967295 becomes -1 --
+    // the "every process the caller may signal" broadcast target. `kill(-1, 0)`
+    // then succeeds, `process_start_time` finds nothing, and the match below falls
+    // to the trust-existence arm, so the probe returns TRUE and a caller goes on
+    // to broadcast SIGTERM. Reject anything outside a real pid's range here, in
+    // the shared probe, so every signalling caller inherits the guard.
+    if pid <= 1 || pid > i32::MAX as u32 {
         return false;
     }
     // SAFETY: signal 0 is an existence/permission probe only. rc == 0 means the
@@ -3356,13 +3363,62 @@ async fn worker_down_within(sock: &std::path::Path, budget: Duration) -> bool {
 /// Stop a Claude agent (AC7-EDGE). Claude is shellout-managed (LD8): there is no
 /// worker PTY to signal, so the daemon shells out to the claude supervisor's
 /// `stop` on the agent's short id and marks the registry row exited on success.
-/// Poll until `pid` is no longer our worker, or `budget` elapses. Ownership is
-/// re-proved each tick through `pid_is_ours`, so a pid recycled mid-wait reads
-/// as gone rather than as a still-running worker.
+/// Whether `pid` is confirmed GONE, as opposed to merely unreachable.
+///
+/// `pid_is_ours` answers "may I treat this as my worker", and returns false for
+/// two very different reasons: the process is dead (ESRCH), or it is alive but
+/// unsignalable (EPERM) / recycled. Using it as a death oracle turns "I cannot
+/// tell" into "it stopped", which reports a clean stop over a process that is
+/// still running. Only ESRCH is death.
+fn pid_confirmed_dead(pid: u32) -> bool {
+    if pid <= 1 || pid > i32::MAX as u32 {
+        // Never signalled in the first place, so nothing is running on our behalf.
+        return true;
+    }
+    // SAFETY: signal 0 is an existence/permission probe only, no signal is sent.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } == 0 {
+        return false; // reachable => alive
+    }
+    std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Whether `pid` is PROVABLY a different incarnation than the one recorded.
+///
+/// Not the negation of `pid_is_ours`. That returns false for three different
+/// situations -- dead, recycled, and alive-but-unsignalable (EPERM) -- so using
+/// it as a recycle test folds EPERM back into "gone" and reinstates the very
+/// clean-stop-over-a-live-process bug `pid_confirmed_dead` exists to prevent.
+/// A recycle claim needs positive evidence: the pid is reachable AND its start
+/// token is readable AND it differs from the recorded one. Anything less is no
+/// verdict, which leaves the caller waiting and, ultimately, reporting failure.
+fn pid_recycled(pid: u32, recorded_start: Option<u64>) -> bool {
+    let Some(recorded) = recorded_start else {
+        return false; // nothing to compare against
+    };
+    if pid <= 1 || pid > i32::MAX as u32 {
+        return false;
+    }
+    // SAFETY: signal 0 is an existence/permission probe only, no signal is sent.
+    if unsafe { libc::kill(pid as libc::pid_t, 0) } != 0 {
+        return false; // dead or unsignalable: not a positive recycle finding
+    }
+    match process_start_time(pid) {
+        Some(now) => now != recorded,
+        None => false, // unreadable: no verdict
+    }
+}
+
+/// Poll until `pid` is confirmed dead, or `budget` elapses.
+///
+/// A pid that got RECYCLED mid-wait also ends the wait: the process we signalled
+/// is gone, which is what the caller asked about, and the new occupant is not
+/// ours to keep waiting on. Both arms demand positive evidence, so an
+/// alive-but-unsignalable process satisfies neither and the wait runs out --
+/// reporting failure, which is the honest answer when we cannot see.
 async fn pid_gone_within(pid: u32, recorded_start: Option<u64>, budget: Duration) -> bool {
     let start = Instant::now();
     loop {
-        if !pid_is_ours(pid, recorded_start) {
+        if pid_confirmed_dead(pid) || pid_recycled(pid, recorded_start) {
             return true;
         }
         if start.elapsed() >= budget {
@@ -3389,6 +3445,14 @@ async fn stop_claude_pid_confirmed(entry: &RegistryEntry) -> bool {
     let Some(pid) = entry.pid else {
         return false;
     };
+    // Require the incarnation token. Without it `pid_is_ours` falls back to bare
+    // liveness, which cannot tell our worker from an unrelated process that
+    // inherited the pid after it died. That is tolerable for a probe; it is not
+    // tolerable as the sole basis for SIGKILL. Refusing costs a legacy row an
+    // honest "cannot stop" message. Guessing costs someone else's process.
+    if entry.pid_start_time.is_none() {
+        return false;
+    }
     if !pid_is_ours(pid, entry.pid_start_time) {
         return false;
     }
@@ -5386,27 +5450,114 @@ mod tests {
             .expect("sleeper pid");
         let start = process_start_time(pid);
 
-        // Wrong incarnation token: the pid belongs to someone else now.
+        // Independent death oracle. Asserting with `pid_is_ours` would use the
+        // subject's own probe as its judge, and that probe reports EPERM and a
+        // recycled pid as not-ours too, so it can read "gone" over a process
+        // that is still running. `ps` knows nothing about our guards.
+        let ps_says_alive = |pid: u32| {
+            std::process::Command::new("ps")
+                .args(["-p", &pid.to_string()])
+                .output()
+                .map(|o| {
+                    String::from_utf8_lossy(&o.stdout)
+                        .lines()
+                        .filter(|l| l.split_whitespace().next() == Some(&pid.to_string()))
+                        .count()
+                        > 0
+                })
+                .unwrap_or(false)
+        };
+
+        // No incarnation token: bare liveness is not a licence to SIGKILL.
         entry.pid = Some(pid);
-        entry.pid_start_time = start.map(|s| s.wrapping_add(1));
-        if start.is_some() {
+        entry.pid_start_time = None;
+        assert!(
+            !stop_claude_pid_confirmed(&entry).await,
+            "no start token -> refuse"
+        );
+        assert!(ps_says_alive(pid), "a refused row must not be signalled");
+
+        // Wrong incarnation token: the pid belongs to someone else now.
+        if let Some(st) = start {
+            entry.pid_start_time = Some(st.wrapping_add(1));
             assert!(
                 !stop_claude_pid_confirmed(&entry).await,
                 "recycled pid -> refuse"
             );
             assert!(
-                pid_is_ours(pid, start),
+                ps_says_alive(pid),
                 "an unrelated process must not be signalled"
             );
         }
 
         // Correct token: the process is really killed, not merely reported.
         entry.pid_start_time = start;
+        if start.is_some() {
+            assert!(
+                stop_claude_pid_confirmed(&entry).await,
+                "owned live pid -> stopped"
+            );
+            assert!(!ps_says_alive(pid), "process is gone");
+        } else {
+            // No readable start time on this platform: the guard above refuses
+            // every row, so reap the sleeper rather than leaking it.
+            unsafe {
+                libc::kill(pid as libc::pid_t, libc::SIGKILL);
+            }
+        }
+    }
+
+    #[test]
+    fn pid_is_ours_rejects_an_out_of_range_pid() {
+        // u32::MAX wraps to -1 in signed pid_t, the "signal every process I may
+        // signal" broadcast target. kill(-1, 0) succeeds and no start time is
+        // readable, so without the range guard the probe returns true and the
+        // caller broadcasts SIGTERM.
+        assert!(!pid_is_ours(u32::MAX, None), "u32::MAX must never be ours");
         assert!(
-            stop_claude_pid_confirmed(&entry).await,
-            "owned live pid -> stopped"
+            !pid_is_ours(i32::MAX as u32 + 1, Some(123)),
+            "anything past i32::MAX wraps negative"
         );
-        assert!(!pid_is_ours(pid, start), "process is gone");
+        assert!(
+            pid_confirmed_dead(u32::MAX),
+            "out-of-range is never running"
+        );
+    }
+
+    #[test]
+    fn recycle_and_death_each_demand_positive_evidence() {
+        // The distinction `pid_gone_within` rests on. `!pid_is_ours` is NOT a
+        // recycle test: it is also false for a live-but-unsignalable process, and
+        // treating that as "gone" reports a clean stop over a running worker.
+        let me = std::process::id();
+        let Some(st) = process_start_time(me) else {
+            return; // platform without start-time support
+        };
+
+        // Alive and ours: neither dead nor recycled.
+        assert!(!pid_confirmed_dead(me), "a live pid is not dead");
+        assert!(
+            !pid_recycled(me, Some(st)),
+            "matching token is not a recycle"
+        );
+
+        // Alive with a mismatched token: a positive recycle finding.
+        assert!(
+            pid_recycled(me, Some(st.wrapping_add(1))),
+            "reachable + differing token is a recycle"
+        );
+
+        // No recorded token: no basis to claim a recycle either way.
+        assert!(!pid_recycled(me, None), "no token -> no recycle verdict");
+
+        // A dead pid is dead, and is never *also* reported as recycled -- the
+        // caller must not be able to reach "gone" through an unproven path.
+        let dead = 0x7fff_fff0u32;
+        assert!(pid_confirmed_dead(dead), "unused high pid reads as dead");
+        assert!(
+            !pid_recycled(dead, Some(st)),
+            "dead is not a recycle finding"
+        );
     }
 
     #[test]
