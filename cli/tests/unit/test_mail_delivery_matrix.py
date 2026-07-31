@@ -180,6 +180,10 @@ def test_cell1_inject_is_attempted_before_any_durable_write(
     """
     # Seed a reachable-but-asleep session and fail every live lane, so the send
     # actually reaches the durable floor and there is an order to assert.
+    # Load mail.cli before patching the store so its module-level reply-path
+    # binding cannot capture this test double during lazy command registration.
+    import fno.mail.cli  # noqa: F401
+
     _seed_asleep_transcript(monkeypatch, tmp_path)
     order: list[str] = []
     monkeypatch.setattr(
@@ -205,9 +209,9 @@ def test_cell1_inject_is_attempted_before_any_durable_write(
 def _recording_durable(order):
     from fno.inbox.store import write_new_thread as real
 
-    def _wrapped(**kwargs):
+    def _wrapped(*args, **kwargs):
         order.append("durable")
-        return real(**kwargs)
+        return real(*args, **kwargs)
 
     return _wrapped
 
