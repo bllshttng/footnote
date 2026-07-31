@@ -302,3 +302,25 @@ def test_immutable_manifest_has_no_mutable_fields(tmp_path):
     assert not found, (
         f"Immutable manifest must not contain mutable fields; found: {found}"
     )
+
+
+def test_plan_path_env_lands_in_manifest_with_anchor(tmp_path):
+    """TARGET_PLAN_PATH becomes the manifest `plan_path:`, anchor intact.
+
+    The CLI-side back-fill tests (test_target_init_plan_backfill.py) stub the
+    bash writer and assert on the env handed to it, which proves the CLI's half
+    and nothing about the writer's. Without this, "the node's plan reaches the
+    manifest" is asserted on one of the two reachable halves only - a guard on
+    one path reads as protection while the other stays unproven. This also pins
+    that a `#group-N` anchor survives the writer's own quote-escaping.
+    """
+    assert _INIT_SCRIPT.exists(), f"init script missing: {_INIT_SCRIPT}"
+
+    bound = tmp_path / "bound.md"
+    bound.write_text("# Bound plan\n", encoding="utf-8")
+
+    proc = _run_init_script(tmp_path, {"TARGET_PLAN_PATH": f"{bound}#group-2"})
+    assert proc.returncode == 0, f"init failed: {proc.stderr}"
+
+    fm = _parse_target_state_frontmatter(tmp_path / ".fno" / "target-state.md")
+    assert fm.get("plan_path") == f"{bound}#group-2"

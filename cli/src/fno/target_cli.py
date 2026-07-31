@@ -281,6 +281,51 @@ def _resolve_plan_for_blast(plan_path: Optional[str], input_: Optional[str]) -> 
     return None
 
 
+def _resolve_plan_pointer(plan_path: str) -> Optional[str]:
+    """The plan pointer to bind, NORMALIZED, or None when it does not resolve.
+
+    Returns the resolved pointer rather than a bool because the value written to
+    the write-once manifest must be the one whose existence was proven. ``~`` is
+    expanded here but NOT by init-target-state.sh - bash does not tilde-expand a
+    variable's value - so admitting a ``~``-prefixed pointer and then storing the
+    raw string would pass this check and read as missing in every consumer, which
+    is the exact wedge this gate exists to prevent. A ``#group-N`` anchor is
+    stripped for the stat the way the shell does (``${INITIAL_PLAN_PATH%%#*}``)
+    and preserved on the way out. A RELATIVE pointer resolves against the repo
+    root, not the process cwd: the graph is global (one graph.json spans every
+    project), so a relative plan_path in it is repo-root-relative by convention
+    and is meaningless against a caller's cwd. Normalizing it to absolute here is
+    also what makes the shell safe, because init-target-state.sh does NOT anchor
+    relative paths - both of its plan stats are bare and cwd-relative - so
+    handing it a still-relative pointer is what would break it from a
+    subdirectory. Do not "simplify" this back to passing the raw string through.
+
+    Existence, not is_file: a footnote plan is routinely a DIRECTORY (the folder
+    plan whose entry point is 00-INDEX.md, see target/blast.py), so tightening
+    this to is_file() would silently drop the back-fill for every folder plan.
+
+    Fail-CLOSED to None, the opposite of ``_resolve_plan_for_blast`` above and
+    deliberately so: an unresolved blast read only forgoes ceremony modulation,
+    while an unverified pointer here lands in a field that can never be
+    corrected. Under uncertainty the recoverable empty beats the permanent guess.
+    """
+    try:
+        bare, sep, anchor = plan_path.partition("#")
+        bare = bare.strip()
+        if not bare:
+            return None
+        resolved = Path(bare).expanduser()
+        if not resolved.is_absolute():
+            root = _repo_root_or_none()
+            if root:
+                resolved = Path(root) / resolved
+        if not resolved.exists():
+            return None
+        return f"{resolved}{sep}{anchor}"
+    except Exception:
+        return None
+
+
 _TARGET_NODE_TOKEN_RE = re.compile(r"^[a-z][a-z0-9]{0,7}-[0-9a-f]{4,8}$", re.IGNORECASE)
 _SOURCE_PR_URL_RE = re.compile(
     r"https?://github\.com/([^/\s]+)/([^/\s]+)/pull/(\d+)(?:[#?\s)]|$)",
@@ -1101,10 +1146,32 @@ def init(
     # first-fill. An explicit --plan-path wins; an idea-first free-text input
     # resolves no node and stays empty for the legitimate blueprint-then-first-fill
     # flow. Reuses the same fail-safe node->plan resolver the blast read uses.
+    #
+    # Gated on the plan resolving to a file, because the manifest is WRITE-ONCE
+    # and `fno state set --field plan_path` accepts a first-fill only while the
+    # field is EMPTY (else exit 5). Back-filling a dangling pointer would
+    # therefore not just record a bad path, it would close the only legal repair
+    # route; leaving it empty keeps the blueprint-then-first-fill escape open.
+    # What gets bound is the NORMALIZED pointer the gate proved, never the raw
+    # graph string - see _resolve_plan_pointer for why storing the raw form
+    # re-opens the wedge on a `~` path. An explicit --plan-path is NOT gated: the
+    # operator named that path, so a typo must surface as a plan error rather
+    # than be silently dropped.
     if not plan_path:
         resolved_plan = _resolve_plan_for_blast(None, input_)
         if resolved_plan:
-            plan_path = resolved_plan
+            bound = _resolve_plan_pointer(resolved_plan)
+            if bound:
+                plan_path = bound
+            else:
+                typer.echo(
+                    f"fno target init: the node's bound plan_path does not resolve "
+                    f"to an existing path ({resolved_plan}); leaving the manifest plan_path "
+                    f"empty so it stays first-fillable this session "
+                    f"(fno state set --field plan_path). Repair the node itself "
+                    f"with: fno backlog update <id> --plan-path <path>",
+                    err=True,
+                )
 
     env = dict(os.environ)
     env["TARGET_START"] = "1"
