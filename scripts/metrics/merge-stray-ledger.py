@@ -11,8 +11,13 @@ a stray project-local ledger in the repo checkout. The dual-write is removed
      ``session_id`` (a re-run adds nothing - AC1-FR).
   2. Replace the stray FILE with a symlink to the global ledger, so every path
      that still points at ``<repo>/.fno/ledger.json`` (worktree symlinks,
-     setup-worktree.sh's link_file, config_cli's activity probe) transparently
-     resolves to the single global ledger rather than a dangling path.
+     config_cli's activity probe) transparently resolves to the single global
+     ledger rather than a dangling path.
+  3. REMOVE a stray that is a broken symlink (dangling, or self-referencing
+     -> itself). ``Path.exists()`` follows the link and so reports both cases
+     as plain "absent"; this tool used to print "nothing to do" about exactly
+     the breakage it exists to repair. Nothing project-local should survive:
+     ``paths.ledger_json()`` is pinned global.
 
 Holds the same flock the register path takes (/tmp/fno-ledger.lock) and
 refuses on contention, so a live stop-hook append can never interleave.
@@ -147,6 +152,21 @@ def main() -> int:
         stray_link = paths.resolve_repo_root() / ".fno" / "ledger.json"
 
     if not stray_link.exists():
+        # exists() FOLLOWS the link, so a dangling or self-referencing symlink
+        # (-> itself, ELOOP) is indistinguishable from "absent" here. That is
+        # the false all-clear that let a canonical self-loop sit unreported:
+        # the repair tool said "nothing to do" about the very breakage it
+        # exists to fix. is_symlink() lstat()s the link itself, so it sees it.
+        if stray_link.is_symlink():
+            print(f"broken stray ledger symlink: {stray_link} -> "
+                  f"{os.readlink(stray_link)}")
+            if not args.apply:
+                print("[dry-run] pass --apply to remove it.")
+                return 0
+            stray_link.unlink()
+            print(f"removed broken symlink: {stray_link} "
+                  f"(the ledger is global-only; no project-local copy belongs here)")
+            return 0
         print(f"no stray ledger at {stray_link}; nothing to do.")
         return 0
 
