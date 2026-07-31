@@ -12,7 +12,7 @@ AC6-FR   an unrecognized ci value surfaces as ci_unparsed, ci_reds None.
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import typer
 from typer.testing import CliRunner
@@ -40,6 +40,16 @@ def _wire(monkeypatch, tmp_path, ledger_path, events=None):
 
 def _loop(sid: str, ci: str, ts: str) -> str:
     return json.dumps({"ts": ts, "type": "loop_check", "data": {"session_id": sid, "ci": ci}})
+
+
+# CLI-path fixtures are RELATIVE to now; only the fold-level tests below may use
+# literals, because they inject `now=NOW` and are clock-independent. The CLI
+# reads a bare datetime.now() with no seam to freeze, so a literal row silently
+# ages out of the 28d window: the 2026-07-03T10:00 rows here expired at
+# 2026-07-31T10:00Z and reddened main. test_scoreboard.py already carries this
+# same fix; that pass converted one file and left the sibling files ticking.
+# Only `completed` needs this; loop_check ts values are sort keys, not windowed.
+_RECENT = (datetime.now() - timedelta(days=1)).isoformat()
 
 
 # --- AC1-HP ------------------------------------------------------------------
@@ -102,7 +112,7 @@ def test_hp_two_distinct_red_episodes_count_twice():
 def test_err_corrupt_events_line_never_crashes(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _RECENT, "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 1.0, "sessions": ["s-a"]},
     ]}))
     events = [
@@ -151,7 +161,7 @@ def test_ui_efficiency_conflicts_with_by_skill(tmp_path, monkeypatch):
 def test_ui_cli_renders_coverage_first(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _RECENT, "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "tokens_total": 10, "duration_minutes": 5, "sessions": ["s-a"]},
     ]}))
     _wire(monkeypatch, tmp_path, ledger, [_loop("s-a", "SUCCESS", "2026-07-03T09:00:00Z")])

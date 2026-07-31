@@ -11,6 +11,7 @@ AC-EDGE a skill file with no git history at the timestamp -> version "unknown",
 from __future__ import annotations
 
 import json
+from datetime import datetime, timedelta
 
 import typer
 from typer.testing import CliRunner
@@ -32,6 +33,15 @@ def _wire(monkeypatch, tmp_path, ledger_path):
 
     monkeypatch.setattr(paths, "ledger_json", lambda: ledger_path)
     monkeypatch.setattr(paths, "graph_json", lambda: tmp_path / "graph.json")
+
+
+# CLI-path fixtures are RELATIVE to now; only the fold-level tests below may use
+# literals, because they inject `now=` and are clock-independent. The CLI reads
+# a bare datetime.now() with no seam to freeze, so a literal row silently ages
+# out of the 28d window: the 2026-07-03T10:00 rows here expired at
+# 2026-07-31T10:00Z and reddened main. test_scoreboard.py already carries this
+# same fix; that pass converted one file and left the sibling files ticking.
+_RECENT = (datetime.now() - timedelta(days=1)).isoformat()
 
 
 def _skill_line(skill: str) -> str:
@@ -146,7 +156,7 @@ def test_default_hooks_real_path_never_crashes(tmp_path, monkeypatch):
 def test_hp_cli_renders_coverage_and_table(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _RECENT, "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "phases_completed": ["do", "review"]},
     ]}))
     _wire(monkeypatch, tmp_path, ledger)
@@ -373,7 +383,7 @@ def test_revert_rate_is_na_when_node_missing_from_graph():
 def test_cli_renders_na_for_unjudgeable_revert_rate(tmp_path, monkeypatch):
     ledger = tmp_path / "ledger.json"
     ledger.write_text(json.dumps({"entries": [
-        {"completed": "2026-07-03T10:00:00", "termination_reason": "DonePRGreen",
+        {"completed": _RECENT, "termination_reason": "DonePRGreen",
          "graph_node_id": "x-1", "cost_usd": 3.0, "phases_completed": ["do"]},
     ]}))
     _wire(monkeypatch, tmp_path, ledger)  # no graph.json -> no causal telemetry
