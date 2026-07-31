@@ -374,6 +374,94 @@ def test_destructive_lifecycle_pins_full_id_across_name_lock(
     assert shellouts == []
 
 
+def test_rm_full_id_retains_row_restamped_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A restamp after rm's side effect cannot make a replacement inherit deletion."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def restamp_during_rm(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return (0, "")
+
+    monkeypatch.setattr(claude_mod, "claude_rm", restamp_during_rm)
+
+    with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm") as exc:
+        dispatch.rm_agent(original_id)
+
+    assert exc.value.exit_code == 12
+    rows = registry_mod.load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == replacement_id
+
+
+def test_stop_full_id_does_not_stamp_row_restamped_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """A successful stop reports success without stamping a replacement row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+            status="live",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def restamp_during_stop(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return (0, "")
+
+    monkeypatch.setattr(claude_mod, "claude_stop", restamp_during_stop)
+
+    result = dispatch.stop_agent(original_id)
+
+    assert result.claude_exit == 0
+    rows = registry_mod.load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == replacement_id
+    assert rows[0].status == "live"
+    assert any(
+        event.get("kind") == "agent_stopped_status_write_failed"
+        and event.get("reason") == "recipient_identity_changed"
+        for event in _read_events(tmp_path)
+    )
+
+
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-EDGE: codex agents print info on stderr and exit 0; no subprocess."""
     use_tmpdir(monkeypatch, tmp_path)

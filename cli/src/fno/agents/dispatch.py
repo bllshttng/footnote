@@ -87,6 +87,36 @@ def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
     )
 
 
+def _update_registry_if_recipient_unchanged(
+    name: str,
+    expected_identity: Optional[RecipientIdentity],
+    updater: Callable[[list[AgentEntry]], list[AgentEntry]],
+) -> bool:
+    """Apply a post-side-effect write only to the address-selected recipient.
+
+    Exact-name lifecycle calls intentionally follow the current owner of that
+    name. Address-bound calls carry the originally resolved identity through
+    the final registry-wide lock so a writer that does not honor the per-name
+    lock cannot make a replacement inherit the registry mutation.
+    """
+    applied = expected_identity is None
+
+    def _guarded(entries: list[AgentEntry]) -> list[AgentEntry]:
+        nonlocal applied
+        if expected_identity is not None:
+            matches = [entry for entry in entries if entry.name == name]
+            if (
+                len(matches) != 1
+                or _recipient_identity_key(matches[0]) != expected_identity
+            ):
+                return entries
+            applied = True
+        return updater(entries)
+
+    update_registry(_guarded)
+    return applied
+
+
 # ---------------------------------------------------------------------------
 # Dispatch-scoped context propagation (Task 2.1)
 # ---------------------------------------------------------------------------
@@ -2681,13 +2711,22 @@ def stop_agent(
             # state, so this pre-empts the eventual reconcile without
             # introducing a new status value (no schema bump).
             try:
-                update_registry(
+                status_written = _update_registry_if_recipient_unchanged(
+                    name,
+                    expected_identity,
                     _stamp_status(
                         name,
                         status="orphaned",
                         last_message_at_preserve=True,
                     ),
                 )
+                if not status_written:
+                    events.emit(
+                        "agent_stopped_status_write_failed",
+                        name=name,
+                        provider="claude",
+                        reason="recipient_identity_changed",
+                    )
             except (OSError, RegistryVersionError):
                 # The stop subprocess already succeeded; a registry-write
                 # failure here is logged via the same events stream the
@@ -2974,7 +3013,11 @@ def rm_agent(
             # deprecated, so a speculative one would be untestable guesswork.
 
             try:
-                update_registry(lambda entries: [e for e in entries if e.name != name])
+                registry_changed = _update_registry_if_recipient_unchanged(
+                    name,
+                    expected_identity,
+                    lambda entries: [e for e in entries if e.name != name],
+                )
             except (OSError, RegistryVersionError) as exc:
                 events.emit(
                     "agent_removed",
@@ -2991,6 +3034,23 @@ def rm_agent(
                     f"registry write failed: {exc}",
                     exit_code=12,
                 ) from exc
+            if not registry_changed:
+                events.emit(
+                    "agent_removed",
+                    name=name,
+                    provider=existing.harness,
+                    claude_exit=claude_exit,
+                    force=force,
+                    registry_changed=False,
+                    teardown_error=teardown_error,
+                    error="recipient identity changed during harness removal",
+                    error_type="RecipientIdentityChanged",
+                )
+                raise DispatchAskError(
+                    f"agent {name!r} recipient identity changed during rm; "
+                    "the replacement registry row was retained",
+                    exit_code=12,
+                )
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
