@@ -72,8 +72,13 @@ fno_resolve_dir() {
 # that does not exist yet then looks like its own parent.
 #
 # The missing tail needs no symlink resolution (nothing there exists to be a
-# link), so following links on the parts that DO exist is the whole job - and
-# that includes the path itself, not only its ancestors.
+# link), so links are followed at the leaf and on every directory along the way
+# (`cd -P`) - the path itself included, not only its ancestors. One shape is
+# deliberately left unresolved: an intermediate symlink to a FILE, which is
+# peeled into the tail like any other non-directory. Nothing can be written
+# through it (the kernel refuses a path that descends into a file), and the
+# carve-out needs EVERY target inside the plans dir, so it cannot launder a
+# second one alongside.
 fno_physical_path() {
     local path="$1" tail="" base head phys link hops=0
     [[ -n "$path" ]] || return 1
