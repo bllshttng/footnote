@@ -26,6 +26,7 @@ from __future__ import annotations
 import contextvars
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
@@ -4555,7 +4556,15 @@ def _kickoff_background_relay(
         os._exit(0)
 
 
-def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
+_A2A_CONFIRM_TIMEOUT_SECONDS = 5.0
+
+
+def _a2a_first_use_gate(
+    auto: bool,
+    ceiling: int,
+    *,
+    confirm_timeout_seconds: float = _A2A_CONFIRM_TIMEOUT_SECONDS,
+) -> bool:
     """First-use confirm for the autonomous a2a relay (US6, ab-098967b4).
 
     Returns the EFFECTIVE ``auto`` after gating. Only the autonomous relay
@@ -4604,9 +4613,23 @@ def _a2a_first_use_gate(auto: bool, ceiling: int) -> bool:
     )
     sys.stderr.flush()
     try:
+        ready, _, _ = select.select(
+            [sys.stdin],
+            [],
+            [],
+            confirm_timeout_seconds,
+        )
+        if not ready:
+            raise TimeoutError
         answer = sys.stdin.readline().strip().lower()
     except Exception:
-        return False  # cannot read an answer -> conservative
+        sys.stderr.write(
+            "\nfno-agents a2a: confirmation timed out or could not be read; "
+            "applying the conservative fallback (autonomous relay OFF, single "
+            "observed hop).\n"
+        )
+        sys.stderr.flush()
+        return False
     keep_on = answer in ("", "y", "yes")
 
     try:

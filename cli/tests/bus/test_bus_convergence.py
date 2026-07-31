@@ -10,7 +10,11 @@ into the global log, so:
 """
 from __future__ import annotations
 
+import fcntl
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 from typer.testing import CliRunner
@@ -45,6 +49,54 @@ def test_write_new_thread_mirrors_to_bus_log(inbox_and_bus):
     assert env.body == "region column work"
     # The render path is carried so drain can preserve provenance back to the md.
     assert env.meta.get("render_path", "").endswith(".md")
+
+
+def test_ac1_err_contended_bus_lock_times_out_without_record_or_render(
+    inbox_and_bus,
+):
+    """A stalled canonical writer cannot hold a durable send forever."""
+    from fno.bus import log as bus_log
+    from fno.inbox.store import inbox_dir_for
+
+    lock_path = bus_log._lock_path()
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    holder = os.open(lock_path, os.O_CREAT | os.O_RDWR, 0o600)
+    fcntl.flock(holder, fcntl.LOCK_EX)
+    script = """
+from fno.bus import log as bus_log
+from fno.inbox.store import Kind, write_new_thread
+
+bus_log._LOCK_TIMEOUT_SECONDS = 0.05
+bus_log._LOCK_POLL_SECONDS = 0.005
+try:
+    write_new_thread("alice", "bob", Kind.SEND.value, "must not disappear")
+except Exception as exc:
+    print(type(exc).__name__)
+    print(str(exc))
+else:
+    raise SystemExit("contended write unexpectedly succeeded")
+"""
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            env=os.environ.copy(),
+            capture_output=True,
+            text=True,
+            timeout=1.0,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail("durable write remained blocked on messages.jsonl.lock")
+    finally:
+        fcntl.flock(holder, fcntl.LOCK_UN)
+        os.close(holder)
+
+    assert proc.returncode == 0, proc.stderr
+    assert "BusLockTimeout" in proc.stdout
+    assert "no durable envelope was written" in proc.stdout
+    assert not bus_log.bus_log_path().exists()
+    inbox = inbox_dir_for("alice")
+    assert not list(inbox.glob("*.md"))
 
 
 def test_append_to_thread_mirrors_reply_envelope(inbox_and_bus):

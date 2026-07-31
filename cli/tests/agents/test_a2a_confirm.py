@@ -6,7 +6,9 @@ AC6-FR (answered once, never re-asks), and the observed/malformed pass-through.
 """
 from __future__ import annotations
 
-import pytest
+import os
+import time
+
 import tomllib
 
 from fno import paths
@@ -16,14 +18,19 @@ from fno.paths_testing import use_tmpdir
 
 class _FakeIn:
     def __init__(self, line: str, tty: bool = True):
-        self._line = line
         self._tty = tty
+        self._read_fd, write_fd = os.pipe()
+        os.write(write_fd, line.encode())
+        os.close(write_fd)
 
     def isatty(self) -> bool:
         return self._tty
 
+    def fileno(self) -> int:
+        return self._read_fd
+
     def readline(self) -> str:
-        return self._line
+        return os.read(self._read_fd, 4096).decode()
 
 
 class _FakeErr:
@@ -93,6 +100,45 @@ def test_ac6_edge_no_tty_conservative_off(tmp_path, monkeypatch):
     assert "conservative fallback" in err.text()
     # NOT persisted -> no marker, so an interactive run later still asks.
     assert not (paths.state_dir() / ".a2a-confirmed").exists()
+
+
+def test_ac3_err_unanswered_tty_times_out_without_persisting(tmp_path, monkeypatch):
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", str(tmp_path / "g.yaml"))
+    read_fd, write_fd = os.pipe()
+
+    class _UnansweredTTY:
+        def isatty(self):
+            return True
+
+        def fileno(self):
+            return read_fd
+
+        def readline(self):
+            return os.read(read_fd, 4096).decode()
+
+    err = _FakeErr()
+    monkeypatch.setattr(dispatch.sys, "stdin", _UnansweredTTY())
+    monkeypatch.setattr(dispatch.sys, "stderr", err)
+    monkeypatch.delenv("FNO_A2A_NO_CONFIRM", raising=False)
+
+    started = time.monotonic()
+    try:
+        effective = dispatch._a2a_first_use_gate(
+            True,
+            6,
+            confirm_timeout_seconds=0.05,
+        )
+    finally:
+        os.close(write_fd)
+        os.close(read_fd)
+
+    assert time.monotonic() - started < 0.5
+    assert effective is False
+    assert "timed out" in err.text()
+    assert "conservative fallback" in err.text()
+    assert not (paths.state_dir() / ".a2a-confirmed").exists()
+    assert not (tmp_path / "config.toml").exists()
 
 
 def test_ac6_fr_marker_means_no_reask(tmp_path, monkeypatch):

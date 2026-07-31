@@ -1,6 +1,8 @@
 # How-to: send an async message to a peer agent with `fno mail send`
 
-`fno mail send <name> "<message>"` is the async sibling of `ask`. It attempts a live inject first and falls back to a durable envelope only when that misses, returning immediately either way - the caller never blocks waiting for a reply. A live delivery writes nothing to the bus; a durable one is the recovery copy, not delivery, so read the receipt (`delivered (hosted)` vs `queued (durable)`) rather than the exit code. `queued (durable)` means the live inject was not CONFIRMED, which is not proof it failed: a busy recipient can record the turn past the confirm budget and receive it anyway, so `peek` before re-sending. Unlike `ask`, it does not require a registry row - it resolves a live session across the registry, the daemon roster, and disk - but a name that resolves to nothing exits 16 with a "spawn it first" hint (Locked Decision 1 from the cross-agent bus epic: ask and send never create peers).
+`fno mail send <name> "<message>"` is the async sibling of `ask`. It attempts a live inject first and falls back to a durable envelope only when that misses, returning without waiting for a reply. A live delivery writes nothing to the bus; a durable one is the recovery copy, not delivery, so read the receipt (`delivered (hosted)` vs `queued (durable)`) rather than the exit code. `queued (durable)` means the live inject was not CONFIRMED, which is not proof it failed: a busy recipient can record the turn past the confirm budget and receive it anyway, so `peek` before re-sending. Unlike `ask`, it does not require a registry row - it resolves a live session across the registry, the daemon roster, and disk - but a name that resolves to nothing exits 16 with a "spawn it first" hint (Locked Decision 1 from the cross-agent bus epic: ask and send never create peers).
+
+Only a terminal success receipt or independent evidence in the recipient transcript proves that a send occurred. A timeout, interruption, or command that returns no receipt is not coordination and must not be reported as such.
 
 Use this guide when a script or LLM session needs to hand off work to a peer without waiting for the response, or when the recipient may be offline and you want the message to land in their inbox for pickup at next turn-start.
 
@@ -15,7 +17,7 @@ Use this guide when a script or LLM session needs to hand off work to a peer wit
 fno mail send frontend-worker "run the failing tests and open a PR"
 ```
 
-stdout is exactly one line, always exit 0:
+On success, stdout is exactly one line and the command exits 0:
 
 ```
 msg-3a7f1c2e delivered (hosted)
@@ -77,6 +79,7 @@ Send resolves delivery in order:
 | Provider mismatch | 2 | mismatch description |
 | Registry read error | 12 | `registry read failed: ...` |
 | Lock timeout (another send/ask holds the per-agent flock) | 11 | `timed out waiting for agent '<name>' lock (timeout=Ns)` |
+| Bus lock timeout before durable append | 12 | `bus lock timeout after 5s at <path>; no durable envelope was written` |
 | Durable envelope write failed | 12 | `durable envelope write failed: ...` |
 | Live delivery demoted | 0 | demotion notice on stderr; stdout says `queued (durable)` |
 

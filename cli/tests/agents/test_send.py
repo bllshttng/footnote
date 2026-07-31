@@ -1230,6 +1230,38 @@ def test_dispatch_send_envelope_write_oserror_exit12(tmp_path: Path, monkeypatch
     )
 
 
+def test_dispatch_send_bus_lock_timeout_is_explicit_exit12(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC1-ERR: a pre-append timeout is loud and never resembles a receipt."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _register_claude_peer()
+
+    from fno.bus.log import BusLockTimeout
+    from fno.inbox import store as store_mod
+
+    timeout = BusLockTimeout(tmp_path / "messages.jsonl.lock", 5.0)
+    monkeypatch.setattr(
+        store_mod,
+        "write_new_thread",
+        lambda **_kw: (_ for _ in ()).throw(timeout),
+    )
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_send
+
+    cwd = tmp_path / "work"
+    cwd.mkdir()
+    with pytest.raises(DispatchAskError) as exc_info:
+        dispatch_send(name="red", message="hello", provider=None, cwd=cwd)
+
+    text = str(exc_info.value)
+    assert exc_info.value.exit_code == 12
+    assert "bus lock timeout" in text
+    assert "no durable envelope was written" in text
+    assert "delivered" not in text
+    assert "queued (durable)" not in text
+
+
 def test_dispatch_send_envelope_write_valueerror_exit12(tmp_path: Path, monkeypatch) -> None:
     """F1: write_new_thread raises ValueError -> DispatchAskError exit 12."""
     use_tmpdir(monkeypatch, tmp_path)

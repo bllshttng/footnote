@@ -46,6 +46,8 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **A durable receipt is not delivery.** Read the send receipt: `delivered (hosted)` = confirmed into the peer's session; `queued (durable)` = NOT confirmed, waiting on a drain that may never run. Don't wait on a durable send: `fno agents peek <handle>` (landed? alive?), `resume <handle>` then re-send, or `attach <handle>`. Check with `peek` before re-sending - a busy recipient can still receive the queued turn, so a blind re-send double-delivers.
 
+**No receipt is no coordination.** Only a terminal success receipt or independent recipient-transcript evidence proves a send occurred. A timeout, interruption, or command that returns no receipt must not be reported as coordination; a bus-lock timeout exits 12 and states that no durable envelope was written.
+
 **Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer a specific one with `fno mail reply --to <id> "..."` (threads `in_reply_to`). A live-injected message has no bus id - use `send <from>` for those.
 
 **Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project; if you will hold for the answer, add `--from-self`. The `mail:` line of `fno whoami` is the only valid `--from-name`.
