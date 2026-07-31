@@ -28,6 +28,7 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -344,6 +345,10 @@ class AgentEntry:
 # short id, canonical handle, or legacy prefix. This function is the single
 # lookup choke point so no verb re-implements a name-only `.find`.
 # ---------------------------------------------------------------------------
+
+# Exactly eight lowercase hex characters, used only when deciding whether a
+# Claude restamp may safely refresh a derived transport short id.
+_DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
 
 _ACCEPTED_FORMS = (
     "accepted forms: name, canonical handle, transport short id, or full session id"
