@@ -129,6 +129,12 @@ expect "C4b: Edit on a plans path outside the plans dir still approved" approve 
 expect "C5: non-md write approved" approve \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$TMP/repo/src/main.py\",\"content\":\"print(1)\"}}"
 
+# The frontmatter grammar is node + slug + one of type/deliverable_type/status.
+# C1/C2/C3 never reach that third arm, so without this a guard that dropped it
+# and blocked every node+slug doc would still look clean.
+expect "C8: node+slug without type or status is not a plan" approve \
+  "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/note.md\",\"content\":\"---\\nnode: x-1\\nslug: s\\n---\\n# note\\n\"}}"
+
 # ── C6/C7: relative targets anchor to the PAYLOAD cwd, not the hook's own ────
 # Chosen so the two anchorings disagree: relative to the payload cwd this lands
 # INSIDE the plans dir, while against any other cwd it lands outside and the
@@ -297,10 +303,22 @@ else
     write_fake_fno "$PLANS"
 
     # A symlink LEADING OUT of an existing plans dir must not carve itself out:
-    # the lexical shortcut exists only for a plans dir that does not exist yet.
+    # the physical resolver must follow the directory link OUT of the plans dir.
     ln -s "$CANON/src" "$PLANS/sneak" 2>/dev/null
     expect_wp "H2: symlink out of the plans dir does not carve out" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/sneak/evil.md\"}}"
+
+    # H2 only covers a DIRECTORY link. A link to a FILE fails the `-d` test the
+    # walk-up keys on, so without an explicit dereference it is carried along
+    # unresolved and the target reads as inside the plans dir. A vault full of
+    # symlinked notes makes this the ordinary shape, not an exotic one.
+    : > "$CANON/src/thing.md"
+    ln -s "$CANON/src/thing.md" "$PLANS/decoy.md" 2>/dev/null
+    expect_wp "H2b: leaf file symlink out of the plans dir does not carve out" block \
+      "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/decoy.md\"}}"
+
+    expect "H2c: leaf file symlink is judged at its destination" block \
+      "{\"tool_name\":\"Write\",\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/decoy.md\",\"content\":\"$PLAN_FM\"}}"
 
     # A sibling sharing the prefix is not inside it (the trailing-slash rule).
     mkdir -p "${PLANS}-archive"
@@ -341,9 +359,9 @@ STUBEOF
     # behavior, not lose its per-target check.
     HALF="$TMP/half"
     mkdir -p "$HALF/helpers"
-    cp hooks/worktree-write-protect.sh "$HALF/"
-    cp hooks/helpers/check-impl-location.sh "$HALF/helpers/"
-    sed -n '/^fno_plans_dir()/,/^}/p' hooks/helpers/plans-dir.sh > "$HALF/helpers/plans-dir.sh"
+    cp "$REPO_ROOT/hooks/worktree-write-protect.sh" "$HALF/"
+    cp "$REPO_ROOT/hooks/helpers/check-impl-location.sh" "$HALF/helpers/"
+    sed -n '/^fno_plans_dir()/,/^}/p' "$REPO_ROOT/hooks/helpers/plans-dir.sh" > "$HALF/helpers/plans-dir.sh"
     out=$(printf '%s' "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}" \
         | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
     if printf '%s' "$out" | grep -q '"block"'; then
@@ -363,6 +381,19 @@ STUBEOF
         pass "J2: half-sourced helper keeps the per-target check"
     else
         fail "J2: per-target check lost with a half-sourced helper: $out"
+    fi
+
+    # The positive guard must fail OPEN on the same input, per its own contract.
+    # A missing containment test reads as "not under the plans dir", so without a
+    # completeness check it would DENY the correct save while naming that very
+    # directory as the right destination.
+    cp "$REPO_ROOT/hooks/plan-location-guard.sh" "$HALF/"
+    out=$(printf '%s' "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\",\"content\":\"$PLAN_FM\"}}" \
+        | PATH="$FAKE_PATH" bash "$HALF/plan-location-guard.sh" 2>/dev/null)
+    if [[ "$out" == "{}" ]]; then
+        pass "J3: half-sourced helper leaves the positive guard fail-open"
+    else
+        fail "J3: positive guard denied a correct save on a half-sourced helper: $out"
     fi
 
     write_fake_fno "$PLANS"

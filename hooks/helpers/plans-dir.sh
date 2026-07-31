@@ -72,10 +72,28 @@ fno_resolve_dir() {
 # that does not exist yet then looks like its own parent.
 #
 # The missing tail needs no symlink resolution (nothing there exists to be a
-# link), so following links on the existing part is the whole job.
+# link), so following links on the parts that DO exist is the whole job - and
+# that includes the path itself, not only its ancestors.
 fno_physical_path() {
-    local path="$1" tail="" base head phys
+    local path="$1" tail="" base head phys link hops=0
     [[ -n "$path" ]] || return 1
+    # Dereference a link AT the path. The walk-up below tests `-d`, so an
+    # existing symlink to a FILE fails that test and would be peeled into the
+    # tail and never resolved. The plans dir is normally a vault, where
+    # symlinked notes are ordinary, so a link there pointing at a tracked source
+    # file would otherwise satisfy containment and carve itself out - approving
+    # a write onto the shared branch. A path that does not exist has no link to
+    # follow, so the not-yet-created case is untouched.
+    while [[ -L "$path" ]]; do
+        hops=$((hops + 1))
+        [[ $hops -le 40 ]] || return 1
+        link="$(readlink "$path" 2>/dev/null)" || return 1
+        if [[ "$link" == /* ]]; then
+            path="$link"
+        else
+            path="$(dirname "$path")/$link"
+        fi
+    done
     while [[ ! -d "$path" ]]; do
         base="${path##*/}"
         head="${path%/*}"
