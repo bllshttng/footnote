@@ -528,7 +528,7 @@ def _ensure_unique_across_aliases(
         )
 
     entry = resolved.entry
-    registry_id = entry.harness_session_id
+    registry_id = getattr(entry, "harness_session_id", None)
     foreign = sorted(
         sid
         for sid in set(alias_ids)
