@@ -23,6 +23,16 @@ from __future__ import annotations
 
 import pytest
 
+from fno.harness_identity import scrub_ambient_identity
+
+# Ambient session identity, scrubbed at module load like the cli/tests/ tree
+# does. This tree is a SEPARATE pytest root with its own conftest, so the scrub
+# over there protects nothing here: a targeted `pytest cli/src/fno/...` reaches
+# target_cli.py and the carveout/done/log readers with the live session's
+# markers still set, and resolves the identity of the session running the tests.
+# A fixture would be too late for anything reading a marker at import time.
+scrub_ambient_identity()
+
 
 @pytest.fixture(autouse=True)
 def _pin_global_settings_to_devnull(monkeypatch: pytest.MonkeyPatch) -> None:

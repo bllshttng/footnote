@@ -83,16 +83,11 @@ os.environ["FNO_E2E"] = "1"
 # genuinely read - was already missing from the literal this replaces. The import
 # is safe here despite the import-time-constant hazard above: harness_identity
 # pulls only os/re/typing plus the typing-only harness_map, never fno.graph.
-from fno.harness_identity import (  # noqa: E402
-    HARNESS_SESSION_MARKERS,
-    LEGACY_HARNESS_SESSION_MARKERS,
-)
+from fno.harness_identity import scrub_ambient_identity  # noqa: E402
 
-for _ambient_key in (
-    "FNO_NODE", "FNO_SLUG", "FNO_PLAN",
-    *(m for m, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)),
-):
+for _ambient_key in ("FNO_NODE", "FNO_SLUG", "FNO_PLAN"):
     os.environ.pop(_ambient_key, None)
+scrub_ambient_identity()
 
 
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:

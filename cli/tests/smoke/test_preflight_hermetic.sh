@@ -28,25 +28,52 @@ grep -Fq 'hardcoded fallback list' "$PF" \
 grep -Fq '&& [[ -n "$HARNESS_MARKERS" ]]; then' "$PF" \
   || fail "fallback not keyed on fetch exit status (partial-stdout+nonzero would slip past)"
 
-# The derivation must read the LEGACY tuple too. CLAUDE_SESSION_ID lives only
-# there, and current_session_id()/current_session_ids() both read it, so a
-# canonical-tuple-only derivation leaves a live claude session resolvable.
-grep -Fq 'LEGACY_HARNESS_SESSION_MARKERS' "$PF" \
-  || fail "marker derivation ignores LEGACY_HARNESS_SESSION_MARKERS"
+# Both marker lists preflight can end up using must cover AMBIENT_IDENTITY_ENV:
+# the derivation it runs when Python works, and the literal it falls back to when
+# Python does not. The fallback especially needs its own check - it only runs
+# when the venv is broken, which is exactly when nobody is reading the output.
+#
+# Done in ONE python3 call that EXECUTES preflight's own derivation rather than
+# grepping for tuple names. Two reasons. A name-occurrence grep passes on the
+# unused import alone, so dropping the tuple from the executable expression while
+# leaving the import reds nothing. And a shell `while read` over a here-string is
+# silently skipped when bash cannot create the temp file backing `<<<`, under
+# `set -e`, reaching PASS with zero assertions run (observed, not theorized).
+# One command, one exit code, nothing to skip.
+PROBLEMS="$(PYTHONPATH=cli/src python3 - "$PF" <<'PYEOF'
+import re, subprocess, sys, os
+from fno.harness_identity import AMBIENT_IDENTITY_ENV
 
-# The last-resort literal must still name every marker. A stale copy scrubs less
-# than the derived list, and the gap is invisible where it matters: the fallback
-# only runs when the venv is broken, which is exactly when nobody is reading.
-EXPECTED_MARKERS="$(PYTHONPATH=cli/src python3 -c \
-  'from fno.harness_identity import HARNESS_SESSION_MARKERS as C, LEGACY_HARNESS_SESSION_MARKERS as L; print("\n".join(m[0] for m in (*C, *L)))')" \
-  || fail "cannot read the harness marker tuples"
-[[ -n "$EXPECTED_MARKERS" ]] || fail "harness marker tuples resolved empty"
-FALLBACK_MARKERS="$(sed -n 's/^ *HARNESS_MARKERS="\(CODEX_THREAD_ID[^"]*\)"$/\1/p' "$PF" | tr ' ' '\n')"
-[[ -n "$FALLBACK_MARKERS" ]] || fail "cannot locate the hardcoded fallback marker list"
-while read -r marker; do
-  printf '%s\n' "$FALLBACK_MARKERS" | grep -qx -- "$marker" \
-    || fail "hardcoded fallback marker list is missing $marker"
-done <<< "$EXPECTED_MARKERS"
+source = open(sys.argv[1]).read()
+expected = set(AMBIENT_IDENTITY_ENV)
+problems = []
+
+# The derivation preflight actually runs, executed rather than pattern-matched.
+snippet = re.search(r"'(from fno\.harness_identity import [^']*)'", source)
+if not snippet:
+    problems.append("cannot locate the python derivation in preflight.sh")
+else:
+    env = dict(os.environ, PYTHONPATH="cli/src")
+    out = subprocess.run([sys.executable, "-c", snippet.group(1)],
+                         capture_output=True, text=True, env=env)
+    if out.returncode != 0:
+        problems.append(f"preflight's derivation does not run: {out.stderr.strip()}")
+    else:
+        derived = set(out.stdout.split())
+        if missing := expected - derived:
+            problems.append(f"derivation misses {sorted(missing)}")
+
+# The last-resort literal.
+literal = re.search(r'^\s*HARNESS_MARKERS="(CODEX_THREAD_ID[^"]*)"\s*$', source, re.M)
+if not literal:
+    problems.append("cannot locate the hardcoded fallback marker list")
+elif missing := expected - set(literal.group(1).split()):
+    problems.append(f"fallback literal misses {sorted(missing)}")
+
+print("; ".join(problems))
+PYEOF
+)" || fail "harness marker coverage check did not run"
+[[ -z "$PROBLEMS" ]] || fail "$PROBLEMS"
 
 # The changed packet must run through run_hermetic like every other leg, and
 # with an EXPLICIT base/head. Local mode inside the preflight worktree would

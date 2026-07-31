@@ -204,7 +204,13 @@ def test_rust_marker_mirror_matches_the_python_tuple():
         r"const HARNESS_SESSION_MARKERS:[^=]*=\s*&\[(.*?)\];", source, re.S
     )
     assert block, f"no HARNESS_SESSION_MARKERS const found in {claims_rs}"
-    mirrored = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))
+    # Drop commented-out lines first. Matching raw source counts a
+    # `// ("MARKER", "harness"),` as an entry, so commenting a marker out - which
+    # removes it from the compiled array - would leave this green.
+    entries = "\n".join(
+        line for line in block.group(1).splitlines() if not line.lstrip().startswith("//")
+    )
+    mirrored = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', entries)
 
     assert mirrored == list(HARNESS_SESSION_MARKERS), (
         "claims.rs HARNESS_SESSION_MARKERS drifted from harness_identity.py; "
