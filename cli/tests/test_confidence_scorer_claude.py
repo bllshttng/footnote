@@ -493,11 +493,14 @@ class TestScoreFindings:
         assert [f.confidence for f in kept] == [95, 85]
         assert call_counter["n"] == 1  # single batched invocation, not per-finding
 
-    def test_batch_scorer_wrong_length_zeros_all(
+    def test_batch_scorer_wrong_length_passes_through(
         self, capsys: pytest.CaptureFixture
     ) -> None:
         """A user-supplied batch scorer that returns the wrong-length list
         must NOT have its scores zip'd into findings (silent misalignment).
+        The guard zeros the misaligned scores, and the resulting all-zero is
+        treated as a scorer failure: findings pass through unscored rather than
+        being silently dropped.
         """
         from fno.review.confidence_scorer import score_findings
 
@@ -511,16 +514,18 @@ class TestScoreFindings:
 
         kept = score_findings(findings, scorer=bad_batch_scorer, threshold=80)
 
-        # Every finding zeroed out, all below threshold -> empty kept list.
-        assert kept == []
+        # Misalignment guarded (no zip), and findings preserved unscored.
+        assert len(kept) == 4
+        assert all(f.confidence is None for f in kept)
         err = capsys.readouterr().err
         assert "batch scorer returned 2 for 4" in err
 
-    def test_batch_scorer_non_list_zeros_all(
+    def test_batch_scorer_non_list_passes_through(
         self, capsys: pytest.CaptureFixture
     ) -> None:
-        """A batch scorer that returns a non-list (buggy user scorer) also
-        triggers the guard rather than crashing on zip().
+        """A batch scorer that returns a non-list (buggy user scorer) triggers
+        the guard rather than crashing on zip(); the zeroed result then passes
+        the findings through unscored.
         """
         from fno.review.confidence_scorer import score_findings
 
@@ -532,7 +537,8 @@ class TestScoreFindings:
         broken_batch_scorer.__batch__ = True  # type: ignore[attr-defined]
 
         kept = score_findings(findings, scorer=broken_batch_scorer, threshold=80)
-        assert kept == []
+        assert len(kept) == 3
+        assert all(f.confidence is None for f in kept)
         err = capsys.readouterr().err
         assert "batch scorer returned int for 3" in err
 
@@ -549,6 +555,74 @@ class TestScoreFindings:
         # pass-through gives every finding 100 which is above threshold 80.
         assert len(kept) == 2
         assert all(f.confidence == 100 for f in kept)
+
+
+# ---------------------------------------------------------------------------
+# Systemic scorer failure must not manufacture a clean review.
+# A broken scorer (timeout, auth refusal, all-zero fallback) returns 0 for
+# every finding; 0 is also the score for a genuine false positive, so the
+# codebase treats all-zero on a non-empty batch as a systemic failure and
+# passes the findings through unscored rather than silently dropping them.
+# ---------------------------------------------------------------------------
+
+class TestSystemicScorerFailurePassthrough:
+    """An all-zero result on a non-empty finding set is a scorer failure, so
+    findings are preserved (unscored), not dropped."""
+
+    def test_all_zero_batch_scorer_passes_through(self, capsys: pytest.CaptureFixture) -> None:
+        from fno.review.confidence_scorer import score_findings
+
+        findings = [_make_finding(f"f{i}") for i in range(3)]
+
+        def failing_batch(fs: list[Finding]) -> list[int]:
+            return [0, 0, 0]  # systemic: nothing came back scoreable
+
+        failing_batch.__batch__ = True  # type: ignore[attr-defined]
+
+        kept = score_findings(findings, scorer=failing_batch, threshold=80)
+        # Findings preserved (not dropped), confidence left unscored.
+        assert len(kept) == 3
+        assert all(f.confidence is None for f in kept)
+        err = capsys.readouterr().err
+        assert "pass" in err.lower() or "preserve" in err.lower() or "all-zero" in err.lower()
+
+    def test_real_batch_scorer_timeout_preserves_findings(
+        self, capsys: pytest.CaptureFixture
+    ) -> None:
+        """End-to-end: the real claude_scorer_batch timing out must not drop
+        findings when run through score_findings."""
+        from fno.review import confidence_scorer as cs_mod
+        from fno.review.confidence_scorer import score_findings
+
+        findings = [_make_finding(f"f{i}") for i in range(3)]
+        cs_mod._no_claude_warned = False
+        with (
+            patch("shutil.which", return_value="/usr/local/bin/claude"),
+            patch(
+                "subprocess.run",
+                side_effect=subprocess.TimeoutExpired(cmd=["claude", "-p"], timeout=120),
+            ),
+        ):
+            kept = score_findings(findings, threshold=80)
+
+        assert len(kept) == 3  # preserved despite the systemic timeout
+        assert all(f.confidence is None for f in kept)
+
+    def test_partial_low_scores_still_filter_normally(self) -> None:
+        """Only an ALL-zero result is treated as systemic. A mix with some
+        below-threshold (but not all zero) filters normally."""
+        from fno.review.confidence_scorer import score_findings
+
+        findings = [_make_finding(f"f{i}") for i in range(3)]
+        scorer = self._scores([90, 50, 0])
+        kept = score_findings(findings, scorer=scorer, threshold=80)
+        assert len(kept) == 1
+        assert kept[0].confidence == 90
+
+    @staticmethod
+    def _scores(scores: list[int]):
+        it = iter(scores)
+        return lambda f: next(it)
 
 
 # ---------------------------------------------------------------------------
