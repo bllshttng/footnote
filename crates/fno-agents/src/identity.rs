@@ -4,7 +4,12 @@
 pub(crate) fn canonical_handle(session_id: &str) -> String {
     let mut tail = session_id.chars().rev().take(8).collect::<Vec<_>>();
     tail.reverse();
-    tail.into_iter().collect()
+    let tail: String = tail.into_iter().collect();
+    if session_id.starts_with("ses_") {
+        tail
+    } else {
+        tail.to_ascii_lowercase()
+    }
 }
 
 /// The retired first-eight address retained only for compatibility resolution.
@@ -34,4 +39,18 @@ pub(crate) fn session_handle_tier(token: &str, session_id: &str) -> Option<u8> {
     .iter()
     .position(|value| equal(value))
     .map(|tier| tier as u8)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::canonical_handle;
+
+    #[test]
+    fn canonical_handle_normalizes_uuid_case_but_preserves_opencode_case() {
+        assert_eq!(
+            canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4"),
+            "4bcf4ae4"
+        );
+        assert_eq!(canonical_handle("ses_7f3a9b2cAbCd1234"), "AbCd1234");
+    }
 }

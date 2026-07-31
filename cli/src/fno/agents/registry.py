@@ -491,7 +491,7 @@ def resolve_agent_across_sources(
         # A MISS may fall through; a registry the caller must disambiguate must
         # not. Otherwise a store hit on one of several matching rows would pick
         # the winner the registry deliberately refused to pick.
-        if exc.ambiguous:
+        if exc.ambiguous or exc.unavailable:
             raise
         entry = resolve_from_harness_store(token, registry_path=path)
         if entry is None:
@@ -506,7 +506,46 @@ def resolve_registered_agent_across_sources(entries: list, token: str) -> Resolv
     gated read and delivery verbs use this to share the all-source ambiguity rule
     without changing their established miss contract.
     """
-    return _ensure_unique_across_stores(resolve_agent_in(entries, token), token)
+    resolved = resolve_agent_in(entries, token)
+    resolved = _ensure_unique_across_aliases(resolved, token)
+    return _ensure_unique_across_stores(resolved, token)
+
+
+def _ensure_unique_across_aliases(
+    resolved: ResolvedAgent, token: str
+) -> ResolvedAgent:
+    """Union a registry hit with persisted friendly aliases before selecting."""
+    if resolved.matched_by == "full_session_id":
+        return resolved
+
+    from fno.agents.discover import _alias_to_session_ids
+
+    alias_ids, read_ok = _alias_to_session_ids(token, None)
+    if not read_ok:
+        raise AgentResolutionError(
+            f"persisted alias map unreadable; cannot resolve {token!r} uniquely",
+            unavailable=True,
+        )
+
+    entry = resolved.entry
+    registry_id = entry.harness_session_id
+    foreign = sorted(
+        sid
+        for sid in set(alias_ids)
+        if registry_id is None or sid != registry_id
+    )
+    if not foreign:
+        return resolved
+
+    candidates = [
+        f"{registry_id or entry.name} ({entry.harness}, registry name={entry.name})",
+        *(f"{sid} (persisted alias)" for sid in foreign),
+    ]
+    raise AgentResolutionError(
+        f"token {token!r} is ambiguous across {len(candidates)} sessions: "
+        f"{', '.join(candidates)}. Disambiguate with the full session id.",
+        ambiguous=True,
+    )
 
 
 def _ensure_unique_across_stores(

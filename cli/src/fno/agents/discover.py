@@ -1334,6 +1334,24 @@ def resolve_or_suggest(
         }.values()
     )
     if len(exact) == 1:
+        from fno.agents.store_fallback import is_full_session_id
+
+        if not is_full_session_id(handle):
+            try:
+                durable, ambiguous = resolve_reachable(
+                    handle,
+                    projects_dir=projects_dir,
+                    registry_path=registry_path,
+                    name_map_path=name_map_path,
+                )
+            except StoreReadError:
+                return None, [exact[0].session_id]
+            if ambiguous:
+                return None, sorted({exact[0].session_id, *ambiguous})
+            if durable is not None and _fold_token(durable.session_id) != _fold_token(
+                exact[0].session_id
+            ):
+                return None, sorted({exact[0].session_id, durable.session_id})
         return exact[0], []
     if len(exact) > 1:
         return None, sorted(s.session_id for s in exact)
@@ -1690,6 +1708,21 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
     return hits, not malformed
 
 
+def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
+    """Codex, OpenCode, and Claude native-store hits below live discovery."""
+    from fno.agents.registry import AgentResolutionError
+    from fno.agents.store_fallback import complete_store_hits
+
+    try:
+        hits = complete_store_hits(token)
+    except AgentResolutionError:
+        return [], False
+    return [
+        (hit.session_id, hit.harness, hit.cwd or None, True)
+        for hit in hits
+    ], True
+
+
 def resolve_reachable(
     token: str,
     *,
@@ -1730,6 +1763,7 @@ def resolve_reachable(
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
+        ("harness-store", _reachable_from_harness_stores),
         ("registry", lambda t: _reachable_from_registry(t, registry_path)),
         ("roster", lambda t: _reachable_from_roster(t, daemon_dir)),
         ("graph", lambda t: _reachable_from_graph(t)),

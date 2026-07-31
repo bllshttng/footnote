@@ -23,6 +23,7 @@ from fno.harness_identity import (
         ("CLAUDE_CODE_SESSION_ID", "claude-1", "claude"),
         ("CODEX_SESSION_ID", "codex-1", "codex"),
         ("GEMINI_SESSION_ID", "gemini-1", "gemini"),
+        ("OPENCODE_SESSION_ID", "ses_OpenCode1", "opencode"),
     ],
 )
 def test_resolves_each_supported_marker(marker, session_id, harness):
@@ -70,6 +71,7 @@ def test_current_session_helpers_share_precedence_and_legacy_fallback():
 def test_ac1_hp_canonical_handle_is_random_tail():
     """The generated mailbox id carries no harness prefix (AC1-HP)."""
     assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
+    assert canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"
     assert canonical_handle("ses_7f3a9b2cAbCd1234") == "AbCd1234"
 
 

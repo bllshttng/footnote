@@ -15,6 +15,7 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),
     ("GEMINI_SESSION_ID", "gemini"),
+    ("OPENCODE_SESSION_ID", "opencode"),
 )
 
 LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
@@ -37,7 +38,8 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 # another and silently strand on the bus.
 def canonical_handle(session_id: str) -> str:
     """The mailbox address: the final eight characters of the session id."""
-    return session_id[-8:]
+    tail = session_id[-8:]
+    return tail if session_id.startswith("ses_") else tail.lower()
 
 
 def legacy_prefix_handle(session_id: str) -> str:

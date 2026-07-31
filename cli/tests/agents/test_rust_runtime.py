@@ -564,8 +564,8 @@ def test_rust_client_verbs_match_client_rs() -> None:
     )
 
 
-def test_harness_markers_match_client_rs() -> None:
-    """Rust HARNESS_MARKERS mirrors Python HARNESS_SESSION_MARKERS, order included.
+def test_harness_markers_match_rust_consumers() -> None:
+    """Rust marker tables mirror Python HARNESS_SESSION_MARKERS, order included.
 
     The Rust unit test only checks the Rust const against a hard-coded Rust
     literal, so a drift on the Python side leaves both suites green while the two
@@ -581,18 +581,25 @@ def test_harness_markers_match_client_rs() -> None:
     repo_root = _find_repo_root(Path(__file__).resolve().parent)
     if repo_root is None:
         pytest.skip("crates/fno-agents/src/bin/client.rs not present in this checkout")
-    client_rs = repo_root / "crates" / "fno-agents" / "src" / "bin" / "client.rs"
-
-    src = client_rs.read_text()
-    block = re.search(r"const HARNESS_MARKERS[^=]*=\s*&\[(.*?)\];", src, re.DOTALL)
-    assert block, "HARNESS_MARKERS const not found in client.rs"
-    rust_pairs = re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))
-
-    assert rust_pairs == [tuple(p) for p in HARNESS_SESSION_MARKERS], (
-        "HARNESS_MARKERS is out of sync between Rust and Python.\n"
-        f"  client.rs: {rust_pairs}\n"
-        f"  harness_identity.HARNESS_SESSION_MARKERS: {list(HARNESS_SESSION_MARKERS)}"
-    )
+    rust_root = repo_root / "crates" / "fno-agents" / "src"
+    expected = [tuple(p) for p in HARNESS_SESSION_MARKERS]
+    for path, const_name in (
+        (rust_root / "bin" / "client.rs", "HARNESS_MARKERS"),
+        (rust_root / "claims.rs", "HARNESS_SESSION_MARKERS"),
+    ):
+        src = path.read_text()
+        block = re.search(
+            rf"const {const_name}[^=]*=\s*&\[(.*?)\];", src, re.DOTALL
+        )
+        assert block, f"{const_name} const not found in {path.name}"
+        rust_pairs = re.findall(
+            r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1)
+        )
+        assert rust_pairs == expected, (
+            f"{const_name} is out of sync between Rust and Python.\n"
+            f"  {path.name}: {rust_pairs}\n"
+            f"  harness_identity.HARNESS_SESSION_MARKERS: {list(HARNESS_SESSION_MARKERS)}"
+        )
 
 
 # --------------------------------------------------------------------------- #

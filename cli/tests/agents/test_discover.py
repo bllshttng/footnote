@@ -21,6 +21,16 @@ from fno.agents import discover
 from fno.paths_testing import use_tmpdir
 
 
+@pytest.fixture(autouse=True)
+def _isolate_native_harness_stores(monkeypatch):
+    """Keep resolver tests independent of the operator's real session stores."""
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_harness_stores",
+        lambda _token: ([], True),
+    )
+
+
 class _FakeProc:
     def __init__(self, create_time: float):
         self._ct = create_time
@@ -2476,6 +2486,59 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
 
     assert found is None
     assert ambiguous == sorted([upper, lower])
+
+
+def test_resolve_reachable_includes_complete_harness_store_hits(
+    tmp_path, monkeypatch
+):
+    """Codex/OpenCode stores participate below the liveness listing."""
+    sid = "019fb417-1111-7222-8333-4444deadbeef"
+    monkeypatch.setattr(discover, "_reachable_from_transcripts", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_harness_stores",
+        lambda _token: ([(sid, "codex", "/repo", True)], True),
+    )
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=tmp_path / "projects"
+    )
+
+    assert ambiguous == []
+    assert found is not None
+    assert (found.session_id, found.agent, found.cwd) == (sid, "codex", "/repo")
+
+
+def test_resolve_or_suggest_rechecks_live_short_against_durable_namespace(
+    monkeypatch,
+):
+    """Liveness filtering cannot turn a persisted collision into uniqueness."""
+    visible = discover.DiscoveredSession(
+        session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=1,
+        cwd="/visible",
+        project=None,
+        status="live",
+        agent="codex",
+        truth_state="working",
+    )
+    hidden = "bbbbbbbb-1111-7222-8333-4444deadbeef"
+    monkeypatch.setattr(discover, "discover_live_sessions", lambda **_kwargs: [visible])
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_args, **_kwargs: (None, [visible.session_id, hidden]),
+    )
+
+    resolved, ambiguous = discover.resolve_or_suggest("deadbeef")
+
+    assert resolved is None
+    assert ambiguous == [visible.session_id, hidden]
 
 
 def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(

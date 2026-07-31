@@ -109,7 +109,16 @@ def _seed_asleep_transcript(monkeypatch, tmp_path, *, session_id=ASLEEP_SID, age
 
 def _drain_as(runner, monkeypatch, session_id):
     """Read what the recipient's own drain-self would see (the durable truth)."""
-    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    marker = (
+        "OPENCODE_SESSION_ID"
+        if session_id.startswith("ses_")
+        else "CLAUDE_CODE_SESSION_ID"
+    )
+    monkeypatch.setenv(marker, session_id)
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     return json.loads(res.stdout.strip().splitlines()[-1])
@@ -678,17 +687,23 @@ def test_unreadable_store_still_allows_an_exact_full_session_id(
 
 
 @pytest.mark.parametrize(
-    "session_id",
+    ("send_id", "drain_id"),
     [
-        pytest.param(ASLEEP_SID, id="uuid"),
-        pytest.param("ses_AaBbCcDdEeFf001122", id="opencode"),
+        pytest.param(ASLEEP_SID, ASLEEP_SID, id="uuid"),
+        pytest.param(ASLEEP_SID.upper(), ASLEEP_SID, id="uppercase-uuid"),
+        pytest.param(
+            "ses_AaBbCcDdEeFf001122",
+            "ses_AaBbCcDdEeFf001122",
+            id="opencode",
+        ),
     ],
 )
 def test_unreadable_store_full_id_live_miss_queues_to_drainable_canonical_handle(
-    runner, mailbox, monkeypatch, tmp_path, session_id
+    runner, mailbox, monkeypatch, tmp_path, send_id, drain_id
 ):
     """A full-id live miss persists under the same address drain-self reads."""
     from fno.agents import discover
+    from fno.harness_identity import canonical_handle
 
     monkeypatch.setattr(
         discover,
@@ -709,15 +724,16 @@ def test_unreadable_store_full_id_live_miss_queues_to_drainable_canonical_handle
 
     res = runner.invoke(
         app,
-        ["mail", "send", session_id, "hi", "--from-name", "web"],
+        ["mail", "send", send_id, "hi", "--from-name", "web"],
     )
 
     assert res.exit_code == 0, res.output
-    assert attempted == [("claude", session_id), ("codex", session_id)]
-    assert f"queued (durable) for {session_id[-8:]}" in res.output
-    drained = _drain_as(runner, monkeypatch, session_id)
+    assert attempted == [("claude", send_id), ("codex", send_id)]
+    expected_handle = canonical_handle(drain_id)
+    assert f"queued (durable) for {expected_handle}" in res.output
+    drained = _drain_as(runner, monkeypatch, drain_id)
     assert len(drained) == 1
-    assert drained[0]["to"] == session_id[-8:]
+    assert drained[0]["to"] == expected_handle
 
 
 def test_a_non_claude_session_is_not_woken_as_claude(

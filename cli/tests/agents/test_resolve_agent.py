@@ -6,6 +6,7 @@ Rust parity for the same matrix lives in crates/fno-agents (US4).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -246,6 +247,26 @@ def test_opencode_style_row_resolves_by_name_full_id_and_canonical_handle(tmp_pa
     assert resolve_agent("oc-worker", path=reg).matched_by == "name"
     assert resolve_agent(ses, path=reg).matched_by == "full_session_id"
     assert resolve_agent("AbCd1234", path=reg).matched_by == "canonical_handle"
+
+
+def test_registry_name_and_persisted_alias_share_one_namespace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A registry name cannot hide another session's persisted alias."""
+    from fno.agents import discover
+
+    registered = _claude("friendly", "transport", UUID)
+    alias_sid = "aaaaaaaa-1111-7222-8333-444455556666"
+    alias_map = tmp_path / "session-names.json"
+    alias_map.write_text(
+        json.dumps({alias_sid: "friendly"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discover, "default_name_map_path", lambda: alias_map)
+    reg = _write(tmp_path, registered)
+
+    with pytest.raises(AgentResolutionError, match=alias_sid):
+        resolve_agent("friendly", path=reg)
 
 
 def test_no_transport_row_resolves_but_worker_short_is_none(tmp_path: Path) -> None:

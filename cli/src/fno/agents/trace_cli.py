@@ -172,7 +172,7 @@ def _resolve_registry_name(token: str) -> "str | None":
     try:
         return resolve_registered_agent_across_sources(entries, token).entry.name
     except AgentResolutionError as exc:
-        if exc.ambiguous:
+        if exc.ambiguous or exc.unavailable:
             raise _RegistryResolutionError(str(exc)) from exc
         return None
 

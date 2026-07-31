@@ -1044,6 +1044,7 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
       CLAUDE_CODE_SESSION_ID -> harness="claude"
       CODEX_SESSION_ID       -> harness="codex"
       GEMINI_SESSION_ID      -> harness="gemini"
+      OPENCODE_SESSION_ID    -> harness="opencode"
     """
     identity = resolve_harness_identity()
 
@@ -5099,11 +5100,19 @@ def dispatch_send(
         except AgentResolutionError as exc:
             events.emit(
                 "agent_send_failed",
-                stage="ambiguous-address" if exc.ambiguous else "unknown-name",
+                stage=(
+                    "ambiguous-address"
+                    if exc.ambiguous
+                    else "identity-unavailable"
+                    if exc.unavailable
+                    else "unknown-name"
+                ),
                 name=requested_name,
             )
             if exc.ambiguous:
                 raise DispatchAskError(str(exc), exit_code=2) from exc
+            if exc.unavailable:
+                raise DispatchAskError(str(exc), exit_code=12) from exc
             raise DispatchAskError(
                 f"unknown agent {requested_name!r}; spawn it first: "
                 f"fno agents spawn {requested_name} --harness <harness>",

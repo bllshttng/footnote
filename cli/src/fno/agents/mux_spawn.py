@@ -885,7 +885,7 @@ def _await_interactive_readiness(
     session: str,
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
-) -> str:
+) -> tuple[str, str]:
     """Interactive readiness gate (x-6928).
 
     A painted first frame plus a still-live child after a 1s dwell is READY; an
@@ -895,15 +895,44 @@ def _await_interactive_readiness(
     ``pane read`` (non-empty == painted) for the ready/live label. Only FAILED
     stops the spawn (AC5-ERR); READY and LIVE both proceed to the registry row.
     """
-    probe = _run_mux(
-        ["mux", "pane", "wait", "--session", session, str(pane_id), "--timeout", "1"], runner
-    )
+    try:
+        probe = _run_mux(
+            [
+                "mux", "pane", "wait", "--session", session,
+                str(pane_id), "--timeout", "1",
+            ],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return "failed", f"readiness probe failed: {exc}"
     if probe.returncode == _WAIT_EXITED:
-        return "failed"
-    painted = _run_mux(
-        ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "1"], runner
-    )
-    return "ready" if (painted.stdout or "").strip() else "live"
+        return "failed", "provider exited before readiness"
+    if probe.returncode not in {0, 11}:
+        detail = (probe.stderr or probe.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            "failed",
+            f"readiness probe failed: pane wait exited {probe.returncode}{suffix}",
+        )
+    try:
+        painted = _run_mux(
+            [
+                "mux", "pane", "read", "--session", session,
+                str(pane_id), "--lines", "1",
+            ],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return "failed", f"readiness probe failed: {exc}"
+    if painted.returncode != 0:
+        detail = (painted.stderr or painted.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            "failed",
+            f"readiness probe failed: pane read exited {painted.returncode}{suffix}",
+        )
+    readiness = "ready" if (painted.stdout or "").strip() else "live"
+    return readiness, ""
 
 
 def dispatch_spawn_pane(
@@ -1158,18 +1187,21 @@ def dispatch_spawn_pane(
             # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
             # collapses the split, the viewer's focus and any later sibling split
             # survive (AC5-FR/AC6-FR), and no registry row is written.
-            if _await_interactive_readiness(session, pane_id, runner) == "failed":
+            readiness, readiness_detail = _await_interactive_readiness(
+                session, pane_id, runner
+            )
+            if readiness == "failed":
                 reaped, cleanup_detail = _reap_spawned_pane(
                     session, pane_id, runner
                 )
                 if reaped:
                     raise DispatchAskError(
-                        f"agent {name!r} provider exited before readiness in session "
+                        f"agent {name!r} {readiness_detail} in session "
                         f"{session!r}; pane {pane_id} reaped, no registry row written",
                         exit_code=1,
                     )
                 raise DispatchAskError(
-                    f"agent {name!r} provider exited before readiness; pane "
+                    f"agent {name!r} {readiness_detail}; pane "
                     f"{pane_id} may still exist in session {session!r} because "
                     f"exact cleanup failed: {cleanup_detail}",
                     exit_code=1,

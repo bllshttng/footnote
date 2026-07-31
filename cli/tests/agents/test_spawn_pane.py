@@ -43,6 +43,8 @@ class FakeRunner:
         # x-6928 interactive-readiness gate probes.
         wait_returncode: int = 11,
         read_stdout: str = "",
+        read_returncode: int = 0,
+        read_stderr: str = "",
         placement: Optional[dict] = None,
         kill_returncode: int = 0,
         kill_stderr: str = "",
@@ -56,6 +58,8 @@ class FakeRunner:
         self.db_stdout = db_stdout
         self.wait_returncode = wait_returncode
         self.read_stdout = read_stdout
+        self.read_returncode = read_returncode
+        self.read_stderr = read_stderr
         self.placement = placement
         self.kill_calls: list[list[str]] = []
         self.kill_returncode = kill_returncode
@@ -90,7 +94,9 @@ class FakeRunner:
         if argv[1:4] == ["mux", "pane", "wait"]:
             return subprocess.CompletedProcess(argv, self.wait_returncode, "", "")
         if argv[1:4] == ["mux", "pane", "read"]:
-            return subprocess.CompletedProcess(argv, 0, self.read_stdout, "")
+            return subprocess.CompletedProcess(
+                argv, self.read_returncode, self.read_stdout, self.read_stderr
+            )
         if argv[1:4] == ["mux", "pane", "kill"]:
             self.kill_calls.append(list(argv))
             if self.kill_exception is not None:
@@ -1429,6 +1435,39 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
     assert "--session" in kill and "main" in kill, "cleanup targets the spawn's session"
     assert "7" in kill, "the placed pane id is reaped"
     assert load_registry() == [], "no registry row on launch failure"
+
+
+@pytest.mark.parametrize("probe", ["wait", "read"])
+def test_exact_readiness_probe_error_reaps_without_writing_row(
+    tmp_path: Path, monkeypatch, probe: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner(
+        placement={"anchor": 4},
+        wait_returncode=99 if probe == "wait" else 11,
+        read_returncode=99 if probe == "read" else 0,
+        read_stdout="painted despite error",
+        read_stderr="mux unavailable",
+    )
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="peer",
+            message="hi",
+            provider="claude",
+            cwd=tmp_path,
+            split="down",
+            at="current",
+            runner=runner,
+        )
+
+    assert "readiness probe failed" in str(exc.value)
+    assert runner.kill_calls
+    assert load_registry() == []
 
 
 @pytest.mark.parametrize("cleanup_failure", ["nonzero", "timeout"])
