@@ -1,12 +1,13 @@
-"""Resolve a session token against its harness's OWN store when the fno
-registry misses, then adopt the row (x-9cc5).
+"""Resolve a session token against its harness's OWN store and adopt store-only
+sessions when the fno registry misses (x-9cc5).
 
 The registry is a cache of reality, not a gate in front of it. A session with no
 roster row -- reaped after a terminal stop, or never spawn-created -- was
 unreachable by every fno verb even though the harness itself resumes it fine.
-This module is the miss-path healer behind ``registry.resolve_agent``: probe the
-harness stores for a session-shaped token, and on exactly one match register the
-row so the verb proceeds AND the session returns to the roster.
+This module owns the store probes behind ``registry.resolve_agent``. Every short
+session-shaped registry hit is checked against them for cross-source ambiguity;
+on a registry miss, exactly one match is registered so the verb proceeds AND the
+session returns to the roster.
 
 Three rules keep it from guessing:
 
@@ -27,14 +28,20 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
+from fno.agents.fs_scan import path_exists_strict, scan_files
+from fno.harness_identity import claude_transport_short_id, session_handle_tier
+
 if TYPE_CHECKING:
     from fno.agents.registry import AgentEntry
 
-# Session-shaped tokens only. A name that merely misses (`reviewer`, `deadbeef`
-# as a registry name) never reaches a store probe -- registry names win first in
-# resolve_agent, and anything not matching these shapes raises as it always did.
-_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
-_UUID_RE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+# Session-shaped tokens only. Eight alphanumeric characters can be an OpenCode
+# tail even when they look like a friendly name, so those tokens share the store
+# ambiguity check. Names outside these shapes never pay for a store read.
+_SHORT_RE = re.compile(r"^[A-Za-z0-9]{8}$")
+_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 _OPENCODE_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
 
 # Transcript lines before the session's `cwd` is recorded (line 1 is a summary /
@@ -52,20 +59,25 @@ class StoreHit:
 
     @property
     def short_id(self) -> str:
-        return self.session_id.split("-", 1)[0][:8]
+        """Claude's legacy first-eight transport key, not a mailbox address."""
+        return claude_transport_short_id(self.session_id)
 
 
 def _normalize(token: str) -> str:
-    """Trim, and lowercase a hex-shaped token. opencode ids are mixed-case by
-    construction, so they are left exactly as given."""
-    t = (token or "").strip()
-    return t if _OPENCODE_RE.match(t) else t.lower()
+    """Trim only; the shared identity owner applies harness-safe case rules."""
+    return (token or "").strip()
 
 
 def is_session_shaped(token: str) -> bool:
     """True for a token worth probing a harness store with."""
     t = _normalize(token)
-    return bool(_SHORT_RE.match(t) or _UUID_RE.match(t) or _OPENCODE_RE.match(t))
+    return bool(_SHORT_RE.match(t) or is_full_session_id(t))
+
+
+def is_full_session_id(token: str) -> bool:
+    """True when ``token`` is a complete, collision-free harness session id."""
+    t = _normalize(token)
+    return bool(_UUID_RE.match(t) or _OPENCODE_RE.match(t))
 
 
 def _claude_projects_dir() -> Path:
@@ -113,18 +125,20 @@ def _probe_claude(token: str) -> list[StoreHit]:
     """
     if _OPENCODE_RE.match(token):
         return []
-    pattern = f"*/{token}.jsonl" if _UUID_RE.match(token) else f"*/{token}-*.jsonl"
+    needle = token.lower()
     hits: dict[str, StoreHit] = {}
-    try:
-        found = list(_claude_projects_dir().glob(pattern))
-    except OSError:
-        return []
+    root = _claude_projects_dir()
+    found = scan_files(
+        root,
+        max_depth=1,
+        include=lambda name: name.endswith(".jsonl") and needle in name.lower(),
+    )
     for path in sorted(found):
         name = path.name
         if ".sync-conflict-" in name:
             continue
         sid = name[: -len(".jsonl")]
-        if sid not in hits:
+        if session_handle_tier(token, sid) is not None and sid not in hits:
             hits[sid] = StoreHit("claude", sid, _transcript_cwd(path))
     return list(hits.values())
 
@@ -136,18 +150,18 @@ def _probe_codex(token: str) -> list[StoreHit]:
     from fno.agents.discover import _codex_meta
 
     hits: dict[str, StoreHit] = {}
-    try:
-        found = list(_codex_sessions_dir().rglob(f"rollout-*-{token}*.jsonl"))
-    except OSError:
-        return []
+    root = _codex_sessions_dir()
+    found = scan_files(
+        root,
+        include=lambda name: name.startswith("rollout-")
+        and name.endswith(".jsonl"),
+    )
     for path in sorted(found):
         meta = _codex_meta(path)
         if meta is None:
-            continue
+            raise OSError(f"unreadable codex session candidate: {path}")
         sid, cwd = meta
-        # The glob matches on the filename; confirm against the record itself so
-        # a token that lands mid-uuid never counts as a match.
-        if not (sid == token or sid.startswith(token)):
+        if session_handle_tier(token, sid) is None:
             continue
         hits.setdefault(sid, StoreHit("codex", sid, cwd))
     return list(hits.values())
@@ -156,37 +170,94 @@ def _probe_codex(token: str) -> list[StoreHit]:
 def _probe_opencode(token: str) -> list[StoreHit]:
     """opencode's SQLite store. Its ids are ``ses_``-prefixed, so a hex token
     never reaches here -- and a `ses_` token never reaches the other two."""
-    if not _OPENCODE_RE.match(token):
+    if not (_OPENCODE_RE.match(token) or _SHORT_RE.match(token)):
         return []
-    from fno.agents.discover import default_opencode_db_path, opencode_query
+    from fno.agents.discover import (
+        _opencode_session_info,
+        default_opencode_db_path,
+        default_opencode_storage_dir,
+        opencode_query,
+    )
 
     db = default_opencode_db_path()
-    if not db.exists():
-        return []
-    rows = opencode_query(db, "SELECT id, directory FROM session WHERE id = ?", (token,))
+    if not path_exists_strict(db):
+        paths = scan_files(
+            default_opencode_storage_dir() / "session",
+            max_depth=1,
+            include=lambda name: name.endswith(".json") and token in name,
+        )
+        hits: list[StoreHit] = []
+        for path in paths:
+            info = _opencode_session_info(path)
+            if info is None:
+                raise OSError(f"unreadable opencode session candidate: {path}")
+            sid, cwd = info
+            if session_handle_tier(token, sid) is not None:
+                hits.append(StoreHit("opencode", sid, cwd))
+        return hits
+    rows = opencode_query(
+        db,
+        "SELECT id, directory FROM session "
+        "WHERE id = ? OR substr(id, -8) = ? OR substr(id, 1, 8) = ?",
+        (token, token, token),
+        raise_on_error=True,
+    )
     return [
         StoreHit("opencode", sid, directory if isinstance(directory, str) else "")
         for sid, directory in rows
-        if isinstance(sid, str) and sid
+        if isinstance(sid, str) and sid and session_handle_tier(token, sid) is not None
     ]
 
 
 _PROBES = (_probe_claude, _probe_codex, _probe_opencode)
 
 
-def probe_stores(token: str) -> list[StoreHit]:
-    """Every harness store's answer for ``token``. Never raises: a corrupt or
-    missing store contributes no rows rather than denying the whole probe."""
+def probe_stores(token: str, *, require_complete: bool = True) -> list[StoreHit]:
+    """Every harness store's answer for ``token``.
+
+    Callers that explicitly pass ``require_complete=False`` retain the
+    historical partial-result behavior. Identity selection uses the strict
+    default because a partial answer cannot prove a short token unique across
+    the shared namespace.
+    """
     token = _normalize(token)
     if not is_session_shaped(token):
         return []
     hits: list[StoreHit] = []
+    failed: list[str] = []
     for probe in _PROBES:
         try:
             hits.extend(probe(token))
-        except Exception:  # noqa: BLE001 - one broken store never denies the rest
+        except Exception:  # noqa: BLE001 - collect every readable store before refusing
+            failed.append(probe.__name__.removeprefix("_probe_"))
             continue
-    return hits
+    matched = [
+        hit
+        for hit in hits
+        if session_handle_tier(token, hit.session_id) is not None
+    ]
+    distinct = list({(hit.harness, hit.session_id): hit for hit in matched}.values())
+    if failed and require_complete:
+        from fno.agents.registry import AgentResolutionError
+
+        candidates = ""
+        if distinct:
+            candidates = " Visible candidates: " + ", ".join(
+                f"{hit.session_id} ({hit.harness})"
+                for hit in sorted(distinct, key=lambda hit: (hit.harness, hit.session_id))
+            ) + "."
+        raise AgentResolutionError(
+            f"token {token!r} could not be checked for cross-store uniqueness "
+            f"because these harness stores were unreadable: {', '.join(failed)}. "
+            f"{candidates} Use the full session id.",
+            ambiguous=True,
+        )
+    return distinct
+
+
+def complete_store_hits(token: str) -> list[StoreHit]:
+    """Return a complete cross-harness answer or refuse short-token selection."""
+    return probe_stores(token, require_complete=True)
 
 
 def heal_from_harness_store(
@@ -205,7 +276,7 @@ def heal_from_harness_store(
     """
     from fno.agents.registry import AgentEntry, AgentResolutionError, register_existing_session
 
-    hits = probe_stores(token)
+    hits = complete_store_hits(token)
     if not hits:
         return None
     if len(hits) > 1:
@@ -231,6 +302,8 @@ def heal_from_harness_store(
             status="orphaned",
             registry_path=registry_path,
         )
+    except AgentResolutionError:
+        raise
     except Exception as exc:  # noqa: BLE001 - reaching the session beats the roster row
         sys.stderr.write(
             f"WARN: resolved {token!r} from the {hit.harness} store but could not "

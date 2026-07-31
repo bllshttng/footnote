@@ -674,6 +674,7 @@ const HARNESS_MARKERS: &[(&str, &str)] = &[
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),
     ("GEMINI_SESSION_ID", "gemini"),
+    ("OPENCODE_SESSION_ID", "opencode"),
 ];
 
 /// Infer the dispatch provider when `--provider` is absent, mirroring Python
@@ -2560,6 +2561,10 @@ mod tests {
             infer_dispatch_provider(env_of(&[("GEMINI_SESSION_ID", "abc")])),
             "gemini"
         );
+        assert_eq!(
+            infer_dispatch_provider(env_of(&[("OPENCODE_SESSION_ID", "ses_abc")])),
+            "opencode"
+        );
     }
 
     #[test]
@@ -2603,6 +2608,7 @@ mod tests {
                 ("CLAUDE_CODE_SESSION_ID", "claude"),
                 ("CODEX_SESSION_ID", "codex"),
                 ("GEMINI_SESSION_ID", "gemini"),
+                ("OPENCODE_SESSION_ID", "opencode"),
             ]
         );
     }

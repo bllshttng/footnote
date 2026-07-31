@@ -45,14 +45,95 @@ from fno.agents.providers import KNOWN_PROVIDERS
 from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
+    AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
     load_registry,
+    resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.harness_identity import resolve_harness_identity
+from fno.harness_identity import (
+    canonical_handle,
+    resolve_harness_identity,
+    session_identity_key,
+)
 
 DispatchKind = Literal["create", "followup"]
+RecipientIdentity = tuple[
+    str,
+    str,
+    Optional[str],
+    str,
+    Optional[str],
+    Optional[tuple[object, object]],
+    str,
+]
+SwitchboardIdentity = dict[str, object]
+
+
+def _recipient_identity_key(entry: AgentEntry) -> RecipientIdentity:
+    """Snapshot every field that can select or replace a live recipient."""
+    session_id = getattr(entry, "harness_session_id", None) or getattr(
+        entry, "session_id", None
+    )
+    mux = entry.mux
+    return (
+        entry.name,
+        entry.harness,
+        session_identity_key(session_id) if session_id else None,
+        entry.short_id,
+        entry.mcp_channel_id,
+        (
+            (mux.get("session"), mux.get("pane_id"))
+            if mux is not None
+            else None
+        ),
+        entry.created_at,
+    )
+
+
+def _switchboard_identity(entry: AgentEntry) -> SwitchboardIdentity:
+    """Identity fields the daemon must match before driving a named stream."""
+    return {
+        "harness": entry.harness,
+        "session_id": entry.harness_session_id,
+        "short_id": entry.short_id,
+        "created_at": entry.created_at,
+    }
+
+
+def _update_registry_if_recipient_unchanged(
+    name: str,
+    expected_identity: RecipientIdentity,
+    updater: Callable[[list[AgentEntry]], list[AgentEntry]],
+    *,
+    registry_path: Optional[Path] = None,
+) -> bool:
+    """Apply a post-side-effect write only to the selected recipient.
+
+    Exact-name lifecycle calls follow the current owner until the per-name lock
+    selects a concrete row. Every call then carries that row's identity through
+    the final registry-wide lock so a writer that does not honor the per-name
+    lock cannot make a replacement inherit the registry mutation.
+    """
+    applied = False
+
+    def _guarded(entries: list[AgentEntry]) -> list[AgentEntry]:
+        nonlocal applied
+        matches = [entry for entry in entries if entry.name == name]
+        if (
+            len(matches) != 1
+            or _recipient_identity_key(matches[0]) != expected_identity
+        ):
+            return entries
+        applied = True
+        return updater(entries)
+
+    if registry_path is None:
+        update_registry(_guarded)
+    else:
+        update_registry(_guarded, path=registry_path)
+    return applied
 
 
 # ---------------------------------------------------------------------------
@@ -855,7 +936,7 @@ def _codex_create_path(
 
     try:
         update_registry(lambda entries: entries + [new_entry])
-    except (OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -1042,6 +1123,7 @@ def _capture_parent_edge() -> tuple[Optional[str], Optional[str], Optional[str]]
       CLAUDE_CODE_SESSION_ID -> harness="claude"
       CODEX_SESSION_ID       -> harness="codex"
       GEMINI_SESSION_ID      -> harness="gemini"
+      OPENCODE_SESSION_ID    -> harness="opencode"
     """
     identity = resolve_harness_identity()
 
@@ -1113,6 +1195,7 @@ def _claude_create_path(
     effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
     from fno.agents.providers import claude as claude_mod
+    from fno.harness_identity import claude_transport_short_id
 
     # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer claim
     # here, so a concurrent resume of the same uuid (the residual window the
@@ -1137,7 +1220,7 @@ def _claude_create_path(
                 # Guard 1: refuse a transcript whose original bg supervisor is
                 # still reachable. Carried in from wake_and_deliver's acquire so
                 # moving the claim inward does not drop the probe.
-                claude_short_id=resume_session_id[:8],
+                claude_short_id=claude_transport_short_id(resume_session_id),
             )
         except claude_mod.SessionWriterClaimError as exc:
             raise DispatchAskError(
@@ -1323,7 +1406,7 @@ def _claude_create_path(
 
     try:
         update_registry(_write)
-    except (OSError, RegistryVersionError) as exc:
+    except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -2322,21 +2405,37 @@ def _validate_lifecycle_name(name: str) -> None:
         )
 
 
-def _canonical_agent_name(token: str, *, registry_path: Optional[Path] = None) -> str:
-    """Translate a lifecycle token (name | 8-hex short | full session id) to the
-    canonical registry name, so ``stop``/``rm`` address a session by any of the
-    three forms (x-1b1e) while still locking + acting on the canonical name.
+def _resolve_lifecycle_target(
+    token: str,
+    *,
+    registry_path: Optional[Path] = None,
+) -> tuple[AgentEntry, Optional[RecipientIdentity]]:
+    """Resolve a lifecycle token without discarding address-bound identity.
 
-    Falls back to the token UNCHANGED on any resolution miss (unknown, ambiguous,
-    unreadable registry), so the downstream name lookup raises its familiar
-    ``agent {name!r} not found in registry`` error rather than a second variant -
-    the not-found/exit-2 contract the lifecycle tests pin stays intact."""
+    A genuine miss falls through to the exact-name lookup so the downstream
+    error remains ``agent {name!r} not found in registry``.
+    Exact names intentionally follow the current owner of that name under the
+    lock; full ids and short handles remain pinned to the selected session.
+    Ambiguity and unavailable identity evidence are refusals: falling back could
+    make a token that also happens to be a row name select that row and act on
+    the wrong session."""
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
-        return resolve_agent(token, path=registry_path).entry.name
-    except AgentResolutionError:
-        return token
+        resolved = resolve_agent(token, path=registry_path)
+        expected_identity = (
+            None
+            if resolved.matched_by == "name"
+            else _recipient_identity_key(resolved.entry)
+        )
+        return resolved.entry, expected_identity
+    except AgentResolutionError as exc:
+        if exc.ambiguous or exc.unavailable:
+            raise DispatchAskError(
+                str(exc),
+                exit_code=12 if exc.unavailable else 2,
+            ) from exc
+        return _resolve_registry_entry(token, registry_path=registry_path), None
 
 
 def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) -> AgentEntry:
@@ -2363,9 +2462,19 @@ def _resolve_registry_entry(name: str, *, registry_path: Optional[Path] = None) 
             f"registry read failed: {exc}",
             exit_code=12,
         ) from exc
-    for entry in entries:
-        if entry.name == name:
-            return entry
+    matches = [entry for entry in entries if entry.name == name]
+    if len(matches) > 1:
+        candidates = ", ".join(
+            f"{entry.harness_session_id or entry.short_id or '-'} ({entry.harness})"
+            for entry in matches
+        )
+        raise DispatchAskError(
+            f"registry name {name!r} is ambiguous across {len(matches)} rows: "
+            f"{candidates}. Repair the duplicate registry rows before retrying.",
+            exit_code=2,
+        )
+    if matches:
+        return matches[0]
     raise DispatchAskError(
         f"agent {name!r} not found in registry",
         exit_code=2,
@@ -2379,6 +2488,7 @@ def with_agent_lock_and_entry(
     registry_path: Optional[Path] = None,
     timeout: float = 30.0,
     on_wait: Optional[Callable[[], None]] = None,
+    expected_identity: Optional[RecipientIdentity] = None,
 ) -> Iterator[tuple[object, AgentEntry]]:
     """Acquire per-agent flock AND re-load the registry entry under it.
 
@@ -2414,6 +2524,9 @@ def with_agent_lock_and_entry(
             the timeout event.
         on_wait: Optional callback fired at the standard 1s
             blocked-acquire threshold by ``hold_agent_lock``.
+        expected_identity: Recipient selected from the caller's original token.
+            Both registry reads must still match it; a same-name replacement is
+            refused before any lifecycle side effect.
 
     Yields:
         ``(lock_handle, existing)`` where ``existing`` is the AgentEntry
@@ -2434,14 +2547,23 @@ def with_agent_lock_and_entry(
             shape its tests expect.
     """
     # Pre-flock validation. The returned snapshot is intentionally NOT
-    # passed out of this scope; we re-read post-lock below so any
-    # concurrent rm/recreate between the two reads is absorbed. The
+    # passed out of this scope; we re-read post-lock below so a name-addressed
+    # call observes the current owner, while an address-bound call compares the
+    # snapshot with expected_identity and refuses a replacement. The
     # ``registry_path`` override (Codex P2 on PR #317) forwards to BOTH
     # the lock acquisition AND the registry read so a test or future
     # caller cannot accidentally lock one file while reading another.
     if registry_path is None:
         registry_path = paths.agents_registry_path()
-    _resolve_registry_entry(name, registry_path=registry_path)
+    pre_existing = _resolve_registry_entry(name, registry_path=registry_path)
+    if (
+        expected_identity is not None
+        and _recipient_identity_key(pre_existing) != expected_identity
+    ):
+        raise DispatchAskError(
+            f"agent {name!r} recipient identity changed before lock acquisition; retry",
+            exit_code=2,
+        )
     with hold_agent_lock(name, registry_path, timeout=timeout, on_wait=on_wait) as lock_handle:
         # Post-lock re-read. If another process deleted the entry between
         # the pre-flock validation and the flock acquisition, this raises
@@ -2451,6 +2573,14 @@ def with_agent_lock_and_entry(
         # missing-entry flow. The lock is released as the context
         # manager unwinds (AC2-ERR).
         existing = _resolve_registry_entry(name, registry_path=registry_path)
+        if (
+            expected_identity is not None
+            and _recipient_identity_key(existing) != expected_identity
+        ):
+            raise DispatchAskError(
+                f"agent {name!r} recipient identity changed while acquiring its lock; retry",
+                exit_code=2,
+            )
         yield (lock_handle, existing)
 
 
@@ -2478,9 +2608,10 @@ def stop_agent(
             PATH, claude shellout timeout, lock timeout.
     """
     _validate_lifecycle_name(name)
-    # Accept any of the three address forms (x-1b1e): translate to the canonical
-    # name before the flock, which keys on it.
-    name = _canonical_agent_name(name)
+    # Resolve any address form once, then carry that identity through the
+    # canonical-name flock. A same-name replacement cannot inherit this action.
+    pre_existing, expected_identity = _resolve_lifecycle_target(name)
+    name = pre_existing.name
     # Pre-flock fast-fail + capture provider for the lock-timeout event
     # payload. The authoritative load happens inside
     # ``with_agent_lock_and_entry`` below; this pre-read exists ONLY so
@@ -2488,14 +2619,18 @@ def stop_agent(
     # emit. The lint script `scripts/lint-flock-pattern.sh` allows this
     # because we do NOT call ``hold_agent_lock`` directly in this function
     # body — the helper encapsulates the lock acquisition.
-    pre_existing = _resolve_registry_entry(name)
     pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+        with with_agent_lock_and_entry(
+            name,
+            timeout=lock_timeout,
+            on_wait=_on_wait,
+            expected_identity=expected_identity,
+        ) as (
             _lock_handle,
             existing,
         ):
@@ -2595,13 +2730,22 @@ def stop_agent(
             # state, so this pre-empts the eventual reconcile without
             # introducing a new status value (no schema bump).
             try:
-                update_registry(
+                status_written = _update_registry_if_recipient_unchanged(
+                    name,
+                    _recipient_identity_key(existing),
                     _stamp_status(
                         name,
                         status="orphaned",
                         last_message_at_preserve=True,
                     ),
                 )
+                if not status_written:
+                    events.emit(
+                        "agent_stopped_status_write_failed",
+                        name=name,
+                        provider="claude",
+                        reason="recipient_identity_changed",
+                    )
             except (OSError, RegistryVersionError):
                 # The stop subprocess already succeeded; a registry-write
                 # failure here is logged via the same events stream the
@@ -2751,20 +2895,26 @@ def rm_agent(
 
     """
     _validate_lifecycle_name(name)
-    # Accept any of the three address forms (x-1b1e); lock on the canonical name.
-    name = _canonical_agent_name(name)
+    # Resolve any address form once, then carry that identity through the
+    # canonical-name flock. A same-name replacement cannot inherit this action.
+    pre_existing, expected_identity = _resolve_lifecycle_target(name)
+    name = pre_existing.name
     # Pre-flock fast-fail + capture provider for lock-timeout event
     # payload. See ``stop_agent`` for the lint-pattern rationale: the
     # body does NOT call ``hold_agent_lock`` directly — that lives inside
     # ``with_agent_lock_and_entry``, which the lint script allowlists.
-    pre_existing = _resolve_registry_entry(name)
     pre_provider = pre_existing.harness
 
     def _on_wait() -> None:
         print(f"Waiting for agent {name!r} lock...", file=sys.stderr, flush=True)
 
     try:
-        with with_agent_lock_and_entry(name, timeout=lock_timeout, on_wait=_on_wait) as (
+        with with_agent_lock_and_entry(
+            name,
+            timeout=lock_timeout,
+            on_wait=_on_wait,
+            expected_identity=expected_identity,
+        ) as (
             _lock_handle,
             existing,
         ):
@@ -2882,7 +3032,11 @@ def rm_agent(
             # deprecated, so a speculative one would be untestable guesswork.
 
             try:
-                update_registry(lambda entries: [e for e in entries if e.name != name])
+                registry_changed = _update_registry_if_recipient_unchanged(
+                    name,
+                    _recipient_identity_key(existing),
+                    lambda entries: [e for e in entries if e.name != name],
+                )
             except (OSError, RegistryVersionError) as exc:
                 events.emit(
                     "agent_removed",
@@ -2899,6 +3053,23 @@ def rm_agent(
                     f"registry write failed: {exc}",
                     exit_code=12,
                 ) from exc
+            if not registry_changed:
+                events.emit(
+                    "agent_removed",
+                    name=name,
+                    provider=existing.harness,
+                    claude_exit=claude_exit,
+                    force=force,
+                    registry_changed=False,
+                    teardown_error=teardown_error,
+                    error="recipient identity changed during harness removal",
+                    error_type="RecipientIdentityChanged",
+                )
+                raise DispatchAskError(
+                    f"agent {name!r} recipient identity changed during rm; "
+                    "the replacement registry row was retained",
+                    exit_code=12,
+                )
 
             # Stdout "removed:" prints come AFTER update_registry succeeds so
             # a write failure cannot leave the operator with a misleading
@@ -3665,14 +3836,25 @@ def attach_agent(name: str) -> AttachResult:
     # heal (x-9cc5) synthesizes a row it could not persist, re-reading the
     # registry by name would miss it and report not-found - defeating the
     # best-effort recovery in exactly the registry-unwritable case it exists for.
-    # Falls back to today's name lookup on any resolution failure, so the
-    # familiar not-found/exit-2 contract is unchanged.
+    # A genuine miss falls back to today's exact-name lookup, preserving the
+    # familiar not-found/exit-2 contract. Ambiguous or unavailable identity
+    # evidence must refuse before any attach side effect.
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
     try:
         resolved = resolve_agent(name)
-    except (AgentResolutionError, OSError, RegistryVersionError):
+    except AgentResolutionError as exc:
+        if exc.ambiguous or exc.unavailable:
+            raise DispatchAskError(
+                str(exc),
+                exit_code=12 if exc.unavailable else 2,
+            ) from exc
         existing = _resolve_registry_entry(name)
+    except (OSError, RegistryVersionError) as exc:
+        raise DispatchAskError(
+            f"registry read failed: {exc}",
+            exit_code=12,
+        ) from exc
     else:
         existing, name = resolved.entry, resolved.entry.name
 
@@ -4009,6 +4191,8 @@ _SWITCHBOARD_READ_TIMEOUT = 130.0
 # the connect fast and demote, rather than burn the 3s default before the
 # existing MCP/socket path runs.
 _SWITCHBOARD_CONNECT_TIMEOUT = 1.0
+# A pre-identity daemon rejects this verb before it can act on the message body.
+_SWITCHBOARD_RPC_METHOD = "agent.switchboard_v2"
 
 
 def _load_a2a_settings() -> tuple[bool, int]:
@@ -4046,12 +4230,36 @@ def _wrap_relay_body(cur: str, ctx: "Optional[_MailCtx]") -> str:
     )
 
 
+def _emit_relay_stopped(
+    target: str,
+    peer: str,
+    turns_completed: int,
+    reason: str,
+    *,
+    error: Optional[BaseException | str] = None,
+) -> None:
+    data: dict[str, object] = {
+        "target": target,
+        "peer": peer,
+        "turn": turns_completed + 1,
+        "turns_completed": turns_completed,
+        "reason": reason,
+    }
+    if error is not None:
+        data["error"] = str(error)
+        if isinstance(error, BaseException):
+            data["error_type"] = type(error).__name__
+    _emit_ev(events.KIND_AGENT_RELAY_STOPPED, **data)
+
+
 def _run_relay_loop(
     to_name: str,
     from_name: str,
     seed: str,
     ceiling: int,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    recipient_identities: "Mapping[str, SwitchboardIdentity]",
 ) -> int:
     """Drive the bounded A2A relay AFTER the first hop (B already replied
     ``seed``). Alternate driving A then B with each other's reply — the drive IS
@@ -4072,22 +4280,41 @@ def _run_relay_loop(
     target, peer = from_name, to_name  # next: drive A (from) with B's reply
     turns = 1  # the first hop (drive B) already happened in the caller
     while turns < ceiling and cur.strip():
-        hop = _daemon_rpc(
-            "agent.switchboard",
-            {
-                "to": target,
-                "from": peer,
-                # Wrap each continuation in the sending peer's <fno_mail> so the
-                # relay turn carries provenance, not just the seed (node x-1f23).
-                "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
-                "mirror": False,
-            },
-            connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
-            read_timeout=_SWITCHBOARD_READ_TIMEOUT,
-        )
-        if not isinstance(hop, dict) or hop.get("delivered") is not True:
-            # peer is not a live stream thread (one-way) or a daemon hiccup;
-            # the exchange ends here — B already received the original body.
+        target_identity = recipient_identities.get(target)
+        if target_identity is None:
+            _emit_relay_stopped(target, peer, turns, "recipient-identity-missing")
+            break
+        try:
+            hop = _daemon_rpc(
+                _SWITCHBOARD_RPC_METHOD,
+                {
+                    "to": target,
+                    "from": peer,
+                    # Wrap each continuation in the sending peer's <fno_mail> so the
+                    # relay turn carries provenance, not just the seed (node x-1f23).
+                    "body": _wrap_relay_body(cur, (mail_ctxs or {}).get(peer)),
+                    "mirror": False,
+                    "recipient_identity": target_identity,
+                },
+                connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
+                read_timeout=_SWITCHBOARD_READ_TIMEOUT,
+            )
+        except Exception as exc:
+            _emit_relay_stopped(target, peer, turns, "relay-hop-error", error=exc)
+            break
+        if (
+            not isinstance(hop, dict)
+            or hop.get("delivered") is not True
+            or hop.get("identity_verified") is not True
+        ):
+            if not isinstance(hop, dict):
+                reason = "invalid-response"
+            elif hop.get("delivered") is not True:
+                reason = str(hop.get("reason") or "not-delivered")
+            else:
+                reason = "identity-unverified"
+            error = hop.get("error") if isinstance(hop, dict) else None
+            _emit_relay_stopped(target, peer, turns, reason, error=error)
             break
         turns += 1
         cur = hop.get("reply") or ""
@@ -4130,6 +4357,8 @@ def _kickoff_background_relay(
     seed: str,
     ceiling: int,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    recipient_identities: "Mapping[str, SwitchboardIdentity]",
 ) -> None:
     """Run the A2A relay in a DETACHED background process so the caller returns
     immediately (ab-3bd520ab).
@@ -4148,7 +4377,14 @@ def _kickoff_background_relay(
     try:
         pid = os.fork()
     except OSError:
-        _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
+        _run_relay_loop(
+            to_name,
+            from_name,
+            seed,
+            ceiling,
+            mail_ctxs,
+            recipient_identities=recipient_identities,
+        )
         return
     if pid > 0:
         # Parent: reap the intermediate child (it exits at once) and return.
@@ -4169,9 +4405,22 @@ def _kickoff_background_relay(
             os._exit(0)
         _detach_stdio()
         try:
-            _run_relay_loop(to_name, from_name, seed, ceiling, mail_ctxs)
-        except Exception:
-            pass
+            _run_relay_loop(
+                to_name,
+                from_name,
+                seed,
+                ceiling,
+                mail_ctxs,
+                recipient_identities=recipient_identities,
+            )
+        except Exception as exc:
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-process-error",
+                error=exc,
+            )
     finally:
         # _exit (not sys.exit) so the child never runs atexit handlers or flushes
         # the parent's buffers a second time.
@@ -4251,6 +4500,9 @@ def _switchboard_exchange(
     from_name: str,
     body: str,
     mail_ctxs: "Optional[dict[str, _MailCtx]]" = None,
+    *,
+    to_identity: SwitchboardIdentity,
+    from_identity: "Optional[SwitchboardIdentity]" = None,
 ) -> Optional[bool]:
     """Drive a stream-json switchboard exchange (Group 2, Tasks 3.1 + 4.1).
 
@@ -4281,13 +4533,27 @@ def _switchboard_exchange(
     # First hop: drive B. In observed mode (auto off) ask the daemon to mirror
     # B's reply into A's view; in auto mode the relay's next hop injects it (so
     # mirror=False avoids a double-injection).
+    mirror = not auto and from_identity is not None
+    params: dict[str, object] = {
+        "to": to_name,
+        "from": from_name,
+        "body": body,
+        "mirror": mirror,
+        "recipient_identity": to_identity,
+    }
+    if from_identity is not None:
+        params["from_identity"] = from_identity
     sb = _daemon_rpc(
-        "agent.switchboard",
-        {"to": to_name, "from": from_name, "body": body, "mirror": not auto},
+        _SWITCHBOARD_RPC_METHOD,
+        params,
         connect_timeout=_SWITCHBOARD_CONNECT_TIMEOUT,
         read_timeout=_SWITCHBOARD_READ_TIMEOUT,
     )
-    if sb is None or sb.get("delivered") is not True:
+    if (
+        sb is None
+        or sb.get("delivered") is not True
+        or sb.get("identity_verified") is not True
+    ):
         return None  # not a live stream thread / daemon down -> caller demotes
     if not auto:
         return True  # observed: one hop, B's reply mirrored into A
@@ -4296,8 +4562,23 @@ def _switchboard_exchange(
     # caller is not blocked for the whole exchange. A self-send (from == to) or an
     # empty first reply has no relay to run.
     cur = sb.get("reply") or ""
-    if ceiling > 1 and from_name != to_name and cur.strip():
-        _kickoff_background_relay(to_name, from_name, cur, ceiling, mail_ctxs)
+    if (
+        ceiling > 1
+        and from_name != to_name
+        and cur.strip()
+        and from_identity is not None
+    ):
+        _kickoff_background_relay(
+            to_name,
+            from_name,
+            cur,
+            ceiling,
+            mail_ctxs,
+            recipient_identities={
+                to_name: to_identity,
+                from_name: from_identity,
+            },
+        )
     return True
 
 
@@ -4342,7 +4623,7 @@ def _build_mail_ctx(
 ) -> _MailCtx:
     """Build the ``<fno_mail>`` sender context from the dispatch provenance.
 
-    ``from`` is the sender's short 8-hex sessionId (or the bare ``from_name`` when
+    ``from`` is the sender's canonical session handle (or the bare ``from_name`` when
     the caller is unregistered). ``model`` is the invoking session's real model,
     resolved from its own transcript store (x-605c); an unresolvable model floors
     to ``"unknown"`` -- never fabricated.
@@ -4352,9 +4633,10 @@ def _build_mail_ctx(
     the recipient can tell a directed turn from a broadcast. ``node`` (the sender's
     backlog node) stays None: dispatch has no truthful source for it today."""
     from fno.agents.self_stamp import resolve_self_model
+    from fno.harness_identity import canonical_handle
     from fno.mail.envelope import harness_for_provider
 
-    from_ = from_session.split("-")[0] if from_session else from_name
+    from_ = canonical_handle(from_session) if from_session else from_name
     return _MailCtx(
         from_=from_,
         harness=harness_for_provider(provider_from),
@@ -4618,7 +4900,9 @@ def _lineage_seed_prefix(root_uuid: str) -> str:
     resolution across transcripts).
     """
     ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    short_root = (root_uuid or "")[:8]
+    from fno.harness_identity import legacy_prefix_handle
+
+    short_root = legacy_prefix_handle(root_uuid or "")
     return (
         f"[lineage: forked from {short_root} at {ts}; "
         f"you are the claim-holding incarnation of {short_root}]"
@@ -4707,6 +4991,8 @@ def wake_and_deliver(
     if not session_uuid:
         return False, "no-session-uuid"
 
+    from fno.harness_identity import claude_transport_short_id, legacy_prefix_handle
+
     # Rung 2 (x-eea5 1.1): an exited-but-rostered session revives IN PLACE via
     # `claude respawn <shortid>` (identity-preserving: same uuid, one roster
     # row), then the rung-1 inject probe re-runs against the revived session.
@@ -4718,7 +5004,7 @@ def wake_and_deliver(
         short = (
             getattr(entry, "short_id", None)
             or getattr(entry, "name", "")
-            or session_uuid[:8]
+            or claude_transport_short_id(session_uuid)
         )
         # F5: take session:<uuid> so two concurrent wakes of one exited session
         # don't both respawn+inject (double delivery / competing writers). Another
@@ -4739,7 +5025,7 @@ def wake_and_deliver(
 
     try:
         result = dispatch_spawn(
-            name=f"{_WAKE_NAME_PREFIX}{session_uuid[:8]}",
+            name=f"{_WAKE_NAME_PREFIX}{legacy_prefix_handle(session_uuid)}",
             message=_lineage_seed_prefix(session_uuid) + "\n" + wrapped,
             provider="claude",
             cwd=cwd or Path.cwd(),
@@ -4764,7 +5050,7 @@ def wake_and_deliver(
     # names both the new handle and the old lineage, and the seed prompt above
     # carried the lineage prefix. A fork is never silent.
     print(
-        f"forked new incarnation {short} from lineage {session_uuid[:8]}",
+        f"forked new incarnation {short} from lineage {legacy_prefix_handle(session_uuid)}",
         file=sys.stderr,
     )
     return True, short
@@ -4861,6 +5147,7 @@ def _deliver_live(
     body: str,
     from_name: str,
     mail: "Optional[_MailCtx]" = None,
+    sender_entry: "Optional[AgentEntry]" = None,
 ) -> bool:
     """Attempt a single fire-and-forget live delivery (live-inject-first; the
     caller writes the durable fallback when this returns False -- node x-1f23).
@@ -4961,7 +5248,16 @@ def _deliver_live(
                 model="unknown",
                 to=mail.from_,
             )
-    if _switchboard_exchange(entry.name, from_name, wrapped, relay_ctxs):
+    if _switchboard_exchange(
+        entry.name,
+        from_name,
+        wrapped,
+        relay_ctxs,
+        to_identity=_switchboard_identity(entry),
+        from_identity=(
+            _switchboard_identity(sender_entry) if sender_entry is not None else None
+        ),
+    ):
         return True
 
     # Live inject over control.sock (adopted `claude --bg`, the fno-agents
@@ -5028,14 +5324,15 @@ def dispatch_send(
 
     1. Validate name / message / from_name (same rules as dispatch_ask).
     2. Reject bodies over 1 MiB (exit 2) BEFORE any store write.
-    3. Acquire per-agent flock (hold_agent_lock) with timeout (exit 11).
+    3. Resolve the address to its registry primary key, then acquire that
+       per-agent flock (hold_agent_lock) with timeout (exit 11).
     4. INSIDE the flock:
-       a. Load registry; unknown name -> exit 16 (same message as ask).
+       a. Reload and re-resolve; unknown or changed identity refuses.
        b. Provider mismatch -> exit 2.
        c. Capture sender provenance + build the <fno_mail> ctx; generate msg_id.
        d. Attempt live delivery via _deliver_live (fire-and-forget).
        e. On non-hosted, write the durable fallback envelope (the <fno_mail>
-          body), kind=send, recipient=name.
+          body), kind=send, addressed to the selected session's canonical handle.
        f. Emit agent_send_started / agent_send_done (delivery field).
        g. Bump last_message_at + status stamps via update_registry.
     5. Return DispatchSendResult(msg_id, delivery).
@@ -5062,10 +5359,105 @@ def dispatch_send(
         )
 
     registry_path = paths.agents_registry_path()
+    requested_name = name
+
+    def _load_and_resolve_target(
+        expected_identity: Optional[RecipientIdentity] = None,
+    ) -> tuple[list[AgentEntry], AgentEntry]:
+        try:
+            entries = load_registry(registry_path)
+        except (OSError, ValueError, RegistryVersionError) as exc:
+            events.emit(
+                "agent_send_failed",
+                stage="registry-read",
+                name=requested_name,
+            )
+            raise DispatchAskError(
+                f"registry read failed: {exc}",
+                exit_code=12,
+            ) from exc
+        try:
+            existing = resolve_registered_agent_across_sources(
+                entries, requested_name
+            ).entry
+            resolved_identity = _recipient_identity_key(existing)
+            if (
+                expected_identity is not None
+                and resolved_identity != expected_identity
+            ):
+                raise DispatchAskError(
+                    f"agent address {requested_name!r} changed from "
+                    f"{expected_identity[0]!r} to {existing.name!r} while acquiring "
+                    "its lock; recipient identity changed from "
+                    f"{expected_identity!r} to {resolved_identity!r}; retry the send",
+                    exit_code=2,
+                )
+            from fno.agents.discover import discovery_address_matches
+
+            registry_id = resolved_identity[2]
+            registry_key = (resolved_identity[1], registry_id)
+            live_foreign = {
+                (session.agent, session_identity_key(session.session_id)): session
+                for session in discovery_address_matches(
+                    requested_name, registry_path=registry_path
+                )
+                if (
+                    session.agent,
+                    session_identity_key(session.session_id),
+                )
+                != registry_key
+            }
+            if live_foreign:
+                candidates = [
+                    f"{registry_id or existing.name} "
+                    f"({existing.harness}, registry name={existing.name})",
+                    *(
+                        f"{session.session_id} ({session.agent}, live discovery)"
+                        for session in sorted(
+                            live_foreign.values(),
+                            key=lambda value: (value.agent, value.session_id),
+                        )
+                    ),
+                ]
+                raise AgentResolutionError(
+                    f"token {requested_name!r} is ambiguous across "
+                    f"{len(candidates)} sessions: {', '.join(candidates)}. "
+                    "Disambiguate with the full session id.",
+                    ambiguous=True,
+                )
+        except AgentResolutionError as exc:
+            events.emit(
+                "agent_send_failed",
+                stage=(
+                    "ambiguous-address"
+                    if exc.ambiguous
+                    else "identity-unavailable"
+                    if exc.unavailable
+                    else "unknown-name"
+                ),
+                name=requested_name,
+            )
+            if exc.ambiguous:
+                raise DispatchAskError(str(exc), exit_code=2) from exc
+            if exc.unavailable:
+                raise DispatchAskError(str(exc), exit_code=12) from exc
+            raise DispatchAskError(
+                f"unknown agent {requested_name!r}; spawn it first: "
+                f"fno agents spawn {requested_name} --harness <harness>",
+                exit_code=UNKNOWN_AGENT_EXIT_CODE,
+            ) from exc
+        return entries, existing
+
+    # Resolve before locking so every address form serializes on the registry
+    # primary key. The second resolution under that lock closes the read/lock
+    # race and refuses if the address changed owners while we waited.
+    _, initial = _load_and_resolve_target()
+    canonical_name = initial.name
+    canonical_identity = _recipient_identity_key(initial)
 
     def _on_wait() -> None:
         print(
-            f"Waiting for agent {name!r} lock...",
+            f"Waiting for agent {canonical_name!r} lock...",
             file=sys.stderr,
             flush=True,
         )
@@ -5073,39 +5465,24 @@ def dispatch_send(
     # 3. Per-agent flock.
     try:
         with hold_agent_lock(
-            name,
+            canonical_name,
             registry_path,
             timeout=lock_timeout,
             on_wait=_on_wait,
         ):
-            # 4a. Load registry under the lock.
-            try:
-                entries = load_registry()
-            except (OSError, ValueError, RegistryVersionError) as exc:
-                events.emit(
-                    "agent_send_failed",
-                    stage="registry-read",
-                    name=name,
-                )
+            entries, existing = _load_and_resolve_target(canonical_identity)
+            if existing.name != canonical_name:
                 raise DispatchAskError(
-                    f"registry read failed: {exc}",
-                    exit_code=12,
-                ) from exc
-
-            existing = next((e for e in entries if e.name == name), None)
-
-            # 4a (cont). Unknown-agent guard: send never creates.
-            if existing is None:
-                events.emit(
-                    "agent_send_failed",
-                    stage="unknown-name",
-                    name=name,
+                    f"agent address {requested_name!r} changed from "
+                    f"{canonical_name!r} to {existing.name!r} while acquiring "
+                    "its lock; retry the send",
+                    exit_code=2,
                 )
-                raise DispatchAskError(
-                    f"unknown agent {name!r}; spawn it first: "
-                    f"fno agents spawn {name} --harness <harness>",
-                    exit_code=UNKNOWN_AGENT_EXIT_CODE,
-                )
+            selected_identity = _recipient_identity_key(existing)
+            # Live routing and events use the registry primary key, never the
+            # caller's alias. Durable routing below binds to this selected
+            # session's canonical handle so later name reuse cannot inherit it.
+            name = canonical_name
 
             # 4b. Provider mismatch check (mirrors dispatch_ask).
             try:
@@ -5147,17 +5524,24 @@ def dispatch_send(
                     getattr(sender_entry, "harness_session_id", None)
                     or getattr(sender_entry, "short_id", None)
                 )
-            # A `fno mail send <name>` is always directed -> stamp the recipient's
-            # short id as the envelope `to` (node x-1f23: optional, set when known).
+            # A `fno mail send <name>` is always directed -> stamp the selected
+            # session's canonical handle as the envelope `to`. A transport short
+            # id is retained only for hosted delivery when the legacy row has no
+            # full session id; such a row cannot safely receive durable mail.
             # Mint the id BEFORE building the ctx so the SAME id rides the live
             # inject, the durable fallback, AND the durable thread record (US1 /
             # Locked Decision 8: both _name_lane_send and _deliver_live carry it).
             msg_id = generate_msg_id()
+            durable_recipient = (
+                canonical_handle(existing.harness_session_id)
+                if existing.harness_session_id
+                else None
+            )
             mail_ctx = _build_mail_ctx(
                 from_name,
                 from_session,
                 provider_from,
-                to=(existing.short_id or None),
+                to=(durable_recipient or existing.short_id or None),
                 id=msg_id,
             )
 
@@ -5174,6 +5558,18 @@ def dispatch_send(
                 thread render unchanged (no unwrap, so mark_thread_read does not
                 strip it); summaries surface the open tag, which identifies the
                 message as a2a from its `from` sender."""
+                if durable_recipient is None:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="durable-address",
+                        name=name,
+                        reason="missing_harness_session_id",
+                    )
+                    raise DispatchAskError(
+                        f"cannot queue durable mail for {name!r}: registry row has "
+                        "no full harness session id",
+                        exit_code=12,
+                    )
                 durable_body = message
                 if mail_ctx is not None:
                     from fno.mail.envelope import wrap_fno_mail
@@ -5189,12 +5585,12 @@ def dispatch_send(
                     )
                 try:
                     write_new_thread(
-                        recipient=name,
+                        recipient=durable_recipient,
                         sender=from_name,
                         kind="send",
                         body=durable_body,
                         msg_id=msg_id,
-                        to_kind="name",
+                        to_kind="session",
                         provider_to=existing.harness,
                         provider_from=provider_from,
                         from_session=from_session,
@@ -5245,7 +5641,11 @@ def dispatch_send(
                 # decide; failure falls through to the durable bus.
                 family1_attemptable = family1_live or family1_state == "unknown"
                 if family1_attemptable and _deliver_live(
-                    existing, message, from_name, mail_ctx
+                    existing,
+                    message,
+                    from_name,
+                    mail_ctx,
+                    sender_entry=sender_entry,
                 ):
                     delivery = "hosted"
                 else:
@@ -5277,8 +5677,10 @@ def dispatch_send(
             if demotion_notice:
                 print(demotion_notice, file=sys.stderr)
 
-            # 4f. Bump registry stamps (best-effort; not fatal if registry
-            # write fails here since envelope is already durable).
+            # 4f. Bump registry stamps. Delivery is already complete, so a
+            # failure cannot make the send retryable, but it must stay visible:
+            # hosted sends intentionally have no durable envelope to expose the
+            # degradation later.
             try:
 
                 def _stamp(entries_list: "list[AgentEntry]") -> "list[AgentEntry]":
@@ -5293,9 +5695,48 @@ def dispatch_send(
                             out.append(e)
                     return out
 
-                update_registry(_stamp, path=registry_path)
-            except (OSError, ValueError, RegistryVersionError):
-                pass  # envelope is durable; stamp failure is non-fatal
+                stamp_written = _update_registry_if_recipient_unchanged(
+                    name,
+                    selected_identity,
+                    _stamp,
+                    registry_path=registry_path,
+                )
+                if not stamp_written:
+                    warning = (
+                        f"registry stamp failed after {delivery} delivery for "
+                        f"{name!r}: recipient identity changed; delivery succeeded; "
+                        "do not retry"
+                    )
+                    print(warning, file=sys.stderr)
+                    try:
+                        events.emit(
+                            "agent_send_failed",
+                            stage="registry-write",
+                            name=name,
+                            delivery=delivery,
+                            reason="recipient_identity_changed",
+                            error="recipient identity changed after delivery",
+                            error_type="RecipientIdentityChanged",
+                        )
+                    except (OSError, ValueError):
+                        pass  # stderr already carries the non-retryable degradation
+            except (OSError, ValueError, RegistryVersionError) as exc:
+                print(
+                    f"registry stamp failed after {delivery} delivery for "
+                    f"{name!r}: {exc}; delivery succeeded; do not retry",
+                    file=sys.stderr,
+                )
+                try:
+                    events.emit(
+                        "agent_send_failed",
+                        stage="registry-write",
+                        name=name,
+                        delivery=delivery,
+                        error=str(exc),
+                        error_type=type(exc).__name__,
+                    )
+                except (OSError, ValueError):
+                    pass  # stderr already carries the non-retryable degradation
 
             return DispatchSendResult(msg_id=msg_id, delivery=delivery)
 

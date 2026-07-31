@@ -223,7 +223,7 @@ def _resolved_claude(session_id: str):
     from types import SimpleNamespace
 
     return SimpleNamespace(
-        session_id=session_id, agent="claude", handle=session_id[:8]
+        session_id=session_id, agent="claude", handle=session_id[-8:]
     )
 
 
@@ -253,7 +253,7 @@ def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
 
     assert len(emitted_events) == 1, "operator live-miss escalates once"
     assert emitted_events[0]["data"]["reason"] == "attended-miss"
-    assert emitted_events[0]["data"]["recipient"] == "9a063cd3"
+    assert emitted_events[0]["data"]["recipient"] == "0164189c"
 
 
 def test_worker_recipient_live_miss_does_not_escalate(mailbox, monkeypatch, emitted_events):
@@ -298,4 +298,3 @@ def test_registry_read_failure_escalates_neither_nor_breaks(monkeypatch):
 
     monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
     assert _recipient_is_attended("9a063cd3") is False
-

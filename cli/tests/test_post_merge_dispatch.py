@@ -10,14 +10,12 @@ subprocess or inject fires.
 from __future__ import annotations
 
 from fno.graph._reconcile import (
-    MergeDriftRecord,
     PrMergeState,
     query_pr_merge_state,
     scan_merge_drift,
 )
 from fno.post_merge_route import (
     ColdRitualResult,
-    PostMergeDispatchResult,
     dispatch_post_merge_ritual,
 )
 
@@ -258,6 +256,7 @@ def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
         emit_receipt_fn=rcpt,
     )
     assert res.outcome == "routed-warm"
+    assert res.short_id == "s-live-1"
     assert warm.calls == [("sess-live-1", 7, None)]
     assert verb.calls == []
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW1").exists()
@@ -443,8 +442,6 @@ _RITUAL_TTL_MS = 15 * 60 * 1000
 
 
 def _arm_ritual_claim(monkeypatch, tmp_path, pr_number, *, pid):
-    import os
-
     from fno import claims
     from fno.claims.io import claims_root_for
 

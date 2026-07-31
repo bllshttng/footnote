@@ -14,7 +14,11 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.agents import discover
-from fno.agents.cli import HEAL_TOKEN_AMBIGUOUS_EXIT, HEAL_TOKEN_MISS_EXIT
+from fno.agents.cli import (
+    HEAL_TOKEN_AMBIGUOUS_EXIT,
+    HEAL_TOKEN_MISS_EXIT,
+    HEAL_TOKEN_UNAVAILABLE_EXIT,
+)
 from fno.agents.registry import load_registry
 from fno.cli import app
 
@@ -102,6 +106,47 @@ def test_ambiguous_token_refuses_with_every_candidate(_scratch_stores):
     assert CLAUDE_UUID in res.stderr and TWIN_UUID in res.stderr
     # Nothing adopted: an ambiguous token is refused, never guessed.
     assert load_registry() == []
+
+
+def test_all_sources_refuses_registry_and_store_collision_without_adopting(
+    _scratch_stores,
+):
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    write_registry([
+        AgentEntry(
+            name="c655c326",
+            cwd="/registered",
+            log_path="",
+            harness="claude",
+            harness_session_id=registered_id,
+        )
+    ])
+    _write_claude_session(_scratch_stores, CLAUDE_UUID)
+    _write_codex_session(_scratch_stores, TWIN_UUID)
+
+    res = _run("c655c326", "--all-sources")
+
+    assert res.exit_code == HEAL_TOKEN_AMBIGUOUS_EXIT
+    assert registered_id in res.stderr
+    assert CLAUDE_UUID in res.stderr and TWIN_UUID in res.stderr
+    assert [e.harness_session_id for e in load_registry()] == [registered_id]
+
+
+def test_all_sources_reports_unreadable_registry_as_unavailable(_scratch_stores):
+    from fno.agents.registry import SCHEMA_VERSION
+
+    registry = _scratch_stores / "agents" / "registry.json"
+    registry.write_text(
+        json.dumps({"schema_version": SCHEMA_VERSION + 1, "agents": []}),
+        encoding="utf-8",
+    )
+
+    res = _run("deadbeef", "--all-sources")
+
+    assert res.exit_code == HEAL_TOKEN_UNAVAILABLE_EXIT
+    assert "registry unreadable" in res.stderr
 
 
 def test_verb_stays_off_the_rust_routing_set():

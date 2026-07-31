@@ -1884,6 +1884,7 @@ def cmd_discovered_json(
 #: the original not-found error" (x-da8c AC4 vs AC5).
 HEAL_TOKEN_MISS_EXIT = 13
 HEAL_TOKEN_AMBIGUOUS_EXIT = 3
+HEAL_TOKEN_UNAVAILABLE_EXIT = 12
 
 
 @agents_app.command("heal-token", hidden=True)
@@ -1894,14 +1895,21 @@ def cmd_heal_token(
         "--registry",
         help="Adopt into THIS registry file (default: the configured one).",
     ),
+    all_sources: bool = typer.Option(
+        False,
+        "--all-sources",
+        hidden=True,
+        help="Resolve against the registry and stores as one namespace.",
+    ),
 ) -> None:
     """Internal: adopt the session TOKEN names from its harness store, as JSON.
 
     The one x-9cc5 healer behind ``registry.resolve_agent``, exposed so the Rust
-    lifecycle verbs (logs/attach/resume) heal a registry miss through the SAME
-    probe rather than growing a second one. Exit 0 with the adopted row on
-    stdout; 13 on a miss or a non-session-shaped token; 3 with the candidate
-    list on stderr when the token is ambiguous.
+    lifecycle verbs (logs/attach/resume) use the SAME probes rather than growing
+    a second implementation. ``--all-sources`` also includes registry rows in
+    the uniqueness decision. Exit 0 with the resolved row on stdout; 13 on a
+    miss or a non-session-shaped token; 3 with the candidate list on stderr when
+    the token is ambiguous; 12 when identity evidence is unavailable.
 
     ``--registry`` exists because the two runtimes resolve the registry
     differently -- Rust honors ``FNO_AGENTS_HOME``, this side does not -- so a
@@ -1916,6 +1924,25 @@ def cmd_heal_token(
     from dataclasses import asdict
 
     from fno.agents.registry import AgentResolutionError, resolve_from_harness_store
+
+    if all_sources:
+        from fno.agents.registry import resolve_agent
+
+        try:
+            resolved_entry = resolve_agent(
+                token, path=Path(registry) if registry else None
+            ).entry
+        except AgentResolutionError as exc:
+            if exc.ambiguous:
+                sys.stderr.write(f"{exc}\n")
+                raise typer.Exit(code=HEAL_TOKEN_AMBIGUOUS_EXIT)
+            if exc.unavailable:
+                sys.stderr.write(f"{exc}\n")
+                raise typer.Exit(code=HEAL_TOKEN_UNAVAILABLE_EXIT)
+            raise typer.Exit(code=HEAL_TOKEN_MISS_EXIT)
+        sys.stdout.write(_json.dumps(asdict(resolved_entry)))
+        sys.stdout.write("\n")
+        return
 
     try:
         entry = resolve_from_harness_store(

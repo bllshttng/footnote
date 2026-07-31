@@ -118,13 +118,13 @@ def _seed_bus_message(*, to: str, from_: str, body: str):
 def test_drain_self_reads_own_handle_and_acks(runner, mailbox, monkeypatch):
     # AC1-EDGE: the bare address drains exactly once and acks under that key.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    _seed_bus_message(to="019f48e1", from_="claude-web", body="ack from K")
+    _seed_bus_message(to="4bcf4ae4", from_="claude-web", body="ack from K")
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
     payload = json.loads(res.stdout.strip().splitlines()[-1])
     assert [m["body"] for m in payload] == ["ack from K"]
-    assert payload[0]["to"] == "019f48e1"
+    assert payload[0]["to"] == "4bcf4ae4"
 
     # Ack advanced the cursor: a second drain sees nothing (not re-surfaced).
     again = runner.invoke(app, ["mail", "drain-self", "--json"])
@@ -135,7 +135,7 @@ def test_drain_self_human_render_surfaces_id_and_reply_hint(runner, mailbox, mon
     # The receive-path render must show each message's id (what `reply --to`
     # correlates against) and the how-to, so a draining agent can answer.
     monkeypatch.setenv("CODEX_THREAD_ID", "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4")
-    h = _seed_bus_message(to="019f48e1", from_="claude-web", body="need a decision")
+    h = _seed_bus_message(to="4bcf4ae4", from_="claude-web", body="need a decision")
 
     res = runner.invoke(app, ["mail", "drain-self"])  # human path (no --json)
     assert res.exit_code == 0, res.output
@@ -157,7 +157,8 @@ def test_legacy_addressed_mail_is_not_drained(runner, mailbox, monkeypatch):
     absorbing it would hide the fact that something addressed it the retired way."""
     monkeypatch.setenv("CODEX_THREAD_ID", CODEX_SID)
     _seed_bus_message(to="codex-019f48e1", from_="web", body="retired form")
-    _seed_bus_message(to="019f48e1", from_="web", body="real address")
+    _seed_bus_message(to="019f48e1", from_="web", body="ambiguous legacy address")
+    _seed_bus_message(to="4bcf4ae4", from_="web", body="real address")
 
     res = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert res.exit_code == 0, res.output
@@ -258,7 +259,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
         app, ["mail", "send", "019f48e1", "ack from K", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "019f48e1" in sent.output
+    assert "4bcf4ae4" in sent.output
     assert "queued (durable)" in sent.output
 
     # The codex session drains its own handle and sees the message.
@@ -266,7 +267,7 @@ def test_us7a_send_to_disk_discovered_codex_round_trips(runner, mailbox, monkeyp
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "019f48e1"
+    assert payload and payload[0]["to"] == "4bcf4ae4"
     assert "ack from K" in payload[0]["body"]  # inside the <fno_mail> wrap
 
 
@@ -553,7 +554,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
         app, ["mail", "send", "9a063cd3", "hi bg worker", "--from-name", "web"]
     )
     assert sent.exit_code == 0, sent.output
-    assert "9a063cd3" in sent.output
+    assert "0164189c" in sent.output
     assert "queued (durable)" in sent.output
 
     # The bg worker drains its own handle and sees the message (stamp == drain key).
@@ -561,7 +562,7 @@ def test_us3_rostered_claude_inject_miss_falls_to_drainable_floor(
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     assert drained.exit_code == 0, drained.output
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "9a063cd3"
+    assert payload and payload[0]["to"] == "0164189c"
     assert "hi bg worker" in payload[0]["body"]
 
 
@@ -620,7 +621,7 @@ def test_ac3_hp_envelope_carries_real_from_and_model(
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", recipient_sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     body = json.loads(drained.stdout.strip().splitlines()[-1])[0]["body"]
-    assert 'from="abcd1234"' in body
+    assert 'from="44444444"' in body
     assert 'model="claude-opus-4-8"' in body
     # Pinned to the shared mapper, not spelled literally: the name lane once
     # stamped a raw "claude" here while dispatch, the relay, and the Rust
@@ -665,7 +666,7 @@ def test_mailbox_fixture_neutralizes_ambient_bus_dir(runner, monkeypatch, tmp_pa
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
     drained = runner.invoke(app, ["mail", "drain-self", "--json"])
     payload = json.loads(drained.stdout.strip().splitlines()[-1])
-    assert payload and payload[0]["to"] == "9a063cd3"
+    assert payload and payload[0]["to"] == "0164189c"
     assert "hi bg worker" in payload[0]["body"]
 
 
@@ -681,3 +682,109 @@ def test_project_send_no_peer_warns_deferred(runner, mailbox):
     assert res.exit_code == 0, res.output
     assert "queued (durable) for project web" in res.stdout
     assert "project inbox web has no live drain" in (res.stderr or "")
+
+
+def test_self_send_compares_canonical_identity_without_rewriting_alias(monkeypatch):
+    from fno.mail import cli
+
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    assert cli._is_self_send("55556666")
+    assert not cli._is_self_send("friendly-alias")
+
+
+def test_self_recipient_accepts_full_canonical_and_legacy_forms(monkeypatch):
+    from fno.mail import cli
+
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    for token in (sid, "55556666", "019fb417"):
+        assert cli._self_recipient(token) == "55556666"
+
+
+def test_resolved_explicit_name_cannot_be_shadowed_by_ambient_self_handle(monkeypatch):
+    from fno.mail import cli
+
+    monkeypatch.setenv("CODEX_THREAD_ID", "019fb417-1111-7222-8333-444455556666")
+    other = "aaaaaaaa-1111-7222-8333-bbbbbbbbbbbb"
+    assert cli._self_recipient("55556666", resolved_session_id=other) is None
+
+
+@pytest.mark.parametrize("token", ["019fb417-1111-7222-8333-444455556666", "019fb417"])
+def test_full_and_legacy_ambient_self_queue_to_canonical_without_inject(
+    runner, mailbox, monkeypatch, token
+):
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
+    )
+    sent = runner.invoke(app, ["mail", "send", token, "note", "--from-name", "web"])
+    assert sent.exit_code == 0, sent.output
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "55556666"
+
+
+def test_unreadable_store_full_self_id_still_queues_to_canonical(
+    runner, mailbox, monkeypatch
+):
+    """Store uncertainty cannot strand self-mail under the full UUID address."""
+    from fno.agents import discover
+
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (_ for _ in ()).throw(
+            discover.StoreReadError(["registry"])
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
+    )
+
+    sent = runner.invoke(app, ["mail", "send", sid, "note", "--from-name", "web"])
+
+    assert sent.exit_code == 0, sent.output
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "55556666"
+
+
+def test_live_discovered_ambient_self_queues_canonical_without_inject_or_mux(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents.discover import DiscoveredSession
+    from fno.mail import cli
+
+    sid = "019fb417-1111-7222-8333-444455556666"
+    monkeypatch.setenv("CODEX_THREAD_ID", sid)
+    own_session = DiscoveredSession(
+        session_id=sid,
+        short_id="55556666",
+        handle="55556666",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status=None,
+        agent="codex",
+        truth_state="working",
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_codex",
+        lambda *_a, **_k: pytest.fail("self-send attempted live injection"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mux_pane_send",
+        lambda *_a, **_k: pytest.fail("self-send attempted mux delivery"),
+    )
+
+    cli._name_lane_send("note", from_name="web", resolved=own_session)
+
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    payload = json.loads(drained.stdout.strip().splitlines()[-1])
+    assert payload and payload[0]["to"] == "55556666"

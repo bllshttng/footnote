@@ -78,7 +78,7 @@ os.environ["FNO_E2E"] = "1"
 for _ambient_key in (
     "FNO_NODE", "FNO_SLUG", "FNO_PLAN",
     "CLAUDE_CODE_SESSION_ID", "CODEX_THREAD_ID",
-    "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+    "CODEX_SESSION_ID", "GEMINI_SESSION_ID", "OPENCODE_SESSION_ID",
 ):
     os.environ.pop(_ambient_key, None)
 

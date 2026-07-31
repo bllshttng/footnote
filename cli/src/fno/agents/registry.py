@@ -33,10 +33,16 @@ import sys
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Iterator, Literal, Optional
+from typing import Any, Callable, Iterator, Literal, Optional
 
 from fno import paths
-from fno.harness_identity import canonical_handle, sync_harness_aliases
+from fno.harness_identity import (
+    canonical_handle,
+    legacy_prefix_handle,
+    session_handle_tier,
+    session_identity_key,
+    sync_harness_aliases,
+)
 
 # registry.status is a projection of state.status (LD10), so it can be ANY
 # AgentStatus variant. The daemon writes "live" on spawn and "exited" on child
@@ -335,17 +341,18 @@ class AgentEntry:
 
 # ---------------------------------------------------------------------------
 # Shared identifier resolver (x-1b1e): every session-connecting `fno agents`
-# verb accepts ONE of three address forms — the registry name/slug, the full
-# harness_session_id, or an 8-hex short. This one function is the single lookup
-# choke point so no verb re-implements a name-only `.find`.
+# verb accepts the registry name, full harness session id, explicit transport
+# short id, canonical handle, or legacy prefix. This function is the single
+# lookup choke point so no verb re-implements a name-only `.find`.
 # ---------------------------------------------------------------------------
 
-# Exactly-8 lowercase hex, the `spawn --resume` convention (_SHORT_ID_RE, PR #397).
-# A 7- or 9-char token is NOT a short; it falls through to name/full-id, then the
-# not-found error.
+# Exactly eight lowercase hex characters, used only when deciding whether a
+# Claude restamp may safely refresh a derived transport short id.
 _DERIVED_SHORT_RE = re.compile(r"^[0-9a-f]{8}$")
 
-_ACCEPTED_FORMS = "accepted forms: name, 8-hex short id, or full session id"
+_ACCEPTED_FORMS = (
+    "accepted forms: name, canonical handle, transport short id, or full session id"
+)
 
 
 class AgentResolutionError(RuntimeError):
@@ -358,18 +365,25 @@ class AgentResolutionError(RuntimeError):
     default is the fallback, not a universal choke point.
 
     ``ambiguous`` distinguishes "this token names several agents" from "no agent
-    matches". Both are resolution failures, but only a MISS may fall through to
-    the harness-store fallback (x-9cc5): a token the registry already refuses to
-    disambiguate must keep refusing, or a store hit on one of the candidates
-    would silently pick the winner the registry deliberately would not.
+    matches". ``unavailable`` means the evidence needed to decide could not be
+    read. Only a genuine MISS may fall through to the harness-store fallback: a
+    token the registry already refuses to disambiguate must keep refusing, or a
+    store hit on one of the candidates would silently pick the winner the
+    registry deliberately would not.
     """
 
     def __init__(
-        self, message: str, *, exit_code: int = 2, ambiguous: bool = False
+        self,
+        message: str,
+        *,
+        exit_code: int = 2,
+        ambiguous: bool = False,
+        unavailable: bool = False,
     ) -> None:
         super().__init__(message)
         self.exit_code = exit_code
         self.ambiguous = ambiguous
+        self.unavailable = unavailable
 
 
 @dataclass
@@ -383,61 +397,52 @@ class ResolvedAgent:
     """
 
     entry: AgentEntry
-    matched_by: str  # "name" | "full_session_id" | "short_id" | "derived_short"
+    matched_by: str  # "name" | "full_session_id" | "short_id" | handle compatibility
 
     @property
     def worker_short_id(self) -> Optional[str]:
         return self.entry.short_id or None
 
 
-def _full_session_ids(entry: object) -> list[str]:
-    """The canonical full session id, lowercased (x-880e: the per-provider
-    full-id fields are gone; harness_session_id is their single successor).
-
-    ``getattr`` so the resolver core also accepts a duck-typed registry row
-    (e.g. a test's SimpleNamespace)."""
+def _session_tier(entry: object, token: str) -> Optional[int]:
+    """Delegate generated and legacy address comparison to the identity owner."""
     hsid = getattr(entry, "harness_session_id", None)
-    return [hsid.lower()] if hsid else []
-
-
-def _derived_short(entry: object) -> Optional[str]:
-    """The canonical addressing short: the first 8 hex of harness_session_id
-    (claude's jobId is built the same way, so for a claude row it equals the
-    stored short_id). ``None`` for a row whose id is unresolved or non-hex
-    (e.g. an opencode ``ses_...`` id), so the derived rule simply never fires."""
-    hsid = getattr(entry, "harness_session_id", None)
-    if not hsid:
-        return None
-    lead = hsid.split("-", 1)[0].lower()
-    return lead if _DERIVED_SHORT_RE.match(lead) else None
+    return session_handle_tier(token, hsid) if hsid else None
 
 
 def _one_or_ambiguous(hits: list, matched_by: str, token: str) -> ResolvedAgent:
     """Return the single matched entry, or raise on a real ambiguity.
 
-    Dedups by ``name`` (the PK), so the SAME entry matching a tier via multiple
-    rules is not ambiguous; two DISTINCT entries are (git's ambiguous-short-SHA
-    behavior — never silently pick one)."""
-    distinct = {getattr(e, "name", None): e for e in hits}
+    Dedup only repeated references to the same loaded row. A corrupt or legacy
+    registry can contain two rows with one name but different sessions; treating
+    the intended primary key as proof of identity would silently pick one.
+    """
+    distinct: list[Any] = []
+    for entry in hits:
+        if not any(entry is existing for existing in distinct):
+            distinct.append(entry)
     if len(distinct) > 1:
         cands = ", ".join(
             f"{getattr(e, 'name', '?')} (short={getattr(e, 'short_id', '') or '-'}, "
             f"{getattr(e, 'harness', '?')})"
-            for e in distinct.values()
+            for e in distinct
         )
         raise AgentResolutionError(
             f"token {token!r} is ambiguous across {len(distinct)} agents: "
             f"{cands}. Disambiguate with the name or full session id.",
             ambiguous=True,
         )
-    return ResolvedAgent(entry=next(iter(distinct.values())), matched_by=matched_by)
+    return ResolvedAgent(entry=distinct[0], matched_by=matched_by)
 
 
 def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
-    """The 4-rule matching core over an already-loaded entry list (the Rust
-    ``find_agent_entry`` mirror). Precedence: exact name, exact full session id
-    (case-insensitive), exact stored short_id (shape-agnostic), derived 8-hex
-    prefix. Name wins first so a hex-shaped name is byte-stable.
+    """The matching core over an already-loaded entry list (the Rust mirror).
+
+    A full session id is explicit and resolves first. Every shorter address form
+    shares one namespace: exact name, stored transport short id, canonical
+    handle, and legacy prefix matches are unioned before uniqueness is decided.
+    UUID-family identity matching is case-insensitive; OpenCode identity matching
+    preserves case.
 
     ``getattr``-based, so both real ``AgentEntry`` rows and duck-typed rows (a
     verb that injects its own registry loader) resolve identically. Raises
@@ -445,24 +450,20 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
     token = (token or "").strip()
     if not token:
         raise AgentResolutionError(f"empty agent token; {_ACCEPTED_FORMS}")
-    low = token.lower()
-
-    named = [e for e in entries if getattr(e, "name", None) == token]
-    if named:
-        return _one_or_ambiguous(named, "name", token)
-
-    by_full = [e for e in entries if low in _full_session_ids(e)]
+    by_full = [e for e in entries if _session_tier(e, token) == 0]
     if by_full:
         return _one_or_ambiguous(by_full, "full_session_id", token)
 
-    by_short = [e for e in entries if getattr(e, "short_id", None) == token]
-    if by_short:
-        return _one_or_ambiguous(by_short, "short_id", token)
-
-    if _DERIVED_SHORT_RE.match(low):
-        by_derived = [e for e in entries if _derived_short(e) == low]
-        if by_derived:
-            return _one_or_ambiguous(by_derived, "derived_short", token)
+    categories = (
+        ("name", [e for e in entries if getattr(e, "name", None) == token]),
+        ("short_id", [e for e in entries if getattr(e, "short_id", None) == token]),
+        ("canonical_handle", [e for e in entries if _session_tier(e, token) == 1]),
+        ("legacy_prefix", [e for e in entries if _session_tier(e, token) == 2]),
+    )
+    hits = [entry for _matched_by, category in categories for entry in category]
+    if hits:
+        matched_by = next(matched_by for matched_by, category in categories if category)
+        return _one_or_ambiguous(hits, matched_by, token)
 
     raise AgentResolutionError(f"no agent matching {token!r}; {_ACCEPTED_FORMS}")
 
@@ -470,33 +471,130 @@ def resolve_agent_in(entries: list, token: str) -> ResolvedAgent:
 def resolve_agent(token: str, *, path: Optional[Path] = None) -> ResolvedAgent:
     """Resolve ``token`` to one registry entry, loading the registry first.
 
-    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry degrades to
-    a clean :class:`AgentResolutionError`, never a traceback leaking to the
-    verb. See ``resolve_agent_in`` for the matching rules.
+    Wraps :func:`resolve_agent_in`; a malformed/unreadable registry becomes a
+    typed unavailable :class:`AgentResolutionError`, never a traceback leaking
+    to the verb. See ``resolve_agent_in`` for the matching rules.
 
-    On a MISS ONLY, a session-shaped token falls through to the harness stores
-    (x-9cc5): the registry is a cache of reality, so a real session with no
-    roster row is adopted here rather than refused. The happy path pays nothing
-    -- this is a hot seam (spawn dedup, mail), and a hit never reaches the probe.
+    A full session id and an ordinary name resolve from the registry directly.
+    Every session-shaped short token is checked against the harness stores too:
+    the registry is a cache of reality, so a store-only session must participate
+    in the same ambiguity decision. A registry miss may then adopt one unique
+    store hit (x-9cc5).
     """
     try:
         entries = load_registry(path=path)
     except RegistryVersionError as exc:
         raise AgentResolutionError(
-            f"registry unreadable ({exc}); cannot resolve {token!r}"
+            f"registry unreadable ({exc}); cannot resolve {token!r}",
+            unavailable=True,
         ) from exc
+    return resolve_agent_across_sources(entries, token, path=path)
+
+
+def resolve_agent_across_sources(
+    entries: list, token: str, *, path: Optional[Path] = None
+) -> ResolvedAgent:
+    """Resolve one token against a registry snapshot and every harness store."""
     try:
-        return resolve_agent_in(entries, token)
+        return resolve_registered_agent_across_sources(entries, token)
     except AgentResolutionError as exc:
         # A MISS may fall through; a registry the caller must disambiguate must
         # not. Otherwise a store hit on one of several matching rows would pick
         # the winner the registry deliberately refused to pick.
-        if exc.ambiguous:
+        if exc.ambiguous or exc.unavailable:
             raise
         entry = resolve_from_harness_store(token, registry_path=path)
         if entry is None:
             raise
         return ResolvedAgent(entry=entry, matched_by="harness_store")
+
+
+def resolve_registered_agent_across_sources(entries: list, token: str) -> ResolvedAgent:
+    """Resolve a registry row while checking store-only collision candidates.
+
+    A registry miss stays a miss and never adopts a store-only session. Registry-
+    gated read and delivery verbs use this to share the all-source ambiguity rule
+    without changing their established miss contract.
+    """
+    resolved = resolve_agent_in(entries, token)
+    resolved = _ensure_unique_across_aliases(resolved, token)
+    return _ensure_unique_across_stores(resolved, token)
+
+
+def _ensure_unique_across_aliases(
+    resolved: ResolvedAgent, token: str
+) -> ResolvedAgent:
+    """Union a registry hit with persisted friendly aliases before selecting."""
+    if resolved.matched_by == "full_session_id":
+        return resolved
+
+    from fno.agents.discover import _alias_to_session_ids
+
+    alias_ids, read_ok = _alias_to_session_ids(token, None)
+    if not read_ok:
+        raise AgentResolutionError(
+            f"persisted alias map unreadable; cannot resolve {token!r} uniquely",
+            unavailable=True,
+        )
+
+    entry = resolved.entry
+    registry_id = getattr(entry, "harness_session_id", None)
+    registry_identity = session_identity_key(registry_id) if registry_id else None
+    foreign = sorted(
+        sid
+        for sid in set(alias_ids)
+        if registry_identity is None or session_identity_key(sid) != registry_identity
+    )
+    if not foreign:
+        return resolved
+
+    candidates = [
+        f"{registry_id or entry.name} ({entry.harness}, registry name={entry.name})",
+        *(f"{sid} (persisted alias)" for sid in foreign),
+    ]
+    raise AgentResolutionError(
+        f"token {token!r} is ambiguous across {len(candidates)} sessions: "
+        f"{', '.join(candidates)}. Disambiguate with the full session id.",
+        ambiguous=True,
+    )
+
+
+def _ensure_unique_across_stores(
+    resolved: ResolvedAgent, token: str
+) -> ResolvedAgent:
+    """Union one registry hit with store-only candidates before selecting it."""
+    from fno.agents.store_fallback import complete_store_hits, is_session_shaped
+
+    if resolved.matched_by == "full_session_id" or not is_session_shaped(token):
+        return resolved
+
+    entry = resolved.entry
+    registry_id = getattr(entry, "harness_session_id", None)
+    registry_key = (
+        entry.harness,
+        session_identity_key(registry_id) if registry_id else None,
+    )
+    foreign = {
+        (hit.harness, session_identity_key(hit.session_id)): hit
+        for hit in complete_store_hits(token)
+        if (hit.harness, session_identity_key(hit.session_id)) != registry_key
+    }
+    if not foreign:
+        return resolved
+
+    registry_id = registry_id or entry.name
+    candidates = [
+        f"{registry_id} ({entry.harness}, registry name={entry.name})",
+        *(
+            f"{hit.session_id} ({hit.harness}, harness store)"
+            for hit in sorted(foreign.values(), key=lambda h: (h.harness, h.session_id))
+        ),
+    ]
+    raise AgentResolutionError(
+        f"token {token!r} is ambiguous across {len(candidates)} sessions: "
+        f"{', '.join(candidates)}. Disambiguate with the full session id.",
+        ambiguous=True,
+    )
 
 
 def resolve_from_harness_store(
@@ -823,9 +921,9 @@ def register_existing_session(
     Idempotent on ``(provider, session_id)``: re-registering the same
     session (the hook re-fires after a resume/compaction) refreshes the
     row in place rather than appending a duplicate. A genuinely new
-    session whose derived name collides with a different row gets a
-    numeric suffix, so two sessions in one cwd stay addressable under
-    distinct names (AC7-EDGE).
+    session whose generated canonical handle collides with a different row is
+    refused rather than assigned an order-dependent numeric address. Explicitly
+    supplied friendly names retain their existing suffix behavior.
 
     Raises on registry I/O failure or bad input; the SessionStart caller
     (``register_session.main``) fails open and emits a warning event
@@ -861,6 +959,19 @@ def register_existing_session(
     _REGISTERED_STATUS: AgentStatus = status or "idle"
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
+        def _address_is_taken(
+            token: str, *, exclude: Optional[AgentEntry] = None
+        ) -> bool:
+            return any(
+                entry is not exclude
+                and (
+                    getattr(entry, "name", None) == token
+                    or getattr(entry, "short_id", None) == token
+                    or _session_tier(entry, token) is not None
+                )
+                for entry in entries
+            )
+
         for entry in entries:
             # Keyed on harness_session_id, the canonical id every row carries --
             # `session_field` is `short_id` for claude, which a caller may set to
@@ -880,6 +991,14 @@ def register_existing_session(
                 if log_path:
                     entry.log_path = log_path
                 if short_id:
+                    if short_id != entry.short_id and _address_is_taken(
+                        short_id, exclude=entry
+                    ):
+                        raise AgentResolutionError(
+                            f"transport short id {short_id!r} collision while "
+                            f"refreshing session {session_id!r}; use the full session id",
+                            ambiguous=True,
+                        )
                     entry.short_id = short_id
                 # Only restamp origin when the caller passed one: the harness-store
                 # healer refreshes rows without it, and a blind `entry.origin = None`
@@ -887,10 +1006,23 @@ def register_existing_session(
                 if origin is not None:
                     entry.origin = origin
                 return entries
-        base = name or canonical_handle(session_id)
-        taken = {entry.name for entry in entries}
+        generated = canonical_handle(session_id)
+        if _address_is_taken(generated):
+            raise AgentResolutionError(
+                f"canonical handle {generated!r} collision while registering session "
+                f"{session_id!r}; use the full session id directly",
+                ambiguous=True,
+            )
+        if short_id and _address_is_taken(short_id):
+            raise AgentResolutionError(
+                f"transport short id {short_id!r} collision while registering session "
+                f"{session_id!r}; use the full session id",
+                ambiguous=True,
+            )
+
+        base = name or generated
         chosen, suffix = base, 2
-        while chosen in taken:
+        while _address_is_taken(chosen):
             chosen = f"{base}-{suffix}"
             suffix += 1
         fresh = AgentEntry(
@@ -1024,6 +1156,69 @@ def update_registry(
     target = _registry_path(path)
     with _hold_registry_lock(target):
         current = load_registry(path=target)
+        before = {entry.name: _identity_signature(entry) for entry in current}
         new_entries = updater(list(current))
+        _validate_changed_identities(before, new_entries)
         write_registry(new_entries, path=target)
         return new_entries
+
+
+def _identity_signature(entry: AgentEntry) -> tuple[str, str, str, str]:
+    """Fields whose mutation can change what token addresses a registry row."""
+    return (
+        entry.name,
+        entry.short_id or "",
+        entry.harness or "",
+        entry.harness_session_id or "",
+    )
+
+
+def _validate_changed_identities(
+    before: dict[str, tuple[str, str, str, str]], entries: list[AgentEntry]
+) -> None:
+    """Reject a newly minted address that shadows any existing row.
+
+    Historical legacy-prefix collisions remain readable and resolve as
+    ambiguity. New names, transport keys, full ids, and canonical handles may
+    not enter that namespace because those are current producers and durable
+    mailbox addresses.
+    """
+
+    def _matches(token: str, other: AgentEntry, *, include_legacy: bool) -> bool:
+        if token == other.name or (other.short_id and token == other.short_id):
+            return True
+        tier = _session_tier(other, token)
+        return tier is not None and (include_legacy or tier != 2)
+
+    for index, candidate in enumerate(entries):
+        if before.get(candidate.name) == _identity_signature(candidate):
+            continue
+        sid = candidate.harness_session_id or ""
+        strong_tokens = {candidate.name}
+        if candidate.short_id:
+            strong_tokens.add(candidate.short_id)
+        if sid:
+            strong_tokens.update((sid, canonical_handle(sid)))
+        legacy = legacy_prefix_handle(sid) if sid else ""
+        for other_index, other in enumerate(entries):
+            if index == other_index:
+                continue
+            collision = next(
+                (
+                    token
+                    for token in strong_tokens
+                    if _matches(token, other, include_legacy=True)
+                ),
+                None,
+            )
+            if collision is None and legacy and _matches(
+                legacy, other, include_legacy=False
+            ):
+                collision = legacy
+            if collision is not None:
+                raise AgentResolutionError(
+                    f"registry identity {collision!r} for new or changed row "
+                    f"{candidate.name!r} collides with row {other.name!r}; use a "
+                    "different name or the full session id",
+                    ambiguous=True,
+                )

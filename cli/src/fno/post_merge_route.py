@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal, Optional, Tuple
 
-from fno.harness_identity import current_session_ids
+from fno.harness_identity import canonical_handle, current_session_ids
 
 # The injected turn: the SAME mechanical verb the cold path runs as a subprocess
 # (Locked Decision 11). Warm and cold execute one identical bounded command and
@@ -669,7 +669,7 @@ def dispatch_post_merge_ritual(
                 )
                 return PostMergeDispatchResult(
                     "routed-warm", pr_number,
-                    short_id=(verdict.borrowed_session_id or "")[:8],
+                    short_id=canonical_handle(verdict.borrowed_session_id or ""),
                     detail="queued" if queued else reason,
                 )
             cold_reason = reason  # warm miss -> degrade to the cold verb

@@ -48,13 +48,9 @@ def _identity(hook_input: bytes, explicit_entry: str | None) -> tuple[str, str, 
     payload = payload if isinstance(payload, dict) else {}
     session_id = str(payload.get("session_id") or "").strip()
     harness = (os.environ.get("FNO_PLATFORM") or "").strip().lower()
-    markers = (
-        ("CODEX_THREAD_ID", "codex"),
-        ("CLAUDE_CODE_SESSION_ID", "claude"),
-        ("CODEX_SESSION_ID", "codex"),
-        ("GEMINI_SESSION_ID", "gemini"),
-    )
-    for marker, marker_harness in markers:
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, marker_harness in HARNESS_SESSION_MARKERS:
         value = (os.environ.get(marker) or "").strip()
         if not session_id and value:
             session_id = value

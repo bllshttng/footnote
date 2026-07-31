@@ -15,13 +15,40 @@ pointed at the fixture. Skipped when the Rust binary is absent (sdist test env).
 """
 from __future__ import annotations
 
+import functools
 import json
 import os
+import shutil
 import subprocess
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+
+
+@functools.lru_cache(maxsize=1)
+def _fno_shim_dir() -> str | None:
+    """A PATH dir providing ``fno``, or ``None`` when the real one is present.
+
+    The Rust client resolves a short token by shelling out to
+    ``fno agents heal-token --all-sources`` (``client_verbs.rs``). ``fno`` is the
+    cargo-installed RUST binary; the Python package installs only ``fno-py``
+    (``[project.scripts]``). So a checkout that has never run ``cargo install``
+    -- CI, and any dev box that only built ``fno-agents`` -- has no ``fno`` on
+    PATH, the shellout dies with ENOENT, and every short-token case fails the
+    Rust/Python parity assertion for a reason that is purely environmental.
+
+    The shim resolves ``fno-py`` at exec time rather than install time, because
+    it is the surrounding ``uv run`` that puts the venv bin on PATH.
+    """
+    if shutil.which("fno"):
+        return None
+    d = tempfile.mkdtemp(prefix="fno-parity-shim-")
+    shim = Path(d) / "fno"
+    shim.write_text('#!/bin/sh\nexec fno-py "$@"\n')
+    shim.chmod(0o755)
+    return d
 
 
 def _find_rust_bin() -> Path | None:
@@ -57,9 +84,39 @@ def _run_rust(args: list[str], home: Path) -> subprocess.CompletedProcess:
     otherwise resume/attach would diverge purely on which PATH each side was
     handed, not on behavior.
     """
+    source_path = str(Path(__file__).resolve().parents[2] / "src")
+    inherited_pythonpath = os.environ.get("PYTHONPATH")
+    pythonpath = (
+        source_path + os.pathsep + inherited_pythonpath
+        if inherited_pythonpath
+        else source_path
+    )
+    env = {
+        **os.environ,
+        "FNO_AGENTS_HOME": str(home),
+        "PYTHONPATH": pythonpath,
+    }
+    # Only when the real binary is absent, so a machine that HAS fno keeps
+    # exercising the genuine article rather than a shim.
+    shim_dir = _fno_shim_dir()
+    if shim_dir:
+        env["PATH"] = shim_dir + os.pathsep + env.get("PATH", "")
+    # A short-token parity case asks the Rust client to invoke the Python
+    # all-source resolver. Keep that test hermetic instead of scanning the
+    # operator's real Claude/OpenCode corpora; individual tests can still
+    # override these seams through monkeypatch before calling this helper.
+    isolated_stores = {
+        "FNO_CLAUDE_PROJECTS_DIR": home.parent / "empty-claude-projects",
+        "FNO_CODEX_SESSIONS_DIR": home.parent / "empty-codex-sessions",
+        "FNO_OPENCODE_STORAGE_DIR": home.parent / "empty-opencode" / "storage",
+    }
+    for key, path in isolated_stores.items():
+        if key not in env:
+            path.mkdir(parents=True, exist_ok=True)
+            env[key] = str(path)
     return subprocess.run(
         [str(RUST_BIN), *args],
-        env={**os.environ, "FNO_AGENTS_HOME": str(home)},
+        env=env,
         capture_output=True,
         text=True,
     )
@@ -265,9 +322,7 @@ def test_resume_gemini_print_command_parity(tmp_path) -> None:
 
 @requires_rust
 def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
-    """x-1b1e AC1-UI / AC2-HP: `resume` reaches the same row by name, by the
-    derived 8-hex prefix of its session id, and by the full session id - the
-    Rust binary and the Python resume_logic agree on all three forms."""
+    """Rust and Python agree on every current and compatibility address form."""
     from fno.agents import resume_cli
 
     full = "a1b2c3d4-1111-2222-3333-444455556666"
@@ -292,7 +347,7 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
 
     by_name = _run_rust(["resume", "cx", "--print-command"], agents)
     assert by_name.returncode == 0, by_name.stderr
-    for token in ("a1b2c3d4", full, "cxworker"):
+    for token in ("55556666", "a1b2c3d4", full, "cxworker"):
         rust = _run_rust(["resume", token, "--print-command"], agents)
         assert rust.stdout == by_name.stdout, f"token {token} diverged"
         assert rust.returncode == 0
@@ -300,6 +355,49 @@ def test_resume_resolves_by_short_and_full_id_parity(tmp_path) -> None:
             name=token, print_command=True, registry_loader=loader
         )
         assert rust.stdout == py.output, f"rust/py parity for token {token}"
+
+
+@requires_rust
+def test_resume_opencode_canonical_tail_case_parity(tmp_path) -> None:
+    """The Rust promotion gate preserves OpenCode's case-sensitive tail."""
+    from fno.agents import resume_cli
+
+    full = "ses_7f3a9b2cAbCd1234"
+    entries = [
+        {
+            "name": "oc",
+            "short_id": "ocworker",
+            "harness": "opencode",
+            "cwd": "/tmp/proj",
+            "project_root": "/tmp/proj",
+            "log_path": "/tmp/proj/l.jsonl",
+            "harness_session_id": full,
+            "status": "live",
+            "created_at": "2026-05-26T09:00:00Z",
+        }
+    ]
+    agents = tmp_path / "agents"
+    _seed_registry(agents, entries)
+
+    def loader():
+        return [SimpleNamespace(**entry) for entry in entries]
+
+    # Warm the first-run Rust front door; dependency provisioning may write to
+    # stderr, but it is not part of the resume contract compared below.
+    warm = _run_rust(["resume", "AbCd1234", "--print-command"], agents)
+    assert warm.returncode == 0, warm.stderr
+
+    for token in ("oc", full, "AbCd1234", "ocworker", "abcd1234"):
+        rust = _run_rust(["resume", token, "--print-command"], agents)
+        py = resume_cli.resume_logic(
+            name=token, print_command=True, registry_loader=loader
+        )
+        assert rust.returncode == py.exit_code, f"exit parity for token {token}"
+        assert rust.stdout == py.output, f"stdout parity for token {token}"
+        assert rust.stderr == py.stderr, f"stderr parity for token {token}"
+
+    assert _run_rust(["resume", "AbCd1234", "--print-command"], agents).returncode == 0
+    assert _run_rust(["resume", "abcd1234", "--print-command"], agents).returncode != 0
 
 
 @requires_rust
@@ -358,7 +456,7 @@ def test_attach_missing_agent_exit2(tmp_path) -> None:
     rust = _run_rust(["attach", "ghost"], agents)
     assert rust.stderr == (
         "no agent matching 'ghost'; "
-        "accepted forms: name, 8-hex short id, or full session id\n"
+        "accepted forms: name, canonical handle, transport short id, or full session id\n"
     )
     assert rust.returncode == 2
 
@@ -369,20 +467,32 @@ def test_attach_missing_agent_exit2(tmp_path) -> None:
 
 @requires_rust
 @pytest.mark.parametrize("tail", [2, 0, 100])
-def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
+@pytest.mark.parametrize("token", ["cx", "deadbeef"])
+def test_logs_codex_oneshot_parity(tmp_path, monkeypatch, tail, token) -> None:
     from fno.agents import read as read_mod
     from fno.agents.registry import AgentEntry
     import io
 
     agents = tmp_path / "agents"
     agents.mkdir(parents=True)
+    projects = tmp_path / "projects"
+    codex = tmp_path / "codex"
+    opencode_storage = tmp_path / "opencode" / "storage"
+    projects.mkdir()
+    codex.mkdir()
+    opencode_storage.mkdir(parents=True)
+    monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(projects))
+    monkeypatch.setenv("FNO_CODEX_SESSIONS_DIR", str(codex))
+    monkeypatch.setenv("FNO_OPENCODE_STORAGE_DIR", str(opencode_storage))
     log = agents / "cx.log.jsonl"
     log.write_text('{"line":1}\n{"line":2}\n{"line":3}\n{"line":4}')  # last line no newline
+    session_id = "019fb417-1111-7222-8333-4444deadbeef"
     entries = [
         {
             "name": "cx",
             "short_id": "cx",
             "provider": "codex",
+            "harness_session_id": session_id,
             "cwd": "/tmp/x",
             "project_root": "/tmp/x",
             "log_path": str(log),
@@ -395,7 +505,15 @@ def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
     # Python side: read_logs with load_registry pointed at the fixture.
     def fake_registry():
         return [
-            AgentEntry(name=e["name"], harness=e["provider"], cwd=e["cwd"], log_path=e["log_path"], created_at=e["created_at"], status=e["status"])
+            AgentEntry(
+                name=e["name"],
+                harness=e["provider"],
+                harness_session_id=e["harness_session_id"],
+                cwd=e["cwd"],
+                log_path=e["log_path"],
+                created_at=e["created_at"],
+                status=e["status"],
+            )
             for e in entries
         ]
 
@@ -404,13 +522,13 @@ def test_logs_codex_oneshot_parity(tmp_path, tail) -> None:
     try:
         out = io.StringIO()
         err = io.StringIO()
-        py = read_mod.read_logs(name="cx", tail=tail, stdout=out, stderr=err)
+        py = read_mod.read_logs(name=token, tail=tail, stdout=out, stderr=err)
         py_out = out.getvalue()
         py_exit = py.exit_code
     finally:
         read_mod.load_registry = orig
 
-    rust = _run_rust(["logs", "cx", "--tail", str(tail)], agents)
+    rust = _run_rust(["logs", token, "--tail", str(tail)], agents)
     assert rust.stdout == py_out
     assert rust.returncode == py_exit
 
@@ -459,7 +577,7 @@ def test_logs_agent_not_found_parity(tmp_path) -> None:
     rust = _run_rust(["logs", "ghost"], agents)
     assert rust.stderr == (
         "no agent matching 'ghost'; "
-        "accepted forms: name, 8-hex short id, or full session id\n"
+        "accepted forms: name, canonical handle, transport short id, or full session id\n"
     )
     assert rust.returncode == 13
 

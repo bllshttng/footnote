@@ -9,9 +9,11 @@ from fno.harness_identity import (
     HarnessIdentity,
     LEGACY_HANDLE_RE,
     canonical_handle,
+    claude_transport_short_id,
     current_session_id,
     current_session_ids,
     resolve_harness_identity,
+    session_identity_key,
 )
 
 
@@ -22,6 +24,7 @@ from fno.harness_identity import (
         ("CLAUDE_CODE_SESSION_ID", "claude-1", "claude"),
         ("CODEX_SESSION_ID", "codex-1", "codex"),
         ("GEMINI_SESSION_ID", "gemini-1", "gemini"),
+        ("OPENCODE_SESSION_ID", "ses_OpenCode1", "opencode"),
     ],
 )
 def test_resolves_each_supported_marker(marker, session_id, harness):
@@ -66,10 +69,19 @@ def test_current_session_helpers_share_precedence_and_legacy_fallback():
     assert current_session_ids({}) == set()
 
 
-def test_ac1_hp_canonical_handle_is_bare_first8():
+def test_ac1_hp_canonical_handle_is_random_tail():
     """The generated mailbox id carries no harness prefix (AC1-HP)."""
-    assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "019f48e1"
-    assert canonical_handle("abcdef01-2345") == "abcdef01"
+    assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
+    assert canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"
+    assert canonical_handle("ses_7f3a9b2cAbCd1234") == "AbCd1234"
+
+
+def test_session_identity_key_normalizes_uuid_case_but_preserves_opencode():
+    assert (
+        session_identity_key("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4")
+        == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    )
+    assert session_identity_key("ses_7f3a9b2cAbCd1234") == "ses_7f3a9b2cAbCd1234"
 
 
 def test_canonical_handle_takes_no_harness():
@@ -113,7 +125,7 @@ def test_ac1_fr_registry_name_equals_canonical_handle(tmp_path):
         cwd="/tmp",
         registry_path=tmp_path / "agents.json",
     )
-    assert entry.name == canonical_handle(sid) == "019f48e1"
+    assert entry.name == canonical_handle(sid) == "4bcf4ae4"
 
 
 def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch):
@@ -149,4 +161,19 @@ def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch)
     # The wire envelope's from/to too - the bus columns drifted from this once.
     body = wrap_fno_mail("hi", from_=stamp_from(None), harness="claude-code",
                          model="m", to=canonical_handle(sid))
-    assert 'from="019f48e1"' in body and 'to="019f48e1"' in body
+    assert 'from="4bcf4ae4"' in body and 'to="4bcf4ae4"' in body
+
+
+def test_ac4_err_legacy_prefix_has_one_named_compatibility_owner():
+    """Legacy first-eight lookup is explicit compatibility, never generation."""
+    from fno import harness_identity
+
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    assert harness_identity.legacy_prefix_handle(sid) == "019f48e1"
+    assert harness_identity.legacy_prefix_handle(sid) != canonical_handle(sid)
+
+
+def test_claude_transport_key_is_named_separately_from_mailbox_address():
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    assert claude_transport_short_id(sid) == "019f48e1"
+    assert claude_transport_short_id(sid) != canonical_handle(sid)

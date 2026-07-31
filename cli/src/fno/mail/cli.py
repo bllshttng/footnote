@@ -388,7 +388,12 @@ def _collect_refs(
 # ---------------------------------------------------------------------------
 
 def _reply_to_name_handle(
-    body_text: str, *, from_project: Optional[str], target: str, to_msg: str
+    body_text: str,
+    *,
+    from_project: Optional[str],
+    target: str,
+    to_msg: str,
+    require_resolution: bool = False,
 ) -> None:
     """Send a name-lane reply to ``target`` (a canonical handle): resolve it live
     and inject, else durable-floor to it. Shared by the bus-record reply path and
@@ -399,12 +404,38 @@ def _reply_to_name_handle(
     replies back to and that drain-self scans, NOT a project name."""
     from fno.agents import discover as discover_mod
 
-    resolved, _ = discover_mod.resolve_or_suggest(target)
+    resolved, suggestions = discover_mod.resolve_or_suggest(target)
     if resolved is not None:
         _name_lane_send(
             body_text, from_name=from_project, resolved=resolved, reply_to=to_msg
         )
     else:
+        try:
+            reachable, ambiguous = discover_mod.resolve_reachable(target)
+        except discover_mod.StoreReadError as exc:
+            raise typer.BadParameter(
+                f"sender handle {target!r} cannot be checked uniquely; unreadable "
+                f"stores: {', '.join(exc.failed)}"
+            ) from exc
+        if ambiguous:
+            raise typer.BadParameter(
+                f"sender handle {target!r} is ambiguous across sessions: "
+                f"{', '.join(ambiguous)}"
+            )
+        if reachable is not None:
+            _name_lane_send(
+                body_text,
+                from_name=from_project,
+                resolved=None,
+                token=target,
+                reply_to=to_msg,
+            )
+            return
+        if require_resolution:
+            detail = f"; candidates: {', '.join(suggestions)}" if suggestions else ""
+            raise typer.BadParameter(
+                f"retired sender handle {target!r} cannot be resolved uniquely{detail}"
+            )
         # AC1-FR: the original sender is no longer live -> durable floor addressed
         # to their canonical handle, still drainable. No provider: it is only
         # consulted on the live-inject path, which a None `resolved` already skips.
@@ -431,26 +462,24 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    Looks ``to_msg`` up on the durable bus. A name-lane message (``to_kind ==
-    "name"``) is answered by sending back to its original sender -- no re-typed
-    handle -- with the correlation threaded via ``in_reply_to`` (and the wire
-    ``reply_to`` attr). Any other target falls through to the thread-store reply
-    (append to the existing thread, or a ``replies_to``-linked new thread). A
-    ``to_msg`` absent from the bus is a hard error.
+    Looks ``to_msg`` up on the durable bus. A directed message (``to_kind`` is
+    ``name`` or ``session``) is answered by sending back to its original sender
+    -- no re-typed handle -- with the correlation threaded via ``in_reply_to``
+    (and the wire ``reply_to`` attr). Any other target falls through to the
+    thread-store reply. A ``to_msg`` absent from the bus is a hard error.
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file)
 
-    # Name-lane routing (x-8045): look the --to msg-id up on the durable bus and
-    # branch on its addressing. A name-lane message is answered by sending back to
-    # its original sender (no re-typed handle) with the correlation threaded via
-    # in_reply_to. Anything else falls through to the thread-store reply below.
+    # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
+    # and answer name/session mail back to its original sender. Anything else
+    # falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
-    from fno.harness_identity import LEGACY_HANDLE_RE
+    from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
-    if orig is not None and orig.to_kind == "name":
+    if orig is not None and orig.to_kind in {"name", "session"}:
         # A stored sender predating the address flip carries the retired
         # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
         # mistake by whoever is replying, and the address it would carry today is
@@ -460,16 +489,35 @@ def cmd_reply(
         # (Not the harness-parsing this scheme forbids: the harness is discarded,
         # the short-id is what routes, and routing is still a roster lookup.)
         target = orig.from_ or ""
-        if LEGACY_HANDLE_RE.match(target):
-            migrated = target.split("-", 1)[1][:8]
+        require_resolution = False
+        if orig.to_kind == "session":
+            from fno.agents.store_fallback import is_full_session_id
+            from fno.harness_identity import canonical_handle
+
+            if orig.from_session and is_full_session_id(orig.from_session):
+                target = canonical_handle(orig.from_session)
+            else:
+                # A session-addressed record without full sender provenance may
+                # use its stored sender only when current discovery proves that
+                # token uniquely. Never demote an unverified mutable alias.
+                require_resolution = True
+        elif LEGACY_HANDLE_RE.match(target):
+            migrated = legacy_prefix_handle(target.split("-", 1)[1])
             print(
                 f"note: stored sender {target!r} is a retired address form "
-                f"(pre-flip record); replying to {migrated!r}.",
+                f"(pre-flip record); resolving legacy token {migrated!r}.",
                 file=sys.stderr,
             )
             target = migrated
+            require_resolution = True
 
-        _reply_to_name_handle(body_text, from_project=from_project, target=target, to_msg=to_msg)
+        _reply_to_name_handle(
+            body_text,
+            from_project=from_project,
+            target=target,
+            to_msg=to_msg,
+            require_resolution=require_resolution,
+        )
         return
     if orig is None:
         # US3: a live-confirmed delivery writes no durable thread (LD11a), so the
@@ -905,16 +953,50 @@ class UnreachableTokenError(Exception):
     """
 
 
-def _is_self_send(recipient: Optional[str]) -> bool:
-    """True when the sender is addressing its own session."""
-    from fno.harness_identity import current_session_id
+class UnavailableTokenError(Exception):
+    """A short token could not be proven unique because stores were unreadable."""
+
+    def __init__(self, failed: list[str], candidates: list[str]) -> None:
+        super().__init__("session token resolution unavailable")
+        self.failed = failed
+        self.candidates = candidates
+
+
+_RAW_SELF_TOKEN = object()
+
+
+def _self_recipient(
+    token: str,
+    *,
+    resolved_session_id: object = _RAW_SELF_TOKEN,
+    full_only: bool = False,
+) -> Optional[str]:
+    """Canonical own address after resolution, or on a clean raw-token miss."""
+    from fno.harness_identity import (
+        canonical_handle,
+        current_session_id,
+        session_handle_tier,
+    )
 
     own = current_session_id() or ""
-    if not own or not recipient:
-        return False
-    from fno.harness_identity import canonical_handle
+    if not own:
+        return None
+    candidate = token if resolved_session_id is _RAW_SELF_TOKEN else resolved_session_id
+    if not isinstance(candidate, str):
+        return None
+    tier = session_handle_tier(candidate, own)
+    if (
+        tier is None
+        or (resolved_session_id is not _RAW_SELF_TOKEN and tier != 0)
+        or (full_only and tier != 0)
+    ):
+        return None
+    return canonical_handle(own)
 
-    return canonical_handle(own) == recipient
+
+def _is_self_send(recipient: Optional[str]) -> bool:
+    """True when an already-addressed token is this ambient session."""
+    return bool(recipient and _self_recipient(recipient))
 
 
 def _resolve_token(token: str):
@@ -922,9 +1004,8 @@ def _resolve_token(token: str):
 
     Resolution has to precede wrapping. The durable recipient is the resolved
     session's canonical handle, and deriving it from the raw token instead would
-    misaddress every alias: ``canonical_handle`` takes the first 8 characters, so
-    a friendly ``footnote-9a063cd3`` becomes the recipient ``footnote`` and the
-    real session never drains its own mail.
+    misaddress aliases because an alias is not a session identifier. Friendly
+    names must resolve to a full session before the canonical handle is derived.
 
     Returns ``(reachable_or_None, lane_note_or_None)``. A ``None`` reachable with
     no note means every store was read cleanly and knows nothing -- the only case
@@ -935,9 +1016,15 @@ def _resolve_token(token: str):
     try:
         reachable, ambiguous = discover_mod.resolve_reachable(token)
     except discover_mod.StoreReadError as exc:
-        # Unreadable is not proof of absence, and exit 16 queues nothing. Keep
-        # the mail: demote durably, addressed to the lone candidate when the
-        # resolver found one, and name the stores that could not be read.
+        from fno.agents.store_fallback import is_full_session_id
+
+        # Full ids are collision-free and remain safe to address directly. A
+        # short token is different: the unreadable store may contain another
+        # match, so even a durable write to the lone visible candidate is a
+        # wrong-recipient side effect. Refuse before minting or writing mail.
+        if not is_full_session_id(token):
+            candidates = [exc.resolved.session_id] if exc.resolved is not None else []
+            raise UnavailableTokenError(exc.failed, candidates) from exc
         return exc.resolved, f"wake=stores-unreadable({','.join(exc.failed)})"
     if ambiguous:
         raise AmbiguousTokenError(ambiguous)
@@ -1015,6 +1102,7 @@ def _name_lane_send(
     from fno.agents.provider_resolve import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.agents.store_fallback import is_full_session_id
     from fno.harness_identity import canonical_handle
     from fno.inbox.store import (
         classify_durable_owner,
@@ -1023,23 +1111,42 @@ def _name_lane_send(
     )
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
 
+    self_send = False
     if resolved is not None:
         recipient = canonical_handle(resolved.session_id)
         provider = resolved.agent
+        self_send = _self_recipient(
+            recipient, resolved_session_id=resolved.session_id
+        ) is not None
     elif token is not None:
         # Resolve BEFORE addressing. The durable copy must be addressed to the
         # resolved session's canonical handle -- deriving it from the raw token
-        # would misaddress every alias (canonical_handle takes the first 8
-        # chars, so `footnote-9a063cd3` would queue to `footnote`, which nothing
-        # drains). Falls back to the token when nothing resolved, which is the
-        # unregistered/exited-row case the socket probe below still covers.
-        if _is_self_send(canonical_handle(token)):
-            token_reachable, token_lane = None, "self-send"
+        # would misaddress every alias. A clean miss may still be this ambient
+        # session's full, canonical, or legacy identity; all three drain under
+        # the canonical recipient without attempting to inject into self.
+        self_recipient = None
+        token_reachable, token_lane = _resolve_token(token)
+        if token_reachable is None:
+            self_recipient = _self_recipient(
+                token, full_only=token_lane is not None
+            )
+            if self_recipient is not None:
+                token_lane = "self-send"
+        if token_reachable is not None:
+            self_recipient = _self_recipient(
+                token, resolved_session_id=token_reachable.session_id
+            )
+            if self_recipient is not None:
+                token_reachable, token_lane = None, "self-send"
+        self_send = token_lane == "self-send"
+        if self_recipient is not None:
+            recipient = self_recipient
+        elif token_reachable is not None:
+            recipient = canonical_handle(token_reachable.session_id)
+        elif is_full_session_id(token):
+            recipient = canonical_handle(token)
         else:
-            token_reachable, token_lane = _resolve_token(token)
-        recipient = canonical_handle(
-            token_reachable.session_id if token_reachable is not None else token
-        )
+            recipient = token
         provider = (
             token_reachable.agent if token_reachable is not None else provider
         ) or "claude"
@@ -1123,7 +1230,9 @@ def _name_lane_send(
                     if wake_lane:
                         lanes.append(wake_lane)
 
-    if resolved is not None:
+    if resolved is not None and self_send:
+        lanes.append("self-send")
+    elif resolved is not None:
         if provider == "claude":
             injected = _mail_inject_claude(resolved.session_id, wrapped)
         elif provider == "codex":
@@ -1172,12 +1281,11 @@ def _name_lane_send(
     # the sweep's to make once a wake-daemon thread sits unread past its TTL - at
     # birth we never know a recipient is gone for good (a token no store knows
     # already exits 16 upstream), so the durable floor never escalates non-zero.
-    self_send = resolved is None and token is not None and token_lane == "self-send"
     # A live rung was actually attempted (and missed): the resolved-session
     # inject, or the token ladder run below discovery. A self-send and a
     # durable-only reply (neither resolved nor token) had no live attempt, so
     # the attended lane must not fire for them (Locked Decision 3: live-miss).
-    live_attempted = resolved is not None or (token is not None and not self_send)
+    live_attempted = (resolved is not None or token is not None) and not self_send
     recipient_live = self_send or resolved is not None
     owner = classify_durable_owner(
         param_forced=False,
@@ -1758,6 +1866,19 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=exc.exit_code) from exc
+        except UnavailableTokenError as unavailable:
+            stores = ", ".join(unavailable.failed)
+            visible = (
+                f" Visible candidates: {', '.join(unavailable.candidates)}."
+                if unavailable.candidates
+                else ""
+            )
+            print(
+                f"cannot resolve short session token {name!r}: unreadable stores: "
+                f"{stores}.{visible} Send to a full session id.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from unavailable
         return
 
     # AC3-UI: distinguish delivered vs queued on stdout.

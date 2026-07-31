@@ -20,6 +20,7 @@ _ALL_MARKERS = (
     "CLAUDE_CODE_SESSION_ID",
     "CODEX_SESSION_ID",
     "GEMINI_SESSION_ID",
+    "OPENCODE_SESSION_ID",
 )
 
 
@@ -65,6 +66,7 @@ def test_explicit_empty_provider_rejected():
         ("CLAUDE_CODE_SESSION_ID", "claude"),
         ("CODEX_SESSION_ID", "codex"),
         ("GEMINI_SESSION_ID", "gemini"),
+        ("OPENCODE_SESSION_ID", "opencode"),
     ],
 )
 def test_harness_inferred_from_marker(marker, expected):

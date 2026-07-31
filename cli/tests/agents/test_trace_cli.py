@@ -114,7 +114,7 @@ def test_trace_returns_events_sorted_by_ts(tmp_path: Path) -> None:
     ])
     res = trace_logic(name="alpha", events_path=events_path, registry_check=False)
     assert res.exit_code == 0
-    lines = [l for l in res.output.splitlines() if l]
+    lines = [line for line in res.output.splitlines() if line]
     # First non-header line is the started (earlier ts) per sort.
     assert "agent_ask_started" in lines[0]
     assert "agent_ask_done" in lines[-1]
@@ -140,6 +140,59 @@ def test_trace_missing_agent_exits_13(
     assert res.exit_code == 13
     assert "ghost" in res.stderr
     assert "not found" in res.stderr
+
+
+def test_trace_refuses_registry_name_colliding_with_store_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Trace must not display one row when its address names another session."""
+    from fno import paths
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.agents.trace_cli import trace_logic
+
+    registry = tmp_path / "agents" / "registry.json"
+    monkeypatch.setattr(paths, "agents_registry_path", lambda: registry)
+    projects = tmp_path / "projects"
+    codex = tmp_path / "codex"
+    projects.mkdir()
+    rollout_dir = codex / "2026" / "07" / "30"
+    rollout_dir.mkdir(parents=True)
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex))
+
+    registered_id = "aaaaaaaa-1111-2222-3333-444455556666"
+    store_only_id = "019fb417-1111-7222-8333-4444deadbeef"
+    write_registry([
+        AgentEntry(
+            name="deadbeef",
+            cwd="/registered",
+            log_path="",
+            harness="codex",
+            harness_session_id=registered_id,
+        )
+    ])
+    rollout = rollout_dir / f"rollout-now-{store_only_id}.jsonl"
+    rollout.write_text(
+        json.dumps(
+            {
+                "type": "session_meta",
+                "payload": {"id": store_only_id, "cwd": "/store-only"},
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    events = tmp_path / "events.jsonl"
+    _write_events(events, [_started(_FULL_RID, to_name="deadbeef")])
+
+    result = trace_logic(name="deadbeef", events_path=events)
+
+    assert result.exit_code == 13
+    assert registered_id in result.stderr
+    assert store_only_id in result.stderr
+    assert "not found" not in result.stderr
+    assert "agent_ask_started" not in result.output
 
 
 def test_trace_all_agents_skips_registry_gate(tmp_path: Path) -> None:

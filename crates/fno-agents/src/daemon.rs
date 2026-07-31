@@ -1344,7 +1344,7 @@ async fn dispatch_agent(ctx: &Arc<Ctx>, req: &Request) -> Response {
     match Namespace::verb(&req.method) {
         Some("spawn") => handle_spawn(ctx, req).await,
         Some("ask") => handle_ask(ctx, req).await,
-        Some("switchboard") => handle_switchboard(ctx, req).await,
+        Some("switchboard") | Some("switchboard_v2") => handle_switchboard(ctx, req).await,
         Some("stop") => handle_stop(ctx, req).await,
         Some("rm") => handle_rm(ctx, req).await,
         Some("list") => run_blocking(ctx, req, handle_list).await,
@@ -2309,7 +2309,7 @@ async fn handle_ask(ctx: &Ctx, req: &Request) -> Response {
 const MAX_INJECT_BODY_BYTES: usize = 16 * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
-// handle_switchboard (agent.switchboard RPC) — Group 2, Task 3.1
+// handle_switchboard (agent.switchboard_v2 RPC; legacy alias agent.switchboard)
 // ---------------------------------------------------------------------------
 //
 // The session-to-session switchboard: `send A->B` where B is a held stream-json
@@ -2521,39 +2521,42 @@ async fn mirror_into(worker_sock: &std::path::Path, text: &str) -> Result<(), St
     }
 }
 
-/// Best-effort flip a registry row to `Orphaned` (the worker is gone and did not
-/// self-stamp, e.g. it was SIGKILLed rather than hitting EOF). Offloaded so the
-/// async runtime is not blocked on file I/O; failures are swallowed (the
-/// reconcile sweep is the backstop).
-async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
-    let reg = home.registry_json();
-    let sid = short_id.to_string();
-    let _ = tokio::task::spawn_blocking(move || {
-        let _ = state::update_registry(&reg, |r| {
-            if let Some(e) = r.entries.iter_mut().find(|e| e.short_id == sid) {
-                // Only flip a still-Live row. Do NOT clobber a terminal status
-                // the worker already set (a clean `Exited` from stream.shutdown,
-                // or `Failed`): clobbering Exited->Orphaned would make a
-                // deliberately-stopped session look adoptable (stream_worker.rs
-                // documents this hazard).
-                if e.status == AgentStatus::Live {
-                    e.status = AgentStatus::Orphaned;
-                }
-            }
-        });
+/// Flip the verified registry row to `Orphaned` after its drive fails. The
+/// recipient can be restamped while a turn is in flight, so the mutation is an
+/// identity CAS rather than a lookup by its reusable transport key.
+async fn stamp_orphaned(
+    home: &AgentsHome,
+    name: String,
+    identity: Value,
+) -> Result<bool, state::StateError> {
+    update_registry_offloaded(home.registry_json(), move |registry| {
+        let Some(entry) = registry.find_mut(&name) else {
+            return false;
+        };
+        if !switchboard_identity_matches(entry, &identity) {
+            return false;
+        }
+        // Only flip a still-Live row. Do NOT clobber a terminal status the
+        // worker already set (a clean `Exited` from stream.shutdown, or
+        // `Failed`): clobbering Exited->Orphaned would make a deliberately
+        // stopped session look adoptable (stream_worker.rs documents this hazard).
+        if entry.status == AgentStatus::Live {
+            entry.status = AgentStatus::Orphaned;
+        }
+        true
     })
-    .await;
+    .await
 }
 
-/// Handle the `agent.switchboard` RPC (Group 2, Task 3.1).
+/// Handle the identity-bound switchboard RPC.
 ///
-/// Params: `{to: string, from: string, body: string, mirror?: bool,
-/// timeout_ms?: u64}`.
+/// Params: `{to: string, from: string, body: string, recipient_identity: object,
+/// from_identity?: object, mirror?: bool, timeout_ms?: u64}`.
 ///
 /// Result (Ok unless `to` is unknown or params invalid):
-/// - `{delivered: true, reply, is_error, mirrored, receipt, transport:
-///   "switchboard"}` — the turn was driven against B and (when `mirror` and A is
-///   a held stream thread) B's reply was written into A.
+/// - `{delivered: true, identity_verified: true, reply, is_error, mirrored,
+///   receipt, transport: "switchboard"}` — the turn was driven against B and
+///   (when `mirror` and A is a held stream thread) B's reply was written into A.
 /// - `{delivered: false, reason: "not-a-live-stream-thread"}` — B is not a held
 ///   stream-json thread; the caller demotes to the durable/socket path.
 /// - `{delivered: false, reason: "<drive error>"}` — B was a stream thread but
@@ -2561,6 +2564,30 @@ async fn stamp_orphaned(home: &AgentsHome, short_id: &str) {
 ///   and A is NOT touched (the exchange did not complete).
 ///
 /// Errors: `AgentNotFound` (unknown `to`), `InvalidParams` (missing/oversized).
+fn switchboard_identity_matches(entry: &RegistryEntry, identity: &Value) -> bool {
+    let Some(expected) = identity.as_object() else {
+        return false;
+    };
+    let Some(harness) = expected.get("harness").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(short_id) = expected.get("short_id").and_then(Value::as_str) else {
+        return false;
+    };
+    let Some(created_at) = expected.get("created_at").and_then(Value::as_str) else {
+        return false;
+    };
+    let session_id = match expected.get("session_id") {
+        Some(Value::Null) => None,
+        Some(Value::String(value)) => Some(value.as_str()),
+        _ => return false,
+    };
+    entry.harness_name() == harness
+        && entry.harness_session_id.as_deref() == session_id
+        && entry.short_id == short_id
+        && entry.created_at == created_at
+}
+
 async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
     let to = match req.params.get("to").and_then(|v| v.as_str()) {
         Some(s) => s.to_string(),
@@ -2581,6 +2608,24 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         .get("mirror")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let recipient_identity = match req.params.get("recipient_identity") {
+        Some(value) if value.is_object() => value,
+        _ => {
+            return Response::err(
+                req.id,
+                ErrorCode::InvalidParams,
+                "missing `recipient_identity`",
+            )
+        }
+    };
+    let from_identity = req.params.get("from_identity");
+    if mirror && !from_identity.is_some_and(Value::is_object) {
+        return Response::err(
+            req.id,
+            ErrorCode::InvalidParams,
+            "missing `from_identity` for mirrored switchboard turn",
+        );
+    }
     let timeout_ms = req
         .params
         .get("timeout_ms")
@@ -2609,6 +2654,12 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
             )
         }
     };
+    if !switchboard_identity_matches(&to_entry, recipient_identity) {
+        return Response::ok(
+            req.id,
+            json!({"delivered": false, "reason": "recipient-identity-changed"}),
+        );
+    }
 
     // B must be a held stream-json thread. A non-claude peer (PTY lane) or a
     // claude session with no live stream worker demotes to the durable path.
@@ -2638,7 +2689,34 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
             // B was a stream thread but the turn failed: the child is gone or the
             // pipe broke. Stamp B orphaned (AC2-ERR) and do NOT touch A — the
             // exchange did not complete, so A must not show a reply B never gave.
-            stamp_orphaned(&ctx.home, &to_entry.short_id).await;
+            match stamp_orphaned(&ctx.home, to.clone(), recipient_identity.clone()).await {
+                Ok(true) => {}
+                Ok(false) => {
+                    let _ = ctx.emitter.emit(
+                        "agent_deliver_status_write_failed",
+                        &json!({
+                            "name": to,
+                            "from_name": from,
+                            "provider": "claude",
+                            "transport": "switchboard",
+                            "reason": "recipient-identity-changed",
+                        }),
+                    );
+                }
+                Err(error) => {
+                    let _ = ctx.emitter.emit(
+                        "agent_deliver_status_write_failed",
+                        &json!({
+                            "name": to,
+                            "from_name": from,
+                            "provider": "claude",
+                            "transport": "switchboard",
+                            "reason": "registry-write-failed",
+                            "error": error.to_string(),
+                        }),
+                    );
+                }
+            }
             let _ = ctx.emitter.emit(
                 "agent_deliver_demoted",
                 &json!({
@@ -2663,7 +2741,9 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         // during which A may have been restarted with a new short_id. The pre-turn
         // snapshot could point at A's old socket (gemini-review HIGH).
         let fresh = load_registry_offloaded(ctx.home.registry_json()).await;
-        if let Some(from_entry) = fresh.find(&from) {
+        if let Some(from_entry) = fresh.find(&from).filter(|entry| {
+            from_identity.is_some_and(|identity| switchboard_identity_matches(entry, identity))
+        }) {
             let from_sock = ctx.home.worker_sock(&from_entry.short_id);
             if from_entry.harness_name() == "claude" && is_live_stream_thread(&from_sock).await {
                 match mirror_into(&from_sock, &outcome.reply).await {
@@ -2704,6 +2784,7 @@ async fn handle_switchboard(ctx: &Ctx, req: &Request) -> Response {
         req.id,
         json!({
             "delivered": true,
+            "identity_verified": true,
             "transport": "switchboard",
             "reply": outcome.reply,
             "is_error": outcome.is_error,
@@ -3061,43 +3142,63 @@ async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     )
 }
 
-/// Resolve a lifecycle token (name | 8-hex short | full session id) to the
-/// canonical registry name via the shared resolver (x-1b1e), so the daemon
-/// `stop`/`rm` handlers accept all three address forms like their Python
-/// counterparts (`_canonical_agent_name`) instead of matching on name alone.
-/// Falls back to the raw token on any miss (unknown/ambiguous/serialize error)
-/// so the caller's familiar `agent {name} not found` path still fires.
-fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
-    let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
-        return token.to_string();
+/// Resolve lifecycle tokens through the all-source client resolver. Return the
+/// resolved row itself because the helper may have just adopted a store-only
+/// session that is absent from the caller's pre-heal registry snapshot.
+async fn entry_for_lifecycle(
+    registry: &state::Registry,
+    token: &str,
+    registry_path: &std::path::Path,
+) -> Result<Option<RegistryEntry>, String> {
+    let Value::Array(rows) = serde_json::to_value(&registry.entries)
+        .map_err(|exc| format!("could not inspect registry identities: {exc}"))?
+    else {
+        return Err("could not inspect registry identities".to_string());
     };
-    match crate::client_verbs::find_agent_entry(&rows, token) {
-        Ok(e) => e
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or(token)
-            .to_string(),
-        Err(_) => token.to_string(),
+    let worker_token = token.to_string();
+    let path = registry_path.to_path_buf();
+    let resolved = tokio::task::spawn_blocking(move || {
+        crate::client_verbs::resolve_entry_with_heal(&rows, &worker_token, &path)
+    })
+    .await
+    .map_err(|exc| format!("identity resolution task failed: {exc}"))?;
+    match resolved {
+        Ok(entry) => {
+            let mut entry: RegistryEntry = serde_json::from_value(entry)
+                .map_err(|exc| format!("resolved identity row is unreadable: {exc}"))?;
+            entry.backfill_harness_aliases();
+            if let Some(legacy) = entry.backfill_short_id() {
+                return Err(format!(
+                    "resolved identity row {:?} has conflicting transport ids (legacy={legacy:?})",
+                    entry.name
+                ));
+            }
+            Ok(Some(entry))
+        }
+        Err(crate::client_verbs::ResolveError::NotFound(_)) => Ok(None),
+        Err(err) => Err(err.message()),
     }
 }
 
 async fn handle_stop(ctx: &Ctx, req: &Request) -> Response {
-    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+    let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = canonical_name_in(&registry, &name);
-    let entry = match registry.find(&name) {
-        Some(e) => e.clone(),
-        None => {
-            return Response::err(
-                req.id,
-                ErrorCode::AgentNotFound,
-                format!("agent {name} not found"),
-            )
-        }
-    };
+    let entry =
+        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Response::err(
+                    req.id,
+                    ErrorCode::AgentNotFound,
+                    format!("agent {requested_name} not found"),
+                )
+            }
+            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+        };
+    let name = entry.name.clone();
     if entry.status == AgentStatus::Exited {
         // An exited agent needs no stop work. (Pre-G4 this also force-cleared a
         // lingering WebSocket driver; the drive surface was retired at G4.)
@@ -3323,7 +3424,7 @@ async fn stop_claude(ctx: &Ctx, req: &Request, name: &str, entry: &RegistryEntry
 }
 
 async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
-    let name = match req.params.get("name").and_then(|v| v.as_str()) {
+    let requested_name = match req.params.get("name").and_then(|v| v.as_str()) {
         Some(n) => n.to_string(),
         None => return Response::err(req.id, ErrorCode::InvalidParams, "missing `name`"),
     };
@@ -3333,17 +3434,19 @@ async fn handle_rm(ctx: &Ctx, req: &Request) -> Response {
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let registry = load_registry_offloaded(ctx.home.registry_json()).await;
-    let name = canonical_name_in(&registry, &name);
-    let entry = match registry.find(&name) {
-        Some(e) => e.clone(),
-        None => {
-            return Response::err(
-                req.id,
-                ErrorCode::AgentNotFound,
-                format!("agent {name} not found"),
-            )
-        }
-    };
+    let entry =
+        match entry_for_lifecycle(&registry, &requested_name, &ctx.home.registry_json()).await {
+            Ok(Some(entry)) => entry,
+            Ok(None) => {
+                return Response::err(
+                    req.id,
+                    ErrorCode::AgentNotFound,
+                    format!("agent {requested_name} not found"),
+                )
+            }
+            Err(message) => return Response::err(req.id, ErrorCode::InvalidParams, message),
+        };
+    let name = entry.name.clone();
     if entry.status == AgentStatus::Live && !force {
         return Response::err(
             req.id,
@@ -4530,6 +4633,21 @@ fn fill_random(buf: &mut [u8]) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Registry-local projection used only by the address-form unit test.
+    fn canonical_name_in(registry: &state::Registry, token: &str) -> String {
+        let Ok(Value::Array(rows)) = serde_json::to_value(&registry.entries) else {
+            return token.to_string();
+        };
+        match crate::client_verbs::find_agent_entry(&rows, token) {
+            Ok(entry) => entry
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or(token)
+                .to_string(),
+            Err(_) => token.to_string(),
+        }
+    }
     use crate::state::{AgentState, DriveWindow, PtyState};
 
     fn tmp_home(tag: &str) -> AgentsHome {
@@ -5017,6 +5135,30 @@ mod tests {
         ); // case-insensitive
            // Unknown token -> unchanged, so the caller's not-found path fires.
         assert_eq!(canonical_name_in(&reg, "nope"), "nope");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_name_resolution_never_falls_back_on_ambiguity() {
+        let mut named = rentry("deadbeef", AgentStatus::Live, None);
+        named.short_id = "transport-a".into();
+        named.harness_session_id = Some("aaaaaaaa-1111-2222-3333-444455556666".into());
+        let mut short = rentry("other", AgentStatus::Live, None);
+        short.short_id = "deadbeef".into();
+        short.harness_session_id = Some("bbbbbbbb-1111-2222-3333-000000000002".into());
+        let reg = crate::state::Registry {
+            schema_version: crate::state::REGISTRY_SCHEMA_VERSION,
+            entries: vec![named, short],
+        };
+
+        let error = entry_for_lifecycle(
+            &reg,
+            "deadbeef",
+            std::path::Path::new("/nonexistent/registry.json"),
+        )
+        .await
+        .expect_err("ambiguous token must not fall back to the matching row name");
+
+        assert!(error.contains("ambiguous across 2 agents"));
     }
 
     #[test]
@@ -6332,6 +6474,35 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    fn stream_identity(short_id: &str) -> Value {
+        json!({
+            "harness": "claude",
+            "session_id": format!("uuid-{short_id}"),
+            "short_id": short_id,
+            "created_at": "2026-06-09T00:00:00Z",
+        })
+    }
+
+    fn switchboard_params(
+        to: &str,
+        to_short: &str,
+        from: &str,
+        from_short: Option<&str>,
+        body: &str,
+    ) -> Value {
+        let mut params = json!({
+            "to": to,
+            "from": from,
+            "body": body,
+            "mirror": from_short.is_some(),
+            "recipient_identity": stream_identity(to_short),
+        });
+        if let Some(short_id) = from_short {
+            params["from_identity"] = stream_identity(short_id);
+        }
+        params
+    }
+
     #[test]
     fn list_renders_family1_truth_instead_of_stored_registry_status() {
         let home = short_home("listtruth");
@@ -6833,7 +7004,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "A", "body": "hello"}),
+            switchboard_params("B", "swB", "A", Some("swA"), "hello"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp.result().expect("switchboard errored");
@@ -6842,6 +7013,7 @@ done
         assert_eq!(res["is_error"], false);
         assert_eq!(res["receipt"], true, "user-echo receipt not observed");
         assert_eq!(res["mirrored"], true, "B's reply was not mirrored into A");
+        assert_eq!(res["identity_verified"], true);
 
         // The injected-event reuse carries the switchboard transport discriminator.
         let events = read_events(&home);
@@ -6880,7 +7052,7 @@ done
             &Request::new(
                 1,
                 "agent.switchboard",
-                json!({"to": "B", "from": "ghost", "body": "first"}),
+                switchboard_params("B", "swB", "ghost", None, "first"),
             ),
         )
         .await;
@@ -6891,7 +7063,7 @@ done
             &Request::new(
                 2,
                 "agent.switchboard",
-                json!({"to": "B", "from": "ghost", "body": "second"}),
+                switchboard_params("B", "swB", "ghost", None, "second"),
             ),
         )
         .await;
@@ -6914,7 +7086,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "A", "body": "hi"}),
+            switchboard_params("B", "swB", "A", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp
@@ -6937,7 +7109,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "B", "from": "ghost", "body": "hi"}),
+            switchboard_params("B", "swB", "ghost", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         let res = resp.result().expect("switchboard errored");
@@ -6955,7 +7127,7 @@ done
         let req = Request::new(
             1,
             "agent.switchboard",
-            json!({"to": "nope", "from": "A", "body": "hi"}),
+            switchboard_params("nope", "swNope", "A", None, "hi"),
         );
         let resp = handle_switchboard(&ctx, &req).await;
         if let crate::protocol::ResponsePayload::Err(ref e) = resp.payload {
@@ -6963,6 +7135,133 @@ done
         } else {
             panic!("expected AgentNotFound, got {resp:?}");
         }
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_refuses_replaced_recipient_identity() {
+        let home = short_home("replaced");
+        seed_stream_row(&home, "victim", "swB");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let mut params = switchboard_params("victim", "swB", "ghost", None, "secret");
+        params["recipient_identity"]["session_id"] = json!("uuid-swA");
+
+        let response =
+            handle_switchboard(&ctx, &Request::new(1, "agent.switchboard", params)).await;
+        let result = response.result().expect("identity mismatch is a demotion");
+        assert_eq!(result["delivered"], false);
+        assert_eq!(result["reason"], "recipient-identity-changed");
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_failed_drive_does_not_orphan_restamped_recipient() {
+        let home = short_home("failedrestamp");
+        seed_stream_row(&home, "B", "swB");
+        let turn_started = home.root().join("turn-started");
+        let restamp_done = home.root().join("restamp-done");
+        let script = format!(
+            r#"
+printf '%s\n' '{{"type":"system","subtype":"init","session_id":"s1"}}'
+while IFS= read -r line; do
+  touch '{}'
+  while [ ! -f '{}' ]; do sleep 0.01; done
+  exit 1
+done
+"#,
+            turn_started.display(),
+            restamp_done.display()
+        );
+        let _b = start_stream_worker(&home, "swB", &script).await;
+        let ctx = test_ctx_with_events(home.clone(), PathBuf::from("/nonexistent-worker"));
+
+        let registry_path = home.registry_json();
+        let restamp_signal = turn_started.clone();
+        let restamp_complete = restamp_done.clone();
+        let restamp = tokio::spawn(async move {
+            let start = Instant::now();
+            while !restamp_signal.exists() && start.elapsed() < Duration::from_secs(5) {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            assert!(restamp_signal.exists(), "drive never reached the worker");
+            state::update_registry(&registry_path, |registry| {
+                let row = registry.find_mut("B").expect("recipient row missing");
+                row.harness_session_id = Some("uuid-replacement".into());
+                row.claude_session_uuid = Some("uuid-replacement".into());
+                row.created_at = "2026-06-09T00:00:01Z".into();
+            })
+            .unwrap();
+            std::fs::write(restamp_complete, b"done\n").unwrap();
+        });
+
+        let response = handle_switchboard(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard",
+                switchboard_params("B", "swB", "ghost", None, "fail after receipt"),
+            ),
+        )
+        .await;
+        restamp.await.unwrap();
+        let result = response.result().expect("failed drive is a demotion");
+        assert_eq!(result["delivered"], false);
+
+        let registry = state::load_registry(&home.registry_json()).unwrap();
+        let replacement = registry.find("B").expect("replacement row missing");
+        assert_eq!(replacement.status, AgentStatus::Live);
+        assert_eq!(
+            replacement.harness_session_id.as_deref(),
+            Some("uuid-replacement")
+        );
+        let events = read_events(&home);
+        assert!(
+            events.iter().any(|event| {
+                event["type"] == "agent_deliver_status_write_failed"
+                    && event["data"]["name"] == "B"
+                    && event["data"]["reason"] == "recipient-identity-changed"
+            }),
+            "identity-CAS failure event missing: {events:?}"
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_requires_recipient_identity() {
+        let home = short_home("identity-required");
+        let ctx = test_ctx(home.clone(), PathBuf::from("/nonexistent-worker"));
+        let response = handle_switchboard(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard",
+                json!({"to": "victim", "from": "ghost", "body": "secret", "mirror": false}),
+            ),
+        )
+        .await;
+        assert_eq!(
+            response.error().expect("missing identity must fail").code,
+            ErrorCode::InvalidParams
+        );
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn switchboard_v2_routes_to_identity_guard() {
+        let home = short_home("v2route");
+        let ctx = Arc::new(test_ctx(home.clone(), PathBuf::from("/nonexistent-worker")));
+        let response = dispatch_agent(
+            &ctx,
+            &Request::new(
+                1,
+                "agent.switchboard_v2",
+                json!({"to": "victim", "from": "ghost", "body": "secret"}),
+            ),
+        )
+        .await;
+        let error = response.error().expect("missing identity must fail");
+        assert_eq!(error.code, ErrorCode::InvalidParams);
+        assert!(error.message.contains("recipient_identity"));
         std::fs::remove_dir_all(home.root()).ok();
     }
 

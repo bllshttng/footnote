@@ -45,6 +45,7 @@ from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import hold_agent_lock
 from fno.agents.registry import (
     AgentEntry,
+    AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
     load_registry,
@@ -817,6 +818,24 @@ def _run_mux(
         ) from exc
 
 
+def _reap_spawned_pane(
+    session: str,
+    pane_id: int,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> tuple[bool, str]:
+    """Attempt exact pane cleanup and return confirmed status plus failure detail."""
+    try:
+        cleanup = _run_mux(
+            ["mux", "pane", "kill", "--session", session, str(pane_id)],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return False, str(exc)
+    if cleanup.returncode == 0:
+        return True, ""
+    return False, (cleanup.stderr or cleanup.stdout or "no output").strip()
+
+
 def _lookup_child_pid(
     session: str,
     pane_id: int,
@@ -866,7 +885,7 @@ def _await_interactive_readiness(
     session: str,
     pane_id: int,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
-) -> str:
+) -> tuple[str, str]:
     """Interactive readiness gate (x-6928).
 
     A painted first frame plus a still-live child after a 1s dwell is READY; an
@@ -876,15 +895,44 @@ def _await_interactive_readiness(
     ``pane read`` (non-empty == painted) for the ready/live label. Only FAILED
     stops the spawn (AC5-ERR); READY and LIVE both proceed to the registry row.
     """
-    probe = _run_mux(
-        ["mux", "pane", "wait", "--session", session, str(pane_id), "--timeout", "1"], runner
-    )
+    try:
+        probe = _run_mux(
+            [
+                "mux", "pane", "wait", "--session", session,
+                str(pane_id), "--timeout", "1",
+            ],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return "failed", f"readiness probe failed: {exc}"
     if probe.returncode == _WAIT_EXITED:
-        return "failed"
-    painted = _run_mux(
-        ["mux", "pane", "read", "--session", session, str(pane_id), "--lines", "1"], runner
-    )
-    return "ready" if (painted.stdout or "").strip() else "live"
+        return "failed", "provider exited before readiness"
+    if probe.returncode not in {0, 11}:
+        detail = (probe.stderr or probe.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            "failed",
+            f"readiness probe failed: pane wait exited {probe.returncode}{suffix}",
+        )
+    try:
+        painted = _run_mux(
+            [
+                "mux", "pane", "read", "--session", session,
+                str(pane_id), "--lines", "1",
+            ],
+            runner,
+        )
+    except DispatchAskError as exc:
+        return "failed", f"readiness probe failed: {exc}"
+    if painted.returncode != 0:
+        detail = (painted.stderr or painted.stdout or "").strip()
+        suffix = f": {detail}" if detail else ""
+        return (
+            "failed",
+            f"readiness probe failed: pane read exited {painted.returncode}{suffix}",
+        )
+    readiness = "ready" if (painted.stdout or "").strip() else "live"
+    return readiness, ""
 
 
 def dispatch_spawn_pane(
@@ -1139,11 +1187,23 @@ def dispatch_spawn_pane(
             # exit (AC5-ERR) reaps ONLY this pane - the mux's tree normalization
             # collapses the split, the viewer's focus and any later sibling split
             # survive (AC5-FR/AC6-FR), and no registry row is written.
-            if _await_interactive_readiness(session, pane_id, runner) == "failed":
-                _run_mux(["mux", "pane", "kill", "--session", session, str(pane_id)], runner)
+            readiness, readiness_detail = _await_interactive_readiness(
+                session, pane_id, runner
+            )
+            if readiness == "failed":
+                reaped, cleanup_detail = _reap_spawned_pane(
+                    session, pane_id, runner
+                )
+                if reaped:
+                    raise DispatchAskError(
+                        f"agent {name!r} {readiness_detail} in session "
+                        f"{session!r}; pane {pane_id} reaped, no registry row written",
+                        exit_code=1,
+                    )
                 raise DispatchAskError(
-                    f"agent {name!r} provider exited before readiness in session "
-                    f"{session!r}; pane {pane_id} reaped, no registry row written",
+                    f"agent {name!r} {readiness_detail}; pane "
+                    f"{pane_id} may still exist in session {session!r} because "
+                    f"exact cleanup failed: {cleanup_detail}",
                     exit_code=1,
                 )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
@@ -1240,30 +1300,25 @@ def dispatch_spawn_pane(
 
         try:
             update_registry(_append, path=registry_path)
-        except (OSError, ValueError, RegistryVersionError) as exc:
-            cleanup = _run_mux(
-                ["mux", "pane", "kill", "--session", session, str(pane_id)],
-                runner,
-            )
-            if cleanup.returncode == 0:
+        except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
+            reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+            if reaped:
                 raise DispatchAskError(
                     f"registry write failed: {exc}; pane {pane_id} reaped, no registry row written",
                     exit_code=12,
                 ) from exc
-            detail = (cleanup.stderr or cleanup.stdout or "no output").strip()
             raise DispatchAskError(
                 f"registry write failed: {exc}; pane {pane_id} may still exist in "
-                f"session {session!r} because exact cleanup failed: {detail}",
+                f"session {session!r} because exact cleanup failed: {cleanup_detail}",
                 exit_code=12,
             ) from exc
 
         # Claude and Codex both resolve the canonical full harness id through the
         # generated mailbox handle. The row keeps short_id empty because mux is
         # its one live transport ref; the receipt may still hand out the derived
-        # handle. Derive it via canonical_handle, the single source for that
-        # string - a local slice here would be a fourth copy to keep in sync, and
-        # the send path, registry name fallback, and drain all read that one
-        # function (see fno.harness_identity).
+        # handle. Derive it via canonical_handle, the Python source for that
+        # string; the send path, registry name fallback, and drain all read that
+        # same function (see fno.harness_identity).
         from fno.harness_identity import canonical_handle
 
         session_uuid = stored_session_uuid

@@ -10,6 +10,7 @@ plus AC1-HP / AC1-ERR / AC2-ERR routing.
 from __future__ import annotations
 
 import json
+import os
 
 import pytest
 from typer.testing import CliRunner
@@ -116,9 +117,89 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
-    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
+    assert replies[0].to == "0164189c"  # sender resolved to its canonical handle
+    assert replies[0].from_ == "66667777"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
+
+
+def test_session_lane_reply_uses_full_sender_provenance(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A session-addressed durable message replies to its immutable sender."""
+    from fno.harness_identity import canonical_handle
+    from fno.inbox.store import write_new_thread
+
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    sender_id = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    msg = write_new_thread(
+        recipient="recipient",
+        sender="mutable-alias",
+        kind="send",
+        body="ping",
+        to_kind="session",
+        from_session=sender_id,
+    ).thread_id
+
+    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert result.exit_code == 0, result.output
+    replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
+    assert len(replies) == 1
+    assert replies[0].to == canonical_handle(sender_id)
+    assert replies[0].to != "mutable-alias"
+
+
+def test_reply_refuses_when_unreadable_transcripts_hide_a_short_id_collision(
+    runner, mailbox, monkeypatch, tmp_path
+):
+    """A hidden transcript candidate cannot make a visible row look unique."""
+    from fno.agents import discover
+
+    visible_sid = "aaaaaaaa-1111-2222-3333-4444deadbeef"
+    hidden_sid = "bbbbbbbb-1111-2222-3333-4444deadbeef"
+    _isolate_empty_discovery(monkeypatch, tmp_path)
+    projects = tmp_path / "projects"
+    blocked = projects / "blocked"
+    blocked.mkdir(parents=True)
+    (blocked / f"{hidden_sid}.jsonl").write_text("{}\n", encoding="utf-8")
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
+
+    class _ExitedRow:
+        harness_session_id = visible_sid
+        harness = "claude"
+        cwd = "/visible"
+
+    monkeypatch.setattr(
+        "fno.agents.registry.load_registry", lambda *_a, **_k: [_ExitedRow()]
+    )
+    monkeypatch.setattr(
+        discover,
+        "resolve_or_suggest",
+        lambda *_a, **_k: (None, []),
+    )
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude",
+        lambda *_a, **_k: pytest.fail("unproven reply recipient was injected"),
+    )
+    monkeypatch.setattr(
+        "fno.mail.cli._wake_rung",
+        lambda *_a, **_k: pytest.fail("unproven reply recipient was woken"),
+    )
+    msg = _seed_name_lane_inbound(to="meeeeeee", from_="deadbeef", body="ping")
+
+    blocked.chmod(0)
+    try:
+        if os.access(blocked, os.R_OK | os.X_OK):
+            pytest.skip("test user can still enumerate mode-000 directories")
+        result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    finally:
+        blocked.chmod(0o700)
+
+    assert result.exit_code != 0
+    assert "unreadable stores: transcript" in result.output
+    assert "delivered (hosted)" not in result.output
+    assert "queued (durable)" not in result.output
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
 
 
 def test_ac1err_unknown_msg_id_is_rejected_sending_nothing(runner, mailbox):
@@ -251,6 +332,35 @@ def test_ac1fr_offline_sender_queues_durably_with_correlation(
     assert f'reply_to="{msg}"' in rep.body  # wrapped-body wire attr (never split)
 
 
+def test_reply_refuses_ambiguous_offline_sender_handle(
+    runner, mailbox, monkeypatch
+):
+    """A discovery miss must not turn a known store ambiguity into durable mail."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(discover, "resolve_or_suggest", lambda *_a, **_k: (None, []))
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_a, **_k: (
+            None,
+            [
+                "aaaaaaaa-1111-2222-3333-4444deadbeef",
+                "bbbbbbbb-1111-2222-3333-5555deadbeef",
+            ],
+        ),
+    )
+    msg = _seed_name_lane_inbound(
+        to="claude-meeeeeee", from_="deadbeef", body="ping"
+    )
+
+    result = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+
+    assert result.exit_code != 0
+    assert "ambiguous" in result.output.lower()
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
+
+
 def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     runner, mailbox, monkeypatch, tmp_path
 ):
@@ -271,22 +381,53 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     assert r.exit_code == 0, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "9a063cd3"  # migrated, never the retired string
+    assert replies[0].to == "0164189c"  # migrated to the live session's canonical handle
 
 
-def test_reply_to_retired_sender_offline_still_addresses_the_bare_id(
+def test_reply_to_retired_sender_offline_fails_without_queuing_an_unsafe_prefix(
     runner, mailbox, monkeypatch, tmp_path
 ):
-    """Even with nothing live, the durable floor carries the MIGRATED address, so
-    the record is drainable if that session ever wakes - the old string never is."""
+    """A retired prefix cannot recover a canonical recipient while offline."""
     _isolate_empty_discovery(monkeypatch, tmp_path)
     msg = _seed_name_lane_inbound(to="meeeeeee", from_="claude-deadbeef", body="ping")
 
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
 
-    assert r.exit_code == 0, r.output
+    assert r.exit_code != 0
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
-    assert [m.to for m in replies] == ["deadbeef"]
+    assert replies == []
+
+
+def test_reply_to_retired_sender_cross_category_collision_fails_closed(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents.discover import DiscoveredSession
+
+    legacy_sid = "deadbeef-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    sessions = [
+        DiscoveredSession(
+            session_id=sid,
+            short_id=sid[-8:],
+            handle=sid[-8:],
+            pid=1,
+            cwd="/x",
+            project=None,
+            status="live",
+            agent="codex",
+            truth_state="working",
+        )
+        for sid in (legacy_sid, canonical_sid)
+    ]
+    monkeypatch.setattr(
+        "fno.agents.discover.discover_live_sessions", lambda **_kwargs: sessions
+    )
+    msg = _seed_name_lane_inbound(
+        to="meeeeeee", from_="claude-deadbeef", body="ping"
+    )
+    r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
+    assert r.exit_code != 0
+    assert [m for m in _bus_msgs() if m.in_reply_to == msg] == []
 
 
 def test_ac1fr_offline_full_uuid_handle_wire_to_matches_durable(

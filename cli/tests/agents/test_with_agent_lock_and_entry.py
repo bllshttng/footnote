@@ -20,9 +20,8 @@ target is auditable in isolation.
 from __future__ import annotations
 
 import contextlib
-import os
+import hashlib
 from pathlib import Path
-from typing import Iterator
 
 import pytest
 
@@ -30,18 +29,18 @@ from fno.agents.dispatch import (
     DispatchAskError,
     with_agent_lock_and_entry,
 )
-from fno.agents.lock import AgentLockTimeout, hold_agent_lock
 from fno.agents.registry import AgentEntry, update_registry
 
 
 def _seed_entry(name: str, provider: str = "claude") -> AgentEntry:
     """Insert a minimal AgentEntry into the registry for the test."""
+    short_id = hashlib.sha256(name.encode()).hexdigest()[:8]
     entry = AgentEntry(
         name=name,
         harness=provider,
         cwd=str(Path.cwd()),
         log_path=str(Path.cwd() / f"{name}.log"),
-        short_id="aaaaaaaa" if provider == "claude" else "",
+        short_id=short_id if provider == "claude" else "",
         harness_session_id=(
             "deadbeef-dead-beef-dead-beefdeadbeef"
             if provider == "codex" else None
@@ -149,7 +148,7 @@ def test_staged_resolve_pattern_proves_post_lock_value_is_used(
         # snapshot. If the helper accidentally yielded the pre-flock
         # value, this assertion would fail because short_id would
         # be "00000000" and status would be "orphaned".
-        assert existing.short_id == "aaaaaaaa"
+        assert existing.short_id == real_entry.short_id
         assert existing.status == "live"
     assert call_count["n"] == 2, "helper must read twice (pre + post lock)"
 

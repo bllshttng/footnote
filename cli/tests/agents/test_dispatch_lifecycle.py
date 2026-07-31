@@ -199,6 +199,322 @@ def test_stop_agent_not_found(tmp_path: Path, monkeypatch) -> None:
     assert spawn_called is False
 
 
+@pytest.mark.parametrize("verb", ["stop", "rm", "attach"])
+def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """Unreadable identity stores cannot degrade into exact-name selection."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(name="victim", provider="claude", short_id="7c5dcf5d"),
+    )
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def unavailable(*_args, **_kwargs):
+        raise registry_mod.AgentResolutionError(
+            "identity evidence unavailable",
+            unavailable=True,
+        )
+
+    monkeypatch.setattr(registry_mod, "resolve_agent", unavailable)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda *_args, **_kwargs: shellouts.append("stop") or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda *_args, **_kwargs: shellouts.append("rm") or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_attach",
+        lambda *_args, **_kwargs: shellouts.append("attach") or 0,
+    )
+
+    action = {
+        "stop": dispatch.stop_agent,
+        "rm": dispatch.rm_agent,
+        "attach": dispatch.attach_agent,
+    }[verb]
+    with pytest.raises(dispatch.DispatchAskError, match="identity evidence unavailable") as exc:
+        action("victim")
+
+    assert exc.value.exit_code == 12
+    assert shellouts == []
+    assert [entry.name for entry in registry_mod.load_registry()] == ["victim"]
+
+
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A full id cannot be collapsed back to a corrupt shared registry name."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    first = registry_mod.AgentEntry(
+        name="same",
+        harness="claude",
+        harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="transport1",
+        cwd="/one",
+        log_path="/tmp/one.log",
+    )
+    second = registry_mod.AgentEntry(
+        name="same",
+        harness="claude",
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transport2",
+        cwd="/two",
+        log_path="/tmp/two.log",
+    )
+    rows = [first, second]
+    monkeypatch.setattr(registry_mod, "load_registry", lambda *_a, **_k: rows)
+    monkeypatch.setattr(dispatch, "load_registry", lambda *_a, **_k: rows)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+
+    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    with pytest.raises(dispatch.DispatchAskError, match="ambiguous") as exc:
+        action(second.harness_session_id)
+
+    assert exc.value.exit_code == 2
+    assert shellouts == []
+
+
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_destructive_lifecycle_pins_full_id_across_name_lock(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A same-name replacement cannot inherit a full-id lifecycle request."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from contextlib import contextmanager
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    original = registry_mod.AgentEntry(
+        name="victim",
+        harness="claude",
+        harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="transportA",
+        cwd="/one",
+        log_path="/tmp/one.log",
+        created_at="2026-07-30T10:00:00Z",
+    )
+    replacement = registry_mod.AgentEntry(
+        name="victim",
+        harness="claude",
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transportB",
+        cwd="/two",
+        log_path="/tmp/two.log",
+        created_at="2026-07-30T10:00:01Z",
+    )
+    monkeypatch.setattr(
+        registry_mod,
+        "resolve_agent",
+        lambda *_a, **_k: registry_mod.ResolvedAgent(
+            entry=original,
+            matched_by="full_session_id",
+        ),
+    )
+    reads = {"count": 0}
+
+    def staged_read(*_args, **_kwargs):
+        reads["count"] += 1
+        return original if reads["count"] == 1 else replacement
+
+    @contextmanager
+    def unlocked(*_args, **_kwargs):
+        yield object()
+
+    monkeypatch.setattr(dispatch, "_resolve_registry_entry", staged_read)
+    monkeypatch.setattr(dispatch, "hold_agent_lock", unlocked)
+    shellouts: list[str] = []
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_stop",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+    monkeypatch.setattr(
+        claude_mod,
+        "claude_rm",
+        lambda short_id, **_kwargs: shellouts.append(short_id) or (0, ""),
+    )
+
+    action = dispatch.stop_agent if verb == "stop" else dispatch.rm_agent
+    with pytest.raises(dispatch.DispatchAskError, match="recipient identity changed"):
+        action(original.harness_session_id)
+
+    assert reads["count"] == 2
+    assert shellouts == []
+
+
+@pytest.mark.parametrize("address_by_name", [False, True])
+def test_rm_retains_row_restamped_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+    address_by_name: bool,
+) -> None:
+    """A restamp after rm's side effect cannot make a replacement inherit deletion."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def restamp_during_rm(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return (0, "")
+
+    monkeypatch.setattr(claude_mod, "claude_rm", restamp_during_rm)
+
+    with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm") as exc:
+        dispatch.rm_agent("victim" if address_by_name else original_id)
+
+    assert exc.value.exit_code == 12
+    rows = registry_mod.load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == replacement_id
+
+
+@pytest.mark.parametrize("address_by_name", [False, True])
+def test_stop_does_not_stamp_row_restamped_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+    address_by_name: bool,
+) -> None:
+    """A successful stop reports success without stamping a replacement row."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original_id = "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    replacement_id = "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id=original_id,
+            short_id="transportA",
+            status="live",
+        ),
+    )
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from fno.agents import dispatch
+    from fno.agents import registry as registry_mod
+    from fno.agents.providers import claude as claude_mod
+
+    def restamp_during_stop(*_args, **_kwargs):
+        registry_mod.restamp_harness_session_id(
+            name="victim",
+            harness="claude",
+            session_id=replacement_id,
+        )
+        return (0, "")
+
+    monkeypatch.setattr(claude_mod, "claude_stop", restamp_during_stop)
+
+    result = dispatch.stop_agent("victim" if address_by_name else original_id)
+
+    assert result.claude_exit == 0
+    rows = registry_mod.load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == replacement_id
+    assert rows[0].status == "live"
+    assert any(
+        event.get("kind") == "agent_stopped_status_write_failed"
+        and event.get("reason") == "recipient_identity_changed"
+        for event in _read_events(tmp_path)
+    )
+
+
+@pytest.mark.parametrize("verb", ["stop", "rm"])
+def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
+    tmp_path: Path,
+    monkeypatch,
+    verb: str,
+) -> None:
+    """A newly ambiguous name cannot inherit a selected row's lifecycle write."""
+    use_tmpdir(monkeypatch, tmp_path)
+    original = _seed_registry(
+        dict(
+            name="victim",
+            provider="claude",
+            harness_session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+            short_id="transportA",
+            status="live",
+        ),
+    )[0]
+    _force_claude_on_path(monkeypatch, tmp_path)
+
+    from dataclasses import replace
+    from fno.agents import dispatch
+    from fno.agents.providers import claude as claude_mod
+
+    replacement = replace(
+        original,
+        harness_session_id="bbbbbbbb-1111-7222-8333-4444cafefeed",
+        short_id="transportB",
+        created_at="2026-07-30T10:00:01Z",
+    )
+    persisted: list = []
+
+    def update_with_duplicate(updater):
+        persisted[:] = updater([original, replacement])
+        return persisted
+
+    monkeypatch.setattr(dispatch, "update_registry", update_with_duplicate)
+    monkeypatch.setattr(claude_mod, "claude_stop", lambda *_a, **_k: (0, ""))
+    monkeypatch.setattr(claude_mod, "claude_rm", lambda *_a, **_k: (0, ""))
+
+    if verb == "rm":
+        with pytest.raises(dispatch.DispatchAskError, match="identity changed during rm"):
+            dispatch.rm_agent("victim")
+    else:
+        assert dispatch.stop_agent("victim").claude_exit == 0
+
+    assert len(persisted) == 2
+    assert {entry.status for entry in persisted} == {"live"}
+
+
 def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     """AC1-EDGE: codex agents print info on stderr and exit 0; no subprocess."""
     use_tmpdir(monkeypatch, tmp_path)

@@ -21,6 +21,16 @@ from fno.agents import discover
 from fno.paths_testing import use_tmpdir
 
 
+@pytest.fixture(autouse=True)
+def _isolate_native_harness_stores(monkeypatch):
+    """Keep resolver tests independent of the operator's real session stores."""
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_harness_stores",
+        lambda _token: ([], True),
+    )
+
+
 class _FakeProc:
     def __init__(self, create_time: float):
         self._ct = create_time
@@ -284,6 +294,40 @@ def test_empty_scan_preserves_alias_map(tmp_path, monkeypatch):
     assert name_map.read_text(encoding="utf-8") == before
 
 
+def test_alias_write_failure_exposes_only_canonical_handle(tmp_path, monkeypatch):
+    """An alias is addressable only after its name-map write succeeds."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    session_id = "aaaaaaaa-1111-7222-8333-4444cafefeed"
+    transcript = _write_session(
+        sdir,
+        912,
+        session_id=session_id,
+        job_id="deadbeef",
+        cwd="/Users/x/code/project",
+    )
+
+    def fail_write(*_args, **_kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(discover, "_atomic_write_json", fail_write)
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir,
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=tmp_path / "no-codex",
+        opencode_storage_dir=tmp_path / "no-opencode",
+        name_map_path=name_map,
+        registry_path=tmp_path / "no-registry.json",
+        psutil_mod=_FakePsutil({912: transcript}),
+        project_resolver=lambda _cwd: "project",
+        classify_truth=False,
+    )
+
+    assert [session.handle for session in sessions] == ["cafefeed"]
+    assert not name_map.exists()
+
+
 def _resolve(handle, sdir, alive, tmp_path):
     return discover.resolve_or_suggest(
         handle,
@@ -462,7 +506,7 @@ def test_x_a1d5_fallback_surfaces_live_session(tmp_path, monkeypatch):
     assert len(sessions) == 1
     s = sessions[0]
     assert s.session_id == sid
-    assert s.short_id == "02a5c8bc"  # session_id[:8], the addressable handle
+    assert s.short_id == "5d0f3671"  # canonical random tail
     assert s.cwd == "/Users/x/code/proj"  # from the live process
     assert s.pid == 4242  # real pid from the running claude
     assert s.agent == "claude"
@@ -501,7 +545,7 @@ def test_x_a1d5_sidecar_and_projects_candidates_are_unioned(tmp_path, monkeypatc
         ),
         project_resolver=lambda c: None,
     )
-    assert {s.short_id for s in sessions} == {"side0001", "ghost-si"}
+    assert {s.short_id for s in sessions} == {"side0001", "host-sid"}
 
 
 def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
@@ -651,7 +695,7 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     s = sessions[0]
     assert s.agent == "codex"
     assert s.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
-    assert s.short_id == "019f48e1"
+    assert s.short_id == "4bcf4ae4"
     assert s.cwd == "/Users/x/proj"
 
 
@@ -956,6 +1000,47 @@ def test_resolver_only_short_collision_checks_every_store(tmp_path):
     assert suggestions == ["deadbeef-registry", "deadbeef-transcript"]
 
 
+def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
+    tmp_path,
+    monkeypatch,
+):
+    """The full-id fast path must not promote a legacy transport projection."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    registry = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                harness="claude",
+                cwd="/legacy",
+                log_path="/tmp/legacy.log",
+                short_id="deadbeef",
+            )
+        ],
+        path=registry,
+    )
+    foreign = "bbbbbbbb-1111-7222-8333-4444deadbeef"
+    codex = tmp_path / "codex"
+    _write_codex_rollout(codex, session_id=foreign, cwd="/foreign")
+
+    match, suggestions = discover.resolve_or_suggest(
+        "deadbeef",
+        registry_path=registry,
+        sessions_dir=tmp_path / "no-sessions",
+        projects_dir=tmp_path / "no-projects",
+        codex_sessions_dir=codex,
+        name_map_path=tmp_path / ".fno" / "session-names.json",
+        psutil_mod=_FakePsutil(alive={}),
+        project_resolver=lambda _cwd: None,
+        require_alive=False,
+    )
+
+    assert match is None
+    assert suggestions == [foreign, "deadbeef"]
+
+
 @pytest.mark.parametrize(
     "truth_state,expected",
     [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],
@@ -1095,7 +1180,7 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
 
     assert [(r["session_id"], r["short_id"], r["cwd"]) for r in rows] == [
         ("short", "short", ""),
-        ("019f4d0c-full", "019f4d0c", "/repo"),
+        ("019f4d0c-full", "d0c-full", "/repo"),
     ]
 
 
@@ -1106,7 +1191,7 @@ def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
         codex, session_id="019abcde-good", cwd="/y", mtime_age=3.0,
     )
     sessions = _run_codex(tmp_path, codex)
-    assert [s.short_id for s in sessions] == ["019abcde"]
+    assert [s.short_id for s in sessions] == ["cde-good"]
 
 
 def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
@@ -1156,7 +1241,7 @@ def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
 
     assert resolved is None
     assert suggestions[0] == "019f48e1"
-    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-019f48e1"
+    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-4bcf4ae4"
 
 
 @pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])
@@ -1289,11 +1374,11 @@ def test_us2_registry_handle_resolves(tmp_path, monkeypatch):
     assert by_short is not None
 
 
-def test_us2_registry_name_resolves_codex_on_fast_path(tmp_path, monkeypatch):
+def test_us2_registry_name_resolves_codex_after_cross_store_uniqueness_check(tmp_path):
     """US2/AC1-HP: truth resolves a live codex pane worker by its registered NAME.
 
-    The name axis lives on the require_alive=False registry fast-path (truth's
-    path), so a name resolves without scanning the transcript store."""
+    Short address categories must consult every store before they are declared
+    unique; a registry name still resolves when the other stores are empty."""
     from fno.agents.registry import AgentEntry, write_registry
 
     registry = tmp_path / "registry.json"
@@ -1309,16 +1394,11 @@ def test_us2_registry_name_resolves_codex_on_fast_path(tmp_path, monkeypatch):
         ],
         path=registry,
     )
-    monkeypatch.setattr(
-        discover,
-        "_discover_from_codex",
-        lambda *_a, **_k: pytest.fail("transcript store was scanned"),
-    )
-
     match, _suggestions = discover.resolve_or_suggest(
         "codex-x2af5",
         registry_path=registry,
         require_alive=False,
+        **_empty_seams(tmp_path),
     )
 
     assert match is not None
@@ -1423,7 +1503,7 @@ def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
     )
 
     resolved = []
-    for handle in (requested_name, session_id[:8], session_id):
+    for handle in (requested_name, session_id[-8:], session_id[:8], session_id):
         match, suggestions = discover.resolve_or_suggest(
             handle,
             registry_path=registry,
@@ -1435,7 +1515,7 @@ def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
         resolved.append(match)
 
     assert {peer.session_id for peer in resolved} == {session_id}
-    assert {peer.short_id for peer in resolved} == {session_id[:8]}
+    assert {peer.short_id for peer in resolved} == {session_id[-8:]}
     assert {peer.name for peer in resolved} == {requested_name}
 
 
@@ -1503,10 +1583,8 @@ def test_us2_registered_name_matching_retired_shape_resolves_for_peek(
     assert match.session_id == sid
 
 
-def test_us2_registered_name_beats_a_colliding_alias(monkeypatch):
-    """Codex P2 r4 (#603): a registered name that also matches another live
-    session's alias resolves to the named row (resolve_agent_in is name-first),
-    not rejected as ambiguous by peek while truth's fast-path resolves it."""
+def test_us2_registered_name_and_colliding_alias_are_ambiguous(monkeypatch):
+    """A registered name cannot silently displace another session's alias."""
     named = discover.DiscoveredSession(
         session_id="sid-named",
         short_id="aa111111",
@@ -1533,9 +1611,9 @@ def test_us2_registered_name_beats_a_colliding_alias(monkeypatch):
     monkeypatch.setattr(
         discover, "discover_live_sessions", lambda **_k: [named, aliased]
     )
-    match, _ = discover.resolve_or_suggest("dup-name")
-    assert match is not None
-    assert match.session_id == "sid-named"
+    match, suggestions = discover.resolve_or_suggest("dup-name")
+    assert match is None
+    assert sorted(suggestions) == ["sid-alias", "sid-named"]
 
 
 def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
@@ -1563,6 +1641,36 @@ def test_ac1_edge_source_overlap_dedups(tmp_path, monkeypatch):
     )
     sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
     assert [s.session_id for s in sessions] == [sid]
+
+
+def test_legacy_claude_transport_projection_is_provisional(tmp_path, monkeypatch):
+    """A transport-only registry row cannot masquerade as a full session id."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                harness="claude",
+                cwd="/x",
+                log_path="/tmp/legacy.log",
+                short_id="footnote-56",
+            )
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    sessions = discover.discover_live_sessions(
+        registry_path=reg,
+        **_empty_seams(tmp_path),
+    )
+
+    assert [(session.session_id, session.identity_provisional) for session in sessions] == [
+        ("footnote-56", True)
+    ]
 
 
 def test_opencode_row_without_captured_id_yields_no_live_recipient(tmp_path, monkeypatch):
@@ -1695,9 +1803,25 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     # ...and by the canonical handle derived from the uuid, which differs from
     # the jobId short_id, so this exercises the derived-handle branch on its own.
     by_canon, _ = discover.resolve_or_suggest(
-        "aaaabbbb", registry_path=reg, **_empty_seams(tmp_path)
+        "44444444", registry_path=reg, **_empty_seams(tmp_path)
     )
     assert by_canon is not None
+
+
+def test_ac2_fr_codex_and_opencode_discovery_rows_use_canonical_tail(tmp_path):
+    codex = tmp_path / "codex"
+    codex_sid = "019fb417-1111-2222-3333-444455556666"
+    _write_codex_rollout(codex, session_id=codex_sid, cwd="/codex")
+    codex_rows = discover._discover_from_codex(codex, recency_seconds=60, now=time.time())
+    assert codex_rows[0]["short_id"] == "55556666"
+
+    storage = tmp_path / "opencode"
+    opencode_sid = "ses_7f3a9b2cAbCd1234"
+    _write_opencode_session(storage, session_id=opencode_sid, cwd="/opencode", mtime_age=1)
+    opencode_rows = discover._discover_from_opencode(
+        storage, recency_seconds=60, now=time.time()
+    )
+    assert opencode_rows[0]["short_id"] == "AbCd1234"
 
 
 # --------------------------------------------------------------------------
@@ -1769,7 +1893,7 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
     s = sessions[0]
     assert s.agent == "opencode"
     assert s.session_id == sid
-    assert s.short_id == sid[:8]
+    assert s.short_id == sid[-8:]
     assert s.cwd == "/Users/x/proj"  # from `directory`, not `cwd`
     assert s.pid == 0  # no OS handle, mirroring the codex lane
 
@@ -1930,8 +2054,8 @@ def test_opencode_db_surfaces_live_session(tmp_path):
     )
     sessions = _run_opencode(tmp_path, storage)
     assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
-        ("ses_live", "/Users/x/proj", "opencode"),
         ("ses_stale", "/Users/x/old", "opencode"),
+        ("ses_live", "/Users/x/proj", "opencode"),
     ]
     assert [s.truth_state for s in sessions] == ["unknown", "unknown"]
 
@@ -2442,3 +2566,233 @@ def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
     # opencode does NOT fold: case is meaningful, so these are distinct.
     assert _token_matches("ses_AbC123", "ses_AbC123")
     assert not _token_matches("ses_abc123", "ses_AbC123")
+
+
+def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
+    tmp_path, monkeypatch
+):
+    """Two case-distinct OpenCode ids must remain an ambiguity, not deduplicate."""
+    from fno.agents import discover
+
+    upper = "ses_AbCd0000SAMEtail"
+    lower = "ses_aBcD0000SAMEtail"
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_transcripts",
+        lambda *_a: ([(upper, "opencode", "/upper", True), (lower, "opencode", "/lower", True)], True),
+    )
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        "SAMEtail", projects_dir=tmp_path / "projects"
+    )
+
+    assert found is None
+    assert ambiguous == sorted([upper, lower])
+
+
+# An id string is unique only WITHIN a harness. The three regression tests below
+# pin that on each structure that deduplicates independently: collapsing them
+# would resolve a two-session token to one unambiguous hit and wake a stranger's
+# session. Fixing one structure alone is decorative -- an upstream source that
+# still folds on the raw id drops the second row before the merge ever sees it.
+_SHARED_SID = "019fb417-2222-7333-8444-5555cafebabe"
+
+
+def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(
+    tmp_path, monkeypatch
+):
+    """One uuid string under two harnesses is two sessions, never one."""
+    from fno.agents import discover
+
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_transcripts",
+        lambda *_a: (
+            [
+                (_SHARED_SID, "claude", "/claude-cwd", True),
+                (_SHARED_SID, "codex", "/codex-cwd", True),
+            ],
+            True,
+        ),
+    )
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        _SHARED_SID, projects_dir=tmp_path / "projects"
+    )
+
+    assert found is None, "a cross-harness id collision must never resolve uniquely"
+    assert ambiguous == [_SHARED_SID, _SHARED_SID]
+
+
+def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
+    """The registry spans providers, so its own dedup must carry harness."""
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+
+    hits, read_ok = discover._reachable_from_registry(_SHARED_SID, reg)
+
+    assert read_ok
+    assert sorted(harness for _sid, harness, _cwd, _v in hits) == ["claude", "codex"]
+
+
+def test_discover_live_sessions_keeps_cross_harness_rows_distinct(
+    tmp_path, monkeypatch
+):
+    """Candidates are the union of every harness's source; the merge must not
+    fold two of them into one row that absorbs the other's cwd."""
+    from fno.agents.registry import AgentEntry, write_registry
+
+    reg = tmp_path / "registry.json"
+    write_registry(
+        [
+            AgentEntry(
+                name="claude-side",
+                harness="claude",
+                cwd="/claude-cwd",
+                log_path="/tmp/c.log",
+                short_id="cafebabe",
+                harness_session_id=_SHARED_SID,
+            ),
+            AgentEntry(
+                name="codex-side",
+                harness="codex",
+                cwd="/codex-cwd",
+                log_path="/tmp/x.log",
+                harness_session_id=_SHARED_SID,
+            ),
+        ],
+        path=reg,
+    )
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
+
+    sessions = discover.discover_live_sessions(
+        registry_path=reg, **_empty_seams(tmp_path)
+    )
+
+    assert sorted((s.agent, s.cwd) for s in sessions) == [
+        ("claude", "/claude-cwd"),
+        ("codex", "/codex-cwd"),
+    ]
+
+
+def test_resolve_reachable_includes_complete_harness_store_hits(
+    tmp_path, monkeypatch
+):
+    """Codex/OpenCode stores participate below the liveness listing."""
+    sid = "019fb417-1111-7222-8333-4444deadbeef"
+    monkeypatch.setattr(discover, "_reachable_from_transcripts", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    monkeypatch.setattr(
+        discover,
+        "_reachable_from_harness_stores",
+        lambda _token: ([(sid, "codex", "/repo", True)], True),
+    )
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=tmp_path / "projects"
+    )
+
+    assert ambiguous == []
+    assert found is not None
+    assert (found.session_id, found.agent, found.cwd) == (sid, "codex", "/repo")
+
+
+def test_resolve_or_suggest_rechecks_live_short_against_durable_namespace(
+    monkeypatch,
+):
+    """Liveness filtering cannot turn a persisted collision into uniqueness."""
+    visible = discover.DiscoveredSession(
+        session_id="aaaaaaaa-1111-7222-8333-4444deadbeef",
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=1,
+        cwd="/visible",
+        project=None,
+        status="live",
+        agent="codex",
+        truth_state="working",
+    )
+    hidden = "bbbbbbbb-1111-7222-8333-4444deadbeef"
+    monkeypatch.setattr(discover, "discover_live_sessions", lambda **_kwargs: [visible])
+    monkeypatch.setattr(
+        discover,
+        "resolve_reachable",
+        lambda *_args, **_kwargs: (None, [visible.session_id, hidden]),
+    )
+
+    resolved, ambiguous = discover.resolve_or_suggest("deadbeef")
+
+    assert resolved is None
+    assert ambiguous == [visible.session_id, hidden]
+
+
+def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
+    tmp_path, monkeypatch
+):
+    """A persisted alias cannot silently displace or be displaced by a handle."""
+    alias_sid = "11111111-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    project = tmp_path / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    for sid in (alias_sid, canonical_sid):
+        (project / f"{sid}.jsonl").write_text("{}\n")
+    aliases = tmp_path / "aliases.json"
+    aliases.write_text(json.dumps({alias_sid: "deadbeef"}))
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=project.parent, name_map_path=aliases
+    )
+    assert found is None
+    assert sorted(ambiguous) == sorted([alias_sid, canonical_sid])
+
+
+def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(
+    tmp_path, monkeypatch
+):
+    legacy_sid = "deadbeef-0000-0000-0000-11111111"
+    canonical_sid = "22222222-0000-0000-0000-deadbeef"
+    project = tmp_path / "projects" / "-tmp-project"
+    project.mkdir(parents=True)
+    for sid in (legacy_sid, canonical_sid):
+        (project / f"{sid}.jsonl").write_text("{}\n")
+    monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
+    monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
+    found, ambiguous = discover.resolve_reachable(
+        "deadbeef", projects_dir=project.parent
+    )
+    assert found is None
+    assert sorted(ambiguous) == sorted([legacy_sid, canonical_sid])

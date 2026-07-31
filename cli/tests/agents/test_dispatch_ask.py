@@ -430,6 +430,42 @@ def test_dispatch_ask_preserves_lock_on_registry_failure(
     assert "7c5dcf5d" in body
 
 
+def test_claude_create_treats_identity_collision_as_registry_failure(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A spawned supervisor remains explicitly orphaned when identity write refuses."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _install_fake(tmp_path, monkeypatch)
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, _claude_create_path
+    from fno.agents.registry import AgentResolutionError
+
+    def collide(updater, path=None):  # type: ignore[no-untyped-def]
+        raise AgentResolutionError("identity collision", ambiguous=True)
+
+    monkeypatch.setattr(dispatch_mod, "update_registry", collide)
+    detached: list[bool] = []
+
+    class _TrackedLockHandle:
+        def detach(self) -> None:
+            detached.append(True)
+
+    with pytest.raises(DispatchAskError, match="identity collision") as exc:
+        _claude_create_path(
+            name="doomed",
+            message="hi",
+            cwd=tmp_path,
+            chosen="claude",
+            timeout=10,
+            yolo=False,
+            lock_handle=_TrackedLockHandle(),
+        )
+
+    assert exc.value.exit_code == 12
+    assert detached == [True]
+
+
 # ---------------------------------------------------------------------------
 # AC1-FR — subprocess non-zero + parse failure
 # ---------------------------------------------------------------------------

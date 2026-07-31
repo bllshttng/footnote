@@ -43,7 +43,12 @@ class FakeRunner:
         # x-6928 interactive-readiness gate probes.
         wait_returncode: int = 11,
         read_stdout: str = "",
+        read_returncode: int = 0,
+        read_stderr: str = "",
         placement: Optional[dict] = None,
+        kill_returncode: int = 0,
+        kill_stderr: str = "",
+        kill_exception: Optional[Exception] = None,
     ) -> None:
         self.calls: list[list[str]] = []
         self.run_returncode = run_returncode
@@ -53,8 +58,13 @@ class FakeRunner:
         self.db_stdout = db_stdout
         self.wait_returncode = wait_returncode
         self.read_stdout = read_stdout
+        self.read_returncode = read_returncode
+        self.read_stderr = read_stderr
         self.placement = placement
         self.kill_calls: list[list[str]] = []
+        self.kill_returncode = kill_returncode
+        self.kill_stderr = kill_stderr
+        self.kill_exception = kill_exception
 
     def __call__(self, argv, **kwargs):
         self.calls.append(list(argv))
@@ -84,10 +94,16 @@ class FakeRunner:
         if argv[1:4] == ["mux", "pane", "wait"]:
             return subprocess.CompletedProcess(argv, self.wait_returncode, "", "")
         if argv[1:4] == ["mux", "pane", "read"]:
-            return subprocess.CompletedProcess(argv, 0, self.read_stdout, "")
+            return subprocess.CompletedProcess(
+                argv, self.read_returncode, self.read_stdout, self.read_stderr
+            )
         if argv[1:4] == ["mux", "pane", "kill"]:
             self.kill_calls.append(list(argv))
-            return subprocess.CompletedProcess(argv, 0, "", "")
+            if self.kill_exception is not None:
+                raise self.kill_exception
+            return subprocess.CompletedProcess(
+                argv, self.kill_returncode, "", self.kill_stderr
+            )
         raise AssertionError(f"unexpected fno invocation: {argv}")
 
 
@@ -453,7 +469,7 @@ def test_codex_spawn_with_capture_returns_bound_identity(
     assert row.status == "live"
     assert result.status == "live"
     assert result.session_uuid == session_id
-    assert result.short_id == session_id[:8]
+    assert result.short_id == session_id[-8:]
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
@@ -495,16 +511,15 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     # The row keeps short_id empty: it is the worker/bg transport slot, and a mux
     # row holds exactly one live ref (validate_single_live_ref).
     assert row.short_id == ""
-    # US8: the receipt-facing result carries claude's 8-hex jobId so the king can
-    # mail the pane straight from the spawn receipt...
-    assert result.short_id == result.session_uuid[:8]
-    # ...and that handle resolves back to this exact row via the derived_short
-    # rule (harness_session_id[:8]), proving the receipt handle is addressable.
+    # The pane receipt carries the generated mailbox handle, not a provider
+    # transport job id, so the caller can mail the pane from the receipt.
+    assert result.short_id == result.session_uuid[-8:]
+    # That canonical handle resolves back to this exact row.
     from fno.agents.registry import resolve_agent_in
 
     resolved = resolve_agent_in(rows, result.short_id)
     assert resolved.entry.name == "peer"
-    assert resolved.matched_by == "derived_short"
+    assert resolved.matched_by == "canonical_handle"
 
 
 def test_ac1_hp_session_resolution_env_beats_default(
@@ -1062,7 +1077,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
             pane_id=9,
             child_pid=4242,
             session_uuid=session_id,
-            short_id=session_id[:8],
+            short_id=session_id[-8:],
             status="live",
         ),
     )
@@ -1078,7 +1093,7 @@ def test_cmd_spawn_pane_bound_codex_receipt_carries_full_identity(
     receipt = json.loads(result.output.strip().splitlines()[-1])
     assert receipt["status"] == "live"
     assert receipt["session_id"] == session_id
-    assert receipt["short_id"] == session_id[:8]
+    assert receipt["short_id"] == session_id[-8:]
 
 
 def test_cmd_spawn_rejects_output_format_on_pane_before_dispatch(
@@ -1422,6 +1437,78 @@ def test_exact_at_current_kills_pane_and_writes_no_row_on_early_exit(
     assert load_registry() == [], "no registry row on launch failure"
 
 
+@pytest.mark.parametrize("probe", ["wait", "read"])
+def test_exact_readiness_probe_error_reaps_without_writing_row(
+    tmp_path: Path, monkeypatch, probe: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner(
+        placement={"anchor": 4},
+        wait_returncode=99 if probe == "wait" else 11,
+        read_returncode=99 if probe == "read" else 0,
+        read_stdout="painted despite error",
+        read_stderr="mux unavailable",
+    )
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="peer",
+            message="hi",
+            provider="claude",
+            cwd=tmp_path,
+            split="down",
+            at="current",
+            runner=runner,
+        )
+
+    assert "readiness probe failed" in str(exc.value)
+    assert runner.kill_calls
+    assert load_registry() == []
+
+
+@pytest.mark.parametrize("cleanup_failure", ["nonzero", "timeout"])
+def test_exact_readiness_failure_never_claims_unconfirmed_reap(
+    tmp_path: Path, monkeypatch, cleanup_failure: str
+) -> None:
+    from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    runner = FakeRunner(
+        placement={"anchor": 4},
+        wait_returncode=12,
+        kill_returncode=1,
+        kill_stderr="permission denied",
+        kill_exception=(
+            subprocess.TimeoutExpired(["fno", "mux", "pane", "kill"], 30)
+            if cleanup_failure == "timeout"
+            else None
+        ),
+    )
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="peer",
+            message="hi",
+            provider="claude",
+            cwd=tmp_path,
+            split="down",
+            at="current",
+            runner=runner,
+        )
+
+    message = str(exc.value)
+    assert "pane 7 may still exist" in message
+    assert "session 'main'" in message
+    assert "pane 7 reaped" not in message
+    assert load_registry() == []
+
+
 def test_spawn_stamps_process_incarnation_token(tmp_path: Path, monkeypatch) -> None:
     """The registry row binds the pane PID and its process incarnation."""
     from fno.agents import spawn_gate
@@ -1435,14 +1522,25 @@ def test_spawn_stamps_process_incarnation_token(tmp_path: Path, monkeypatch) -> 
     assert row.pid_start_time == 987654
 
 
-@pytest.mark.parametrize("failure", [OSError("disk full"), ValueError("invalid row")])
+@pytest.mark.parametrize(
+    "failure_kind",
+    ["os-error", "value-error", "identity-collision"],
+)
 def test_registry_write_failure_reaps_exact_spawned_pane(
-    tmp_path: Path, monkeypatch, failure: Exception
+    tmp_path: Path, monkeypatch, failure_kind: str
 ) -> None:
     """A pane without its registry identity is rolled back before failure."""
     from fno.agents import mux_spawn
     from fno.agents.mux_spawn import DispatchAskError, dispatch_spawn_pane
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import AgentResolutionError, load_registry
+
+    failure: Exception
+    if failure_kind == "os-error":
+        failure = OSError("disk full")
+    elif failure_kind == "value-error":
+        failure = ValueError("invalid row")
+    else:
+        failure = AgentResolutionError("identity collision", ambiguous=True)
 
     use_tmpdir(monkeypatch, tmp_path)
     monkeypatch.delenv("FNO_SESSION", raising=False)

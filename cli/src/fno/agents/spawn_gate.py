@@ -27,6 +27,8 @@ from pathlib import Path
 from typing import Literal, Optional
 from urllib.parse import unquote
 
+from fno.harness_identity import claude_transport_short_id
+
 # Exit codes, distinct from existing dispatch codes (2, 13, 14, 15, 18, 127)
 # and byte-parity with the Rust gate.
 EXIT_QUEUE_TIMEOUT = 75
@@ -241,7 +243,7 @@ def census() -> LiveCensus:
         seen_sessions.add(session_id)
         pid = w.get("pid") if isinstance(w.get("pid"), int) else None
         if _pid_alive(pid, None):
-            short_id = session_id.split("-")[0]
+            short_id = claude_transport_short_id(session_id)
             counted_short_ids.add(short_id)
             out.workers.append(
                 LiveWorker(

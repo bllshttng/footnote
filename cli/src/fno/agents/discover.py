@@ -30,6 +30,13 @@ from pathlib import Path
 from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
+from fno.agents.fs_scan import path_exists_strict, scan_files
+from fno.harness_identity import (
+    canonical_handle,
+    legacy_prefix_handle,
+    session_handle_tier,
+    session_identity_key,
+)
 
 # A real per-session registry file is named ``<pid>.json``. The strict guard
 # is load-bearing: a 7000+ entry sessions dir holds ``.sync-conflict-*.json``
@@ -161,7 +168,7 @@ def _discover_from_codex_daemon() -> list[dict]:
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd if isinstance(cwd, str) else "",
                 "status": None,
@@ -346,7 +353,7 @@ def _discover_from_codex(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd,
                 "status": None,
@@ -378,7 +385,7 @@ def default_opencode_db_path(storage_dir: Optional[Path] = None) -> Path:
     return (storage_dir or default_opencode_storage_dir()).parent / "opencode.db"
 
 
-def opencode_connect(db_path: Path):
+def opencode_connect(db_path: Path, *, raise_on_error: bool = False):
     """A read-only connection to opencode's store, or None if unavailable.
 
     Read-only URI mode is load-bearing, not decoration: a live opencode holds
@@ -388,15 +395,31 @@ def opencode_connect(db_path: Path):
     """
     import sqlite3
 
-    if not db_path.exists():
+    from fno.agents.fs_scan import path_exists_strict
+
+    try:
+        exists = path_exists_strict(db_path)
+    except OSError:
+        if raise_on_error:
+            raise
+        return None
+    if not exists:
         return None
     try:
         return sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return None
 
 
-def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
+def opencode_query(
+    db_path: Path,
+    sql: str,
+    params: tuple = (),
+    *,
+    raise_on_error: bool = False,
+) -> list[tuple]:
     """Run one read-only query, returning ``[]`` on any failure.
 
     A missing file, a lock, or schema drift on a future opencode all degrade to
@@ -405,12 +428,14 @@ def opencode_query(db_path: Path, sql: str, params: tuple = ()) -> list[tuple]:
     """
     import sqlite3
 
-    con = opencode_connect(db_path)
+    con = opencode_connect(db_path, raise_on_error=raise_on_error)
     if con is None:
         return []
     try:
         return list(con.execute(sql, params))
     except sqlite3.Error:
+        if raise_on_error:
+            raise
         return []
     finally:
         con.close()
@@ -443,7 +468,7 @@ def _discover_from_opencode_db(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": directory if isinstance(directory, str) else "",
                 "status": None,
@@ -576,7 +601,7 @@ def _discover_from_opencode(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": 0,
                 "cwd": cwd,
                 "status": None,
@@ -618,7 +643,11 @@ def _discover_from_registry(
 
     exclude = {s for s in (exclude_session_ids or ()) if s}
     rows: list[dict] = []
-    seen: set[str] = set()
+    # Identity is (harness, normalized id), never the raw string. The registry
+    # holds rows for every provider, so a raw-sid dedup silently drops a real
+    # second session whenever two harnesses carry the same id string -- before
+    # the tuple-aware ambiguity check downstream ever sees it.
+    seen: set[tuple[str, str, bool]] = set()
     try:
         entries = load_registry(registry_path)
     except Exception:  # noqa: BLE001 — a torn/version-drifted registry contributes no rows
@@ -643,14 +672,22 @@ def _discover_from_registry(
             # identity is the canonical field (a heal-backfilled bg row) resolves
             # here, where before it fell through to durable-only forever.
             short_val = getattr(e, "short_id", "") or None
-            sid = getattr(e, "harness_session_id", None) or short_val
-            short = short_val or (sid[:8] if sid else None)
+            harness_session_id = getattr(e, "harness_session_id", None)
+            sid = harness_session_id or short_val
+            short = short_val or (canonical_handle(sid) if sid else None)
+            identity_provisional = harness_session_id is None
         else:
             sid = getattr(e, "harness_session_id", None) or getattr(e, "session_id", None)
-            short = sid[:8] if sid else None
-        if not sid or sid in exclude or sid in seen:
+            short = canonical_handle(sid) if sid else None
+            identity_provisional = False
+        if not sid or sid in exclude:
             continue
-        seen.add(sid)
+        # The provisional flag stays in the key so a legacy short-id projection
+        # can never merge with a full-uuid identity for the same harness.
+        key = (harness, session_identity_key(sid), identity_provisional)
+        if key in seen:
+            continue
+        seen.add(key)
         rows.append(
             {
                 "session_id": sid,
@@ -660,6 +697,7 @@ def _discover_from_registry(
                 "status": None,
                 "agent": harness,
                 "name": getattr(e, "name", None),
+                "identity_provisional": identity_provisional,
             }
         )
     return rows
@@ -680,6 +718,11 @@ class DiscoveredSession:
     truth_state: str = "unknown"
     transcript_path: Optional[str] = None
     name: Optional[str] = None  # registered spawn name (address axis, distinct from handle/alias)
+    # True only when a legacy Claude row lacks a full harness session id and its
+    # transport short_id temporarily stands in as session_id. Such a projection
+    # participates in short-address ambiguity, but can never claim full-id
+    # precedence over another candidate.
+    identity_provisional: bool = False
 
     @property
     def is_alive(self) -> bool:
@@ -703,6 +746,61 @@ class DiscoveredSession:
             ),
             "agent": self.agent,
         }
+
+
+def _session_handle_matches(
+    token: Optional[str], sessions: Iterable[DiscoveredSession]
+) -> list[DiscoveredSession]:
+    """Every session matching the full, canonical, or legacy identity token."""
+    if not token:
+        return []
+    return [
+        session
+        for session in sessions
+        if session_handle_tier(token, session.session_id) is not None
+    ]
+
+
+def _exact_address_matches(
+    token: Optional[str], sessions: Iterable[DiscoveredSession]
+) -> list[DiscoveredSession]:
+    """Union every exact live address category before selecting a session."""
+    if not token:
+        return []
+    rows = list(sessions)
+    full = [
+        session
+        for session in rows
+        if not session.identity_provisional
+        and session_handle_tier(token, session.session_id) == 0
+    ]
+    candidates = full or [
+        session
+        for session in rows
+        if session.name == token
+        or session.handle == token
+        or session.short_id == token
+        or session_handle_tier(token, session.session_id) in {1, 2}
+    ]
+    return list(
+        {
+            (session.agent, session_identity_key(session.session_id)): session
+            for session in candidates
+        }.values()
+    )
+
+
+def discovery_address_matches(
+    token: str, *, registry_path: Optional[Path] = None
+) -> list[DiscoveredSession]:
+    """Exact discovery owners of one address, independent of liveness truth.
+
+    ``unknown`` is unproven, not absent, and an asleep session remains
+    resumable. Address uniqueness therefore unions every enumerated identity;
+    liveness decides the transport only after one recipient is selected.
+    """
+    sessions = discover_live_sessions(registry_path=registry_path)
+    return _exact_address_matches(token, sessions)
 
 
 # --------------------------------------------------------------------------
@@ -876,7 +974,7 @@ def _discover_from_projects(
         rows.append(
             {
                 "session_id": sid,
-                "short_id": sid[:8],
+                "short_id": canonical_handle(sid),
                 "pid": pid,
                 "cwd": cwd,
                 "status": None,
@@ -1010,7 +1108,8 @@ def _resolve_aliases(
     interleave a half-written file (Concurrency / Invariant). Retires entries
     whose session_id is no longer live so an exited/restarted session never
     resurfaces under a stale alias (AC1-EDGE2). Best-effort: a write failure
-    falls back to the in-memory aliases rather than crashing the list.
+    falls back to canonical handles rather than exposing an alias that the send
+    path cannot include in its persisted collision check.
     """
     import fcntl
     from fno.harness_identity import LEGACY_HANDLE_RE
@@ -1052,14 +1151,9 @@ def _resolve_aliases(
             finally:
                 fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
     except OSError:
-        # Lock / write failed — fall back to fresh in-memory aliases so the
-        # hex handle still addresses every session (overlay is UX, not a
-        # correctness requirement).
-        for r in live:
-            aliases.setdefault(
-                r["session_id"], _default_alias(r.get("project"), r["short_id"])
-            )
-        aliases = _disambiguate(aliases, live)
+        # An alias is an address only after it is durable. An in-memory alias
+        # would be invisible to the send path's persisted namespace guard.
+        return {}
     return aliases
 
 
@@ -1076,7 +1170,7 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     for sid in sorted(aliases):
         name = aliases[sid]
         if name in seen.values():
-            name = f"{name}-{short_by_sid.get(sid, sid[:8])}"
+            name = f"{name}-{short_by_sid.get(sid, canonical_handle(sid))}"
         out[sid] = name
         seen[sid] = name
     return out
@@ -1155,19 +1249,16 @@ def resolve_or_suggest(
         return resolved.transcript_path
 
     if not require_alive:
-        # Name-first (resolve_agent_in contract): a registered name that equals
-        # another row's full harness_session_id must resolve to the named row
-        # here, not fall through to the ID tier and select the other row, or
-        # truth and peek can inspect different workers (Codex P2 r5, #603).
         registry_rows = _discover_from_registry(registry_path)
-        name_matches = [
-            row for row in registry_rows if handle and handle == row.get("name")
+        registry_full = [
+            row
+            for row in registry_rows
+            if handle
+            and not row.get("identity_provisional")
+            and session_handle_tier(handle, row["session_id"]) == 0
         ]
-        registry_matches = name_matches or [
-            row for row in registry_rows if handle and handle == row["session_id"]
-        ]
-        if len(registry_matches) == 1:
-            row = registry_matches[0]
+        if len(registry_full) == 1:
+            row = registry_full[0]
             transcript_path = (
                 claude_transcript_path(row["session_id"], row["cwd"])
                 if row["agent"] == "claude"
@@ -1186,7 +1277,10 @@ def resolve_or_suggest(
                     transcript_path if transcript_path is not None else None
                 ),
                 name=row.get("name"),
+                identity_provisional=bool(row.get("identity_provisional")),
             ), []
+        if len(registry_full) > 1:
+            return None, sorted(row["session_id"] for row in registry_full)
 
         if handle:
             transcript_path = claude_transcript_path(handle, "")
@@ -1242,17 +1336,7 @@ def resolve_or_suggest(
             **discovery_kwargs,
             resolve_metadata=False,
         )
-        bare_exact = [
-            session
-            for session in bare_sessions
-            if handle
-            and handle
-            in {
-                session.session_id,
-                session.short_id,
-                canonical_handle(session.session_id),
-            }
-        ]
+        bare_exact = _exact_address_matches(handle, bare_sessions)
         if len(bare_exact) == 1:
             return bare_exact[0], []
         if len(bare_exact) > 1:
@@ -1263,28 +1347,29 @@ def resolve_or_suggest(
     )
     if require_alive:
         sessions = [s for s in sessions if s.is_alive]
-    # Exact-match the address BEFORE the retired-syntax rejection: a registered
-    # name matching the retired <harness>-<short8> shape (e.g. codex-deadbeef,
-    # which validate_spawn_name permits) must still resolve here, or truth's
-    # fast-path and peek disagree (Codex P2, #603). Registered names take
-    # PRECEDENCE over alias/id tiers (resolve_agent_in is name-first): a name
-    # that also matches another live session's alias resolves to the named row,
-    # not rejected as ambiguous by peek while truth resolves it (Codex P2 r4).
-    by_name = [s for s in sessions if handle and s.name == handle]
-    if len(by_name) == 1:
-        return by_name[0], []
-    exact = [
-        s
-        for s in sessions
-        if handle
-        and (
-            s.handle == handle
-            or s.session_id == handle
-            or s.short_id == handle
-            or canonical_handle(s.session_id) == handle
-        )
-    ]
+    # Exact-match every address category BEFORE the retired-syntax rejection: a
+    # registered name matching the retired <harness>-<short8> shape remains a
+    # valid address when unique.
+    exact = _exact_address_matches(handle, sessions)
     if len(exact) == 1:
+        from fno.agents.store_fallback import is_full_session_id
+
+        if not is_full_session_id(handle):
+            try:
+                durable, ambiguous = resolve_reachable(
+                    handle,
+                    projects_dir=projects_dir,
+                    registry_path=registry_path,
+                    name_map_path=name_map_path,
+                )
+            except StoreReadError:
+                return None, [exact[0].session_id]
+            if ambiguous:
+                return None, sorted({exact[0].session_id, *ambiguous})
+            if durable is not None and session_identity_key(
+                durable.session_id
+            ) != session_identity_key(exact[0].session_id):
+                return None, sorted({exact[0].session_id, durable.session_id})
         return exact[0], []
     if len(exact) > 1:
         return None, sorted(s.session_id for s in exact)
@@ -1301,7 +1386,7 @@ def resolve_or_suggest(
     # copied out of an old transcript) is still building addresses the retired
     # way. Lead the suggestions with the bare form it should have used.
     if retired:
-        bare = handle.split("-", 1)[1][:8]
+        bare = legacy_prefix_handle(handle.split("-", 1)[1])
         return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
@@ -1331,19 +1416,18 @@ class StoreReadError(Exception):
 
     The distinction this exists to preserve: "read the store, the token is not
     there" and "could not read the store" look identical as an empty list, but
-    they must not be treated identically. The first earns exit 16 (nothing is
-    queued, because nothing would ever drain it); the second must NOT, because
-    demoting to the durable queue costs one stranded envelope while a wrong
-    exit 16 costs the message permanently. When we cannot prove unreachable, we
-    fall toward keeping the mail.
+    they must not be treated identically. A complete session id remains safe to
+    address, but a short token must be refused: an unreadable store may contain
+    another matching session, so neither live nor durable delivery can choose a
+    recipient without risking a wrong-recipient side effect.
     """
 
     def __init__(self, failed: list[str], resolved=None) -> None:
         super().__init__(f"unreadable reachability stores: {', '.join(failed)}")
         self.failed = failed
-        # The lone candidate, when one was found but uniqueness could not be
-        # proven. Carrying it lets the caller address the durable copy to a real
-        # session rather than to the raw token it was handed.
+        # The lone visible candidate, when one was found but uniqueness could
+        # not be proven. Carrying it lets the caller explain the incomplete
+        # evidence without treating this candidate as the recipient.
         self.resolved = resolved
 
 
@@ -1398,7 +1482,11 @@ def _alias_to_session_ids(
     only addressable by its alias to exit 16 with nothing queued.
     """
     path = name_map_path or default_name_map_path()
-    if not path.exists():
+    try:
+        exists = path_exists_strict(path)
+    except OSError:
+        return [], False
+    if not exists:
         return [], True
     try:
         stored = json.loads(path.read_text(encoding="utf-8"))
@@ -1434,7 +1522,15 @@ def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, 
     """
     hits: _Hits = []
     try:
-        entries = list(projects_dir.glob("*/*.jsonl"))
+        entries = [
+            path
+            for path in scan_files(
+                projects_dir,
+                max_depth=1,
+                include=lambda name: name.endswith(".jsonl"),
+            )
+            if path.parent != projects_dir
+        ]
     except OSError:
         return [], False
     seen: set[str] = set()
@@ -1462,18 +1558,7 @@ def _token_matches(token: str, session_id: str) -> bool:
     """
     if not token or not session_id:
         return False
-    tok = _fold_token(token)
-    sid = _fold_token(session_id)
-    return tok == sid or tok == sid[:8]
-
-
-_OPENCODE_ID_RE = re.compile(r"^ses_[A-Za-z0-9]+$")
-
-
-def _fold_token(value: str) -> str:
-    """Lowercase a hex-shaped id; leave a mixed-case opencode id untouched."""
-    v = (value or "").strip()
-    return v if _OPENCODE_ID_RE.match(v) else v.lower()
+    return session_handle_tier(token, session_id) is not None
 
 
 def _reachable_from_registry(
@@ -1498,7 +1583,11 @@ def _reachable_from_registry(
         # is unknown" from "we could not look".
         return [], False
     hits: _Hits = []
-    seen: set[str] = set()
+    # (harness, normalized id), not the raw string: this source spans every
+    # provider, so a raw-sid dedup would hide one of two real sessions that
+    # share an id string -- and the merge in ``resolve_reachable`` can only see
+    # what each source emits.
+    seen: set[tuple[str, str]] = set()
     for e in entries:
         # NOT ``AgentEntry.session_id``: that property is harness-polymorphic
         # and resolves to ``short_id`` for claude -- the 8-hex daemon transport
@@ -1508,13 +1597,15 @@ def _reachable_from_registry(
         sid = getattr(e, "harness_session_id", None)
         if not isinstance(sid, str):
             continue
-        if _token_matches(token, sid) and sid not in seen:
-            seen.add(sid)
-            harness = getattr(e, "harness", None)
+        raw_harness = getattr(e, "harness", None)
+        harness = raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
+        key = (harness, session_identity_key(sid))
+        if _token_matches(token, sid) and key not in seen:
+            seen.add(key)
             cwd = getattr(e, "cwd", None)
             hits.append((
                 sid,
-                harness if isinstance(harness, str) and harness else "claude",
+                harness,
                 cwd if isinstance(cwd, str) and cwd else None,
                 True,
             ))
@@ -1534,12 +1625,17 @@ def _reachable_from_roster(token: str, daemon_dir: Optional[Path]) -> tuple[_Hit
     if base is None:
         override = os.environ.get("FNO_CLAUDE_DAEMON_DIR")
         base = Path(override) if override else Path.home() / ".claude" / "daemon"
-    if not (base / "roster.json").exists():
+    roster = base / "roster.json"
+    try:
+        exists = path_exists_strict(roster)
+    except OSError:
+        return [], False
+    if not exists:
         # No roster file is a real, readable answer: the claude daemon is not
         # running, so it hosts nothing. Distinct from an unreadable one.
         return [], True
     try:
-        raw = json.loads((base / "roster.json").read_text(encoding="utf-8"))
+        raw = json.loads(roster.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError):
         return [], False
     if not isinstance(raw, dict):
@@ -1591,7 +1687,8 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
         # nothing" and drop the mail.
         return [], False
     hits: _Hits = []
-    seen: set[str] = set()
+    # Node stamps carry their own harness, so identity is the pair (x-c670).
+    seen: set[tuple[str, str]] = set()
     malformed = False
     for node in entries or []:
         if not isinstance(node, dict):
@@ -1614,17 +1711,36 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
             if not isinstance(sid, str):
                 malformed = True
                 continue
-            if _token_matches(token, sid) and sid not in seen:
-                seen.add(sid)
-                harness = entry.get("harness")
+            raw_harness = entry.get("harness")
+            harness = (
+                raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
+            )
+            key = (harness, session_identity_key(sid))
+            if _token_matches(token, sid) and key not in seen:
+                seen.add(key)
                 cwd = node.get("cwd")
                 hits.append((
                     sid,
-                    harness if isinstance(harness, str) and harness else "claude",
+                    harness,
                     cwd if isinstance(cwd, str) and cwd else None,
                     True,
                 ))
     return hits, not malformed
+
+
+def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
+    """Codex, OpenCode, and Claude native-store hits below live discovery."""
+    from fno.agents.registry import AgentResolutionError
+    from fno.agents.store_fallback import complete_store_hits
+
+    try:
+        hits = complete_store_hits(token)
+    except AgentResolutionError:
+        return [], False
+    return [
+        (hit.session_id, hit.harness, hit.cwd or None, True)
+        for hit in hits
+    ], True
 
 
 def resolve_reachable(
@@ -1667,6 +1783,7 @@ def resolve_reachable(
 
     sources = (
         ("transcript", lambda t: _reachable_from_transcripts(t, pdir)),
+        ("harness-store", _reachable_from_harness_stores),
         ("registry", lambda t: _reachable_from_registry(t, registry_path)),
         ("roster", lambda t: _reachable_from_roster(t, daemon_dir)),
         ("graph", lambda t: _reachable_from_graph(t)),
@@ -1674,12 +1791,16 @@ def resolve_reachable(
     tokens = [token, *alias_sids]
 
     degraded: list[str] = [] if alias_ok else ["alias-map"]
-    # Keyed case-insensitively: _token_matches is case-insensitive, so keying on
-    # the stored spelling would make one uuid recorded lowercase in one store and
-    # uppercase in another look like two sessions -- a false ambiguity, and one
-    # the raw-token/alias expansion below would hit routinely.
-    found: dict[str, ReachableSession] = {}
-    cwd_verbatim: dict[str, bool] = {}
+    # Keyed on (harness, normalized id). Harness is load-bearing: an id string
+    # is only unique WITHIN a harness, so folding on the id alone merges a
+    # claude session with a codex one that happens to share it, and the merged
+    # row then reports a single unambiguous hit -- a wake that resumes a
+    # stranger's session, which is precisely what the ambiguity return exists to
+    # prevent. ``session_identity_key`` is the one normalization rule (UUID
+    # families fold across source spelling; mixed-case OpenCode ids do not);
+    # a second local copy of it is how the two drift apart.
+    found: dict[tuple[str, str], ReachableSession] = {}
+    cwd_verbatim: dict[tuple[str, str], bool] = {}
     for source, lookup in sources:
         for tok in tokens:
             hits, read_ok = lookup(tok)
@@ -1688,7 +1809,7 @@ def resolve_reachable(
                     degraded.append(source)
                 continue
             for sid, agent, cwd, verbatim in hits:
-                key = sid.lower()
+                key = (agent, session_identity_key(sid))
                 prior = found.get(key)
                 if prior is None:
                     found[key] = ReachableSession(
@@ -1718,14 +1839,14 @@ def resolve_reachable(
             # Exactly one hit, but a store we could not read might hold a
             # colliding session. Uniqueness is therefore unproven, and waking on
             # an unproven-unique short id is the guess this refuses to make.
-            # StoreReadError demotes durably to a real recipient rather than
-            # waking a possible stranger.
+            # StoreReadError makes short-address callers refuse before any
+            # delivery side effect rather than waking a possible stranger.
             raise StoreReadError(degraded, resolved=next(iter(found.values())))
         return next(iter(found.values())), []
     if degraded:
         # Every source that COULD be read came back empty, but at least one
-        # could not be read at all -- so absence is unproven. Refusing here
-        # would exit 16 and queue nothing; the caller demotes durably instead.
+        # could not be read at all -- so absence is unproven. The caller may
+        # still address a collision-free full id, but must refuse a short one.
         raise StoreReadError(degraded)
     return None, []
 
@@ -1782,7 +1903,9 @@ def discover_live_sessions(
                 pid = int(f.stem)
             except ValueError:
                 continue
-        short_id = data.get("jobId") or data.get("name") or session_id[:8]
+        # jobId/name are explicit Claude transport keys; only the absent-key
+        # fallback mints a generated mailbox address.
+        short_id = data.get("jobId") or data.get("name") or canonical_handle(session_id)
         short_id = str(short_id)
         if short_id in exclude:
             continue
@@ -1878,12 +2001,18 @@ def discover_live_sessions(
             continue
         candidates.append(r)
 
-    # Dedup on session_id (Invariant: one row per live sessionId, not per pid).
-    # Source order preserves daemon liveness precedence; later rows only enrich
-    # missing metadata on the primary candidate.
-    by_sid: dict[str, dict] = {}
+    # Dedup on (harness, normalized session_id) -- Invariant: one row per live
+    # session, not per pid. ``candidates`` is the union of every harness's
+    # source, so the id alone is not an identity here: keying it merged a claude
+    # row into a codex one sharing the string, and the survivor then absorbed
+    # the other's cwd/name as if they were the same session. Source order
+    # preserves daemon liveness precedence; later rows only enrich missing
+    # metadata on the primary candidate.
+    by_sid: dict[tuple[str, str], dict] = {}
     for r in candidates:
-        existing = by_sid.setdefault(r["session_id"], r)
+        existing = by_sid.setdefault(
+            (r["agent"], session_identity_key(r["session_id"])), r
+        )
         if existing is not r:
             if not existing.get("cwd") and r.get("cwd"):
                 existing["cwd"] = r["cwd"]
@@ -1904,7 +2033,7 @@ def discover_live_sessions(
         DiscoveredSession(
             session_id=r["session_id"],
             short_id=r["short_id"],
-            handle=aliases.get(r["session_id"], r["short_id"]),
+            handle=aliases.get(r["session_id"], canonical_handle(r["session_id"])),
             pid=r["pid"],
             cwd=r["cwd"],
             project=r.get("project"),
@@ -1912,6 +2041,7 @@ def discover_live_sessions(
             agent=r["agent"],
             transcript_path=r.get("transcript_path"),
             name=r.get("name"),
+            identity_provisional=bool(r.get("identity_provisional")),
         )
         for r in live
     ]

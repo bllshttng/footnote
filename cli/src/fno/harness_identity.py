@@ -15,6 +15,7 @@ HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),
     ("GEMINI_SESSION_ID", "gemini"),
+    ("OPENCODE_SESSION_ID", "opencode"),
 )
 
 LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
@@ -22,23 +23,63 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
-# The mailbox handle is the bare first-8 of the session id - the same prefix that
-# already keys resume/attach/peek/transcripts/registry, so a session has ONE
-# identity everywhere. The signature takes no harness ON PURPOSE: harness is an
-# envelope attribute, never part of an address, and no code path may recover it
-# from a handle string. A harness-prefixed address (`claude-<short8>`) is a
+# The mailbox handle is the random tail of the session id. The signature takes
+# no harness ON PURPOSE: harness is an envelope attribute, never part of an
+# address, and no code path may recover it from a handle string. A
+# harness-prefixed address (`claude-<short8>`) is a
 # retired form that is NOT accepted anywhere - a caller still producing one is a
 # bug to fix at the source, so resolution refuses it by name rather than quietly
 # translating it.
 #
-# This ONE function is the single source of the generated string: the send-resolve
-# path (discover), the registry row-name fallback, and the receive-side drain
-# (mail drain-self) all call it. If any two computed it differently, a
-# durably-queued message would address one handle while its recipient drained
+# This function is the Python source of the generated string: discovery,
+# registration, receipts, send, and drain all call it. The Rust lifecycle client
+# carries a parity-tested mirror because it cannot import Python. If those two
+# rules differ, a durable send can address one handle while its recipient drains
 # another and silently strand on the bus.
+def session_identity_key(session_id: str) -> str:
+    """Normalize one session id for identity comparison across stores.
+
+    UUID-family ids are case-insensitive. OpenCode's ``ses_`` ids are not.
+    """
+    return session_id if session_id.startswith("ses_") else session_id.lower()
+
+
 def canonical_handle(session_id: str) -> str:
-    """The mailbox address: the bare first-8 of the session id."""
+    """The mailbox address: the final eight characters of the session id."""
+    return session_identity_key(session_id)[-8:]
+
+
+def legacy_prefix_handle(session_id: str) -> str:
+    """The retired first-eight address, for fail-closed lookup compatibility only."""
     return session_id[:8]
+
+
+def claude_transport_short_id(session_id: str) -> str:
+    """Claude's first-eight attach/job key, which is not a mailbox address."""
+    return legacy_prefix_handle(session_id)
+
+
+def session_handle_tier(token: str, session_id: str) -> Optional[int]:
+    """Return full/canonical/legacy match tier (0/1/2), or ``None``.
+
+    OpenCode identifiers are case-sensitive; UUID-family identifiers retain the
+    historical case-insensitive paste behavior. Callers may prefer the explicit
+    full-id tier, but must union canonical and legacy matches with every other
+    short address category before deciding uniqueness.
+    """
+    token = (token or "").strip()
+    if not token or not session_id:
+        return None
+    exact_case = session_id.startswith("ses_")
+
+    def equal(value: str) -> bool:
+        return token == value if exact_case else token.lower() == value.lower()
+    for tier, value in enumerate(
+        (session_id, canonical_handle(session_id), legacy_prefix_handle(session_id))
+    ):
+        if equal(value):
+            return tier
+    return None
 
 
 # The retired harness-prefixed address. Kept ONLY so the send path can recognize

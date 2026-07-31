@@ -6,6 +6,7 @@ Rust parity for the same matrix lives in crates/fno-agents (US4).
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -14,6 +15,8 @@ from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
     resolve_agent,
+    resolve_agent_in,
+    update_registry,
     write_registry,
 )
 
@@ -54,9 +57,9 @@ def test_ac1_hp_full_uuid_is_case_insensitive(tmp_path: Path) -> None:
     assert r.matched_by == "full_session_id"
 
 
-def test_ac2_hp_daemon_short_and_derived_short_both_resolve(tmp_path: Path) -> None:
+def test_ac2_hp_daemon_short_and_canonical_handle_both_resolve(tmp_path: Path) -> None:
     """AC2-HP: a codex row resolves by its daemon short_id (name-derived,
-    non-hex) AND by the derived 8-hex prefix of its thread id."""
+    non-hex) AND by the canonical tail of its thread id."""
     codex_uuid = "a1b2c3d4-1111-2222-3333-444455556666"
     codex = AgentEntry(
         name="reviewer",
@@ -68,18 +71,84 @@ def test_ac2_hp_daemon_short_and_derived_short_both_resolve(tmp_path: Path) -> N
     )
     reg = _write(tmp_path, codex)
     assert resolve_agent("billingf", path=reg).matched_by == "short_id"
-    assert resolve_agent("a1b2c3d4", path=reg).matched_by == "derived_short"
+    assert resolve_agent("55556666", path=reg).matched_by == "canonical_handle"
 
 
-def test_ac1_edge_hex_shaped_name_precedence(tmp_path: Path) -> None:
-    """AC1-EDGE: a name that is 8-hex-shaped wins over hex interpretation, even
-    when a DIFFERENT row's short_id equals it."""
+def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
+    ses = "ses_7f3a9b2cAbCd1234"
+    row = AgentEntry(
+        name="oc", harness="opencode", harness_session_id=ses, cwd="/w", log_path="/l"
+    )
+    assert resolve_agent_in([row], "AbCd1234").matched_by == "canonical_handle"
+    with pytest.raises(AgentResolutionError):
+        resolve_agent_in([row], "abcd1234")
+
+
+def test_update_registry_refuses_new_canonical_handle_collision(tmp_path: Path) -> None:
+    """Normal producers cannot mint two rows sharing one durable mailbox."""
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1111deadbeef"),
+    )
+    second = _claude(
+        "second", "transport2", "bbbbbbbb-0000-0000-0000-2222deadbeef"
+    )
+
+    with pytest.raises(AgentResolutionError, match="identity 'deadbeef'"):
+        update_registry(lambda rows: [*rows, second], path=reg)
+
+
+def test_update_registry_refuses_name_shadowing_existing_handle(tmp_path: Path) -> None:
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1111deadbeef"),
+    )
+    shadow = _claude(
+        "deadbeef", "transport2", "bbbbbbbb-0000-0000-0000-222233334444"
+    )
+
+    with pytest.raises(AgentResolutionError, match="collides with row 'first'"):
+        update_registry(lambda rows: [*rows, shadow], path=reg)
+
+
+def test_update_registry_allows_legacy_prefix_collision(tmp_path: Path) -> None:
+    """Retired UUIDv7 time prefixes remain ambiguity-compatible, not a spawn wall."""
+    reg = _write(
+        tmp_path,
+        _claude("first", "transport1", "019fb417-0000-0000-0000-111122223333"),
+    )
+    second = _claude(
+        "second", "transport2", "019fb417-0000-0000-0000-444455556666"
+    )
+
+    persisted = update_registry(lambda rows: [*rows, second], path=reg)
+
+    assert [entry.name for entry in persisted] == ["first", "second"]
+
+
+def test_ac4_err_canonical_handle_and_legacy_prefix_are_ambiguous() -> None:
+    canonical = _claude("canonical", "transport1", "ffffffff-0000-0000-0000-abcd1234")
+    legacy = _claude("legacy", "transport2", "abcd1234-0000-0000-0000-ffffffff")
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent_in([legacy, canonical], "abcd1234")
+
+
+def test_ac4_err_legacy_prefix_collision_is_ambiguous() -> None:
+    rows = [
+        _claude("one", "transport1", "019fb417-0000-0000-0000-11111111"),
+        _claude("two", "transport2", "019fb417-0000-0000-0000-22222222"),
+    ]
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent_in(rows, "019fb417")
+
+
+def test_ac1_edge_hex_shaped_name_and_short_id_are_ambiguous(tmp_path: Path) -> None:
+    """AC1-EDGE: a name cannot silently displace another row's short id."""
     row_named = _claude("deadbeef", "aaaa0000", "aaaa0000-0000-0000-0000-000000000000")
     row_short = _claude("other", "deadbeef", "deadbeef-1111-1111-1111-111111111111")
     reg = _write(tmp_path, row_named, row_short)
-    r = resolve_agent("deadbeef", path=reg)
-    assert r.entry.name == "deadbeef"
-    assert r.matched_by == "name"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("deadbeef", path=reg)
 
 
 def test_ac2_err_ambiguous_short_across_two_entries(tmp_path: Path) -> None:
@@ -90,10 +159,39 @@ def test_ac2_err_ambiguous_short_across_two_entries(tmp_path: Path) -> None:
     a = _claude("aa", "abcd1234", "ffffffff-0000-0000-0000-000000000000")
     b = _claude("bb", "eeee0000", "abcd1234-2222-3333-4444-555566667777")
     reg = _write(tmp_path, a, b)
-    # "abcd1234": rule 3 hits A (stored short). Rule 4 would hit B, but rule 3
-    # short-circuits — so it resolves A unambiguously. To force cross-tier
-    # ambiguity we need two entries in the SAME tier.
-    assert resolve_agent("abcd1234", path=reg).entry.name == "aa"
+    with pytest.raises(AgentResolutionError, match="ambiguous"):
+        resolve_agent("abcd1234", path=reg)
+
+
+def test_same_row_matching_multiple_address_categories_is_not_ambiguous() -> None:
+    row = _claude(
+        "deadbeef", "deadbeef", "deadbeef-0000-0000-0000-0000deadbeef"
+    )
+    resolved = resolve_agent_in([row], "deadbeef")
+    assert resolved.entry.name == "deadbeef"
+    assert resolved.matched_by == "name"
+
+
+def test_duplicate_name_rows_with_distinct_sessions_are_ambiguous() -> None:
+    first = _claude(
+        "same", "transport1", "aaaaaaaa-1111-7222-8333-4444deadbeef"
+    )
+    second = _claude(
+        "same", "transport2", "bbbbbbbb-1111-7222-8333-4444cafefeed"
+    )
+
+    with pytest.raises(AgentResolutionError, match="ambiguous across 2 agents"):
+        resolve_agent_in([first, second], "same")
+
+
+def test_exact_full_session_id_wins_over_short_address_categories() -> None:
+    full = _claude("full", "transport1", "deadbeef")
+    named = _claude(
+        "deadbeef", "transport2", "aaaaaaaa-0000-0000-0000-000000000000"
+    )
+    resolved = resolve_agent_in([named, full], "deadbeef")
+    assert resolved.entry.name == "full"
+    assert resolved.matched_by == "full_session_id"
 
 
 def test_ac2_err_ambiguous_same_tier_short_collision(tmp_path: Path) -> None:
@@ -147,10 +245,9 @@ def test_empty_registry_is_clean_not_found(tmp_path: Path) -> None:
         resolve_agent("billing", path=reg)
 
 
-def test_opencode_style_row_resolves_by_name_and_full_id_only(tmp_path: Path) -> None:
-    """An opencode-shaped row (ses_... id, no hex prefix) has no derived short:
-    it resolves by name and full id, and an 8-hex token simply misses it."""
-    ses = "ses_7f3a9b2c1d0e"
+def test_opencode_style_row_resolves_by_name_full_id_and_canonical_handle(tmp_path: Path) -> None:
+    """An opencode row gains a generated handle without changing its full id."""
+    ses = "ses_7f3a9b2cAbCd1234"
     row = AgentEntry(
         name="oc-worker",
         cwd="/w",
@@ -161,8 +258,74 @@ def test_opencode_style_row_resolves_by_name_and_full_id_only(tmp_path: Path) ->
     reg = _write(tmp_path, row)
     assert resolve_agent("oc-worker", path=reg).matched_by == "name"
     assert resolve_agent(ses, path=reg).matched_by == "full_session_id"
-    with pytest.raises(AgentResolutionError):
-        resolve_agent("7f3a9b2c", path=reg)
+    assert resolve_agent("AbCd1234", path=reg).matched_by == "canonical_handle"
+
+
+def test_registry_name_and_persisted_alias_share_one_namespace(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A registry name cannot hide another session's persisted alias."""
+    from fno.agents import discover
+
+    registered = _claude("friendly", "transport", UUID)
+    alias_sid = "aaaaaaaa-1111-7222-8333-444455556666"
+    alias_map = tmp_path / "session-names.json"
+    alias_map.write_text(
+        json.dumps({alias_sid: "friendly"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discover, "default_name_map_path", lambda: alias_map)
+    reg = _write(tmp_path, registered)
+
+    with pytest.raises(AgentResolutionError, match=alias_sid):
+        resolve_agent("friendly", path=reg)
+
+
+def test_registry_and_alias_same_uuid_different_case_are_one_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """UUID-family identity is case-insensitive across registry and alias stores."""
+    from fno.agents import discover
+
+    registered = _claude("friendly", "transport", UUID.lower())
+    alias_map = tmp_path / "session-names.json"
+    alias_map.write_text(
+        json.dumps({UUID.upper(): "friendly"}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(discover, "default_name_map_path", lambda: alias_map)
+    reg = _write(tmp_path, registered)
+
+    assert resolve_agent("friendly", path=reg).entry.name == "friendly"
+
+
+def test_registry_and_store_same_uuid_different_case_are_one_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A store echo of one UUID cannot become a false ambiguity by case alone."""
+    from fno.agents import discover
+    from fno.agents import store_fallback
+    from fno.agents.store_fallback import StoreHit
+
+    session_id = "aaaaaaaa-1111-7222-8333-444455556666"
+    registered = AgentEntry(
+        name="worker",
+        cwd="/w",
+        log_path="/tmp/worker.log",
+        harness="codex",
+        harness_session_id=session_id.upper(),
+    )
+    monkeypatch.setattr(
+        discover, "default_name_map_path", lambda: tmp_path / "missing-aliases.json"
+    )
+    monkeypatch.setattr(
+        store_fallback,
+        "complete_store_hits",
+        lambda _token: [StoreHit("codex", session_id.lower(), "/w")],
+    )
+    reg = _write(tmp_path, registered)
+
+    assert resolve_agent("55556666", path=reg).entry.name == "worker"
 
 
 def test_no_transport_row_resolves_but_worker_short_is_none(tmp_path: Path) -> None:

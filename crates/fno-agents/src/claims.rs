@@ -871,6 +871,7 @@ const HARNESS_SESSION_MARKERS: &[(&str, &str)] = &[
     ("CLAUDE_CODE_SESSION_ID", "claude"),
     ("CODEX_SESSION_ID", "codex"),
     ("GEMINI_SESSION_ID", "gemini"),
+    ("OPENCODE_SESSION_ID", "opencode"),
 ];
 
 /// Resolve the owning harness from the ambient process environment. `None` when
@@ -1709,6 +1710,11 @@ mod tests {
             _ => None,
         };
         assert_eq!(resolve_harness_from(blank_hi).as_deref(), Some("claude"));
+        assert_eq!(
+            resolve_harness_from(|k| (k == "OPENCODE_SESSION_ID").then(|| "ses_1".to_string()))
+                .as_deref(),
+            Some("opencode")
+        );
         // No markers -> None (unknown), never a panic.
         assert_eq!(resolve_harness_from(|_| None), None);
     }

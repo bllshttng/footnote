@@ -26,14 +26,12 @@ Plan ACs covered:
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
 from fno.paths_testing import use_tmpdir
-from fno.agents import events as events_mod
 from fno.agents.providers import codex as codex_mod
 from fno.agents.providers.codex import (
     CodexInvocationError,
@@ -142,6 +140,42 @@ def test_create_codex_routes_to_provider_and_registers(workdir, fake_codex_creat
     assert e.harness_session_id == "codex-sid-abc"
     assert e.cwd == str(workdir)
     assert e.status == "live"
+
+
+def test_create_codex_treats_identity_collision_as_registry_failure(
+    workdir, fake_codex_create, monkeypatch
+):
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import DispatchAskError, _codex_create_path
+    from fno.agents.registry import AgentResolutionError
+
+    detached: list[bool] = []
+
+    class _TrackedLockHandle:
+        def detach(self) -> None:
+            detached.append(True)
+
+    monkeypatch.setattr(
+        dispatch_mod,
+        "update_registry",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AgentResolutionError("identity collision", ambiguous=True)
+        ),
+    )
+
+    with pytest.raises(DispatchAskError, match="identity collision") as exc:
+        _codex_create_path(
+            name="worker-X",
+            message="echo hello",
+            cwd=workdir,
+            from_name="fno",
+            yolo=False,
+            timeout_sec=10.0,
+            lock_handle=_TrackedLockHandle(),
+        )
+
+    assert exc.value.exit_code == 12
+    assert detached == [True]
 
 
 def test_create_codex_no_session_id_maps_to_exit_11(workdir, fake_codex_create):
@@ -553,7 +587,6 @@ def test_yolo_on_claude_create_maps_to_bypass_permissions(workdir, capsys, monke
 def test_yolo_on_claude_followup_emits_stderr_note(workdir, capsys, monkeypatch):
     """AC3-ERR variant: claude follow-up with --yolo also emits the note."""
     from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers._claude_session_registry import SessionLocator
 
     write_registry([
         AgentEntry(
