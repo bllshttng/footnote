@@ -101,4 +101,4 @@ A peer-mail caller may claim coordination only after `delivered (hosted)`, `deli
 A timeout, interruption, or command with no terminal receipt proves no send outcome; the canonical bus lock is bounded and reports exit 12 with `no durable envelope was written` when it cannot append.
 A completed live delivery cannot be undone by a bounded post-delivery registry-stamp timeout; the command preserves the hosted receipt and warns the caller not to retry.
 Discovery alias-map contention is bounded and falls back to canonical handles before delivery.
-After a confirmed first switchboard hop, relay-detach failure stops only the optional continuation and cannot delay the hosted receipt.
+After a confirmed first switchboard hop, fork or standard-stream detachment failure stops only the optional continuation and cannot delay the hosted receipt.

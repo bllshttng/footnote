@@ -4461,28 +4461,26 @@ def _run_relay_loop(
     return turns
 
 
-def _detach_stdio() -> None:
-    """Redirect fd 0/1/2 to /dev/null so a detached relay cannot wedge on (or
-    spew to) a closed terminal."""
+def _detach_stdio() -> bool:
+    """Detach every standard fd, returning false if any still stays inherited."""
     import os
 
     try:
         devnull = os.open(os.devnull, os.O_RDWR)
     except OSError:
-        # fd limits / permissions: nothing we can redirect to. The detached
-        # grandchild proceeds without redirection rather than crashing on an
-        # unbound `devnull` (gemini review).
-        return
+        return False
+    detached = True
     for fd in (0, 1, 2):
         try:
             os.dup2(devnull, fd)
         except OSError:
-            pass
+            detached = False
     if devnull > 2:
         try:
             os.close(devnull)  # the dup2'd copies remain; don't leak the original
         except OSError:
             pass
+    return detached
 
 
 def _kickoff_background_relay(
@@ -4543,7 +4541,14 @@ def _kickoff_background_relay(
             return
         if grandchild > 0:
             os._exit(0)
-        _detach_stdio()
+        if not _detach_stdio():
+            _emit_relay_stopped(
+                from_name,
+                to_name,
+                1,
+                "relay-stdio-detach-failed",
+            )
+            return
         try:
             _run_relay_loop(
                 to_name,

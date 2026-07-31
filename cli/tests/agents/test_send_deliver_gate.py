@@ -752,6 +752,80 @@ def test_background_relay_second_fork_failure_exits_intermediate_without_relay(
     assert stopped[0][0][3] == "relay-detach-failed"
 
 
+def test_detach_stdio_reports_devnull_open_failure(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            dispatch_mod.os,
+            "open",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("fd exhausted")),
+        )
+        assert dispatch_mod._detach_stdio() is False
+
+
+def test_detach_stdio_reports_partial_dup_failure_and_closes_source(monkeypatch) -> None:
+    from fno.agents import dispatch as dispatch_mod
+
+    duplicated: list[int] = []
+    closed: list[int] = []
+    def _dup2(_source, destination):
+        duplicated.append(destination)
+        if destination == 1:
+            raise OSError("stdout read only")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dispatch_mod.os, "open", lambda *_args, **_kwargs: 9)
+        patch.setattr(dispatch_mod.os, "dup2", _dup2)
+        patch.setattr(dispatch_mod.os, "close", lambda fd: closed.append(fd))
+        assert dispatch_mod._detach_stdio() is False
+    assert duplicated == [0, 1, 2]
+    assert closed == [9]
+
+
+def test_background_relay_stdio_detach_failure_exits_without_relay(monkeypatch) -> None:
+    """A grandchild retaining capture pipes cannot withhold the CLI terminal."""
+    from fno.agents import dispatch as dispatch_mod
+
+    forks = iter((0, 0))
+
+    class _ChildExit(BaseException):
+        pass
+
+    monkeypatch.setattr(dispatch_mod.os, "fork", lambda: next(forks))
+    monkeypatch.setattr(dispatch_mod.os, "setsid", lambda: None)
+    monkeypatch.setattr(
+        dispatch_mod.os,
+        "_exit",
+        lambda _code: (_ for _ in ()).throw(_ChildExit()),
+    )
+    monkeypatch.setattr(dispatch_mod, "_detach_stdio", lambda: False)
+    relay_calls: list[tuple] = []
+    stopped: list[tuple] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_run_relay_loop",
+        lambda *args, **kwargs: relay_calls.append((args, kwargs)),
+    )
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_emit_relay_stopped",
+        lambda *args, **kwargs: stopped.append((args, kwargs)),
+    )
+
+    with pytest.raises(_ChildExit):
+        dispatch_mod._kickoff_background_relay(
+            "B",
+            "A",
+            "reply",
+            6,
+            recipient_identities=_sb_identities("A", "B"),
+        )
+
+    assert relay_calls == []
+    assert stopped[0][0][3] == "relay-stdio-detach-failed"
+
+
 def test_switchboard_auto_no_kickoff_when_first_reply_empty(monkeypatch) -> None:
     """B delivered but replied empty -> nothing to relay, so no background kickoff."""
     from fno.agents import dispatch as dispatch_mod
