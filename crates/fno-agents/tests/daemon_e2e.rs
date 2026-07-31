@@ -372,11 +372,6 @@ async fn drift_warned_on_list_stderr_only() {
     // JSON.
     let home = short_home();
     home.ensure_root().unwrap();
-    // One real row, so this is also the only coverage of a row projection
-    // travelling the whole client -> socket -> daemon -> stdout path. The unit
-    // test calls the projection directly and so cannot see the client seam;
-    // with an empty registry this test proved only that stdout parses.
-    seed_pane_row(&home, "worker-pane-e2e");
 
     // A private copy of the daemon binary we can replace out from under the
     // running process (the running process keeps the old inode).
@@ -421,6 +416,18 @@ async fn drift_warned_on_list_stderr_only() {
     };
     wait_for(&home.supervisor_sock(), Duration::from_secs(10));
 
+    // One real row, so this is also the only coverage of a row projection
+    // travelling the whole client -> socket -> daemon -> stdout path. The unit
+    // test calls the projection directly and so cannot see the client seam;
+    // with an empty registry this test proved only that stdout parses.
+    //
+    // Seeded AFTER startup on purpose: the daemon re-reads the registry on every
+    // list, so the row is still visible, and this leaves the cold-start reconcile
+    // sweep walking an empty registry exactly as it did before. Seeding first
+    // hands the sweep a pane row to probe on a test whose subject is binary
+    // drift, which is latency and failure surface this test should not own.
+    seed_pane_row(&home, "worker-pane-e2e");
+
     // A served status RPC only returns once the daemon is in its accept loop,
     // which is AFTER it records its exe fingerprint at startup. Gating the
     // replace on this proves the daemon fingerprinted the ORIGINAL copy, closing
@@ -455,14 +462,46 @@ async fn drift_warned_on_list_stderr_only() {
     let stdout = String::from_utf8_lossy(&out.stdout);
     let stderr = String::from_utf8_lossy(&out.stderr);
 
+    assert!(out.status.success(), "client list exited {:?}", out.status);
+
     // AC4-HP: stdout is valid JSON with no warning text.
     let parsed: serde_json::Value =
         serde_json::from_str(stdout.trim()).expect("list --json stdout is valid JSON");
 
-    // The identity + hosting keys survive the whole real path, not just the
-    // in-process projection: the client splices daemon rows verbatim today, and
-    // nothing else fails if a future change starts projecting a subset there.
+    // The row survives the whole real path, not just the in-process projection:
+    // the client splices daemon rows verbatim today, and nothing else fails if a
+    // future change starts projecting a subset there. Assert the WHOLE key set
+    // against the same contract the daemon test uses; a few hand-picked keys
+    // would leave every other key unguarded at this seam.
+    const CONTRACT: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../schemas/agents-list-row.json"
+    ));
+    let contract: serde_json::Value =
+        serde_json::from_str(CONTRACT).expect("contract is valid JSON");
+    let mut expected: std::collections::BTreeSet<String> = contract["required"]
+        .as_array()
+        .expect("required is an array")
+        .iter()
+        .map(|k| k.as_str().unwrap().to_string())
+        .collect();
+    expected.extend(
+        contract["rust_only"]["keys"]
+            .as_array()
+            .expect("rust_only.keys is an array")
+            .iter()
+            .map(|k| k.as_str().unwrap().to_string()),
+    );
+
     let row = &parsed["agents"][0];
+    let actual: std::collections::BTreeSet<String> = row
+        .as_object()
+        .expect("agents[0] is an object (a zero-row list fails here)")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(actual, expected, "row key set drifted at the client seam");
+
     assert_eq!(row["name"], "worker-pane-e2e");
     assert_eq!(row["harness"], "claude");
     assert_eq!(

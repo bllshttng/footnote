@@ -2895,6 +2895,7 @@ where
                 "opencode" => e
                     .harness_session_id
                     .clone()
+                    .filter(|s| !s.is_empty())
                     .or_else(|| e.session_id.clone()),
                 _ => e.session_id.clone(),
             };
@@ -6278,6 +6279,30 @@ done
 
         assert_eq!(row["harness"], "opencode");
         assert_eq!(row["session_id"], "oc-sess-9f2");
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
+    /// An empty crown scope renders `?`, not a trailing space. Python tests the
+    /// scope for falsiness (`self.crown_scope or '?'`), so matching only on None
+    /// would diverge on the empty string -- and nothing else covers that leg.
+    #[test]
+    fn list_row_crown_label_falls_back_on_an_empty_scope() {
+        let home = short_home("listcrownempty");
+        seed_stream_row(&home, "worker-crown", "abc12345");
+        state::update_registry(&home.registry_json(), |r| {
+            let e = &mut r.entries[0];
+            e.crown_level = Some(1);
+            e.crown_scope = Some(String::new());
+        })
+        .unwrap();
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let result = response.result().unwrap();
+
+        assert_eq!(result["agents"][0]["crown"], "L1 ?");
 
         std::fs::remove_dir_all(home.root()).ok();
     }
