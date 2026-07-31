@@ -172,18 +172,35 @@ class _LazyStub(click.Group):
             # install still answers "absent" and still fails below with the same
             # message, so nothing is masked. A second failure is reported
             # normally rather than retried again.
+            # ModuleNotFoundError specifically, not ImportError generally: only
+            # that subclass proves a module was ABSENT. A plain "cannot import
+            # name X from Y" names a module that exists, so the on-disk check
+            # below would say yes and we would re-execute the whole module tree
+            # for nothing, running every import-time side effect a second time.
             name = getattr(exc, "name", None) or ""
             module = None
-            if _is_fno_module(name) and _module_is_now_on_disk(name):
+            failure: ImportError = exc
+            if (
+                isinstance(exc, ModuleNotFoundError)
+                and _is_fno_module(name)
+                and _module_is_now_on_disk(name)
+            ):
                 try:
                     module = importlib.import_module(module_path)
-                except ImportError:
+                except ImportError as retry_exc:
+                    # Report what the RETRY hit, never the stale first failure.
+                    # The retry gets further through the tree, so it can surface
+                    # a different and more truthful cause (a genuinely missing
+                    # third-party dependency, say). Reporting the original would
+                    # bury that under an fno reinstall hint and send the operator
+                    # to `fno update` for a problem `fno update` cannot fix.
+                    failure = retry_exc
                     module = None
             if module is None:
                 raise click.ClickException(
                     f"Failed to import {self._import_path!r} for command "
-                    f"{self.name!r}: {exc}{_import_failure_hint(exc)}"
-                ) from exc
+                    f"{self.name!r}: {failure}{_import_failure_hint(failure)}"
+                ) from failure
         attr = getattr(module, attr_name, None)
         if attr is None:
             raise click.ClickException(

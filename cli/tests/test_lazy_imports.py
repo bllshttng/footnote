@@ -685,3 +685,62 @@ def test_lazy_import_does_not_retry_when_the_module_is_really_missing(monkeypatc
     combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
     flat = " ".join(combined.replace("│", " ").split())
     assert "fno doctor" in flat, combined
+
+
+def _run_one_lazy_command(monkeypatch, results):
+    """Invoke a lazy 'state' command whose import outcomes come from `results`."""
+    from fno._lazy_group import make_lazy_group_cls
+    import typer
+    from typer.testing import CliRunner
+
+    calls = _counting_import(monkeypatch, "fno.state.cli", results)
+    app = typer.Typer(
+        cls=make_lazy_group_cls({"state": "fno.state.cli:cli"}),
+        no_args_is_help=True,
+        pretty_exceptions_enable=False,
+        rich_markup_mode=None,
+    )
+
+    @app.callback()
+    def _cb() -> None:
+        pass
+
+    return calls, CliRunner().invoke(app, ["state", "--help"])
+
+
+def test_plain_import_error_is_never_retried(monkeypatch):
+    """A 'cannot import name X from Y' names a module that EXISTS, so the on-disk
+    check would say yes and the whole module tree would re-execute for nothing,
+    running every import-time side effect twice. Only ModuleNotFoundError proves a
+    module was absent, so only it earns a retry."""
+    from fno import _lazy_group as lg
+
+    # on_disk deliberately True: the guard must be the exception TYPE, not this.
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    boom = ImportError("cannot import name 'gone' from 'fno.config'", name="fno.config")
+    calls, result = _run_one_lazy_command(monkeypatch, [boom])
+
+    assert len(calls) == 1, f"a plain ImportError must not be retried; got {len(calls)}"
+    assert result.exit_code != 0
+
+
+def test_retry_failure_is_reported_instead_of_the_stale_first_error(monkeypatch):
+    """The retry gets further through the import tree, so it can surface a different
+    and more truthful cause. Reporting the original would bury a real missing
+    dependency under an fno reinstall hint and send the operator to `fno update` for
+    something `fno update` cannot fix."""
+    from fno import _lazy_group as lg
+
+    monkeypatch.setattr(lg, "_module_is_now_on_disk", lambda name: True)
+    first = ModuleNotFoundError("gone", name="fno.state._mid_reinstall")
+    second = ModuleNotFoundError("No module named 'some_third_party'", name="some_third_party")
+    calls, result = _run_one_lazy_command(monkeypatch, [first, second])
+
+    assert len(calls) == 2
+    assert result.exit_code != 0
+    combined = (result.output or "") + (result.stderr if hasattr(result, "stderr") else "")
+    flat = " ".join(combined.replace("│", " ").split())
+    assert "some_third_party" in flat, combined
+    # The stale fno hint must NOT be attached to a third-party failure.
+    assert "fno doctor" not in flat, combined
+    assert "_mid_reinstall" not in flat, combined
