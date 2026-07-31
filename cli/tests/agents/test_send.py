@@ -1206,6 +1206,76 @@ def test_legacy_registry_row_does_not_collide_with_its_live_projection(
     assert read_all_threads("legacy") == []
 
 
+def test_legacy_pseudo_id_does_not_hide_foreign_canonical_owner(
+    runner, tmp_path, monkeypatch
+):
+    """A short-only legacy self cannot take full-id precedence over a peer."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents import discover as discover_mod
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.discover import DiscoveredSession
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.inbox.store import read_all_threads
+    from fno.mail.cli import mail_app
+
+    write_registry(
+        [
+            AgentEntry(
+                name="legacy",
+                cwd="/legacy",
+                log_path="/tmp/legacy.log",
+                harness="claude",
+                harness_session_id=None,
+                short_id="deadbeef",
+                status="live",
+            )
+        ]
+    )
+    legacy = DiscoveredSession(
+        session_id="deadbeef",
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=123,
+        cwd="/legacy",
+        project="legacy",
+        status="idle",
+        agent="claude",
+        truth_state="working",
+        name="legacy",
+    )
+    foreign = DiscoveredSession(
+        session_id="bbbbbbbb-1111-7222-8333-4444deadbeef",
+        short_id="deadbeef",
+        handle="deadbeef",
+        pid=456,
+        cwd="/foreign",
+        project="foreign",
+        status="idle",
+        agent="claude",
+        truth_state="unknown",
+    )
+    monkeypatch.setattr(
+        discover_mod,
+        "discover_live_sessions",
+        lambda **_kwargs: [legacy, foreign],
+    )
+    monkeypatch.setattr(dispatch_mod, "_registered_family1_state", lambda _entry: "working")
+    delivered: list[str] = []
+    monkeypatch.setattr(
+        dispatch_mod,
+        "_deliver_live",
+        lambda entry, *_a, **_k: delivered.append(entry.name) or True,
+    )
+
+    result = runner.invoke(mail_app, ["send", "deadbeef", "must not guess"])
+
+    assert result.exit_code == 2
+    assert "ambiguous" in result.output
+    assert "delivered" not in result.output and "queued" not in result.output
+    assert delivered == []
+    assert read_all_threads("legacy") == []
+
+
 def test_us2_unknown_handle_errors_with_suggestions(runner, tmp_path, monkeypatch):
     """AC2-ERR: an unknown handle errors with the closest live handles, sending
     nothing (dispatch_send_to_project is never called)."""

@@ -749,12 +749,18 @@ def _exact_address_matches(
     """Union every exact live address category before selecting a session."""
     if not token:
         return []
+    from fno.agents.store_fallback import is_full_session_id
+
     rows = list(sessions)
-    full = [
-        session
-        for session in rows
-        if session_handle_tier(token, session.session_id) == 0
-    ]
+    full = (
+        [
+            session
+            for session in rows
+            if session_handle_tier(token, session.session_id) == 0
+        ]
+        if is_full_session_id(token)
+        else []
+    )
     candidates = full or [
         session
         for session in rows
