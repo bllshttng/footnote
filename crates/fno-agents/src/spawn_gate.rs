@@ -798,7 +798,11 @@ MemAvailable:    8000000 kB\n";
         let _ = claims::release("spawn-gate", "spawn-gate:999999:ghost", Some(&root), None);
         std::env::remove_var("FNO_CLAIMS_ROOT");
 
-        assert_eq!(got.err(), Some(EXIT_NO_WAIT), "must refuse with the no-wait code");
+        assert_eq!(
+            got.err(),
+            Some(EXIT_NO_WAIT),
+            "must refuse with the no-wait code"
+        );
         assert!(
             elapsed < QUEUE_TIMEOUT,
             "must refuse fast, not queue: took {elapsed:?}"
