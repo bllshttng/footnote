@@ -38,6 +38,16 @@ const QUEUE_TIMEOUT: Duration = Duration::from_secs(600);
 /// spawn-gate mutex TTL: generous vs the seconds-scale check→dispatch window;
 /// PID liveness frees it instantly if the spawner dies.
 const GATE_CLAIM_TTL_MS: i64 = 5 * 60 * 1000;
+/// How long to tolerate an UNBROKEN run of failed mutex acquisitions before
+/// proceeding unserialized. The mutex is a check→dispatch serializer, not a
+/// state owner: a spawner that dies inside the critical section leaves it
+/// `Suspect` for the full [`GATE_CLAIM_TTL_MS`], and with no bound here EVERY
+/// spawner on the machine then queues behind that corpse until its own queue
+/// timeout; the gate becomes the very thing that bricks spawning, which LD5
+/// forbids. Failing open can overshoot the cap by the number of racing
+/// spawners; wedging the whole mesh is strictly worse. Mirrors
+/// `spawn_gate.py::MUTEX_WAIT_BUDGET_S`.
+const MUTEX_WAIT_BUDGET: Duration = Duration::from_secs(60);
 /// worker:<name> headless slot TTL: bounds a one-shot that outlives its
 /// client pid record; PID liveness is the primary release.
 const WORKER_CLAIM_TTL_MS: i64 = 4 * 60 * 60 * 1000;
@@ -410,11 +420,15 @@ pub fn run_gate(
     let started = Instant::now();
     let mut last_progress = Instant::now();
     let mut announced = false;
+    // Start of the current UNBROKEN run of failed acquisitions (None = holding
+    // or not yet contended). Reset on every success so a long legitimate queue
+    // never accumulates into a spurious fail-open.
+    let mut mutex_blocked_since: Option<Instant> = None;
 
     loop {
         // Serialize check→dispatch under the spawn-gate mutex so N concurrent
         // spawners at cap-1 can't all pass. Not held across the wait sleep.
-        let acquired_mutex = match claims::acquire(
+        let mut acquired_mutex = match claims::acquire(
             "spawn-gate",
             &holder,
             claims::AcquireOpts {
@@ -431,6 +445,33 @@ pub fn run_gate(
                 true
             }
         };
+
+        if acquired_mutex {
+            mutex_blocked_since = None;
+        } else {
+            let now = Instant::now();
+            let since = *mutex_blocked_since.get_or_insert(now);
+            // --no-wait means "do not queue", and a busy mutex is queueing.
+            // Refusing here (rather than falling through to the sleep) is what
+            // keeps the promise: without it the caller waits the full
+            // QUEUE_TIMEOUT and then gets EXIT_QUEUE_TIMEOUT, so it cannot even
+            // tell "cap is full" from "the gate is wedged".
+            if flags.no_wait {
+                eprintln!(
+                    "spawn-gate: another spawner holds the gate mutex; refusing \
+                     (--no-wait). See `fno agents top`."
+                );
+                return Err(EXIT_NO_WAIT);
+            }
+            if now.duration_since(since) >= MUTEX_WAIT_BUDGET {
+                eprintln!(
+                    "spawn-gate: gate mutex still held after {}s (holder likely died \
+                     mid-gate); proceeding unserialized",
+                    MUTEX_WAIT_BUDGET.as_secs()
+                );
+                acquired_mutex = true;
+            }
+        }
 
         if acquired_mutex {
             guard.gate_key = Some(("spawn-gate".to_string(), holder.clone()));
@@ -700,6 +741,68 @@ MemAvailable:    8000000 kB\n";
         assert_eq!(parse_meminfo(text), Some(8_000_000 * 1024));
         assert_eq!(parse_meminfo("MemTotal: 1 kB\n"), None);
         assert_eq!(parse_meminfo("MemAvailable: banana kB\n"), None);
+    }
+
+    /// Mirrors `test_no_wait_refuses_fast_when_the_mutex_is_contended` on the
+    /// Python side: a busy gate mutex IS queueing, so `--no-wait` must refuse on
+    /// it instead of falling through to the queue loop. The regression it pins
+    /// made every `--no-wait` caller wait the full `QUEUE_TIMEOUT` behind a
+    /// spawner that died mid-gate, then exit `EXIT_QUEUE_TIMEOUT`, so the
+    /// caller could not tell "cap is full" from "the gate is wedged".
+    #[test]
+    fn no_wait_refuses_fast_when_the_mutex_is_contended() {
+        let _g = claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("fno-gate-nowait-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let root = dir.join("claims-root");
+        std::fs::create_dir_all(&root).unwrap();
+        std::env::set_var("FNO_CLAIMS_ROOT", &root);
+        // A high cap so the ONLY thing that can refuse here is the mutex.
+        let fnodir = dir.join(".fno");
+        std::fs::create_dir_all(&fnodir).unwrap();
+        std::fs::write(
+            fnodir.join("config.toml"),
+            "[agents]\nmax_live = 999\nmin_free_gb = 0\n",
+        )
+        .unwrap();
+
+        // Hold the mutex as somebody else, exactly as a corpse would.
+        let held = claims::acquire(
+            "spawn-gate",
+            "spawn-gate:999999:ghost",
+            claims::AcquireOpts {
+                ttl_ms: Some(GATE_CLAIM_TTL_MS),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(held, claims::AcquireOutcome::Acquired(_)),
+            "test setup: ghost must hold the mutex, got {held:?}"
+        );
+
+        let started = Instant::now();
+        let got = run_gate(
+            &dir,
+            &dir.join("registry.json"),
+            "w2",
+            "bg",
+            GateFlags {
+                force: false,
+                no_wait: true,
+            },
+        );
+        let elapsed = started.elapsed();
+        let _ = claims::release("spawn-gate", "spawn-gate:999999:ghost", Some(&root), None);
+        std::env::remove_var("FNO_CLAIMS_ROOT");
+
+        assert_eq!(got.err(), Some(EXIT_NO_WAIT), "must refuse with the no-wait code");
+        assert!(
+            elapsed < QUEUE_TIMEOUT,
+            "must refuse fast, not queue: took {elapsed:?}"
+        );
     }
 
     #[test]

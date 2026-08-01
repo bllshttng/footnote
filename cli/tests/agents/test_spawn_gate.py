@@ -284,6 +284,70 @@ class TestRunGate:
         assert "forced past cap" in capsys.readouterr().err
         guard.release()
 
+    def test_no_wait_refuses_fast_when_the_mutex_is_contended(
+        self, monkeypatch, capsys
+    ):
+        """A busy gate mutex is queueing, so --no-wait must refuse on it.
+
+        Regression: the no_wait check used to live INSIDE the acquired-mutex
+        branch, so a spawner that died mid-gate (leaving the claim `suspect`
+        for its full TTL) made every --no-wait caller wait the whole
+        QUEUE_TIMEOUT_S and then exit EXIT_QUEUE_TIMEOUT - unable to tell
+        "cap is full" from "the gate is wedged".
+        """
+        _settings(monkeypatch, max_live=99)  # cap is irrelevant: never counted
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: False)
+        # Long enough that a fall-through to the queue loop is unmistakable.
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 30.0)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg", no_wait=True)
+        assert exc.value.code == spawn_gate.EXIT_NO_WAIT
+        assert "gate mutex" in capsys.readouterr().err
+
+    def test_permanently_held_mutex_proceeds_unserialized(
+        self, monkeypatch, capsys
+    ):
+        """A wedged mutex must not brick spawning (the module's fail-open rule).
+
+        Regression: with no bound on the mutex wait, one spawner that died
+        inside the critical section queued EVERY other spawner on the machine
+        behind its corpse until each hit its own 600s timeout.
+        """
+        _settings(monkeypatch, max_live=3)
+        monkeypatch.setattr(
+            spawn_gate, "census", lambda: spawn_gate.LiveCensus(workers=[])
+        )
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: False)
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.05)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 30.0)
+        guard = spawn_gate.run_gate("w2", "bg")  # must return, not hang
+        assert "proceeding unserialized" in capsys.readouterr().err
+        guard.release()
+
+    def test_mutex_budget_resets_on_a_successful_acquire(self, monkeypatch, capsys):
+        """The budget tracks an UNBROKEN contention run, not total queue time.
+
+        A long legitimate queue (mutex acquired every poll, cap simply full)
+        must never accumulate into a spurious "proceeding unserialized".
+        """
+        _settings(monkeypatch, max_live=1)
+        w = spawn_gate.LiveWorker("fno", "w1", "claude", "bg", ALIVE, "busy")
+        monkeypatch.setattr(
+            spawn_gate,
+            "census",
+            lambda: spawn_gate.LiveCensus(workers=[w], fno_slot_workers=1),
+        )
+        monkeypatch.setattr(spawn_gate, "_acquire_gate_mutex", lambda _h: True)
+        monkeypatch.setattr(spawn_gate, "MUTEX_WAIT_BUDGET_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_POLL_S", 0.01)
+        monkeypatch.setattr(spawn_gate, "QUEUE_TIMEOUT_S", 0.2)
+        with pytest.raises(SystemExit) as exc:
+            spawn_gate.run_gate("w2", "bg")
+        assert exc.value.code == spawn_gate.EXIT_QUEUE_TIMEOUT
+        assert "proceeding unserialized" not in capsys.readouterr().err
+
     def test_dequeue_ram_recheck_refuses(self, monkeypatch):
         """AC2-FR: a freed slot still refuses when RAM dropped meanwhile."""
         _settings(monkeypatch, max_live=1, min_free_gb=4.0)

@@ -39,6 +39,16 @@ QUEUE_POLL_S = 2.0
 QUEUE_PROGRESS_EVERY_S = 30.0
 QUEUE_TIMEOUT_S = 600.0
 GATE_CLAIM_TTL_MS = 5 * 60 * 1000
+#: How long to tolerate an UNBROKEN run of failed mutex acquisitions before
+#: proceeding unserialized. The mutex is a check->dispatch serializer, not a
+#: state owner: a spawner that dies inside the critical section leaves it
+#: `suspect` for the full ``GATE_CLAIM_TTL_MS``, and with no bound here EVERY
+#: spawner on the machine then queues behind that corpse until its own queue
+#: timeout - the gate becoming the very thing that bricks spawning, which the
+#: module contract forbids. Failing open can overshoot the cap by the number of
+#: racing spawners; wedging the whole mesh is strictly worse. Mirrors
+#: ``spawn_gate.rs::MUTEX_WAIT_BUDGET``.
+MUTEX_WAIT_BUDGET_S = 60.0
 WORKER_CLAIM_TTL_MS = 4 * 60 * 60 * 1000
 
 #: Registry statuses that can hold a live process. `idle` counts when the pid
@@ -492,9 +502,38 @@ def run_gate(
     started = time.monotonic()
     last_progress = started
     announced = False
+    #: start of the current UNBROKEN run of failed acquisitions (None = holding
+    #: or not yet contended). Reset on every success so a long legitimate queue
+    #: never accumulates into a spurious fail-open.
+    mutex_blocked_since: Optional[float] = None
 
     while True:
-        if _acquire_gate_mutex(holder):
+        acquired = _acquire_gate_mutex(holder)
+        if acquired:
+            mutex_blocked_since = None
+        else:
+            now = time.monotonic()
+            if mutex_blocked_since is None:
+                mutex_blocked_since = now
+            # --no-wait means "do not queue", and a busy mutex is queueing.
+            # Refusing here (rather than falling through to the sleep) is what
+            # keeps the promise: without it the caller waits the full
+            # QUEUE_TIMEOUT_S and then gets EXIT_QUEUE_TIMEOUT, so it cannot
+            # even tell "cap is full" from "the gate is wedged".
+            if no_wait:
+                _warn(
+                    "spawn-gate: another spawner holds the gate mutex; refusing "
+                    "(--no-wait). See `fno agents top`."
+                )
+                raise GateRefused(EXIT_NO_WAIT)
+            if now - mutex_blocked_since >= MUTEX_WAIT_BUDGET_S:
+                _warn(
+                    f"spawn-gate: gate mutex still held after "
+                    f"{int(MUTEX_WAIT_BUDGET_S)}s (holder likely died mid-gate); "
+                    f"proceeding unserialized"
+                )
+                acquired = True
+        if acquired:
             guard._gate_holder = holder
             c = census()
             for w in c.warnings:
