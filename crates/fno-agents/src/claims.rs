@@ -369,8 +369,15 @@ fn machine_id() -> String {
 /// written before the field existed; those reproduce the old hostname compare
 /// exactly, so a pre-change claim classifies no worse than it does today.
 fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+    // The machine arm decides only when BOTH sides have an id. A reader that
+    // cannot read its own is "unknown", not "a different machine": answering
+    // false there would stale a live local claim and make it stealable, and
+    // ambiguous liveness must degrade to skip, never to steal.
+    let mine = machine_id();
     if let Some(m) = machine.filter(|m| !m.is_empty()) {
-        return m == machine_id();
+        if !mine.is_empty() {
+            return m == mine;
+        }
     }
     if host.is_empty() {
         return false;

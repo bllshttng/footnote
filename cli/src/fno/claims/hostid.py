@@ -148,9 +148,17 @@ def is_same_machine(host: Optional[str], machine: Optional[str]) -> bool:
     ``machine`` is REQUIRED and deliberately has no default. A default let two
     callers keep compiling while silently taking the pre-change fallback for
     every claim, which is the fix quietly not applying on those paths.
+
+    The machine arm decides only when BOTH sides have an id. If THIS reader
+    cannot read its own (``ioreg`` missing, machine-id files unreadable), that
+    is "unknown", not "a different machine": answering False there would stale a
+    live local claim and make it stealable, and ambiguous liveness must degrade
+    to skip, never to steal. Either side missing falls back to the hostname
+    compare, which is the pre-change behavior.
     """
-    if machine:
-        return machine == machine_id()
+    mine = machine_id()
+    if machine and mine:
+        return machine == mine
     if not host:
         return False
     return host == hostname()

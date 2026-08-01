@@ -311,6 +311,20 @@ def test_claim_omits_machine_id_when_none_is_available(monkeypatch):
     hostid.machine_id.cache_clear()
 
 
+def test_reader_that_cannot_read_its_own_id_does_not_steal(monkeypatch):
+    """A reader whose ioreg/machine-id lookup fails cannot tell whose claim it
+    is. Ambiguous liveness must degrade to skip, never to steal, so it falls
+    back to the hostname compare instead of declaring the claim foreign - which
+    would stale a live LOCAL holder and make it reclaimable."""
+    claim = _live_claim(host=hostid.hostname(), machine_id="some-machine-id")
+    monkeypatch.setattr(hostid, "_macos_platform_uuid", lambda: "")
+    monkeypatch.setattr(hostid, "_linux_machine_id", lambda: "")
+    hostid.machine_id.cache_clear()
+    assert hostid.machine_id() == ""
+    assert is_live(claim) is True, "unreadable own id must not read as foreign"
+    hostid.machine_id.cache_clear()
+
+
 def test_is_same_machine_arms():
     hostid.machine_id.cache_clear()
     # machine arm (authoritative when present)

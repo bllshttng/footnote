@@ -454,22 +454,20 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
     # carries a session marker (a codex/claude/gemini session), absent otherwise
     # (bare CI), so it is excluded from the exact-set check rather than asserted.
     data = yaml.safe_load(text)
-    assert set(data) - {"harness"} == {
-        "schema_version",
-        "key",
-        "holder",
-        "acquired_at",
-        "pid",
-        "host",
-        # asserted, not excluded like `harness`. Both writers emit it
-        # unconditionally, and liveness compares it - a writer that stopped
-        # emitting it would send every reader down the pre-change hostname
-        # fallback and silently restore the bug.
-        "machine_id",
-    }
-    # Parity on the VALUE, not just the key: the two implementations must derive
-    # the same identity or each reads the other's claims as cross-machine.
-    assert data["machine_id"] == py_machine_id()
+    expected = {"schema_version", "key", "holder", "acquired_at", "pid", "host"}
+    # Asserted, not excluded like `harness`: liveness compares this, so a writer
+    # that stopped emitting it would send every reader down the pre-change
+    # hostname fallback and silently restore the bug. Conditional because a host
+    # with no OS machine id (a minimal container, no ioreg) legitimately omits
+    # it - and then BOTH writers must omit it, which is the real parity claim.
+    if py_machine_id():
+        expected.add("machine_id")
+        assert data["machine_id"] == py_machine_id()
+    else:
+        assert "machine_id" not in data, (
+            "no stable id on this host: both implementations must omit the field"
+        )
+    assert set(data) - {"harness"} == expected
     assert data["host"] == socket.gethostname(), (
         "host stays the hostname a pre-change reader compares against"
     )
