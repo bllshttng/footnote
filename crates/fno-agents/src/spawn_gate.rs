@@ -782,6 +782,25 @@ MemAvailable:    8000000 kB\n";
             matches!(held, claims::AcquireOutcome::Acquired(_)),
             "test setup: ghost must hold the mutex, got {held:?}"
         );
+        // Positive control on the test's own premise. The ghost pid is dead, so
+        // the claim is `Suspect` (TTL unexpired, holder gone) and acquire must
+        // still report it held by another. Assert that instead of assuming it:
+        // if claim semantics ever let a dead holder be reclaimed, the mutex
+        // would be FREE, run_gate would sail through, and this test would pass
+        // while exercising none of the branch it exists to pin.
+        let contended = claims::acquire(
+            "spawn-gate",
+            "spawn-gate:probe",
+            claims::AcquireOpts {
+                ttl_ms: Some(GATE_CLAIM_TTL_MS),
+                root: Some(root.clone()),
+                ..Default::default()
+            },
+        );
+        assert!(
+            matches!(contended, claims::AcquireOutcome::HeldByOther { .. }),
+            "test premise broken: a dead-holder claim must still read as held, got {contended:?}"
+        );
 
         let started = Instant::now();
         let got = run_gate(
