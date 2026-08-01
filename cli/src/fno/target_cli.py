@@ -130,10 +130,10 @@ def _refuse_unsatisfiable_reviewers() -> None:
         )
         if message
     ]
-    for v in [v for v in verdicts if v.status == "unverifiable"]:
-        typer.echo(f"note target init: {v.line()}", err=True)
-    for v in [v for v in peer_verdicts if v.status == "unverifiable"]:
-        typer.echo(f"note target init: {v.line()}", err=True)
+    for reviewer_verdict in [v for v in verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
+    for peer_verdict in [v for v in peer_verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {peer_verdict.line()}", err=True)
     if messages:
         typer.echo("\n\n".join(messages), err=True)
         raise typer.Exit(code=2)

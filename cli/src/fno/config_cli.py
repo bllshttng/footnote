@@ -395,13 +395,13 @@ def _report_review_capability(json_out: bool = False) -> int:
     if not reviewers:
         typer.echo("  config.review.reviewers is empty - no local reviewers gate.")
     else:
-        for v in verdicts:
-            typer.echo(f"  {v.line()}")
+        for reviewer_verdict in verdicts:
+            typer.echo(f"  {reviewer_verdict.line()}")
     if peer_verdicts:
         state = "unavailable" if peer_blocked else "satisfiable"
         typer.echo(f"  local peer gate: {state}")
-        for v in peer_verdicts:
-            typer.echo(f"    {v.line()}")
+        for peer_verdict in peer_verdicts:
+            typer.echo(f"    {peer_verdict.line()}")
     if blocked or peer_blocked:
         typer.echo("")
         typer.echo(
