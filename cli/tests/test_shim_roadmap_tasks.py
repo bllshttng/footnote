@@ -18,19 +18,41 @@ _REAL_SHIM = _REPO_ROOT / "scripts" / "roadmap-tasks.py"
 
 # For tests that need to run the shim WITHOUT fno installed, we need a
 # Python interpreter that does NOT have fno in its site-packages.
-# The venv Python (sys.executable) has fno installed; search PATH
-# excluding the venv for a system Python3.
 def _find_system_python3() -> str:
-    """Return a Python3 interpreter that is NOT the active venv's Python."""
-    path_entries = os.environ.get("PATH", "").split(os.pathsep)
-    for entry in path_entries:
+    """Return a Python3 interpreter that cannot import ``fno``.
+
+    Probe for that property directly rather than inferring it from the path.
+    The previous rule - "any python3 whose realpath differs from the active
+    venv's" - is strictly weaker, because it excludes only THIS venv. A sibling
+    footnote worktree's venv on PATH is a different interpreter that still has
+    fno installed, so it passed the check and the shim's import then SUCCEEDED,
+    turning the expected exit 3 into exit 2.
+
+    That is not hypothetical: a preflight run picked
+    `.fno/worktrees/footnote/<other>/cli/.venv/bin/python3` this way. The two
+    venvs escaped the realpath comparison only because they were built on
+    different base interpreters (uv's cpython vs homebrew's), which is exactly
+    the kind of coincidence a path heuristic cannot see and an import probe
+    does not care about.
+    """
+    # Probe under the SAME env the shim will run with: `fno test` pins a
+    # worktree PYTHONPATH that makes fno importable from any interpreter, so a
+    # probe that inherited it would find no fno-free python and fall back to
+    # sys.executable. _run_shim drops the same key for the same reason.
+    probe_env = os.environ.copy()
+    probe_env.pop("PYTHONPATH", None)
+    for entry in os.environ.get("PATH", "").split(os.pathsep):
         candidate = Path(entry) / "python3"
-        if candidate.resolve() != Path(sys.executable).resolve() and candidate.is_file():
-            # Verify it's actually a different python (not a venv symlink to same interpreter)
-            venv_python_realpath = Path(sys.executable).resolve()
-            candidate_realpath = candidate.resolve()
-            if candidate_realpath != venv_python_realpath:
-                return str(candidate)
+        if not candidate.is_file():
+            continue
+        probe = subprocess.run(
+            [str(candidate), "-c", "import fno"],
+            capture_output=True,
+            text=True,
+            env=probe_env,
+        )
+        if probe.returncode != 0:  # fno absent: exactly what these tests need
+            return str(candidate)
     # Fallback: sys.executable (tests may not isolate perfectly but still test logic)
     return sys.executable
 

@@ -55,4 +55,12 @@ run_case malformed 1 fail $'Looks fine.\nverdict: clean\n'
 run_case empty 1 fail ''
 run_case count_mismatch 1 fail $'P1 a:1 - one - fix\nfno-peer-verdict: {"verdict":"blocked","blocking_findings":2}\n'
 
+# Bare severity markers are SECTION HEADERS, not findings. codex emits this
+# shape routinely, and counting the headers rejected a genuinely clean review
+# as "declares 0 blocking finding(s), but output contains 2".
+run_case bare_markers_are_headers 0 pass $'P1\nP2\nP3\nverdict\nfno-peer-verdict: {"verdict":"clean","blocking_findings":0}\n'
+run_case bare_marker_with_colon 0 pass $'P1:\nP2:\nfno-peer-verdict: {"verdict":"clean","blocking_findings":0}\n'
+# ...but a header ABOVE real findings must not change the count.
+run_case headers_plus_findings 1 fail $'P1\nP1 a:1 - one - fix\nP2\nP2 b:2 - two - fix\nfno-peer-verdict: {"verdict":"blocked","blocking_findings":2}\n'
+
 echo "PASS consume-peer-verdict"
