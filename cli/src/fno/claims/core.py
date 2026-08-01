@@ -32,6 +32,7 @@ from .events import (
     emit_claim_released,
     emit_claim_stale_reclaimed,
 )
+from .hostid import machine_id
 from .io import (
     ClaimAlreadyHeld,
     ClaimCorrupted,
@@ -146,6 +147,12 @@ def _make_claim(
         expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
         pid=pid if pid is not None else os.getpid(),
         host=host if host is not None else socket.gethostname(),
+        # Liveness compares THIS, not host: a name that flips mid-session made a
+        # live holder read cross-host, then stale, then stealable. Additive, so a
+        # pre-change reader still reads host and behaves exactly as today. `or
+        # None` omits the field when no stable id exists rather than recording a
+        # hostname readers would trust as authoritative.
+        machine_id=machine_id() or None,
         reason=reason,
         # x-3e70: tag the claim with the acquiring harness so the dispatch guard
         # can read a foreign owner off the claim. This is the PRODUCTION writer
@@ -540,6 +547,9 @@ def claim_status(key: str, *, root: Optional[Path] = None) -> dict[str, Any]:
         "holder": claim.holder,
         "pid": claim.pid,
         "host": claim.host,
+        # Callers classify ownership from this dict, so it has to carry what
+        # liveness actually compares; host alone sends them down the fallback.
+        "machine_id": claim.machine_id,
         "acquired_at": claim.acquired_at,
         "expires_at": claim.expires_at,
     }

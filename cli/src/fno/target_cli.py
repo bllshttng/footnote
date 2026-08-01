@@ -23,7 +23,6 @@ import json
 import os
 import re
 import shutil
-import socket
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -2137,9 +2136,11 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
     Three arms, mirroring init-target-state.sh's ``claim_owner_id`` so a
     successor and the classifier agree on 'ours': TARGET_SESSION_ID (a
     driver-run claude session), CODEX_THREAD_ID (codex parity - the durable-pid
-    arm below only resolves a claude ancestor), then durable session pid + host
-    (a bare re-run with no env id). An uncapturable own pid reads as not-ours
-    (park / re-acquire, never assume ownership) - the conservative direction.
+    arm below only resolves a claude ancestor), then durable session pid +
+    machine (a bare re-run with no env id). An uncapturable own pid reads as
+    not-ours (park / re-acquire, never assume ownership) - the conservative
+    direction. The machine check goes through ``hostid.is_same_machine``, never
+    a raw gethostname() compare: the name is not stable.
     """
     for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
         own_id = os.environ.get(env_var)
@@ -2149,10 +2150,12 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
         from fno.claims.session_pid import resolve_session_pid
 
         own_pid = resolve_session_pid(from_pid=os.getpid())
-        own_host = socket.gethostname()  # can raise OSError in sandboxes
     except Exception:
-        own_pid = own_host = None
-    return bool(own_pid and info.get("pid") == own_pid and info.get("host") == own_host)
+        own_pid = None
+    from fno.claims.hostid import is_same_machine
+
+    same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
+    return bool(own_pid and info.get("pid") == own_pid and same_machine)
 
 
 def _read_node_claim(node_id: str) -> Optional[dict]:

@@ -27,8 +27,11 @@
 //! - stale claims are archived by rename to `.expired/<enc>.<now_ms>.lock`,
 //!   never unlinked;
 //! - hybrid liveness: an expired-TTL claim whose recorded pid is a live
-//!   process on this host is still LIVE; PID-reuse is detected by comparing
-//!   the process create time (epoch ms) against `acquired_at`.
+//!   process on this machine is still LIVE; PID-reuse is detected by comparing
+//!   the process create time (epoch ms) against `acquired_at`;
+//! - liveness compares the additive `machine_id` field (`hostid.machine_id`),
+//!   NOT `host`/`gethostname(2)`; both implementations must write and compare
+//!   it identically or each reads the other's claims as cross-machine.
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -120,6 +123,13 @@ pub struct ClaimRecord {
     /// a foreign-harness owner from a native one without parsing the holder id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub harness: Option<String>,
+    /// Stable machine identity (mirrors `fno.claims.hostid.machine_id`).
+    /// Additive for the same reason `harness` is: absent on pre-change records
+    /// (reads as `None`, never a parse error). Overwriting `host` instead would
+    /// make a still-running pre-change reader compare a machine id against its
+    /// `gethostname(2)`, miss, and call a LIVE claim stale, which is stealable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub machine_id: Option<String>,
     /// Opaque; preserved byte-for-byte through idempotent re-acquires.
     #[serde(default, skip_serializing_if = "Map::is_empty")]
     pub metadata: Map<String, Value>,
@@ -285,6 +295,101 @@ fn hostname() -> String {
     String::from_utf8_lossy(&buf[..end]).into_owned()
 }
 
+/// macOS IOPlatformUUID: per-machine, survives renames and roaming.
+#[cfg(target_os = "macos")]
+fn platform_machine_id() -> String {
+    let out = match std::process::Command::new("/usr/sbin/ioreg")
+        .args(["-rd1", "-c", "IOPlatformExpertDevice"])
+        .output()
+    {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+        Err(_) => return String::new(),
+    };
+    // `    "IOPlatformUUID" = "0A1B..."` — split rather than pull in a regex dep.
+    out.split_once("\"IOPlatformUUID\" = \"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(id, _)| id.to_string())
+        .unwrap_or_default()
+}
+
+/// Linux: systemd writes `/etc/machine-id`; dbus the second path.
+#[cfg(target_os = "linux")]
+fn platform_machine_id() -> String {
+    let mut base = String::new();
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id"] {
+        if let Ok(text) = std::fs::read_to_string(path) {
+            let value = text.trim();
+            if !value.is_empty() {
+                base = value.to_string();
+                break;
+            }
+        }
+    }
+    if base.is_empty() {
+        return base;
+    }
+    // Containers from one image share /etc/machine-id but hold INDEPENDENT pid
+    // namespaces; without the namespace two of them sharing a claims root read
+    // each other's pids as local, so a dead foreign claim classifies LIVE
+    // forever instead of staying opaque.
+    use std::os::unix::fs::MetadataExt;
+    match std::fs::metadata("/proc/self/ns/pid") {
+        Ok(md) => format!("{base}:{}", md.ino()),
+        Err(_) => base,
+    }
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn platform_machine_id() -> String {
+    String::new()
+}
+
+/// A stable identifier for this machine, or "" when there is none (mirrors
+/// `fno.claims.hostid.machine_id`). Never substitutes `hostname()`: readers
+/// treat a present value as authoritative.
+///
+/// `gethostname(2)` is NOT a stable machine identity: on macOS with
+/// `scutil --get HostName` unset it is derived from whatever DHCP/DNS last
+/// supplied and flips on network join, VPN, and sleep/wake. The claim `host`
+/// field scopes PID-reuse detection, so keying it on a moving string made a
+/// live holder read cross-host — short-circuiting `is_live` before the pid
+/// check — and drop to Stale, which is stealable.
+///
+/// Cached: the macOS arm shells out to `ioreg`, and a sweep reads many
+/// lockfiles against one machine identity.
+fn machine_id() -> String {
+    static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    CACHE.get_or_init(platform_machine_id).clone()
+}
+
+/// Was this claim written on THIS machine? (mirrors
+/// `fno.claims.hostid.is_same_machine`)
+///
+/// `machine` is authoritative whenever present. It is absent only on a claim
+/// written before the field existed; those reproduce the old hostname compare
+/// exactly, so a pre-change claim classifies no worse than it does today.
+fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
+    // The machine arm decides only when BOTH sides have an id. A reader that
+    // cannot read its own is "unknown", not "a different machine": answering
+    // false there would stale a live local claim and make it stealable, and
+    // ambiguous liveness must degrade to skip, never to steal.
+    let mine = machine_id();
+    if let Some(m) = machine.filter(|m| !m.is_empty()) {
+        if !mine.is_empty() {
+            return m == mine;
+        }
+        // Claim names a machine but our own id is unreadable: UNKNOWN, not
+        // foreign. Falling through to the hostname compare would stale a live
+        // local claim whenever the name has also moved. The pid arm still
+        // decides, so this only ever withholds a steal.
+        return true;
+    }
+    if host.is_empty() {
+        return false;
+    }
+    host == hostname()
+}
+
 /// Process create time in EPOCH MILLISECONDS, or `None` if the pid is gone or
 /// uninspectable (permission denied counts as dead: a holder we cannot
 /// inspect is one we cannot validate — fail toward recoverable, matching
@@ -364,10 +469,10 @@ pub fn process_create_time_ms(_pid: i32) -> Option<i64> {
 }
 
 /// Is the claim's holder verifiably running? (mirrors `staleness.is_live`)
-/// False when: cross-host, pid gone/uninspectable, or the current occupant of
-/// the pid slot started AFTER the claim was filed (PID reuse).
+/// False when: cross-machine, pid gone/uninspectable, or the current occupant
+/// of the pid slot started AFTER the claim was filed (PID reuse).
 fn is_live(rec: &ClaimRecord) -> bool {
-    if rec.host != hostname() {
+    if !is_same_machine(&rec.host, rec.machine_id.as_deref()) {
         return false;
     }
     match process_create_time_ms(rec.pid) {
@@ -903,6 +1008,10 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         acquired_at: acquired,
         pid: opts.pid.unwrap_or_else(std::process::id) as i32,
         host: hostname(),
+        // Omitted, not backfilled with the hostname, when no stable id exists:
+        // readers treat a present value as authoritative, so a substitute would
+        // make two processes on one machine disagree and stale each other.
+        machine_id: Some(machine_id()).filter(|m| !m.is_empty()),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
         harness: resolve_harness(),
@@ -1662,6 +1771,7 @@ mod tests {
             expires_at: None,
             reason: Some("why".into()),
             harness: Some("codex".into()),
+            machine_id: Some("mid".into()),
             metadata: meta,
         };
         let text = serialize_claim(&rec).unwrap();
@@ -1732,6 +1842,9 @@ mod tests {
             expires_at,
             reason: None,
             harness: None,
+            // None on purpose: these fixtures pass a HOST, so they exercise the
+            // pre-change fallback arm. The machine-id arm has its own tests.
+            machine_id: None,
             metadata: Map::new(),
         }
     }
@@ -1853,6 +1966,81 @@ mod tests {
             AcquireOutcome::HeldByOther { holder, pid, .. } => {
                 assert_eq!(holder, "pty:owner");
                 assert_eq!(pid, std::process::id() as i32);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    // -- machine identity -------------------------------------
+
+    #[test]
+    fn is_same_machine_host_arm() {
+        // The pre-change fallback, used when no machine id was recorded. Always
+        // expressible, with or without an OS machine id on this box.
+        assert!(is_same_machine(&hostname(), None));
+        assert!(!is_same_machine("", None));
+        assert!(!is_same_machine(
+            "some-other-host-that-does-not-exist",
+            None
+        ));
+    }
+
+    #[test]
+    fn is_same_machine_machine_arm() {
+        // Needs a real OS id: where none exists both writers omit the field and
+        // the machine arm cannot be exercised at all.
+        if machine_id().is_empty() {
+            return;
+        }
+        assert!(is_same_machine("anything", Some(&machine_id())));
+        assert!(!is_same_machine(
+            &hostname(),
+            Some("00000000-0000-0000-0000-000000000000")
+        ));
+    }
+
+    #[test]
+    fn unknown_own_machine_id_is_not_foreign() {
+        // Mirrors the Python contract: a claim naming a machine, read where our
+        // own id is unreadable, must not read as foreign - that would stale a
+        // live local claim, and ambiguity degrades to skip, never to steal.
+        if !machine_id().is_empty() {
+            return; // this box HAS an id, so the unknown path is unreachable here
+        }
+        assert!(is_same_machine(
+            "a-name-it-no-longer-has",
+            Some("some-machine-id")
+        ));
+    }
+
+    #[test]
+    fn machine_id_is_stable_across_calls() {
+        // The whole point: a value that cannot move mid-session. A hostname
+        // can (DHCP/DNS/VPN/sleep-wake on macOS), which is what made a live
+        // holder read cross-host -> stale -> stealable.
+        assert_eq!(machine_id(), machine_id());
+    }
+
+    #[test]
+    fn make_claim_records_machine_id_not_hostname() {
+        // Parity guard: Python's acquire writes the same value. If these two
+        // writers disagree, each implementation reads the other's claims as
+        // cross-machine and silently treats live claims as recoverable. Where
+        // the OS exposes no id both omit the field, which is also parity.
+        let td = TempDir::new().unwrap();
+        match acquire("session:mid", "pty:owner", opts_in(&td)) {
+            AcquireOutcome::Acquired(rec) => {
+                let expected = machine_id();
+                if expected.is_empty() {
+                    assert_eq!(rec.machine_id, None);
+                } else {
+                    assert_eq!(rec.machine_id.as_deref(), Some(expected.as_str()));
+                }
+                assert_eq!(
+                    rec.host,
+                    hostname(),
+                    "host stays the hostname a pre-change reader expects"
+                );
             }
             other => panic!("{other:?}"),
         }

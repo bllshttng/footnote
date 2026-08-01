@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import subprocess
 import threading
 import time
@@ -29,6 +30,7 @@ import pytest
 import yaml
 
 from fno.claims.core import ClaimHeldByOther, acquire_claim, claim_status, release_claim
+from fno.claims.hostid import machine_id as py_machine_id
 from fno.claims.io import claim_path, encode_key, read_claim_file, serialize_claim
 from fno.claims.types import Claim
 
@@ -97,7 +99,9 @@ def rust_json(proc: subprocess.CompletedProcess) -> dict:
     return json.loads(proc.stdout)
 
 
-STATUS_PARITY_FIELDS = ("state", "holder", "pid", "host", "acquired_at", "expires_at", "metadata")
+STATUS_PARITY_FIELDS = (
+    "state", "holder", "pid", "host", "machine_id", "acquired_at", "expires_at", "metadata",
+)
 
 
 def assert_status_parity(direction: str, py: dict, rs: dict) -> None:
@@ -450,14 +454,23 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
     # carries a session marker (a codex/claude/gemini session), absent otherwise
     # (bare CI), so it is excluded from the exact-set check rather than asserted.
     data = yaml.safe_load(text)
-    assert set(data) - {"harness"} == {
-        "schema_version",
-        "key",
-        "holder",
-        "acquired_at",
-        "pid",
-        "host",
-    }
+    expected = {"schema_version", "key", "holder", "acquired_at", "pid", "host"}
+    # Asserted, not excluded like `harness`: liveness compares this, so a writer
+    # that stopped emitting it would send every reader down the pre-change
+    # hostname fallback and silently restore the bug. Conditional because a host
+    # with no OS machine id (a minimal container, no ioreg) legitimately omits
+    # it - and then BOTH writers must omit it, which is the real parity claim.
+    if py_machine_id():
+        expected.add("machine_id")
+        assert data["machine_id"] == py_machine_id()
+    else:
+        assert "machine_id" not in data, (
+            "no stable id on this host: both implementations must omit the field"
+        )
+    assert set(data) - {"harness"} == expected
+    assert data["host"] == socket.gethostname(), (
+        "host stays the hostname a pre-change reader compares against"
+    )
 
 
 # --------------------------------------------------------------------------

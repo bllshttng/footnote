@@ -82,6 +82,30 @@ def test_yaml_round_trip_pid_liveness_omits_expires_at(tmp_path):
     assert parsed.acquired_at == claim.acquired_at
 
 
+def test_yaml_round_trip_machine_id(tmp_path):
+    """machine_id must reach DISK, not just the model. Liveness compares it, so
+    a field that never serializes is a fix that only works in-process: every
+    reader falls back to the hostname compare and the bug is still there."""
+    claim = _make_claim(machine_id="0A1B-STABLE")
+    text = serialize_claim(claim)
+    assert "machine_id: 0A1B-STABLE" in text
+
+    path = tmp_path / "mid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).machine_id == "0A1B-STABLE"
+
+
+def test_yaml_omits_machine_id_when_absent(tmp_path):
+    """A pre-change claim has no machine_id; the writer must not invent one as
+    null, matching the absent-not-null discipline expires_at already follows."""
+    text = serialize_claim(_make_claim(machine_id=None))
+    assert "machine_id" not in text
+
+    path = tmp_path / "nomid.lock"
+    path.write_text(text)
+    assert read_claim_file(path).machine_id is None
+
+
 def test_yaml_round_trip_ttl_serializes_expires_at(tmp_path):
     claim = _make_claim(expires_at=1747641660000)
     text = serialize_claim(claim)

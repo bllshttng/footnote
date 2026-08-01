@@ -1285,14 +1285,28 @@ def test_foreign_live_holder_different_codex_thread_is_foreign(monkeypatch):
 
 
 def test_foreign_live_holder_ours_by_pid_host(monkeypatch):
-    # Bare interactive re-run: durable pid + host match -> not foreign.
+    # Bare interactive re-run: durable pid + machine match -> not foreign.
+    # Ownership keys on the stable machine id, not gethostname().
+    status = {
+        "key": "node:N", "state": "live", "holder": "target-session:Z",
+        "pid": 555, "host": "whatever-the-name-is-now", "machine_id": "mine",
+    }
+    _wire_claim(monkeypatch, status, own_pid=555)
+    monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
+    monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "mine")
+    assert target_cli._foreign_live_holder("N") is None
+
+
+def test_foreign_live_holder_ours_by_pid_host_pre_change_claim(monkeypatch):
+    # A claim written before machine_id existed still resolves as ours through
+    # the hostname fallback, so an upgrade does not orphan a running session.
     status = {
         "key": "node:N", "state": "live",
         "holder": "target-session:Z", "pid": 555, "host": "myhost",
     }
     _wire_claim(monkeypatch, status, own_pid=555)
     monkeypatch.delenv("TARGET_SESSION_ID", raising=False)
-    monkeypatch.setattr(target_cli.socket, "gethostname", lambda: "myhost")
+    monkeypatch.setattr("fno.claims.hostid.hostname", lambda: "myhost")
     assert target_cli._foreign_live_holder("N") is None
 
 
@@ -1320,6 +1334,8 @@ def test_foreign_live_holder_uncapturable_pid_parks(monkeypatch):
 def test_foreign_live_holder_gethostname_raises_parks(monkeypatch):
     # Contract: never raises. socket.gethostname() can OSError in a sandbox ->
     # own identity is uncapturable -> a foreign live claim parks (AC2-FR).
+    # hostid swallows the OSError and reports "" (never this machine), so the
+    # park still happens; the contract is the outcome, not the exception path.
     status = {
         "key": "node:N", "state": "live",
         "holder": "target-session:A", "pid": 555, "host": "h",
@@ -1330,7 +1346,8 @@ def test_foreign_live_holder_gethostname_raises_parks(monkeypatch):
     def boom():
         raise OSError("no hostname in sandbox")
 
-    monkeypatch.setattr(target_cli.socket, "gethostname", boom)
+    monkeypatch.setattr("fno.claims.hostid.socket.gethostname", boom)
+    monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "")
     assert target_cli._foreign_live_holder("N") == status
 
 

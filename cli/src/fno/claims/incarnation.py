@@ -16,9 +16,10 @@ from __future__ import annotations
 
 import os
 import re
-import socket
 from pathlib import Path
 from typing import Optional, Tuple, Union
+
+from .hostid import is_same_machine
 
 
 def resolve_fence_session_uuid(cwd: Optional[Union[str, Path]] = None) -> Optional[str]:
@@ -50,18 +51,13 @@ def resolve_fence_session_uuid(cwd: Optional[Union[str, Path]] = None) -> Option
     return None
 
 
-def _own_session_pid_host() -> Tuple[Optional[int], Optional[str]]:
+def _own_session_pid() -> Optional[int]:
     try:
         from .session_pid import resolve_session_pid
 
-        pid = resolve_session_pid(from_pid=os.getpid())
+        return resolve_session_pid(from_pid=os.getpid())
     except Exception:  # noqa: BLE001 - uncapturable -> conservative (not provably ours)
-        pid = None
-    try:
-        host = socket.gethostname()
-    except OSError:
-        host = None
-    return pid, host
+        return None
 
 
 def incarnation_fence_blocks(
@@ -93,8 +89,9 @@ def incarnation_fence_blocks(
         return True, f"incarnation-fence: {key} claim file corrupted (unverifiable single-writer state)"
     if state not in ("live", "suspect"):
         return False, ""  # free / stale / dead -> no live contender
-    own_pid, own_host = _own_session_pid_host()
-    if own_pid and info.get("pid") == own_pid and info.get("host") == own_host:
+    own_pid = _own_session_pid()
+    same_machine = is_same_machine(info.get("host"), info.get("machine_id"))
+    if own_pid and info.get("pid") == own_pid and same_machine:
         return False, ""  # ours
     holder = info.get("holder", "?")
     pid = info.get("pid", "?")
