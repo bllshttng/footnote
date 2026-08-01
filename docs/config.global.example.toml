@@ -35,12 +35,12 @@ github_apps = ["gemini-code-assist"]
 # honored-if-present: counts if it reviews, never WAITS on it (so a codex
 # usage-limit wedge can't stall you).
 optional_apps = ["chatgpt-codex-connector"]
-# peers: run a review CLI locally and post it under a distinct machine account
-# (own quota, needs a PAT); gates like an App bot. Uncomment to require
-# codex/gemini this way instead of via the GitHub App:
+# peers: run review harnesses locally and require one explicit clean,
+# head-pinned cross-model verdict. No second GitHub account or PAT is needed.
 # peers = ["codex", "gemini"]
-# peer_identity = "fno-peer-bot"     # the distinct login peers post under (NOT your account)
-# peer_token_env = "GH_PEER_TOKEN"   # env var holding that account's PAT
+# Setting peer_identity opts into the legacy posted-review carrier:
+# peer_identity = "fno-peer-bot"
+# peer_token_env = "GH_PEER_TOKEN"
 # reviewers: local reviewers that produce NO GitHub review - loop-check reads a
 # head-pinned attestation event instead. Lets a solo/claude-only harness (no App
 # bot) express a real gate. One of sigma | /code-review | declare. Uncomment:
