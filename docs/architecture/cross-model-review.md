@@ -97,6 +97,6 @@ Enforcement is layered, and the gate is the point of record because that is wher
 
 **Routed-transport limitation.** A claude-authored session routed to a different model (GLM via z.ai) still reads as anthropic-family here, because the harness is the model proxy. A bare claude peer on such a run would be discounted even though the real author model is GLM - the conservative direction (the gate HOLDS, it never wrongly clears). If a reliable ambient marker for the routed model appears, this can tighten later.
 
-**Symmetric repository pattern.** A repository can list `codex` plus a routed Claude-over-GLM peer without identities.
-For a Claude author, Codex is eligible; for a Codex author, routed GLM is eligible.
+**Symmetric repository pattern.** A repository can list `codex` plus `gemini` without identities.
+For a Gemini author, Codex is eligible; for a Codex author, Gemini is eligible; for a Claude author, both are eligible.
 Doctor reports the same-model option without letting it veto the eligible one, while loop-check requires one clean composite attestation.
