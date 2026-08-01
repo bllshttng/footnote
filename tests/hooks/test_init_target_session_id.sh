@@ -111,6 +111,7 @@ _ALL_TMPS+=("$TMP_B")
   TARGET_START=1 \
   TARGET_INPUT="test-session-id-generated" \
   CODEX_THREAD_ID= \
+  TARGET_SESSION_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(b): init exited non-zero"
@@ -165,6 +166,7 @@ STDERR_C="${TMP_C}/init-stderr.txt"
   TARGET_START=1 \
   TARGET_INPUT="test-heredoc-no-subst" \
   CODEX_THREAD_ID= \
+  TARGET_SESSION_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>"$STDERR_C") \
   || fail "(c): init exited non-zero"
@@ -195,6 +197,7 @@ _ALL_TMPS+=("$TMP_D")
   TARGET_START=1 \
   TARGET_INPUT="test-codex-thread-id" \
   CODEX_THREAD_ID="019f48e4-codex-thread" \
+  TARGET_SESSION_ID= \
   CLAUDE_CODE_SESSION_ID="claude-transcript-stays-separate" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
@@ -228,6 +231,7 @@ printf '%s\n' \
   TARGET_START=1 \
   TARGET_INPUT="test-codex-thread-id-second-run" \
   CODEX_THREAD_ID="019f48e4-codex-thread" \
+  TARGET_SESSION_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(d): second target init exited non-zero"
@@ -247,6 +251,7 @@ printf '%s\n' \
   TARGET_START=1 \
   TARGET_INPUT="test-codex-thread-id-third-run" \
   CODEX_THREAD_ID="019f48e4-codex-thread" \
+  TARGET_SESSION_ID= \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(d): third target init exited non-zero"
