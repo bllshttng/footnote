@@ -459,7 +459,7 @@ def test_rust_pid_claim_omits_expires_at_line(tmp_path: Path) -> None:
         "acquired_at",
         "pid",
         "host",
-        # x-588d: asserted, not excluded like `harness`. Both writers emit it
+        # asserted, not excluded like `harness`. Both writers emit it
         # unconditionally, and liveness compares it - a writer that stopped
         # emitting it would send every reader down the pre-change hostname
         # fallback and silently restore the bug.

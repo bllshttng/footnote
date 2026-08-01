@@ -18,7 +18,7 @@ Cross-machine claims are treated as opaque: is_live returns False so the
 local actor can recover them. The design doc accepts this as a limitation of
 the no-shared-state model. "Same machine" is decided by ``hostid``, NOT by
 ``socket.gethostname()`` directly - see that module for why the hostname is
-not a stable identity (x-588d).
+not a stable identity.
 """
 from __future__ import annotations
 

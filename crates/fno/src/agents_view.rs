@@ -579,7 +579,7 @@ fn process_create_time_ms(_pid: i32) -> Option<i64> {
 /// macOS IOPlatformUUID (mirror of `claims.rs::platform_machine_id`).
 #[cfg(target_os = "macos")]
 fn platform_machine_id() -> String {
-    let out = match std::process::Command::new("ioreg")
+    let out = match std::process::Command::new("/usr/sbin/ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
         .output()
     {
@@ -620,22 +620,13 @@ fn platform_machine_id() -> String {
     String::new()
 }
 
-/// Stable machine identity, falling back to `hostname()` (mirror of
-/// `claims.rs::machine_id` / `fno.claims.hostid.machine_id`). `gethostname(2)`
-/// moves under a roaming laptop, which read as cross-host and dropped a live
-/// claim to stale — and stale is stealable (x-588d).
+/// Stable machine identity, or "" when there is none (mirror of
+/// `claims.rs::machine_id`). `gethostname(2)` moves under a roaming laptop,
+/// which read as cross-host and dropped a live claim to stale, and stale is
+/// stealable. Never substitutes the hostname: a present value is authoritative.
 fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let id = platform_machine_id();
-            if id.is_empty() {
-                hostname()
-            } else {
-                id
-            }
-        })
-        .clone()
+    CACHE.get_or_init(platform_machine_id).clone()
 }
 
 /// Was this claim written on THIS machine? (mirror of

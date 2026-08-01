@@ -13,7 +13,7 @@ def _wire(monkeypatch, status, *, own_pid=None):
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_pid", lambda from_pid=None: own_pid
     )
-    # Ownership compares the claim's machine_id, not a raw gethostname() (x-588d).
+    # Ownership compares the claim's machine_id, not a raw gethostname().
     # Fixtures below carry machine_id="h" to match.
     monkeypatch.setattr("fno.claims.hostid.machine_id", lambda: "h")
 

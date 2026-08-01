@@ -147,10 +147,12 @@ def _make_claim(
         expires_at=(acquired + ttl_ms) if ttl_ms is not None else None,
         pid=pid if pid is not None else os.getpid(),
         host=host if host is not None else socket.gethostname(),
-        # x-588d: liveness compares THIS, not host - a name that flips mid-session
-        # made a live holder read cross-host, then stale, then stealable. Additive
-        # so a pre-change reader still reads host and behaves exactly as today.
-        machine_id=machine_id(),
+        # Liveness compares THIS, not host: a name that flips mid-session made a
+        # live holder read cross-host, then stale, then stealable. Additive, so a
+        # pre-change reader still reads host and behaves exactly as today. `or
+        # None` omits the field when no stable id exists rather than recording a
+        # hostname readers would trust as authoritative.
+        machine_id=machine_id() or None,
         reason=reason,
         # x-3e70: tag the claim with the acquiring harness so the dispatch guard
         # can read a foreign owner off the claim. This is the PRODUCTION writer

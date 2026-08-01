@@ -207,23 +207,23 @@ def test_now_ms_increases_over_time():
 
 
 # ---------------------------------------------------------------------------
-# machine identity (x-588d): a hostname flip must not stale a live claim
+# machine identity: a hostname flip must not stale a live claim
 # ---------------------------------------------------------------------------
 
 
 def _requires_stable_machine_id():
-    """Skip when this box has no OS machine id and machine_id() == hostname().
+    """Skip where the OS exposes no stable machine id.
 
-    In that fallback mode the two are the same string by construction, so the
-    flip these tests simulate is indistinguishable from a real machine change.
+    machine_id() is "" there, claims omit the field, and every reader takes the
+    hostname fallback - so the flip these tests simulate cannot be expressed.
     """
     hostid.machine_id.cache_clear()
-    if hostid.machine_id() == hostid.hostname():
-        pytest.skip("no stable OS machine id on this platform; fallback mode")
+    if not hostid.machine_id():
+        pytest.skip("no stable OS machine id on this platform")
 
 
 def test_is_live_survives_hostname_flip(monkeypatch):
-    """x-588d: gethostname() is derived from DHCP/DNS on macOS with HostName
+    """gethostname() is derived from DHCP/DNS on macOS with HostName
     unset, so it flips on network join, VPN, and sleep/wake. A live holder must
     NOT read as cross-host when the name moves - the host check short-circuits
     is_live before the pid check, and the resulting STALE is stealable."""
@@ -283,6 +283,32 @@ def test_new_claims_stay_readable_by_a_pre_change_reader():
     claim = _make_claim("node:x", "h", None, None, None, os.getpid(), None)
     assert claim.host == socket.gethostname(), "a pre-change reader still matches host"
     assert claim.machine_id == hostid.machine_id()
+
+
+def test_machine_id_is_never_a_hostname_substitute(monkeypatch):
+    """A PATH-stripped hook cannot run /usr/sbin/ioreg. The old fallback wrote a
+    HOSTNAME into machine_id, which readers trust as authoritative, so a reader
+    that could compute the real id would disagree and stale a live claim. Absent
+    is the honest answer; readers then use the hostname compare."""
+    monkeypatch.setattr(hostid, "_macos_platform_uuid", lambda: "")
+    monkeypatch.setattr(hostid, "_linux_machine_id", lambda: "")
+    hostid.machine_id.cache_clear()
+    assert hostid.machine_id() == ""
+    assert hostid.machine_id() != hostid.hostname()
+    hostid.machine_id.cache_clear()
+
+
+def test_claim_omits_machine_id_when_none_is_available(monkeypatch):
+    """The writer must omit the field rather than record a stand-in."""
+    from fno.claims.core import _make_claim
+
+    monkeypatch.setattr(hostid, "_macos_platform_uuid", lambda: "")
+    monkeypatch.setattr(hostid, "_linux_machine_id", lambda: "")
+    hostid.machine_id.cache_clear()
+    claim = _make_claim("node:x", "h", None, None, None, os.getpid(), None)
+    assert claim.machine_id is None
+    assert claim.host == socket.gethostname()
+    hostid.machine_id.cache_clear()
 
 
 def test_is_same_machine_arms():

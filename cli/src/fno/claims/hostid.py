@@ -12,10 +12,12 @@ as cross-host, which short-circuits ``staleness.is_live`` before the pid check
 and drops the claim to STALE. STALE is recoverable, so the claim became
 stealable out from under a working session: duplicate work, duplicate PR.
 
-``machine_id()`` prefers the OS's own stable identifier (IOPlatformUUID on
-macOS, ``/etc/machine-id`` plus the pid-namespace inode on Linux) and falls
-back to ``gethostname()`` where neither is readable, which is no worse than
-the previous behavior.
+``machine_id()`` reads the OS's own stable identifier (IOPlatformUUID on macOS,
+``/etc/machine-id`` plus the pid-namespace inode on Linux), or "" when neither
+is readable. It never substitutes ``gethostname()``: a claim then simply omits
+the field and its readers use the old hostname compare, which is no worse than
+the previous behavior. Substituting would be worse, because readers treat a
+present value as authoritative.
 
 It travels in its OWN claim field rather than replacing ``host``. Overwriting
 ``host`` would make a pre-change reader - a still-running old binary during a
@@ -61,11 +63,17 @@ def hostname() -> str:
         return ""
 
 
+# Absolute, not PATH-resolved: hooks run with a stripped PATH and /usr/sbin is
+# routinely absent from it. A PATH-dependent identity is not an identity - the
+# same machine would answer differently depending on who started the process.
+_IOREG = "/usr/sbin/ioreg"
+
+
 def _macos_platform_uuid() -> str:
     """IOPlatformUUID: per-machine, survives renames, reinstalls, and roaming."""
     try:
         proc = subprocess.run(
-            ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
+            [_IOREG, "-rd1", "-c", "IOPlatformExpertDevice"],
             capture_output=True,
             text=True,
             timeout=5,
@@ -103,7 +111,15 @@ def _linux_machine_id() -> str:
 
 @lru_cache(maxsize=1)
 def machine_id() -> str:
-    """A stable identifier for this machine; falls back to ``hostname()``.
+    """A stable identifier for this machine, or "" when there is none.
+
+    Empty is meaningful and is NOT backfilled with ``hostname()``. Writing a
+    hostname into a field readers treat as authoritative would assert an
+    identity the value does not have: a process that could not read the real id
+    would record a name, and a process that could would compute the id, so the
+    two would disagree about one machine and stale each other's live claims.
+    Absent instead means "no stable id", and readers fall back to the hostname
+    compare - the pre-change behavior, which is no worse.
 
     Cached for the process lifetime: the macOS arm shells out to ``ioreg``, and
     a claims sweep reads many lockfiles against one machine identity. Tests
@@ -111,12 +127,10 @@ def machine_id() -> str:
     """
     system = platform.system()
     if system == "Darwin":
-        resolved = _macos_platform_uuid()
-    elif system == "Linux":
-        resolved = _linux_machine_id()
-    else:
-        resolved = ""
-    return resolved or hostname()
+        return _macos_platform_uuid()
+    if system == "Linux":
+        return _linux_machine_id()
+    return ""
 
 
 def is_same_machine(host: Optional[str], machine: Optional[str]) -> bool:

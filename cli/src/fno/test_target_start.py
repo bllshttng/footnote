@@ -1286,7 +1286,7 @@ def test_foreign_live_holder_different_codex_thread_is_foreign(monkeypatch):
 
 def test_foreign_live_holder_ours_by_pid_host(monkeypatch):
     # Bare interactive re-run: durable pid + machine match -> not foreign.
-    # Ownership keys on the stable machine id, not gethostname() (x-588d).
+    # Ownership keys on the stable machine id, not gethostname().
     status = {
         "key": "node:N", "state": "live", "holder": "target-session:Z",
         "pid": 555, "host": "whatever-the-name-is-now", "machine_id": "mine",

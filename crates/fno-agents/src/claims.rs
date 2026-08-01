@@ -298,7 +298,7 @@ fn hostname() -> String {
 /// macOS IOPlatformUUID: per-machine, survives renames and roaming.
 #[cfg(target_os = "macos")]
 fn platform_machine_id() -> String {
-    let out = match std::process::Command::new("ioreg")
+    let out = match std::process::Command::new("/usr/sbin/ioreg")
         .args(["-rd1", "-c", "IOPlatformExpertDevice"])
         .output()
     {
@@ -344,30 +344,22 @@ fn platform_machine_id() -> String {
     String::new()
 }
 
-/// A stable identifier for this machine, falling back to `hostname()`
-/// (mirrors `fno.claims.hostid.machine_id`).
+/// A stable identifier for this machine, or "" when there is none (mirrors
+/// `fno.claims.hostid.machine_id`). Never substitutes `hostname()`: readers
+/// treat a present value as authoritative.
 ///
 /// `gethostname(2)` is NOT a stable machine identity: on macOS with
 /// `scutil --get HostName` unset it is derived from whatever DHCP/DNS last
 /// supplied and flips on network join, VPN, and sleep/wake. The claim `host`
 /// field scopes PID-reuse detection, so keying it on a moving string made a
 /// live holder read cross-host — short-circuiting `is_live` before the pid
-/// check — and drop to Stale, which is stealable (x-588d).
+/// check — and drop to Stale, which is stealable.
 ///
 /// Cached: the macOS arm shells out to `ioreg`, and a sweep reads many
 /// lockfiles against one machine identity.
 fn machine_id() -> String {
     static CACHE: std::sync::OnceLock<String> = std::sync::OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let id = platform_machine_id();
-            if id.is_empty() {
-                hostname()
-            } else {
-                id
-            }
-        })
-        .clone()
+    CACHE.get_or_init(platform_machine_id).clone()
 }
 
 /// Was this claim written on THIS machine? (mirrors
@@ -1004,7 +996,10 @@ fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
         acquired_at: acquired,
         pid: opts.pid.unwrap_or_else(std::process::id) as i32,
         host: hostname(),
-        machine_id: Some(machine_id()),
+        // Omitted, not backfilled with the hostname, when no stable id exists:
+        // readers treat a present value as authoritative, so a substitute would
+        // make two processes on one machine disagree and stale each other.
+        machine_id: Some(machine_id()).filter(|m| !m.is_empty()),
         expires_at: opts.ttl_ms.map(|ttl| acquired + ttl),
         reason: opts.reason.clone(),
         harness: resolve_harness(),
@@ -1964,7 +1959,7 @@ mod tests {
         }
     }
 
-    // -- machine identity (x-588d) -------------------------------------
+    // -- machine identity -------------------------------------
 
     #[test]
     fn is_same_machine_matches_machine_id_and_legacy_hostname() {

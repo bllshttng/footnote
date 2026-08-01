@@ -2126,7 +2126,7 @@ def _holder_is_ours(holder: Optional[str], info: dict) -> bool:
     machine (a bare re-run with no env id). An uncapturable own pid reads as
     not-ours (park / re-acquire, never assume ownership) - the conservative
     direction. The machine check goes through ``hostid.is_same_machine``, never
-    a raw gethostname() compare: the name is not stable (x-588d).
+    a raw gethostname() compare: the name is not stable.
     """
     for env_var in ("TARGET_SESSION_ID", "CODEX_THREAD_ID"):
         own_id = os.environ.get(env_var)
