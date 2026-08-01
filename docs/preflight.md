@@ -128,9 +128,20 @@ temp `HOME` cannot hide either, because both travel through channels other than
    `CLAUDE_CODE_SESSION_ID` / `CODEX_THREAD_ID` / `CODEX_SESSION_ID` /
    `GEMINI_SESSION_ID` are set and `resolve_self_model()` would resolve the real
    session's model instead of the `"unknown"` floor a fresh CI checkout produces.
-   `run_hermetic` unsets every `HARNESS_SESSION_MARKERS` name (derived from the
-   Python tuple that is the single source of truth, fail-closed to a hardcoded
-   literal list with a warning if the fetch errors).
+   `run_hermetic` unsets every `HARNESS_SESSION_MARKERS` **and**
+   `LEGACY_HARNESS_SESSION_MARKERS` name (derived from the Python tuples that are
+   the single source of truth, fail-closed to a hardcoded literal list with a
+   warning if the fetch errors).
+   Both tuples are read, not just the canonical one: `CLAUDE_SESSION_ID` lives
+   only in the legacy tuple, and `current_session_id()` / `current_session_ids()`
+   both read it, so a canonical-only scrub leaves a live claude session
+   resolvable inside the run whose whole purpose is to look like a fresh
+   checkout. `cli/tests/smoke/test_preflight_hermetic.sh` fails when the
+   derivation drops the legacy tuple or when the fallback literal goes stale,
+   which is the only thing keeping a last-resort copy honest: the fallback runs
+   only when Python cannot, so its gap is invisible wherever anyone is watching.
+   The pytest suite seals the same leak independently in `cli/tests/conftest.py`,
+   because a bare `pytest` skips preflight entirely.
 
 2. **The canonical config candidate chain.** A worktree reaches the canonical
    checkout's `.fno/config.toml` through the shared git-common-dir, leaking

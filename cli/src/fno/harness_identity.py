@@ -23,6 +23,41 @@ LEGACY_HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (
 )
 
 
+# Ambient session-identity env names that a HERMETIC run must not see. This is
+# deliberately WIDER than the two tuples above: those define what
+# resolve_harness_identity() consults, in precedence order, while this defines
+# what has to be absent for a test or a preflight leg to behave like a fresh
+# checkout. Several modules read a session marker directly rather than through
+# the resolver - carveout/core.py, done/cli.py and log_cmd.py read
+# CLAUDECODE_SESSION_ID, adapters/hermes.py additionally treats
+# HERMES_SESSION_ID as proof of an in-session run - so scrubbing only the
+# resolver's tuples leaves those paths resolving the live session.
+#
+# Adding a name here changes ONLY what gets scrubbed, never what resolves, which
+# is why the direct-read markers belong here and not in the tuples: promoting one
+# to HARNESS_SESSION_MARKERS would silently change resolution precedence and the
+# harness a claim is tagged with.
+AMBIENT_IDENTITY_ENV: tuple[str, ...] = (
+    *(marker for marker, _ in HARNESS_SESSION_MARKERS),
+    *(marker for marker, _ in LEGACY_HARNESS_SESSION_MARKERS),
+    "CLAUDECODE_SESSION_ID",
+    "HERMES_SESSION_ID",
+)
+
+
+def scrub_ambient_identity(environ: Optional[dict] = None) -> tuple[str, ...]:
+    """Remove every ambient session-identity name from ``environ`` (default
+    ``os.environ``); return the names actually removed.
+
+    Both pytest trees call this at conftest module load, because a fixture runs
+    too late for the modules that read a marker at import time, and because a
+    scrub on one tree is decorative while the other still resolves the live
+    session.
+    """
+    target = os.environ if environ is None else environ
+    return tuple(name for name in AMBIENT_IDENTITY_ENV if target.pop(name, None) is not None)
+
+
 # The mailbox handle is the random tail of the session id. The signature takes
 # no harness ON PURPOSE: harness is an envelope attribute, never part of an
 # address, and no code path may recover it from a handle string. A
