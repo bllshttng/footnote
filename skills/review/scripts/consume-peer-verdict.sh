@@ -37,7 +37,13 @@ fi
 
 verdict="$(jq -r '.verdict' <<<"$record")"
 declared="$(jq -r '.blocking_findings' <<<"$record")"
-observed="$(grep -Ec '^[[:space:]]*P[12]([[:space:]:-]|$)' "$review_file" || true)"
+# A finding line must carry CONTENT after the severity marker. The bare-marker
+# case is a section header, not a finding: codex reliably emits `P1` / `P2` as
+# empty headers above its findings, and counting those as findings rejected a
+# genuinely clean review with "declares 0 blocking finding(s), but output
+# contains 2". Nothing is hidden by this: a marker with no text after it states
+# no defect, so it cannot be a finding someone is smuggling past the count.
+observed="$(grep -Ec '^[[:space:]]*P[12][[:space:]:-]+[^[:space:]]' "$review_file" || true)"
 
 [[ "$observed" -eq "$declared" ]] || reject \
   "terminal record declares $declared blocking finding(s), but output contains $observed"
