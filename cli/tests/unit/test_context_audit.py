@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-import shutil
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -1246,6 +1245,18 @@ def test_helper_runs_under_a_bare_python_with_no_pythonpath(tmp_path: Path) -> N
     PYTHONPATH that the helper inherited. A relative one does not survive the
     hook's ``cwd`` change, and a real session may have none at all - so this
     strips it rather than trusting the runner's.
+
+    Stripping PYTHONPATH is not enough on its own. Whichever interpreter runs
+    this, an editable install of fno sits in its site-packages, so the import
+    succeeds with or without the fix and the test proves nothing. Picking
+    ``python3`` off PATH only moves the problem: on a box with the venv
+    activated - CI included - PATH resolves to that same interpreter, and
+    comparing it to ``sys.executable`` by path string does not notice, because
+    ``bin/python3`` is a symlink to ``bin/python``.
+
+    ``-S`` is the deterministic cure: no site-packages, so the editable install
+    is gone and the only thing that can make ``fno`` importable is the helper's
+    own sys.path insert. Same outcome on every machine.
     """
     helper = Path(context_observation.__file__)
     hook_input = tmp_path / "input.json"
@@ -1260,16 +1271,18 @@ def test_helper_runs_under_a_bare_python_with_no_pythonpath(tmp_path: Path) -> N
     # would pass on an early return rather than on a successful import.
     env["FNO_PLATFORM"] = "claude"
 
-    # The hook invokes a bare `python3` off PATH, NOT sys.executable. Using the
-    # test runner's interpreter would pass vacuously: it has fno installed, so
-    # the import succeeds with or without the fix.
-    python3 = shutil.which("python3")
-    assert python3, "no python3 on PATH; the hook would not run either"
-    if python3 == sys.executable:
-        pytest.skip("PATH python3 IS the test interpreter; cannot test the bare case")
+    # Positive control: under -S with no PYTHONPATH, fno MUST be unimportable.
+    # If it is importable anyway the run below cannot fail, so say so instead of
+    # reporting a pass that was never at risk.
+    probe = subprocess.run([sys.executable, "-S", "-c", "import fno"],
+                           env=env, capture_output=True, text=True, timeout=60)
+    assert probe.returncode != 0, (
+        "fno is importable under -S with no PYTHONPATH, so this test cannot "
+        "detect the missing sys.path insert it exists to catch"
+    )
 
     result = subprocess.run(
-        [python3, str(helper), "record",
+        [sys.executable, "-S", str(helper), "record",
          "--source-id", "solo", "--expected", "solo", "--carrier", "true",
          "--input-file", str(hook_input), "--output-file", str(output),
          "--hook-rc", "0"],
