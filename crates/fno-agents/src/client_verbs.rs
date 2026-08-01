@@ -2499,6 +2499,13 @@ pub fn run_claim(args: &[String]) -> i32 {
                 out.insert("holder".into(), Value::String(rec.holder));
                 out.insert("pid".into(), Value::Number(rec.pid.into()));
                 out.insert("host".into(), Value::String(rec.host));
+                // Liveness compares this, not host. Omitting it here would leave a
+                // caller that classifies ownership from status JSON on the mutable
+                // hostname, so the fix would not reach that path at all.
+                out.insert(
+                    "machine_id".into(),
+                    rec.machine_id.map(Value::from).unwrap_or(Value::Null),
+                );
                 out.insert("acquired_at".into(), Value::Number(rec.acquired_at.into()));
                 out.insert(
                     "expires_at".into(),

@@ -99,7 +99,9 @@ def rust_json(proc: subprocess.CompletedProcess) -> dict:
     return json.loads(proc.stdout)
 
 
-STATUS_PARITY_FIELDS = ("state", "holder", "pid", "host", "acquired_at", "expires_at", "metadata")
+STATUS_PARITY_FIELDS = (
+    "state", "holder", "pid", "host", "machine_id", "acquired_at", "expires_at", "metadata",
+)
 
 
 def assert_status_parity(direction: str, py: dict, rs: dict) -> None:
