@@ -387,7 +387,10 @@ def _model_family(provider: str, model: object = None) -> str:
     """Resolve the model family a peer actually runs, independent of transport."""
     family = provider.strip().lower()
     route = model.strip() if isinstance(model, str) else ""
-    if "," in route:
+    # Only the Claude transport executes an explicit route. Codex and Gemini
+    # ignore `model`, so honoring it here would disagree with loop-check and
+    # could advertise a same-model peer as eligible.
+    if family == "claude" and "," in route:
         routed_provider, _, _routed_model = route.partition(",")
         if routed_provider.strip():
             family = routed_provider.strip().lower()
@@ -429,7 +432,7 @@ def resolve_local_peers(
             continue
 
         route = model.strip() if isinstance(model, str) else ""
-        name = f"{provider} via {route}" if route else provider
+        name = f"{provider} via {route}" if route and provider.lower() == "claude" else provider
         peer_family = _model_family(provider, model)
         author_family = _model_family(sess.harness)
         if sess.harness == "unknown":

@@ -220,6 +220,19 @@ def test_doctor_review_refuses_only_same_model_local_peer(
     assert "same model" in r.output
 
 
+def test_doctor_does_not_treat_a_codex_model_field_as_a_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = _doctor_peers(
+        tmp_path,
+        monkeypatch,
+        '[{provider = "codex", model = "zai,glm-5.2"}]',
+        {"CODEX_THREAD_ID": "c1"},
+    )
+    assert r.exit_code == 1
+    assert "same model" in r.output
+
+
 # --- the refusal message's two hints (AC10-ERR / AC11-ERR / AC12-HP) ---
 
 
