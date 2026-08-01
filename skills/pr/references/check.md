@@ -100,7 +100,8 @@ PEERS="$(fno config get config.review.peers 2>/dev/null || echo '')"
 
 If `PEERS` is empty, skip this step.
 
-When neither shared `review.peer_identity` nor the selected entry's `identity` is set, select an eligible peer whose effective model family differs from the author and invoke `/review peer <N> <provider-or-route> --attest`.
+When neither shared `review.peer_identity` nor the selected entry's `identity` is set, select an eligible peer whose effective model family differs from the author and invoke `/review peer <N> <provider> --attest`.
+For a routed Claude entry, the peer skill reads and executes the configured model route.
 The peer skill validates its explicit terminal verdict and emits the composite, head-pinned `peer` attestation.
 A blocked, malformed, empty, failed, or same-model result exits non-zero and must be handled as review work or an unavailable peer; never replace it with a guessed pass.
 

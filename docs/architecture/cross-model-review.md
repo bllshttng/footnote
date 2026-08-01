@@ -90,7 +90,8 @@ Enforcement is layered, and the gate is the point of record because that is wher
 
 - **Gate time (loop-check):** identity-free peers resolve to one `peer` reviewer key when any configured option is cross-model, or to an unmatchable local sentinel when every option is same-model.
   Identity-backed peers retain their required-login set; a login backed only by same-model peers is replaced by the existing login sentinel.
-- **Fail open on unknown authorship:** when no harness marker resolves (a manual CLI invocation, an unknown harness), the guard is inert and the required-login set is byte-identical to before - the load-time claude check remains the floor for the dominant author.
+- **Unknown authorship:** when no harness marker resolves, the same-model guard is inert.
+  Identity-backed logins remain unchanged, and identity-free peers still require the composite `peer` attestation.
 - **Load time (`config/__init__.py`):** rejects a bare or anthropic-routed `claude` peer. This is the fail-EARLY layer for a claude author only; the config file is harness-agnostic, so load time cannot know a codex/gemini author. A codex-authored repo that wants a claude-model peer is a known inverse gap, deferred until a real deployment needs it.
 - **Dispatch time (`/review peer`):** refuses a bare peer whose provider matches the invoking harness at RESOLVE, the earliest advisory layer.
 

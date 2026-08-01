@@ -324,10 +324,8 @@ After any fix commit, the old attestation is stale by design and the peer must r
 
 ### 7. POST (only with `--post`) - the legacy identity-backed gate
 
-Default `/review peer` is advisory (step 5 ends it). With `--post`, after a
-successful relay you POST the review to the PR under the harness peer identity
-so it counts toward the loop-check gate (`config.review.peers`). This is the
-deliberate, opt-in relaxation of Hard rule 4.
+Default `/review peer` is advisory (step 5 ends it).
+With `--post`, after a successful relay you post the review to the PR under the explicitly configured harness peer identity so it counts toward the legacy login gate.
 
 Preconditions (all required; if any is missing, STOP and say why - never fake a
 post):
