@@ -96,6 +96,8 @@ def _refuse_unsatisfiable_reviewers() -> None:
         review = load_settings().review
         reviewers = list(review.reviewers or [])
         registry = review.reviewer_registry
+        peers = list(review.peers or [])
+        peer_identity = review.peer_identity
     except Exception as exc:  # noqa: BLE001 - report, never block bootstrap
         # "settings", not "config.review.reviewers": load_settings validates the
         # whole model, so the fault may be in an unrelated block. Naming the key
@@ -106,22 +108,34 @@ def _refuse_unsatisfiable_reviewers() -> None:
             err=True,
         )
         return
-    if not reviewers:
+    if not reviewers and not peers:
         return
 
     from fno.review_capability import (
         detect_session,
+        local_peers_refusal_message,
         refusal_message,
+        resolve_local_peers,
         resolve_reviewers,
     )
 
     session = detect_session()
     verdicts = resolve_reviewers(reviewers, session, registry)
-    message = refusal_message(verdicts, session)
-    for v in [v for v in verdicts if v.status == "unverifiable"]:
-        typer.echo(f"note target init: {v.line()}", err=True)
-    if message:
-        typer.echo(message, err=True)
+    peer_verdicts = resolve_local_peers(peers, peer_identity, session)
+    messages = [
+        message
+        for message in (
+            refusal_message(verdicts, session),
+            local_peers_refusal_message(peer_verdicts, session),
+        )
+        if message
+    ]
+    for reviewer_verdict in [v for v in verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {reviewer_verdict.line()}", err=True)
+    for peer_verdict in [v for v in peer_verdicts if v.status == "unverifiable"]:
+        typer.echo(f"note target init: {peer_verdict.line()}", err=True)
+    if messages:
+        typer.echo("\n\n".join(messages), err=True)
         raise typer.Exit(code=2)
 
 

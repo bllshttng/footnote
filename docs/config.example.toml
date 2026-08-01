@@ -143,11 +143,11 @@ model = "claude-opus-5"
 # github_apps = <unset>   # optional; no default
 # Legacy alias for config.review.github_apps (a straight rename); github_apps wins if both are set.
 # required_bots = <unset>   # optional; no default
-# Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.
+# Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode.
 peers = []
-# The distinct machine-account login peers post their review under (must not be the author account).
+# Optional legacy carrier: the distinct machine-account login peers post their review under (must not be the author account).
 # peer_identity = <unset>   # optional; no default
-# Env var holding the PAT for peer_identity used to post peer reviews to the PR.
+# Optional legacy carrier: env var holding the PAT for peer_identity used to post peer reviews to the PR.
 # peer_token_env = <unset>   # optional; no default
 # Reviewer logins honored-if-present but NOT required: the gate never waits for them (kills the App-bot usage-limit wedge), but a blocking finding from one still holds it. Also the escape for a required App you no longer want the gate to wait on: move its login here.
 optional_apps = []

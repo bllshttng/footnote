@@ -235,9 +235,9 @@ struct Settings {
     /// config.review.required_bots: legacy alias for `github_apps` (a straight
     /// rename). `github_apps` wins when both are set. Same fail-closed rules.
     required_bots: Option<Vec<String>>,
-    /// config.review.peers (x-4baa): harness peers that post a real PR review
-    /// under `peer_identity` (or their own map `identity`). loop-check only
-    /// needs each peer's posting identity - the gate is login-based.
+    /// config.review.peers: local review harnesses. Identity-free entries form
+    /// one composite, head-pinned local-attestation gate; entries with a shared
+    /// or per-entry identity retain the legacy GitHub-login gate.
     peers: Vec<PeerEntry>,
     /// config.review.peer_identity: the shared login peers post under.
     peer_identity: Option<String>,
@@ -283,14 +283,14 @@ fn normalize_reviewer(raw: &str) -> String {
 /// NOT silently drop it to an empty list (= no gate, fail OPEN). Instead it
 /// stores this sentinel so the gate stays active but UNSATISFIABLE - the NUL
 /// byte can never appear in an emitted `review_attestation.reviewer`, so no
-/// evidence ever clears it (codex peer review P1; mirrors x-4baa's
-/// UNRESOLVED_PEER_SENTINEL).
+/// evidence ever clears it (codex peer review P1).
 const MALFORMED_REVIEWERS_SENTINEL: &str = "\u{0}malformed-reviewers";
 
 /// A `config.review.peers` entry. `provider` is kept for messaging and the
 /// same-model guard; `model` carries an optional `"route_provider,route_model"`
 /// route (the claude CLI as transport for a genuinely different model); the gate
-/// itself only matches the resolved posting `identity` (own, or peer_identity).
+/// identity selects the legacy posting carrier; otherwise the entry contributes
+/// to the composite local-attestation gate.
 #[derive(Debug, Default, Clone)]
 struct PeerEntry {
     provider: String,
@@ -2273,15 +2273,19 @@ fn classify_bot_nudge(
 /// explicitly via config.review.github_apps (e.g. ["chatgpt-codex-connector"]).
 const DEFAULT_REQUIRED_BOTS: &[&str] = &[];
 
-/// A login that no real GitHub account can equal, pushed when a `peers` entry
-/// has no resolvable posting identity so the gate stays UNMET (fail closed)
-/// rather than silently going green without that reviewer (x-4baa).
-const UNRESOLVED_PEER_SENTINEL: &str = "\u{0}fno-peer-without-identity\u{0}";
+/// Stable reviewer key emitted by every identity-free peer. Multiple configured
+/// peer harnesses are alternatives for one composite gate, not N required votes.
+const LOCAL_PEER_REVIEWER: &str = "peer";
+
+/// An unmatchable reviewer key used when every identity-free peer is the
+/// author's own model family. It keeps the local gate fail-closed independently
+/// of the producer and is rendered as an actionable same-model refusal.
+const SAME_MODEL_LOCAL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model-local\u{0}";
 
 /// A login no real GitHub account can equal, pushed when a required peer login is
 /// backed ONLY by peers whose model is the author's own (same-model guard). It
 /// REPLACES the clearable login so a same-model review can never satisfy the
-/// cross-model gate. Distinct from UNRESOLVED_PEER_SENTINEL for greppability.
+/// cross-model gate.
 const SAME_MODEL_PEER_SENTINEL: &str = "\u{0}fno-peer-same-model\u{0}";
 
 /// Model family of a harness or provider name - the same-model guard's proxy for
@@ -2340,8 +2344,8 @@ fn resolved_required_bots(settings: &Settings) -> Vec<String> {
 
 /// The set of expected review logins that must have passed for the gate to
 /// clear (x-4baa): `github_apps` (or its legacy `required_bots` alias) UNION
-/// the resolved posting identity of each `peers` entry. loop-check stays
-/// login-based; a peer with no resolvable identity fails closed via a sentinel.
+/// the resolved posting identity of each identity-backed `peers` entry.
+/// Identity-free peers are resolved separately into local reviewer evidence.
 ///
 /// `author_harness` is the invoking harness (`claude`/`codex`/`gemini`), resolved
 /// from the ambient env markers by the caller. When it resolves to a model
@@ -2371,9 +2375,9 @@ fn resolved_required_bots_for_author(
             .collect(),
     };
 
-    // Each peer contributes its posting identity to the expected-login set.
-    // Shared identity (scalar peers) collapses to one login; per-peer map
-    // identities each add their own. A dedup keeps a shared identity single.
+    // Only identity-backed peers contribute to the expected-login set. Shared
+    // identity collapses to one login; per-peer identities each add their own.
+    // Identity-free peers are not missing logins: they use local attestations.
     for peer in &settings.peers {
         let id = peer
             .identity
@@ -2382,15 +2386,7 @@ fn resolved_required_bots_for_author(
         match id {
             Some(id) if !logins.iter().any(|l| l == &id) => logins.push(id),
             Some(_) => {} // already present (shared identity)
-            None => {
-                eprintln!(
-                    "loop-check: config.review.peers entry '{}' has no posting identity (peer_identity unset) - gate fails closed",
-                    peer.provider
-                );
-                if !logins.iter().any(|l| l == UNRESOLVED_PEER_SENTINEL) {
-                    logins.push(UNRESOLVED_PEER_SENTINEL.to_string());
-                }
-            }
+            None => {}    // local-attestation carrier
         }
     }
 
@@ -2405,6 +2401,44 @@ fn resolved_required_bots_for_author(
         }
     }
     logins
+}
+
+/// Resolve all identity-free peers into one local reviewer requirement.
+///
+/// Any cross-model option makes the composite gate satisfiable by a `peer`
+/// attestation. When the author is known and every option is same-model, return
+/// an unmatchable sentinel so even a forged `peer: pass` cannot self-review the
+/// change. Unknown peer families remain eligible, matching the existing
+/// identity-backed guard's conservative compatibility rule.
+fn resolved_local_peer_reviewers_for_author(
+    settings: &Settings,
+    author_harness: Option<&str>,
+) -> Vec<String> {
+    if settings.peer_identity.is_some() {
+        return Vec::new();
+    }
+    let local: Vec<&PeerEntry> = settings
+        .peers
+        .iter()
+        .filter(|peer| peer.identity.is_none())
+        .collect();
+    if local.is_empty() {
+        return Vec::new();
+    }
+    let Some(author_fam) = author_harness.and_then(harness_family) else {
+        return vec![LOCAL_PEER_REVIEWER.to_string()];
+    };
+    if local
+        .iter()
+        .any(|peer| peer_family(peer) != Some(author_fam))
+    {
+        vec![LOCAL_PEER_REVIEWER.to_string()]
+    } else {
+        eprintln!(
+            "loop-check: every identity-free peer is the author's own model - configure a cross-model peer or routed model"
+        );
+        vec![SAME_MODEL_LOCAL_PEER_SENTINEL.to_string()]
+    }
 }
 
 /// Replace every peer-contributed login backed ONLY by same-model peers with
@@ -3526,6 +3560,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // the same-model peer guard (x-c2e7); None leaves the set unchanged.
     let author_harness = crate::claims::resolve_harness();
     let required_bots = resolved_required_bots_for_author(&settings, author_harness.as_deref());
+    let mut required_reviewers = settings.reviewers.clone();
+    for reviewer in resolved_local_peer_reviewers_for_author(&settings, author_harness.as_deref()) {
+        if !required_reviewers.contains(&reviewer) {
+            required_reviewers.push(reviewer);
+        }
+    }
     let optional_bots = resolved_optional_bots(&settings);
     let nudge_configs = resolved_nudge_configs(&settings);
 
@@ -4097,7 +4137,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &required_bots,
             &optional_bots,
             &settings.external_reviewers,
-            &settings.reviewers,
+            &required_reviewers,
             &nudge_configs,
             &head_sha,
             &project_events,
@@ -5471,6 +5511,15 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                             None => String::new(),
                         }
                     };
+                    if r.name == SAME_MODEL_LOCAL_PEER_SENTINEL {
+                        return format!(
+                            "peer{} -> configure a cross-model peer or routed model",
+                            state
+                        );
+                    }
+                    if r.name == LOCAL_PEER_REVIEWER {
+                        return format!("peer{} -> run `/fno:review peer --attest`", state);
+                    }
                     match reviewer_invocation(&r.name) {
                         Some((inv, self_cert)) => {
                             let mark = if self_cert {
@@ -6623,6 +6672,36 @@ mod tests {
         assert!(reason.contains("sigma"), "got: {reason}");
         assert!(reason.contains("/fno:review sigma"), "got: {reason}");
         assert!(!reason.contains("bot reviewer"), "got: {reason}");
+    }
+
+    #[test]
+    fn block_reason_names_the_local_peer_invocation() {
+        let mut pr = reviewers_gate_pr();
+        pr.unattested_reviewers[0].name = LOCAL_PEER_REVIEWER.to_string();
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("/fno:review peer --attest"),
+            "got: {reason}"
+        );
+        assert!(
+            !reason.contains("wait on a GitHub reviewer"),
+            "got: {reason}"
+        );
+    }
+
+    #[test]
+    fn block_reason_explains_same_model_local_peer_refusal() {
+        let mut pr = reviewers_gate_pr();
+        pr.unattested_reviewers[0].name = SAME_MODEL_LOCAL_PEER_SENTINEL.to_string();
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(
+            reason.contains("configure a cross-model peer"),
+            "got: {reason}"
+        );
+        assert!(
+            !reason.contains(SAME_MODEL_LOCAL_PEER_SENTINEL),
+            "got: {reason}"
+        );
     }
 
     #[test]
@@ -8483,28 +8562,97 @@ mod tests {
     }
 
     #[test]
-    fn resolved_peers_without_identity_fails_closed() {
-        // A peer with no resolvable identity injects an unmatchable sentinel so
-        // the gate can never go green (fail closed), rather than silently
-        // dropping the reviewer (fail open).
+    fn identity_free_peer_uses_local_attestation_not_a_login() {
         let s = Settings {
             github_apps: Some(Vec::new()),
             peers: vec![PeerEntry {
-                provider: "codex".into(),
+                provider: "gemini".into(),
                 model: None,
                 identity: None,
             }],
             peer_identity: None,
             ..Default::default()
         };
-        let logins = resolved_required_bots(&s);
-        assert!(logins.iter().any(|l| l == UNRESOLVED_PEER_SENTINEL));
-        // The sentinel matches no real login, so missing_bots stays non-empty.
-        assert!(!login_matches_bot("fno-peer-bot", UNRESOLVED_PEER_SENTINEL));
-        assert!(!login_matches_bot(
-            "chatgpt-codex-connector[bot]",
-            UNRESOLVED_PEER_SENTINEL
-        ));
+        assert!(resolved_required_bots_for_author(&s, Some("codex")).is_empty());
+        assert_eq!(
+            resolved_local_peer_reviewers_for_author(&s, Some("codex")),
+            vec![LOCAL_PEER_REVIEWER.to_string()]
+        );
+    }
+
+    #[test]
+    fn identity_free_same_model_peer_is_an_unsatisfiable_local_gate() {
+        let s = Settings {
+            peers: vec![PeerEntry {
+                provider: "codex".into(),
+                model: None,
+                identity: None,
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_local_peer_reviewers_for_author(&s, Some("codex")),
+            vec![SAME_MODEL_LOCAL_PEER_SENTINEL.to_string()]
+        );
+    }
+
+    #[test]
+    fn identity_free_mixed_peers_form_one_composite_gate() {
+        let s = Settings {
+            peers: vec![
+                PeerEntry {
+                    provider: "codex".into(),
+                    model: None,
+                    identity: None,
+                },
+                PeerEntry {
+                    provider: "claude".into(),
+                    model: Some("zai,glm-5.2".into()),
+                    identity: None,
+                },
+            ],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_local_peer_reviewers_for_author(&s, Some("codex")),
+            vec![LOCAL_PEER_REVIEWER.to_string()]
+        );
+    }
+
+    #[test]
+    fn explicit_peer_identity_keeps_login_gate_only() {
+        let s = Settings {
+            peers: vec![PeerEntry {
+                provider: "gemini".into(),
+                model: None,
+                identity: Some("fno-gemini-bot".into()),
+            }],
+            ..Default::default()
+        };
+        assert_eq!(
+            resolved_required_bots_for_author(&s, Some("codex")),
+            vec!["fno-gemini-bot".to_string()]
+        );
+        assert!(resolved_local_peer_reviewers_for_author(&s, Some("codex")).is_empty());
+    }
+
+    #[test]
+    fn local_peer_attestation_is_head_pinned() {
+        let td = tempfile::tempdir().unwrap();
+        let events = td.path().join("events.jsonl");
+        std::fs::write(
+            &events,
+            r#"{"type":"review_attestation","data":{"reviewer":"peer","head_sha":"OLD","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let peer = vec![LOCAL_PEER_REVIEWER.to_string()];
+        assert!(!reviewers_all_attested(&events, &peer, "NEW"));
+        std::fs::write(
+            &events,
+            r#"{"type":"review_attestation","data":{"reviewer":"peer","head_sha":"NEW","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        assert!(reviewers_all_attested(&events, &peer, "NEW"));
     }
 
     // ---- same-model peer guard (x-c2e7) -----------------------------------
@@ -8832,9 +8980,7 @@ mod tests {
 
     #[test]
     fn nudge_none_cfg_is_not_nudgeable() {
-        // AC7: a peer sentinel (or any login with no config) classifies NotNudgeable.
-        let b = classify_bot_nudge(UNRESOLVED_PEER_SENTINEL, &[], None, nudge_now());
-        assert_eq!(b.class, NudgeClass::NotNudgeable);
+        // AC7: a peer-login sentinel classifies NotNudgeable.
         let b2 = classify_bot_nudge(SAME_MODEL_PEER_SENTINEL, &[], None, nudge_now());
         assert_eq!(b2.class, NudgeClass::NotNudgeable);
     }

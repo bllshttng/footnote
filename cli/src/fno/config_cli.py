@@ -339,13 +339,20 @@ def _report_review_capability(json_out: bool = False) -> int:
     import json as _json
 
     from fno.config import load_settings
-    from fno.review_capability import detect_session, resolve_reviewers
+    from fno.review_capability import (
+        detect_session,
+        local_peers_refusal_message,
+        resolve_local_peers,
+        resolve_reviewers,
+    )
 
     session = detect_session()
     review = load_settings().review
     reviewers = list(review.reviewers or [])
     verdicts = resolve_reviewers(reviewers, session, review.reviewer_registry)
+    peer_verdicts = resolve_local_peers(review.peers, review.peer_identity, session)
     blocked = [v for v in verdicts if v.blocks_autonomy]
+    peer_blocked = local_peers_refusal_message(peer_verdicts, session) is not None
 
     if json_out:
         typer.echo(
@@ -368,24 +375,40 @@ def _report_review_capability(json_out: bool = False) -> int:
                         }
                         for v in verdicts
                     ],
+                    "local_peers": [
+                        {"name": v.name, "status": v.status, "reason": v.reason}
+                        for v in peer_verdicts
+                    ],
+                    "local_peer_gate": (
+                        "unavailable"
+                        if peer_blocked
+                        else "satisfiable"
+                        if peer_verdicts
+                        else "not-configured"
+                    ),
                 }
             )
         )
-        return 1 if blocked else 0
+        return 1 if blocked or peer_blocked else 0
 
     typer.echo(f"review gate: {session.describe()} attended={session.attended}")
     if not reviewers:
         typer.echo("  config.review.reviewers is empty - no local reviewers gate.")
-        return 0
-    for v in verdicts:
-        typer.echo(f"  {v.line()}")
-    if blocked:
+    else:
+        for reviewer_verdict in verdicts:
+            typer.echo(f"  {reviewer_verdict.line()}")
+    if peer_verdicts:
+        state = "unavailable" if peer_blocked else "satisfiable"
+        typer.echo(f"  local peer gate: {state}")
+        for peer_verdict in peer_verdicts:
+            typer.echo(f"    {peer_verdict.line()}")
+    if blocked or peer_blocked:
         typer.echo("")
         typer.echo(
-            "This gate is fail-closed. Change config.review.reviewers, or run "
-            "attended; `declare` is never substituted for you."
+            "This gate is fail-closed. Change config.review.reviewers or "
+            "config.review.peers; `declare` is never substituted for you."
         )
-    return 1 if blocked else 0
+    return 1 if blocked or peer_blocked else 0
 
 
 def _report_gates() -> None:

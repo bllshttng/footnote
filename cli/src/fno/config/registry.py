@@ -171,13 +171,13 @@ FIELD_META: dict[str, Meta] = {
         "advanced", "Local-attestation reviewers (sigma | /code-review | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
     ),
     "review.peers": Meta(
-        "advanced", "Harness peers (codex/gemini/...) run locally that post a real PR review under peer_identity and gate like github_apps. Scalar or {provider, identity, token_env} map entries.",
+        "advanced", "Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode.",
     ),
     "review.peer_identity": Meta(
-        "advanced", "The distinct machine-account login peers post their review under (must not be the author account).",
+        "advanced", "Optional legacy carrier: the distinct machine-account login peers post their review under (must not be the author account).",
     ),
     "review.peer_token_env": Meta(
-        "advanced", "Env var holding the PAT for peer_identity used to post peer reviews to the PR.",
+        "advanced", "Optional legacy carrier: env var holding the PAT for peer_identity used to post peer reviews to the PR.",
     ),
     "review.external_reviewers": Meta(
         "always", "Which AI reviewers /pr requests a review from (the INVOCATION list).",

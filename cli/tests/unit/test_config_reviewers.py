@@ -164,6 +164,75 @@ def test_doctor_review_empty_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
     assert "no local reviewers gate" in r.output
 
 
+def _doctor_peers(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    peers_toml: str,
+    env: dict[str, str],
+):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(f"[review]\npeers = {peers_toml}\n")
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    for var in (
+        "CLAUDE_CODE_SESSION_ID",
+        "CODEX_THREAD_ID",
+        "CODEX_SESSION_ID",
+        "GEMINI_SESSION_ID",
+        "TARGET_UNATTENDED",
+        "FNO_BG",
+        "FNO_AGENT_SELF",
+    ):
+        monkeypatch.delenv(var, raising=False)
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    load_settings.cache_clear()
+    from fno.cli import app
+
+    return CliRunner().invoke(app, ["config", "doctor", "--review"])
+
+
+def test_doctor_review_reports_identity_free_cross_model_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = _doctor_peers(
+        tmp_path,
+        monkeypatch,
+        '["codex", {provider = "claude", model = "zai,glm-5.2"}]',
+        {"CODEX_THREAD_ID": "c1"},
+    )
+    assert r.exit_code == 0, r.output
+    assert "local peer gate: satisfiable" in r.output
+    assert "claude via zai,glm-5.2" in r.output
+    assert "codex" in r.output and "same model" in r.output
+
+
+def test_doctor_review_refuses_only_same_model_local_peer(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = _doctor_peers(
+        tmp_path,
+        monkeypatch,
+        '["codex"]',
+        {"CODEX_THREAD_ID": "c1"},
+    )
+    assert r.exit_code == 1
+    assert "local peer gate: unavailable" in r.output
+    assert "same model" in r.output
+
+
+def test_doctor_does_not_treat_a_codex_model_field_as_a_route(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    r = _doctor_peers(
+        tmp_path,
+        monkeypatch,
+        '[{provider = "codex", model = "zai,glm-5.2"}]',
+        {"CODEX_THREAD_ID": "c1"},
+    )
+    assert r.exit_code == 1
+    assert "same model" in r.output
+
+
 # --- the refusal message's two hints (AC10-ERR / AC11-ERR / AC12-HP) ---
 
 

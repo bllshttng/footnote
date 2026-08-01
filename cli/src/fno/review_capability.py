@@ -97,6 +97,22 @@ class ReviewerVerdict:
         return f"{self.status}: {self.name} - {self.reason}{_RUNG_NOTES.get(asserts, '')}"
 
 
+@dataclass(frozen=True)
+class LocalPeerVerdict:
+    """One identity-free peer candidate for the composite local gate."""
+
+    name: str
+    status: Status
+    reason: str
+
+    @property
+    def eligible(self) -> bool:
+        return self.status == "satisfiable"
+
+    def line(self) -> str:
+        return f"{self.status}: {self.name} - {self.reason}"
+
+
 # What each rung is allowed to claim, printed wherever a reviewer is reported.
 # `review-evidence` gets no note: it is the ordinary case. The two weaker rungs
 # are annotated so an operator learns what is behind their green checkmark here,
@@ -365,6 +381,108 @@ def resolve_reviewers(
             continue
         out.append(_resolve_one(name, descriptor, sess))
     return out
+
+
+def _model_family(provider: str, model: object = None) -> str:
+    """Resolve the model family a peer actually runs, independent of transport."""
+    family = provider.strip().lower()
+    route = model.strip() if isinstance(model, str) else ""
+    # Only the Claude transport executes an explicit route. Codex and Gemini
+    # ignore `model`, so honoring it here would disagree with loop-check and
+    # could advertise a same-model peer as eligible.
+    if family == "claude" and "," in route:
+        routed_provider, _, _routed_model = route.partition(",")
+        if routed_provider.strip():
+            family = routed_provider.strip().lower()
+    aliases = {
+        "anthropic": "claude",
+        "openai": "codex",
+        "google": "gemini",
+    }
+    return aliases.get(family, family)
+
+
+def resolve_local_peers(
+    peers: list[object],
+    peer_identity: Optional[str] = None,
+    session: Optional[SessionCapability] = None,
+) -> list[LocalPeerVerdict]:
+    """Classify identity-free peers for one composite cross-model gate.
+
+    Entries with a per-peer identity, or all entries when a shared identity is
+    configured, retain the legacy GitHub-posting carrier and are intentionally
+    absent here. The composite gate is satisfiable when *any* returned peer is
+    cross-model; same-model alternatives remain visible diagnostics, not vetoes.
+    """
+    sess = detect_session() if session is None else session
+    if peer_identity:
+        return []
+
+    verdicts: list[LocalPeerVerdict] = []
+    for entry in peers:
+        if isinstance(entry, str):
+            provider, model, identity = entry.strip(), None, None
+        elif isinstance(entry, dict):
+            provider = str(entry.get("provider") or "").strip()
+            model = entry.get("model")
+            identity = entry.get("identity")
+        else:
+            continue
+        if identity:
+            continue
+
+        route = model.strip() if isinstance(model, str) else ""
+        name = f"{provider} via {route}" if route and provider.lower() == "claude" else provider
+        peer_family = _model_family(provider, model)
+        author_family = _model_family(sess.harness)
+        if sess.harness == "unknown":
+            verdicts.append(
+                LocalPeerVerdict(
+                    name,
+                    "unverifiable",
+                    "author model is unknown; cross-model eligibility cannot be verified",
+                )
+            )
+        elif peer_family == author_family:
+            verdicts.append(
+                LocalPeerVerdict(
+                    name,
+                    "unavailable",
+                    f"same model family as the author ({author_family})",
+                )
+            )
+        else:
+            verdicts.append(
+                LocalPeerVerdict(
+                    name,
+                    "satisfiable",
+                    f"cross-model peer for {author_family} author",
+                )
+            )
+    return verdicts
+
+
+def local_peers_refusal_message(
+    verdicts: list[LocalPeerVerdict], session: SessionCapability
+) -> Optional[str]:
+    """Return an init refusal only when a configured local peer gate has no option."""
+    if not verdicts or any(v.eligible for v in verdicts):
+        return None
+    # An unknown author is not proof of an impossible gate. Preserve the stop
+    # gate as the backstop, matching reviewer capability's unverifiable policy.
+    if any(v.status == "unverifiable" for v in verdicts):
+        return None
+    lines = [
+        "fno target init: config.review.peers has no eligible cross-model "
+        f"local peer on {session.describe()}.",
+    ]
+    lines += [f"  {v.line()}" for v in verdicts]
+    lines += [
+        "",
+        "The gate is fail-closed: configure at least one peer from a different "
+        "model family, or remove config.review.peers.",
+    ]
+    return "\n".join(lines)
 
 
 def refusal_message(

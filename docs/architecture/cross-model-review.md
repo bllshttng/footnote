@@ -69,7 +69,9 @@ Resolution reads the existing `config.accounts` records + per-provider lockout s
 
 ## The `config.review.peers` gate: symmetric same-model guard
 
-`config.review.peers` is a different mechanism from the panel above: it names harness peers (`codex` / `gemini` / a routed `claude`) that post a real PR review under `config.review.peer_identity`, and loop-check requires that login to have reviewed before the gate clears. Its whole point is one trust invariant: **at least one required reviewer runs a genuinely different model than the author.** A same-model peer reviewing its own work is exactly what the gate exists to prevent.
+`config.review.peers` is a different mechanism from the panel above: it names local review harnesses (`codex` / `gemini` / a routed `claude`) and enforces one trust invariant: **at least one required reviewer runs a genuinely different model than the author.**
+Identity-free entries form one composite gate satisfied by an explicit clean `peer` attestation pinned to current HEAD.
+An entry with its own `identity`, or a review block with shared `peer_identity`, retains the legacy GitHub-posting carrier and requires that login to have reviewed.
 
 The author's model is a proxy for its invoking harness, resolved from the ambient env markers in the shared precedence `CODEX_THREAD_ID` > `CLAUDE_CODE_SESSION_ID` > `CODEX_SESSION_ID` > `GEMINI_SESSION_ID` (`harness_identity.py`, mirrored in `claims.rs`). A peer's effective family comes from its route provider when it names one, else its bare provider:
 
@@ -86,11 +88,15 @@ A peer whose effective family equals the author's family is a **same-model peer*
 
 Enforcement is layered, and the gate is the point of record because that is where the invariant is spent:
 
-- **Gate time (loop-check, `resolved_required_bots_for_author`):** for each required login contributed by `peers`, if every peer backing that login is same-model, the login is replaced with a distinct unsatisfiable sentinel and one loud line names the peer, the authoring harness, and the fix. A login backed by at least one cross-model peer (different family, or an unknown provider) is left alone, so `peers: [codex, gemini]` sharing one identity stays satisfiable on a codex-authored run (gemini backs the login) while `peers: [codex]` alone does not. The guard only ever REPLACES a peer login with the sentinel - it never removes a login, so the gate can only get stricter, never looser, and a login also required by `github_apps` is exempt.
-- **Fail open on unknown authorship:** when no harness marker resolves (a manual CLI invocation, an unknown harness), the guard is inert and the required-login set is byte-identical to before - the load-time claude check remains the floor for the dominant author.
+- **Gate time (loop-check):** identity-free peers resolve to one `peer` reviewer key when any configured option is cross-model, or to an unmatchable local sentinel when every option is same-model.
+  Identity-backed peers retain their required-login set; a login backed only by same-model peers is replaced by the existing login sentinel.
+- **Unknown authorship:** when no harness marker resolves, the same-model guard is inert.
+  Identity-backed logins remain unchanged, and identity-free peers still require the composite `peer` attestation.
 - **Load time (`config/__init__.py`):** rejects a bare or anthropic-routed `claude` peer. This is the fail-EARLY layer for a claude author only; the config file is harness-agnostic, so load time cannot know a codex/gemini author. A codex-authored repo that wants a claude-model peer is a known inverse gap, deferred until a real deployment needs it.
 - **Dispatch time (`/review peer`):** refuses a bare peer whose provider matches the invoking harness at RESOLVE, the earliest advisory layer.
 
 **Routed-transport limitation.** A claude-authored session routed to a different model (GLM via z.ai) still reads as anthropic-family here, because the harness is the model proxy. A bare claude peer on such a run would be discounted even though the real author model is GLM - the conservative direction (the gate HOLDS, it never wrongly clears). If a reliable ambient marker for the routed model appears, this can tighten later.
 
-**Sanctioned per-run pattern.** Because the config is harness-agnostic, an author that knows its own harness picks the cross-model peer per run via a per-worktree config override: a claude worktree sets `peers: [codex]`, a codex worktree sets `peers: [gemini]`. The guard makes a wrong choice fail loudly instead of clearing silently; this pattern makes the right choice explicit per author.
+**Symmetric repository pattern.** A repository can list `codex` plus `gemini` without identities.
+For a Gemini author, Codex is eligible; for a Codex author, Gemini is eligible; for a Claude author, both are eligible.
+Doctor reports the same-model option without letting it veto the eligible one, while loop-check requires one clean composite attestation.

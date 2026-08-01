@@ -105,6 +105,33 @@ def test_empty_reviewers_is_a_no_op(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     _refuse_unsatisfiable_reviewers()  # no raise
 
 
+def test_init_refuses_identity_free_peers_when_all_are_same_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text('[review]\npeers = ["codex"]\n')
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("CODEX_THREAD_ID", "c1")
+    load_settings.cache_clear()
+    with pytest.raises(typer.Exit) as exc:
+        _refuse_unsatisfiable_reviewers()
+    assert exc.value.exit_code == 2
+
+
+def test_init_allows_identity_free_peers_with_cross_model_option(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[review]\npeers = ["codex", '
+        '{provider = "claude", model = "zai,glm-5.2"}]\n'
+    )
+    monkeypatch.setenv("FNO_CONFIG", str(cfg))
+    monkeypatch.setenv("CODEX_THREAD_ID", "c1")
+    load_settings.cache_clear()
+    _refuse_unsatisfiable_reviewers()
+
+
 def test_unreadable_config_degrades_to_a_no_op(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
@@ -498,8 +525,6 @@ from fno.review_capability import (  # noqa: E402
     github_apps_refusal_message,
     resolve_github_apps,
 )
-from fno.target_cli import _refuse_unreachable_github_apps  # noqa: E402
-
 _NEVER = lambda login, cwd=None: False  # noqa: E731 - a probe that found nothing
 _SEEN = lambda login, cwd=None: True  # noqa: E731 - a probe that found activity
 _UNVERIFIABLE = lambda login, cwd=None: None  # noqa: E731 - a probe that could not run
@@ -802,4 +827,3 @@ def test_init_still_speaks_exit_2_on_a_refusal(
         {"GEMINI_SESSION_ID": "g1", "TARGET_UNATTENDED": "1"},
     )
     assert r.exit_code == 2
-

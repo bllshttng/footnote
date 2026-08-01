@@ -11,7 +11,7 @@
 # reviewed commit is the tip.
 #
 # Usage: emit-attestation.sh <reviewer> [verdict]
-#   <reviewer>  a built-in (sigma | code-review | declare) or any name declared
+#   <reviewer>  a built-in (sigma | peer | code-review | declare) or any name declared
 #               in config.review.reviewer_registry (a leading '/' is stripped)
 #   [verdict]   pass (default) | fail
 set -euo pipefail

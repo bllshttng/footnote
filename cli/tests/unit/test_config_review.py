@@ -13,8 +13,9 @@ Semantics under test:
   - explicit [] -> [] (the declared no-review-gate path, US3)
   - non-list    -> None + warning (fail closed, AC3-ERR)
   - required_bots is a legacy alias for github_apps (github_apps wins if both)
-  - peers scalar-or-map coercion; a map missing `provider` or a peers block
-    with no posting identity fails LOUD (fail closed, not a silent skip)
+  - peers scalar-or-map coercion; a map missing `provider` fails LOUD
+  - identity-free peers select the head-pinned local-attestation gate
+  - explicit peer identities preserve the legacy posted-GitHub-review gate
 """
 from __future__ import annotations
 
@@ -329,16 +330,31 @@ def test_peers_map_missing_provider_fails_loud(
         )
 
 
-def test_peers_without_identity_fails_loud(
+def test_peers_without_identity_selects_local_attestation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """peers set with no posting identity can never clear -> fail closed at load."""
-    with pytest.raises(Exception, match="peer_identity"):
-        _load(
-            tmp_path,
-            monkeypatch,
-            "schema_version: 1\nconfig:\n  review:\n    peers: [codex]\n",
-        )
+    """A peer is another harness; no second GitHub identity is required."""
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    peers: [codex]\n",
+    )
+    assert settings.review.peers == ["codex"]
+    assert settings.review.peer_identity is None
+
+
+def test_routed_claude_peer_without_identity_loads_for_local_attestation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    settings = _load(
+        tmp_path,
+        monkeypatch,
+        "schema_version: 1\nconfig:\n  review:\n    peers:\n"
+        '      - provider: claude\n        model: "zai,glm-5.2"\n',
+    )
+    assert settings.review.peers == [
+        {"provider": "claude", "model": "zai,glm-5.2"}
+    ]
 
 
 # --- claude->routed-model peer lane (x-ef41) ---

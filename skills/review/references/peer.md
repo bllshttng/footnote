@@ -17,9 +17,8 @@ conversation without a manual nudge. When the *agent* runs the same
 gets acted on the same turn. This skill is that pattern, plus diff assembly and
 honest reporting.
 
-It does not reimplement spawn, does not touch `/pr check`, and does not gate
-anything. It is an on-demand verb. The peer review is **advisory**: it is not a
-review from the bot account and never satisfies a `required_bots` gate.
+It does not reimplement spawn.
+It is advisory by default, can satisfy an identity-free local peer gate with `--attest`, and preserves `--post` for explicitly identity-backed legacy gates.
 
 ## Inputs
 
@@ -51,12 +50,14 @@ review from the bot account and never satisfies a `required_bots` gate.
   a focus word is never mistaken for the target; with no such token the target is the
   current branch and every extra token is focus. Ignored in `MODE=defect`.
 - **`--post`** (optional flag): after getting the review, POST it to the PR
-  under `config.review.peer_identity` so it satisfies the login-based loop-check
-  gate. This is the ONE mode where a peer review is a gate, not advisory (see
-  step 6 and Hard rule 4). Requires a PR-number target, `peer_identity`, and a
+  under `config.review.peer_identity` so it satisfies the legacy login-based
+  loop-check gate (see step 7 and Hard rule 4). Requires a PR-number target, `peer_identity`, and a
   PAT in `config.review.peer_token_env`.
+- **`--attest`** (optional flag): validate the provider's exact terminal verdict record and emit the composite `peer` attestation at the current HEAD.
+  This is the identity-free `config.review.peers` gate and requires no PR, GitHub account, or PAT.
+  It is mutually exclusive with `--post`.
 
-## Flow: RESOLVE -> BRIEF -> SPAWN (agent is the runner) -> RELAY -> OFFER
+## Flow: RESOLVE -> BRIEF -> SPAWN (agent is the runner) -> RELAY -> ATTEST OR OFFER
 
 ### 1. RESOLVE the diff
 
@@ -179,6 +180,17 @@ step-2 size decision).
   is `claude -p` and the generic shape is already Claude-idiomatic; GLM-specific
   tuning is future work, not this node.
 
+**Verdict-gated framing (`--attest`).** Replace any ordinary final-verdict instruction with these exact constraints in every provider header when `--attest` is present:
+
+```text
+Every P1 or P2 finding must be one physical line beginning `P1 ` or `P2 `, followed by `file:line - problem - fix`.
+End with exactly one machine record and no text after it: `fno-peer-verdict: {"verdict":"clean","blocking_findings":0}` when there are no P1/P2 findings, or `fno-peer-verdict: {"verdict":"blocked","blocking_findings":N}` where N exactly equals the P1/P2 lines above.
+Never output a clean verdict when any P1/P2 finding exists.
+```
+
+The terminal record is evidence input, not evidence by itself.
+Only `consume-peer-verdict.sh` may convert it into a passing attestation.
+
 **Large diff (> ~120 KB).** A multi-hundred-KB brief can exceed the argv limit in
 step 3. In that case, do NOT inline the diff. `$DIFF` lives in a temp dir that a
 sandboxed model cannot read, so first re-stage it to a workspace-relative path
@@ -288,18 +300,32 @@ sniffing for a tone:
   out) and suggest the other provider or `/review sigma`. NEVER invent findings to
   fill the gap.
 
-### 5. OFFER to apply
+When `--attest` is present, save stdout verbatim as `$REVIEW_FILE` and continue to step 6.
+Do not infer the verdict from exit code, non-empty prose, sentiment, or a hand-written summary.
+
+### 5. OFFER to apply (advisory mode only)
 
 Do not auto-apply. Summarize the P1/P2 findings and ask whether to address them.
 On a yes, fix them like any other review feedback. P3 nits are optional - call
 them out, let the user choose.
 
-### 6. POST (only with `--post`) - the one gating mode
+### 6. ATTEST (only with `--attest`) - the identity-free local gate
 
-Default `/review peer` is advisory (step 5 ends it). With `--post`, after a
-successful relay you POST the review to the PR under the harness peer identity
-so it counts toward the loop-check gate (`config.review.peers`). This is the
-deliberate, opt-in relaxation of Hard rule 4.
+Pass the verbatim provider output to the strict consumer:
+
+```bash
+bash "${SKILL_DIR}/scripts/consume-peer-verdict.sh" "$REVIEW_FILE"
+```
+
+The consumer requires the exact terminal JSON record, counts the syntactically declared P1/P2 finding lines, and rejects empty, malformed, contradictory, or count-mismatched output.
+A valid clean verdict with zero findings emits `review_attestation` for reviewer `peer` with verdict `pass` at the current HEAD.
+A valid blocked verdict, or any invalid output, emits `fail` when possible and exits non-zero, so the gate remains unmet and loop-check reports local work to do.
+After any fix commit, the old attestation is stale by design and the peer must review the new HEAD.
+
+### 7. POST (only with `--post`) - the legacy identity-backed gate
+
+Default `/review peer` is advisory (step 5 ends it).
+With `--post`, after a successful relay you post the review to the PR under the explicitly configured harness peer identity so it counts toward the legacy login gate.
 
 Preconditions (all required; if any is missing, STOP and say why - never fake a
 post):
@@ -327,20 +353,9 @@ bash "${SKILL_DIR}/scripts/post-peer-review.sh" \
   --p1 "src/bar.py:88:Off-by-one drops the last row"
 ```
 
-**Advisory-first (x-ef41) - what "advisory" actually means here.** Be precise: any
-`config.review.peers` entry IS read by loop-check as a required reviewer (it
-resolves each entry to a posting login - the entry's own map `identity`, else the
-shared `peer_identity` - and requires that login to have reviewed). So a GLM peer
-is not gate-free simply by being routed. What keeps it advisory in v1 is that it
-posts under the *shared* `peer_identity` alongside codex/gemini: peers sharing one
-identity collapse to a SINGLE required login, cleared by ANY of them posting, so
-adding GLM does not add a new hurdle and blocking judgment still rides the flagship
-(`PROTECTED_ROLES` stance). (Caveat: a GLM peer that is the *only* peer, posting
-under the shared identity, is effectively the sole thing satisfying that login -
-there it does gate.) To PROMOTE GLM to an INDEPENDENT required gate once trusted,
-give its peers entry its OWN map `identity` (a distinct login loop-check must see
-separately) instead of letting it ride the shared `peer_identity` - a one-line
-config change, no code.
+**Identity-backed compatibility.** In `--post` mode, peers sharing `peer_identity` collapse to one required login, while a per-entry `identity` creates an independently required login.
+This behavior is retained only for configs that explicitly choose the GitHub carrier.
+Identity-free peers use step 6 instead and never need a posting account.
 
 On a **provider-failed** or **post-failed** outcome the helper exits non-zero
 and prints why; relay that verbatim. The gate then stays UNMET with a stated
@@ -371,13 +386,10 @@ review, or whose post to GitHub failed, must be reported, not papered over.
    load (fail-early for the dominant claude author) and loop-check's gate-time
    guard (x-c2e7) holds the gate for any same-model author - this RESOLVE refusal
    is the earliest, advisory layer.
-4. **Advisory by default; a gate only with `--post`.** Bare `/review peer` is a
-   coding-account read that never satisfies a review gate. With `--post` it is
-   posted under the distinct `peer_identity` (NOT the author account) and DOES
-   gate via `config.review.peers` - the identity's login is what loop-check
-   matches, and its P1 inline comments block. It must post the provider output
-   verbatim (Hard rule 2 still holds: never invent or soften a finding), and it
-   must fail loud rather than mark the gate met on a post that did not happen.
+4. **Advisory by default; explicit evidence carrier for gating.** Bare `/review peer` is advisory.
+   `--attest` gates identity-free peers through a strictly validated, head-pinned local verdict and requires no GitHub identity.
+   `--post` is the legacy explicit-identity carrier: it posts under `peer_identity`, and loop-check matches that login.
+   Both modes preserve provider output verbatim and fail loud rather than mark the gate met when validation or delivery fails.
 
 ## Multi-CLI
 

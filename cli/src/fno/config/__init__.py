@@ -691,13 +691,11 @@ class ReviewBlock(BaseModel):
                               mirroring ci.declared_none; never auto-detected
       - non-empty list     -> every listed login must pass
 
-    `peers` are harness peers (codex/gemini/...) run locally that post a real PR
-    review under `peer_identity` (a distinct machine account, not the author).
-    Each entry is a provider scalar (`codex`) or a map (`{provider, identity,
-    token_env}`). The gate is the union of `github_apps` and the resolved peer
-    identities (loop-check stays login-based; per-peer coverage is the posting
-    pipeline's job for a shared identity). Phase 1: `reviewers` (local
-    attestation) is a follow-up node.
+    `peers` are harness peers (codex/gemini/...) run locally. Identity-free
+    entries satisfy one composite, head-pinned local-attestation gate when any
+    configured cross-model peer returns a clean verdict. An explicit entry
+    `identity` or shared `peer_identity` retains the legacy mode that posts a
+    GitHub review and gates on that login.
 
     `required_bots` is a legacy alias for `github_apps` (a straight rename).
     Existing configs are unchanged; if both are set, `github_apps` wins.
@@ -714,11 +712,11 @@ class ReviewBlock(BaseModel):
     # Legacy alias for github_apps; resolved into github_apps by the validator
     # below (github_apps wins if both set). Kept readable for back-compat.
     required_bots: Optional[list[str]] = None
-    # Harness peers that run a CLI locally and post a real PR review under
-    # peer_identity. Scalar (`codex`) or map (`{provider, identity, token_env}`).
+    # Harness peers that run locally. Identity-free entries use a head-pinned
+    # local attestation; an explicit identity opts into posted GitHub reviews.
     peers: list[Any] = Field(default_factory=list)  # str provider or {provider,...} map
-    # The distinct login peers post under (must not be the author account) and
-    # the env var holding that identity's PAT. Required whenever `peers` is set.
+    # Optional legacy posting carrier: the distinct login peers post under and
+    # the env var holding that identity's PAT.
     peer_identity: Optional[str] = None
     peer_token_env: Optional[str] = None
     # Reviewer logins honored-if-present but NOT required (x-4baa): the gate
@@ -915,22 +913,9 @@ class ReviewBlock(BaseModel):
             self.github_apps = self.required_bots
         # Keep the alias readable and consistent with the canonical field.
         self.required_bots = self.github_apps
-        # A peer needs an identity to post under: its own (map `identity`) or
-        # the shared `peer_identity`. Fail loud if any peer has neither - a
-        # peers gate with no resolvable login can never clear (fail-closed
-        # forever), so surface it at load rather than wedging the loop.
-        if self.peers and not self.peer_identity:
-            needs_shared = [
-                e
-                for e in self.peers
-                if not (isinstance(e, dict) and e.get("identity"))
-            ]
-            if needs_shared:
-                raise ValueError(
-                    "config.review.peers has an entry with no posting identity "
-                    "and config.review.peer_identity is unset; peers must post "
-                    f"under a distinct machine account: {needs_shared!r}"
-                )
+        # Identity-free peers deliberately use the local head-pinned attestation
+        # carrier. A per-entry or shared identity remains an explicit opt-in to
+        # the legacy GitHub-posting carrier.
         # A `claude` peer is only a real cross-model reviewer when it names a
         # model route (e.g. {provider: claude, model: "zai,glm-5.2"}): the claude
         # CLI is only transport, and the routed model (GLM) is genuinely distinct

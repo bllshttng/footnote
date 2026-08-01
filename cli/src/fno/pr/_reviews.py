@@ -71,9 +71,10 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
             names.append(review.peer_identity)
         for entry in review.peers or []:
             if isinstance(entry, dict):
-                names.append(entry.get("identity") or entry.get("provider") or "")
-            elif isinstance(entry, str):
-                names.append(entry)
+                # Identity-free peers attest locally and are not GitHub review
+                # authors. Only the explicit legacy posting carrier belongs in
+                # this login-matching set.
+                names.append(entry.get("identity") or "")
     except Exception:  # unreadable/invalid config -> just the hardcoded bots
         pass
     return [n for n in names if n]
