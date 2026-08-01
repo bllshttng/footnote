@@ -313,10 +313,13 @@ def test_claim_omits_machine_id_when_none_is_available(monkeypatch):
 
 def test_reader_that_cannot_read_its_own_id_does_not_steal(monkeypatch):
     """A reader whose ioreg/machine-id lookup fails cannot tell whose claim it
-    is. Ambiguous liveness must degrade to skip, never to steal, so it falls
-    back to the hostname compare instead of declaring the claim foreign - which
-    would stale a live LOCAL holder and make it reclaimable."""
-    claim = _live_claim(host=hostid.hostname(), machine_id="some-machine-id")
+    is. Ambiguous liveness must degrade to skip, never to steal.
+
+    The hostname is ALSO changed here, which is the whole point: on the roaming
+    laptop this exists for, the name has usually moved too, so falling back to
+    the hostname compare would fail and stale a live LOCAL holder.
+    """
+    claim = _live_claim(host="the-name-it-had-back-then", machine_id="some-machine-id")
     monkeypatch.setattr(hostid, "_macos_platform_uuid", lambda: "")
     monkeypatch.setattr(hostid, "_linux_machine_id", lambda: "")
     hostid.machine_id.cache_clear()
@@ -325,13 +328,31 @@ def test_reader_that_cannot_read_its_own_id_does_not_steal(monkeypatch):
     hostid.machine_id.cache_clear()
 
 
+def test_unknown_own_id_still_stales_a_dead_pid(monkeypatch):
+    """The unknown path withholds a STEAL, it does not fake liveness: the pid
+    arm still decides, so a dead holder is stale exactly as before."""
+    dead = 999_999
+    while psutil.pid_exists(dead):
+        dead += 1
+    claim = _live_claim(host="whatever", machine_id="some-machine-id", pid=dead)
+    monkeypatch.setattr(hostid, "_macos_platform_uuid", lambda: "")
+    monkeypatch.setattr(hostid, "_linux_machine_id", lambda: "")
+    hostid.machine_id.cache_clear()
+    assert is_live(claim) is False
+    hostid.machine_id.cache_clear()
+
+
 def test_is_same_machine_arms():
     hostid.machine_id.cache_clear()
-    # machine arm (authoritative when present)
-    assert hostid.is_same_machine("irrelevant", hostid.machine_id()) is True
-    assert hostid.is_same_machine(hostid.hostname(), "other-machine") is False
-    # host arm (only when no machine id was recorded)
+    # host arm (only when no machine id was recorded) - always available
     assert hostid.is_same_machine(hostid.hostname(), None) is True
     assert hostid.is_same_machine("some-other-host-that-does-not-exist", None) is False
     assert hostid.is_same_machine(None, None) is False
     assert hostid.is_same_machine("", "") is False
+
+
+def test_is_same_machine_machine_arm():
+    """The machine arm needs a real OS id to be expressible at all."""
+    _requires_stable_machine_id()
+    assert hostid.is_same_machine("irrelevant", hostid.machine_id()) is True
+    assert hostid.is_same_machine(hostid.hostname(), "other-machine") is False

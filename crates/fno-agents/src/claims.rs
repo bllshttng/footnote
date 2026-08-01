@@ -378,6 +378,11 @@ fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
         if !mine.is_empty() {
             return m == mine;
         }
+        // Claim names a machine but our own id is unreadable: UNKNOWN, not
+        // foreign. Falling through to the hostname compare would stale a live
+        // local claim whenever the name has also moved. The pid arm still
+        // decides, so this only ever withholds a steal.
+        return true;
     }
     if host.is_empty() {
         return false;
@@ -1969,16 +1974,42 @@ mod tests {
     // -- machine identity -------------------------------------
 
     #[test]
-    fn is_same_machine_matches_machine_id_and_legacy_hostname() {
-        // Both arms are "this machine"; the machine-id arm is the stable one,
-        // the hostname arm keeps pre-machine-id claims classifiable.
-        // machine_id wins when present; host is the pre-change fallback.
-        assert!(is_same_machine("anything", Some(&machine_id())));
+    fn is_same_machine_host_arm() {
+        // The pre-change fallback, used when no machine id was recorded. Always
+        // expressible, with or without an OS machine id on this box.
         assert!(is_same_machine(&hostname(), None));
         assert!(!is_same_machine("", None));
         assert!(!is_same_machine(
+            "some-other-host-that-does-not-exist",
+            None
+        ));
+    }
+
+    #[test]
+    fn is_same_machine_machine_arm() {
+        // Needs a real OS id: where none exists both writers omit the field and
+        // the machine arm cannot be exercised at all.
+        if machine_id().is_empty() {
+            return;
+        }
+        assert!(is_same_machine("anything", Some(&machine_id())));
+        assert!(!is_same_machine(
             &hostname(),
             Some("00000000-0000-0000-0000-000000000000")
+        ));
+    }
+
+    #[test]
+    fn unknown_own_machine_id_is_not_foreign() {
+        // Mirrors the Python contract: a claim naming a machine, read where our
+        // own id is unreadable, must not read as foreign - that would stale a
+        // live local claim, and ambiguity degrades to skip, never to steal.
+        if !machine_id().is_empty() {
+            return; // this box HAS an id, so the unknown path is unreachable here
+        }
+        assert!(is_same_machine(
+            "a-name-it-no-longer-has",
+            Some("some-machine-id")
         ));
     }
 
@@ -1988,18 +2019,23 @@ mod tests {
         // can (DHCP/DNS/VPN/sleep-wake on macOS), which is what made a live
         // holder read cross-host -> stale -> stealable.
         assert_eq!(machine_id(), machine_id());
-        assert!(!machine_id().is_empty() || hostname().is_empty());
     }
 
     #[test]
     fn make_claim_records_machine_id_not_hostname() {
-        // Parity guard: Python's acquire writes machine_id() too. If these two
+        // Parity guard: Python's acquire writes the same value. If these two
         // writers disagree, each implementation reads the other's claims as
-        // cross-machine and silently treats live claims as recoverable.
+        // cross-machine and silently treats live claims as recoverable. Where
+        // the OS exposes no id both omit the field, which is also parity.
         let td = TempDir::new().unwrap();
         match acquire("session:mid", "pty:owner", opts_in(&td)) {
             AcquireOutcome::Acquired(rec) => {
-                assert_eq!(rec.machine_id.as_deref(), Some(machine_id().as_str()));
+                let expected = machine_id();
+                if expected.is_empty() {
+                    assert_eq!(rec.machine_id, None);
+                } else {
+                    assert_eq!(rec.machine_id.as_deref(), Some(expected.as_str()));
+                }
                 assert_eq!(
                     rec.host,
                     hostname(),

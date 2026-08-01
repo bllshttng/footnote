@@ -157,8 +157,16 @@ def is_same_machine(host: Optional[str], machine: Optional[str]) -> bool:
     compare, which is the pre-change behavior.
     """
     mine = machine_id()
-    if machine and mine:
-        return machine == mine
+    if machine:
+        if mine:
+            return machine == mine
+        # The claim names a machine but we cannot read our own id. That is
+        # UNKNOWN, not "a different machine", and it must not fall through to
+        # the hostname compare: on the roaming laptop this exists for, the name
+        # has usually moved too, so the compare fails and stales a live local
+        # claim. Answer "not disproven" and let the pid arm decide - a dead or
+        # reused pid still reads stale, so this only ever withholds a steal.
+        return True
     if not host:
         return False
     return host == hostname()

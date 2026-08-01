@@ -642,6 +642,11 @@ fn is_same_machine(host: &str, machine: Option<&str>) -> bool {
         if !mine.is_empty() {
             return m == mine;
         }
+        // Claim names a machine but our own id is unreadable: UNKNOWN, not
+        // foreign. Falling through to the hostname compare would stale a live
+        // local claim whenever the name has also moved. The pid arm still
+        // decides, so this only ever withholds a steal.
+        return true;
     }
     if host.is_empty() {
         return false;
