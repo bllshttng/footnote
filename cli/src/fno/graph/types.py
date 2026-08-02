@@ -11,6 +11,8 @@ from typing import Optional
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
+from fno.company.contracts import CompanyWorkRefs
+
 
 class Status(str, Enum):
     ready = "ready"
@@ -159,6 +161,7 @@ class Entry(BaseModel):
     dispatch_verb: Optional[str] = None
     dispatch_brief: Optional[str] = None
     plan_path: Optional[str] = None
+    company_work: Optional[CompanyWorkRefs] = None
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
     # Follow-up PRs shipped against the same node (e.g. wrap-up + review-fix
