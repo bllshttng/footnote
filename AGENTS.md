@@ -64,6 +64,16 @@ Before concluding "no callers left", verify the search found something it should
 - graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
 - added: 2026-07-27
 
+### A failed commit under a codex sandbox is not data loss
+
+codex `workspace-write` marks `<project_root>/.git` read-only, so every `git add` fails on `index.lock` - in a plain repo, and doubly in a linked worktree whose gitdir sits at `<repo>/.git/worktrees/<name>/`, outside the workspace entirely.
+When a commit fails there, read the real worktree's `git log` before concluding anything: a metadata clone under `/tmp` answers `git cat-file` from a DIFFERENT repo, so "Not a valid object name" came back for four commits that had in fact landed, and the worker emitted a STOP for data loss that never happened.
+All three fno spawn lanes now pass `--add-dir <git-common-dir>`, so a surviving failure means an argv fno did not build - a codex subagent, or a hand-run `codex`.
+
+- specimens: `cli/src/fno/agents/providers/codex.py` (`git_writable_args`), `cli/src/fno/agents/mux_spawn.py` (pane arm), `crates/fno-agents/src/provider.rs` (`git_writable`), `.codex/agents/*.toml` (`sandbox_mode = "workspace-write"` subagents, still uncovered).
+- graduates-to: a codex-spawn lint that fails a bounded codex argv missing the git grant, plus a first-write probe that refuses the spawn naming the gitdir instead of letting the worker discover it mid-task.
+- added: 2026-08-02
+
 ## Repository
 
 ```
