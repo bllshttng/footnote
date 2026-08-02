@@ -363,18 +363,6 @@ maybe_auto_worktree() {
 }
 maybe_auto_worktree   # self-gating: no-op unless code payload + main checkout
 
-# Admit the peer into a worktree WE own when it runs a different harness. The
-# guard refuses a foreign harness to catch an unaware human opening a second
-# CLI in live work; a peer we are deliberately dispatching is the opposite
-# case, and without this it is refused at its first Edit/Write/Bash. The
-# invitation rides on the claim rather than the peer's env because a claim is
-# on disk: it reaches the peer no matter which substrate launched it, and needs
-# no per-provider env plumbing. Best-effort - a non-owner writes nothing, and a
-# failure here must never block the spawn.
-if [[ -n "${CWD:-}" && -n "${PROVIDER:-}" ]]; then
-  ( cd "$CWD" 2>/dev/null && fno claim worktree-guard --invite "$PROVIDER" ) >/dev/null 2>&1 || true
-fi
-
 # ---- Spawn (subscription lane only) -------------------------------------
 # Run the GENUINE verb. claude `spawn` builds `claude --bg --name <name> <msg>`
 # client-side (Group 1 ab-8b3e4fe0 moved the create off `ask`); codex/gemini

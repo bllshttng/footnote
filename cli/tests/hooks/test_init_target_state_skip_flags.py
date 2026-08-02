@@ -86,7 +86,7 @@ case "$1" in
   worktree) exit 0 ;;                     # worktree policy -> 0; hook reads stdout (empty => harness-native default)
   claim)
     case "$2" in
-      status|session-pid|acquire|worktree-guard) exit 0 ;;  # all -> 0 in bare env
+      status|session-pid|acquire) exit 0 ;;  # all -> 0 in bare env
       *) exit 1 ;;
     esac ;;
   *) exit 1 ;;
