@@ -9,6 +9,7 @@ cd "$(git rev-parse --show-toplevel)/cli"
 # environment. It cuts both ways: src/fno/events/schema.yaml exists, so the
 # schema assertions would PASS from source even if the wheel shipped nothing.
 unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL: PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
 uv sync --quiet
 uv build --quiet
 ls dist/*.whl >/dev/null

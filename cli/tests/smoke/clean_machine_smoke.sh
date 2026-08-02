@@ -22,6 +22,14 @@
 # Usage: clean_machine_smoke.sh <path-to-wheel>
 set -uo pipefail
 
+# Scrubbed FIRST, before anything is installed or run: every check below reads
+# the INSTALLED wheel, and an inherited PYTHONPATH pointing at cli/src puts the
+# source tree ahead of it on sys.path, so this smoke would pass on a wheel that
+# shipped nothing. scripts/ci/preflight.sh exports exactly that, and it already
+# cost test_build.sh two false wheel-defect reports before it got this same line.
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
+
 WHEEL="${1:?usage: clean_machine_smoke.sh <wheel>}"
 # Absolutise before we cd away to a repo-less working dir.
 WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"

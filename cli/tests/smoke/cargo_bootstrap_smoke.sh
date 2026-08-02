@@ -25,6 +25,14 @@
 # the launch-gated required check. This smoke proves the mechanism now.
 set -uo pipefail
 
+# Scrubbed FIRST, before anything is provisioned or run: the shim provisions the
+# wheel and then runs its console script, which uses the tool venv's interpreter
+# - but an inherited PYTHONPATH still prepends the source tree to sys.path, so
+# the provisioned run would answer from cli/src on a wheel that shipped nothing.
+# scripts/ci/preflight.sh exports exactly that.
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
+
 WHEEL="${1:?usage: cargo_bootstrap_smoke.sh <binary-complete-wheel>}"
 WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"
 [ -f "$WHEEL" ] || { echo "FAIL[input] wheel not found: $WHEEL"; exit 1; }
