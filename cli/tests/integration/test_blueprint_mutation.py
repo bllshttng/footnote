@@ -8,6 +8,7 @@ Each test maps to an acceptance criterion from the lean-blueprint plan.
 from __future__ import annotations
 
 import hashlib
+import re
 import shutil
 import subprocess
 import sys
@@ -412,16 +413,36 @@ class TestAC1ERR:
         assert "ready" in result.stderr, f"Expected 'ready' in stderr: {result.stderr}"
         assert "rewrite" in result.stderr, f"Expected 'rewrite' in stderr: {result.stderr}"
 
-    def test_in_progress_exits_1_even_with_rewrite(self, tmp_path):
-        """AC1-ERR: status=in_progress exits 1 even with --rewrite."""
+    def test_in_progress_with_execution_strategy_exits_1_even_with_rewrite(self, tmp_path):
+        """AC1-ERR: a doc that really is past blueprint exits 1 even with --rewrite."""
         doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
-        # Manually set status to in_progress
+        # Blueprint it first, so the doc genuinely carries an execution draft.
+        first = _run_mutate(doc, "--mode", "greenfield")
+        assert first.returncode == 0, f"Setup failed: {first.stderr}"
         text = doc.read_text(encoding="utf-8")
-        text = text.replace("status: design", "status: in_progress")
+        text = re.sub(r"(?m)^status:.*$", "status: in_progress", text, count=1)
         doc.write_text(text, encoding="utf-8")
         result = _run_mutate(doc, "--mode", "greenfield", "--rewrite")
         assert result.returncode == 1, \
-            f"Expected exit 1 for in_progress status, got {result.returncode}"
+            f"Expected exit 1 for a blueprinted in_progress doc, got {result.returncode}"
+
+    def test_in_progress_without_execution_strategy_is_still_blueprintable(self, tmp_path):
+        """`in_progress` alone is NOT proof that blueprint ran.
+
+        `fno target init` acquiring a node claim projects `in_progress` onto the
+        plan doc along a forward-only axis, so the documented /target design-rung
+        branch (init, then blueprint) would refuse itself: holding the claim needed
+        to work the node made the node unblueprintable, and resetting the doc did
+        not persist. The artifact is the evidence, which the sibling test above
+        pins; the bare status token is not.
+        """
+        doc = _copy_fixture(GREENFIELD_FIXTURE, tmp_path)
+        text = doc.read_text(encoding="utf-8")
+        text = text.replace("status: design", "status: in_progress")
+        doc.write_text(text, encoding="utf-8")
+        result = _run_mutate(doc, "--mode", "greenfield")
+        assert result.returncode == 0, \
+            f"Expected exit 0 for a claim-stamped doc with no draft, got {result.returncode}\nstderr: {result.stderr}"
 
 
 # ---------------------------------------------------------------------------

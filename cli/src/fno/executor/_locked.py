@@ -43,13 +43,21 @@ _LOCKED_HEADING_RE = re.compile(r"^##[ \t]+locked[ \t]+decisions")
 # Mirrors awk's `/^##[[:space:]]/` (a `## ` heading).
 _H2_RE = re.compile(r"^##[ \t]")
 
-# grep -oEi 'executor[[:space:]]*:[[:space:]]*[a-zA-Z_-]+'
-_EXECUTOR_KV_RE = re.compile(r"executor[ \t]*:[ \t]*[a-zA-Z_-]+", re.IGNORECASE)
+# grep -oEi 'executor[[:space:]]*:[[:space:]]*[a-zA-Z_-]+', plus a ``\**`` after
+# the colon so a bold-wrapped key (``**Executor:** do``) reaches its value -
+# the same tolerance ``_MODEL_KV_RE`` already grants ``**Model:** fable``.
+_EXECUTOR_KV_RE = re.compile(
+    r"executor[ \t]*:[ \t]*\**[ \t]*[a-zA-Z_-]+", re.IGNORECASE
+)
 # sed -E 's/^[Ee][Xx]...[Rr][[:space:]]*:[[:space:]]*//' (strip the leading key).
-_EXECUTOR_PREFIX_RE = re.compile(r"^executor[ \t]*:[ \t]*", re.IGNORECASE)
+_EXECUTOR_PREFIX_RE = re.compile(r"^executor[ \t]*:[ \t]*\**[ \t]*", re.IGNORECASE)
 
 # is_routing_header: strip leading list markers ("- ", "1. ", "* ") then a
 # leading "**", then require ^\*?\*?executor[[:space:]]+routing\*?\*?[[:space:]]*: .
+# The wording the documented mixed shape always carries ("per-task overrides").
+# This is what separates it from rationale prose that merely names both values.
+_OVERRIDE_SHAPE_RE = re.compile(r"overrid(?:e|es|ing)\b|per-task\b", re.IGNORECASE)
+
 _LIST_MARKER_RE = re.compile(r"^[ \t]*([0-9]+\.|[-*])[ \t]*")
 _LEADING_BOLD_RE = re.compile(r"^\*\*")
 _ROUTING_HEADER_RE = re.compile(
@@ -58,6 +66,15 @@ _ROUTING_HEADER_RE = re.compile(
 # New-list-item detection inside the buffering loop:
 # grep -qE '^[[:space:]]*([0-9]+\.|[-*])[[:space:]]+\*?\*?'
 _NEW_LIST_ITEM_RE = re.compile(r"^[ \t]*([0-9]+\.|[-*])[ \t]+\*?\*?")
+
+# A Locked Decision that names the executor directly rather than through the
+# two-word "Executor routing" head, e.g. ``5. **Executor: `do` (archer/TDD).**``.
+# Anchored at line start (after an optional list marker and bold run) so a prose
+# ``the executor: impeccable resolver`` mention inside the section is still not a
+# lock; ``parse_locked_model`` already accepts the same shape for ``Model:``.
+_BARE_EXECUTOR_ENTRY_RE = re.compile(
+    r"^[ \t]*(?:[0-9]+\.|[-*])?[ \t]*\**executor\**[ \t]*:", re.IGNORECASE
+)
 
 
 def _extract_section(text: str) -> str:
@@ -88,30 +105,52 @@ def _extract_section(text: str) -> str:
 
 
 def _extract_value(block: str) -> str:
-    """Find the LAST ``executor:<value>`` in ``block``; return the lowercase
-    value if canonical (do|impeccable|mixed), else ''.
+    """Resolve one entry's ``executor:<value>`` to a canonical value, or ''.
 
-    Mirrors the bash ``extract_value``: drop backticks, grep the last
-    ``executor: <value>`` (case-insensitive), strip the key prefix, lowercase,
-    filter to the canonical three.
+    ``block`` is a SINGLE buffered entry. The documented mixed shape - "plan-level
+    ``executor: do`` with per-task overrides ``executor: impeccable``" - resolves
+    to ``mixed``, because taking the last value there would return ``impeccable``
+    and route the whole plan through the frontend pipeline, the more expensive of
+    the two mistakes.
+
+    Two canonical values alone do NOT prove that shape. The whole buffered entry
+    is scanned, rationale included, so a decision that names its rejected option
+    ("``executor: do``, not the rejected ``executor: impeccable``") or its history
+    ("changed from ``executor: impeccable`` to ``executor: do``") also carries two
+    values while having plainly chosen one. Require the override wording that the
+    real shape always states; otherwise fall through to last-wins, which preserves
+    the stated choice. An explicit ``executor: mixed`` is canonical and needs no
+    inference.
+
+    Otherwise this mirrors the bash ``extract_value``: drop backticks, take the
+    LAST ``executor: <value>`` (case-insensitive), strip the key prefix,
+    lowercase, and filter to the canonical three. Last-wins still decides
+    ACROSS entries, which the caller's per-entry buffering keeps separate.
     """
     block = block.replace("`", "")
     matches = _EXECUTOR_KV_RE.findall(block)
     if not matches:
         return ""
-    val = _EXECUTOR_PREFIX_RE.sub("", matches[-1]).lower()
-    return val if val in _CANONICAL else ""
+    values = [_EXECUTOR_PREFIX_RE.sub("", m).lower() for m in matches]
+    if (
+        len({v for v in values if v in _CANONICAL}) > 1
+        and _OVERRIDE_SHAPE_RE.search(block) is not None
+    ):
+        return "mixed"
+    return values[-1] if values[-1] in _CANONICAL else ""
 
 
-def _is_routing_header(line: str) -> bool:
-    """Return True if ``line`` opens an "Executor routing" entry.
+def _is_entry_head(line: str) -> bool:
+    """Return True if ``line`` opens a locked executor entry.
 
-    Strip leading list markers and a leading ``**``, then require the
-    ``executor routing:`` head (bold variants and plain prefix accepted).
+    Two shapes qualify: the "Executor routing" head /think is prompted to emit,
+    and a bare ``Executor:`` decision naming the value directly.
     """
-    line = _LIST_MARKER_RE.sub("", line)
-    line = _LEADING_BOLD_RE.sub("", line)
-    return _ROUTING_HEADER_RE.search(line) is not None
+    if _BARE_EXECUTOR_ENTRY_RE.match(line):
+        return True
+    stripped = _LIST_MARKER_RE.sub("", line)
+    stripped = _LEADING_BOLD_RE.sub("", stripped)
+    return _ROUTING_HEADER_RE.search(stripped) is not None
 
 
 def parse_locked_executor(text: str) -> str:
@@ -144,7 +183,7 @@ def parse_locked_executor(text: str) -> str:
         lines = lines[:-1]
 
     for line in lines:
-        if _is_routing_header(line):
+        if _is_entry_head(line):
             # Flush any prior buffered entry first.
             _flush()
             buffer = line
@@ -161,7 +200,7 @@ def parse_locked_executor(text: str) -> str:
                 _flush()
                 buffer = ""
                 # Re-evaluate this line in case it's another routing header.
-                if _is_routing_header(line):
+                if _is_entry_head(line):
                     buffer = line
                 continue
             buffer = buffer + "\n" + line
