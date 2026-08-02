@@ -207,6 +207,25 @@ def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Pa
     assert saved["future_graph_field"] == {"kept": True}
 
 
+def test_graph_store_persists_normalized_company_work(tmp_path: Path) -> None:
+    from fno.graph.store import locked_mutate_graph
+
+    company_work = _refs().model_dump(mode="json")
+    company_work["work_order"]["node_id"] = " x-e9a3 "
+    company_work["work_order"]["attempt_id"] = " attempt-1 "
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps({"entries": [{"id": "x-e9a3", "company_work": company_work}]})
+        + "\n"
+    )
+
+    locked_mutate_graph(graph, lambda entries: entries)
+
+    saved = json.loads(graph.read_text())["entries"][0]["company_work"]
+    assert saved["work_order"]["node_id"] == "x-e9a3"
+    assert saved["work_order"]["attempt_id"] == "attempt-1"
+
+
 def test_legacy_graph_entry_remains_valid() -> None:
     entry = Entry(id="x-legacy")
 
