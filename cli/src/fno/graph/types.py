@@ -7,9 +7,11 @@ from __future__ import annotations
 import datetime as _dt
 import math
 from enum import Enum
-from typing import Optional
+from typing import Optional, Self
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+
+from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 
 
 class Status(str, Enum):
@@ -159,6 +161,7 @@ class Entry(BaseModel):
     dispatch_verb: Optional[str] = None
     dispatch_brief: Optional[str] = None
     plan_path: Optional[str] = None
+    company_work: Optional[CompanyWorkRefs] = None
     pr_number: Optional[int] = None
     pr_url: Optional[str] = None
     # Follow-up PRs shipped against the same node (e.g. wrap-up + review-fix
@@ -291,6 +294,11 @@ class Entry(BaseModel):
                 # SchemaUnavailableError, KeyError, AttributeError) must propagate loudly.
                 pass
         return data
+
+    @model_validator(mode="after")
+    def _company_work_matches_entry_id(self) -> Self:
+        validate_company_work_for_node(self.company_work, self.id, owner="graph entry id")
+        return self
 
     @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field over property
     @property

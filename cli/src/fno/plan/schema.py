@@ -18,10 +18,11 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
+from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
 # Str-enum built directly from the status axis + terminals. Functional API so
@@ -91,6 +92,7 @@ class PlanFrontmatter(BaseModel):
     # would graduate a plan with no URLs; the stamp/set-expected writers already
     # reject < 1, and this makes validate catch the same corrupt frontmatter.
     expected_url_count: int | None = Field(default=None, ge=1)
+    company_work: CompanyWorkRefs | None = None
 
     @field_validator("status", mode="before")
     @classmethod
@@ -112,3 +114,8 @@ class PlanFrontmatter(BaseModel):
         if isinstance(v, bool):
             return str(v).lower()
         return STATUS_ALIASES.get(v, v) if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _company_work_matches_plan_node(self) -> Self:
+        validate_company_work_for_node(self.company_work, self.node, owner="plan node")
+        return self

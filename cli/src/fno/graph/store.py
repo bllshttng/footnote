@@ -778,6 +778,19 @@ def locked_mutate_graph(path: Path, mutator) -> list[dict]:
         # in the .bak _create_backup takes just before the write.
         _dropped = len(raw) - len(entries)
         entries = mutator(entries)
+        from fno.company.contracts import validate_company_work_for_node
+
+        for entry in entries:
+            if not isinstance(entry, dict) or entry.get("company_work") is None:
+                continue
+            entry_id = entry.get("id")
+            if not isinstance(entry_id, str):
+                raise ValueError("company_work graph entry requires a string id")
+            refs = validate_company_work_for_node(
+                entry["company_work"], entry_id, owner="graph entry id"
+            )
+            assert refs is not None
+            entry["company_work"] = refs.model_dump(mode="json", exclude_unset=True)
         # Slug assignment (ab-f82e8083). Runs on EVERY persisted mutation so any
         # node-creating path (intake / add / idea / decompose / advance) and any
         # legacy pre-slug node gets a stable, unique, title-derived handle under
