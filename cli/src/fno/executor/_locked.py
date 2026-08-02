@@ -101,19 +101,27 @@ def _extract_section(text: str) -> str:
 
 
 def _extract_value(block: str) -> str:
-    """Find the LAST ``executor:<value>`` in ``block``; return the lowercase
-    value if canonical (do|impeccable|mixed), else ''.
+    """Resolve one entry's ``executor:<value>`` to a canonical value, or ''.
 
-    Mirrors the bash ``extract_value``: drop backticks, grep the last
-    ``executor: <value>`` (case-insensitive), strip the key prefix, lowercase,
-    filter to the canonical three.
+    ``block`` is a SINGLE buffered entry. Two distinct canonical values inside
+    one entry is the documented mixed shape - "plan-level ``executor: do`` with
+    per-task overrides ``executor: impeccable``" - so it resolves to ``mixed``.
+    Taking the last value there would return ``impeccable`` and route the whole
+    plan through the frontend pipeline, the more expensive of the two mistakes.
+
+    Otherwise this mirrors the bash ``extract_value``: drop backticks, take the
+    LAST ``executor: <value>`` (case-insensitive), strip the key prefix,
+    lowercase, and filter to the canonical three. Last-wins still decides
+    ACROSS entries, which the caller's per-entry buffering keeps separate.
     """
     block = block.replace("`", "")
     matches = _EXECUTOR_KV_RE.findall(block)
     if not matches:
         return ""
-    val = _EXECUTOR_PREFIX_RE.sub("", matches[-1]).lower()
-    return val if val in _CANONICAL else ""
+    values = [_EXECUTOR_PREFIX_RE.sub("", m).lower() for m in matches]
+    if len({v for v in values if v in _CANONICAL}) > 1:
+        return "mixed"
+    return values[-1] if values[-1] in _CANONICAL else ""
 
 
 def _is_entry_head(line: str) -> bool:
