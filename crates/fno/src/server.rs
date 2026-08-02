@@ -5772,11 +5772,16 @@ impl Core {
                         // pane arrives here as a bare release (the client
                         // re-hit-tests every report), and an ordinary cross-pane
                         // selection would launch a browser (codex P2, PR 702).
+                        // TAKE, not read: a stored press authorizes exactly one
+                        // gesture. Left un-consumed it also authorizes any LATER
+                        // unmatched release at the same cell - and unmatched
+                        // releases do reach here, because a press swallowed as
+                        // chrome client-side never cancels it (codex, PR 702).
                         let clicked = self
                             .clients
-                            .iter()
+                            .iter_mut()
                             .find(|c| c.id == client_id)
-                            .and_then(|c| c.last_press)
+                            .and_then(|c| c.last_press.take())
                             == Some((pane, event.row, event.col));
                         if clicked {
                             if let Some(url) = self

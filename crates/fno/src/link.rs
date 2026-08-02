@@ -109,13 +109,18 @@ fn scheme_at(chars: &[char], i: usize) -> Option<usize> {
     })
 }
 
+/// The longest URL we will act on. Also bounds the soft-wrap walk in
+/// [`crate::vt::Pane::link_at`]: a walk that stops short of this while the line
+/// is still wrapping has only a PREFIX, and a prefix of a URL is a different
+/// URL, so the two limits have to agree.
+pub const MAX_URL_LEN: usize = 4096;
+
 /// Whether `url` may be handed to the platform opener.
 ///
 /// Rejects anything outside [`OPENABLE_SCHEMES`], anything carrying whitespace
 /// or a control character (an argv element with a newline is how a "URL"
 /// becomes two arguments to something downstream), and anything absurdly long.
 pub fn is_openable(url: &str) -> bool {
-    const MAX_URL_LEN: usize = 4096;
     if url.len() > MAX_URL_LEN {
         return false;
     }

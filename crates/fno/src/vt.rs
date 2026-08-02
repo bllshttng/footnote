@@ -430,7 +430,7 @@ impl Pane {
         {
             return crate::link::is_openable(&uri).then_some(uri);
         }
-        let (text, points) = self.logical_line(point.line);
+        let (text, points) = self.logical_line(point.line)?;
         let idx = points.iter().position(|p| *p == point)?;
         let (start, end) = crate::link::find_urls(&text)
             .into_iter()
@@ -447,31 +447,44 @@ impl Pane {
     /// so linkifying one row at a time would find two broken halves. alacritty
     /// marks a soft wrap by setting `WRAPLINE` on the LAST cell of the row that
     /// wrapped, which is what both walks test.
-    fn logical_line(&self, line: Line) -> (String, Vec<Point>) {
-        /// How far the join may reach in either direction. A URL spanning more
-        /// than this many rows is not one anybody typed, and the cap keeps a
-        /// screenful of wrapped output from turning one click into a full scan.
-        const MAX_WRAP_ROWS: i32 = 8;
-
+    /// Returns `None` when the join hit its row cap while the line was STILL
+    /// wrapping: the collected text is then a prefix, and a prefix of a URL is a
+    /// different URL that `find_urls` would happily accept and open. Refusing is
+    /// the only safe answer (codex, PR 702).
+    fn logical_line(&self, line: Line) -> Option<(String, Vec<Point>)> {
         let grid = self.term.grid();
         let cols = self.cols as usize;
         let last = Column(cols.saturating_sub(1));
         let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
 
+        // Reach far enough that the longest URL we would act on still fits, so
+        // the walk and `is_openable`'s length bound agree. Deriving it from the
+        // pane width rather than fixing it at 8 rows is what stops a narrow
+        // split from truncating a URL that a wide one resolves fine. Still a
+        // cap: one click must not scan an entire scrollback.
+        let max_rows = (crate::link::MAX_URL_LEN / cols.max(1)) as i32 + 2;
+
         // Up while the row ABOVE wraps into this one; down while THIS row wraps.
         let mut start = line.0;
         while start > top
-            && line.0 - start < MAX_WRAP_ROWS
+            && line.0 - start < max_rows
             && grid[Line(start - 1)][last].flags.contains(Flags::WRAPLINE)
         {
             start -= 1;
         }
         let mut end = line.0;
         while end < bot
-            && end - line.0 < MAX_WRAP_ROWS
+            && end - line.0 < max_rows
             && grid[Line(end)][last].flags.contains(Flags::WRAPLINE)
         {
             end += 1;
+        }
+        // Stopped on the cap rather than on a real line end: we hold a fragment.
+        let truncated_above =
+            start > top && grid[Line(start - 1)][last].flags.contains(Flags::WRAPLINE);
+        let truncated_below = end < bot && grid[Line(end)][last].flags.contains(Flags::WRAPLINE);
+        if truncated_above || truncated_below {
+            return None;
         }
 
         let mut text = String::new();
@@ -493,7 +506,7 @@ impl Pane {
                 points.push(Point::new(l, Column(c)));
             }
         }
-        (text, points)
+        Some((text, points))
     }
 
     // -- Block navigation (x-38c4) ---------------------------------------------
@@ -1665,6 +1678,29 @@ mod tests {
         );
     }
 
+    #[test]
+    fn link_at_returns_the_whole_url_not_a_prefix_when_it_wraps_past_the_old_cap() {
+        // codex, PR 702. The cap was a fixed 8 rows, so a URL wrapping further
+        // was cut WHILE STILL WRAPPING and find_urls treated the collected
+        // prefix as a complete URL. is_openable accepts a prefix - it is a
+        // well-formed http URL - so a click opened a DIFFERENT address than the
+        // one on screen, which is worse than opening nothing.
+        //
+        // 20 columns and a 200-char URL is 10 rows: past the old 8-row cap, and
+        // the click sits on row 0 so the scheme is inside the window either way.
+        // That is what makes prefix-vs-whole the thing under test rather than
+        // detected-vs-not.
+        let url = format!("https://example.com/{}", "a".repeat(180));
+        assert!(url.len() > 20 * 8, "must outrun the old cap");
+        let mut pane = Pane::new(14, 20);
+        pane.feed(url.as_bytes());
+
+        assert_eq!(
+            pane.link_at(0, 0).as_deref(),
+            Some(url.as_str()),
+            "a wrapped URL must resolve whole; a prefix is a different address"
+        );
+    }
     #[test]
     fn link_at_reads_an_osc8_hyperlink_whose_text_is_not_a_url() {
         // OSC 8 with display text that looks nothing like a link: only the URI
