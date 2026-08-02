@@ -36,7 +36,6 @@ from fno.graph.render import (  # noqa: F401
     _kanban_column,
     _kanban_card,
     _graph_sort_key,
-    _lane_sort_key,
     _project_key,
     UNSCOPED_LABEL,
 )

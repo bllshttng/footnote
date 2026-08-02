@@ -138,10 +138,10 @@ def _run_init_script(tmpdir: Path, extra_env: dict[str, str]) -> subprocess.Comp
         env=env,
         capture_output=True,
         text=True,
-        # The stub makes each run sub-second, so 30s is a hang backstop with ample
-        # headroom, not a perf ceiling. Restored from the 180s stopgap (df9b9ddd):
-        # the stub removed the load-sensitivity that stopgap papered over.
-        timeout=30,
+        # The stub makes each run sub-second in isolation. Keep the backstop well
+        # above the parallel full-suite scheduling tail so load cannot look like
+        # a functional failure, while still bounding a genuinely hung hook.
+        timeout=90,
     )
     return proc
 

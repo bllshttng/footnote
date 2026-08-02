@@ -7,80 +7,56 @@ status: accepted
 
 ## Overview
 
-Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the
-self-contained HTML board) - render from one shared ordering engine so they can
-never drift. A column's cards are ordered by a single lane key that clusters by
-project (swimlanes), floats hand-curated cards to the front (rank), and falls
-back to today's priority order. The HTML board additionally draws per-project
-sub-lane dividers and a soft WIP-cap count per column.
+Both backlog boards - `graph.md` (Obsidian Kanban) and `fno backlog view` (the self-contained HTML board) - and the work selector consume one ordering function.
+The board calls `_intake.make_selection_sort_key(entries, swimlane=True)` and selection calls the same function with `swimlane=False`.
+The HTML board additionally draws per-project sub-lane dividers and a soft WIP-cap count per column.
 
-Both boards are auto-rendered on every backlog mutation, inside
-`locked_mutate_graph` (after `_write_json`). That placement is the load-bearing
-constraint for the whole feature: **a renderer exception must never abort a
-backlog mutation**, so every new read on the render path is defensive.
+Both boards are auto-rendered on every backlog mutation inside `locked_mutate_graph`, after `_write_json`.
+That placement is load-bearing: **a renderer exception must never abort a backlog mutation**, so every derived read on the render path is defensive.
 
-## The shared lane key
+## The shared order key
 
-`render._lane_sort_key(entry)` is the single sort key both renderers use for
-non-Done columns:
+`_intake.make_selection_sort_key` returns this logical key for unranked work:
 
 ```
-(_lane_order_key(project), _rank_band(entry), _graph_sort_key(entry))
+[project lane] -> rank band -> live-epic child tier -> in-progress live epic -> live epic priority -> epic created_at -> child priority -> orphan-last -> created_at
 ```
 
-- `_lane_order_key(project)` -> `(project == UNSCOPED_LABEL, project)`: named
-  projects sort alphabetically, the `(unscoped)` lane sorts last.
-- `_rank_band(entry)` -> `(0, float(rank))` when `rank` is a finite, non-bool
-  number, else `(1, 0.0)`. Ranked cards (band 0, ascending rank) precede
-  unranked cards (band 1). `math.isfinite` excludes NaN/inf so the key stays a
-  total order (a NaN would compare False both ways and silently mis-order).
-- `_graph_sort_key(entry)` -> `(priority_rank, created_at)`: the pre-existing
-  fallback, unchanged.
+The optional project-lane prefix is present only when `swimlane=True`.
+Named projects sort alphabetically and `(unscoped)` sorts last, preserving contiguous board swimlanes without teaching global selection an alphabetical project preference.
 
-`_project_key` and `UNSCOPED_LABEL` were hoisted from `render_html.py` into
-`render.py` (the shared module) so both renderers import one definition.
+`_rank_band(entry)` returns `(0, float(rank))` for a finite, non-bool number and `(1, 0.0)` otherwise.
+Ranked cards precede unranked cards, ascending by rank, and NaN, infinity, booleans, and overflowing integers degrade to unranked so the key remains a total order.
 
-Rank is therefore scoped per `(column, project)` lane: "web's #1 in Now" is
-independent of "etl's #1 in Now". Rank never changes a node's column -
-`render._kanban_column` remains the sole column authority; rank only orders
-within a column.
+An epic contributes its tier, in-progress signal, priority, and grouping timestamp only while it is a real `type: epic` row that is not completed, done, superseded, or deferred.
+Its in-progress signal includes a child with persisted completion/session state or a live lockfile claim, and each consumer binds one claim snapshot into both ordering and column routing.
+Terminal field markers (`completed_at`, `superseded_by`, and `deferred_at`) also win over a stale persisted `ready` status.
+A child of a missing, malformed, or terminal parent is a loose-node equivalent and sorts on its own priority.
+
+Rank remains scoped per `(column, project)` lane: "web's #1 in Now" is independent of "etl's #1 in Now".
+Rank never changes a node's column.
+`render._kanban_column` remains the sole column authority, while the renderer supplies an effective priority that may promote a child to its live epic's higher priority but never demote a child already above its epic.
+`render.make_kanban_column(entries)` binds that projection together with the in-progress-epic and live-claim overlays so renderers, rank lane validation, and WIP counts delegate the same whole-graph context to `_kanban_column`.
 
 ## Board order == work order
 
-Board order and work order are one ordering. The lane key above orders
-the **board** (the Obsidian Kanban + the HTML board), and *selection* - what
-`fno backlog next` returns, and therefore what `/megawalk`, the active-backlog
-daemon, and a `/target <id>` walk pick up - shares the **same** `_rank_band`
-term. So "top of the board" means "worked next."
+Board order and work order share the whole decision suffix rather than only the rank term.
+The Obsidian board, HTML master board, HTML project boards, public roadmap, `fno backlog next`, `fno backlog ready`, `/megawalk`, and the active-backlog daemon all call `make_selection_sort_key`.
+No renderer carries an independent priority/created-at fallback that can drift from the walker.
 
-Selection uses `make_selection_sort_key` (`cli/src/fno/graph/_intake.py`):
+The project prefix is an explicit display exception.
+Default `fno backlog next` is project-scoped, so its order matches that project's board lane.
+`fno backlog next --all` intentionally omits the prefix and compares work globally, while the master board remains grouped into visible project swimlanes.
 
-```
-rank band  ->  epics-first  ->  priority (pN)  ->  created_at
-```
+Consequences:
 
-The `rank band` is `_rank_band` from `cli/src/fno/graph/_constants.py` - the
-ONE helper both the board lane key (`render._lane_sort_key`) and the selection
-key import, so the two can never drift (this section's old "board lies about
-work order" gap is closed). It returns `(0, rank)` for a finite rank and
-`(1, 0.0)` otherwise, so ranked nodes (band 0, ascending rank) precede all
-unranked nodes (band 1). Consequences:
-
-- **`rank` changes what runs next.** `fno backlog rank <id> --top` floats a card
-  to the top of its swimlane on the board AND makes the walker / daemon pick it
-  first. An explicit rank overrides the epics-first heuristic (a ranked loose
-  node beats an in-progress epic's children - Locked Decision 1).
-- **Priority is still the lever for unranked work.** Among unranked nodes
-  (no `rank` set), selection is byte-for-byte the prior epics-first -> priority
-  -> created_at order, so `fno backlog reprioritize <id> p0` remains the way to
-  promote a node you have not explicitly ranked. Epic *children* outrank loose
-  nodes (Locked Decision 7) only within the unranked band.
-- **Rank is per-`(column, project)` lane.** Selection is project-scoped
-  (`fno backlog next [--project P]`), so rank orders within the project's ready
-  set, matching the board's per-`(column, project)` swimlane rank; it never
-  reorders across projects. `fno backlog update` does NOT clear `rank`, so a
-  moved node keeps its rank in the new lane's ranked band; run
-  `fno backlog rank <id> --clear` to rejoin the unranked flow.
+- **`rank` changes what runs next.** `fno backlog rank <id> --top` floats a card to the top of its swimlane on the board and makes the walker or daemon pick it first.
+  An explicit rank overrides the epics-first heuristic, so a ranked loose node beats an in-progress epic's children.
+- **Priority is still the lever for unranked work.** Among unranked nodes, the shared suffix keeps the epics-first, live-epic priority, child priority, orphan-last, and creation-time terms.
+  `fno backlog reprioritize <id> p0` remains the way to promote an unranked node, and reprioritizing a live epic can promote its lower-priority children into the same board column without rewriting those children.
+- **Rank is per-`(column, project)` lane.** Selection is project-scoped by default (`fno backlog next [--project P]`), so rank orders within the project's ready set and matches the board's swimlane rank.
+  It never reorders across projects, and `fno backlog update` does not clear `rank`.
+  A moved node keeps its rank in the new lane's ranked band; run `fno backlog rank <id> --clear` to rejoin the unranked flow.
 
 ## The rank model
 
@@ -117,10 +93,9 @@ raises *before* the locked write so no partial rank is ever persisted.
 `render_html._board_html` gained two optional behaviors, used only by the master
 board (per-project sections render unchanged):
 
-- **Sub-lanes** (`sublanes=True`): a lightweight `<div class="lane">` divider
-  before each project's run of cards, emitted only in multi-project columns
-  (a single-project column stays clean). Cards are pre-sorted by the lane key,
-  so the divider-on-project-change yields contiguous, labeled runs.
+- **Sub-lanes** (`sublanes=True`): a lightweight `<div class="lane">` divider before each project's run of cards, emitted only in multi-project columns.
+  A single-project column stays clean.
+  Cards are pre-sorted by the shared key, so the divider-on-project-change yields contiguous, labeled runs.
 - **WIP cap** (`caps`): each column `<summary>` shows `<count> / <cap>` with an
   `.over` class when the count exceeds the cap; uncapped columns show the plain
   count.
@@ -154,10 +129,11 @@ tracked as a follow-up, not built here.
 1. Rank is per-`(column, project)` lane, not per-column.
 2. WIP count/cap is HTML-board-only; md headings stay clean.
 3. `fno backlog rank` is the ranking surface (no fzf drag-reorder).
-4. `rank` is a nullable float, ordered ahead of the `(priority, created_at)`
-   fallback within a lane.
+4. `rank` is a nullable float, ordered ahead of the unranked shared-order suffix within a lane.
 5. Rank never changes a node's column.
 6. Done is untouched (history, capped at 10, sorted by `completed_at`).
+7. A live epic can promote a child's effective board priority but can never demote a higher-priority child.
+8. Completed, done, superseded, deferred, missing, and non-epic parents confer no ordering or column priority.
 
 See the design doc (in the maintainers' vault) for the full
 spec, acceptance criteria, and discretion notes.

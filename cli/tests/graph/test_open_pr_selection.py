@@ -76,7 +76,9 @@ def graph_file(tmp_path, monkeypatch):
 
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: path)
     # Never consult the real global claims root from a unit test.
-    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.cli._live_claimed_node_ids", lambda **_kwargs: set()
+    )
     return write
 
 

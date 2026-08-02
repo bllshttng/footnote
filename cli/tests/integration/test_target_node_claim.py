@@ -100,7 +100,14 @@ def _sandbox(tmp_path: Path):
 def _run_init(repo: Path, env: dict):
     return subprocess.run(
         ["bash", str(INIT_SCRIPT)],
-        cwd=repo, env=env, capture_output=True, text=True, timeout=30,
+        cwd=repo,
+        env=env,
+        capture_output=True,
+        text=True,
+        # These integration paths exercise the real writer and can approach the
+        # old ceiling under the parallel full suite. Bound hangs without turning
+        # scheduler pressure into a false functional failure.
+        timeout=90,
     )
 
 

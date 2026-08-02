@@ -17,12 +17,11 @@ changing the field that drives its placement:
 
 | What you see | What controls it |
 |--------------|------------------|
-| **Column** (Now / Next / Later / Triage / Done) | priority + lifecycle status (claimed, queued, done, deferred) |
+| **Column** (Now / Next / Later / Triage / Done) | `_kanban_column` over lifecycle overlays plus live-epic effective priority |
 | **Swimlane** (the per-project cluster inside a column) | `project` |
-| **Position within a lane** | `rank` (curated), else `(priority, created_at)` |
+| **Position within a lane** | `rank` (curated), else the shared epic-aware work-order suffix |
 
-`_kanban_column` is the sole column authority; `rank` never changes a card's
-column.
+`_kanban_column` is the sole column authority, `make_kanban_column(entries)` binds its whole-graph overlays, and `rank` never changes a card's column.
 
 ## Creating nodes
 

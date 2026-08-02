@@ -8,6 +8,10 @@ shelling `fno backlog ready`; the claims root is isolated to `tmp_path`.
 """
 from __future__ import annotations
 
+import json
+
+import pytest
+
 from fno.backlog import advance
 from fno.claims.lanes import acquire_lane_slot, active_lane_count, find_lane_slot
 
@@ -237,8 +241,6 @@ def test_mission_scope_reaches_ready_query(tmp_path, monkeypatch):
 
 def test_cli_ready_mission_filter(tmp_path, monkeypatch):
     """`fno backlog ready --mission` mirrors `next`'s mission_id filter."""
-    import json
-
     from typer.testing import CliRunner
 
     from fno.graph import cli as gcli
@@ -256,7 +258,7 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
         encoding="utf-8",
     )
     monkeypatch.setattr(gcli, "_graph_path", lambda: path)
-    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(gcli, "_live_claimed_node_ids", lambda **_kwargs: set())
 
     res = CliRunner().invoke(gcli.cli, ["ready", "--all", "--mission", "m-7"])
     assert res.exit_code == 0, res.output
@@ -265,11 +267,6 @@ def test_cli_ready_mission_filter(tmp_path, monkeypatch):
 
 
 # --- dispatch-time collision gate ----------------------------------------
-
-
-import json
-
-import pytest
 
 
 @pytest.fixture(autouse=True)

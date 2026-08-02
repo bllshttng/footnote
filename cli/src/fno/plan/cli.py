@@ -402,7 +402,7 @@ def folder_audit(
     "rung",
     hidden=True,
     help=(
-        "Print a plan's readiness rung and both policy verdicts. Exit 0 when the "
+        "Print a plan's readiness rung and dispatch-policy verdict. Exit 0 when the "
         "plan is dispatchable, 1 when it is not (including unreadable), 2 on a "
         "usage error. The single readiness authority for shell callers."
     ),
@@ -424,7 +424,7 @@ def rung(
     dependency; the exit code carries the dispatchable verdict so the common
     case stays a one-liner with no parsing at all.
     """
-    from fno.graph.ladder import Rung, is_dispatchable, is_selectable, plan_rung
+    from fno.graph.ladder import Rung, is_dispatchable, plan_rung
 
     if not plan_path:
         typer.echo("fno plan rung: a plan path is required", err=True)
@@ -438,7 +438,6 @@ def rung(
 
     r = plan_rung(entry)
     typer.echo(f"rung={r.value}")
-    typer.echo(f"selectable={'true' if is_selectable(entry) else 'false'}")
     typer.echo(f"dispatchable={'true' if is_dispatchable(entry) else 'false'}")
     if r is Rung.UNREADABLE:
         typer.echo(

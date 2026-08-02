@@ -21,15 +21,14 @@ import zlib
 from collections import Counter
 from pathlib import Path
 
+import fno.graph.render as graph_render
 from fno.graph.render import (
     KANBAN_COLUMNS,
     UNSCOPED_LABEL,
     _kanban_column,
-    _lane_sort_key,
     _orphan_ids,
     _project_key,
-    in_progress_epic_ids,
-    live_claimed_node_ids,
+    make_kanban_classifiers,
 )
 
 # Shared single source of truth with the markdown renderer (render.KANBAN_COLUMNS)
@@ -200,13 +199,18 @@ def _column_for(
     entry: dict,
     epics: frozenset[str] = frozenset(),
     live_claimed: frozenset[str] = frozenset(),
+    effective_priority: str | None = None,
 ) -> str | None:
     """Stable column name for an entry; None to exclude (roadmap type)."""
-    return _kanban_column(entry, epics, live_claimed)
+    return _kanban_column(entry, epics, live_claimed, effective_priority)
 
 
 def _bucket(
-    entries: list[dict], orphans: frozenset[str] | None = None
+    entries: list[dict],
+    orphans: frozenset[str] | None = None,
+    *,
+    ordering_entries: list[dict] | None = None,
+    live_claimed: frozenset[str] | None = None,
 ) -> dict[str, list[dict]]:
     """Partition entries into the kanban columns, sorted per column.
 
@@ -215,13 +219,17 @@ def _bucket(
     whose parent epic sits in another project has no reachable ancestor inside
     a project-scoped slice, so computing it from the subset invents orphans.
     """
-    epics = in_progress_epic_ids(entries)
-    live_claimed = frozenset(live_claimed_node_ids())
     if orphans is None:
         orphans = _orphan_ids(entries)
+    ordering_source = ordering_entries if ordering_entries is not None else entries
+    board_order, column_for = make_kanban_classifiers(
+        ordering_source,
+        orphans,
+        live_claimed=live_claimed,
+    )
     cols: dict[str, list[dict]] = {c: [] for c in COLUMNS}
     for e in entries:
-        col = _column_for(e, epics, live_claimed)
+        col = column_for(e)
         if col is None:
             continue
         cols[col].append(e)
@@ -232,9 +240,7 @@ def _bucket(
             # so revealing it via the toggle should show the full history.
             items.sort(key=lambda e: e.get("completed_at", ""), reverse=True)
         else:
-            # Shared lane key: cluster by project, ranked-before-unranked, then
-            # the (priority, created_at) fallback - same order as the md board.
-            items.sort(key=lambda e: _lane_sort_key(e, orphans))
+            items.sort(key=board_order)
     return cols
 
 
@@ -421,7 +427,7 @@ def _board_html(
     per-project sections pass None for a plain count). ``sublanes`` emits a
     per-project divider before each project's run of cards, but only in a
     multi-project column (a single-project column emits none - AC2-EDGE).
-    Cards are pre-sorted by the shared lane key, so a divider on each
+    Cards are pre-sorted by the shared work-order key, so a divider on each
     project change yields contiguous, labeled runs.
     """
     orphans = _orphan_ids(list(id_to_entry.values()))
@@ -708,6 +714,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     ``fno.graph._constants.GRAPH_HTML`` without having to also
     patch this module's import-cached reference.
     """
+    entries = [e for e in entries if isinstance(e, dict)]
     if path is None:
         from fno.graph._constants import GRAPH_HTML as _CURRENT_GRAPH_HTML
         path = _CURRENT_GRAPH_HTML
@@ -715,6 +722,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     statuses, projects = _stats(entries)
     vault = _load_obsidian_vault()
     caps = _load_wip_caps()
+    live_claimed = frozenset(graph_render.live_claimed_node_ids())
 
     parts: list[str] = []
     parts.append("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">")
@@ -738,7 +746,7 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     parts.append('<label class="toggle"><input type="checkbox" id="show-done"> Show done</label>')
     parts.append("</header>")
 
-    master = _bucket(entries)
+    master = _bucket(entries, live_claimed=live_claimed)
     master_total = sum(len(items) for items in master.values())
     parts.append(
         f'<details class="board-section" id="master" open>'
@@ -758,7 +766,12 @@ def render_graph_html(entries: list[dict], path: Path | None = None) -> None:
     all_orphans = _orphan_ids(entries)
     for project in project_order:
         proj_entries = [e for e in entries if _project_key(e) == project]
-        cols = _bucket(proj_entries, all_orphans)
+        cols = _bucket(
+            proj_entries,
+            all_orphans,
+            ordering_entries=entries,
+            live_claimed=live_claimed,
+        )
         chip_color = _project_color(None if project == UNSCOPED_LABEL else project)
         summary = (
             f'<summary><span class="chip" style="background:{chip_color}">'

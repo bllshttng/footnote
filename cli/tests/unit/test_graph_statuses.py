@@ -5,7 +5,11 @@ from datetime import datetime, timezone, timedelta
 
 import pytest
 
-from fno.graph.statuses import recompute_statuses, is_stale_lock
+from fno.graph.statuses import (
+    is_stale_lock,
+    live_claimed_node_ids,
+    recompute_statuses,
+)
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -52,6 +56,17 @@ def test_ac2_err_is_stale_lock_bad_timestamp():
     """AC2-ERR: unparseable timestamp is treated as stale."""
     e = _entry("ab-44444444", session_id="sess-001", claimed_at="not-a-date")
     assert is_stale_lock(e) is True
+
+
+def test_live_claim_read_can_fail_open_for_display_or_raise_for_mutation(monkeypatch):
+    def unavailable(*args, **kwargs):
+        raise OSError("claims unavailable")
+
+    monkeypatch.setattr("fno.claims.core.list_claims", unavailable)
+
+    assert live_claimed_node_ids() == set()
+    with pytest.raises(OSError, match="claims unavailable"):
+        live_claimed_node_ids(strict=True)
 
 
 # -- recompute_statuses --
@@ -294,11 +309,10 @@ def test_unresolvable_plan_path_stays_ready_not_idea():
     Folding those together would demote every foreign relative-path node to
     `idea` and hide it from the board.
     """
-    from fno.graph.ladder import Rung, is_selectable, plan_rung
+    from fno.graph.ladder import Rung, plan_rung
 
     e = _entry("ab-norelat1", plan_path="plans/somewhere.md")  # no cwd anchor
     assert plan_rung(e) is Rung.UNREADABLE
-    assert is_selectable(e) is True
     assert recompute_statuses([e])[0]["status"] == "ready"
 
 

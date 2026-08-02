@@ -296,6 +296,56 @@ def test_roadmap_html_escapes_and_filters(tmp_graph, tmp_path):
     assert "Shipped" in body  # Done column relabeled
 
 
+def test_roadmap_uses_live_epic_priority_and_shared_order(
+    tmp_graph, tmp_path, monkeypatch
+):
+    import fno.graph.render as render
+
+    monkeypatch.setattr(render, "live_claimed_node_ids", lambda: {"ab-claimed1"})
+    _seed(tmp_graph, [
+        {"id": "ab-live0001", "title": "Live epic", "type": "epic",
+         "status": "ready", "priority": "p1", "project": "fno"},
+        {"id": "ab-child001", "title": "Promoted child", "status": "ready",
+         "priority": "p2", "project": "fno", "public": True,
+         "parent": "ab-live0001"},
+        {"id": "ab-loose001", "title": "Loose now", "status": "ready",
+         "priority": "p1", "project": "fno", "public": True},
+        {"id": "ab-dead0001", "title": "Dead epic", "type": "epic",
+         "status": "superseded", "priority": "p0", "project": "fno"},
+        {"id": "ab-child002", "title": "Unpromoted child", "status": "ready",
+         "priority": "p2", "project": "fno", "public": True,
+         "parent": "ab-dead0001"},
+        {"id": "ab-active01", "title": "Active epic", "type": "epic",
+         "status": "ready", "priority": "p2", "project": "fno", "public": True},
+        {"id": "ab-done001", "title": "Done child", "status": "done",
+         "priority": "p2", "project": "fno", "parent": "ab-active01",
+         "completed_at": "2026-01-01T00:00:00Z"},
+        {"id": "ab-claimed1", "title": "Claimed later", "status": "ready",
+         "priority": "p3", "project": "fno", "public": True},
+    ])
+
+    md = runner.invoke(app, ["backlog", "roadmap", "--project", "fno"]).stdout
+    md_now = md.split("## Now", 1)[1].split("## Next", 1)[0]
+    md_next = md.split("## Next", 1)[1]
+    assert md_now.index("Promoted child") < md_now.index("Loose now")
+    assert "Active epic" in md_now
+    assert "Claimed later" in md_now
+    assert "Unpromoted child" in md_next
+
+    hp = tmp_path / "roadmap-order.html"
+    result = runner.invoke(
+        app, ["backlog", "roadmap", "--project", "fno", "--html", str(hp)]
+    )
+    assert result.exit_code == 0, result.output
+    body = hp.read_text()
+    html_now = body.split('data-col="Now"', 1)[1].split('data-col="Next"', 1)[0]
+    html_next = body.split('data-col="Next"', 1)[1].split('data-col="Later"', 1)[0]
+    assert html_now.index("Promoted child") < html_now.index("Loose now")
+    assert "Active epic" in html_now
+    assert "Claimed later" in html_now
+    assert "Unpromoted child" in html_next
+
+
 def test_roadmap_html_omits_internal_status_flags(tmp_graph, tmp_path):
     # Public HTML must not leak live-board workflow flags (codex P2 on PR #48):
     # a blocked / plan-less node would otherwise render `blocked`/`needs plan`.

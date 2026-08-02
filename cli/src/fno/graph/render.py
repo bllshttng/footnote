@@ -7,9 +7,16 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Collection
 from pathlib import Path
 
-from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band
+from fno.graph._constants import GRAPH_MD, PRIORITY_ORDER, _rank_band as _rank_band
+from fno.graph._intake import (
+    UNSCOPED_LABEL as UNSCOPED_LABEL,
+    _project_key,
+    make_effective_priority,
+    make_selection_sort_key,
+)
 from fno.graph.statuses import live_claimed_node_ids
 
 # Canonical Kanban column order, left to right. Single source of truth for both
@@ -18,12 +25,6 @@ from fno.graph.statuses import live_claimed_node_ids
 # board. Now leads (genuine today-work), Triage holds the awaiting-ack queue,
 # Done is terminal.
 KANBAN_COLUMNS = ("Now", "Next", "Later", "Triage", "Done")
-
-# Lane label for a node with no project. Shared single source of truth for both
-# renderers (render_html imports it) so the swimlane grouping label can never
-# drift between the markdown board and the HTML board.
-UNSCOPED_LABEL = "(unscoped)"
-
 
 def _graph_sort_key(e: dict) -> tuple:
     """Sort key for graph entries: priority (p0 first), then creation time.
@@ -35,23 +36,6 @@ def _graph_sort_key(e: dict) -> tuple:
     never backfills created_at, so null values reach here from real graph.json rows.
     """
     return (PRIORITY_ORDER.get(e.get("priority", "p2"), 2), e.get("created_at") or "")
-
-
-def _project_key(entry: dict) -> str:
-    """Normalize a node's project for swimlane grouping.
-
-    Missing/empty/whitespace -> UNSCOPED_LABEL. Shared by both renderers
-    (hoisted from render_html so render.py can reuse it for the lane key).
-    """
-    proj = entry.get("project")
-    if isinstance(proj, str) and proj.strip():
-        return proj
-    return UNSCOPED_LABEL
-
-
-def _lane_order_key(project: str) -> tuple:
-    """Order lanes within a column: named projects alphabetical, unscoped last."""
-    return (project == UNSCOPED_LABEL, project)
 
 
 def _orphan_ids(entries: list[dict]) -> frozenset[str]:
@@ -69,31 +53,10 @@ def _orphan_ids(entries: list[dict]) -> frozenset[str]:
         return frozenset()
 
 
-def _lane_sort_key(entry: dict, orphans: frozenset[str] = frozenset()) -> tuple:
-    """Shared within-column ordering key, consumed by both renderers.
-
-    Orders a column's cards by ``(project_lane, rank_band, priority,
-    orphan_last, created_at)``: cluster by project, then ranked-before-unranked
-    (ascending rank), then priority, then mission-linked before orphan, then
-    ``created_at``. Rank is therefore scoped per ``(column, project)`` lane.
-
-    The orphan term sits AFTER priority, so it only ever breaks a tie within a
-    priority band - a p0 orphan still outranks a p1 mission-linked node. Pass
-    ``orphans`` (from ``rollup.orphan_ids``) to enable it; the default empty set
-    reproduces the pre-rollup ordering exactly, which is what callers that do
-    not care about rollup get.
-    """
-    priority, created_at = _graph_sort_key(entry)
-    return (
-        _lane_order_key(_project_key(entry)),
-        _rank_band(entry),
-        priority,
-        entry.get("id") in orphans,
-        created_at,
-    )
-
-
-def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
+def in_progress_epic_ids(
+    entries: list[dict],
+    live_claimed: Collection[str] = frozenset(),
+) -> frozenset[str]:
     """Parent ids whose work is underway: an epic with a done or claimed child.
 
     Sessions claim the leaf CHILDREN of an epic, never the container, so an
@@ -103,23 +66,16 @@ def in_progress_epic_ids(entries: list[dict]) -> frozenset[str]:
     ``claimed => session_id`` invariant holds (x-33b2). Mirrors the epics-first
     in-progress signal in ``_intake.make_selection_sort_key``.
     """
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pid = e.get("parent")
-        if isinstance(pid, str):
-            children_by_parent.setdefault(pid, []).append(e)
-    return frozenset(
-        pid for pid, kids in children_by_parent.items()
-        if any(k.get("completed_at") or k.get("status") == "in_progress" for k in kids)
-    )
+    from fno.graph._intake import in_progress_epic_ids as _shared_epic_ids
+
+    return _shared_epic_ids(entries, live_claimed)
 
 
 def _kanban_column(
     entry: dict,
     in_progress_epics: frozenset[str] = frozenset(),
     live_claimed: frozenset[str] = frozenset(),
+    effective_priority: str | None = None,
 ) -> str | None:
     """Return the kanban column for a graph entry, or None to exclude.
 
@@ -148,11 +104,12 @@ def _kanban_column(
         return None
     if status == "in_progress":
         return "Now"
+    entry_id = entry.get("id")
     # In-progress epic (x-33b2): a container with a done/claimed child has no
     # claim of its own (sessions claim the children) but is genuinely underway,
     # so surface it in Now. The set is derived from children by the caller; the
     # epic's `status` stays honest (never a claim without a session_id).
-    if entry.get("id") in in_progress_epics:
+    if isinstance(entry_id, str) and entry_id in in_progress_epics:
         return "Now"
     # Live-claim overlay (x-4845): a node another session is actively driving
     # holds a LIVE `node:<id>` lockfile but may never write a graph session_id,
@@ -161,7 +118,7 @@ def _kanban_column(
     # graph `status` is never mutated (x-33b2: claimed => session_id stays a
     # pure derivation). Additive: placed below the exclusions so a dead/off-board
     # node is never resurrected, and it only ever promotes to Now.
-    if entry.get("id") in live_claimed:
+    if isinstance(entry_id, str) and entry_id in live_claimed:
         return "Now"
     # Queued is orthogonal to status (the field stays set across blocked,
     # idea, etc.). It routes to the Triage lane - a queued node is "awaiting
@@ -170,12 +127,58 @@ def _kanban_column(
     # and stays in Now even when also queued.
     if entry.get("queued_at"):
         return "Triage"
-    priority = entry.get("priority") or "p2"
+    priority = effective_priority or entry.get("priority") or "p2"
     if priority in ("p0", "p1"):
         return "Now"
     if priority == "p3":
         return "Later"
     return "Next"
+
+
+def make_kanban_column(
+    entries: list[dict],
+    live_claimed: Collection[str] | None = None,
+    *,
+    strict_claims: bool = False,
+):
+    """Bind whole-graph overlays into the sole kanban column authority."""
+    if live_claimed is None:
+        live_claimed = frozenset(live_claimed_node_ids(strict=strict_claims))
+    else:
+        live_claimed = frozenset(live_claimed)
+    in_progress_epics = in_progress_epic_ids(entries, live_claimed)
+    priority_for = make_effective_priority(entries)
+
+    def column_for(entry: dict) -> str | None:
+        return _kanban_column(
+            entry,
+            in_progress_epics,
+            live_claimed,
+            priority_for(entry),
+        )
+
+    return column_for
+
+
+def make_kanban_classifiers(
+    entries: list[dict],
+    orphans: frozenset[str] | None = None,
+    *,
+    swimlane: bool = True,
+    live_claimed: Collection[str] | None = None,
+):
+    """Bind one live-claim snapshot into board ordering and column routing."""
+    if live_claimed is None:
+        live_claimed = frozenset(live_claimed_node_ids())
+    else:
+        live_claimed = frozenset(live_claimed)
+    board_order = make_selection_sort_key(
+        entries,
+        orphans,
+        swimlane=swimlane,
+        live_claimed=live_claimed,
+    )
+    return board_order, make_kanban_column(entries, live_claimed)
 
 
 def _kanban_card(
@@ -243,9 +246,10 @@ def render_graph_md(
 
     Columns: Now (claimed / p0-p1), Next (p2), Later (p3),
     Triage (queued, awaiting human ack), Done (completed). Within each
-    non-Done column, cards sort by the shared lane key (project, then
-    ranked-before-unranked, then priority, then created_at) so per-project
-    clusters are contiguous. Done sorts by completed_at (capped at 10).
+    non-Done column, cards use the same selection key as the walker with an
+    added project-lane prefix, so per-project clusters are contiguous without
+    maintaining a second work-order suffix. Done sorts by completed_at (capped
+    at 10).
 
     ``obsidian`` (default True, preserving prior behavior) controls the
     Obsidian Kanban plugin scaffolding: the ``kanban-plugin: board``
@@ -258,14 +262,14 @@ def render_graph_md(
     don't crash a successful JSON write. Programmer bugs like KeyError
     or TypeError propagate so they're visible in development.
     """
+    entries = [e for e in entries if isinstance(e, dict)]
     id_to_entry = {e["id"]: e for e in entries if isinstance(e.get("id"), str)}
 
-    epics = in_progress_epic_ids(entries)
-    live_claimed = frozenset(live_claimed_node_ids())
     orphans = _orphan_ids(entries)
+    board_order, column_for = make_kanban_classifiers(entries, orphans)
     columns: dict[str, list[dict]] = {col: [] for col in KANBAN_COLUMNS}
     for entry in entries:
-        col = _kanban_column(entry, epics, live_claimed)
+        col = column_for(entry)
         if col is None:
             continue
         columns[col].append(entry)
@@ -277,7 +281,7 @@ def render_graph_md(
             items.sort(key=lambda e: e.get("completed_at") or "", reverse=True)
             del items[10:]
         else:
-            items.sort(key=lambda e: _lane_sort_key(e, orphans))
+            items.sort(key=board_order)
 
     lines: list[str] = ["---", "kanban-plugin: board", "---", ""] if obsidian else []
     for col in KANBAN_COLUMNS:

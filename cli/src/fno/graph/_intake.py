@@ -10,7 +10,7 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from typing import Literal, Optional, TypedDict, Union
+from typing import Collection, Literal, Optional, TypedDict, Union
 
 from fno.graph._constants import (
     LEDGER_JSON, PRIORITY_ORDER, is_wellformed_node_id, mint_node_id, _rank_band,
@@ -21,6 +21,7 @@ from fno.graph.depends import (
     _resolve_depends_on,
     _derive_title,
 )
+from fno.graph.statuses import VALID_STATUSES
 
 
 # Source-field vocabulary for nodes intaked from a plan. Both spellings
@@ -224,16 +225,142 @@ def _graph_sort_key_fn(e: dict) -> tuple:
     return (PRIORITY_ORDER.get(e.get("priority", "p2"), 2), e.get("created_at", ""))
 
 
-def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str]] = None):
+UNSCOPED_LABEL = "(unscoped)"
+
+
+def _project_key(entry: dict) -> str:
+    """Normalize a node's project for swimlane grouping."""
+    proj = entry.get("project")
+    if isinstance(proj, str) and proj.strip():
+        return proj
+    return UNSCOPED_LABEL
+
+
+def _lane_order_key(project: str) -> tuple:
+    """Order named project lanes alphabetically and the unscoped lane last."""
+    return (project == UNSCOPED_LABEL, project)
+
+
+_TERMINAL_EPIC_STATUSES = frozenset({"done", "superseded", "deferred"})
+
+
+def _priority_name(entry: dict) -> str:
+    """Return a canonical priority, degrading malformed values to p2."""
+    priority = entry.get("priority")
+    return priority if isinstance(priority, str) and priority in PRIORITY_ORDER else "p2"
+
+
+def _sort_text(value: object) -> str:
+    """Normalize a graph value into a comparable sort-key string."""
+    return value if isinstance(value, str) else ""
+
+
+def _has_terminal_marker(entry: dict, field: str) -> bool:
+    """Match the graph's truthy terminal-marker semantics for malformed rows."""
+    return bool(entry.get(field))
+
+
+def _live_epic_for(node: object, id_to_entry: dict[str, dict]) -> dict | None:
+    """Return the node's live epic parent, or None when it has none."""
+    if not isinstance(node, dict):
+        return None
+    parent_id = node.get("parent")
+    epic = id_to_entry.get(parent_id) if isinstance(parent_id, str) else None
+    if epic is None or epic.get("type") != "epic":
+        return None
+    epic_priority = epic.get("priority")
+    if not isinstance(epic_priority, str) or epic_priority not in PRIORITY_ORDER:
+        return None
+    status = epic.get("status")
+    if status is not None and (
+        not isinstance(status, str) or status not in VALID_STATUSES
+    ):
+        return None
+    created_at = epic.get("created_at")
+    if created_at is not None and not isinstance(created_at, str):
+        return None
+    if (
+        (isinstance(status, str) and status in _TERMINAL_EPIC_STATUSES)
+        or _has_terminal_marker(epic, "completed_at")
+        or _has_terminal_marker(epic, "superseded_by")
+        or _has_terminal_marker(epic, "deferred_at")
+    ):
+        return None
+    return epic
+
+
+def in_progress_epic_ids(
+    entries: list[dict],
+    live_claimed: Collection[str] = frozenset(),
+) -> frozenset[str]:
+    """Return live epic ids with a completed or claimed child."""
+    id_to_entry = {
+        entry["id"]: entry
+        for entry in entries
+        if isinstance(entry, dict) and isinstance(entry.get("id"), str)
+    }
+    result: set[str] = set()
+    for child in entries:
+        if not isinstance(child, dict):
+            continue
+        child_id = child.get("id")
+        if not (
+            child.get("completed_at")
+            or child.get("status") in ("done", "in_progress")
+            or child.get("session_id")
+            or (isinstance(child_id, str) and child_id in live_claimed)
+        ):
+            continue
+        epic = _live_epic_for(child, id_to_entry)
+        if epic is not None:
+            result.add(epic["id"])
+    return frozenset(result)
+
+
+def make_effective_priority(entries: list[dict]):
+    """Build the board-priority projection shared with live-epic ordering.
+
+    A live epic can only promote a child; a child already above its epic keeps
+    its own priority. Missing, malformed, and terminal parents are loose-node
+    equivalents. The returned value is read-only and never mutates either row.
+    """
+    id_to_entry = {
+        e["id"]: e
+        for e in entries
+        if isinstance(e, dict) and isinstance(e.get("id"), str)
+    }
+
+    def priority_for(node: object) -> str:
+        if not isinstance(node, dict):
+            return "p2"
+        child_priority = _priority_name(node)
+        epic = _live_epic_for(node, id_to_entry)
+        if epic is None:
+            return child_priority
+        epic_priority = _priority_name(epic)
+        if PRIORITY_ORDER[epic_priority] < PRIORITY_ORDER[child_priority]:
+            return epic_priority
+        return child_priority
+
+    return priority_for
+
+
+def make_selection_sort_key(
+    entries: list[dict],
+    orphans: Optional[frozenset[str]] = None,
+    *,
+    swimlane: bool = False,
+    live_claimed: Collection[str] = frozenset(),
+):
     """Build the rank-then-epics-first selection sort key (Locked Decision 7, C3).
 
-    Returns a key function for sorting *ready candidates* by selection
-    precedence: curated ``rank`` first, then epics-first, then flat priority.
-    The key prepends the SAME ``_rank_band`` term the board lane key uses
-    (``render._lane_sort_key``), so a ``fno backlog rank --top`` node is
-    *worked* next, not merely floated on the board - board order and work
-    order share one rank definition and cannot drift (Locked
-    Decision 4). A ranked node (band 0, ascending rank) outranks every
+    Returns the one key function for sorting board cards and ready candidates.
+    ``swimlane=True`` prepends the project lane used by renderers; the remaining
+    suffix is byte-identical to selection precedence: curated ``rank`` first,
+    then epics-first, then flat priority.
+    The key always includes the same ``_rank_band`` term, so a ``fno backlog
+    rank --top`` node is *worked* next, not merely floated on the board.
+    A ranked node (band 0, ascending rank) outranks every
     unranked node, so an explicit rank overrides the epics-first heuristic;
     with no ranks set every node shares the ``(1, 0.0)`` band and ordering is
     byte-for-byte today's epics-first behavior. A node is an "epic child"
@@ -267,46 +394,36 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
             orphans = orphan_ids(entries)
         except Exception:  # noqa: BLE001 - ordering signal; never break selection
             orphans = frozenset()
-    children_by_parent: dict[str, list[dict]] = {}
-    for e in entries:
-        if not isinstance(e, dict):
-            continue
-        pid = e.get("parent")
-        if pid:
-            children_by_parent.setdefault(pid, []).append(e)
-    # An epic is "in progress" when any of its children is done or claimed.
-    epic_in_progress: dict[str, bool] = {
-        pid: any(
-            kid.get("status") == "done" or kid.get("session_id")
-            for kid in kids
-        )
-        for pid, kids in children_by_parent.items()
-    }
+    epic_in_progress = in_progress_epic_ids(entries, live_claimed)
 
     def _prio(e: dict) -> int:
-        return PRIORITY_ORDER.get(e.get("priority", "p2"), 2)
+        return PRIORITY_ORDER[_priority_name(e)]
 
-    def key(node: dict) -> tuple:
+    def key(node: object) -> tuple:
         # Curated rank leads: the SAME `_rank_band` the board uses,
         # prepended so a `rank --top` node (band 0, ascending rank) is selected
         # ahead of ALL unranked nodes (band 1) - including in-progress epic
         # children, so an explicit rank overrides the epics-first heuristic
         # (Locked Decision 1). Unranked nodes all share the `(1, 0.0)` band, so
         # the existing epics-first key below decides their order byte-for-byte.
+        if not isinstance(node, dict):
+            node = {}
+        lane = (_lane_order_key(_project_key(node)),) if swimlane else ()
         band = _rank_band(node)
         child_prio = _prio(node)
-        child_orphan = node.get("id") in orphans
-        child_created = node.get("created_at", "") or ""
+        node_id = node.get("id")
+        child_orphan = isinstance(node_id, str) and node_id in orphans
+        child_created = _sort_text(node.get("created_at"))
         pid = node.get("parent")
-        epic = id_to_entry.get(pid) if pid else None
+        epic = _live_epic_for(node, id_to_entry)
         if epic is not None:
-            in_progress_rank = 0 if (pid and epic_in_progress.get(pid)) else 1
-            return (
+            in_progress_rank = 0 if pid in epic_in_progress else 1
+            return lane + (
                 band,                    # curated rank band (ranked first)
                 0,                       # epic-children tier (before loose)
                 in_progress_rank,        # in-progress epics first
                 _prio(epic),             # highest-priority epic first
-                epic.get("created_at", "") or "",  # group one epic together
+                _sort_text(epic.get("created_at")),  # group one epic together
                 child_prio,
                 child_orphan,        # in-band: after priority, before created_at
                 child_created,
@@ -318,7 +435,7 @@ def make_selection_sort_key(entries: list[dict], orphans: Optional[frozenset[str
         # Decision fields lead: priority, then orphan-last, then created_at.
         # The trailing pair only pads the tuple to the epic branch's arity;
         # tier (index 1) already separates the two, so it is never compared.
-        return (
+        return lane + (
             band, 1, 0, child_prio, child_orphan, child_created,
             child_prio, child_created,
         )

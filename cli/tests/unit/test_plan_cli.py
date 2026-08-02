@@ -243,7 +243,7 @@ def test_rung_is_hidden_from_the_plan_menu():
 
 def test_AC1_HP_cli_verdict_matches_the_python_verdict(tmp_path):
     """The CLI is a face on plan_rung, not a second classifier."""
-    from fno.graph.ladder import is_dispatchable, is_selectable, plan_rung
+    from fno.graph.ladder import is_dispatchable, plan_rung
 
     for status in ("idea", "stub", "design", "ready", "in_review", "done"):
         p = tmp_path / f"{status}.md"
@@ -252,7 +252,7 @@ def test_AC1_HP_cli_verdict_matches_the_python_verdict(tmp_path):
         res = CliRunner().invoke(app, ["plan", "rung", str(p)])
 
         assert f"rung={plan_rung(entry).value}" in res.output
-        assert f"selectable={'true' if is_selectable(entry) else 'false'}" in res.output
+        assert "selectable=" not in res.output
         assert f"dispatchable={'true' if is_dispatchable(entry) else 'false'}" in res.output
         assert res.exit_code == (0 if is_dispatchable(entry) else 1)
 

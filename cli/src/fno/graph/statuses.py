@@ -225,7 +225,7 @@ def recompute_statuses(entries: list[dict]) -> list[dict]:
     return entries
 
 
-def live_claimed_node_ids() -> set[str]:
+def live_claimed_node_ids(*, strict: bool = False) -> set[str]:
     """Node ids that currently hold a LIVE ``node:<id>`` claim.
 
     The claim lockfile at ``~/.fno/claims/node:<id>`` is the liveness truth a
@@ -234,9 +234,10 @@ def live_claimed_node_ids() -> set[str]:
     the ``status`` derivation it complements — so both selection (graph/cli.py)
     and the board renderers can overlay it without a cli<->render import cycle.
 
-    Best-effort: any fault in the claims subsystem degrades to an empty set so
-    neither selection nor rendering ever breaks on it (identical to
-    pre-enforcement behavior). Only LIVE claims count; stale/released ones do not.
+    Best-effort by default: any fault in the claims subsystem degrades to an
+    empty set so display rendering never breaks on it. Mutation paths pass
+    ``strict=True`` and fail closed rather than persisting from fabricated
+    no-claim state. Only LIVE claims count; stale/released ones do not.
     """
     try:
         from fno.claims.core import list_claims
@@ -244,4 +245,6 @@ def live_claimed_node_ids() -> set[str]:
         live = list_claims(prefix="node:", include_stale=False, root=global_claims_root())
         return {c["key"].removeprefix("node:") for c in live if isinstance(c.get("key"), str)}
     except Exception:
+        if strict:
+            raise
         return set()

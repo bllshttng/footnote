@@ -6,21 +6,18 @@ vocabularies, with two of the answers using opposite failure policies and no
 file referencing another. This module is the single Python answer; the shell
 callers reach it through ``fno plan rung`` rather than re-parsing ``^status:``.
 
-Three names, one read:
+Three policies, one read:
 
 - :func:`plan_rung` - the classification. Never raises.
-- :func:`is_selectable` - may the daemon pick this node up on its own? Fails
-  OPEN on :attr:`Rung.UNREADABLE`.
 - :func:`is_dispatchable` - may a fresh-context worker be launched against this
   plan? Fails CLOSED on the same rung.
+- :func:`is_cold_dispatchable` - may the autonomous drain hand a plan-less idea
+  to target so target can author its plan?
 
-**The two policies disagree on purpose, permanently.** Selection must fail open
-because plans live in a symlinked vault: demoting on a read failure would
-quarantine the entire backlog the moment it unmounts. Dispatch must fail closed
-because building against an unreadable plan is worse than parking. Both are
-correct; the defect this module fixes was that they were scattered and
-undocumented relative to each other, not that they differ. A test asserts they
-disagree on ``UNREADABLE`` so a future "simplification" fails loudly.
+Autonomous selection reads ``plan_rung`` directly through its shared guards;
+there is no second selection predicate whose name can imply coverage it lacks.
+Dispatch fails closed because building against an unreadable plan is worse than
+parking.
 
 Derived per read rather than persisted into ``status``. A plan doc is external
 mutable state that ``/blueprint`` rewrites WITHOUT touching the graph, and
@@ -248,15 +245,6 @@ def plan_rung(entry: object) -> Rung:
     return _STATUS_TO_RUNG.get(canonical_status(raw), Rung.UNREADABLE)
 
 
-def is_selectable(entry: object) -> bool:
-    """May the daemon pick this node up on its own? FAILS OPEN.
-
-    False only for the two undesigned rungs. An unreadable plan stays
-    selectable on purpose: see the module docstring's fail-open argument.
-    """
-    return plan_rung(entry) not in UNSELECTABLE_RUNGS
-
-
 def is_dispatchable(entry: object) -> bool:
     """May a fresh-context worker be launched against this plan? FAILS CLOSED.
 
@@ -264,8 +252,7 @@ def is_dispatchable(entry: object) -> bool:
     idea (``Rung.NONE``) has no plan to launch against, so this returns False for
     it - but it IS cold-dispatchable; see :func:`is_cold_dispatchable`, the
     separate gate the autonomous drain uses. Everything else parks, including an
-    unreadable plan - the deliberate disagreement with :func:`is_selectable`,
-    which fails open on it.
+    unreadable plan.
     """
     return plan_rung(entry) in _DISPATCHABLE
 

@@ -6,17 +6,16 @@ titles + priority + size grouped into Now / Next / Later / Shipped.
 No node IDs, no plan paths, no cwd - nothing internal leaks. Safe to
 commit to a public OSS repo or host on a marketing site.
 
-Reuses the existing column mapping + lane ordering from ``render`` so
-the public roadmap can never drift from the real board.
+Reuses the existing column mapping and the shared board/work ordering function
+so the public roadmap cannot drift from the real board.
 """
 from __future__ import annotations
 
 import html as _html
 
 from fno.graph.render import (
-    _kanban_column,
-    _lane_sort_key,
     _project_key,
+    make_kanban_classifiers,
 )
 
 # Public-facing column set + labels. The internal Triage column (awaiting
@@ -28,20 +27,21 @@ _PUBLIC_COLUMNS = (("Now", "Now"), ("Next", "Next"), ("Later", "Later"), ("Done"
 def _public_entries(entries: list[dict], project: str) -> list[dict]:
     return [
         e for e in entries
-        if e.get("public") is True and _project_key(e) == project
+        if isinstance(e, dict) and e.get("public") is True and _project_key(e) == project
     ]
 
 
 def _columns(entries: list[dict], project: str) -> dict[str, list[dict]]:
     cols: dict[str, list[dict]] = {col: [] for col, _ in _PUBLIC_COLUMNS}
+    board_order, column_for = make_kanban_classifiers(entries)
     for e in _public_entries(entries, project):
-        col = _kanban_column(e)
+        col = column_for(e)
         if col == "Triage":  # fold the internal triage pile into Later
             col = "Later"
         if col in cols:
             cols[col].append(e)
     for items in cols.values():
-        items.sort(key=_lane_sort_key)
+        items.sort(key=board_order)
     return cols
 
 

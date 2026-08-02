@@ -65,7 +65,9 @@ def graph_file(tmp_path, monkeypatch):
         return path
 
     monkeypatch.setattr("fno.graph.cli._graph_path", lambda: path)
-    monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.cli._live_claimed_node_ids", lambda **_kwargs: set()
+    )
     return write
 
 

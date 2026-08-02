@@ -1,21 +1,18 @@
 """Unit tests for fno.graph.render - kanban rendering."""
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
-
 from fno.graph.render import (
     UNSCOPED_LABEL,
     _kanban_column,
     _kanban_card,
-    _lane_sort_key,
     _project_key,
     _rank_band,
     render_graph_md,
     _graph_sort_key,
     in_progress_epic_ids,
+    make_kanban_column,
 )
+from fno.graph._intake import make_selection_sort_key
 
 
 def _entry(eid: str, **kwargs) -> dict:
@@ -34,6 +31,10 @@ def _entry(eid: str, **kwargs) -> dict:
     }
     base.update(kwargs)
     return base
+
+
+def _lane_key(entries, orphans=frozenset()):
+    return make_selection_sort_key(entries, orphans, swimlane=True)
 
 
 # -- _kanban_column --
@@ -149,16 +150,55 @@ def test_ac1_hp_column_roadmap_excluded():
 
 def test_in_progress_epic_ids_detects_done_or_claimed_child():
     entries = [
-        _entry("ab-epic0001"),                                   # in-progress (claimed child)
+        _entry("ab-epic0001", type="epic"),                      # in-progress (claimed child)
         _entry("ab-kid00001", status="in_progress", parent="ab-epic0001"),
-        _entry("ab-epic0002"),                                   # in-progress (done child)
+        _entry("ab-epic0002", type="epic"),                      # in-progress (done child)
         _entry("ab-kid00002", completed_at="2026-01-01T00:00:00Z", parent="ab-epic0002"),
-        _entry("ab-epic0003"),                                   # NOT in progress (ready child)
+        _entry("ab-epic0003", type="epic"),                      # NOT in progress (ready child)
         _entry("ab-kid00003", parent="ab-epic0003"),
         _entry("ab-loose001"),                                   # not a parent at all
     ]
     ids = in_progress_epic_ids(entries)
     assert ids == frozenset({"ab-epic0001", "ab-epic0002"})
+
+
+def test_live_claimed_child_promotes_parent_epic_to_now(monkeypatch):
+    epic = _entry("ab-epic0004", type="epic", priority="p3")
+    child = _entry("ab-kid00004", parent=epic["id"], priority="p3")
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {child["id"]}
+    )
+
+    column_for = make_kanban_column([epic, child])
+
+    assert column_for(epic) == "Now"
+    assert column_for(child) == "Now"
+    assert epic["status"] == "ready"
+
+
+def test_in_progress_epic_signal_requires_a_live_epic_parent():
+    feature_parent = _entry("feature-parent", type="feature", priority="p2")
+    feature_child = _entry(
+        "feature-child",
+        parent="feature-parent",
+        status="done",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    dead_epic = _entry(
+        "dead-epic", type="epic", status="superseded", priority="p2"
+    )
+    dead_child = _entry(
+        "dead-child",
+        parent="dead-epic",
+        status="done",
+        completed_at="2026-01-01T00:00:00Z",
+    )
+    entries = [feature_parent, feature_child, dead_epic, dead_child]
+
+    assert in_progress_epic_ids(entries) == frozenset()
+    column_for = make_kanban_column(entries)
+    assert column_for(feature_parent) == "Next"
+    assert column_for(dead_epic) is None
 
 
 def test_column_in_progress_epic_goes_now():
@@ -175,6 +215,17 @@ def test_column_epic_not_in_progress_rides_priority():
     priority column like any other node (the promotion is in-progress only)."""
     epic = _entry("ab-epic0003", priority="p2")
     assert _kanban_column(epic, frozenset()) == "Next"
+
+
+def test_column_overlays_ignore_unhashable_malformed_id():
+    malformed = _entry("placeholder", priority="p2")
+    malformed["id"] = []
+
+    assert _kanban_column(
+        malformed,
+        frozenset({"active-epic"}),
+        frozenset({"claimed-node"}),
+    ) == "Next"
 
 
 def test_column_done_epic_stays_done_even_if_in_progress_set():
@@ -256,7 +307,8 @@ def test_lane_sort_key_clusters_by_project():
     web1 = _entry("ab-la000001", project="web")
     web2 = _entry("ab-la000002", project="web")
     etl1 = _entry("ab-la000003", project="etl")
-    ordered = sorted([web1, etl1, web2], key=_lane_sort_key)
+    entries = [web1, etl1, web2]
+    ordered = sorted(entries, key=_lane_key(entries))
     projs = [_project_key(e) for e in ordered]
     # each project's cards are contiguous (no interleaving)
     assert projs == ["etl", "web", "web"]
@@ -266,7 +318,8 @@ def test_lane_sort_key_unscoped_lane_sorts_last():
     """AC2-UI: the (unscoped) lane orders after every named project lane."""
     named = _entry("ab-la000010", project="zeta")
     unscoped = _entry("ab-la000011", project=None)
-    ordered = sorted([unscoped, named], key=_lane_sort_key)
+    entries = [unscoped, named]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [_project_key(e) for e in ordered] == ["zeta", UNSCOPED_LABEL]
 
 
@@ -275,7 +328,8 @@ def test_lane_sort_key_ranked_precedes_unranked_within_lane():
     even when the unranked card has higher priority."""
     ranked = _entry("ab-la000020", project="web", priority="p3", rank=0.0)
     unranked_hi = _entry("ab-la000021", project="web", priority="p0")
-    ordered = sorted([unranked_hi, ranked], key=_lane_sort_key)
+    entries = [unranked_hi, ranked]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [e["id"] for e in ordered] == ["ab-la000020", "ab-la000021"]
 
 
@@ -305,7 +359,8 @@ def test_lane_sort_key_total_order_with_nan_rank():
     """A NaN-ranked card does not break sorting (degrades to unranked band)."""
     nan_card = _entry("ab-rb000010", project="web", rank=float("nan"))
     ranked = _entry("ab-rb000011", project="web", rank=1.0)
-    ordered = sorted([nan_card, ranked], key=_lane_sort_key)  # must not raise
+    entries = [nan_card, ranked]
+    ordered = sorted(entries, key=_lane_key(entries))  # must not raise
     # the genuinely-ranked card leads; the NaN card falls to the unranked flow
     assert ordered[0]["id"] == "ab-rb000011"
 
@@ -313,7 +368,8 @@ def test_lane_sort_key_total_order_with_nan_rank():
 def test_lane_sort_key_ranked_orders_by_rank_ascending():
     a = _entry("ab-la000030", project="web", rank=2.0)
     b = _entry("ab-la000031", project="web", rank=1.0)
-    ordered = sorted([a, b], key=_lane_sort_key)
+    entries = [a, b]
+    ordered = sorted(entries, key=_lane_key(entries))
     assert [e["id"] for e in ordered] == ["ab-la000031", "ab-la000030"]
 
 
@@ -411,6 +467,73 @@ def test_ac2_hp_md_clusters_cards_by_project(tmp_path):
     assert (iw1 < iw2 < ie1) or (ie1 < iw1 < iw2)
 
 
+def test_md_board_uses_work_order_inside_project_lane(tmp_path):
+    """An epic child leads a loose peer exactly as selection orders them."""
+    entries = [
+        _entry(
+            "epic", title="Epic", type="epic", project="fno", priority="p1",
+            created_at="2026-01-01T00:00:00Z",
+        ),
+        _entry(
+            "child", title="Child", parent="epic", project="fno", priority="p1",
+            created_at="2026-03-01T00:00:00Z",
+        ),
+        _entry(
+            "loose", title="Loose", project="fno", priority="p1", orphan_ok="infra",
+            created_at="2026-01-01T00:00:00Z",
+        ),
+    ]
+    output = tmp_path / "graph.md"
+
+    render_graph_md(entries, output)
+
+    now_body = output.read_text().split("## Now", 1)[1].split("\n## ", 1)[0]
+    assert now_body.index("Child") < now_body.index("Loose")
+
+
+def test_live_epic_priority_promotes_child_column_without_mutation(tmp_path):
+    epic = _entry("epic", type="epic", priority="p1", status="ready")
+    child = _entry("child", parent="epic", priority="p2", status="ready")
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    content = output.read_text()
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    assert "`child`" in now_body
+    assert child["priority"] == "p2"
+
+
+def test_terminal_epic_priority_does_not_promote_child_column(tmp_path):
+    epic = _entry("epic", type="epic", priority="p1", status="superseded")
+    child = _entry("child", parent="epic", priority="p2", status="ready")
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    content = output.read_text()
+    now_body = content.split("## Now", 1)[1].split("\n## ", 1)[0]
+    next_body = content.split("## Next", 1)[1].split("\n## ", 1)[0]
+    assert "`child`" not in now_body
+    assert "`child`" in next_body
+
+
+def test_render_skips_non_dict_rows_without_aborting_write(tmp_path):
+    output = tmp_path / "graph.md"
+    render_graph_md([None, "poison", _entry("healthy", priority="p1")], output)
+    assert "`healthy`" in output.read_text()
+
+
+def test_render_degrades_malformed_epic_enrichment_without_aborting(tmp_path):
+    epic = _entry("epic", type="epic", status=[], priority=[], created_at=[])
+    child = _entry("child", parent="epic", priority=[], created_at=[])
+    output = tmp_path / "graph.md"
+
+    render_graph_md([epic, child], output)
+
+    assert "child" in output.read_text()
+
+
 def test_ac3_fr_md_headings_stay_clean(tmp_path):
     """AC3-FR: column headings stay exactly `## Now` (no count), so the
     Obsidian Kanban plugin keeps per-column state across re-renders."""
@@ -478,7 +601,9 @@ def test_overlay_does_not_resurrect_offboard():
 def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
     """AC: claims subsystem unreadable -> the helper returns an empty overlay
     (it swallows faults), so render still succeeds with status-only placement."""
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: set())
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: set()
+    )
     entries = [_entry("x-eeee", priority="p2")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)
@@ -488,7 +613,9 @@ def test_overlay_degrades_when_claims_unreadable(tmp_path, monkeypatch):
 def test_render_md_places_live_claimed_in_now(tmp_path, monkeypatch):
     """End-to-end: render_graph_md consults live_claimed_node_ids and places the
     claimed node under the Now column even though its priority is p3."""
-    monkeypatch.setattr("fno.graph.render.live_claimed_node_ids", lambda: {"x-ffff"})
+    monkeypatch.setattr(
+        "fno.graph.render.live_claimed_node_ids", lambda **_kwargs: {"x-ffff"}
+    )
     entries = [_entry("x-ffff", title="LiveNode", priority="p3")]
     output = tmp_path / "graph.md"
     render_graph_md(entries, output)

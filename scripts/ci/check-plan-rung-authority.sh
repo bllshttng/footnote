@@ -178,15 +178,18 @@ else
     note "OK: the rung table lives only in ladder.py"
 fi
 
-# The two policies must stay opposite. A future "simplification" that makes
-# is_selectable and is_dispatchable share one predicate would either quarantine
-# the backlog on a vault unmount or dispatch against unreadable plans.
-if ! grep -q 'def is_selectable' cli/src/fno/graph/ladder.py 2>/dev/null \
-    || ! grep -q 'def is_dispatchable' cli/src/fno/graph/ladder.py 2>/dev/null; then
-    violation "is_selectable and is_dispatchable must both exist in ladder.py" \
-        "They fail OPEN and CLOSED respectively; collapsing them is never a cleanup."
+# Dispatch policy stays explicit for both plan-bearing and plan-less nodes.
+# Autonomous selection reads plan_rung directly through selection_guards; a
+# second is_selectable predicate would be decorative because no selector calls it.
+if grep -q 'def is_selectable' cli/src/fno/graph/ladder.py 2>/dev/null; then
+    violation "is_selectable must not return as a decorative policy" \
+        "Autonomous selectors read plan_rung through selection_guards."
+elif ! grep -q 'def is_dispatchable' cli/src/fno/graph/ladder.py 2>/dev/null \
+    || ! grep -q 'def is_cold_dispatchable' cli/src/fno/graph/ladder.py 2>/dev/null; then
+    violation "both real dispatch policies must exist in ladder.py" \
+        "Expected is_dispatchable and is_cold_dispatchable."
 else
-    note "OK: both named policies are present"
+    note "OK: real dispatch policies are present and is_selectable is absent"
 fi
 
 echo ""
