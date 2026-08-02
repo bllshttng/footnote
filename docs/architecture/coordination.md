@@ -38,7 +38,6 @@ so the prefix's colon is filename-safe.
 | `walker:` | `megawalk-loop:<pid>` | megawalk singleton |
 | `fleet:` | `megatron-commander:<pid>` | megatron `run()` |
 | `project:` | `megatron-project:<mission>:<project>` | (reserved) per-project worker |
-| `worktree:` | `worktree-owner:<harness>` | worktree harness guard (see below) |
 | `user:` | (reserved) | (future) human-imposed locks |
 
 Holder shape is convention, not enforced. The verb-level invariants are:

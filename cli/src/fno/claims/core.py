@@ -158,8 +158,8 @@ def _make_claim(
         # can read a foreign owner off the claim. This is the PRODUCTION writer
         # (`fno claim` forwards to this Python CLI), kept in lockstep with the
         # Rust make_claim resolver via the shared harness_identity markers.
-        # An explicit `harness` (worktree guard) wins over the ambient env
-        # resolution so the caller can pin the owning harness deterministically.
+        # An explicit `harness` wins over ambient resolution so callers can pin
+        # the owning harness deterministically.
         harness=harness if harness is not None else resolve_harness_identity().harness,
         metadata=metadata or {},
     )
