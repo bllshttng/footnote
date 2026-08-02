@@ -34,7 +34,52 @@ VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: The runtime proof that the scrub took effect. Checked for separately because
 #: it, not the lint, is what catches a scrub that parsed fine and did nothing.
-ASSERT_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \]')
+#: The `exit` is part of the pattern: these scripts run under `set -uo pipefail`
+#: WITHOUT `-e`, so a bare `[ -z ... ]` (or one ending `|| true`) reports a
+#: failed test and then installs anyway.
+ASSERT_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \].*\|\|.*\bexit [1-9]')
+
+#: Lines that open a shell block, and the ones that close it. Used to reject a
+#: scrub nested inside a conditional, loop, function, or heredoc, where it may
+#: never run in the shell that performs the install. Deliberately a small
+#: structural tracker and not a shell parser: it recognises the block forms this
+#: repo's smoke scripts actually use, and `test_tracker_sees_through_*` pins the
+#: cases that matter. A construct it cannot see is reported as nested (the safe
+#: direction - a false alarm names a line, a false pass protects nothing).
+OPENS_RE = re.compile(r"^\s*(if|while|until|for|case)\b|\{\s*$|\(\)\s*\{")
+CLOSES_RE = re.compile(r"^\s*(fi|done|esac|\})\b")
+HEREDOC_RE = re.compile(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
+
+
+def top_level_lines(lines: list[str]) -> set[int]:
+    """1-indexed line numbers that run unconditionally in the script's own shell.
+
+    Excludes anything inside a block or a heredoc body. Column zero is NOT
+    evidence of top level - shell needs no indentation - which is why this walks
+    the structure instead of measuring whitespace.
+    """
+    top: set[int] = set()
+    depth = 0
+    heredoc: str | None = None
+    for i, line in enumerate(lines, start=1):
+        if heredoc is not None:
+            if line.strip() == heredoc:
+                heredoc = None
+            continue
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            continue
+        if CLOSES_RE.match(line):
+            depth = max(0, depth - 1)
+            continue
+        if depth == 0 and not OPENS_RE.search(line):
+            top.add(i)
+        if OPENS_RE.search(line):
+            depth += 1
+        found = HEREDOC_RE.search(line)
+        if found:
+            heredoc = found.group(1)
+    return top
 
 
 def is_scrub(line: str) -> bool:
@@ -44,15 +89,14 @@ def is_scrub(line: str) -> bool:
     a real review finding and a pattern loose enough to accept one tends to
     accept the rest:
 
-    * indented -> inside a conditional, loop, subshell, or heredoc body, so it
-      may never run in the shell that performs the install
+    Whether the line actually runs unconditionally is a separate question, and a
+    structural one - see ``top_level_lines``.
+
     * ``unset -f PYTHONPATH`` -> clears a function; the variable survives
     * ``unset OTHER # PYTHONPATH`` -> only named in a comment
     * ``unset PYTHONPATH 2>/dev/null || true`` -> a failed unset (readonly var)
       is swallowed and the smoke proceeds contaminated
     """
-    if line != line.lstrip():
-        return False
     tokens = line.split()
     if not tokens or tokens[0] != "unset":
         return False
@@ -141,12 +185,59 @@ def test_is_scrub_accepts_real_unsets(line: str) -> None:
         "unset OTHER # PYTHONPATH",  # PYTHONPATH only named in a comment
         "unset PYTHONPATHX",  # a different variable
         'echo "unset PYTHONPATH"',  # printed, not executed
-        "  unset PYTHONPATH",  # indented: inside a block, may never run
         "unset PYTHONPATH 2>/dev/null || true",  # a readonly-var failure is swallowed
     ],
 )
 def test_is_scrub_rejects_no_ops(line: str) -> None:
     assert not is_scrub(line)
+
+
+def test_tracker_sees_through_column_zero_nesting() -> None:
+    """Column zero is not top level: the reason this walks structure at all."""
+    script = [
+        "unset PYTHONPATH",  # 1: genuinely top level
+        "if [ -n \"$SOMETHING\" ]; then",  # 2
+        "unset PYTHONPATH",  # 3: column zero, still conditional
+        "fi",  # 4
+        "cat <<EOF",  # 5
+        "unset PYTHONPATH",  # 6: column zero, inside a heredoc body
+        "EOF",  # 7
+        "pip install ./x.whl",  # 8
+    ]
+    top = top_level_lines(script)
+    assert 1 in top
+    assert 3 not in top
+    assert 6 not in top
+    assert 8 in top
+
+
+def test_tracker_reopens_after_a_block_closes() -> None:
+    """Depth must come back down, or everything after the first block is hidden."""
+    script = ["if x; then", "y", "fi", "unset PYTHONPATH"]
+    assert 4 in top_level_lines(script)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '[ -z "${PYTHONPATH:-}" ] || { echo "..."; exit 1; }',
+        '[ -z "${PYTHONPATH:-}" ] || exit 1',
+    ],
+)
+def test_verification_must_exit(line: str) -> None:
+    assert ASSERT_RE.match(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        '[ -z "${PYTHONPATH:-}" ]',  # reports nothing, stops nothing (no set -e)
+        '[ -z "${PYTHONPATH:-}" ] || true',  # explicitly swallows the failure
+        '[ -z "${PYTHONPATH:-}" ] || echo "oh well"',  # warns, then installs anyway
+    ],
+)
+def test_verification_without_an_exit_is_rejected(line: str) -> None:
+    assert not ASSERT_RE.match(line)
 
 
 def test_every_script_is_classified() -> None:
@@ -170,16 +261,24 @@ def test_every_script_is_classified() -> None:
 @pytest.mark.parametrize("name", sorted(WHEEL_CHANNEL_SMOKES))
 def test_scrub_is_executable_and_precedes_the_install(name: str) -> None:
     lines = _lines(name)
-    scrub_line = next((i for i, ln in enumerate(lines, start=1) if is_scrub(ln)), None)
+    top = top_level_lines(lines)
+    scrub_line = next(
+        (i for i, ln in enumerate(lines, start=1) if i in top and is_scrub(ln)), None
+    )
     assert scrub_line is not None, (
         f"{name} installs fno and then runs it, but has no unconditional "
-        "top-level `unset PYTHONPATH`. An inherited PYTHONPATH "
+        "top-level `unset PYTHONPATH` (one nested in a block, function, or "
+        "heredoc does not count - it may never run in the shell that installs). "
+        "An inherited PYTHONPATH "
         "(scripts/ci/preflight.sh exports <repo>/cli/src) puts the source tree "
         "ahead of the installed artifact on sys.path, so this smoke goes green "
         "on a distribution that shipped nothing. See is_scrub for the forms that "
         "look like a scrub and are not."
     )
-    assert_line = _first_match(lines, ASSERT_RE)
+    assert_line = next(
+        (i for i, ln in enumerate(lines, start=1) if i in top and ASSERT_RE.match(ln)),
+        None,
+    )
     assert assert_line is not None, (
         f'{name} never verifies the scrub took: add `[ -z "${{PYTHONPATH:-}}" ] '
         '|| {{ echo ...; exit 1; }}` under the unset. The static check here can '
