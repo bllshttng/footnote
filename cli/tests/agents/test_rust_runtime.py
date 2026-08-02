@@ -874,6 +874,36 @@ def test_role_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch, tmp_path
     assert called == []
 
 
+def test_monitor_bearing_spawn_not_routed_in_forced_rust_mode(monkeypatch) -> None:
+    """The public root CLI keeps monitor guards on the Python path."""
+    from fno.cli import app
+
+    called: list = []
+    monkeypatch.setenv(rr.RUNTIME_ENV, "rust")
+    monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "agents",
+            "spawn",
+            "--name",
+            "peer",
+            "--harness",
+            "claude",
+            "--monitor",
+            "happy",
+            "--substrate",
+            "bg",
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "pane-only" in result.output
+    assert called == []
+
+
 def test_output_format_spawn_not_routed_to_installed_rust(monkeypatch, tmp_path) -> None:
     """PR-watch's JSON-envelope spawn stays on the Python-owned provider path."""
     from fno.cli import app
@@ -944,6 +974,17 @@ def test_is_role_bearing_spawn_predicate() -> None:
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "-r", "tidy"])
     assert not rr._is_role_bearing_spawn("spawn", ["spawn", "w", "--harness", "claude"])
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
+
+
+def test_is_monitor_bearing_spawn_predicate() -> None:
+    assert rr._is_monitor_bearing_spawn(
+        "spawn", ["spawn", "w", "--monitor", "happy", "--substrate", "bg"]
+    )
+    assert rr._is_monitor_bearing_spawn("spawn", ["spawn", "--monitor=happy"])
+    assert not rr._is_monitor_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--monitor", "happy"]
+    )
+    assert not rr._is_monitor_bearing_spawn("ask", ["ask", "w", "--monitor", "happy"])
 
 
 def test_is_resume_bearing_spawn_predicate() -> None:
