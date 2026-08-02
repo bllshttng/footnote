@@ -1447,6 +1447,9 @@ class AgentsBlock(BaseModel):
     # an attended human. This knob only authorizes the grant PATH; it never bypasses
     # the refusals (self-grant, second live crown over one scope) or the scope check.
     crown_config_grant: bool = False
+    # Opt in per machine after happy is installed and paired. Only routed claude
+    # panes use it; primary claude, every other harness, and bg stay unchanged.
+    happy_routed_panes: bool = False
     # Dead-row GC grace window in SECONDS (x-b1aa). A finished agent-view row
     # stays visible this long after the daemon GC first observes its process gone,
     # before it is reaped. Default 3600 (1h). The Rust daemon + `fno agents reap`

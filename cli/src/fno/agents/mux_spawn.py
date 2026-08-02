@@ -26,6 +26,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -33,7 +34,7 @@ import time
 import uuid as _uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Mapping, Optional
 
 from fno import paths
 from fno.agents.dispatch import (
@@ -133,6 +134,52 @@ def resolve_mux_session(explicit: Optional[str] = None) -> str:
         return explicit
     env = os.environ.get("FNO_SESSION", "")
     return env if env else _DEFAULT_SESSION
+
+
+def happy_routed_panes_enabled() -> bool:
+    """Whether routed claude panes launch through ``happy``.
+
+    This defaults off because installing and pairing happy is machine-local.
+    """
+    try:
+        from fno.config import load_settings
+
+        return load_settings().agents.happy_routed_panes
+    except Exception as exc:
+        raise DispatchAskError(
+            "could not read config.agents.happy_routed_panes; refusing the "
+            "routed pane rather than silently launching an unmonitored worker",
+            exit_code=2,
+        ) from exc
+
+
+def happy_pane_argv(argv: list[str], route_env: Mapping[str, str]) -> list[str]:
+    """Carry a routed claude pane through happy without losing its endpoint.
+
+    happy reserves ``--settings`` for its hook server and discards a caller's
+    file, so routed values must use its ``--claude-env`` interface instead.
+    """
+    if any(arg == "--settings" or arg.startswith("--settings=") for arg in argv):
+        raise DispatchAskError(
+            "refusing to launch a routed claude pane through happy with "
+            "--settings: happy consumes that flag for its own hook server and "
+            "discards the caller's file, so the route would be silently ignored "
+            "and the worker would launch on the default account. Carry the route "
+            "as --claude-env KEY=VALUE instead.",
+            exit_code=2,
+        )
+    if shutil.which("happy") is None:
+        raise DispatchAskError(
+            "config.agents.happy_routed_panes is on, but 'happy' is not on PATH; "
+            "a routed claude pane is invisible to the Claude app's remote view "
+            "without it. Install it (npm install -g happy) or set "
+            "config.agents.happy_routed_panes = false to accept a local-only pane.",
+            exit_code=127,
+        )
+    claude_env: list[str] = []
+    for key, value in route_env.items():
+        claude_env += ["--claude-env", f"{key}={value}"]
+    return ["happy", *claude_env, *argv[1:]]
 
 
 def claude_argv_is_interactive(argv: list[str]) -> bool:
@@ -1057,6 +1104,10 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
+    # Keep the outer env wrapper: it scrubs inherited Anthropic credentials,
+    # while --claude-env reasserts the complete route in happy's claude child.
+    if provider == "claude" and route_env and happy_routed_panes_enabled():
+        argv = happy_pane_argv(argv, route_env)
     # QoS (x-c5cc): demote the provider command INSIDE the env wrapper —
     # wrapping outermost would break the mux server's FNO_NODE provenance
     # parse, which is anchored on argv[0] == "env" (server.rs node_from_argv).

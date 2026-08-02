@@ -91,6 +91,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `agents.confirm` | str | `auto` | never | Agent-launch confirmation policy (auto/always/never). |
 | `agents.auto_register_sessions` | bool | `false` | advanced | Auto-join every hand-started session to the roster at SessionStart (default false = opt-in via /fno-me). Spawned workers register regardless. |
 | `agents.crown_config_grant` | bool | `false` | advanced | Authorize `fno agents crown` from an unattended session with no superset crown (a standing, level-0-equivalent human grant; DEFAULT OFF). Authorizes the grant path only - never bypasses the self-grant / one-live-crown-per-scope refusals. |
+| `agents.happy_routed_panes` | bool | `false` | advanced | Launch routed claude panes through happy for remote monitoring; default false and pane-only. |
 | `agents.dead_row_grace` | int | `3600` | advanced | Seconds a finished agent-view row stays before dead-row GC reaps it (default 3600). |
 | `agents.codex.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless codex workers. |
 | `agents.gemini.headless_yolo` | bool | `false` | advanced | Use full-yolo (drop sandbox) for headless gemini workers. |

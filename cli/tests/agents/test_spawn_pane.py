@@ -1576,3 +1576,113 @@ def test_exact_at_current_proceeds_live_when_unpainted(
         runner=FakeRunner(placement={"anchor": 4}, wait_returncode=11, read_stdout=""),
     )
     assert [r.name for r in load_registry()] == ["peer"], "a live spawn still writes the row"
+
+
+_ROUTE = {
+    "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+    "ANTHROPIC_AUTH_TOKEN": "zai-secret",
+}
+
+
+def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
+    """The route rides --claude-env, never --settings."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    argv = mux_spawn.happy_pane_argv(
+        ["claude", "--session-id", "u1", "--model", "glm-5.2", "go"], _ROUTE
+    )
+
+    assert argv[0] == "happy"
+    assert "--settings" not in argv
+    pairs = [argv[i + 1] for i, token in enumerate(argv) if token == "--claude-env"]
+    assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in pairs
+    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    assert argv[-5:] == ["--session-id", "u1", "--model", "glm-5.2", "go"]
+
+
+def test_happy_pane_argv_refuses_when_happy_is_absent(monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: None)
+    with pytest.raises(DispatchAskError, match="happy"):
+        mux_spawn.happy_pane_argv(["claude", "go"], _ROUTE)
+
+
+def test_happy_routed_panes_config_read_failure_refuses(monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+    import fno.config
+    from fno.agents.dispatch import DispatchAskError
+
+    def fail_to_load():
+        raise ValueError("malformed config")
+
+    monkeypatch.setattr(fno.config, "load_settings", fail_to_load)
+    with pytest.raises(DispatchAskError, match="silently launching"):
+        mux_spawn.happy_routed_panes_enabled()
+
+
+@pytest.mark.parametrize(
+    "settings_args",
+    [["--settings", "/tmp/r.json"], ["--settings=/tmp/r.json"]],
+)
+def test_happy_pane_argv_refuses_an_argv_carrying_settings(
+    monkeypatch, settings_args: list[str]
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    with pytest.raises(DispatchAskError, match="--settings"):
+        mux_spawn.happy_pane_argv(["claude", *settings_args, "go"], _ROUTE)
+
+
+def _pane_run_argv(runner: "FakeRunner") -> list[str]:
+    for call in runner.calls:
+        if call[1:4] == ["mux", "pane", "run"]:
+            return call[call.index("--") + 1 :]
+    raise AssertionError("no `mux pane run` call recorded")
+
+
+def test_routed_claude_pane_launches_through_happy_when_enabled(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL, resolve_explicit_route
+    from fno.config import ConfigBlock, ModelRoutingBlock, SettingsModel
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    settings = SettingsModel(config=ConfigBlock(model_routing=ModelRoutingBlock()))
+    route = resolve_explicit_route(
+        "zai", "glm-5.2", settings=settings, env={"ZAI_API_KEY": "zai-secret"}
+    )
+    assert route is not None
+    _, runner = _spawn(monkeypatch, tmp_path, route_env=route)
+
+    argv = _pane_run_argv(runner)
+    assert argv[0] == "env", "the mesh env wrapper must stay outermost"
+    happy_argv = argv[argv.index("happy") :]
+    pairs = [
+        happy_argv[i + 1]
+        for i, token in enumerate(happy_argv)
+        if token == "--claude-env"
+    ]
+    assert f"ANTHROPIC_BASE_URL={DEFAULT_ZAI_BASE_URL}" in pairs
+    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    assert "--settings" not in argv
+
+
+def test_unrouted_and_disabled_panes_still_launch_plain_claude(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    _, runner = _spawn(monkeypatch, tmp_path)
+    assert "happy" not in _pane_run_argv(runner), "an unrouted pane must not use happy"
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: False)
+    _, runner2 = _spawn(monkeypatch, tmp_path, name="peer2", route_env=dict(_ROUTE))
+    assert "happy" not in _pane_run_argv(runner2), "knob off must leave the argv alone"
