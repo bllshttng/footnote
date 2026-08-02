@@ -410,6 +410,92 @@ impl Pane {
         viewport_to_point(self.display_offset(), Point::new(row, Column(col)))
     }
 
+    // -- Links (x-a2d0) --------------------------------------------------------
+
+    /// The URL under viewport cell `(row, col)`, or `None`.
+    ///
+    /// OSC 8 wins when present: an app that declared a hyperlink knows where
+    /// the cell points, and its display text need not resemble a URL at all.
+    /// Everything else is linkified from the text, because the common case is a
+    /// plain URL printed by a tool that never heard of OSC 8.
+    ///
+    /// Returns only what [`crate::link::is_openable`] accepts. The OSC 8 URI is
+    /// chosen by whatever runs in the pane, so the allowlist is applied at this
+    /// end rather than trusted to the client.
+    pub fn link_at(&self, row: u16, col: u16) -> Option<String> {
+        let point = self.viewport_point(row, col);
+        if let Some(uri) = self.term.grid()[point.line][point.column]
+            .hyperlink()
+            .map(|h| h.uri().to_string())
+        {
+            return crate::link::is_openable(&uri).then_some(uri);
+        }
+        let (text, points) = self.logical_line(point.line);
+        let idx = points.iter().position(|p| *p == point)?;
+        let (start, end) = crate::link::find_urls(&text)
+            .into_iter()
+            .find(|&(a, b)| idx >= a && idx < b)?;
+        let uri: String = text.chars().skip(start).take(end - start).collect();
+        crate::link::is_openable(&uri).then_some(uri)
+    }
+
+    /// The soft-wrap-joined line containing `line`, as text plus the grid point
+    /// each char came from (spacers skipped, so the two stay index-aligned the
+    /// way `search` already does it).
+    ///
+    /// A URL that reaches column 80 continues on the next row with no separator,
+    /// so linkifying one row at a time would find two broken halves. alacritty
+    /// marks a soft wrap by setting `WRAPLINE` on the LAST cell of the row that
+    /// wrapped, which is what both walks test.
+    fn logical_line(&self, line: Line) -> (String, Vec<Point>) {
+        /// How far the join may reach in either direction. A URL spanning more
+        /// than this many rows is not one anybody typed, and the cap keeps a
+        /// screenful of wrapped output from turning one click into a full scan.
+        const MAX_WRAP_ROWS: i32 = 8;
+
+        let grid = self.term.grid();
+        let cols = self.cols as usize;
+        let last = Column(cols.saturating_sub(1));
+        let (top, bot) = (grid.topmost_line().0, grid.bottommost_line().0);
+
+        // Up while the row ABOVE wraps into this one; down while THIS row wraps.
+        let mut start = line.0;
+        while start > top
+            && line.0 - start < MAX_WRAP_ROWS
+            && grid[Line(start - 1)][last].flags.contains(Flags::WRAPLINE)
+        {
+            start -= 1;
+        }
+        let mut end = line.0;
+        while end < bot
+            && end - line.0 < MAX_WRAP_ROWS
+            && grid[Line(end)][last].flags.contains(Flags::WRAPLINE)
+        {
+            end += 1;
+        }
+
+        let mut text = String::new();
+        let mut points = Vec::with_capacity(cols * (end - start + 1) as usize);
+        for ln in start..=end {
+            let l = Line(ln);
+            for c in 0..cols {
+                let cell = &grid[l][Column(c)];
+                if cell.flags.contains(Flags::WIDE_CHAR_SPACER)
+                    || cell.flags.contains(Flags::LEADING_WIDE_CHAR_SPACER)
+                {
+                    continue;
+                }
+                text.push(if cell.flags.contains(Flags::HIDDEN) {
+                    ' '
+                } else {
+                    cell.c
+                });
+                points.push(Point::new(l, Column(c)));
+            }
+        }
+        (text, points)
+    }
+
     // -- Block navigation (x-38c4) ---------------------------------------------
 
     /// A grid row as an offset from the TOP of retained scrollback:
@@ -1545,6 +1631,72 @@ mod tests {
         assert_eq!(frame.cursor_col, 5);
         assert!(frame.cursor_visible);
         assert_eq!(frame.cells.len(), 24 * 80);
+    }
+
+    #[test]
+    fn link_at_finds_a_plain_text_url_only_under_its_own_cells() {
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"see https://example.com/a now");
+        // Column 4 is the 'h'; 25 is the trailing 'a'.
+        assert_eq!(pane.link_at(0, 4).as_deref(), Some("https://example.com/a"));
+        assert_eq!(
+            pane.link_at(0, 24).as_deref(),
+            Some("https://example.com/a")
+        );
+        // "see" before it and "now" after it are not part of the link.
+        assert_eq!(pane.link_at(0, 0), None);
+        assert_eq!(pane.link_at(0, 27), None);
+        // Nor is an empty row.
+        assert_eq!(pane.link_at(2, 5), None);
+    }
+
+    #[test]
+    fn link_at_joins_a_url_soft_wrapped_across_rows() {
+        // 20 columns forces the URL to wrap mid-path; clicking either half must
+        // yield the WHOLE url, not the fragment on the clicked row.
+        let mut pane = Pane::new(4, 20);
+        let url = "https://example.com/a/very/long/path";
+        pane.feed(url.as_bytes());
+        assert_eq!(pane.link_at(0, 0).as_deref(), Some(url), "first row");
+        assert_eq!(
+            pane.link_at(1, 2).as_deref(),
+            Some(url),
+            "wrapped continuation"
+        );
+    }
+
+    #[test]
+    fn link_at_reads_an_osc8_hyperlink_whose_text_is_not_a_url() {
+        // OSC 8 with display text that looks nothing like a link: only the URI
+        // carried in the escape can answer this, so it proves the OSC 8 path
+        // rather than the linkifier.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"\x1b]8;;https://example.com/pr/700\x07click me\x1b]8;;\x07");
+        assert_eq!(
+            pane.link_at(0, 2).as_deref(),
+            Some("https://example.com/pr/700")
+        );
+        // Past the anchor text the link ends.
+        assert_eq!(pane.link_at(0, 20), None);
+    }
+
+    #[test]
+    fn link_at_refuses_an_osc8_uri_outside_the_scheme_allowlist() {
+        // A pane's output chooses this URI. `open(1)` would act on file:// and
+        // on registered app schemes, so the grid walk must drop it.
+        let mut pane = Pane::new(4, 40);
+        pane.feed(b"\x1b]8;;file:///etc/passwd\x07innocent\x1b]8;;\x07");
+        assert_eq!(pane.link_at(0, 2), None);
+    }
+
+    #[test]
+    fn link_at_survives_a_click_past_the_end_of_content() {
+        // The click column is clamped into the grid; a click on padding finds
+        // no link rather than panicking or reaching the previous row's URL.
+        let mut pane = Pane::new(4, 20);
+        pane.feed(b"https://example.com");
+        assert_eq!(pane.link_at(3, 19), None);
+        assert_eq!(pane.link_at(200, 200), None, "out-of-range click clamps");
     }
 
     #[test]

@@ -119,6 +119,100 @@ fn mouse_wheel_scrolls_history_and_coviewer_sees_same_offset() {
     });
 }
 
+// -- x-a2d0: a plain click on a URL resolves it and ships it to the clicker ---
+
+/// Press and release on the same cell: no drag, so the selection is empty and
+/// the release lands in the plain-click arm.
+fn click(c: &mut FakeClient, pane: u64, row: u16, col: u16) {
+    for kind in [
+        MouseKind::Press(MouseButton::Left),
+        MouseKind::Release(MouseButton::Left),
+    ] {
+        c.mouse(pane, MouseEvent { row, col, kind });
+    }
+}
+
+/// Echo a line and return the viewport row its OUTPUT landed on. The echoed
+/// command line above it is prompt-prefixed, so `starts_with` picks the real
+/// output, exactly as the copy test disambiguates the two.
+fn echo_line(c: &mut FakeClient, pane: u64, line: &str) -> u16 {
+    c.input(format!("echo {line}\r").as_bytes());
+    let text = c.wait_pane_text(15, pane, |t| t.lines().any(|l| l.starts_with(line)));
+    text.lines().position(|l| l.starts_with(line)).unwrap() as u16
+}
+
+#[test]
+fn mouse_click_on_a_url_opens_it_for_the_clicking_client_only() {
+    let scratch = Scratch::new("link");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    let mut b = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    b.wait_layout(10, "b attached", |l| !l.panes.is_empty());
+
+    a.wait_prompt(pane);
+    // "link " is 5 chars, so the URL occupies cols 5..=35 and "end" follows it.
+    let row = echo_line(&mut a, pane, "link https://example.com/pr/700 end");
+
+    click(&mut a, pane, row, 10);
+    let opened = a.wait(10, "opened link", |c| c.opened_links.first().cloned());
+    assert_eq!(
+        opened, "https://example.com/pr/700",
+        "the whole URL, not the clicked word"
+    );
+
+    // Same causal barrier the copy test uses: OpenLink and Frame share b's one
+    // ordered socket, so a (buggy) broadcast would have arrived before this
+    // marker frame. Opening a browser on every co-viewer's desk would be the
+    // worst possible way to get this wrong.
+    a.input(b"echo no-stray-open#\r");
+    b.wait_pane_text(15, pane, |t| t.contains("no-stray-open#"));
+    assert!(
+        b.opened_links.is_empty(),
+        "the link must reach the clicker only; b got {:?}",
+        b.opened_links
+    );
+}
+
+#[test]
+fn mouse_click_off_a_url_opens_nothing_and_a_drag_still_copies() {
+    let scratch = Scratch::new("link-neg");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    a.wait_prompt(pane);
+    let row = echo_line(&mut a, pane, "link https://example.com/pr/700 end");
+
+    // Col 1 is inside the leading "link" word, col 33 inside the trailing "end".
+    click(&mut a, pane, row, 1);
+    click(&mut a, pane, row, 33);
+
+    // A DRAG across the URL must still copy, not open: the two gestures share
+    // the release and would collide if opening were wired to the wrong one.
+    for (col, kind) in [
+        (5, MouseKind::Press(MouseButton::Left)),
+        (30, MouseKind::Drag(MouseButton::Left)),
+        (30, MouseKind::Release(MouseButton::Left)),
+    ] {
+        a.mouse(pane, MouseEvent { row, col, kind });
+    }
+    let copied = a.wait(10, "copy payload", |c| c.copies.first().cloned());
+    assert_eq!(copied, "https://example.com/pr/700", "drag copies the URL");
+    assert!(
+        a.opened_links.is_empty(),
+        "neither an off-URL click nor a drag may open anything; got {:?}",
+        a.opened_links
+    );
+}
+
 // -- AC2-HP: drag + release auto-copies to the initiating client only ---------
 
 #[test]

@@ -526,6 +526,10 @@ pub struct FakeClient {
     pub byes: Vec<String>,
     /// Server-extracted copy payloads (v7, US2), newest last.
     pub copies: Vec<String>,
+    /// URLs the server resolved under a click (v45, x-a2d0), newest last. The
+    /// harness records them instead of opening anything, which is what lets the
+    /// click-to-open path be asserted end to end without launching a browser.
+    pub opened_links: Vec<String>,
     /// Initiator-only search results (v12, x-e780): `(pane_id, total, current)`,
     /// newest last. A co-viewer never receives these.
     pub search_results: Vec<(u64, u32, u32)>,
@@ -571,6 +575,7 @@ impl FakeClient {
             notices: Vec::new(),
             byes: Vec::new(),
             copies: Vec::new(),
+            opened_links: Vec::new(),
             search_results: Vec::new(),
             order: Vec::new(),
             carry: Vec::new(),
@@ -668,6 +673,7 @@ impl FakeClient {
             ServerMsg::Notice { text } => self.notices.push(text),
             ServerMsg::Bye { reason } => self.byes.push(reason),
             ServerMsg::Copy { text } => self.copies.push(text),
+            ServerMsg::OpenLink { url } => self.opened_links.push(url),
             ServerMsg::SearchResult {
                 pane_id,
                 total,
