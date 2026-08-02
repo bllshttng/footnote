@@ -45,6 +45,18 @@ def _system_python_env() -> dict:
 #: probing for it would reject an interpreter that runs the engine fine.
 ENGINE_DEPS = ("networkx", "grep_ast", "pygments")
 
+#: Exit codes, one per distinguishable failure. All three were `2` until CI
+#: proved that unusable: "your fno install is broken", "you passed incompatible
+#: flags", and "no python on this machine carries the engine deps" need three
+#: different responses from a human and three different branches from a script.
+#: The engine-resolution regression test is itself such a caller - it has to
+#: tell EXIT_NO_ENGINE from EXIT_NO_INTERPRETER, and could not while both were
+#: 2, because a CI box legitimately has neither and the shared code read as a
+#: resolution failure.
+EXIT_USAGE = 2  # incompatible flags
+EXIT_NO_ENGINE = 3  # broken/incomplete fno installation
+EXIT_NO_INTERPRETER = 4  # no python on PATH can import ENGINE_DEPS
+
 
 def _engine_python(env: dict) -> tuple[Optional[str], list[str]]:
     """First interpreter on PATH that can actually import the engine's deps.
@@ -135,7 +147,7 @@ def codemap(
             f"fno install, not a problem with {target_repo}. Try `fno update`.",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=EXIT_NO_ENGINE)
     # Mixed-format guard: --json + --db-schema appends a markdown section
     # to a JSON stream, producing an unparseable file. Reject the combo
     # rather than silently emitting invalid output (Codex review P2).
@@ -145,7 +157,7 @@ def codemap(
             "(JSON output cannot accept the markdown db-schema appendix)",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=EXIT_USAGE)
     # Default output path discrimination:
     #   * --json without --output -> .fno/codemap.json so a JSON
     #     run never overwrites the canonical markdown artifact (Codex P2).
@@ -171,7 +183,7 @@ def codemap(
             f"Tried: {', '.join(tried) or '(no python3 found on PATH)'}",
             err=True,
         )
-        raise typer.Exit(code=2)
+        raise typer.Exit(code=EXIT_NO_INTERPRETER)
     cmd = [interpreter, str(script), str(target_repo), "--tokens", str(tokens)]
     if json_output:
         cmd.append("--json")

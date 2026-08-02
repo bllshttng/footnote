@@ -98,11 +98,18 @@ def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) ->
 
     ``FNO_REPO_ROOT`` points repo resolution at a foreign repo, which is exactly
     what the live failure looked like (running from another project). The engine
-    lookup must not follow it. Asserted on the engine-missing error rather than
-    on rc=0 because repogram needs heavy system-python deps (see ENGINE_DEPS)
-    that CI may not have; a dep failure is a different failure, and this test is
-    about resolution.
+    lookup must not follow it.
+
+    The pass condition is "did NOT exit EXIT_NO_ENGINE", not "exited 0", because
+    repogram needs heavy system-python deps a CI box legitimately lacks. Reaching
+    EXIT_NO_INTERPRETER is itself PROOF of success: that check runs strictly
+    after the engine-exists check, so the command could only get there by having
+    already found the engine. An earlier version of this test asserted
+    ``returncode != 2`` when both failures shared code 2, which made the two
+    indistinguishable and turned a correct fix red on CI.
     """
+    from fno.codemap_cli.cli import EXIT_NO_ENGINE, EXIT_NO_INTERPRETER
+
     foreign = tmp_path / "foreign-repo"
     foreign.mkdir()
     subprocess.run(["git", "init", "-q"], cwd=foreign, check=True)
@@ -110,11 +117,17 @@ def test_fno_codemap_finds_its_engine_outside_the_footnote_checkout(tmp_path) ->
 
     result = _run_fno("codemap", extra_env={"FNO_REPO_ROOT": str(foreign)})
     combined = result.stdout + result.stderr
-    assert "repogram engine is missing" not in combined, (
+    assert result.returncode != EXIT_NO_ENGINE, (
         "codemap resolved its engine from the analyzed repo instead of the fno "
         f"installation:\n{combined[-800:]}"
     )
-    assert result.returncode != 2, f"engine lookup failed:\n{combined[-800:]}"
+    # Not a vacuous pass: the run must land on one of the two outcomes that
+    # prove resolution happened, so a future refactor that drops the engine
+    # lookup entirely (or dies some third way) still fails here.
+    assert result.returncode in (0, EXIT_NO_INTERPRETER), (
+        f"unexpected outcome rc={result.returncode}; expected success or the "
+        f"missing-deps exit:\n{combined[-800:]}"
+    )
 
 
 def test_engine_python_skips_interpreters_missing_the_deps(tmp_path) -> None:
@@ -154,13 +167,30 @@ def test_engine_python_skips_interpreters_missing_the_deps(tmp_path) -> None:
     assert found == str(good / "python3"), f"broken shim was not skipped (tried {tried})"
 
 
+def test_codemap_failure_exit_codes_stay_distinct() -> None:
+    """Guards the guard: three failures, three codes.
+
+    The engine-resolution test tells "engine missing" from "deps missing" by
+    exit code alone. Collapsing any two back onto one number would not fail that
+    test - it would silently strip its ability to discriminate, which is exactly
+    how it passed review and then went red on CI. Assert the separation itself.
+    """
+    from fno.codemap_cli.cli import EXIT_NO_ENGINE, EXIT_NO_INTERPRETER, EXIT_USAGE
+
+    codes = (EXIT_USAGE, EXIT_NO_ENGINE, EXIT_NO_INTERPRETER)
+    assert len(set(codes)) == 3, f"codemap failure exit codes must stay distinct: {codes}"
+    assert all(c != 0 for c in codes), "a failure must never exit 0"
+
+
 def test_fno_codemap_rejects_json_plus_db_schema() -> None:
     """Mixed-format combo is refused (Codex review P2): JSON output cannot
     accept the markdown db-schema appendix, so emit a clear error rather
     than silently producing an unparseable file."""
+    from fno.codemap_cli.cli import EXIT_USAGE
+
     result = _run_fno("codemap", "--json", "--db-schema")
-    assert result.returncode == 2, (
-        f"expected rc=2 for --json + --db-schema, got {result.returncode}\n"
+    assert result.returncode == EXIT_USAGE, (
+        f"expected rc={EXIT_USAGE} for --json + --db-schema, got {result.returncode}\n"
         f"stdout: {result.stdout[-400:]}\n"
         f"stderr: {result.stderr[-400:]}"
     )
