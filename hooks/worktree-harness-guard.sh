@@ -66,12 +66,18 @@ command -v fno >/dev/null 2>&1 || _approve
 # explicit instead of leaving it as a side effect of empty variables.
 command -v jq >/dev/null 2>&1 || _approve
 
-_field() { printf '%s' "$PAYLOAD" | jq -r "$1 // \"\"" 2>/dev/null || true; }
-
-TOOL="$(_field '.tool_name')"
-FILE_PATH="$(_field '.tool_input.file_path')"
-COMMAND="$(_field '.tool_input.command')"
-CWD="$(printf '%s' "$PAYLOAD" | jq -er '.cwd | select(type=="string" and length>0)' 2>/dev/null || true)"
+# One jq for the whole payload, as plan-location-guard.sh does. Newlines in the
+# command become \x1f so a multi-line command survives `read` AND stays
+# detectable below; collapsing them to spaces would let a two-line
+# `cd /tmp` + `rm -rf .` read as a bare cd.
+TOOL="" FILE_PATH="" CWD="" COMMAND=""
+{ read -r TOOL; read -r FILE_PATH; read -r CWD; read -r COMMAND; } < <(
+    printf '%s' "$PAYLOAD" | jq -r '
+        .tool_name // "",
+        (.tool_input.file_path // ""),
+        (.cwd // ""),
+        (.tool_input.command // "" | gsub("\n";""))' 2>/dev/null
+)
 [[ -n "$CWD" && -d "$CWD" ]] || CWD="$PWD"
 
 # The deepest EXISTING ancestor of a target. A Write creates its file and
@@ -94,7 +100,7 @@ _is_bare_cd() {
     c="${c%"${c##*[![:space:]]}"}"
     [[ "$c" == "cd" || "$c" == "cd "* ]] || return 1
     case "$c" in
-        *[\;\&\|\`\$\(\)\<\>]*|*$'\n'*) return 1 ;;
+        *[\;\&\|\`\$\(\)\<\>]*|*$'\x1f'*) return 1 ;;
     esac
     return 0
 }
@@ -111,14 +117,12 @@ esac
 OUT="$(cd "$ANCHOR" 2>/dev/null && fno claim worktree-guard --json 2>/dev/null || true)"
 [[ -n "$OUT" ]] || _approve
 
-_json() { printf '%s' "$OUT" | jq -er "$1 | select(. != \"\") // empty" 2>/dev/null || true; }
-
-VERDICT="$(_json '.verdict')"
+VERDICT="" OWNER_HARNESS="" OWNER_HOLDER="" WORKTREE=""
+{ read -r VERDICT; read -r OWNER_HARNESS; read -r OWNER_HOLDER; read -r WORKTREE; } < <(
+    printf '%s' "$OUT" | jq -r '.verdict // "", .owner_harness // "",
+        .owner_holder // "", .worktree // ""' 2>/dev/null
+)
 [[ "$VERDICT" == "foreign" ]] || _approve
-
-OWNER_HARNESS="$(_json '.owner_harness')"
-OWNER_HOLDER="$(_json '.owner_holder')"
-WORKTREE="$(_json '.worktree')"
 
 # Escapes, evaluated only once the verdict is foreign, and only for Bash: an
 # Edit or Write has already been judged by its target above.
@@ -126,11 +130,10 @@ if [[ "$TOOL" == "Bash" ]]; then
     _is_bare_cd "$COMMAND" && _approve
     [[ "$COMMAND" == *"FNO_WORKTREE_OK=1"* ]] && _approve
     if [[ -n "$WORKTREE" ]]; then
-        for form in "FNO_WORKTREE_GRANT=$WORKTREE" \
-                    "FNO_WORKTREE_GRANT=\"$WORKTREE\"" \
-                    "FNO_WORKTREE_GRANT='$WORKTREE'"; do
-            [[ "$COMMAND" == *"$form"* ]] && _approve
-        done
+        case "$COMMAND" in
+            *"FNO_WORKTREE_GRANT=$WORKTREE"*|*"FNO_WORKTREE_GRANT=\"$WORKTREE\""*|*"FNO_WORKTREE_GRANT='$WORKTREE'"*)
+                _approve ;;
+        esac
     fi
 fi
 

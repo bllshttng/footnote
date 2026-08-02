@@ -182,6 +182,13 @@ assert_block "cd chained to another command does not ride the exemption" \
 assert_block "an ordinary command in a foreign worktree still blocks" \
     "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "git commit -m x")")"
 
+# A multi-line command must not concatenate into something the exemption
+# accepts. jq flattens the command to survive `read`, so the separator it
+# substitutes has to stay detectable; with an empty separator these two lines
+# join into one token that starts with `cd ` and carries no metacharacter.
+assert_block "a two-line command does not read as a bare cd" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "$(printf 'cd /tmp\nrm -rf .')")")"
+
 # The inline grant is honoured HERE because the hook is the only layer that sees
 # the command text; by the time `fno claim` runs it is a subprocess whose
 # environment never saw the assignment.
