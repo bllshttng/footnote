@@ -7255,10 +7255,11 @@ async fn attach_and_run(
                 | ServerMsg::Ok
                 | ServerMsg::WaitDone { .. }
                 | ServerMsg::Err { .. }
-                // Copy answers a mouse-release, and SearchResult answers a
-                // search - both can only follow attach: stray in the preamble,
-                // ignore rather than desync.
+                // Copy and OpenLink answer a mouse-release, and SearchResult
+                // answers a search - all can only follow attach: stray in the
+                // preamble, ignore rather than desync.
                 | ServerMsg::Copy { .. }
+                | ServerMsg::OpenLink { .. }
                 | ServerMsg::SearchResult { .. }
                 // PeekBody answers a post-attach PeekAgent (x-c376): impossible
                 // in the preamble, ignore rather than desync.
@@ -7334,6 +7335,13 @@ async fn attach_and_run(
     // select loop - the loop keeps draining stdin/frames while the copy lands.
     let (copy_tx, mut copy_rx) =
         tokio::sync::mpsc::unbounded_channel::<(usize, crate::clipboard::CopyOutcome)>();
+
+    // x-a2d0: opening a clicked URL execs `open`/`xdg-open`, which can block for
+    // as long as a cold browser launch takes. Same shape as the copy leg above:
+    // run it on a blocking thread and report the outcome back here, so the
+    // select loop keeps drawing frames while the browser starts.
+    let (link_tx, mut link_rx) =
+        tokio::sync::mpsc::unbounded_channel::<(String, Result<(), String>)>();
 
     // x-feec: the needs-me event-fold leg runs off the UI loop and reports back
     // here, tagged with the generation token it was kicked under, so a slow
@@ -7561,6 +7569,17 @@ async fn attach_and_run(
                         let _ = tx.send((chars, outcome));
                     });
                 }
+                Ok(ServerMsg::OpenLink { url }) => {
+                    // x-a2d0: the server resolved a clicked URL (OSC 8 or
+                    // linkified text) and vetted its scheme; `open_url` vets it
+                    // again before exec. Off-loop for the same reason Copy is -
+                    // a cold browser launch must not stall the render loop.
+                    let tx = link_tx.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let outcome = crate::link::open_url(&url);
+                        let _ = tx.send((url, outcome));
+                    });
+                }
                 Ok(ServerMsg::SearchResult {
                     pane_id,
                     total,
@@ -7653,6 +7672,22 @@ async fn attach_and_run(
                     crate::clipboard::CopyOutcome::Failed => {
                         let _ = raw_out(b"\x07");
                         "copy failed: no clipboard tool and OSC 52 blocked".to_string()
+                    }
+                };
+                view.set_notice(notice);
+                if let Err(e) = compositor.draw(&view.compose()) {
+                    break Err(format!("draw: {e}"));
+                }
+            }
+            Some((url, outcome)) = link_rx.recv() => {
+                // x-a2d0: a click that opens nothing visible reads as a broken
+                // button, so BOTH outcomes get a notice - the browser may not
+                // even raise itself above the terminal.
+                let notice = match outcome {
+                    Ok(()) => format!("opened {}", crate::link::for_notice(&url)),
+                    Err(e) => {
+                        let _ = raw_out(b"\x07");
+                        format!("open failed: {e}")
                     }
                 };
                 view.set_notice(notice);
