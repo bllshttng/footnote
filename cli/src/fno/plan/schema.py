@@ -18,9 +18,9 @@ from __future__ import annotations
 
 import enum
 from datetime import date, datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from fno.company.contracts import CompanyWorkRefs
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
@@ -114,3 +114,10 @@ class PlanFrontmatter(BaseModel):
         if isinstance(v, bool):
             return str(v).lower()
         return STATUS_ALIASES.get(v, v) if isinstance(v, str) else v
+
+    @model_validator(mode="after")
+    def _company_work_matches_plan_node(self) -> Self:
+        work_order = self.company_work.work_order if self.company_work is not None else None
+        if work_order is not None and work_order.node_id != self.node:
+            raise ValueError("company_work work_order node_id must match plan node")
+        return self

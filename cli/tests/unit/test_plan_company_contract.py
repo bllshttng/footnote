@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import pytest
+from pydantic import ValidationError
+
 from fno.company.contracts import CompanyWorkRefs, FunctionRef, RoleRef, WorkOrderRef
 from fno.graph.types import Entry
 from fno.plan.schema import PlanFrontmatter
@@ -35,6 +38,16 @@ def test_legacy_plan_frontmatter_remains_valid() -> None:
     assert plan.company_work is None
 
 
+def test_plan_rejects_company_work_for_a_different_graph_node() -> None:
+    with pytest.raises(ValidationError, match="must match plan node"):
+        PlanFrontmatter(
+            node="x-owner",
+            status="ready",
+            created="2026-08-02",
+            company_work=_refs(),
+        )
+
+
 def test_graph_entry_round_trips_company_work_and_unknown_fields() -> None:
     entry = Entry(
         id="x-e9a3",
@@ -45,6 +58,11 @@ def test_graph_entry_round_trips_company_work_and_unknown_fields() -> None:
     dumped = entry.model_dump(mode="json")
     assert dumped["company_work"]["work_order"]["node_id"] == "x-e9a3"
     assert dumped["future_graph_field"] == {"kept": True}
+
+
+def test_graph_entry_rejects_company_work_for_a_different_node() -> None:
+    with pytest.raises(ValidationError, match="must match graph entry id"):
+        Entry(id="x-owner", company_work=_refs())
 
 
 def test_legacy_graph_entry_remains_valid() -> None:

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Self
+from typing import Annotated, Self, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, model_validator
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
+ContractRefT = TypeVar("ContractRefT")
 
 
 class EvidenceResult(str, Enum):
@@ -148,6 +149,26 @@ class CompanyWorkRefs(_ContractModel):
                     f"effect {effect.id} references undeclared deliverable {effect.deliverable_id}"
                 )
 
+        for deliverable in self.deliverables:
+            if deliverable.effect_id is None:
+                continue
+            effect = effects[deliverable.effect_id]
+            if effect.deliverable_id is not None and effect.deliverable_id != deliverable.id:
+                raise ValueError(
+                    f"deliverable {deliverable.id} and effect {effect.id} have "
+                    f"conflicting deliverable references"
+                )
+
+        for effect in self.effects:
+            if effect.deliverable_id is None:
+                continue
+            deliverable = deliverables[effect.deliverable_id]
+            if deliverable.effect_id is not None and deliverable.effect_id != effect.id:
+                raise ValueError(
+                    f"effect {effect.id} and deliverable {deliverable.id} have "
+                    f"conflicting effect references"
+                )
+
         for item in self.evidence:
             self._validate_attempt("evidence", item, work_order)
             declared_subjects: dict[EvidenceSubjectKind, set[str]] = {
@@ -191,8 +212,8 @@ class CompanyWorkRefs(_ContractModel):
             )
 
     @staticmethod
-    def _unique_by_id(kind: str, refs: tuple[object, ...]) -> dict[str, object]:
-        result: dict[str, object] = {}
+    def _unique_by_id(kind: str, refs: tuple[ContractRefT, ...]) -> dict[str, ContractRefT]:
+        result: dict[str, ContractRefT] = {}
         for ref in refs:
             ref_id = getattr(ref, "id")
             if ref_id in result:

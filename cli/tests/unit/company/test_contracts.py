@@ -135,6 +135,35 @@ def test_ac7_hp_effect_cannot_reference_an_undeclared_deliverable() -> None:
         _company_work(effects=(effect,))
 
 
+def test_ac7_hp_deliverable_and_effect_backlinks_must_agree() -> None:
+    deliverables = (
+        DeliverableRef(
+            id="response-draft",
+            kind="internal-artifact",
+            work_order_id="x-e9a3",
+            attempt_id="attempt-1",
+            effect_id="effect-send",
+        ),
+        DeliverableRef(
+            id="other-draft",
+            kind="internal-artifact",
+            work_order_id="x-e9a3",
+            attempt_id="attempt-1",
+        ),
+    )
+    effect = EffectRef(
+        id="effect-send",
+        work_order_id="x-e9a3",
+        attempt_id="attempt-1",
+        deliverable_id="other-draft",
+        effect_class="external-communication",
+        destination="helpdesk://ticket/42",
+    )
+
+    with pytest.raises(ValidationError, match="conflicting deliverable"):
+        _company_work(deliverables=deliverables, effects=(effect,), evidence=())
+
+
 def test_ac8_inv_observation_must_be_separate_graph_work() -> None:
     observation = ObservationRef(
         node_id="x-e9a3",

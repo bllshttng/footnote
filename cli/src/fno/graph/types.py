@@ -7,7 +7,7 @@ from __future__ import annotations
 import datetime as _dt
 import math
 from enum import Enum
-from typing import Optional
+from typing import Optional, Self
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -294,6 +294,13 @@ class Entry(BaseModel):
                 # SchemaUnavailableError, KeyError, AttributeError) must propagate loudly.
                 pass
         return data
+
+    @model_validator(mode="after")
+    def _company_work_matches_entry_id(self) -> Self:
+        work_order = self.company_work.work_order if self.company_work is not None else None
+        if work_order is not None and work_order.node_id != self.id:
+            raise ValueError("company_work work_order node_id must match graph entry id")
+        return self
 
     @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field over property
     @property
