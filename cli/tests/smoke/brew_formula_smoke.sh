@@ -35,6 +35,12 @@
 #   smoke proves the formula + the symlink mechanism now.
 set -uo pipefail
 
+# The INSTALL tier runs the keg's `fno-py` console script. That script uses the
+# keg venv's interpreter, but an inherited PYTHONPATH still prepends the source
+# tree to sys.path, so `--version` answers from cli/src and the check passes on a
+# wheel that shipped nothing. preflight.sh exports exactly that.
+unset PYTHONPATH 2>/dev/null || true
+
 WHEEL="${1:-}"
 
 # Repo root from this script's location (cli/tests/smoke/ -> repo root).

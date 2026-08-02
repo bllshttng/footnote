@@ -65,6 +65,11 @@ cd "$WORK" || { echo "FAIL[env] cd to $WORK failed"; exit 1; }
 export UV_TOOL_DIR="$UV_TOOLS" UV_TOOL_BIN_DIR="$UV_BIN" \
        XDG_CACHE_HOME="$CACHE" HOME="$BASE_TMP/home" \
        FNO_INSTALL_WHEEL="$WHEEL"
+# The provisioned `fno-py` below is a console script: it runs the tool venv's
+# interpreter, but an inherited PYTHONPATH still prepends the source tree to
+# sys.path, so `--version` answers from cli/src and the check passes on a wheel
+# that shipped nothing. preflight.sh exports exactly that.
+unset PYTHONPATH 2>/dev/null || true
 
 run_capture() { OUT="$("$@" 2>&1)"; RC=$?; }
 
