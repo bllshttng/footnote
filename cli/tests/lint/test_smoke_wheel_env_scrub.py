@@ -108,7 +108,11 @@ def is_verification(line: str) -> bool:
 #: A bare `(` opening a multiline subshell counts too: a scrub inside one clears
 #: only the child's copy, leaving the parent - which runs the install - dirty.
 OPENS_RE = re.compile(r"^\s*(if|while|until|for|case|select)\b|\{\s*$|\(\)\s*\{|\(\s*$")
-CLOSES_RE = re.compile(r"^\s*(fi|done|esac|\}|\))\b|^\s*\)\s*$")
+#: `\b` after `}` or `)` would never match - a word boundary needs a word
+#: character on one side, and a bare closing brace at end of line has neither.
+#: Left that way, brace depth only ever increased and every line after the first
+#: helper function read as nested.
+CLOSES_RE = re.compile(r"^\s*(fi|done|esac)\b|^\s*[})]\s*(#.*)?$")
 HEREDOC_RE = re.compile(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
 
 
@@ -275,6 +279,16 @@ def test_tracker_sees_through_column_zero_nesting() -> None:
 def test_tracker_reopens_after_a_block_closes() -> None:
     """Depth must come back down, or everything after the first block is hidden."""
     script = ["if x; then", "y", "fi", "unset PYTHONPATH"]
+    assert 4 in top_level_lines(script)
+
+
+def test_tracker_reopens_after_a_brace_block() -> None:
+    """A helper function must not hide the rest of the file.
+
+    Every one of these scripts defines `run_capture() { ... }`, so a `}` that
+    fails to decrement depth makes each of them look nested from there down.
+    """
+    script = ["run_capture() {", "  echo hi", "}", "unset PYTHONPATH"]
     assert 4 in top_level_lines(script)
 
 
