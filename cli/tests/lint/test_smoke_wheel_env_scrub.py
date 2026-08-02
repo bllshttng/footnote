@@ -69,12 +69,34 @@ def strip_comment(line: str) -> str:
     return line
 
 
+def blank_quoted(line: str) -> str:
+    """Replace quoted spans with spaces, keeping length and structure.
+
+    A quoted `exit 1` is a string being printed, not a command being run:
+    `|| echo "please exit 1"` prints advice and installs anyway.
+    """
+    out = []
+    quote: str | None = None
+    for ch in line:
+        if quote:
+            out.append(" ")
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+            out.append(" ")
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
 def is_verification(line: str) -> bool:
     """True for a check that aborts THIS shell when PYTHONPATH survived."""
     code = strip_comment(line)
     if not TEST_RE.match(code) or SUBSHELL_EXIT_RE.search(code):
         return False
-    return bool(EXIT_RE.search(code))
+    # The exit must be a command, so look for it with strings blanked out.
+    return bool(EXIT_RE.search(blank_quoted(code)))
 
 #: Lines that open a shell block, and the ones that close it. Used to reject a
 #: scrub nested inside a conditional, loop, function, or heredoc, where it may
@@ -85,7 +107,7 @@ def is_verification(line: str) -> bool:
 #: direction - a false alarm names a line, a false pass protects nothing).
 #: A bare `(` opening a multiline subshell counts too: a scrub inside one clears
 #: only the child's copy, leaving the parent - which runs the install - dirty.
-OPENS_RE = re.compile(r"^\s*(if|while|until|for|case)\b|\{\s*$|\(\)\s*\{|\(\s*$")
+OPENS_RE = re.compile(r"^\s*(if|while|until|for|case|select)\b|\{\s*$|\(\)\s*\{|\(\s*$")
 CLOSES_RE = re.compile(r"^\s*(fi|done|esac|\}|\))\b|^\s*\)\s*$")
 HEREDOC_RE = re.compile(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
 
@@ -256,6 +278,14 @@ def test_tracker_reopens_after_a_block_closes() -> None:
     assert 4 in top_level_lines(script)
 
 
+def test_tracker_sees_select_loops() -> None:
+    """`select` skips its body outright when stdin is at EOF."""
+    script = ["select x in a b; do", "unset PYTHONPATH", "done", "pip install ./x.whl"]
+    top = top_level_lines(script)
+    assert 2 not in top
+    assert 4 in top
+
+
 def test_tracker_sees_multiline_subshells() -> None:
     """A subshell clears only its own copy; the parent still installs dirty."""
     script = ["(", "unset PYTHONPATH", ")", "pip install ./x.whl"]
@@ -283,6 +313,7 @@ def test_verification_must_exit(line: str) -> None:
         '[ -z "${PYTHONPATH:-}" ] || echo "oh well"',  # warns, then installs anyway
         '[ -z "${PYTHONPATH:-}" ] || echo warn # exit 1',  # the exit is in a comment
         '[ -z "${PYTHONPATH:-}" ] || (exit 1)',  # exits the subshell, not the script
+        '[ -z "${PYTHONPATH:-}" ] || echo "please exit 1"',  # prints the word, runs nothing
     ],
 )
 def test_verification_without_an_exit_is_rejected(line: str) -> None:
