@@ -163,6 +163,8 @@ def resolve_monitor(
     harness: str,
     route_provider: Optional[str],
     route_env: Optional[Mapping[str, str]],
+    account_env: Optional[Mapping[str, str]] = None,
+    model: Optional[str] = None,
 ) -> str:
     """Resolve the one supported monitor without widening legacy routing."""
     if explicit is not None:
@@ -176,13 +178,22 @@ def resolve_monitor(
                 f"--monitor happy requires the claude harness; got {harness!r}",
                 exit_code=2,
             )
+        if model is not None:
+            raise DispatchAskError(
+                "--monitor happy refuses a separate --model override; the model "
+                "must come from the resolved zai route",
+                exit_code=2,
+            )
         required_route_keys = (
             "ANTHROPIC_BASE_URL",
             "ANTHROPIC_AUTH_TOKEN",
             "ANTHROPIC_MODEL",
         )
+        explicit_route = route_env or {}
         missing_route_keys = [
-            key for key in required_route_keys if not str((route_env or {}).get(key, "")).strip()
+            key
+            for key in required_route_keys
+            if not str(explicit_route.get(key, "")).strip()
         ]
         if route_provider != "zai" or missing_route_keys:
             detail = (
@@ -193,6 +204,30 @@ def resolve_monitor(
             raise DispatchAskError(
                 "--monitor happy currently requires a complete resolved zai route"
                 f"{detail}",
+                exit_code=2,
+            )
+        conflicting_credentials = [
+            key
+            for key in ("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")
+            if any(
+                str(source.get(key, "")).strip()
+                for source in (explicit_route, account_env or {})
+            )
+        ]
+        if conflicting_credentials:
+            raise DispatchAskError(
+                "--monitor happy refuses a resolved zai route with a conflicting "
+                f"Anthropic credential: {', '.join(conflicting_credentials)}",
+                exit_code=2,
+            )
+        from fno.agents.model_routing import resolve_explicit_route
+
+        expected_route = resolve_explicit_route(
+            "zai", str(explicit_route["ANTHROPIC_MODEL"])
+        )
+        if expected_route is None or dict(explicit_route) != expected_route:
+            raise DispatchAskError(
+                "--monitor happy currently requires a complete resolved zai route",
                 exit_code=2,
             )
         return "happy"
@@ -1172,6 +1207,8 @@ def dispatch_spawn_pane(
         harness=provider,
         route_provider=route_provider,
         route_env=route_env,
+        account_env=account_env,
+        model=model,
     )
     # Keep the outer env wrapper: it scrubs inherited Anthropic credentials,
     # while --claude-env reasserts the complete route in happy's claude child.

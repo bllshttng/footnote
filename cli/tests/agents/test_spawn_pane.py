@@ -1743,6 +1743,42 @@ def test_cmd_spawn_explicit_happy_monitor_refuses_incompatible_selection(
     assert message in result.output
 
 
+def test_cmd_spawn_explicit_happy_monitor_refuses_separate_model_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: pytest.fail("pane dispatch called"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn",
+            "--harness",
+            "claude",
+            "--route",
+            "zai/glm-5.2",
+            "--model",
+            "claude-opus-4-1",
+            "--monitor",
+            "happy",
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "separate --model" in result.output
+
+
 def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
     """The route rides --claude-env, never --settings."""
     import fno.agents.mux_spawn as mux_spawn
@@ -1774,8 +1810,12 @@ def test_explicit_happy_monitor_refuses_when_happy_is_absent_before_runner(
 ) -> None:
     import fno.agents.mux_spawn as mux_spawn
     from fno.agents.dispatch import DispatchAskError
+    from fno.agents.model_routing import resolve_explicit_route
 
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda binary: None)
+    route = resolve_explicit_route("zai", "glm-5.2")
+    assert route is not None
     runner = FakeRunner()
 
     with pytest.raises(DispatchAskError, match="--monitor happy") as exc:
@@ -1784,11 +1824,36 @@ def test_explicit_happy_monitor_refuses_when_happy_is_absent_before_runner(
             tmp_path,
             monitor="happy",
             route_provider="zai",
-            route_env={**_ROUTE, "ANTHROPIC_MODEL": "glm-5.2"},
+            route_env=route,
             runner=runner,
         )
 
     assert exc.value.exit_code == 127
+    assert runner.calls == []
+
+
+def test_explicit_happy_monitor_refuses_separate_model_before_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.model_routing import resolve_explicit_route
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    route = resolve_explicit_route("zai", "glm-5.2")
+    assert route is not None
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="separate --model") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env=route,
+            model="claude-opus-4-1",
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
     assert runner.calls == []
 
 
@@ -1834,6 +1899,132 @@ def test_explicit_happy_monitor_refuses_partial_zai_route_before_runner(
             monitor="happy",
             route_provider="zai",
             route_env={"ANTHROPIC_MODEL": "glm-5.2"},
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+def test_explicit_happy_monitor_refuses_route_missing_canonical_tiers(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="resolved zai route") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={**_ROUTE, "ANTHROPIC_MODEL": "glm-5.2"},
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+def test_explicit_happy_monitor_refuses_route_that_does_not_match_zai(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="resolved zai route") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={
+                "ANTHROPIC_BASE_URL": "https://api.anthropic.com",
+                "ANTHROPIC_AUTH_TOKEN": "anthropic-secret",
+                "ANTHROPIC_MODEL": "claude-opus-4-1",
+            },
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+def test_explicit_happy_monitor_refuses_noncanonical_route_override(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="resolved zai route") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={
+                **_ROUTE,
+                "ANTHROPIC_MODEL": "glm-5.2",
+                "ANTHROPIC_DEFAULT_OPUS_MODEL": "claude-opus-4-1",
+            },
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+)
+def test_explicit_happy_monitor_refuses_conflicting_anthropic_credential(
+    tmp_path: Path, monkeypatch, credential: str
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="conflicting Anthropic credential") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={
+                **_ROUTE,
+                "ANTHROPIC_MODEL": "glm-5.2",
+                credential: "anthropic-secret",
+            },
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    "credential",
+    ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"],
+)
+def test_explicit_happy_monitor_refuses_conflicting_account_credential(
+    tmp_path: Path, monkeypatch, credential: str
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="conflicting Anthropic credential") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={**_ROUTE, "ANTHROPIC_MODEL": "glm-5.2"},
+            account_env={credential: "anthropic-secret"},
             runner=runner,
         )
 

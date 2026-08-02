@@ -1178,6 +1178,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        if monitor == "happy" and model is not None:
+            print(
+                "--monitor happy refuses a separate --model override; put the "
+                "Z.ai model in --route or use --provider zai --model <model>",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
         notes: list[str] = []
         route_env = resolve_explicit_route(parsed[0], parsed[1], notice=notes.append)
         if not route_env:
