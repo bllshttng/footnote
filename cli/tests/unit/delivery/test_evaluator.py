@@ -260,3 +260,190 @@ def test_contracts_are_immutable_and_versions_are_strict() -> None:
         fact.producer = "adapter:other"
     with pytest.raises(ValidationError):
         DeliveryEvidenceFact(**{**fact.model_dump(), "version": "v2"})
+
+
+def test_ac_d4_compat_pr_shadow_passes_only_with_all_five_legacy_reads() -> None:
+    from fno.delivery import LegacyPRSnapshot, adapt_legacy_pr
+
+    snapshot = LegacyPRSnapshot(
+        work_order_node_id=NODE_ID,
+        attempt_id=ATTEMPT_ID,
+        pr_open=True,
+        ci_ok=True,
+        ci_pending=False,
+        reviewed=True,
+        head_shipped=True,
+        probes_passed=True,
+        current_head="head-sha",
+        observed_at=NOW,
+        fresh_until=NOW + timedelta(minutes=5),
+        source_revision="pr-42:head-sha",
+        fact_revision="pr-snapshot-1",
+    )
+
+    shadow = adapt_legacy_pr(snapshot, evaluated_at=NOW)
+
+    assert shadow.legacy_passed is True
+    assert shadow.verdict.aggregate is EvidenceResult.PASSED
+    assert shadow.company_work.function is None
+    assert [row.evidence_id for row in shadow.verdict.requirements] == [
+        "legacy-pr-open",
+        "legacy-pr-ci",
+        "legacy-pr-review",
+        "legacy-pr-head",
+        "legacy-pr-probes",
+    ]
+    assert len(shadow.facts) == 5
+    assert {fact.producer for fact in shadow.facts} == {"adapter:legacy-pr"}
+    assert {fact.source_revision for fact in shadow.facts} == {"pr-42:head-sha"}
+    assert {fact.fact_revision for fact in shadow.facts} == {"pr-snapshot-1"}
+    assert {fact.observed_at for fact in shadow.facts} == {NOW}
+    assert {fact.fresh_until for fact in shadow.facts} == {
+        NOW + timedelta(minutes=5)
+    }
+
+
+@pytest.mark.parametrize(
+    ("changes", "evidence_id", "expected"),
+    [
+        ({"pr_open": False}, "legacy-pr-open", EvidenceResult.FAILED),
+        ({"pr_open": None}, "legacy-pr-open", EvidenceResult.UNKNOWN),
+        ({"ci_ok": False}, "legacy-pr-ci", EvidenceResult.FAILED),
+        ({"ci_ok": False, "ci_pending": True}, "legacy-pr-ci", EvidenceResult.BLOCKED),
+        ({"ci_ok": None}, "legacy-pr-ci", EvidenceResult.UNKNOWN),
+        ({"reviewed": False}, "legacy-pr-review", EvidenceResult.BLOCKED),
+        ({"reviewed": None}, "legacy-pr-review", EvidenceResult.UNKNOWN),
+        ({"head_shipped": False}, "legacy-pr-head", EvidenceResult.FAILED),
+        ({"head_shipped": None}, "legacy-pr-head", EvidenceResult.UNKNOWN),
+        ({"probes_passed": False}, "legacy-pr-probes", EvidenceResult.FAILED),
+        ({"probes_passed": None}, "legacy-pr-probes", EvidenceResult.UNKNOWN),
+    ],
+)
+def test_ac_d4_compat_pr_shadow_retains_each_legacy_blocker(
+    changes: dict[str, bool | None], evidence_id: str, expected: EvidenceResult
+) -> None:
+    from fno.delivery import LegacyPRSnapshot, adapt_legacy_pr
+
+    values: dict[str, object] = {
+        "work_order_node_id": NODE_ID,
+        "attempt_id": ATTEMPT_ID,
+        "pr_open": True,
+        "ci_ok": True,
+        "ci_pending": False,
+        "reviewed": True,
+        "head_shipped": True,
+        "probes_passed": True,
+        "current_head": "head-sha",
+        "observed_at": NOW,
+        "fresh_until": NOW + timedelta(minutes=5),
+        "source_revision": "pr-42:head-sha",
+        "fact_revision": "pr-snapshot-1",
+    }
+    values.update(changes)
+
+    shadow = adapt_legacy_pr(LegacyPRSnapshot(**values), evaluated_at=NOW)
+    row = next(row for row in shadow.verdict.requirements if row.evidence_id == evidence_id)
+
+    assert shadow.legacy_passed is False
+    assert shadow.verdict.aggregate is not EvidenceResult.PASSED
+    assert row.result is expected
+
+
+def test_ac_d4_compat_research_shadow_preserves_exact_grade_and_setup_reads() -> None:
+    from fno.delivery import LegacyResearchSnapshot, adapt_legacy_research
+
+    snapshot = LegacyResearchSnapshot(
+        work_order_node_id=NODE_ID,
+        attempt_id=ATTEMPT_ID,
+        uncited_claims=0,
+        dead_urls=0,
+        sections_uncovered=(),
+        artifact_read=True,
+        sidecar_read=True,
+        observed_at=NOW,
+        fresh_until=NOW + timedelta(minutes=5),
+        source_revision="brief-sha:sidecar-sha",
+        fact_revision="research-snapshot-1",
+    )
+
+    shadow = adapt_legacy_research(snapshot, evaluated_at=NOW)
+
+    assert shadow.legacy_passed is True
+    assert shadow.verdict.aggregate is EvidenceResult.PASSED
+    assert [row.evidence_id for row in shadow.verdict.requirements] == [
+        "legacy-research-artifact-read",
+        "legacy-research-sidecar-read",
+        "legacy-research-uncited-claims",
+        "legacy-research-dead-urls",
+        "legacy-research-section-coverage",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("changes", "evidence_id", "expected"),
+    [
+        ({"uncited_claims": 1}, "legacy-research-uncited-claims", EvidenceResult.FAILED),
+        ({"dead_urls": 1}, "legacy-research-dead-urls", EvidenceResult.FAILED),
+        (
+            {"sections_uncovered": ("Findings",)},
+            "legacy-research-section-coverage",
+            EvidenceResult.FAILED,
+        ),
+        ({"artifact_read": False}, "legacy-research-artifact-read", EvidenceResult.FAILED),
+        ({"artifact_read": None}, "legacy-research-artifact-read", EvidenceResult.UNKNOWN),
+        ({"sidecar_read": False}, "legacy-research-sidecar-read", EvidenceResult.FAILED),
+        ({"sidecar_read": None}, "legacy-research-sidecar-read", EvidenceResult.UNKNOWN),
+    ],
+)
+def test_ac_d4_compat_research_shadow_retains_grade_or_setup_failure(
+    changes: dict[str, object], evidence_id: str, expected: EvidenceResult
+) -> None:
+    from fno.delivery import LegacyResearchSnapshot, adapt_legacy_research
+
+    values: dict[str, object] = {
+        "work_order_node_id": NODE_ID,
+        "attempt_id": ATTEMPT_ID,
+        "uncited_claims": 0,
+        "dead_urls": 0,
+        "sections_uncovered": (),
+        "artifact_read": True,
+        "sidecar_read": True,
+        "observed_at": NOW,
+        "fresh_until": NOW + timedelta(minutes=5),
+        "source_revision": "brief-sha:sidecar-sha",
+        "fact_revision": "research-snapshot-1",
+    }
+    values.update(changes)
+
+    shadow = adapt_legacy_research(LegacyResearchSnapshot(**values), evaluated_at=NOW)
+    row = next(row for row in shadow.verdict.requirements if row.evidence_id == evidence_id)
+
+    assert shadow.legacy_passed is False
+    assert shadow.verdict.aggregate is not EvidenceResult.PASSED
+    assert row.result is expected
+
+
+def test_ac_d4_compat_legacy_snapshots_and_shadow_results_are_immutable() -> None:
+    from fno.delivery import LegacyPRSnapshot, adapt_legacy_pr
+
+    snapshot = LegacyPRSnapshot(
+        work_order_node_id=NODE_ID,
+        attempt_id=ATTEMPT_ID,
+        pr_open=True,
+        ci_ok=True,
+        ci_pending=False,
+        reviewed=True,
+        head_shipped=True,
+        probes_passed=True,
+        current_head="head-sha",
+        observed_at=NOW,
+        fresh_until=NOW + timedelta(minutes=5),
+        source_revision="pr-42:head-sha",
+        fact_revision="pr-snapshot-1",
+    )
+    shadow = adapt_legacy_pr(snapshot, evaluated_at=NOW)
+
+    with pytest.raises(ValidationError, match="frozen"):
+        snapshot.pr_open = False
+    with pytest.raises(ValidationError, match="frozen"):
+        shadow.legacy_passed = False
