@@ -91,3 +91,43 @@ def test_no_locked_decisions_section():
 
 def test_empty_text():
     assert parse_locked_executor("") == ""
+
+
+def test_rejected_alternative_prose_does_not_become_mixed():
+    """Naming a rejected option must not manufacture a 'mixed' routing decision.
+
+    Last-wins still governs WHICH value survives, and it reads position, not
+    negation - so an entry that trails with its rejected option still resolves to
+    that option. That is a pre-existing limit of the ported last-wins rule, not
+    something this gate changes; what it must never do is silently upgrade the
+    entry to 'mixed' and route the whole plan through the frontend pipeline.
+    """
+    doc = (
+        "## Locked Decisions\n\n"
+        "5. **Executor routing**: `executor: do` (archer / TDD), "
+        "not the rejected `executor: impeccable` option.\n"
+    )
+    assert parse_locked_executor(doc) != "mixed"
+
+
+def test_decision_history_prose_keeps_the_stated_choice():
+    doc = (
+        "## Locked Decisions\n\n"
+        "5. **Executor routing**: changed from `executor: impeccable` "
+        "to `executor: do` after review.\n"
+    )
+    assert parse_locked_executor(doc) == "do"
+
+
+def test_documented_override_shape_still_resolves_mixed():
+    doc = (
+        "## Locked Decisions\n\n"
+        "5. **Executor routing**: plan-level `executor: do` with per-task "
+        "overrides `executor: impeccable` on tasks touching `**/*.tsx`.\n"
+    )
+    assert parse_locked_executor(doc) == "mixed"
+
+
+def test_explicit_mixed_needs_no_inference():
+    doc = "## Locked Decisions\n\n5. **Executor**: `executor: mixed`\n"
+    assert parse_locked_executor(doc) == "mixed"

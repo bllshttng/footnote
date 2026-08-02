@@ -54,6 +54,10 @@ _EXECUTOR_PREFIX_RE = re.compile(r"^executor[ \t]*:[ \t]*\**[ \t]*", re.IGNORECA
 
 # is_routing_header: strip leading list markers ("- ", "1. ", "* ") then a
 # leading "**", then require ^\*?\*?executor[[:space:]]+routing\*?\*?[[:space:]]*: .
+# The wording the documented mixed shape always carries ("per-task overrides").
+# This is what separates it from rationale prose that merely names both values.
+_OVERRIDE_SHAPE_RE = re.compile(r"overrid(?:e|es|ing)\b|per-task\b", re.IGNORECASE)
+
 _LIST_MARKER_RE = re.compile(r"^[ \t]*([0-9]+\.|[-*])[ \t]*")
 _LEADING_BOLD_RE = re.compile(r"^\*\*")
 _ROUTING_HEADER_RE = re.compile(
@@ -103,11 +107,20 @@ def _extract_section(text: str) -> str:
 def _extract_value(block: str) -> str:
     """Resolve one entry's ``executor:<value>`` to a canonical value, or ''.
 
-    ``block`` is a SINGLE buffered entry. Two distinct canonical values inside
-    one entry is the documented mixed shape - "plan-level ``executor: do`` with
-    per-task overrides ``executor: impeccable``" - so it resolves to ``mixed``.
-    Taking the last value there would return ``impeccable`` and route the whole
-    plan through the frontend pipeline, the more expensive of the two mistakes.
+    ``block`` is a SINGLE buffered entry. The documented mixed shape - "plan-level
+    ``executor: do`` with per-task overrides ``executor: impeccable``" - resolves
+    to ``mixed``, because taking the last value there would return ``impeccable``
+    and route the whole plan through the frontend pipeline, the more expensive of
+    the two mistakes.
+
+    Two canonical values alone do NOT prove that shape. The whole buffered entry
+    is scanned, rationale included, so a decision that names its rejected option
+    ("``executor: do``, not the rejected ``executor: impeccable``") or its history
+    ("changed from ``executor: impeccable`` to ``executor: do``") also carries two
+    values while having plainly chosen one. Require the override wording that the
+    real shape always states; otherwise fall through to last-wins, which preserves
+    the stated choice. An explicit ``executor: mixed`` is canonical and needs no
+    inference.
 
     Otherwise this mirrors the bash ``extract_value``: drop backticks, take the
     LAST ``executor: <value>`` (case-insensitive), strip the key prefix,
@@ -119,7 +132,10 @@ def _extract_value(block: str) -> str:
     if not matches:
         return ""
     values = [_EXECUTOR_PREFIX_RE.sub("", m).lower() for m in matches]
-    if len({v for v in values if v in _CANONICAL}) > 1:
+    if (
+        len({v for v in values if v in _CANONICAL}) > 1
+        and _OVERRIDE_SHAPE_RE.search(block) is not None
+    ):
         return "mixed"
     return values[-1] if values[-1] in _CANONICAL else ""
 
