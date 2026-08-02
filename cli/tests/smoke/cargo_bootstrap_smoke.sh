@@ -30,7 +30,8 @@ set -uo pipefail
 # - but an inherited PYTHONPATH still prepends the source tree to sys.path, so
 # the provisioned run would answer from cli/src on a wheel that shipped nothing.
 # scripts/ci/preflight.sh exports exactly that.
-unset PYTHONPATH 2>/dev/null || true
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
 
 WHEEL="${1:?usage: cargo_bootstrap_smoke.sh <binary-complete-wheel>}"
 WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"

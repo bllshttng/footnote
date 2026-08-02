@@ -27,7 +27,8 @@ set -uo pipefail
 # source tree ahead of it on sys.path, so this smoke would pass on a wheel that
 # shipped nothing. scripts/ci/preflight.sh exports exactly that, and it already
 # cost test_build.sh two false wheel-defect reports before it got this same line.
-unset PYTHONPATH 2>/dev/null || true
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
 
 WHEEL="${1:?usage: clean_machine_smoke.sh <wheel>}"
 # Absolutise before we cd away to a repo-less working dir.

@@ -39,7 +39,8 @@ set -uo pipefail
 # keg venv's interpreter, but an inherited PYTHONPATH still prepends the source
 # tree to sys.path, so `--version` answers from cli/src and the check passes on a
 # wheel that shipped nothing. preflight.sh exports exactly that.
-unset PYTHONPATH 2>/dev/null || true
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
 
 WHEEL="${1:-}"
 

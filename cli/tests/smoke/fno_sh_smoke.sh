@@ -35,7 +35,8 @@ set -uo pipefail
 # inherited PYTHONPATH still prepends the source tree to sys.path and `--version`
 # would answer from cli/src on a wheel that shipped nothing. preflight.sh exports
 # exactly that.
-unset PYTHONPATH 2>/dev/null || true
+unset PYTHONPATH
+[ -z "${PYTHONPATH:-}" ] || { echo "FAIL[env] PYTHONPATH survived unset (readonly?); refusing to smoke against a contaminated sys.path"; exit 1; }
 
 WHEEL="${1:?usage: fno_sh_smoke.sh <binary-complete-wheel>}"
 WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"
