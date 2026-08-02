@@ -154,27 +154,49 @@ pub fn for_notice(url: &str) -> String {
 /// having required an `http(s)://` prefix is also what stops it being read as
 /// an option by the opener.
 pub fn open_url(url: &str) -> Result<(), String> {
-    use std::process::{Command, Stdio};
+    open_url_with(spawn_opener, url)
+}
 
-    if !is_openable(url) {
-        return Err(format!("refused to open {}", for_notice(url)));
-    }
-    let opener = if cfg!(target_os = "macos") {
+/// The opener name for this platform. Named separately so the test that
+/// asserts the argv can name the same binary the real path would use.
+fn opener_bin() -> &'static str {
+    if cfg!(target_os = "macos") {
         "open"
     } else {
         "xdg-open"
-    };
-    match Command::new(opener)
+    }
+}
+
+/// [`open_url`] with the exec injected, mirroring `clipboard::deliver_with`:
+/// the refusal is testable without a process, and the ACCEPT path is testable
+/// without launching a browser on whatever machine runs the suite. The seam
+/// exists so the argv - the part that actually matters for safety - is asserted
+/// rather than assumed.
+fn open_url_with<S>(spawn: S, url: &str) -> Result<(), String>
+where
+    S: FnOnce(&str, &str) -> Result<std::process::ExitStatus, std::io::Error>,
+{
+    if !is_openable(url) {
+        return Err(format!("refused to open {}", for_notice(url)));
+    }
+    let opener = opener_bin();
+    match spawn(opener, url) {
+        Ok(s) if s.success() => Ok(()),
+        Ok(s) => Err(format!("{opener} exited {}", s.code().unwrap_or(-1))),
+        Err(e) => Err(format!("{opener}: {e}")),
+    }
+}
+
+/// The real exec. One argv element for the URL, no shell, stdio detached so a
+/// chatty `xdg-open` cannot scribble over the client's alternate screen.
+fn spawn_opener(opener: &str, url: &str) -> Result<std::process::ExitStatus, std::io::Error> {
+    use std::process::{Command, Stdio};
+    Command::new(opener)
         .arg(url)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status()
-    {
-        Ok(s) if s.success() => Ok(()),
-        Ok(s) => Err(format!("{opener} exited {}", s.code().unwrap_or(-1))),
-        Err(e) => Err(format!("{opener}: {e}")),
-    }
 }
 
 #[cfg(test)]
@@ -293,6 +315,58 @@ mod tests {
             let err = open_url(bad).expect_err("must refuse");
             assert!(err.starts_with("refused to open"), "{bad} -> {err}");
         }
+    }
+
+    /// An exit status without launching anything: `true`/`false` are the two
+    /// smallest real processes on every platform this runs on.
+    fn status(ok: bool) -> std::process::ExitStatus {
+        std::process::Command::new(if ok { "true" } else { "false" })
+            .status()
+            .unwrap()
+    }
+
+    #[test]
+    fn open_url_passes_the_url_as_one_argv_element_to_the_platform_opener() {
+        // The safety-relevant assertion: the URL reaches the opener whole, as a
+        // single argument, with no shell in between. Injected rather than
+        // exec'd for real so the suite never opens a browser.
+        let seen = std::cell::RefCell::new(None);
+        let out = open_url_with(
+            |opener, url| {
+                *seen.borrow_mut() = Some((opener.to_string(), url.to_string()));
+                Ok(status(true))
+            },
+            "https://example.com/a b".replace(' ', "%20").as_str(),
+        );
+        assert!(out.is_ok(), "{out:?}");
+        let (opener, url) = seen.into_inner().expect("opener was invoked");
+        assert_eq!(opener, opener_bin());
+        assert_eq!(url, "https://example.com/a%20b", "URL passed whole");
+    }
+
+    #[test]
+    fn open_url_never_spawns_for_a_refused_url() {
+        let mut spawned = false;
+        let out = open_url_with(
+            |_, _| {
+                spawned = true;
+                Ok(status(true))
+            },
+            "file:///etc/passwd",
+        );
+        assert!(out.is_err());
+        assert!(!spawned, "a refused URL must not reach the opener at all");
+    }
+
+    #[test]
+    fn open_url_reports_a_failing_opener() {
+        let out = open_url_with(|_, _| Ok(status(false)), "https://example.com");
+        assert!(out.unwrap_err().contains("exited"), "non-zero surfaces");
+        let out = open_url_with(
+            |_, _| Err(std::io::Error::new(std::io::ErrorKind::NotFound, "nope")),
+            "https://example.com",
+        );
+        assert!(out.unwrap_err().contains("nope"), "spawn error surfaces");
     }
 
     #[test]
