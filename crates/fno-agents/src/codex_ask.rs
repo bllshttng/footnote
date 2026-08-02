@@ -150,6 +150,12 @@ pub fn build_argv_create(
         argv.push("--add-dir".to_string());
         argv.push(d.to_string());
     }
+    // Parity with codex.py::create: the bounded sandbox marks <project_root>/.git
+    // read-only, so grant the git common dir or the worker cannot commit at all.
+    // Additive - `--add-dir` is repeatable, so a caller's own grant survives.
+    if !yolo {
+        argv.extend(crate::provider::codex_git_writable_args(cwd));
+    }
     // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {

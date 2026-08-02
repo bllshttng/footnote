@@ -154,6 +154,49 @@ fn build_argv_create_forwards_add_dir() {
 }
 
 #[test]
+fn build_argv_create_grants_git_metadata_write_in_a_repo() {
+    // Byte-parity with codex.py::create. codex's workspace-write policy marks
+    // <project_root>/.git read-only, so a bounded `ask` worker asked to commit
+    // fails on index.lock. The grant is the git COMMON dir, which also covers a
+    // linked worktree's gitdir at <repo>/.git/worktrees/<name>/.
+    let dir = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let argv = build_argv_create(dir.path(), "hi", false, None, None, None);
+    let i = argv
+        .iter()
+        .position(|a| a == "--add-dir")
+        .expect("--add-dir present");
+    assert_eq!(
+        std::fs::canonicalize(&argv[i + 1]).unwrap(),
+        std::fs::canonicalize(dir.path().join(".git")).unwrap()
+    );
+
+    // Full yolo is already unsandboxed: no grant to make.
+    let yolo = build_argv_create(dir.path(), "hi", true, None, None, None);
+    assert!(!yolo.iter().any(|a| a == "--add-dir"));
+}
+
+#[test]
+fn build_argv_create_git_grant_composes_with_user_add_dir() {
+    // --add-dir is repeatable, so the git grant never clobbers a caller's own.
+    let dir = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"));
+    assert_eq!(argv.iter().filter(|a| *a == "--add-dir").count(), 2);
+    assert!(argv.iter().any(|a| a == "/extra"));
+}
+
+#[test]
 fn build_argv_create_approval_precedes_exec() {
     // Regression (pr704): --ask-for-approval is a GLOBAL flag and MUST come
     // before the `exec` subcommand, or codex aborts with

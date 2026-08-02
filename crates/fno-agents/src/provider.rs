@@ -436,30 +436,33 @@ impl CodexProvider {
             vec![]
         }
     }
+}
 
-    /// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
-    /// bounded worker can commit. workspace-write marks `<project_root>/.git`
-    /// read-only, so without this every `git add` fails on index.lock - in a
-    /// linked worktree the gitdir is outside the workspace entirely. The
-    /// common dir is `<repo>/.git` in both shapes and holds the per-worktree
-    /// gitdir plus the shared objects/ and refs/ a commit writes. Empty on any
-    /// failure: a grant we cannot resolve must never break the spawn.
-    fn git_writable(cwd: &std::path::Path) -> Vec<String> {
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(cwd)
-            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-            .output();
-        let Ok(out) = out else { return vec![] };
-        if !out.status.success() {
-            return vec![];
-        }
-        let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if common.is_empty() {
-            return vec![];
-        }
-        vec!["--add-dir".into(), common]
+/// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
+/// bounded codex worker can commit. workspace-write marks
+/// `<project_root>/.git` read-only, so without this every `git add` fails on
+/// index.lock - and in a linked worktree the gitdir is outside the workspace
+/// entirely. The common dir is `<repo>/.git` in both shapes and holds the
+/// per-worktree gitdir plus the shared objects/ and refs/ a commit writes.
+///
+/// Shared by every Rust codex argv builder (headless create here, the `ask`
+/// lane in codex_ask.rs) so the grant cannot land on one path and miss another.
+/// Empty on any failure: a grant we cannot resolve must never break the spawn.
+pub(crate) fn codex_git_writable_args(cwd: &std::path::Path) -> Vec<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output();
+    let Ok(out) = out else { return vec![] };
+    if !out.status.success() {
+        return vec![];
     }
+    let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if common.is_empty() {
+        return vec![];
+    }
+    vec!["--add-dir".into(), common]
 }
 
 impl Provider for CodexProvider {
@@ -480,7 +483,7 @@ impl Provider for CodexProvider {
         ];
         argv.extend(Self::sandbox_create(ctx.yolo));
         if !ctx.yolo {
-            argv.extend(Self::git_writable(&ctx.cwd));
+            argv.extend(codex_git_writable_args(&ctx.cwd));
         }
         if let Some(effort) = ctx.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             argv.push("-c".into());
@@ -1368,7 +1371,10 @@ mod tests {
         ctx.cwd = dir.path().to_path_buf();
         let argv = CodexProvider.create_argv(&ctx);
 
-        let i = argv.iter().position(|a| a == "--add-dir").expect("--add-dir");
+        let i = argv
+            .iter()
+            .position(|a| a == "--add-dir")
+            .expect("--add-dir");
         assert_eq!(
             std::fs::canonicalize(&argv[i + 1]).unwrap(),
             std::fs::canonicalize(dir.path().join(".git")).unwrap()
