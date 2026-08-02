@@ -16,6 +16,7 @@ pub mod clipboard;
 pub mod connections_view;
 pub mod digest_overlay;
 pub mod keys;
+pub mod link;
 pub mod mouse;
 pub mod mux_cli;
 pub mod needs_overlay;

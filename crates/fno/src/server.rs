@@ -5741,10 +5741,23 @@ impl Core {
             MouseAction::SelectRelease => {
                 // Auto-copy on release with a real selection; the highlight stays
                 // held (Warp). A plain click (empty selection) clears any prior
-                // highlight instead - never a third behavior.
+                // highlight, and (x-a2d0) opens the URL under it if there is one.
+                //
+                // No modifier: this arm is only reached in a pane that never
+                // negotiated mouse reporting, where a bare left click has no
+                // other meaning (click-to-focus is still unshipped, see this
+                // function's doc). Shift-click stays the native-terminal escape
+                // hatch - the client drops shifted events before they get here.
                 match self.panes.get(&pane).and_then(|e| e.vt.selection_text()) {
                     Some(text) => self.send_copy(client_id, text),
                     None => {
+                        if let Some(url) = self
+                            .panes
+                            .get(&pane)
+                            .and_then(|e| e.vt.link_at(event.row, event.col))
+                        {
+                            self.send_open_link(client_id, url);
+                        }
                         if let Some(e) = self.panes.get_mut(&pane) {
                             e.vt.selection_clear();
                         }
@@ -5768,6 +5781,27 @@ impl Core {
         };
         if c.reliable_tx.try_send(ServerMsg::Copy { text }).is_err() {
             eprintln!("fno mux: client {client_id} reliable channel wedged on Copy; dropping it");
+            self.clients.retain(|c| c.id != client_id);
+            self.push_layout(true);
+        }
+    }
+
+    /// Ship a clicked URL to the client that clicked it (x-a2d0), mirroring
+    /// [`Self::send_copy`]: only the requesting client, over the reliable
+    /// channel. Re-checks the scheme allowlist so a future caller cannot reach
+    /// the client's opener with an unvetted URL - `link_at` already filters, and
+    /// this is the second lock on the same door.
+    fn send_open_link(&mut self, client_id: u64, url: String) {
+        if !crate::link::is_openable(&url) {
+            return;
+        }
+        let Some(c) = self.clients.iter().find(|c| c.id == client_id) else {
+            return;
+        };
+        if c.reliable_tx.try_send(ServerMsg::OpenLink { url }).is_err() {
+            eprintln!(
+                "fno mux: client {client_id} reliable channel wedged on OpenLink; dropping it"
+            );
             self.clients.retain(|c| c.id != client_id);
             self.push_layout(true);
         }

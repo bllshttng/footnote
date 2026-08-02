@@ -239,7 +239,13 @@ fn default_true() -> bool {
 /// deserialize a `BreakPane` and an unbumped client would lose its connection on
 /// the first pane-break drag rather than at handshake. Rides on top of the x-c4d4
 /// layout-template v42 bump (independent additive wire deltas, one version each).
-pub const PROTO_VERSION: u32 = 44;
+///
+/// v45 (x-a2d0, clickable links): `ServerMsg::OpenLink { url }` - the server
+/// resolves the URL under a click (OSC 8 or linkified text, see [`crate::link`])
+/// and the CLIENT opens it, because the client is the process sitting at the
+/// human's desk. A new variant, not an additive field, so a v44 client cannot
+/// decode it; the handshake is what stops the skew.
+pub const PROTO_VERSION: u32 = 45;
 
 /// (v34, x-9c5f) The peek-overlay free-text mail ceiling: the server refuses
 /// (never truncates) a [`Command::MailAgent`] whose sanitized text exceeds this,
@@ -1587,6 +1593,14 @@ pub enum ServerMsg {
     /// else reports the failure visibly. Reliable - a dropped copy is silent
     /// data loss, never acceptable.
     Copy { text: String },
+    /// (v45, x-a2d0) A URL the user clicked, for the client to hand to the
+    /// platform opener. Resolved server-side because the grid (and its OSC 8
+    /// hyperlink state and scrollback) lives there; opened client-side because
+    /// the client is the process at the human's desk, exactly like [`Self::Copy`]
+    /// and its clipboard. Already filtered through `link::is_openable` by the
+    /// server; the client checks again before exec rather than trusting the
+    /// wire. Reliable - a dropped click is a dead-feeling button.
+    OpenLink { url: String },
     /// (v12, x-e780) The initiator-only result of a `SearchOpen`/`SearchStep`:
     /// `total` matches in the snapshot and the `current` 1-based position after
     /// the jump. `total == 0` means no matches (the client shows "no matches" +
@@ -2575,8 +2589,8 @@ mod tests {
         // serde default. The anchored-layout node (x-6928) bumped 43 -> 44;
         // what we assert here is (a) the canonical version and (b) the new
         // variants survive the codec losslessly, exactly the discipline every
-        // prior new-verb bump followed.
-        assert_eq!(PROTO_VERSION, 44);
+        // prior new-verb bump followed. x-a2d0 (clickable links) bumped 44 -> 45.
+        assert_eq!(PROTO_VERSION, 45);
         for msg in [
             ClientMsg::Command(Command::BreakPane { pane: 7 }),
             ClientMsg::Command(Command::JoinTab {
@@ -2618,13 +2632,13 @@ mod tests {
     }
 
     #[test]
-    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_is_44() {
+    fn agent_row_crown_fields_are_serde_default_tolerant_and_proto_version_is_pinned() {
         // The mux-crown wire lift bumped PROTO_VERSION 40 -> 41; the templates
         // node (x-c4d4) bumped it 41 -> 42; the US9 drag faces (x-d6a8) bumped it
-        // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44. The two
-        // additive crown fields stay skew-tolerant both ways regardless of the
-        // version number.
-        assert_eq!(PROTO_VERSION, 44);
+        // 42 -> 43; the anchored-layout node (x-6928) bumped it 43 -> 44;
+        // clickable links (x-a2d0) bumped it 44 -> 45. The two additive crown
+        // fields stay skew-tolerant both ways regardless of the version number.
+        assert_eq!(PROTO_VERSION, 45);
         // A pre-41 row omits both crown keys; a 41 reader decodes them as None.
         let older = r#"{"squad":null,"name":"bg","pane_id":null,
                       "badge":null,"reason":null,"exited":false}"#;
@@ -2654,7 +2668,8 @@ mod tests {
         // `fallback`; a v44 reader decodes it as NewTab (the shipped default),
         // never a failure - the skew window the handshake holds. An exact
         // placement sets Refuse, and the receipt carries it losslessly.
-        assert_eq!(PROTO_VERSION, 44);
+        // (x-a2d0 later bumped 44 -> 45; these v44 shapes are unaffected.)
+        assert_eq!(PROTO_VERSION, 45);
         let v43 = r#"{"target":"CurrentRoute"}"#;
         let legacy: PanePlacement = serde_json::from_str(v43).unwrap();
         assert_eq!(legacy.fallback, PlacementFallback::NewTab);
