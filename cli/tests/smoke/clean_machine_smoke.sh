@@ -22,6 +22,13 @@
 # Usage: clean_machine_smoke.sh <path-to-wheel>
 set -uo pipefail
 
+# Scrubbed FIRST, before anything is installed or run: every check below reads
+# the INSTALLED wheel, and an inherited PYTHONPATH pointing at cli/src puts the
+# source tree ahead of it on sys.path, so this smoke would pass on a wheel that
+# shipped nothing. scripts/ci/preflight.sh exports exactly that, and it already
+# cost test_build.sh two false wheel-defect reports before it got this same line.
+unset PYTHONPATH 2>/dev/null || true
+
 WHEEL="${1:?usage: clean_machine_smoke.sh <wheel>}"
 # Absolutise before we cd away to a repo-less working dir.
 WHEEL="$(cd "$(dirname "$WHEEL")" && pwd)/$(basename "$WHEEL")"
@@ -59,12 +66,6 @@ mkdir -p "$WORK"
 cd "$WORK"
 export PATH="$BIN:$PATH"
 unset FNO_REPO_ROOT CLAUDE_PLUGIN_ROOT CODEX_PLUGIN_ROOT EVENTS_SCHEMA_PATH 2>/dev/null || true
-# PYTHONPATH too: every `import fno` below runs against the INSTALLED wheel, so
-# an inherited PYTHONPATH pointing at cli/src silently redirects them to the
-# source tree and this smoke passes on a wheel that ships nothing. preflight.sh
-# exports exactly that, and it already cost test_build.sh two false wheel-defect
-# reports before it got the same scrub (cli/tests/smoke/test_build.sh).
-unset PYTHONPATH 2>/dev/null || true
 # Pristine HOME so ~/.fno/plugin-root (a dev / CI-runner artifact) cannot resolve
 # the clone-only verbs back to a real checkout - the degrade (class 3) must fire
 # because the plugin is genuinely absent, making the smoke hermetic everywhere.
