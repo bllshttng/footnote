@@ -323,6 +323,18 @@ def test_ac4_err_unknown_retry_is_allowed_once_proven_safe(
     assert reopened.idempotency_key == "key-1"
 
 
+def test_ac4_err_failed_retry_needs_no_capability_proof(store: EffectStore) -> None:
+    """An explicit rejection means the effect did not happen, so a retry cannot
+    duplicate it. Only an ambiguous outcome needs the capability check."""
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+
+    reopened = store.authorize_retry(idempotency_key="key-1", adapter=BLIND_ADAPTER)
+    assert reopened.state is EffectState.EXECUTING
+    assert reopened.idempotency_key == "key-1"
+
+
 def test_ac4_err_unknown_cannot_be_silently_settled_as_executing(store: EffectStore) -> None:
     digest = _approve(store, _request())
     store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)

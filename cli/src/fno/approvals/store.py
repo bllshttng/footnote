@@ -370,6 +370,11 @@ class EffectStore:
 
         Concurrent identical calls observe the same durable attempt, and exactly
         one receives ``may_dispatch=True``.
+
+        Dispatch permission is granted once per attempt and is never regranted
+        here, so a settled attempt always reads back ``may_dispatch=False``.
+        Reopening one is :meth:`authorize_retry`'s job, which is where the
+        safety check for an ambiguous outcome lives.
         """
         now = self._now()
         with self._write() as conn:
@@ -500,12 +505,17 @@ class EffectStore:
     def authorize_retry(
         self, *, idempotency_key: str, adapter: AdapterCapability
     ) -> EffectAttempt:
-        """Reopen an ambiguous attempt only when a retry is provably safe.
+        """Regrant dispatch on a non-terminal attempt, safely.
 
-        Safe means the adapter enforces this idempotency key remotely, or a
-        reconciliation read can prove whether the effect already happened.
-        Without either, the retry is refused: Footnote guarantees one local
-        dispatcher but makes no external exactly-once claim.
+        A ``failed`` attempt needs no capability proof: an explicit rejection
+        means the destination did not apply the effect, so retrying the same key
+        cannot duplicate it. An ``unknown`` attempt does, because nobody knows
+        whether it happened. Safe there means the adapter enforces this
+        idempotency key remotely, or a reconciliation read can prove whether the
+        effect already occurred. Without either, the retry is refused: Footnote
+        guarantees one local dispatcher but makes no external exactly-once claim.
+
+        ``acknowledged`` and ``blocked`` are terminal and never reopen.
         """
         with self._write() as conn:
             row = conn.execute(
