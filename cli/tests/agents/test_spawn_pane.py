@@ -1590,9 +1590,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     """The public flag reaches the existing safe happy launcher seam."""
     from typer.testing import CliRunner
 
-    import fno.agents.cli as agents_cli
     import fno.agents.mux_spawn as mux_spawn
     import fno.agents.spawn_gate as spawn_gate
+    from fno.cli import app
     from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
 
     class Gate:
@@ -1619,8 +1619,9 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
 
     result = CliRunner().invoke(
-        agents_cli.agents_app,
+        app,
         [
+            "agents",
             "spawn",
             "--name",
             "peer",
@@ -1647,6 +1648,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     ]
     assert f"ANTHROPIC_BASE_URL={DEFAULT_ZAI_BASE_URL}" in pairs
     assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    assert "ANTHROPIC_MODEL=glm-5.2" in pairs
     assert "--settings" not in argv
 
 
@@ -1782,7 +1784,7 @@ def test_explicit_happy_monitor_refuses_when_happy_is_absent_before_runner(
             tmp_path,
             monitor="happy",
             route_provider="zai",
-            route_env=dict(_ROUTE),
+            route_env={**_ROUTE, "ANTHROPIC_MODEL": "glm-5.2"},
             runner=runner,
         )
 
@@ -1812,6 +1814,26 @@ def test_explicit_happy_monitor_refuses_in_process_incompatible_route(
             monitor="happy",
             route_provider=route_provider,
             route_env=dict(_ROUTE),
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
+
+
+def test_explicit_happy_monitor_refuses_partial_zai_route_before_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match="resolved zai route") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env={"ANTHROPIC_MODEL": "glm-5.2"},
             runner=runner,
         )
 

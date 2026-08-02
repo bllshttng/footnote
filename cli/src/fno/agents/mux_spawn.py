@@ -176,10 +176,23 @@ def resolve_monitor(
                 f"--monitor happy requires the claude harness; got {harness!r}",
                 exit_code=2,
             )
-        if route_provider != "zai" or not route_env:
+        required_route_keys = (
+            "ANTHROPIC_BASE_URL",
+            "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_MODEL",
+        )
+        missing_route_keys = [
+            key for key in required_route_keys if not str((route_env or {}).get(key, "")).strip()
+        ]
+        if route_provider != "zai" or missing_route_keys:
+            detail = (
+                f"; missing {', '.join(missing_route_keys)}"
+                if missing_route_keys
+                else ""
+            )
             raise DispatchAskError(
-                "--monitor happy currently requires the zai provider with a "
-                "resolved route",
+                "--monitor happy currently requires a complete resolved zai route"
+                f"{detail}",
                 exit_code=2,
             )
         return "happy"
