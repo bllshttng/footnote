@@ -48,7 +48,6 @@ ALLOWLIST_PATHS=(
   cli/src/fno/codemap_cli/
   cli/src/fno/tokens/
   cli/src/fno/worktree_cli/
-  scripts/codemap/
   scripts/diagnostics/
   # Historical LOC-ratchet ledger: records past PRs verbatim, including the
   # retired `fno inbox send` / `fno agents send` verbs in their reason text.

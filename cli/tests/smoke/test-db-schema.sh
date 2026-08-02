@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
+# The engine ships as package data so an installed fno can find it.
+SCRIPT_DIR="$REPO_ROOT/cli/src/fno/codemap_cli"
 
 PASS=0
 FAIL=0

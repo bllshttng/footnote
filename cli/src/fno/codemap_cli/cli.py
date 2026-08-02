@@ -1,9 +1,14 @@
 """fno codemap - AST + PageRank codebase map.
 
-Thin wrapper around scripts/codemap/repogram.py (the analysis engine) and
-scripts/codemap/db-schema.py (optional DB-aware companion). The wrapper
-preserves byte-equivalent output so callers that already rely on
+Thin wrapper around ``repogram.py`` (the analysis engine) and ``db-schema.py``
+(optional DB-aware companion), both of which sit next to this module. The
+wrapper preserves byte-equivalent output so callers that already rely on
 .fno/codemap.md (blueprint, target, operator, megawalk) keep working.
+
+The engines live INSIDE the package, not under the repo's ``scripts/``, because
+they are fno's own analysis code and must be found wherever fno is installed.
+Resolving them from the analyzed repo made ``fno codemap`` work only when the
+analyzed repo happened to be the footnote checkout itself.
 """
 import os
 import subprocess
@@ -32,6 +37,60 @@ def _system_python_env() -> dict:
     if venv:
         env["PATH"] = ":".join(p for p in env.get("PATH", "").split(":") if not p.startswith(venv))
     return env
+
+
+#: repogram's heavy native deps, deliberately not bundled into the fno wheel.
+#: Only the three repogram HARD-exits on (repogram.py:30-54). ``tree_sitter`` is
+#: deliberately absent: repogram degrades to ``Query = None`` without it, so
+#: probing for it would reject an interpreter that runs the engine fine.
+ENGINE_DEPS = ("networkx", "grep_ast", "pygments")
+
+
+def _engine_python(env: dict) -> tuple[Optional[str], list[str]]:
+    """First interpreter on PATH that can actually import the engine's deps.
+
+    Returns ``(interpreter, tried)``; ``interpreter`` is None when none work,
+    and ``tried`` lists every candidate probed so the error can name them.
+
+    Invoking a bare ``python3`` is a guess, not a resolution: a machine with
+    several pythons (pyenv, homebrew, ~/.local/bin, uv) usually has the deps in
+    exactly one of them, and the first on PATH is often not it. Probing turns a
+    silent "Missing dependency: pip install networkx" into either the right
+    interpreter or an error that lists what was tried.
+    """
+    probe = "import " + ", ".join(ENGINE_DEPS)
+    tried: list[str] = []
+    seen: set[str] = set()
+    for directory in env.get("PATH", "").split(":"):
+        if not directory:
+            continue
+        for name in ("python3", "python"):
+            exe = Path(directory) / name
+            if not exe.is_file() or not os.access(exe, os.X_OK):
+                continue
+            key = str(exe.resolve())
+            if key in seen:
+                continue
+            seen.add(key)
+            tried.append(str(exe))
+            try:
+                probe_run = subprocess.run(
+                    [str(exe), "-c", probe], capture_output=True, env=env, timeout=30
+                )
+            except (OSError, subprocess.TimeoutExpired):
+                # A shim that hangs or refuses to exec (a broken pyenv shim is the
+                # usual one) must cost us this candidate, not the whole command.
+                continue
+            if probe_run.returncode == 0:
+                return str(exe), tried
+    return None, tried
+
+
+#: The engines ship as package data beside this module, so they resolve from the
+#: fno INSTALLATION (wheel, editable install, or source checkout) rather than
+#: from the repo being analyzed.
+ENGINE_DIR = Path(__file__).resolve().parent
+
 
 app = typer.Typer(
     name="codemap",
@@ -64,11 +123,18 @@ def codemap(
     """Run the repogram analysis and write the codemap."""
     if ctx.invoked_subcommand is not None:
         return
-    repo_root = Path(resolve_repo_root())
-    target_repo = repo or repo_root
-    script = repo_root / "scripts" / "codemap" / "repogram.py"
+    target_repo = repo or Path(resolve_repo_root())
+    script = ENGINE_DIR / "repogram.py"
     if not script.exists():
-        typer.echo(f"repogram script not found at {script}", err=True)
+        # Name the installation, not the analyzed repo: the old message pointed
+        # at the target repo and sent readers hunting for a file that never
+        # belonged there.
+        typer.echo(
+            f"fno codemap: the repogram engine is missing from this fno "
+            f"installation (looked for {script}). This is a broken/incomplete "
+            f"fno install, not a problem with {target_repo}. Try `fno update`.",
+            err=True,
+        )
         raise typer.Exit(code=2)
     # Mixed-format guard: --json + --db-schema appends a markdown section
     # to a JSON stream, producing an unparseable file. Reject the combo
@@ -93,12 +159,24 @@ def codemap(
     else:
         out_path = output
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    cmd = ["python3", str(script), str(target_repo), "--tokens", str(tokens)]
+    env = _system_python_env()
+    interpreter, tried = _engine_python(env)
+    if interpreter is None:
+        typer.echo(
+            f"fno codemap: no interpreter on PATH can import the engine's "
+            f"dependencies ({', '.join(ENGINE_DEPS)}). They are intentionally "
+            f"not bundled in the fno wheel (heavy native deps). Install them "
+            f"into any python3 on PATH, e.g. "
+            f"`pip install networkx tree-sitter grep-ast pygments`.\n"
+            f"Tried: {', '.join(tried) or '(no python3 found on PATH)'}",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+    cmd = [interpreter, str(script), str(target_repo), "--tokens", str(tokens)]
     if json_output:
         cmd.append("--json")
     if orphans:
         cmd.append("--orphans")
-    env = _system_python_env()
     # Write to a sibling tmpfile and os.replace on success so a partial
     # crash (signal-killed repogram, missing dep) leaves the previous
     # codemap.md intact rather than truncating it to whatever bytes
@@ -126,11 +204,11 @@ def codemap(
         if result.returncode != 0:
             raise typer.Exit(code=propagate_returncode(result.returncode))
         if db_schema:
-            db_script = repo_root / "scripts" / "codemap" / "db-schema.py"
+            db_script = ENGINE_DIR / "db-schema.py"
             if db_script.exists():
                 with open(tmp_path, "a", encoding="utf-8") as fh:
                     db_result = subprocess.run(
-                        ["python3", str(db_script), str(target_repo)],
+                        [interpreter, str(db_script), str(target_repo)],
                         stdout=fh,
                         env=env,
                     )
