@@ -85,6 +85,20 @@ _BLUEPRINT_INPUT_STATUSES = frozenset({"design", "ready"})
 # Statuses where the plan is past blueprint phase (cannot mutate even with --rewrite)
 _PAST_BLUEPRINT_STATUSES = frozenset({"in_progress", "in_review", "reviewing", "shipping", "shipped"})
 
+# `in_progress` is LOCK-derived, not PR-derived: `fno target init` acquiring a node
+# claim projects it onto the plan doc (cli/src/fno/plan/_project.py) along the
+# forward-only axis in cli/src/fno/plan/_status.py. So it is the one past-blueprint
+# status that is not evidence blueprint ran - the `## Execution Strategy` section is.
+# Reading it as terminal deadlocked the documented /target design-rung branch, which
+# must hold the claim to work the node and cannot reset the doc (the projector
+# re-advances it). The PR-derived statuses stay terminal.
+_CLAIM_DERIVED_STATUSES = frozenset({"in_progress"})
+
+
+def _is_claim_derived(status: str) -> bool:
+    """True when `status` came from holding a node claim, not from real progress."""
+    return status in _CLAIM_DERIVED_STATUSES
+
 # Default kill_criteria entries. Canonical {name, predicate, reason} shape - the
 # predicate engine and validate-plan.sh both read these fields; the old flat
 # one-key maps ({iteration_ceiling: 20}) were invisible to both.
@@ -779,6 +793,13 @@ def mutate(
     except StatusTransitionError as exc:
         return 3, f"Frontmatter status invalid: {exc}"
 
+    # A claim-derived status with no Execution Strategy never went through blueprint,
+    # so it is still at its design rung. Coerce BEFORE the terminal check below, which
+    # then runs unchanged: an in_progress doc that DOES carry an Execution Strategy is
+    # genuinely past this phase and still refuses.
+    if _is_claim_derived(current_status) and not plan.has_section("Execution Strategy"):
+        current_status = "design"
+
     if current_status in _PAST_BLUEPRINT_STATUSES:
         return 1, (
             f"doc is in `{current_status}` status (past blueprint phase); "
@@ -932,6 +953,13 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
         current_status = coerce_status_from_yaml(raw_status)
     except StatusTransitionError as exc:
         return 3, f"Frontmatter status invalid: {exc}"
+    # Same claim-derived relaxation as mutate(), but unconditional here: the draft
+    # finalize promotes ALWAYS carries an Execution Strategy (mutate --draft just
+    # wrote it), so conditioning on its absence would refuse the exact case this
+    # exists to unblock. Guarding only mutate() would leave this path deadlocked.
+    if _is_claim_derived(current_status):
+        current_status = "design"
+
     if current_status not in {"design", "ready"}:
         return 1, f"cannot finalize Blueprint draft from status {current_status!r}"
 
