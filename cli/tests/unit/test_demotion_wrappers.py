@@ -149,7 +149,7 @@ def test_engine_python_skips_interpreters_missing_the_deps(tmp_path) -> None:
     for d in (bad, good):
         os.chmod(d / "python3", 0o755)
 
-    found, tried = _engine_python({"PATH": f"{bad}:{good}"})
+    found, tried = _engine_python({"PATH": os.pathsep.join([str(bad), str(good)])})
     assert found == str(good / "python3"), f"picked {found}, tried {tried}"
     assert str(bad / "python3") in tried
 
@@ -163,8 +163,37 @@ def test_engine_python_skips_interpreters_missing_the_deps(tmp_path) -> None:
     broken.mkdir()
     (broken / "python3").write_text("#!/nonexistent/interpreter\n")
     os.chmod(broken / "python3", 0o755)
-    found, tried = _engine_python({"PATH": f"{broken}:{good}"})
+    found, tried = _engine_python({"PATH": os.pathsep.join([str(broken), str(good)])})
     assert found == str(good / "python3"), f"broken shim was not skipped (tried {tried})"
+
+
+def test_engine_python_parses_path_the_way_the_platform_writes_it(monkeypatch) -> None:
+    """PATH is split on os.pathsep and Windows executables carry .exe.
+
+    Codex P2 on PR 700. Splitting on a hardcoded ":" does not merely miss
+    entries on Windows, it tears "C:\\Python\\python.exe" into "C" and
+    "\\Python\\python.exe", so every entry is mangled rather than one being
+    skipped; and probing extensionless names finds nothing there regardless.
+    """
+    import os
+
+    from fno.codemap_cli.cli import _interpreter_names, _system_python_env
+
+    assert "python3.exe" in _interpreter_names() or os.name != "nt"
+
+    monkeypatch.setattr(os, "name", "nt")
+    names = _interpreter_names()
+    assert names[:2] == ("python3.exe", "python.exe"), f"windows names first: {names}"
+    assert "python3" in names, "the bare names stay as a fallback"
+
+    # The venv strip must rebuild PATH with the platform separator, not ":".
+    monkeypatch.setattr(os, "name", os.name)
+    venv = "/tmp/venv-under-test"
+    monkeypatch.setenv("VIRTUAL_ENV", venv)
+    monkeypatch.setenv("PATH", os.pathsep.join([f"{venv}/bin", "/usr/bin"]))
+    env = _system_python_env()
+    assert env["PATH"] == "/usr/bin", f"venv entry not stripped cleanly: {env['PATH']!r}"
+    assert "VIRTUAL_ENV" not in env
 
 
 def test_codemap_failure_exit_codes_stay_distinct() -> None:

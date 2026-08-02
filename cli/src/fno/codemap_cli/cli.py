@@ -35,8 +35,25 @@ def _system_python_env() -> dict:
     env = os.environ.copy()
     venv = env.pop("VIRTUAL_ENV", None)
     if venv:
-        env["PATH"] = ":".join(p for p in env.get("PATH", "").split(":") if not p.startswith(venv))
+        # os.pathsep, not ":" - the repo idiom (config_io, test_cmd). On Windows
+        # the separator is ";" and splitting on ":" tears "C:\..." in half,
+        # silently mangling every entry rather than filtering one.
+        env["PATH"] = os.pathsep.join(
+            p for p in env.get("PATH", "").split(os.pathsep) if not p.startswith(venv)
+        )
     return env
+
+
+def _interpreter_names() -> tuple[str, ...]:
+    """Candidate basenames for a python interpreter on this platform.
+
+    Extensionless names never resolve on Windows, where the executables are
+    `python.exe` / `python3.exe`, so probing only the bare names would report
+    "no interpreter" on a machine that has a perfectly good one.
+    """
+    if os.name == "nt":
+        return ("python3.exe", "python.exe", "python3", "python")
+    return ("python3", "python")
 
 
 #: repogram's heavy native deps, deliberately not bundled into the fno wheel.
@@ -73,10 +90,10 @@ def _engine_python(env: dict) -> tuple[Optional[str], list[str]]:
     probe = "import " + ", ".join(ENGINE_DEPS)
     tried: list[str] = []
     seen: set[str] = set()
-    for directory in env.get("PATH", "").split(":"):
+    for directory in env.get("PATH", "").split(os.pathsep):
         if not directory:
             continue
-        for name in ("python3", "python"):
+        for name in _interpreter_names():
             exe = Path(directory) / name
             if not exe.is_file() or not os.access(exe, os.X_OK):
                 continue
