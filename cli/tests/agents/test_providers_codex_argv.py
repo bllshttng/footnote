@@ -158,6 +158,80 @@ def test_headless_config_full_yolo_resolves_to_bypass(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# git_writable_args — the bounded sandbox cannot write git metadata without it.
+#
+# codex's workspace-write policy marks <project_root>/.git read-only, so a
+# bounded worker cannot take index.lock and every commit fails. In a LINKED
+# worktree the block is doubly hard: the gitdir lives at
+# <repo>/.git/worktrees/<name>/, outside the workspace entirely. One
+# --add-dir on the git COMMON dir covers both, plus the shared objects/ and
+# refs/ a commit also writes.
+# ---------------------------------------------------------------------------
+
+
+def _init_repo(path):
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return path
+
+
+def test_git_writable_args_returns_add_dir_for_plain_repo(tmp_path):
+    """AC1-HP: a plain repo cwd yields --add-dir <repo>/.git.
+
+    Not worktree-specific: the .git read-only carveout blocks a plain repo too.
+    """
+    import pathlib
+
+    repo = _init_repo(tmp_path / "repo")
+    out = codex_mod.git_writable_args(repo)
+
+    assert out[0] == "--add-dir"
+    assert len(out) == 2
+    assert pathlib.Path(out[1]).resolve() == (repo / ".git").resolve()
+
+
+def test_git_writable_args_returns_common_dir_for_linked_worktree(tmp_path):
+    """AC1-HP (the reported case): a linked worktree resolves to the COMMON
+    dir, not its own gitdir - the common dir contains .git/worktrees/<name>/
+    (index.lock) AND the objects/refs a commit writes."""
+    import pathlib
+    import subprocess
+
+    repo = _init_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=repo, check=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(wt), "-b", "feat"],
+        cwd=repo, check=True,
+    )
+    # Precondition: this really is a linked worktree (.git is a FILE).
+    assert (wt / ".git").is_file()
+
+    out = codex_mod.git_writable_args(wt)
+
+    assert out[0] == "--add-dir"
+    assert pathlib.Path(out[1]).resolve() == (repo / ".git").resolve()
+
+
+def test_git_writable_args_empty_outside_a_repo(tmp_path):
+    """AC3-ERR: a non-repo cwd changes no argv and never raises."""
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert codex_mod.git_writable_args(outside) == []
+
+
+def test_git_writable_args_empty_for_missing_path(tmp_path):
+    """AC3-ERR: a cwd that does not exist yet is not a crash."""
+    assert codex_mod.git_writable_args(tmp_path / "nope") == []
+
+
+# ---------------------------------------------------------------------------
 # sandbox_flag_resume (resume path — restricted surface)
 # ---------------------------------------------------------------------------
 

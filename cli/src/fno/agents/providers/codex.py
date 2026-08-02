@@ -182,6 +182,41 @@ def sandbox_flag_resume(yolo: bool) -> list[str]:
     return []
 
 
+def git_writable_args(cwd: Path) -> list[str]:
+    """Return ``--add-dir <git-common-dir>`` so a bounded worker can commit.
+
+    codex's ``workspace-write`` policy marks ``<project_root>/.git`` read-only,
+    so a sandboxed worker cannot take ``index.lock`` and every commit fails
+    mid-task. This is NOT worktree-specific - a plain repo fails the same way -
+    but a LINKED worktree hides it worse, because its gitdir lives at
+    ``<repo>/.git/worktrees/<name>/``, outside the workspace entirely, and the
+    resulting "wrong path" error has been misread as data loss.
+
+    The git COMMON dir covers both shapes in one token: it is ``<repo>/.git``
+    either way, and it contains the per-worktree gitdir alongside the shared
+    ``objects/`` and ``refs/`` a commit also writes. ``--add-dir`` is repeatable
+    and additive, so this composes with a caller's own ``--add-dir`` instead of
+    clobbering it the way ``-c sandbox_workspace_write.writable_roots`` would.
+
+    Returns ``[]`` outside a repo, or on any git failure - a grant we cannot
+    resolve must never break the spawn.
+    """
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return []
+    common = out.stdout.strip()
+    if out.returncode != 0 or not common:
+        return []
+    return ["--add-dir", common]
+
+
 def _effective_yolo(yolo: bool, headless_yolo: Optional[bool] = None) -> bool:
     """Resolve the effective sandbox-bypass for the autonomous exec lane (ab-994222ee).
 
@@ -659,6 +694,9 @@ def create(
     # x-b6e2: a user --add-dir grants extra write access on `codex exec`
     # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
     add_dir_args = ["--add-dir", add_dir] if add_dir else []
+    # The bounded sandbox refuses git metadata writes; grant the git common dir
+    # so the worker can actually commit. Full yolo is already unsandboxed.
+    git_args = [] if eff_yolo else git_writable_args(cwd)
     argv = [
         "codex",
         *config_args,
@@ -667,6 +705,7 @@ def create(
         "-C", str(cwd),
         "--skip-git-repo-check",
         *add_dir_args,
+        *git_args,
         *sandbox_flag(eff_yolo),
         full_prompt,
     ]
