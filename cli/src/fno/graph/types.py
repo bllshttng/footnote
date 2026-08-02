@@ -11,7 +11,7 @@ from typing import Optional, Self
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
-from fno.company.contracts import CompanyWorkRefs
+from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 
 
 class Status(str, Enum):
@@ -297,9 +297,7 @@ class Entry(BaseModel):
 
     @model_validator(mode="after")
     def _company_work_matches_entry_id(self) -> Self:
-        work_order = self.company_work.work_order if self.company_work is not None else None
-        if work_order is not None and work_order.node_id != self.id:
-            raise ValueError("company_work work_order node_id must match graph entry id")
+        validate_company_work_for_node(self.company_work, self.id, owner="graph entry id")
         return self
 
     @computed_field  # type: ignore[prop-decorator]  # pydantic computed_field over property

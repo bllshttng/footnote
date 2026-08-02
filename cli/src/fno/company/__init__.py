@@ -12,6 +12,7 @@ from fno.company.contracts import (
     PrincipalRef,
     RoleRef,
     WorkOrderRef,
+    validate_company_work_for_node,
 )
 
 __all__ = [
@@ -26,4 +27,5 @@ __all__ = [
     "PrincipalRef",
     "RoleRef",
     "WorkOrderRef",
+    "validate_company_work_for_node",
 ]

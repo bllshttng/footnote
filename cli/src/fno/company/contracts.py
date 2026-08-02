@@ -229,3 +229,16 @@ class CompanyWorkRefs(_ContractModel):
                 raise ValueError(f"duplicate observation node_id {ref.node_id}")
             result[ref.node_id] = ref
         return result
+
+
+def validate_company_work_for_node(
+    value: object, node_id: str, *, owner: str
+) -> CompanyWorkRefs | None:
+    """Validate a typed or wire-shaped projection against its graph identity."""
+    if value is None:
+        return None
+    refs = CompanyWorkRefs.model_validate(value)
+    work_order = refs.work_order
+    if work_order is not None and work_order.node_id != node_id:
+        raise ValueError(f"company_work work_order node_id must match {owner}")
+    return refs

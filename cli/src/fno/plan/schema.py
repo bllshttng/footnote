@@ -22,7 +22,7 @@ from typing import Any, Literal, Self
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from fno.company.contracts import CompanyWorkRefs
+from fno.company.contracts import CompanyWorkRefs, validate_company_work_for_node
 from fno.plan._status import STATUS_ALIASES, STATUS_PROGRESSION, TERMINAL_STATUSES
 
 # Str-enum built directly from the status axis + terminals. Functional API so
@@ -117,7 +117,5 @@ class PlanFrontmatter(BaseModel):
 
     @model_validator(mode="after")
     def _company_work_matches_plan_node(self) -> Self:
-        work_order = self.company_work.work_order if self.company_work is not None else None
-        if work_order is not None and work_order.node_id != self.node:
-            raise ValueError("company_work work_order node_id must match plan node")
+        validate_company_work_for_node(self.company_work, self.node, owner="plan node")
         return self
