@@ -702,6 +702,48 @@ const GH_PR_358_LOGGING: &str = "#!/bin/sh\n\
      echo \"gh $*\" >> calls.log\n\
      case \"$2\" in view) echo '{\"number\": 358, \"url\": \"https://github.com/o/r/pull/358\"}' ;; esac\n";
 
+const GH_OPTIONAL_REVIEWED: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\"}],\"comments\":[]}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
+const GH_OPTIONAL_OUTSTANDING: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{\"reviews\":[],\"comments\":[]}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
+const GH_OPTIONAL_USAGE_LIMITED: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{\"reviews\":[],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
+const GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{\"reviews\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"state\":\"COMMENTED\"}],\"comments\":[{\"author\":{\"login\":\"chatgpt-codex-connector[bot]\"},\"body\":\"You have reached your Codex usage limits for code reviews\"}]}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
+const GH_OPTIONAL_READ_FAILS: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo 'review API unavailable' >&2; exit 1 ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
+const GH_OPTIONAL_MALFORMED: &str = "#!/bin/sh\n\
+     echo \"gh $*\" >> calls.log\n\
+     case \"$*\" in\n\
+       *reviews,comments*) echo '{}' ;;\n\
+       *'pr view'*) echo '{\"number\":358,\"url\":\"https://github.com/o/r/pull/358\"}' ;;\n\
+     esac\n";
+
 /// Rewrite the manifest with an explicit merge posture, keeping the node id.
 fn set_posture(env: &Env, session_id: &str, approved: bool) {
     fs::write(
@@ -739,12 +781,124 @@ fn finalize_arms_auto_merge_on_approved_green_terminal() {
         c.contains("gh pr merge 358 --auto --merge"),
         "approved DonePRGreen must arm auto-merge: {c}"
     );
+    assert!(
+        !c.contains("reviews,comments"),
+        "empty optional_apps must add no evidence read: {c}"
+    );
 }
 
 /// Write a `config.auto_merge` block into the temp project. `run_finalize_shimmed`
 /// pins `$FNO_CONFIG` here, so this is the sole config the child reads.
 fn write_auto_merge_config(env: &Env, body: &str) {
     fs::write(env.cwd.join(".fno/config.toml"), body).unwrap();
+}
+
+fn configure_optional_codex(env: &Env) {
+    write_auto_merge_config(
+        env,
+        "[review]\noptional_apps = [\"chatgpt-codex-connector\"]\n",
+    );
+}
+
+fn finalized_event(env: &Env, session_id: &str) -> serde_json::Value {
+    events_text(&env.events)
+        .lines()
+        .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+        .find(|event| {
+            event.get("type").and_then(|v| v.as_str()) == Some("session_finalized")
+                && event.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id)
+        })
+        .expect("session_finalized event")
+}
+
+#[test]
+fn finalize_arms_when_configured_optional_app_reviewed() {
+    let env = setup("S-optional-reviewed", false);
+    set_posture(&env, "S-optional-reviewed", true);
+    configure_optional_codex(&env);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_REVIEWED);
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("--json reviews,comments"), "evidence read: {c}");
+    assert!(c.contains("gh pr merge 358 --auto --merge"), "arm: {c}");
+    let event = finalized_event(&env, "S-optional-reviewed");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
+}
+
+#[test]
+fn finalize_withholds_arm_when_optional_review_outstanding() {
+    let env = setup("S-optional-outstanding", false);
+    set_posture(&env, "S-optional-outstanding", true);
+    configure_optional_codex(&env);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_OUTSTANDING);
+    assert!(out.status.success());
+    assert!(!calls(&env).contains("gh pr merge"));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("optional-review-outstanding:chatgpt-codex-connector"),
+        "stderr: {stderr}"
+    );
+    let event = finalized_event(&env, "S-optional-outstanding");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&false.into()));
+    assert_eq!(
+        event
+            .pointer("/data/auto_merge_blocked_reason")
+            .and_then(|v| v.as_str()),
+        Some("optional-review-outstanding:chatgpt-codex-connector")
+    );
+}
+
+#[test]
+fn finalize_usage_limit_comment_is_not_clean_optional_review() {
+    let env = setup("S-optional-limited", false);
+    set_posture(&env, "S-optional-limited", true);
+    configure_optional_codex(&env);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_USAGE_LIMITED);
+    assert!(out.status.success());
+    assert!(!calls(&env).contains("gh pr merge"));
+    let event = finalized_event(&env, "S-optional-limited");
+    assert_eq!(
+        event
+            .pointer("/data/auto_merge_blocked_reason")
+            .and_then(|v| v.as_str()),
+        Some("optional-review-usage-limited:chatgpt-codex-connector")
+    );
+}
+
+#[test]
+fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
+    let env = setup("S-optional-recovered", false);
+    set_posture(&env, "S-optional-recovered", true);
+    configure_optional_codex(&env);
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_REVIEWED_AFTER_USAGE_LIMIT);
+    assert!(out.status.success());
+    assert!(calls(&env).contains("gh pr merge 358 --auto --merge"));
+    let event = finalized_event(&env, "S-optional-recovered");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
+}
+
+#[test]
+fn finalize_optional_review_read_failure_withholds_arm() {
+    for (session_id, gh) in [
+        ("S-optional-read-failed", GH_OPTIONAL_READ_FAILS),
+        ("S-optional-malformed", GH_OPTIONAL_MALFORMED),
+    ] {
+        let env = setup(session_id, false);
+        set_posture(&env, session_id, true);
+        configure_optional_codex(&env);
+        let out = run_finalize_shimmed(&env, "DonePRGreen", gh);
+        assert!(out.status.success());
+        assert!(!calls(&env).contains("gh pr merge"));
+        let event = finalized_event(&env, session_id);
+        assert_eq!(
+            event
+                .pointer("/data/auto_merge_blocked_reason")
+                .and_then(|v| v.as_str()),
+            Some("optional-review-read-failed")
+        );
+    }
 }
 
 /// The configured merge strategy reaches the argv. Before this, `--merge`
@@ -831,11 +985,16 @@ fn finalize_omits_delete_branch_when_configured_off() {
 fn finalize_never_arms_auto_merge_when_posture_refuses() {
     let env = setup("S-noarm", false);
     set_posture(&env, "S-noarm", false);
+    configure_optional_codex(&env);
     let out = run_finalize_shimmed(&env, "DonePRGreen", GH_PR_358_LOGGING);
     assert!(out.status.success());
     assert!(
         !calls(&env).contains("gh pr merge"),
         "a refused posture must never arm, even on a green terminal"
+    );
+    assert!(
+        !calls(&env).contains("reviews,comments"),
+        "a refused posture must not pay for optional-review evidence"
     );
 }
 

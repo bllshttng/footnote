@@ -7475,9 +7475,11 @@ done
             assert!(restamp_signal.exists(), "drive never reached the worker");
             state::update_registry(&registry_path, |registry| {
                 let row = registry.find_mut("B").expect("recipient row missing");
+                row.short_id = "swC".into();
                 row.harness_session_id = Some("uuid-replacement".into());
                 row.claude_session_uuid = Some("uuid-replacement".into());
                 row.created_at = "2026-06-09T00:00:01Z".into();
+                row.status = AgentStatus::Live;
             })
             .unwrap();
             std::fs::write(restamp_complete, b"done\n").unwrap();

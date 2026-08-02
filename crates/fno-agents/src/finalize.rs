@@ -761,7 +761,18 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // before the merge is handed to GitHub. Same log-only fatality as the two
     // stamps above.
     let approved = m.auto_merge_approved.unwrap_or(false);
-    let auto_merge_armed = should_arm_auto_merge(&reason, approved) && arm_auto_merge(&cwd);
+    let (auto_merge_armed, auto_merge_blocked_reason) = if should_arm_auto_merge(&reason, approved)
+    {
+        match optional_review_block_reason(&cwd) {
+            None => (arm_auto_merge(&cwd), None),
+            Some(blocked) => {
+                eprintln!("finalize: native auto-merge withheld: {blocked}");
+                (false, Some(blocked))
+            }
+        }
+    } else {
+        (false, None)
+    };
     // Without this, "approved but this terminal is ineligible" and "never
     // approved" are the same silence, and the event's `auto_merge_armed: false`
     // cannot tell them apart either.
@@ -786,6 +797,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
         // belongs to the terminal that authorized it, not to PR creation.
         "auto_merge_armed": auto_merge_armed,
     });
+    if let Some(blocked) = auto_merge_blocked_reason {
+        data["auto_merge_blocked_reason"] = json!(blocked);
+    }
     if failed.is_empty() {
         emit_to_both(&project_events, &global_events, "session_finalized", data);
     } else {
@@ -1654,6 +1668,88 @@ fn stamp_node_pr(cwd: &Path, node: Option<&str>) {
 /// something no gate greened.
 fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
     auto_merge_approved && reason == "DonePRGreen"
+}
+
+/// Return why configured optional-review evidence forbids native auto-merge,
+/// or `None` when arming may proceed.
+///
+/// This is deliberately an authorization check, not a completion gate. A
+/// missing or usage-limited optional App still lets finalization complete and
+/// leaves the green PR available for a human merge; it only prevents GitHub
+/// from merging without the review coverage the operator configured.
+fn optional_review_block_reason(cwd: &Path) -> Option<String> {
+    let optional_apps = crate::agents_config::review_optional_apps(cwd);
+    if optional_apps.is_empty() {
+        return None;
+    }
+
+    let output = match Command::new("gh")
+        .args(["pr", "view", "--json", "reviews,comments"])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(output) if output.status.success() => output,
+        Ok(output) => {
+            eprintln!(
+                "finalize: optional-review evidence read failed (non-fatal): {}",
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+            return Some("optional-review-read-failed".to_string());
+        }
+        Err(error) => {
+            eprintln!("finalize: optional-review evidence read failed (non-fatal): {error}");
+            return Some("optional-review-read-failed".to_string());
+        }
+    };
+
+    let payload: Value = match serde_json::from_slice(&output.stdout) {
+        Ok(value) => value,
+        Err(error) => {
+            eprintln!("finalize: optional-review evidence parse failed (non-fatal): {error}");
+            return Some("optional-review-read-failed".to_string());
+        }
+    };
+    let Some(reviews) = payload.get("reviews").and_then(Value::as_array) else {
+        return Some("optional-review-read-failed".to_string());
+    };
+    let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
+        return Some("optional-review-read-failed".to_string());
+    };
+
+    for app in optional_apps {
+        let reviewed = reviews.iter().any(|review| {
+            let login = review
+                .pointer("/author/login")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let state = review.get("state").and_then(Value::as_str).unwrap_or("");
+            !state.is_empty() && crate::loopcheck::login_matches_bot(login, &app)
+        });
+        if reviewed {
+            continue;
+        }
+
+        let usage_limited = comments.iter().any(|comment| {
+            let login = comment
+                .pointer("/author/login")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let body = comment
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            crate::loopcheck::login_matches_bot(login, &app)
+                && crate::loopcheck::body_is_usage_limit(&body)
+        });
+        if usage_limited {
+            return Some(format!("optional-review-usage-limited:{app}"));
+        }
+
+        return Some(format!("optional-review-outstanding:{app}"));
+    }
+
+    None
 }
 
 /// Arm GitHub's native auto-merge for the branch's open PR. Returns whether it
