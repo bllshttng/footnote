@@ -436,6 +436,30 @@ impl CodexProvider {
             vec![]
         }
     }
+
+    /// Mirror of `codex.py::git_writable_args`: grant the git COMMON dir so a
+    /// bounded worker can commit. workspace-write marks `<project_root>/.git`
+    /// read-only, so without this every `git add` fails on index.lock - in a
+    /// linked worktree the gitdir is outside the workspace entirely. The
+    /// common dir is `<repo>/.git` in both shapes and holds the per-worktree
+    /// gitdir plus the shared objects/ and refs/ a commit writes. Empty on any
+    /// failure: a grant we cannot resolve must never break the spawn.
+    fn git_writable(cwd: &std::path::Path) -> Vec<String> {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(cwd)
+            .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+            .output();
+        let Ok(out) = out else { return vec![] };
+        if !out.status.success() {
+            return vec![];
+        }
+        let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if common.is_empty() {
+            return vec![];
+        }
+        vec!["--add-dir".into(), common]
+    }
 }
 
 impl Provider for CodexProvider {
@@ -455,6 +479,9 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_create(ctx.yolo));
+        if !ctx.yolo {
+            argv.extend(Self::git_writable(&ctx.cwd));
+        }
         if let Some(effort) = ctx.reasoning_effort.as_deref().filter(|e| !e.is_empty()) {
             argv.push("-c".into());
             argv.push(format!("model_reasoning_effort={effort}"));
@@ -1320,6 +1347,57 @@ mod tests {
                 "build feature X"
             ]
         );
+    }
+
+    /// AC7-HP: the Rust headless lane grants git-metadata write too.
+    ///
+    /// codex's workspace-write policy makes `<project_root>/.git` read-only,
+    /// so a bounded worker cannot take index.lock and every commit fails. The
+    /// Python create path grants it; this lane builds its own argv and would
+    /// otherwise stay broken (a guard on one of N paths is decorative).
+    #[test]
+    fn codex_create_argv_grants_git_common_dir_when_cwd_is_a_repo() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+
+        let mut ctx = create_ctx();
+        ctx.cwd = dir.path().to_path_buf();
+        let argv = CodexProvider.create_argv(&ctx);
+
+        let i = argv.iter().position(|a| a == "--add-dir").expect("--add-dir");
+        assert_eq!(
+            std::fs::canonicalize(&argv[i + 1]).unwrap(),
+            std::fs::canonicalize(dir.path().join(".git")).unwrap()
+        );
+    }
+
+    /// AC7-EDGE: full yolo is already unsandboxed, so there is no grant to make.
+    #[test]
+    fn codex_create_argv_yolo_omits_the_git_grant() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+
+        let mut ctx = create_ctx();
+        ctx.cwd = dir.path().to_path_buf();
+        ctx.yolo = true;
+        let argv = CodexProvider.create_argv(&ctx);
+
+        assert!(!argv.iter().any(|a| a == "--add-dir"));
+    }
+
+    /// AC7-ERR: a non-repo cwd changes no argv and never panics.
+    #[test]
+    fn codex_create_argv_outside_a_repo_is_unchanged() {
+        let argv = CodexProvider.create_argv(&create_ctx());
+        assert!(!argv.iter().any(|a| a == "--add-dir"));
     }
 
     #[test]
