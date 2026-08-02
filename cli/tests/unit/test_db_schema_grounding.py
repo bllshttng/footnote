@@ -5,8 +5,9 @@ extension to tables + columns + PRIMARY KEY + FOREIGN KEY). The live-DB path is
 not exercised here (no Postgres in CI); the parser and the pure connection-
 candidate resolver are the offline-testable core.
 
-db-schema.py is a dash-named standalone script under scripts/codemap/, so it is
-loaded via importlib rather than imported as a package module.
+db-schema.py is a dash-named standalone script shipped as package data beside
+the codemap wrapper, so it is loaded via importlib rather than imported as a
+package module.
 """
 from __future__ import annotations
 
@@ -16,7 +17,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
-DB_SCHEMA_PATH = REPO_ROOT / "scripts" / "codemap" / "db-schema.py"
+DB_SCHEMA_PATH = REPO_ROOT / "cli" / "src" / "fno" / "codemap_cli" / "db-schema.py"
 
 
 def _load_db_schema():
