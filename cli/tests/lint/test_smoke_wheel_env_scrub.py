@@ -30,15 +30,38 @@ import pytest
 
 SMOKE_DIR = Path(__file__).resolve().parents[2] / "tests" / "smoke"
 
-#: An executable scrub that actually unsets the VARIABLE. Not a commented line,
-#: not `unset -f PYTHONPATH` (that clears a function and leaves the variable
-#: set), and not a trailing `# PYTHONPATH` on some other unset: PYTHONPATH has to
-#: be a bare operand of the canonical command, optionally alongside other names.
-SCRUB_RE = re.compile(
-    r"^[ \t]*unset(?:[ \t]+-v)?"  # `unset` or its explicit `unset -v` form
-    r"(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*)*"  # other variables cleared in the same statement
-    r"[ \t]+PYTHONPATH(?:[ \t;]|$)"  # PYTHONPATH itself, as an operand
-)
+VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+#: The runtime proof that the scrub took effect. Checked for separately because
+#: it, not the lint, is what catches a scrub that parsed fine and did nothing.
+ASSERT_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \]')
+
+
+def is_scrub(line: str) -> bool:
+    """True for an unconditional, top-level `unset` that clears the VARIABLE.
+
+    Token-parsed rather than regex-matched, because each rejected form below was
+    a real review finding and a pattern loose enough to accept one tends to
+    accept the rest:
+
+    * indented -> inside a conditional, loop, subshell, or heredoc body, so it
+      may never run in the shell that performs the install
+    * ``unset -f PYTHONPATH`` -> clears a function; the variable survives
+    * ``unset OTHER # PYTHONPATH`` -> only named in a comment
+    * ``unset PYTHONPATH 2>/dev/null || true`` -> a failed unset (readonly var)
+      is swallowed and the smoke proceeds contaminated
+    """
+    if line != line.lstrip():
+        return False
+    tokens = line.split()
+    if not tokens or tokens[0] != "unset":
+        return False
+    args = tokens[1:]
+    if args[:1] == ["-v"]:  # the explicit variable form; `-f` is a function
+        args = args[1:]
+    if not args or not all(VAR_NAME.fullmatch(a) for a in args):
+        return False
+    return "PYTHONPATH" in args
 
 #: Provisions fno somewhere and then RUNS it. The scrub is load-bearing in every
 #: one, whether it inspects via `python -c` or a console script.
@@ -102,14 +125,12 @@ def _first_match(lines: list[str], pattern: re.Pattern[str]) -> int | None:
     "line",
     [
         "unset PYTHONPATH",
-        "unset PYTHONPATH 2>/dev/null || true",
-        "  unset PYTHONPATH",
         "unset -v PYTHONPATH",
-        "unset FNO_REPO_ROOT PYTHONPATH 2>/dev/null || true",
+        "unset FNO_REPO_ROOT PYTHONPATH",
     ],
 )
-def test_scrub_regex_accepts_real_unsets(line: str) -> None:
-    assert SCRUB_RE.match(line)
+def test_is_scrub_accepts_real_unsets(line: str) -> None:
+    assert is_scrub(line)
 
 
 @pytest.mark.parametrize(
@@ -120,10 +141,12 @@ def test_scrub_regex_accepts_real_unsets(line: str) -> None:
         "unset OTHER # PYTHONPATH",  # PYTHONPATH only named in a comment
         "unset PYTHONPATHX",  # a different variable
         'echo "unset PYTHONPATH"',  # printed, not executed
+        "  unset PYTHONPATH",  # indented: inside a block, may never run
+        "unset PYTHONPATH 2>/dev/null || true",  # a readonly-var failure is swallowed
     ],
 )
-def test_scrub_regex_rejects_no_ops(line: str) -> None:
-    assert not SCRUB_RE.match(line)
+def test_is_scrub_rejects_no_ops(line: str) -> None:
+    assert not is_scrub(line)
 
 
 def test_every_script_is_classified() -> None:
@@ -147,14 +170,22 @@ def test_every_script_is_classified() -> None:
 @pytest.mark.parametrize("name", sorted(WHEEL_CHANNEL_SMOKES))
 def test_scrub_is_executable_and_precedes_the_install(name: str) -> None:
     lines = _lines(name)
-    scrub_line = _first_match(lines, SCRUB_RE)
+    scrub_line = next((i for i, ln in enumerate(lines, start=1) if is_scrub(ln)), None)
     assert scrub_line is not None, (
-        f"{name} installs fno and then runs it, but has no executable "
-        "`unset PYTHONPATH` statement. An inherited PYTHONPATH "
+        f"{name} installs fno and then runs it, but has no unconditional "
+        "top-level `unset PYTHONPATH`. An inherited PYTHONPATH "
         "(scripts/ci/preflight.sh exports <repo>/cli/src) puts the source tree "
         "ahead of the installed artifact on sys.path, so this smoke goes green "
-        "on a distribution that shipped nothing. A commented-out line does not "
-        "count."
+        "on a distribution that shipped nothing. See is_scrub for the forms that "
+        "look like a scrub and are not."
+    )
+    assert_line = _first_match(lines, ASSERT_RE)
+    assert assert_line is not None, (
+        f'{name} never verifies the scrub took: add `[ -z "${{PYTHONPATH:-}}" ] '
+        '|| {{ echo ...; exit 1; }}` under the unset. The static check here can '
+        "only prove the line is present and well-formed; the runtime check is "
+        "what catches an unset that parsed fine and cleared nothing (a readonly "
+        "variable, or a scrub that ran in some other shell)."
     )
     install_line = _first_match(lines, INSTALL_RE)
     assert install_line is not None, (
@@ -162,8 +193,9 @@ def test_scrub_is_executable_and_precedes_the_install(name: str) -> None:
         "found. Either it no longer installs anything (move it to "
         "NON_INSTALL_SMOKES) or INSTALL_RE needs its channel."
     )
-    assert scrub_line < install_line, (
-        f"{name} scrubs PYTHONPATH on line {scrub_line}, after the install on "
-        f"line {install_line}. Hoist the scrub above it: a scrub that runs after "
-        "the code it protects leaves that code exposed."
+    assert scrub_line < assert_line < install_line, (
+        f"{name} orders these wrong: scrub on line {scrub_line}, verification on "
+        f"line {assert_line}, install on line {install_line}. Required order is "
+        "scrub, then verify, then install - anything that runs before the scrub "
+        "is exposed, and a verification below the install proves nothing about it."
     )
