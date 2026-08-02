@@ -477,6 +477,16 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """Keep ``--monitor`` on the Python path that owns its pane-only guards."""
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--monitor" or a.startswith("--monitor=")
+        for a in _args_before_argv(args)
+    )
+
+
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844).
 
@@ -984,6 +994,7 @@ def make_agents_group_cls() -> type:
                 # parser has no --resume flag, and Python owns the revival.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
+                    or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
                     or _is_provenance_bearing_spawn(verb, args)

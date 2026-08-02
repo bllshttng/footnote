@@ -157,7 +157,43 @@ def happy_routed_panes_enabled() -> bool:
         ) from exc
 
 
-def happy_pane_argv(argv: list[str], route_env: Mapping[str, str]) -> list[str]:
+def resolve_monitor(
+    explicit: Optional[str],
+    *,
+    harness: str,
+    route_provider: Optional[str],
+    route_env: Optional[Mapping[str, str]],
+) -> str:
+    """Resolve the one supported monitor without widening legacy routing."""
+    if explicit is not None:
+        if explicit != "happy":
+            raise DispatchAskError(
+                f"--monitor must be 'happy' (got {explicit!r})",
+                exit_code=2,
+            )
+        if harness != "claude":
+            raise DispatchAskError(
+                f"--monitor happy requires the claude harness; got {harness!r}",
+                exit_code=2,
+            )
+        if route_provider != "zai" or not route_env:
+            raise DispatchAskError(
+                "--monitor happy currently requires the zai provider with a "
+                "resolved route",
+                exit_code=2,
+            )
+        return "happy"
+    if harness == "claude" and route_env and happy_routed_panes_enabled():
+        return "happy"
+    return "none"
+
+
+def happy_pane_argv(
+    argv: list[str],
+    route_env: Mapping[str, str],
+    *,
+    explicit: bool = False,
+) -> list[str]:
     """Carry a routed claude pane through happy without losing its endpoint.
 
     happy reserves ``--settings`` for its hook server and discards a caller's
@@ -173,6 +209,12 @@ def happy_pane_argv(argv: list[str], route_env: Mapping[str, str]) -> list[str]:
             exit_code=2,
         )
     if shutil.which("happy") is None:
+        if explicit:
+            raise DispatchAskError(
+                "--monitor happy was requested, but 'happy' is not on PATH; "
+                "install it with npm install -g happy",
+                exit_code=127,
+            )
         raise DispatchAskError(
             "config.agents.happy_routed_panes is on, but 'happy' is not on PATH; "
             "a routed claude pane is invisible to the Claude app's remote view "
@@ -1010,6 +1052,8 @@ def dispatch_spawn_pane(
     provenance: Optional[dict[str, str]] = None,
     account_env: Optional[dict[str, str]] = None,
     route_env: Optional[dict[str, str]] = None,
+    monitor: Optional[str] = None,
+    route_provider: Optional[str] = None,
     runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
     codex_sessions_dir: Optional[Path] = None,
 ) -> MuxSpawnResult:
@@ -1108,10 +1152,19 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
+    # Keep the one existing launcher seam. The explicit selector is deliberately
+    # narrower (claude + zai + pane); omitting it preserves the config default.
+    resolved_monitor = resolve_monitor(
+        monitor,
+        harness=provider,
+        route_provider=route_provider,
+        route_env=route_env,
+    )
     # Keep the outer env wrapper: it scrubs inherited Anthropic credentials,
     # while --claude-env reasserts the complete route in happy's claude child.
-    if provider == "claude" and route_env and happy_routed_panes_enabled():
-        argv = happy_pane_argv(argv, route_env)
+    if resolved_monitor == "happy":
+        assert route_env is not None
+        argv = happy_pane_argv(argv, route_env, explicit=monitor is not None)
     # QoS (x-c5cc): demote the provider command INSIDE the env wrapper —
     # wrapping outermost would break the mux server's FNO_NODE provenance
     # parse, which is anchored on argv[0] == "env" (server.rs node_from_argv).

@@ -1584,6 +1584,163 @@ _ROUTE = {
 }
 
 
+def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The public flag reaches the existing safe happy launcher seam."""
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.mux_spawn as mux_spawn
+    import fno.agents.spawn_gate as spawn_gate
+    from fno.agents.model_routing import DEFAULT_ZAI_BASE_URL
+
+    class Gate:
+        def release(self) -> None:
+            pass
+
+    use_tmpdir(monkeypatch, tmp_path)
+    fake_runner = FakeRunner()
+    real_dispatch = mux_spawn.dispatch_spawn_pane
+
+    def dispatch_with_fake_mux(**kwargs):
+        return real_dispatch(**kwargs, runner=fake_runner)
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", dispatch_with_fake_mux)
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *args, **kwargs: Gate())
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda binary: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn,
+        "happy_routed_panes_enabled",
+        lambda: pytest.fail("explicit --monitor happy must not read the config default"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn",
+            "--name",
+            "peer",
+            "--harness",
+            "claude",
+            "--provider",
+            "zai",
+            "--model",
+            "glm-5.2",
+            "--monitor",
+            "happy",
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    argv = _pane_run_argv(fake_runner)
+    assert argv[0] == "env", "the credential scrub must stay outermost"
+    happy_argv = argv[argv.index("happy") :]
+    pairs = [
+        happy_argv[index + 1]
+        for index, token in enumerate(happy_argv)
+        if token == "--claude-env"
+    ]
+    assert f"ANTHROPIC_BASE_URL={DEFAULT_ZAI_BASE_URL}" in pairs
+    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    assert "--settings" not in argv
+
+
+@pytest.mark.parametrize(
+    "substrate_args",
+    [
+        ["--substrate", "bg"],
+        ["--substrate", "headless"],
+        ["--once"],
+        ["--headless"],
+    ],
+)
+def test_cmd_spawn_explicit_happy_monitor_refuses_non_pane_before_dispatch(
+    tmp_path: Path, monkeypatch, substrate_args: list[str]
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+    import fno.agents.dispatch as dispatch
+    import fno.agents.mux_spawn as mux_spawn
+
+    use_tmpdir(monkeypatch, tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: calls.append("pane") or pytest.fail("pane dispatch called"),
+    )
+    monkeypatch.setattr(
+        dispatch,
+        "dispatch_spawn",
+        lambda **kwargs: calls.append("worker") or pytest.fail("worker dispatch called"),
+    )
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+
+    result = CliRunner().invoke(
+        agents_cli.agents_app,
+        [
+            "spawn",
+            "--name",
+            "peer",
+            "--harness",
+            "claude",
+            "--monitor",
+            "happy",
+            *substrate_args,
+            "hello",
+        ],
+    )
+
+    assert result.exit_code == 2, result.output
+    assert "pane-only" in result.output
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    ("extra_args", "message"),
+    [
+        (["--harness", "codex", "--provider", "zai", "--model", "glm-5.2"], "claude"),
+        (["--harness", "claude"], "zai"),
+        (
+            [
+                "--harness",
+                "claude",
+                "--provider",
+                "zai",
+                "--model",
+                "glm-5.2",
+                "--monitor",
+                "other",
+            ],
+            "happy",
+        ),
+    ],
+)
+def test_cmd_spawn_explicit_happy_monitor_refuses_incompatible_selection(
+    tmp_path: Path, monkeypatch, extra_args: list[str], message: str
+) -> None:
+    from typer.testing import CliRunner
+
+    import fno.agents.cli as agents_cli
+
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    args = ["spawn", "--name", "peer", *extra_args]
+    if "--monitor" not in extra_args:
+        args += ["--monitor", "happy"]
+    args.append("hello")
+    result = CliRunner().invoke(agents_cli.agents_app, args)
+
+    assert result.exit_code == 2, result.output
+    assert message in result.output
+
+
 def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
     """The route rides --claude-env, never --settings."""
     import fno.agents.mux_spawn as mux_spawn
@@ -1608,6 +1765,58 @@ def test_happy_pane_argv_refuses_when_happy_is_absent(monkeypatch) -> None:
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: None)
     with pytest.raises(DispatchAskError, match="happy"):
         mux_spawn.happy_pane_argv(["claude", "go"], _ROUTE)
+
+
+def test_explicit_happy_monitor_refuses_when_happy_is_absent_before_runner(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda binary: None)
+    runner = FakeRunner()
+
+    with pytest.raises(DispatchAskError, match="--monitor happy") as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            monitor="happy",
+            route_provider="zai",
+            route_env=dict(_ROUTE),
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 127
+    assert runner.calls == []
+
+
+@pytest.mark.parametrize(
+    ("provider", "route_provider", "message"),
+    [("codex", "zai", "claude"), ("claude", "other", "zai")],
+)
+def test_explicit_happy_monitor_refuses_in_process_incompatible_route(
+    tmp_path: Path,
+    monkeypatch,
+    provider: str,
+    route_provider: str,
+    message: str,
+) -> None:
+    from fno.agents.dispatch import DispatchAskError
+
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError, match=message) as exc:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider=provider,
+            monitor="happy",
+            route_provider=route_provider,
+            route_env=dict(_ROUTE),
+            runner=runner,
+        )
+
+    assert exc.value.exit_code == 2
+    assert runner.calls == []
 
 
 def test_happy_routed_panes_config_read_failure_refuses(monkeypatch) -> None:

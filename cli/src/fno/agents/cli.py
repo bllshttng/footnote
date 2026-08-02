@@ -682,6 +682,14 @@ def cmd_spawn(
             "the spawn - never a silent primary-model launch. claude only."
         ),
     ),
+    monitor: str | None = typer.Option(
+        None,
+        "--monitor",
+        help=(
+            "Expose this spawn through a monitor. Initial support is exactly "
+            "'happy' with --harness claude --provider zai on the pane substrate."
+        ),
+    ),
     account: str | None = typer.Option(
         None,
         "--account",
@@ -972,6 +980,23 @@ def cmd_spawn(
         )
         raise typer.Exit(code=2)
 
+    if monitor is not None and monitor != "happy":
+        print(f"--monitor must be 'happy' (got {monitor!r})", file=sys.stderr)
+        raise typer.Exit(code=2)
+    if monitor == "happy" and (substrate != "pane" or once):
+        print(
+            "--monitor happy is pane-only; bg and headless workers do not pass "
+            "the happy launcher seam",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+    if monitor == "happy" and provider != "claude":
+        print(
+            f"--monitor happy requires the claude harness; got {provider!r}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
     if output_format is not None and (
         provider != "claude" or substrate != "headless" or output_format != "json"
     ):
@@ -1120,10 +1145,17 @@ def cmd_spawn(
     # (explicit intent) and returns None for unknown/non-anthropic/keyless - which
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
+    route_provider: str | None = None
     if route is not None:
         # Explicit routes remain limited to the bg/headless contract; role routing
-        # is the pane-capable path.
-        if provider != "claude" or substrate not in ("bg", "headless"):
+        # is the pane-capable path. The explicit monitor adds one narrow
+        # exception: a zai route selected for this pane.
+        monitored_zai_pane = (
+            monitor == "happy" and provider == "claude" and substrate == "pane"
+        )
+        if provider != "claude" or (
+            substrate not in ("bg", "headless") and not monitored_zai_pane
+        ):
             print(
                 "--route is claude on --substrate bg or headless only; "
                 f"got provider {provider!r} substrate {substrate!r}.",
@@ -1139,6 +1171,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        route_provider = parsed[0]
+        if monitor == "happy" and route_provider != "zai":
+            print(
+                "--monitor happy currently supports only the zai provider",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
         notes: list[str] = []
         route_env = resolve_explicit_route(parsed[0], parsed[1], notice=notes.append)
         if not route_env:
@@ -1149,6 +1188,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+
+    if monitor == "happy" and route_provider != "zai":
+        print(
+            "--monitor happy currently requires --provider zai with --model",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
 
     # Resolve/validate the route once before pane/bg/headless fan out. The same
     # helper is called by the in-process spawn APIs, so bypassing the CLI cannot
@@ -1280,6 +1326,8 @@ def cmd_spawn(
                     provenance=prov_env,
                     account_env=account_env,
                     route_env=route_env,
+                    monitor=monitor,
+                    route_provider=route_provider,
                 )
             except DispatchAskError as exc:
                 print(str(exc), file=sys.stderr)

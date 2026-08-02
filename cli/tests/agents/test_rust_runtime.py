@@ -946,6 +946,17 @@ def test_is_role_bearing_spawn_predicate() -> None:
     assert not rr._is_role_bearing_spawn("ask", ["ask", "--role", "tidy"])
 
 
+def test_is_monitor_bearing_spawn_predicate() -> None:
+    assert rr._is_monitor_bearing_spawn(
+        "spawn", ["spawn", "w", "--monitor", "happy", "--substrate", "bg"]
+    )
+    assert rr._is_monitor_bearing_spawn("spawn", ["spawn", "--monitor=happy"])
+    assert not rr._is_monitor_bearing_spawn(
+        "spawn", ["spawn", "w", "--argv", "--", "tool", "--monitor", "happy"]
+    )
+    assert not rr._is_monitor_bearing_spawn("ask", ["ask", "w", "--monitor", "happy"])
+
+
 def test_is_resume_bearing_spawn_predicate() -> None:
     # A resume-bearing spawn stays Python (Rust cannot parse --resume yet).
     # x-9844 added --resume revival; x-f76e reassigned -r to --resume, so the
