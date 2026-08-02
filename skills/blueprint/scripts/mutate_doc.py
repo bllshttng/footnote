@@ -953,11 +953,17 @@ def finalize(doc_path: Path, no_emit: bool = False) -> tuple[int, str]:
         current_status = coerce_status_from_yaml(raw_status)
     except StatusTransitionError as exc:
         return 3, f"Frontmatter status invalid: {exc}"
-    # Same claim-derived relaxation as mutate(), but unconditional here: the draft
-    # finalize promotes ALWAYS carries an Execution Strategy (mutate --draft just
-    # wrote it), so conditioning on its absence would refuse the exact case this
-    # exists to unblock. Guarding only mutate() would leave this path deadlocked.
-    if _is_claim_derived(current_status):
+    # Same claim-derived relaxation as mutate(), but keyed on different evidence.
+    # Conditioning on a missing Execution Strategy (mutate's test) would refuse the
+    # exact case this exists to unblock, because the draft finalize promotes always
+    # carries one. The evidence here is that no finalize ever COMPLETED: a plan that
+    # really did reach ready carries `acceptance_contract: compiled-v1`, so an
+    # in_progress doc bearing that stamp has genuinely started implementation and
+    # must not be demoted back to a dispatchable rung. An unstamped one never had an
+    # executable contract to begin with, so it cannot be work-in-flight.
+    if _is_claim_derived(current_status) and (
+        str(plan.frontmatter.get("acceptance_contract") or "").strip() != "compiled-v1"
+    ):
         current_status = "design"
 
     if current_status not in {"design", "ready"}:

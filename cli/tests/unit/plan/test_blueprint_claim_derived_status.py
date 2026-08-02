@@ -117,6 +117,26 @@ def test_finalize_accepts_claim_derived_in_progress(tmp_path):
     assert rc == 0, f"finalize refused a claim-derived in_progress doc: {out}"
 
 
+def test_finalize_refuses_in_progress_that_already_finalized(tmp_path):
+    """A stamped plan is real work-in-flight, not a claim-stamped draft.
+
+    Demoting it back to `ready` would make actively owned work dispatchable again.
+    """
+    doc = tmp_path / "plan.md"
+    doc.write_text(
+        _doc("in_progress", execution_strategy=True).replace(
+            "status: in_progress",
+            "status: in_progress\nacceptance_contract: compiled-v1",
+        ),
+        encoding="utf-8",
+    )
+
+    rc, out = _mutate_doc.finalize(doc, no_emit=True)
+
+    assert rc == 1, f"expected refusal for an already-finalized plan, got rc={rc}"
+    assert "cannot finalize" in out
+
+
 def test_in_progress_with_execution_strategy_still_refused(tmp_path):
     """The artifact, not the token, is the evidence - so this one IS past blueprint."""
     doc = _write(tmp_path, "in_progress", execution_strategy=True)
