@@ -1623,6 +1623,35 @@ def test_happy_routed_panes_config_read_failure_refuses(monkeypatch) -> None:
         mux_spawn.happy_routed_panes_enabled()
 
 
+def test_happy_routed_panes_malformed_config_file_refuses(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+    from fno.config import load_settings
+
+    config_path = tmp_path / "config.toml"
+    config_path.write_text("[agents\nhappy_routed_panes = true\n", encoding="utf-8")
+    monkeypatch.setenv("FNO_CONFIG", str(config_path))
+    load_settings.cache_clear()
+    runner = FakeRunner()
+
+    try:
+        with pytest.raises(DispatchAskError, match="silently launching"):
+            dispatch_spawn_pane(
+                name="peer",
+                message="hello",
+                provider="claude",
+                cwd=tmp_path,
+                route_env=dict(_ROUTE),
+                runner=runner,
+            )
+        assert runner.calls == []
+    finally:
+        load_settings.cache_clear()
+
+
 @pytest.mark.parametrize(
     "settings_args",
     [["--settings", "/tmp/r.json"], ["--settings=/tmp/r.json"]],

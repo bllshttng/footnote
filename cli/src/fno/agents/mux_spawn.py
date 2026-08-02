@@ -142,7 +142,11 @@ def happy_routed_panes_enabled() -> bool:
     This defaults off because installing and pairing happy is machine-local.
     """
     try:
-        from fno.config import load_settings
+        from fno.config import _candidate_paths, _load_raw, load_settings
+
+        for candidate in _candidate_paths():
+            if candidate.is_file() and not _load_raw(candidate)[1]:
+                raise ValueError(f"could not parse {candidate}")
 
         return load_settings().agents.happy_routed_panes
     except Exception as exc:
