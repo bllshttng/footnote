@@ -34,7 +34,7 @@ flowchart LR
 ```
 
 The graph node ID remains the company work order's durable identity.
-Plan parsing, typed graph entry construction, and the locked raw graph persistence seam all validate the same company-work projection.
+`PlanFrontmatter` schema validation, typed graph entry construction, and the locked raw graph persistence seam all validate the same company-work projection.
 The persistence check runs before graph bytes are replaced, so an invalid projection leaves the existing graph unchanged.
 
 ## Contract Surface
