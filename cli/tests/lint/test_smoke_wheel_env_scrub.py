@@ -30,8 +30,15 @@ import pytest
 
 SMOKE_DIR = Path(__file__).resolve().parents[2] / "tests" / "smoke"
 
-#: An executable scrub, at the start of a line - not `# unset PYTHONPATH`.
-SCRUB_RE = re.compile(r"^[ \t]*unset[ \t]+.*\bPYTHONPATH\b")
+#: An executable scrub that actually unsets the VARIABLE. Not a commented line,
+#: not `unset -f PYTHONPATH` (that clears a function and leaves the variable
+#: set), and not a trailing `# PYTHONPATH` on some other unset: PYTHONPATH has to
+#: be a bare operand of the canonical command, optionally alongside other names.
+SCRUB_RE = re.compile(
+    r"^[ \t]*unset(?:[ \t]+-v)?"  # `unset` or its explicit `unset -v` form
+    r"(?:[ \t]+[A-Za-z_][A-Za-z0-9_]*)*"  # other variables cleared in the same statement
+    r"[ \t]+PYTHONPATH(?:[ \t;]|$)"  # PYTHONPATH itself, as an operand
+)
 
 #: Provisions fno somewhere and then RUNS it. The scrub is load-bearing in every
 #: one, whether it inspects via `python -c` or a console script.
@@ -89,6 +96,34 @@ def _first_match(lines: list[str], pattern: re.Pattern[str]) -> int | None:
         if pattern.search(line):
             return i
     return None
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "unset PYTHONPATH",
+        "unset PYTHONPATH 2>/dev/null || true",
+        "  unset PYTHONPATH",
+        "unset -v PYTHONPATH",
+        "unset FNO_REPO_ROOT PYTHONPATH 2>/dev/null || true",
+    ],
+)
+def test_scrub_regex_accepts_real_unsets(line: str) -> None:
+    assert SCRUB_RE.match(line)
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        "# unset PYTHONPATH",  # commented out: runs nothing
+        "unset -f PYTHONPATH",  # clears a function; the variable survives
+        "unset OTHER # PYTHONPATH",  # PYTHONPATH only named in a comment
+        "unset PYTHONPATHX",  # a different variable
+        'echo "unset PYTHONPATH"',  # printed, not executed
+    ],
+)
+def test_scrub_regex_rejects_no_ops(line: str) -> None:
+    assert not SCRUB_RE.match(line)
 
 
 def test_every_script_is_classified() -> None:
