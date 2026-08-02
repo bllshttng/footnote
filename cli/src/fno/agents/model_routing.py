@@ -59,7 +59,7 @@ from fno.env_file import read_var_from_env_file
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
-    from fno.roles import RoleResolution, RoleResolutionBlocked
+    from fno.roles import ResolvedRole, RoleResolution, RoleResolutionBlocked
 
 BusinessRoleLookup = Callable[[str], "RoleResolution"]
 
@@ -514,10 +514,11 @@ def resolve_route(
         env = os.environ
 
     block = _routing_block(settings)
+    business_role = _resolve_business_role(name, business_lookup)
     if not getattr(block, "enabled", True):
         return None
 
-    target = _business_role_target(name, block, business_lookup)
+    target = _business_role_target(name, block, business_role)
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
@@ -777,10 +778,11 @@ def resolve_codex_route(
         env = os.environ
 
     block = _routing_block(settings)
+    business_role = _resolve_business_role(name, business_lookup)
     if not getattr(block, "enabled", True):
         return None
 
-    target = _business_role_target(name, block, business_lookup)
+    target = _business_role_target(name, block, business_role)
     if target is None:
         return None
     pname, model = target
@@ -889,35 +891,39 @@ def _role_target(role: str, block: "ModelRoutingBlock") -> Optional[tuple[str, s
     return _parse_target(str(raw))
 
 
-def _business_role_target(
+def _resolve_business_role(
     role: str,
-    block: "ModelRoutingBlock",
     business_lookup: Optional[BusinessRoleLookup],
-) -> Optional[tuple[str, str]]:
-    """Bridge an explicit business-role tri-state into legacy model routing.
-
-    An omitted lookup and a typed ``not_found`` result delegate to
-    :func:`_role_target` unchanged. A resolved role contributes only its frozen
-    provider/model projection. Every other blocked result raises distinctly so
-    it cannot collapse into legacy ``None`` and launch on the primary model.
-    """
-    legacy_target = _role_target(role, block)
+) -> "Optional[ResolvedRole]":
+    """Validate an opted-in business-role tri-state before routing policy."""
     if business_lookup is None:
-        return legacy_target
+        return None
 
     from fno.roles import ResolvedRole, RoleResolutionBlocked, RoleResolutionReason
 
     result = business_lookup(role)
     if isinstance(result, RoleResolutionBlocked):
         if result.reason is RoleResolutionReason.NOT_FOUND:
-            return legacy_target
+            return None
         raise BusinessRoleResolutionBlockedError(result)
     if not isinstance(result, ResolvedRole):
         raise BusinessRoleRoutingProjectionError(
             f"business lookup for role {role!r} returned no typed resolution; no worker launched"
         )
+    return result
 
-    projection = result.routing_projection
+
+def _business_role_target(
+    role: str,
+    block: "ModelRoutingBlock",
+    business_role: "Optional[ResolvedRole]",
+) -> Optional[tuple[str, str]]:
+    """Project only provider/model material into the legacy routing target."""
+    legacy_target = _role_target(role, block)
+    if business_role is None:
+        return legacy_target
+
+    projection = business_role.routing_projection
     provider = projection.provider if projection is not None else None
     model = projection.model if projection is not None else None
     if legacy_target is not None:

@@ -210,6 +210,75 @@ def test_invalid_business_manifest_is_distinct_from_routing_fallback() -> None:
 
 
 @pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
+def test_disabled_routing_not_found_remains_exact_legacy_none(
+    resolver: Callable[..., object],
+) -> None:
+    settings = _settings(enabled=False)
+    legacy_notices: list[str] = []
+    bridge_notices: list[str] = []
+
+    legacy = resolver(
+        "publisher", settings=settings, env={}, notice=legacy_notices.append
+    )
+    bridged = resolver(
+        "publisher",
+        settings=settings,
+        env={},
+        notice=bridge_notices.append,
+        business_lookup=_not_found,
+    )
+
+    assert legacy is None
+    assert bridged is None
+    assert bridge_notices == legacy_notices
+
+
+@pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
+def test_disabled_routing_invalid_manifest_still_fails_closed(
+    resolver: Callable[..., object],
+) -> None:
+    blocked = RoleResolutionBlocked(
+        role=RoleRef(id="publisher", function_id="communications"),
+        reason=RoleResolutionReason.INVALID_MANIFEST,
+        source_id="company/roles.toml",
+        reference="publisher",
+    )
+
+    with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
+        resolver(
+            "publisher",
+            settings=_settings(enabled=False),
+            env={},
+            business_lookup=lambda _: blocked,
+        )
+
+    assert caught.value.result is blocked
+
+
+@pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
+def test_disabled_routing_resolved_business_role_remains_disabled(
+    resolver: Callable[..., object],
+) -> None:
+    called = False
+
+    def lookup(_: str) -> ResolvedRole:
+        nonlocal called
+        called = True
+        return _resolved(provider="oai", model="gpt-business")
+
+    assert (
+        resolver(
+            "publisher",
+            settings=_settings(enabled=False, providers=OPENAI_PROVIDER),
+            env={"OPENAI_API_KEY": "openai-key"},
+            business_lookup=lookup,
+        )
+        is None
+    )
+    assert called is True
+
+
+@pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
 @pytest.mark.parametrize("role", sorted(mr.PROTECTED_ROLES))
 def test_protected_business_names_short_circuit_before_lookup(
     resolver: Callable[..., object], role: str
