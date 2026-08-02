@@ -14,12 +14,8 @@ Plan ACs covered:
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
-import sys
 from pathlib import Path
-from typing import IO
 from unittest.mock import MagicMock
 
 import pytest
@@ -667,7 +663,6 @@ def test_create_tee_per_errno_warn_recurs_for_distinct_modes(
             self.closed = True
 
     broken = _BrokenTee()
-    monkeypatch_open = lambda *a, **kw: broken
     # Patch _open_tee to return our broken tee.
     import fno.agents.providers.codex as cm
 

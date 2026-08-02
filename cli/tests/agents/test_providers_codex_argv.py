@@ -12,7 +12,6 @@ Plan ACs covered:
 """
 from __future__ import annotations
 
-import re
 
 from fno.agents.providers import codex as codex_mod
 
