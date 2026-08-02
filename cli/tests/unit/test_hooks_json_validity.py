@@ -160,6 +160,19 @@ def test_codex_hooks_block_canonical_edit_tools() -> None:
     )
 
 
+def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
+    for config_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        commands = [
+            hook.get("command", "")
+            for registration in data["hooks"].get("PreToolUse", [])
+            for hook in registration.get("hooks", [])
+        ]
+        assert not any("worktree-harness-guard" in command for command in commands), (
+            f"{config_path.name} still blocks sessions by harness ownership"
+        )
+
+
 def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
