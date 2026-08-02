@@ -48,7 +48,7 @@ The persistence check runs before graph bytes are replaced, so an invalid projec
 | `DeliverableRef` | Records an artifact produced by one work-order attempt. |
 | `EffectRef` | Records the destination and class of an intended external effect. |
 | `EvidenceRef` | Records an honest four-state evidence result: `unknown`, `passed`, `failed`, or `blocked`. |
-| `ObservationRef` | Records an observed business response separately from delivery evidence. |
+| `ObservationRef` | References a separate observation node and the metrics it should collect without changing delivery truth. |
 
 All contract models are frozen and reject unknown fields.
 Reference collections reject duplicate IDs, dangling references, mismatched work-order attempts, and explicitly contradictory deliverable/effect backlinks.
