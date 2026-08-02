@@ -40,21 +40,17 @@ set -uo pipefail
 
 _approve() { printf '%s\n' '{}'; exit 0; }
 
+# No jq fallback: the jq probe below approves before any path can reach here.
 _block() {
-    local reason="$1"
-    if command -v jq >/dev/null 2>&1; then
-        jq -nc --arg reason "$reason" '{
-            decision: "block",
-            reason: $reason,
-            hookSpecificOutput: {
-                hookEventName: "PreToolUse",
-                permissionDecision: "deny",
-                permissionDecisionReason: $reason
-            }
-        }'
-    else
-        printf '{"decision":"block","reason":%s}\n' "$(printf '%s' "$reason" | sed 's/"/\\"/g;s/.*/"&"/')"
-    fi
+    jq -nc --arg reason "$1" '{
+        decision: "block",
+        reason: $reason,
+        hookSpecificOutput: {
+            hookEventName: "PreToolUse",
+            permissionDecision: "deny",
+            permissionDecisionReason: $reason
+        }
+    }'
     exit 0
 }
 
