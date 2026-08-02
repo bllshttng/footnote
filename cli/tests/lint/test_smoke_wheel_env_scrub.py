@@ -10,18 +10,27 @@ distribution that shipped nothing. ``scripts/ci/preflight.sh`` exports exactly
 that, and it already produced two false wheel-defect reports against
 ``test_build.sh`` before that file got its own ``unset PYTHONPATH``.
 
-Three deliberate design choices, each closing a way this guard could have been
-decorative (the pitfall in AGENTS.md - a guard on one of N reachable paths):
+Every requirement below exists because an earlier draft of this file failed open
+in exactly that way - the decorative-guard pitfall in AGENTS.md, found in the
+lint written to prevent it:
 
-1. **Every** ``*.sh`` in the dir must be classified, not just the ones matching
-   an install-marker regex. The first draft classified on ``pip install`` plus
-   ``python -c`` and covered ONE of the five real channels; the second still let
-   a new script using ``sh "$INSTALLER"`` or ``pip3`` slip through unclassified.
-   An unlisted file now fails, so a new smoke cannot inherit silence.
-2. The scrub must be an **executable statement**, not the substring. A commented
-   ``# unset PYTHONPATH`` satisfies a naive ``in`` check and does nothing.
-3. The scrub must come **before the first install**, so it cannot be appended
-   below the code it is supposed to protect.
+1. **Every** ``*.sh`` in the dir must be classified. Matching on ``pip install``
+   plus ``python -c`` covered ONE of the five real channels; broadening the
+   markers still missed a script calling ``sh "$INSTALLER"`` or ``pip3``. An
+   unlisted file now fails, so a new smoke cannot inherit silence.
+2. The scrub must be a real ``unset`` of the VARIABLE (``is_scrub``), not a
+   substring: ``unset -f PYTHONPATH``, a trailing ``# PYTHONPATH`` comment, and
+   a commented-out line all satisfy a naive check and clear nothing.
+3. It must run **unconditionally in the script's own shell**
+   (``top_level_lines``). Column zero does not prove that, since shell needs no
+   indentation, and a subshell's unset dies with the subshell.
+4. It must be followed by a check that **aborts** when the variable survived
+   (``is_verification``). These scripts use ``set -uo pipefail`` without ``-e``,
+   so a test with no exit - or one in a comment or a subshell - installs anyway.
+5. Scrub, then verify, then install, in that order.
+
+The static checks stop at what static checks can do. The runtime verification in
+each script is what catches a scrub that parsed fine and cleared nothing.
 """
 import re
 from pathlib import Path
@@ -34,10 +43,38 @@ VAR_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 #: The runtime proof that the scrub took effect. Checked for separately because
 #: it, not the lint, is what catches a scrub that parsed fine and did nothing.
-#: The `exit` is part of the pattern: these scripts run under `set -uo pipefail`
-#: WITHOUT `-e`, so a bare `[ -z ... ]` (or one ending `|| true`) reports a
-#: failed test and then installs anyway.
-ASSERT_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \].*\|\|.*\bexit [1-9]')
+TEST_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \].*\|\|')
+#: The `exit` is required and must be the CURRENT shell's: these scripts run
+#: under `set -uo pipefail` WITHOUT `-e`, so a bare test, one ending `|| true`,
+#: and `|| (exit 1)` (which exits only the subshell) all install anyway.
+EXIT_RE = re.compile(r"\bexit [1-9]")
+SUBSHELL_EXIT_RE = re.compile(r"\(\s*exit\b")
+
+
+def strip_comment(line: str) -> str:
+    """Drop a trailing `#` comment, respecting quotes.
+
+    Needed because a comment can otherwise supply the token a check is looking
+    for - `|| echo warning # exit 1` reads as an exit and terminates nothing.
+    """
+    quote: str | None = None
+    for i, ch in enumerate(line):
+        if quote:
+            if ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch == "#" and (i == 0 or line[i - 1].isspace()):
+            return line[:i]
+    return line
+
+
+def is_verification(line: str) -> bool:
+    """True for a check that aborts THIS shell when PYTHONPATH survived."""
+    code = strip_comment(line)
+    if not TEST_RE.match(code) or SUBSHELL_EXIT_RE.search(code):
+        return False
+    return bool(EXIT_RE.search(code))
 
 #: Lines that open a shell block, and the ones that close it. Used to reject a
 #: scrub nested inside a conditional, loop, function, or heredoc, where it may
@@ -46,8 +83,10 @@ ASSERT_RE = re.compile(r'^\[ -z "\$\{PYTHONPATH:-\}" \].*\|\|.*\bexit [1-9]')
 #: repo's smoke scripts actually use, and `test_tracker_sees_through_*` pins the
 #: cases that matter. A construct it cannot see is reported as nested (the safe
 #: direction - a false alarm names a line, a false pass protects nothing).
-OPENS_RE = re.compile(r"^\s*(if|while|until|for|case)\b|\{\s*$|\(\)\s*\{")
-CLOSES_RE = re.compile(r"^\s*(fi|done|esac|\})\b")
+#: A bare `(` opening a multiline subshell counts too: a scrub inside one clears
+#: only the child's copy, leaving the parent - which runs the install - dirty.
+OPENS_RE = re.compile(r"^\s*(if|while|until|for|case)\b|\{\s*$|\(\)\s*\{|\(\s*$")
+CLOSES_RE = re.compile(r"^\s*(fi|done|esac|\}|\))\b|^\s*\)\s*$")
 HEREDOC_RE = re.compile(r"<<-?\s*[\"']?([A-Za-z_][A-Za-z0-9_]*)[\"']?")
 
 
@@ -217,6 +256,14 @@ def test_tracker_reopens_after_a_block_closes() -> None:
     assert 4 in top_level_lines(script)
 
 
+def test_tracker_sees_multiline_subshells() -> None:
+    """A subshell clears only its own copy; the parent still installs dirty."""
+    script = ["(", "unset PYTHONPATH", ")", "pip install ./x.whl"]
+    top = top_level_lines(script)
+    assert 2 not in top
+    assert 4 in top
+
+
 @pytest.mark.parametrize(
     "line",
     [
@@ -225,7 +272,7 @@ def test_tracker_reopens_after_a_block_closes() -> None:
     ],
 )
 def test_verification_must_exit(line: str) -> None:
-    assert ASSERT_RE.match(line)
+    assert is_verification(line)
 
 
 @pytest.mark.parametrize(
@@ -234,10 +281,12 @@ def test_verification_must_exit(line: str) -> None:
         '[ -z "${PYTHONPATH:-}" ]',  # reports nothing, stops nothing (no set -e)
         '[ -z "${PYTHONPATH:-}" ] || true',  # explicitly swallows the failure
         '[ -z "${PYTHONPATH:-}" ] || echo "oh well"',  # warns, then installs anyway
+        '[ -z "${PYTHONPATH:-}" ] || echo warn # exit 1',  # the exit is in a comment
+        '[ -z "${PYTHONPATH:-}" ] || (exit 1)',  # exits the subshell, not the script
     ],
 )
 def test_verification_without_an_exit_is_rejected(line: str) -> None:
-    assert not ASSERT_RE.match(line)
+    assert not is_verification(line)
 
 
 def test_every_script_is_classified() -> None:
@@ -276,7 +325,7 @@ def test_scrub_is_executable_and_precedes_the_install(name: str) -> None:
         "look like a scrub and are not."
     )
     assert_line = next(
-        (i for i, ln in enumerate(lines, start=1) if i in top and ASSERT_RE.match(ln)),
+        (i for i, ln in enumerate(lines, start=1) if i in top and is_verification(ln)),
         None,
     )
     assert assert_line is not None, (
