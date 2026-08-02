@@ -1,0 +1,53 @@
+"""Public immutable contracts for role discovery and bounded resolution."""
+
+from fno.roles.models import (
+    AuthorityCeiling,
+    CapabilityFact,
+    ContextBundle,
+    ContextBundleBounds,
+    ContextKind,
+    ContextReference,
+    ContextSelector,
+    DefinitionStatus,
+    DeliveryPolicy,
+    ResolvedRole,
+    ResolvedSource,
+    ReviewPolicy,
+    RoleDefinitionSource,
+    RoleLayer,
+    RoleManifest,
+    RoleResolution,
+    RoleResolutionBlocked,
+    RoleResolutionReason,
+    RoutingHint,
+    Sensitivity,
+)
+from fno.roles.registry import RegistryError, RoleRegistry, ordered_definitions
+from fno.roles.resolver import resolve_role
+
+__all__ = [
+    "AuthorityCeiling",
+    "CapabilityFact",
+    "ContextBundle",
+    "ContextBundleBounds",
+    "ContextKind",
+    "ContextReference",
+    "ContextSelector",
+    "DefinitionStatus",
+    "DeliveryPolicy",
+    "RegistryError",
+    "ResolvedRole",
+    "ResolvedSource",
+    "ReviewPolicy",
+    "RoleDefinitionSource",
+    "RoleLayer",
+    "RoleManifest",
+    "RoleRegistry",
+    "RoleResolution",
+    "RoleResolutionBlocked",
+    "RoleResolutionReason",
+    "RoutingHint",
+    "Sensitivity",
+    "ordered_definitions",
+    "resolve_role",
+]
