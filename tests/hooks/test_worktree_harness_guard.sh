@@ -116,5 +116,94 @@ assert_allow "missing fno on PATH approves" "$NOFNO_OUT"
 # non-foreign owner that approves (a foreign stub would correctly still block).
 assert_allow "malformed payload approves under non-foreign fno" "$(run_guard "$NOWT" 'not-json')"
 
+# ── target gating (x-b18e) ───────────────────────────────────────────────────
+# The verdict a real `fno claim worktree-guard` returns depends on WHERE it is
+# run, so a stub that ignores its cwd cannot exercise target gating at all. This
+# one answers foreign only inside the owned tree, which is the property under
+# test: the hook must ask about the target, not the session cwd.
+make_fno_path_stub() {  # <bindir> <owned-worktree>
+    local bindir="$1" owned="$2"
+    mkdir -p "$bindir"
+    cat >"$bindir/fno" <<EOF
+#!/usr/bin/env bash
+OWNED='$owned'
+EOF
+    cat >>"$bindir/fno" <<'EOF'
+here="$(pwd -P)"
+owned="$(cd "$OWNED" 2>/dev/null && pwd -P)"
+if [[ "$here" == "$owned" || "$here" == "$owned"/* ]]; then
+    printf '{"verdict":"foreign","worktree":"%s","my_harness":"codex","owner_harness":"claude","owner_holder":"claude-worktree:s1"}\n' "$owned"
+    exit 1
+fi
+printf '%s\n' '{"verdict":"no-worktree","my_harness":"claude"}'
+exit 0
+EOF
+    chmod +x "$bindir/fno"
+}
+
+payload() {  # payload <cwd> <tool> <file_path> <command>
+    jq -nc --arg cwd "$1" --arg tool "$2" --arg fp "$3" --arg cmd "$4" \
+        '{cwd: $cwd, tool_name: $tool, tool_input: {file_path: $fp, command: $cmd}}'
+}
+
+OWNED="$TMP_BASE/owned"
+OUTSIDE="$TMP_BASE/outside"
+mkdir -p "$OWNED/sub" "$OUTSIDE"
+OWNED_P="$(cd "$OWNED" && pwd -P)"
+PATHSTUB="$TMP_BASE/pathstub"
+make_fno_path_stub "$PATHSTUB" "$OWNED"
+
+# The defect: a write to an unrelated tree, refused only because cwd drifted.
+assert_allow "Edit outside the owned worktree approves (cwd inside it)" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Edit "$OUTSIDE/notes.md" "")")"
+assert_allow "Write outside the owned worktree approves (cwd inside it)" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Write "$OUTSIDE/notes.md" "")")"
+
+# A target whose parent does not exist yet anchors to the nearest existing
+# ancestor rather than failing the cd and falling through to cwd.
+assert_allow "Write to a not-yet-created directory outside approves" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Write "$OUTSIDE/new/deep/plan.md" "")")"
+
+# Stricter in the other direction: cwd-gating missed this one entirely.
+assert_block "Write INTO the owned worktree blocks from an outside cwd" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OUTSIDE" Write "$OWNED/sub/f.txt" "")")"
+assert_block "Edit INTO the owned worktree still blocks" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Edit "$OWNED/sub/f.txt" "")")"
+
+# ── the escape (x-b18e) ──────────────────────────────────────────────────────
+# A refused session must have at least one in-session command that succeeds and
+# moves it out. Without this the guard is a trap, not a guard.
+assert_allow "bare cd out approves from a foreign cwd" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "cd $OUTSIDE")")"
+assert_allow "bare cd with surrounding whitespace approves" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "   cd $OUTSIDE  ")")"
+assert_block "cd chained to another command does not ride the exemption" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "cd $OUTSIDE && rm -rf .")")"
+assert_block "an ordinary command in a foreign worktree still blocks" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "git commit -m x")")"
+
+# The inline grant is honoured HERE because the hook is the only layer that sees
+# the command text; by the time `fno claim` runs it is a subprocess whose
+# environment never saw the assignment.
+assert_allow "inline FNO_WORKTREE_GRANT naming the worktree approves" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "FNO_WORKTREE_GRANT=$OWNED_P git commit -m x")")"
+assert_allow "inline quoted FNO_WORKTREE_GRANT approves" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "FNO_WORKTREE_GRANT=\"$OWNED_P\" git commit -m x")")"
+assert_allow "inline FNO_WORKTREE_OK=1 approves" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "FNO_WORKTREE_OK=1 git commit -m x")")"
+assert_block "a grant naming a DIFFERENT worktree does not approve" \
+    "$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "FNO_WORKTREE_GRANT=/some/other/tree git commit -m x")")"
+
+# The refusal must advertise only escapes that work. Naming an unreachable one
+# is what cost this guard three days of trapped sessions.
+ESCAPE_OUT="$(run_guard "$PATHSTUB" "$(payload "$OWNED" Bash "" "git commit -m x")")"
+ESCAPE_REASON="$(printf '%s' "$ESCAPE_OUT" | jq -r '.reason')"
+if printf '%s' "$ESCAPE_REASON" | grep -q 'bare cd' \
+   && printf '%s' "$ESCAPE_REASON" | grep -q "FNO_WORKTREE_GRANT=$OWNED_P"; then
+    pass "refusal names the cd escape and a grant with the real worktree path"
+else
+    fail "refusal omits a working escape: $ESCAPE_REASON"
+fi
+
 printf '\n=== Results: %d passed, %d failed ===\n' "$PASS" "$FAIL"
 [[ $FAIL -eq 0 ]]
