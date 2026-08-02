@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
+from typer.testing import CliRunner
 
 from fno.company.contracts import CompanyWorkRefs, FunctionRef, RoleRef, WorkOrderRef
 from fno.graph.types import Entry
+from fno.plan.cli import plan_app
 from fno.plan.schema import PlanFrontmatter
+
+
+runner = CliRunner()
 
 
 def _refs() -> CompanyWorkRefs:
@@ -48,6 +54,52 @@ def test_plan_rejects_company_work_for_a_different_graph_node() -> None:
             created="2026-08-02",
             company_work=_refs(),
         )
+
+
+@pytest.mark.parametrize(("work_order_node", "exit_code"), [("x-e9a3", 0), ("x-other", 1)])
+def test_plan_validate_checks_company_work_from_markdown(
+    tmp_path: Path, work_order_node: str, exit_code: int
+) -> None:
+    plan = tmp_path / "company-plan.md"
+    plan.write_text(
+        "---\n"
+        "node: x-e9a3\n"
+        "status: ready\n"
+        "created: 2026-08-02\n"
+        "company_work:\n"
+        "  work_order:\n"
+        f"    node_id: {work_order_node}\n"
+        "    attempt_id: attempt-1\n"
+        "---\n"
+        "# Company plan\n"
+    )
+
+    result = runner.invoke(plan_app, ["validate", str(plan)])
+
+    assert result.exit_code == exit_code
+    if exit_code == 1:
+        assert "must match plan node" in result.output
+
+
+@pytest.mark.parametrize(("domain", "deliverable_type"), [("code", "engineering"), ("research", "research_document")])
+def test_plan_validate_preserves_legacy_document_kinds(
+    tmp_path: Path, domain: str, deliverable_type: str
+) -> None:
+    plan = tmp_path / f"{domain}-plan.md"
+    plan.write_text(
+        "---\n"
+        f"node: x-{domain}\n"
+        "status: ready\n"
+        "created: 2026-08-02\n"
+        f"domain: {domain}\n"
+        f"deliverable_type: {deliverable_type}\n"
+        "---\n"
+        "# Legacy plan\n"
+    )
+
+    result = runner.invoke(plan_app, ["validate", str(plan)])
+
+    assert result.exit_code == 0
 
 
 def test_graph_entry_round_trips_company_work_and_unknown_fields() -> None:
@@ -127,6 +179,32 @@ def test_graph_store_rejects_invalid_company_work_without_writing(
         locked_mutate_graph(graph, lambda entries: entries)
 
     assert graph.read_bytes() == original
+
+
+def test_graph_store_persists_valid_company_work_and_unknown_fields(tmp_path: Path) -> None:
+    from fno.graph.store import locked_mutate_graph
+
+    graph = tmp_path / "graph.json"
+    graph.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-e9a3",
+                        "company_work": _refs().model_dump(mode="json"),
+                        "future_graph_field": {"kept": True},
+                    }
+                ]
+            }
+        )
+        + "\n"
+    )
+
+    locked_mutate_graph(graph, lambda entries: entries)
+
+    saved = json.loads(graph.read_text())["entries"][0]
+    assert saved["company_work"]["work_order"]["node_id"] == "x-e9a3"
+    assert saved["future_graph_field"] == {"kept": True}
 
 
 def test_legacy_graph_entry_remains_valid() -> None:
