@@ -179,6 +179,72 @@ fn mouse_click_on_a_url_opens_it_for_the_clicking_client_only() {
 }
 
 #[test]
+fn mouse_release_without_a_matching_press_never_opens_a_link() {
+    // codex P2 on PR 702. The client hit-tests every mouse report independently
+    // (client.rs `hit_test`) and forwards each to whatever pane the pointer is
+    // over, so a drag begun in pane A and released over pane B delivers a BARE
+    // RELEASE to pane B. Pane B has no selection of its own, so that release
+    // used to read as a plain click there and launch a browser in the middle of
+    // an ordinary cross-pane selection.
+    //
+    // A lone release is exactly the state pane B sees, which is what makes this
+    // a faithful reproduction without a second pane. The second case covers the
+    // within-pane sibling: a drag that happened to select nothing.
+    let scratch = Scratch::new("link-press");
+    let _server = sh_server(&scratch);
+    let cwd = scratch.dir("w");
+
+    let mut a = FakeClient::attach(&scratch.sock(), 24, 80, cwd.to_str().unwrap());
+    let pane = a
+        .wait_layout(10, "first layout", |l| l.panes.len() == 1)
+        .focus;
+    a.wait_prompt(pane);
+    let row = echo_line(&mut a, pane, "link https://example.com/pr/700 end");
+
+    // 1. Release on the URL with no press at all (what pane B receives).
+    a.mouse(
+        pane,
+        MouseEvent {
+            row,
+            col: 10,
+            kind: MouseKind::Release(MouseButton::Left),
+        },
+    );
+    // 2. Press on the URL, release on a DIFFERENT cell of it: a drag, not a click.
+    a.mouse(
+        pane,
+        MouseEvent {
+            row,
+            col: 8,
+            kind: MouseKind::Press(MouseButton::Left),
+        },
+    );
+    a.mouse(
+        pane,
+        MouseEvent {
+            row,
+            col: 20,
+            kind: MouseKind::Release(MouseButton::Left),
+        },
+    );
+
+    // Causal barrier rather than a sleep: OpenLink and Frame share one ordered
+    // socket, so any open would have landed before this marker frame.
+    a.input(b"echo no-stray-open-2#\r");
+    a.wait_pane_text(15, pane, |t| t.contains("no-stray-open-2#"));
+    assert!(
+        a.opened_links.is_empty(),
+        "a release with no matching same-cell press must not open: {:?}",
+        a.opened_links
+    );
+
+    // The real click still works, so the guard did not just disable the feature.
+    click(&mut a, pane, row, 10);
+    let opened = a.wait(10, "opened link", |c| c.opened_links.first().cloned());
+    assert_eq!(opened, "https://example.com/pr/700");
+}
+
+#[test]
 fn mouse_click_off_a_url_opens_nothing_and_a_drag_still_copies() {
     let scratch = Scratch::new("link-neg");
     let _server = sh_server(&scratch);

@@ -603,6 +603,16 @@ struct Client {
     /// any pane without an upstream message (x-6a14 read-only attach). Its
     /// `Resize` is ignored and it never spawns a squad.
     passive: bool,
+    /// (x-a2d0) Where this client's left button last went DOWN, as
+    /// `(pane, row, col)`. Opening a clicked URL needs it because the client
+    /// hit-tests every mouse report independently (client.rs `hit_test`) and
+    /// forwards each to whatever pane the pointer is over: a drag begun in pane
+    /// A and released over pane B delivers the release to B, which has no
+    /// selection of its own and would otherwise read as a plain click there.
+    /// A release only opens a link when it completes an UNMOVED press in the
+    /// SAME pane, which also rules out a within-pane drag that happened to
+    /// select nothing. `None` before the first press (codex P2, PR 702).
+    last_press: Option<(u64, u16, u16)>,
 }
 
 struct PaneEntry {
@@ -4723,6 +4733,7 @@ impl Core {
             visible: HashSet::new(),
             dims: (rows, cols),
             passive,
+            last_press: None,
         });
         self.push_layout(true);
         // Cold-attach snapshot rides the RELIABLE channel (x-0296). The
@@ -5727,6 +5738,11 @@ impl Core {
             }
             MouseAction::Scroll(delta) => self.apply_scroll(pane, delta),
             MouseAction::SelectStart => {
+                // Remember where the button went down; the release arm needs it
+                // to tell a click from the tail of a drag (x-a2d0).
+                if let Some(c) = self.clients.iter_mut().find(|c| c.id == client_id) {
+                    c.last_press = Some((pane, event.row, event.col));
+                }
                 if let Some(e) = self.panes.get_mut(&pane) {
                     e.vt.selection_start(event.row, event.col);
                 }
@@ -5751,12 +5767,25 @@ impl Core {
                 match self.panes.get(&pane).and_then(|e| e.vt.selection_text()) {
                     Some(text) => self.send_copy(client_id, text),
                     None => {
-                        if let Some(url) = self
-                            .panes
-                            .get(&pane)
-                            .and_then(|e| e.vt.link_at(event.row, event.col))
-                        {
-                            self.send_open_link(client_id, url);
+                        // Only a press and release on the SAME cell of the SAME
+                        // pane is a click. Without this, a drag begun in another
+                        // pane arrives here as a bare release (the client
+                        // re-hit-tests every report), and an ordinary cross-pane
+                        // selection would launch a browser (codex P2, PR 702).
+                        let clicked = self
+                            .clients
+                            .iter()
+                            .find(|c| c.id == client_id)
+                            .and_then(|c| c.last_press)
+                            == Some((pane, event.row, event.col));
+                        if clicked {
+                            if let Some(url) = self
+                                .panes
+                                .get(&pane)
+                                .and_then(|e| e.vt.link_at(event.row, event.col))
+                            {
+                                self.send_open_link(client_id, url);
+                            }
                         }
                         if let Some(e) = self.panes.get_mut(&pane) {
                             e.vt.selection_clear();
@@ -12551,6 +12580,7 @@ mod tests {
             visible: HashSet::new(),
             dims: (24, 80),
             passive: false,
+            last_press: None,
         });
 
         core.command(1, Command::MoveTab { tab: 5, squad: 2 });
@@ -16487,6 +16517,7 @@ mod tests {
             visible: HashSet::new(),
             dims,
             passive,
+            last_press: None,
         }
     }
 
