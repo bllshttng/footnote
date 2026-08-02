@@ -63,6 +63,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
+    "approvals": (
+        "fno.approvals.cli:approvals_app",
+        "Inspect and decide pending approvals for consequential effects.",
+        {"hidden": True},
+    ),
     "log": (
         "fno.log_cmd:app",
         "Append a progress entry to the per-worktree agent-progress.jsonl",

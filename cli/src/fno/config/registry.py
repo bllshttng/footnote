@@ -151,6 +151,10 @@ FIELD_META: dict[str, Meta] = {
     "done_probes": Meta(
         "advanced", "Repo-wide ship-gate probes: shell commands loop-check runs (60s each, cap 3 per source) before it will grant DonePRGreen, alongside any a plan declares. Both lists must pass; a plan can add probes and can never silence these. A probe is an OBSERVATION - one that mutates the repo races the session's own edits, and its only backstops are the timeout and the block reason.",
     ),
+    # --- config.approvals.* ---
+    "approvals.authorized_principals": Meta(
+        "advanced", "Effect class -> principal ids allowed to approve it; the key `*` matches every class. Absent or empty means nobody may approve, so a fresh install can inspect pending approvals but cannot decide one. Financial, signature, employment, and destructive classes stay denied regardless of what is listed here.",
+    ),
     # --- config.review.* ---
     "review.github_apps": Meta(
         "advanced", "GitHub App bot logins that must have reviewed before the ship gate goes green (the GATE). Legacy alias: required_bots.",

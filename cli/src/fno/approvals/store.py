@@ -587,6 +587,13 @@ class EffectStore:
         ).fetchone()
         return _attempt_from_row(row) if row is not None else None
 
+    def attempts_for_request(self, request_digest: str) -> list[EffectAttempt]:
+        rows = self._conn.execute(
+            "SELECT * FROM attempts WHERE request_digest = ? ORDER BY idempotency_key",
+            (request_digest,),
+        )
+        return [_attempt_from_row(row) for row in rows]
+
     def list_requests(self, *, pending_only: bool = False) -> list[ApprovalRequest]:
         sql = "SELECT r.* FROM requests r"
         if pending_only:
