@@ -42,7 +42,9 @@ Two non-negotiable invariants:
 
 - **Fail safe, not fail closed** (US4): if no key is configured for the role's
   provider, the role falls back to the primary Anthropic model with a one-line
-  notice and the spawn still succeeds. :func:`resolve_route` never raises.
+  notice and the spawn still succeeds. The legacy :func:`resolve_route` path
+  never raises; an opted-in business lookup fails closed on typed resolution
+  errors so they cannot be mistaken for legacy fallback.
 - **Hard quality guard**: ``implement`` / ``review-verdict`` are in
   ``PROTECTED_ROLES`` and short-circuit to ``None`` *before* any config is read.
   No settings edit can route the diff or verdict to a secondary provider.
@@ -57,6 +59,9 @@ from fno.env_file import read_var_from_env_file
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
+    from fno.roles import RoleResolution, RoleResolutionBlocked
+
+BusinessRoleLookup = Callable[[str], "RoleResolution"]
 
 # Built-in default endpoint for the z.ai provider: the Anthropic-compatible
 # endpoint a claude worker needs (NOT the OpenAI /api/coding/paas/v4 path).
@@ -109,6 +114,22 @@ class RouteCompositionError(ValueError):
     """A secondary route cannot compose atomically with the active provider."""
 
 
+class BusinessRoleResolutionBlockedError(ValueError):
+    """A business role exists but its typed resolution failed closed."""
+
+    def __init__(self, result: "RoleResolutionBlocked") -> None:
+        self.result = result
+        detail = f": {result.detail}" if result.detail else ""
+        super().__init__(
+            f"business role {result.role.id!r} is blocked ({result.reason.value}){detail}; "
+            "no worker launched"
+        )
+
+
+class BusinessRoleRoutingProjectionError(ValueError):
+    """A resolved business role lacks a deterministic provider/model route."""
+
+
 def resolve_spawn_route(
     role: Optional[str],
     route_env: Optional[Mapping[str, str]] = None,
@@ -116,6 +137,7 @@ def resolve_spawn_route(
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
     account_overlay: bool = False,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve one spawn route and reject managed-OAuth half-composition.
 
@@ -135,7 +157,11 @@ def resolve_spawn_route(
     over Keychain OAuth, so the split-brain the guard exists to prevent cannot
     recur.
     """
-    route = dict(route_env) if route_env else resolve_route(role, notice=notice)
+    route = (
+        dict(route_env)
+        if route_env
+        else resolve_route(role, notice=notice, business_lookup=business_lookup)
+    )
     if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
         # An account overlay relaxes the refusal only when the route is
         # self-sufficient (see docstring): without its own auth the route's
@@ -454,6 +480,7 @@ def resolve_route(
     settings: "Optional[SettingsModel]" = None,
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve per-spawn env overrides for ``role``.
 
@@ -462,7 +489,9 @@ def resolve_route(
 
     ``None`` is returned for: no role, a production/unrouted role, a disabled
     block, an unconfigured / non-Anthropic provider, or a missing key
-    (fail-safe). This function never raises.
+    (fail-safe). The legacy path never raises. An opted-in business lookup
+    raises a typed error when an existing business role is blocked or lacks a
+    complete composable routing projection.
 
     Args:
         role: the spawn's role; case/space-insensitive.
@@ -488,7 +517,7 @@ def resolve_route(
     if not getattr(block, "enabled", True):
         return None
 
-    target = _role_target(name, block)
+    target = _business_role_target(name, block, business_lookup)
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
@@ -725,6 +754,7 @@ def resolve_codex_route(
     settings: "Optional[SettingsModel]" = None,
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[CodexRoute]:
     """Resolve codex-lane routing for ``role`` against an OpenAI-protocol
     provider, or ``None`` (use codex's default config, change nothing).
@@ -733,7 +763,9 @@ def resolve_codex_route(
     disabled block, an unrouted role, an unconfigured provider, a NON-openai
     provider (that belongs to the claude lane), a missing base_url/key, or a
     value that can't be safely embedded in TOML all return ``None`` (with a
-    one-line notice where a misconfiguration is worth surfacing). Never raises.
+    one-line notice where a misconfiguration is worth surfacing). The legacy
+    path never raises; an opted-in business lookup fails closed with the same
+    typed errors as the Claude lane.
     """
     name = _normalize(role)
     if not name or name in PROTECTED_ROLES:
@@ -748,7 +780,7 @@ def resolve_codex_route(
     if not getattr(block, "enabled", True):
         return None
 
-    target = _role_target(name, block)
+    target = _business_role_target(name, block, business_lookup)
     if target is None:
         return None
     pname, model = target
@@ -855,6 +887,55 @@ def _role_target(role: str, block: "ModelRoutingBlock") -> Optional[tuple[str, s
     if not raw:
         return None
     return _parse_target(str(raw))
+
+
+def _business_role_target(
+    role: str,
+    block: "ModelRoutingBlock",
+    business_lookup: Optional[BusinessRoleLookup],
+) -> Optional[tuple[str, str]]:
+    """Bridge an explicit business-role tri-state into legacy model routing.
+
+    An omitted lookup and a typed ``not_found`` result delegate to
+    :func:`_role_target` unchanged. A resolved role contributes only its frozen
+    provider/model projection. Every other blocked result raises distinctly so
+    it cannot collapse into legacy ``None`` and launch on the primary model.
+    """
+    legacy_target = _role_target(role, block)
+    if business_lookup is None:
+        return legacy_target
+
+    from fno.roles import ResolvedRole, RoleResolutionBlocked, RoleResolutionReason
+
+    result = business_lookup(role)
+    if isinstance(result, RoleResolutionBlocked):
+        if result.reason is RoleResolutionReason.NOT_FOUND:
+            return legacy_target
+        raise BusinessRoleResolutionBlockedError(result)
+    if not isinstance(result, ResolvedRole):
+        raise BusinessRoleRoutingProjectionError(
+            f"business lookup for role {role!r} returned no typed resolution; no worker launched"
+        )
+
+    projection = result.routing_projection
+    provider = projection.provider if projection is not None else None
+    model = projection.model if projection is not None else None
+    if legacy_target is not None:
+        provider = provider or legacy_target[0]
+        model = model or legacy_target[1]
+
+    missing = [
+        field for field, value in (("provider", provider), ("model", model)) if value is None
+    ]
+    if missing:
+        fields = " and ".join(missing)
+        raise BusinessRoleRoutingProjectionError(
+            f"resolved business role {role!r} has an incomplete routing projection: "
+            f"missing {fields}; no configured legacy target can complete it; "
+            "no worker launched"
+        )
+    assert provider is not None and model is not None
+    return provider, model
 
 
 def _provider_to_dict(provider: object) -> dict[str, Optional[str]]:
