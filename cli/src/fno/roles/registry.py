@@ -121,9 +121,19 @@ def _read_definition(path: Path, *, layer: RoleLayer, root: Path) -> DiscoveredR
             definition=None,
             error=f"{type(exc).__name__}: {exc}",
         )
+    except UnicodeDecodeError as exc:
+        return DiscoveredRoleDefinition(
+            layer=layer,
+            source_id=source_id,
+            status=DefinitionStatus.INVALID,
+            role=None,
+            raw_definition=None,
+            definition=None,
+            error=f"{type(exc).__name__}: {exc}",
+        )
     try:
         raw: object = json.loads(text)
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except json.JSONDecodeError as exc:
         return DiscoveredRoleDefinition(
             layer=layer,
             source_id=source_id,

@@ -259,7 +259,7 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     assert _snapshot_tree(claims_root) == before_claims
 
 
-@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+@pytest.mark.parametrize("failure", ["malformed", "invalid_utf8", "unreadable"])
 def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
     tmp_path: Path,
     monkeypatch,
@@ -273,10 +273,13 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
         role_id="owner",
         function_id="marketing",
     )
-    if failure == "malformed":
+    if failure in {"malformed", "invalid_utf8"}:
         unchecked = roles_root / RoleLayer.PROJECT.value / "broken.json"
         unchecked.parent.mkdir(parents=True)
-        unchecked.write_text("{not-json", encoding="utf-8")
+        if failure == "malformed":
+            unchecked.write_text("{not-json", encoding="utf-8")
+        else:
+            unchecked.write_bytes(b"\xff\xfe")
         source_args: tuple[str, ...] = ()
         expected_source = "project/broken.json"
     else:
