@@ -68,3 +68,6 @@ fno test cli/tests/unit/company/test_contracts.py cli/tests/unit/test_plan_compa
 ```
 
 The store-level cases are the counterfactual guard: malformed company-work data must raise before the locked writer changes the graph file.
+
+Plans that need a mechanical non-PR finish line can explicitly opt into [generic delivery evidence](generic-delivery-evidence.md).
+The runtime evaluator treats these contracts as identity declarations and requires separate current facts for every required evidence slot.
