@@ -235,12 +235,12 @@ def usage_providers(
         typer.echo("No accounts configured.")
         return
     for record in config.records:
-        entry = out[record.id]
-        assert isinstance(entry, dict)
-        if entry.get("state") == "unknown":
-            typer.echo(f"{record.id}  [{record.harness}]  unknown ({entry['reason']})")
+        row = out[record.id]
+        assert isinstance(row, dict)
+        if row.get("state") == "unknown":
+            typer.echo(f"{record.id}  [{record.harness}]  unknown ({row['reason']})")
             continue
-        for w in entry["windows"]:  # type: ignore[index]
+        for w in row["windows"]:
             typer.echo(
                 f"{record.id}  [{record.harness}]  {w['label']:<8} "
                 f"{w['used_pct']:5.1f}%  {_fmt_resets_in(w['resets_at'], now)}"
