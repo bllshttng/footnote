@@ -16,6 +16,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -92,8 +93,8 @@ def _node(
     now: datetime,
     blocked_by: list[str],
     company_work: dict | None = None,
-) -> dict:
-    node = {
+) -> dict[str, Any]:
+    node: dict[str, Any] = {
         "id": node_id,
         "parent": parent,
         "title": title,

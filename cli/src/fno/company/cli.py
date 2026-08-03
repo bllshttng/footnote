@@ -16,16 +16,17 @@ import typer
 
 from fno.company.campaign import (
     BranchInput,
+    CampaignRefusal,
     PlannedDeliverable,
     PlannedEffect,
     classify_objective,
 )
 from fno.company.contracts import EvidenceResult
-from fno.company.coordinator import commit
+from fno.company.coordinator import CoordinatorRefusal, commit
 from fno.company.join import JoinBranch, evaluate_join
 from fno.company.topology import InferenceFacts, resolve_topology
 from fno.graph._intake import _find_node
-from fno.graph.store import locked_mutate_graph, read_graph
+from fno.graph.store import read_graph
 from fno.roles.models import RoleManifest
 
 company_app = typer.Typer(name="company", help="Company campaign inspection and proposals.")
@@ -100,14 +101,14 @@ def propose_command(
         objective=objective, roles=roles, branches=branches, now=datetime.now(UTC)
     )
 
-    if hasattr(proposal, "reason"):
+    if isinstance(proposal, CampaignRefusal):
         payload = _envelope({"status": "refused", "refusal": {"reason": proposal.reason.value, "detail": proposal.detail}})
         typer.echo(json.dumps(payload, separators=(",", ":")))
         raise typer.Exit(code=1)
 
     if commit_flag:
         result = commit(proposal, graph_path=graph, project="fno", now=datetime.now(UTC))
-        if hasattr(result, "reason"):
+        if isinstance(result, CoordinatorRefusal):
             payload = _envelope({"status": "refused", "refusal": {"reason": result.reason.value, "detail": result.detail}})
             typer.echo(json.dumps(payload, separators=(",", ":")))
             raise typer.Exit(code=1)
@@ -204,8 +205,8 @@ def join_command(
         work_order = company_work.get("work_order", {}) if isinstance(company_work, dict) else {}
         branches.append(
             JoinBranch(
-                work_order_id=work_order.get("node_id", child.get("id")),
-                attempt_id=work_order.get("attempt_id", "attempt-1"),
+                work_order_id=str(work_order.get("node_id") or child.get("id") or "unknown"),
+                attempt_id=str(work_order.get("attempt_id") or "attempt-1"),
                 result=_branch_evidence(company_work if isinstance(company_work, dict) else {}),
             )
         )
