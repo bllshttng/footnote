@@ -1652,8 +1652,8 @@ def test_failover_provider_pin_bypasses(iso, monkeypatch):
 
 def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
     """AC1-FR: a failover-selected spawn that fails releases dispatch:<id> (node
-    stays re-dispatchable) and emits the failover receipt + advance_failed (the
-    receipt is not a competing decision; the single DECISION event is failed)."""
+    stays re-dispatchable) and emits advance_failed ONLY - the cutover receipt is
+    post-spawn, so a failed launch never leaves a receipt claiming one."""
     _force_exhausted(monkeypatch, "ccm")
     _destination(monkeypatch, ("ccr", "claude", {}))
     monkeypatch.setattr(adv, "_next_node", lambda project: NODE)
@@ -1669,7 +1669,7 @@ def test_failover_spawn_failure_releases_reservation(iso, monkeypatch):
     key = f"dispatch:{NODE['id']}"
     assert claim_status(key, root=adv._claims_root_for(key)).get("state") == "free"
     evs = _events(iso)
-    assert [e["type"] for e in evs] == ["dispatch_failover", "advance_failed"]
+    assert [e["type"] for e in evs] == ["advance_failed"]
 
 
 def test_failover_racing_advances_dedup(iso, monkeypatch):
@@ -1749,6 +1749,16 @@ def test_route_tuple_identical_across_launchers(iso, tmp_path, monkeypatch):
     assert adv_captured["extra_env"] == disp_captured["account_env"] == env
     # Codex takes its own command surface, never a raw claude slash verb.
     assert disp_captured["message"] == f"$fno:target no-merge {DISPATCH_NODE['id']}"
+    # Both launchers leave one post-spawn cutover receipt naming the same
+    # destination, triggering window, and reason.
+    for receipt in (
+        _events(iso)[0],
+        _events(tmp_path / ".fno" / "events.jsonl")[-1],
+    ):
+        assert receipt["type"] == "dispatch_failover"
+        d = receipt["data"]
+        assert (d["from"], d["to"], d["harness_to"]) == ("ccm", "codex-acct", "codex")
+        assert d["window"] == "exhausted" and d["reason"] == "exhausted-cutover"
 
 
 def test_unresolvable_harness_never_reaches_the_dispatch_spawn(tmp_path, monkeypatch):

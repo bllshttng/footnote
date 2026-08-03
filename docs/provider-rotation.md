@@ -1333,11 +1333,14 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   skipped like a cooldown (its reset feeds the `QueueExhausted.retry_after`
   hint); non-exhausted members are stably ordered `OK`/`UNKNOWN` before `LOW`.
   Cache-only (no probe - dispatch stays latency-clean).
-- **Node dispatcher** (`dispatch._dispatch_one`, `backlog.advance`): with
-  `defer_dispatch` on, a ready node whose resolved provider is `EXHAUSTED` (or
-  `LOW` with a reset inside `defer_horizon_minutes`) is **not** dispatched - a
+- **Node dispatcher** (`dispatch._dispatch_one`, `backlog.advance`): both go
+  through the one shared route selector,
+  `fno.agents.autonomous_route.select_autonomous_route`, so they cannot
+  disagree. With `defer_dispatch` on, a ready node whose resolved provider is
+  `EXHAUSTED` (or `LOW` with a reset inside `defer_horizon_minutes`) is **not**
+  dispatched here - it either cuts over to another record (below) or leaves a
   `quota-deferred` receipt + one decision event, node left in `ready`, the first
-  tick after the reset dispatches it. `p0` and explicit human dispatch verbs
+  tick after the reset dispatching it. `p0` and explicit human dispatch verbs
   always fire. This is the one probe site (refresh-on-stale).
 - **Lane routing** (review panel `alternate` selection): a kind whose records
   are all `EXHAUSTED` is stably demoted below kinds with headroom. Explicit
@@ -1375,6 +1378,27 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
 | `defer_threshold_pct` | `90` | worst-window used % that marks `LOW` |
 | `probe_ttl_seconds` | `300` | snapshot freshness window |
 | `defer_horizon_minutes` | `60` | only defer on `LOW` when the reset is this close |
+
+And one key on the dispatch block, because it is a routing decision rather than
+a quota-probe tuning knob:
+
+| Key | Default | Meaning |
+|---|---|---|
+| `config.dispatch.on_exhaustion` | `"defer"` | `"failover"` lets an exhausted launch walk the active combo instead of waiting |
+| `config.dispatch.cutover_low_after_minutes` | `0` (off) | minutes: a `LOW` window resetting FARTHER out than this cuts over now |
+
+The second predicate is inverted from `defer_horizon_minutes` on purpose. For
+deferring, a distant reset means *wait*; for cutting over, a distant reset means
+*leave now*, because waiting is the only alternative - a 95%-used weekly window
+resetting 70 hours out is exactly the case cutover exists for. Reusing the defer
+horizon here would route backwards.
+
+Cutover is cross-**harness** when the selected record's `harness` differs
+(claude -> codex resolves to `headless` automatically). It needs a launchable
+record for that harness already registered and in the active combo; footnote
+never synthesizes one. An explicit harness, provider, account, model, or node
+pin is never rerouted - it may still defer. The receipt is
+`dispatch_failover`, emitted only after the spawn succeeds.
 
 Probing and display are always on; only the autonomous *deferral* is gated,
 matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish

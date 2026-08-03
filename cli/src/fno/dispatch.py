@@ -232,6 +232,30 @@ def _cutover_command(harness: Optional[str], node_id: str) -> str:
         return ""
 
 
+def _emit_failover(node_id: str, route) -> None:
+    """Emit the one cross-harness cutover receipt. Non-fatal, post-spawn only."""
+    try:
+        from fno.backlog.advance import EVENT_FAILOVER
+        from fno.events import _build, append_event
+
+        append_event(
+            _build(
+                EVENT_FAILOVER,
+                "backlog",
+                {
+                    "node_id": node_id,
+                    "from": route.source_record,
+                    "to": route.record_id or "",
+                    "harness_to": route.harness or "",
+                    "window": route.window or "",
+                    "reason": route.reason,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 - a telemetry write must never block dispatch
+        pass
+
+
 def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Optional[float]) -> None:
     """Emit the single quota_deferred decision event. Non-fatal (AC1-UI)."""
     try:
@@ -419,6 +443,9 @@ def _dispatch_one(
         release_lane_slot(node_id)
         release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
         return {"outcome": "failed", "node": node_id, "slug": slug or "", "detail": str(exc)[:200]}
+    if cutover is not None:
+        # Post-spawn only: a route decision is not a completed cutover.
+        _emit_failover(node_id, cutover)
     return {
         "outcome": "launched",
         "node": node_id,

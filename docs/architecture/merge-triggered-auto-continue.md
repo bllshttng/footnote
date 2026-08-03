@@ -92,7 +92,26 @@ When the resolved provider is out of quota headroom, `advance` consults `config.
 - **`defer`** (default, byte-identical to before): the node stays `ready` and the tick after the provider's window reset re-dispatches it (`advance_skipped{quota-deferred}`). No combo is read.
 - **`failover`**: instead of deferring, `advance` picks the next non-exhausted provider from the **active combo** (`config.accounts.active_combo`, resolved via the CG8 `settings_combo` rung) and dispatches there. Selection reuses the live `headroom()` read (the same primitive as quota-aware ordering; `UNKNOWN`/`LOW`/`OK` all count as healthy targets, fail-open, so a GLM/gemini record with no headroom signal is a valid destination, only `EXHAUSTED` is skipped) and walks the operator's configured priority order (`next_healthy_provider`, `rotation.py`). An account record carries its own `harness`, so the combo can span accounts (`CLAUDE_CONFIG_DIR`), backends (`base_url`), **and** harnesses: a **claude to codex** failover is in scope and resolves to `headless` automatically.
 
-Failover is pinned once at dispatch (the worker never re-switches mid-run) and degrades to the `defer` floor on every miss: an explicit `--provider`/node provider pin (precedence `explicit > node pin > combo`), no active combo, a whole-combo exhaustion, or any config/combo read error. A single `dispatch_failover{from, to, harness_to?}` receipt precedes the paired `advance_dispatched`.
+Failover is pinned once at dispatch (the worker never re-switches mid-run) and degrades to the `defer` floor on every miss: an explicit `--provider`/node provider pin (precedence `explicit > node pin > combo`), no active combo, a whole-combo exhaustion, an unresolvable destination harness, or any config/combo read error.
+A single `dispatch_failover{from, to, harness_to?, window?, reason?}` receipt follows the successful spawn and precedes the paired `advance_dispatched`; a spawn that fails leaves no receipt, because a routing decision is not a completed cutover.
+
+### One selector, both launchers
+
+The decision itself is not `advance`'s.
+`fno.agents.autonomous_route.select_autonomous_route` is the single seam: it takes one quota probe and returns `stay`, `defer`, `cutover`, or `unknown-proceed`, and for a cutover the whole destination tuple (record id, harness, account overlay).
+Both autonomous target launchers consume it - `backlog advance` (which the active backlog and the merge trigger route through) and `fno dispatch` (which dispatch-node and blueprint auto-launch route through) - so identical node, config, and quota fixtures resolve to the identical destination on either path.
+The sibling context-think resolver and per-harness pane capability are owned elsewhere and are deliberately not duplicated here.
+Attended operator spawns stay outside the automatic policy entirely.
+
+Precedence is explicit invocation pin > node pin > configured dispatch harness > quota policy > built-in harness default.
+A pinned launch may still defer; it is never rerouted, because quota policy must not change a billing or harness choice a human made.
+
+**Proactive LOW cutover (`config.dispatch.cutover_low_after_minutes`, default 0 = off).**
+An `EXHAUSTED` window cuts over immediately when a healthy candidate exists.
+A `LOW` window cuts over only under this opt-in setting, and its predicate is deliberately INVERTED from `defer_horizon_minutes`: a reset that is *farther away* than the configured minutes is the reason to leave now, since waiting is the only alternative, while a nearby reset keeps today's keep-or-defer policy and does not churn harnesses.
+Do not reuse the defer horizon here - it answers the opposite question.
+
+**Operator prerequisite.** A cross-harness cutover needs a launchable record for the other harness (e.g. a Codex account) already registered and present in the active combo. Footnote never synthesizes or silently registers one; with no such record the decision stays at the defer floor.
 
 ## Cross-project successor dispatch (G1)
 
@@ -119,7 +138,7 @@ Four kinds, registered in `cli/src/fno/events/schema.yaml`, source `backlog`:
 - `advance_dispatched{node_id, short_id, agent_name, closed_node_id?, cross_project?}` - surfaced loudly in the next SessionStart reconcile reminder. `cross_project: true` marks a G1 edge-following dispatch into a different project.
 - `advance_skipped{reason, node_id?, closed_node_id?, detail?}` - `dispatched`/`failed` are surfaced; pure skips stay quiet. G1 adds the reasons `unmapped-project` / `no-project` / `dependents-error`; `quota-deferred` is the `on_exhaustion=defer` floor.
 - `advance_failed{node_id, error, closed_node_id?}` - surfaced loudly (a failed chain must be visible); the next reconcile retries.
-- `dispatch_failover{node_id, from, to, harness_to?}` - the receipt of an `on_exhaustion=failover` switch, emitted just before the paired `advance_dispatched` (not a competing decision). `harness_to` is set on a cross-harness failover (e.g. `codex`).
+- `dispatch_failover{node_id, from, to, harness_to?, window?, reason?}` - the receipt of an `on_exhaustion=failover` switch, emitted after the spawn succeeds and just before the paired `advance_dispatched` (not a competing decision). `harness_to` is set on a cross-harness failover (e.g. `codex`); `window`/`reason` name the quota window that triggered it. Emitted by both autonomous launchers.
 
 ## Files
 

@@ -1798,6 +1798,8 @@ def advance(
     failover_harness: Optional[str] = None
     failover_env: Optional[dict] = None
     failover_from: Optional[str] = None
+    failover_window: Optional[str] = None
+    failover_reason: Optional[str] = None
     try:
         from fno.adapters.providers.loader import load_providers
         from fno.agents.autonomous_route import select_autonomous_route
@@ -1830,6 +1832,8 @@ def advance(
         failover_harness = route.harness
         failover_env = route.account_env
         failover_from = route.source_record
+        failover_window = route.window
+        failover_reason = route.reason
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
@@ -1855,19 +1859,6 @@ def advance(
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
         if failover_record is not None:
-            # x-0676: the pre-spawn failover receipt (from -> to), paired with the
-            # advance_dispatched below - not a competing decision. `to` is the
-            # record id; --provider gets the harness, the account env selects it.
-            _emit(
-                EVENT_FAILOVER,
-                {
-                    "node_id": node_id,
-                    "from": failover_from or "",
-                    "to": failover_record,
-                    "harness_to": failover_harness or "",
-                },
-                ev_path,
-            )
             # --provider is the HARNESS (a record id would be rejected by the spawn
             # front door's known-provider gate); the account rides extra_env.
             eff_provider = failover_harness
@@ -1894,6 +1885,24 @@ def advance(
 
     # 7. Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
     #    (or is acquiring) node:<id>, which guards later dispatches.
+    if failover_record is not None:
+        # The cutover receipt (from -> to), emitted only now that a worker
+        # actually launched: a routing decision is not a completed cutover, so a
+        # failed spawn must not leave a receipt claiming one. Paired with the
+        # advance_dispatched below, not a competing decision. `to` is the record
+        # id; --provider got the harness, the account env selected it.
+        _emit(
+            EVENT_FAILOVER,
+            {
+                "node_id": node_id,
+                "from": failover_from or "",
+                "to": failover_record,
+                "harness_to": failover_harness or "",
+                "window": failover_window or "",
+                "reason": failover_reason or "",
+            },
+            ev_path,
+        )
     _emit(
         EVENT_DISPATCHED,
         {
