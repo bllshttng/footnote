@@ -8,6 +8,7 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 HELPER="$REPO_ROOT/hooks/helpers/worktree-live-peers.sh"
 CARRIER="$REPO_ROOT/hooks/worktree-peers-session-start.sh"
 CODEX_WRAPPER="$REPO_ROOT/hooks/session-start.sh"
+HEARTBEAT="$REPO_ROOT/hooks/claim-heartbeat.sh"
 PASS=0
 FAIL=0
 
@@ -122,6 +123,27 @@ if [[ "$rc" -eq 0 && "$out" == *"Another session is working in this worktree."* 
   pass "Codex wrapper renders the shared advisory"
 else
   fail "Codex wrapper: rc=$rc out=[$out]"
+fi
+
+# AC5-CON: this mechanism is absent from PreToolUse and its PostToolUse writer
+# exits 0 after Edit, Write, and Bash payloads in every stamp state.
+pretool="$(jq -r '.hooks.PreToolUse[]?.hooks[]?.command // empty' \
+  "$REPO_ROOT/hooks/hooks.json" "$REPO_ROOT/hooks/codex-hooks.json")"
+if [[ "$pretool" == *"worktree-live-peers"* || "$pretool" == *"worktree-peers-session-start"* ]]; then
+  fail "peer advisory is reachable from PreToolUse"
+else
+  pass "peer advisory is absent from both PreToolUse surfaces"
+fi
+reset_live
+never_refused=1
+for tool in Edit Write Bash; do
+  printf '{"cwd":"%s","session_id":"self-session","tool_name":"%s"}' "$PROJECT" "$tool" \
+    | CODEX_THREAD_ID= bash "$HEARTBEAT" >/dev/null 2>&1 || never_refused=0
+done
+if [[ "$never_refused" -eq 1 ]]; then
+  pass "Edit, Write, and Bash activity never returns a refusal"
+else
+  fail "an Edit, Write, or Bash activity payload returned non-zero"
 fi
 
 printf '[worktree-peers] %d passed, %d failed\n' "$PASS" "$FAIL"

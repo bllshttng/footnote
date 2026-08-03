@@ -173,6 +173,30 @@ def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
         )
 
 
+def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> None:
+    """Both harness manifests must reach the same read-only peer predicate."""
+    helper = "helpers/worktree-live-peers.sh"
+    claude_commands = [
+        hook["command"]
+        for registration in json.loads(HOOKS_JSON.read_text(encoding="utf-8"))[
+            "hooks"
+        ]["SessionStart"]
+        for hook in registration.get("hooks", [])
+    ]
+    assert sum("worktree-peers-session-start.sh" in c for c in claude_commands) == 1
+
+    codex_commands = [
+        hook["command"]
+        for registration in json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))[
+            "hooks"
+        ]["SessionStart"]
+        for hook in registration.get("hooks", [])
+    ]
+    assert sum("hooks/session-start.sh" in c for c in codex_commands) == 1
+    for carrier in ("worktree-peers-session-start.sh", "session-start.sh"):
+        assert helper in (REPO_ROOT / "hooks" / carrier).read_text(encoding="utf-8")
+
+
 def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(
