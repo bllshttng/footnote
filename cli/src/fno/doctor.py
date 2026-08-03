@@ -1792,12 +1792,12 @@ def _referenced_hook_scripts(command: str, root: Path) -> list[Path]:
 
 def _manifest_event_commands(data: Any, *, source: str):
     """Yield ``(event, command)`` for every hook in a parsed manifest, preserving
-    the event name (the probe launches only read-only events). Trust state is
-    skipped. Malformed structure yields nothing rather than raising; the caller
-    owns the hard malformed-manifest signal."""
+    the event name. Bulletproof against structurally malformed-but-valid JSON
+    (the caller owns the hard malformed-manifest signal): every level is
+    type-checked, so no shape raises during iteration."""
     if not isinstance(data, dict):
         return
-    hooks = data.get("hooks", {})
+    hooks = data.get("hooks")
     if not isinstance(hooks, dict):
         return
     for event, groups in hooks.items():
@@ -1806,7 +1806,10 @@ def _manifest_event_commands(data: Any, *, source: str):
         for group in groups:
             if not isinstance(group, dict):
                 continue
-            for hook in group.get("hooks", []) or []:
+            entries = group.get("hooks")
+            if not isinstance(entries, list):
+                continue
+            for hook in entries:
                 if not isinstance(hook, dict):
                     continue
                 command = hook.get("command")
@@ -1815,25 +1818,14 @@ def _manifest_event_commands(data: Any, *, source: str):
 
 
 def _is_hook_launch_failure(result: dict[str, Any]) -> bool:
-    """True only for a genuine launch failure (the fail-open defect).
+    """A genuine launch failure: anything other than a clean exit 0.
 
-    ``rc is None`` (the launcher could not start, timed out, or could not create
-    a temp cwd) is a failure: a missing/non-executable ``$SHELL`` or a hung hook
-    must read as "this guard is not reliably running", not a silent green. 126/
-    127 are the shell's 'could not execute' codes (interpreter or script not
-    found / not executable). rc 2 is python/node 'cannot open the script',
-    corroborated by a not-found signature so a hook's own nonzero logic (a guard
-    that blocks) is not misread as a launch failure."""
-    rc = result.get("rc")
-    if rc is None:
-        return True
-    if rc in (126, 127):
-        return True
-    if rc == 2:
-        stderr = (result.get("stderr") or "").lower()
-        if "no such file" in stderr or "can't open" in stderr or "no module named" in stderr:
-            return True
-    return False
+    Only read-only PreToolUse gates are launched, under a sandboxed env where
+    they have nothing to protect, so a benign probe payload must exit 0 (allow).
+    rc None (the launcher would not start, timed out, or could not create a temp
+    cwd) is a failure, not a silent green: a guard that does not run is exactly
+    the fail-open this probe exists to catch."""
+    return result.get("rc") != 0
 
 
 def _launch_plugin_hook(
@@ -1869,6 +1861,13 @@ def _launch_plugin_hook(
         "CLAUDE_PLUGIN_ROOT": root_value,
         "PLUGIN_DATA": root_value,
         "CLAUDE_PLUGIN_DATA": root_value,
+        # Sandbox fno + claude-project state to the temp cwd: a gate can mutate
+        # on the probe payload (git-protection.py deletes an expired
+        # approve_no_verify.flag it resolves under FNO_HOME), and without this
+        # the probe would write to the live ~/.fno. HOME stays real so
+        # interpreters and binaries still resolve.
+        "FNO_HOME": workdir,
+        "CLAUDE_PROJECT_DIR": workdir,
     }
     rc: Optional[int]
     stderr = ""
@@ -1979,6 +1978,16 @@ def _plugin_hooks_launch_report() -> dict[str, Any]:
         except (OSError, ValueError) as exc:
             manifest_errors.append(
                 {"manifest": name, "issue": f"unparseable: {exc}"[:200], "path": str(path)}
+            )
+            continue
+        # Valid JSON but structurally wrong (e.g. ``{"hooks": []}``) means that
+        # harness registers no real hooks either - same fail-open class as a
+        # missing manifest, not a healthy zero checks.
+        if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+            manifest_errors.append(
+                {"manifest": name,
+                 "issue": "malformed: top-level 'hooks' object missing or wrong type",
+                 "path": str(path)}
             )
             continue
         for event, command in _manifest_event_commands(data, source=name):

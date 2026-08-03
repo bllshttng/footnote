@@ -301,8 +301,16 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
         _referenced_hook_scripts,
     )
 
+    # The probe must only execute read-only gate events. Pin the scope here so a
+    # future change that adds SessionStart (stateful, mutates ~/.fno) to the
+    # launch set fails this test instead of silently running it.
+    assert _PROBE_LAUNCH_EVENTS == ("PreToolUse",), (
+        "probe may only launch read-only PreToolUse gates; adding a stateful "
+        "event here would execute it against the probe env"
+    )
+
     failures: list[str] = []
-    sample_pretooluse: tuple[str, str] | None = None
+    samples: dict[str, str] = {}  # manifest name -> one PreToolUse command
     for name, rel, _root_var in _PROBE_MANIFESTS:
         data = json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         for event, command in _manifest_event_commands(data, source=name):
@@ -310,8 +318,7 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
                 if not script.exists():
                     failures.append(f"{name}/{event}: missing script {script}")
             if event in _PROBE_LAUNCH_EVENTS:
-                if sample_pretooluse is None:
-                    sample_pretooluse = (name, command)
+                samples.setdefault(name, command)
                 result = _launch_plugin_hook(
                     command, root_value=str(REPO_ROOT), shell=shell
                 )
@@ -324,13 +331,14 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
         + "\n  ".join(failures)
     )
 
-    # The advertised fail-open itself: an UNRESOLVED root must make a PreToolUse
-    # launch fail (rc 126/127). This is the case the probe exists for; asserting
-    # it pins the detection so a future change cannot silently turn it green.
-    assert sample_pretooluse is not None, "no PreToolUse hook found to probe"
-    _name, command = sample_pretooluse
-    empty_root = _launch_plugin_hook(command, root_value="", shell=shell)
-    assert _is_hook_launch_failure(empty_root), (
-        f"empty plugin root must fail the launch (the fail-open), got rc={empty_root['rc']}"
-    )
+    # The advertised fail-open itself: an UNRESOLVED root must make every
+    # manifest's PreToolUse launch fail. Asserted per manifest so a broken root
+    # on one harness cannot be masked by another.
+    assert samples, "no PreToolUse hook found to probe"
+    for name, command in samples.items():
+        empty_root = _launch_plugin_hook(command, root_value="", shell=shell)
+        assert _is_hook_launch_failure(empty_root), (
+            f"{name}: empty plugin root must fail the launch (the fail-open), "
+            f"got rc={empty_root['rc']}"
+        )
 
