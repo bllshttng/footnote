@@ -509,6 +509,31 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     assert foreign_payload["verdict"]["aggregate"] == "passed"
     assert foreign_payload["evidence_revision"] == payload["evidence_revision"]
 
+    wrong_attempt_effect = json.loads(json.dumps(rows[-1]))
+    wrong_attempt_effect["ts"] = "2026-08-02T12:05:00Z"
+    wrong_attempt_effect["data"].update(
+        {
+            "attempt_id": "attempt-old",
+            "state": "failed",
+            "previous_state": "acknowledged",
+            "event_id": "event-effect-wrong-attempt",
+        }
+    )
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [wrong_attempt_effect])
+    )
+    _, wrong_attempt_payload = _invoke(plan, events)
+    assert wrong_attempt_payload["verdict"]["aggregate"] == "unknown"
+    wrong_attempt_row = next(
+        row
+        for row in wrong_attempt_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "effect-ready"
+    )
+    diagnostics = " ".join(wrong_attempt_row["diagnostics"])
+    assert "event:approvals:effect_state_changed" in diagnostics
+    assert "attempt-old" in diagnostics
+    assert "rejected binding" in diagnostics
+
     events.write_text(
         "".join(json.dumps(row) + "\n" for row in rows + [rows[-1]])
     )
