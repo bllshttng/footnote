@@ -227,6 +227,17 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
+# Codex calls the shared predicate here; Claude registers a dedicated carrier.
+peer_helper="${SCRIPT_DIR}/helpers/worktree-live-peers.sh"
+peer_note=""
+if [[ -f "$peer_helper" ]]; then
+    peer_note="$(bash "$peer_helper" <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)"
+fi
+if [[ -n "$peer_note" ]]; then
+    [[ -n "$hygiene_content" ]] || hygiene_content="## Worktree hygiene"
+    hygiene_content="${hygiene_content}"$'\n'"${peer_note}"
+fi
+
 # 5. first-run setup nudge — points a brand-new user (no fno config yet) at the
 #    setup wizard. Silent once any settings file exists. On Claude Code this
 #    fires as its own hooks.json entry; here it rides the wrapper so Codex and

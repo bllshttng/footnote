@@ -10,7 +10,7 @@
 #   T2  AC3-EDGE  holder == other session    -> refresh NOT called
 #   T3  AC3-ERR   refresh returns non-zero   -> hook still exits 0
 #   T4  AC3-UI    fresh stamp (throttled)    -> exits 0, `fno claim status` NOT called
-#   T5           no manifest                 -> exits 0, `fno` never called
+#   T5           no manifest                 -> stamps activity, `fno` never called
 #   T6  AC3-UI    not-holder no-op is silent -> no stdout
 #   T7/T8         Claude owner identity match/mismatch
 #   T9/T10        Codex thread identity match/mismatch
@@ -35,6 +35,8 @@ setup_env() {
   TMP_DIR="$(mktemp -d)"
   CWD="${TMP_DIR}/proj"
   mkdir -p "${CWD}/.fno"
+  git init -q "$CWD"
+  LIVE_DIR="$(git -C "$CWD" rev-parse --absolute-git-dir)/fno/live"
   CALLLOG="${TMP_DIR}/fno-calls.log"
   : > "$CALLLOG"
 
@@ -70,6 +72,10 @@ EOF
 }
 
 teardown_env() { rm -rf "$TMP_DIR"; unset STUB_HOLDER STUB_REFRESH_RC; }
+
+mtime_of() {
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
+}
 
 run_hook() {
   # No throttle stamp is written by the harness unless a test does so; a fresh
@@ -181,15 +187,16 @@ else
 fi
 teardown_env
 
-# ── T5: no manifest -> exit 0, fno never called ──────────────────────────────
+# ── T5: no manifest -> stamp activity, fno never called ─────────────────────
 setup_env
 rm -f "${CWD}/.fno/target-state.md"
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
-run_hook >/dev/null 2>&1; rc=$?
-if [[ "$rc" -eq 0 && ! -s "$CALLLOG" ]]; then
-  pass "T5 no manifest -> exit 0, no fno call"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1; rc=$?
+if [[ "$rc" -eq 0 && ! -s "$CALLLOG" \
+      && -f "${LIVE_DIR}/182b29c8-owner-uuid" ]]; then
+  pass "T5 no manifest -> activity stamped, no fno call"
 else
-  fail "T5 rc=$rc calls=$(cat "$CALLLOG")"
+  fail "T5 rc=$rc calls=$(cat "$CALLLOG") stamp=$(test -f "${LIVE_DIR}/182b29c8-owner-uuid" && echo yes || echo no)"
 fi
 teardown_env
 
@@ -329,6 +336,79 @@ if grep -q "claim refresh node:x-a166 --holder target-session:explicit-target-se
   pass "T16 explicit TARGET_SESSION_ID claim owner remains refreshable"
 else
   fail "T16 explicit target session claim did not refresh"
+fi
+teardown_env
+
+# ── T17: activity stamp is written before the claim-holder gate ──────────────
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+if [[ -f "${LIVE_DIR}/182b29c8-owner-uuid" ]] \
+    && ! grep -q "claim refresh" "$CALLLOG"; then
+  pass "T17 current session stamps even when it is not the claim holder"
+else
+  fail "T17 stamp must precede the holder gate; calls: $(cat "$CALLLOG")"
+fi
+teardown_env
+
+# ── T18: fresh activity stamp takes the cheap stat-and-exit path ─────────────
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+mkdir -p "$LIVE_DIR"
+touch -t 203001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+if [[ "$after" == "$before" ]]; then
+  pass "T18 fresh activity stamp is not rewritten"
+else
+  fail "T18 activity throttle rewrote a fresh stamp: before=$before after=$after"
+fi
+teardown_env
+
+# ── T19: aged activity stamp advances after the throttle window ─────────────
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+mkdir -p "$LIVE_DIR"
+touch -t 202001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+if (( after > before )); then
+  pass "T19 aged activity stamp advances"
+else
+  fail "T19 aged activity stamp did not advance: before=$before after=$after"
+fi
+teardown_env
+
+# ── T20: GNU stat's successful textual -f output never reaches arithmetic ───
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+mkdir -p "$LIVE_DIR"
+touch -t 202001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+gnu_stat_bin="${TMP_DIR}/gnu-stat-bin"
+mkdir -p "$gnu_stat_bin"
+cat >"$gnu_stat_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -c && "${2:-}" == %Y ]]; then
+  echo 1
+  exit 0
+fi
+if [[ "${1:-}" == -f ]]; then
+  printf '  File: "fake"\n    ID: 0\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$gnu_stat_bin/stat"
+PATH="$gnu_stat_bin:$PATH" run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+rc=$?
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+if [[ "$rc" -eq 0 ]] && (( after > before )); then
+  pass "T20 GNU stat output cannot break activity-stamp arithmetic"
+else
+  fail "T20 GNU stat compatibility: rc=$rc before=$before after=$after"
 fi
 teardown_env
 
