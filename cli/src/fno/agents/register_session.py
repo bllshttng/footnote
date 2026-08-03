@@ -77,16 +77,19 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     deadline = time.monotonic() + _RESTAMP_ROW_WAIT_S
     try:
         while True:
+            # Observe the row BEFORE restamping, not after. None from the restamp
+            # is ambiguous - no such row YET, or a row that already matches - and
+            # only the first is worth waiting on. Reading existence AFTERWARDS
+            # answers the wrong instant: the spawner can append the row in between,
+            # and we would then break on "a row exists" having never restamped
+            # THAT row, stranding the worker id-less for life. Checked first, a
+            # True can only mean the row predates this restamp, so a None beside
+            # it really is "already current".
+            existed = _row_exists(agent_self, harness)
             entry = restamp_harness_session_id(
                 name=agent_self, harness=harness, session_id=session_id
             )
-            # None is ambiguous: no such row YET, or a row that already matches.
-            # Only the first is worth waiting on. Without this test the ordinary
-            # pinned-id path - where the spawner writes an already-correct row -
-            # polls out the full deadline and adds that delay to EVERY spawned
-            # worker's session start, which is a far worse regression than the
-            # race the wait exists to close.
-            if entry is not None or _row_exists(agent_self, harness):
+            if entry is not None or existed:
                 break
             if time.monotonic() >= deadline:
                 break

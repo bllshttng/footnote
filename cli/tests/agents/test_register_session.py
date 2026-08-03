@@ -553,6 +553,58 @@ def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
     assert "session_restamp_failed" in [e["kind"] for e in _events(tmp_path)]
 
 
+def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The spawner appends the row after `mux pane run` returns, so a fast worker
+    can run this hook first. Losing that race is unrecoverable on any route where
+    the restamp is the only path to an id, so the hook waits for its own row.
+
+    The row appearing between the existence check and the restamp must still be
+    restamped: checking existence first is what makes that safe.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    calls = {"n": 0}
+
+    def _late_row(name: str, harness: str) -> bool:
+        # Absent on the first look; the spawner writes it just before the second.
+        calls["n"] += 1
+        if calls["n"] == 2:
+            _spawned_row()
+        return calls["n"] > 2
+
+    monkeypatch.setattr(rs, "_row_exists", _late_row)
+    monkeypatch.setattr(rs, "_RESTAMP_ROW_POLL_S", 0.0)
+
+    assert rs._restamp("target-x-f0c2", "claude", REMINT) == 0
+
+    from fno.agents.registry import load_registry
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == REMINT, "the late row must still be restamped"
+
+
+def test_restamp_does_not_poll_when_the_row_is_already_current(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ordinary pinned path writes an already-correct row. Waiting out the
+    deadline there would add the whole wait to every spawned session start."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    _spawned_row()
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("must not sleep when the row already exists")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+
+    assert rs._restamp("target-x-f0c2", "claude", BIRTH) == 0
+
+
 def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
     tmp_path: Path, monkeypatch
 ) -> None:
