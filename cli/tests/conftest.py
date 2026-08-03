@@ -123,6 +123,15 @@ from fno.harness_identity import scrub_ambient_identity  # noqa: E402
 
 for _ambient_key in ("FNO_NODE", "FNO_SLUG", "FNO_PLAN"):
     os.environ.pop(_ambient_key, None)
+# Same local-red != CI-red hazard as the config ceiling below, one layer up.
+# `resolve_plugin_script` takes CLAUDE_PLUGIN_ROOT as authoritative, so a suite
+# run from inside a live Claude session resolves the DEVELOPER's checkout as the
+# plugin payload - a hermetic fixture that builds its own source tree and passes
+# it via FNO_REPO_ROOT is then silently overruled and compares against the wrong
+# tree. CI exports neither var, so the failure only ever appears locally. Tests
+# that exercise root resolution set what they need via monkeypatch.setenv.
+for _ambient_key in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT"):
+    os.environ.pop(_ambient_key, None)
 scrub_ambient_identity()
 
 
