@@ -629,9 +629,9 @@ def _declared_test_conditions(manifest: PackManifest, base: Path) -> list[Condit
             Condition(
                 ConditionFamily.DECLARED_TEST,
                 "no-declared-scenarios",
-                checked=False,
-                result=EvidenceResult.UNKNOWN,
-                detail="pack declares no benchmark scenarios",
+                checked=True,
+                result=EvidenceResult.PASSED,
+                detail="pack declares no benchmark scenarios; nothing to fail",
             )
         )
     return conditions

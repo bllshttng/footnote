@@ -31,7 +31,6 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 
-from fno.company.contracts import EvidenceResult
 from fno.plugins.manifest import PackManifest, pack_digest
 from fno.plugins.registry import (
     ActivationReceipt,
@@ -106,8 +105,11 @@ def _contained_under(source_id: str, root: Path, anchor: Path) -> bool:
 def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> None:
     """Stage every definition to a temp file, then swap all into place.
 
-    A staging failure cleans up only the temp files; prior role definitions are
-    untouched until every stage succeeds and the swaps are applied.
+    Staging writes temp files without touching targets, so a staging failure
+    leaves prior definitions intact. The swap backs up each existing target
+    before replacing it and restores every backup if a later replace fails, so a
+    failed swap rolls the layer back to its pre-activation state rather than
+    leaving mixed revisions.
     """
     staged: list[tuple[Path, Path]] = []
     try:
@@ -126,8 +128,34 @@ def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> No
             ActivationRefusalReason.UNWRITABLE_LAYER,
             f"cannot stage a definition file: {exc}",
         ) from exc
-    for target, tmp in staged:
-        os.replace(tmp, target)
+
+    backups: list[tuple[Path, Path]] = []
+    completed: list[Path] = []
+    try:
+        for target, tmp in staged:
+            backup = None
+            if target.exists():
+                backup = Path(str(target) + ".pre-activate-bak")
+                os.replace(target, backup)
+                backups.append((target, backup))
+            os.replace(tmp, target)
+            completed.append(target)
+    except OSError as exc:
+        # Restore every target already swapped to its backup and drop any new
+        # content placed before the failure; clean staging temps left behind.
+        for target, backup in backups:
+            if target.exists():
+                target.unlink(missing_ok=True)
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
+        for _target, tmp in staged:
+            tmp.unlink(missing_ok=True)
+        raise ActivationRefusal(
+            ActivationRefusalReason.UNWRITABLE_LAYER,
+            f"cannot commit a definition file: {exc}",
+        ) from exc
+    for _target, backup in backups:
+        backup.unlink(missing_ok=True)
 
 
 def _definition_document(
@@ -209,15 +237,11 @@ def activate(
             # cannot invalidate the dependency versions between verify and commit.
             installed = {p.pack_id: p.resolved_version for p in registry.packs}
             report = verify_manifest(manifest, installed=installed, base=base)
-            failing = [
-                condition
-                for condition in report.conditions
-                if condition.result in (EvidenceResult.FAILED, EvidenceResult.BLOCKED)
-            ]
-            if failing:
+            if not report.ok:
+                not_ok = [condition for condition in report.conditions if not condition.ok]
                 raise ActivationRefusal(
                     ActivationRefusalReason.VERIFICATION_FAILED,
-                    "; ".join(f"{c.name}={c.result.value}" for c in failing),
+                    "; ".join(f"{c.name}={c.result.value}" for c in not_ok),
                 )
 
             existing = registry.receipt_for(manifest.id)
@@ -234,17 +258,26 @@ def activate(
                         f"{source_id} exists but no receipt owns it",
                     )
 
-            _stage_and_swap(planned)
-            written = [source_id for source_id, _resolved, _definition in planned]
-
-            # An upgrade whose new manifest drops roles must not leave the old
-            # roles' files orphaned: remove prior receipt paths the new set no
-            # longer carries, each confirmed to stay under the plugin root.
-            new_set = set(written)
-            for prior in (existing.written_paths if existing is not None else ()):
+            new_set = {source_id for source_id, _resolved, _definition in planned}
+            prior_paths = existing.written_paths if existing is not None else ()
+            # A prior receipt path that escapes the plugin root means a tampered
+            # registry; refuse as corruption rather than silently skipping it.
+            for prior in prior_paths:
                 if prior in new_set:
                     continue
                 if not _contained_under(prior, root, plugin_root):
+                    raise RegistryCorrupt(
+                        f"prior receipt path {prior!r} escapes the plugin root"
+                    )
+
+            _stage_and_swap(planned)
+            written = [source_id for source_id, _resolved, _definition in planned]
+
+            # Remove prior receipt paths the new manifest no longer carries. Each
+            # was already containment-checked above, so the layer cannot delete
+            # outside the plugin root here.
+            for prior in prior_paths:
+                if prior in new_set:
                     continue
                 prior_path = root / prior
                 if prior_path.is_file():
@@ -306,9 +339,16 @@ def deactivate(
                 left_alone.append(source_id)
                 continue
             path = root / source_id
-            if path.is_file():
+            if not path.exists() and not path.is_symlink():
+                removed.append(source_id)  # already gone
+                continue
+            try:
                 path.unlink()
-            removed.append(source_id)
+                removed.append(source_id)
+            except OSError:
+                # a directory, broken symlink, or permission issue: keep the
+                # receipt so the path keeps an owner and the operator sees it.
+                left_alone.append(source_id)
         if left_alone:
             residual = receipt.model_copy(update={"written_paths": tuple(left_alone)})
             receipts = tuple(r if r.pack_id != pack_id else residual for r in registry.receipts)

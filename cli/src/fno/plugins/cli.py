@@ -157,7 +157,11 @@ def list_command(
 ) -> None:
     """List installed packs with version, activation state, and declared effect ceiling."""
     store, _ = _store(ctx)
-    registry = store.load_or_empty()
+    try:
+        registry = store.load()
+    except RegistryCorrupt as exc:
+        typer.echo(f"registry corrupt; cannot list packs: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     if _json_requested(ctx, json_output):
         packs = [
             {
@@ -191,7 +195,12 @@ def inspect_command(
 ) -> None:
     """Print a pack's manifest with declarations labeled as declarations."""
     store, _ = _store(ctx)
-    pack = store.load_or_empty().pack_by_id(pack_id)
+    try:
+        registry = store.load()
+    except RegistryCorrupt as exc:
+        typer.echo(f"registry corrupt; cannot inspect: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    pack = registry.pack_by_id(pack_id)
     if pack is None:
         typer.echo(f"no installed pack {pack_id!r}", err=True)
         raise typer.Exit(code=1)
