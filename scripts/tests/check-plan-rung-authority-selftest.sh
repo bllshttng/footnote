@@ -21,6 +21,9 @@ fi
 DELIVERY_READER="$FIXTURE_ROOT/crates/fno-agents/src/delivery_completion.rs"
 PRISTINE_READER="$TMP_ROOT/delivery_completion.rs"
 cp "$DELIVERY_READER" "$PRISTINE_READER"
+KILL_READER="$FIXTURE_ROOT/crates/fno-agents/src/kill_criteria.rs"
+PRISTINE_KILL_READER="$TMP_ROOT/kill_criteria.rs"
+cp "$KILL_READER" "$PRISTINE_KILL_READER"
 
 assert_rejected() {
     local label="$1"
@@ -49,5 +52,36 @@ assert_rejected 'mapping["status"] indexing' \
     'fn forbidden(mapping: &serde_yaml_ng::Mapping) { let _ = &mapping["status"]; }'
 assert_rejected 'Value::from("status") lookup' \
     'fn forbidden(mapping: &serde_yaml_ng::Mapping) { let _ = mapping.get(serde_yaml_ng::Value::from("status")); }'
+cp "$PRISTINE_READER" "$DELIVERY_READER"
+
+assert_kill_rejected() {
+    local label="$1"
+    local mutant="$2"
+    local output=""
+    local actual_exit=0
+
+    cp "$PRISTINE_KILL_READER" "$KILL_READER"
+    printf '\n%s\n' "$mutant" >> "$KILL_READER"
+    output="$(bash "$FIXTURE_ROOT/scripts/ci/check-plan-rung-authority.sh" 2>&1)" \
+        || actual_exit=$?
+
+    if [[ "$actual_exit" -eq 0 ]]; then
+        echo "FAIL: $label passed the authority guard" >&2
+        exit 1
+    fi
+    if ! grep -q 'kill_criteria.rs' <<<"$output"; then
+        echo "FAIL: $label violation did not name the kill-criteria reader" >&2
+        exit 1
+    fi
+}
+
+assert_kill_rejected 'kill reader mapping.get("status")' \
+    'fn forbidden(mapping: &serde_yaml_ng::Mapping) { let _ = mapping.get("status"); }'
+assert_kill_rejected 'kill reader mapping["status"] indexing' \
+    'fn forbidden(mapping: &serde_yaml_ng::Mapping) { let _ = &mapping["status"]; }'
+assert_kill_rejected 'kill reader key comparison' \
+    'fn forbidden(key: &str) -> bool { key == "status" }'
+assert_kill_rejected 'kill reader matches comparison' \
+    'fn forbidden(key: &str) -> bool { matches!(key, "status") }'
 
 echo "PASS: every registered Rust plan reader rejects frontmatter status parsing"

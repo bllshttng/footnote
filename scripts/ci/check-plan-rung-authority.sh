@@ -151,23 +151,25 @@ else
     note "OK: the registered Rust plan-reader set is unchanged"
 fi
 
-# Every registered reader except kill_criteria.rs rejects any `"status"` string
-# literal: serde YAML accepts direct string lookup, indexing, and Value::from,
-# so enumerating access syntax would be a decorative guard. kill_criteria.rs
-# legitimately shells `git status --porcelain`, so it retains the narrower
-# frontmatter-key patterns. Scan every registered reader so growing the
-# allowlist cannot silently weaken the guard.
+# Every registered reader rejects any `"status"` string literal: serde YAML
+# accepts direct lookup, indexing, parsed-key comparisons, and Value::from, so
+# enumerating access syntax would be a decorative guard. The sole subtraction
+# is kill_criteria.rs's exact existing `git status --porcelain` argv line.
+# Scan every registered reader so growing the allowlist cannot silently weaken
+# the guard.
 fm_status=""
 while IFS= read -r reader; do
     [ -n "$reader" ] || continue
-    if [ "$reader" = "crates/fno-agents/src/kill_criteria.rs" ]; then
-        status_pattern='"status"[[:space:]]*=>|starts_with\("status:|"\^?status:|Value::from[[:space:]]*\([[:space:]]*"status"'
-    else
-        status_pattern='"status"'
-    fi
     matches="$(
-        grep -nE "$status_pattern" "$reader" 2>/dev/null || true
+        grep -nF '"status"' "$reader" 2>/dev/null || true
     )"
+    if [ "$reader" = "crates/fno-agents/src/kill_criteria.rs" ]; then
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '^[0-9]+:[[:space:]]*\.args\(\["status",[[:space:]]*"--porcelain"\]\)[;]?[[:space:]]*$' \
+                || true
+        )"
+    fi
     if [ -n "$matches" ]; then
         fm_status="${fm_status}${reader}:
 ${matches}
