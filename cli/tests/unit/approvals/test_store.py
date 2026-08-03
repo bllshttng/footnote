@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -157,7 +158,9 @@ def test_ac1_sec_expired_decision_never_dispatches(
     clock[0] = request.expires_at + _dt.timedelta(seconds=1)
 
     with pytest.raises(RefusedError) as excinfo:
-        store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+        store.prepare(
+            request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+        )
     assert excinfo.value.refusal.reason is RefusalReason.EXPIRED
     assert store.get_attempt("key-1") is None
 
@@ -224,7 +227,9 @@ def test_ac2_sec_authority_revoked_after_decision_blocks_execution(store: Effect
     store.authority.allowed = set()  # type: ignore[attr-defined]
 
     with pytest.raises(RefusedError) as excinfo:
-        store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+        store.prepare(
+            request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+        )
     assert excinfo.value.refusal.reason is RefusalReason.UNAUTHORIZED_PRINCIPAL
 
 
@@ -286,10 +291,12 @@ def test_ac4_err_ambiguous_outcome_settles_unknown_and_keeps_the_key(
     store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.EXECUTING)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.EXECUTING)
 
-    attempt = store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    attempt = store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
     assert attempt.state is EffectState.UNKNOWN
     assert attempt.idempotency_key == "key-1"
     assert attempt.external_ref is None
@@ -299,8 +306,10 @@ def test_ac4_err_unknown_retry_is_refused_without_a_proven_capability(
     store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(idempotency_key="key-1", adapter=BLIND_ADAPTER)
@@ -315,28 +324,32 @@ def test_ac4_err_remote_idempotency_alone_makes_an_unknown_retry_safe(
     store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     reopened = store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
-    assert reopened.state is EffectState.EXECUTING
-    assert reopened.idempotency_key == "key-1"
+    assert reopened.attempt.state is EffectState.EXECUTING
+    assert reopened.attempt.idempotency_key == "key-1"
 
 
 def test_ac4_err_a_reconciliation_read_proving_absence_makes_a_retry_safe(
     store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     reopened = store.authorize_retry(
         idempotency_key="key-1",
         adapter=RECONCILING_ADAPTER,
         reconciliation=ReconciliationRead(ref="read-1", effect_present=False),
     )
-    assert reopened.state is EffectState.EXECUTING
-    assert reopened.reconciliation_ref == "read-1"
+    assert reopened.attempt.state is EffectState.EXECUTING
+    assert reopened.attempt.reconciliation_ref == "read-1"
 
 
 def test_ac4_err_reconciliation_capability_without_the_read_is_not_proof(
@@ -344,8 +357,10 @@ def test_ac4_err_reconciliation_capability_without_the_read_is_not_proof(
 ) -> None:
     """Being able to read the destination is not the same as having read it."""
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(idempotency_key="key-1", adapter=RECONCILING_ADAPTER)
@@ -359,8 +374,10 @@ def test_ac4_err_a_read_finding_the_effect_present_refuses_the_retry(
 ) -> None:
     """The effect already landed, so resending it would duplicate it."""
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(
@@ -380,8 +397,10 @@ def test_ac4_err_a_read_cannot_substitute_for_an_adapter_that_cannot_read(
     store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(
@@ -402,7 +421,11 @@ def test_ac3_con_an_in_flight_attempt_cannot_be_reopened(
     first = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
     assert first.may_dispatch is True
     if state is EffectState.EXECUTING:
-        store.settle(idempotency_key="key-1", state=EffectState.EXECUTING)
+        store.settle(
+            dispatch_token=first.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.EXECUTING,
+        )
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
@@ -415,12 +438,14 @@ def test_ac3_con_a_reopened_attempt_cannot_be_reopened_again(store: EffectStore)
     """Two workers retrying one failed attempt: the first reopens it to executing,
     and the second must not be handed dispatch on the same effect."""
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.FAILED)
 
     assert store.authorize_retry(
         idempotency_key="key-1", adapter=ADAPTER
-    ).state is EffectState.EXECUTING
+    ).attempt.state is EffectState.EXECUTING
 
     with pytest.raises(RefusedError) as excinfo:
         store.authorize_retry(idempotency_key="key-1", adapter=ADAPTER)
@@ -433,8 +458,10 @@ def test_ac1_sec_retry_cannot_outlive_the_approval(
     """prepare() revalidates expiration at execution time; so must a retry."""
     request = _request()
     digest = _approve(store, request)
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.FAILED)
     clock[0] = request.expires_at + _dt.timedelta(seconds=1)
 
     with pytest.raises(RefusedError) as excinfo:
@@ -445,8 +472,10 @@ def test_ac1_sec_retry_cannot_outlive_the_approval(
 
 def test_ac2_sec_retry_cannot_outlive_the_principal_authority(store: EffectStore) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.FAILED)
     store.authority.allowed = set()  # type: ignore[attr-defined]
 
     with pytest.raises(RefusedError) as excinfo:
@@ -459,29 +488,36 @@ def test_ac4_err_failed_retry_needs_no_capability_proof(store: EffectStore) -> N
     """An explicit rejection means the effect did not happen, so a retry cannot
     duplicate it. Only an ambiguous outcome needs the capability check."""
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.FAILED)
 
     reopened = store.authorize_retry(idempotency_key="key-1", adapter=BLIND_ADAPTER)
-    assert reopened.state is EffectState.EXECUTING
-    assert reopened.idempotency_key == "key-1"
+    assert reopened.attempt.state is EffectState.EXECUTING
+    assert reopened.attempt.idempotency_key == "key-1"
 
 
 def test_ac4_err_unknown_cannot_be_silently_settled_as_executing(store: EffectStore) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     with pytest.raises(RefusedError):
-        store.settle(idempotency_key="key-1", state=EffectState.EXECUTING)
+        store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.EXECUTING)
 
 
 def test_ac4_err_reconciliation_resolves_unknown_honestly(store: EffectStore) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     resolved = store.settle(
+        dispatch_token=tok,
         idempotency_key="key-1",
         state=EffectState.ACKNOWLEDGED,
         reconciliation_ref="destination-read-1",
@@ -588,9 +624,11 @@ def test_ac6_inv_each_transition_emits_its_own_bound_event(
 ) -> None:
     request = _request()
     digest = _approve(store, request)
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.EXECUTING)
-    store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.EXECUTING)
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
 
     events = _events(tmp_path)
     assert [e["type"] for e in events] == [
@@ -626,8 +664,10 @@ def test_ac6_inv_every_emitted_event_validates_against_the_shared_schema(
     from fno import events as events_mod
 
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     emitted = _events(tmp_path)
     assert emitted
@@ -648,8 +688,10 @@ def test_ac6_inv_delivery_reads_facts_without_an_aggregate_verdict(
     store: EffectStore, state: EffectState, expected: EvidenceResult
 ) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    attempt = store.settle(idempotency_key="key-1", state=state)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    attempt = store.settle(dispatch_token=tok, idempotency_key="key-1", state=state)
 
     evidence = evidence_projection(attempt)
     assert evidence.result is expected
@@ -660,11 +702,13 @@ def test_ac6_inv_delivery_reads_facts_without_an_aggregate_verdict(
 
 def test_ac6_inv_acknowledged_effect_is_immutable(store: EffectStore) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
 
     with pytest.raises(RefusedError) as excinfo:
-        store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+        store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.FAILED)
     assert excinfo.value.refusal.reason is RefusalReason.TERMINAL_STATE
 
     with pytest.raises(RefusedError):
@@ -673,8 +717,10 @@ def test_ac6_inv_acknowledged_effect_is_immutable(store: EffectStore) -> None:
 
 def test_ac6_inv_acknowledged_effect_is_never_redispatched(store: EffectStore) -> None:
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
-    store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
 
     again = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
     assert again.may_dispatch is False
@@ -690,13 +736,16 @@ def test_ac7_rec_commit_survives_event_append_failure(
     from fno import events as events_mod
 
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
 
     def _boom(*_args: object, **_kwargs: object) -> None:
         raise OSError("events.jsonl unavailable")
 
     monkeypatch.setattr(events_mod, "append_event", _boom)
     attempt = store.settle(
+        dispatch_token=tok,
         idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9"
     )
 
@@ -714,10 +763,12 @@ def test_ac7_rec_repair_re_emits_without_redispatching(
 
     real_append = events_mod.append_event
     digest = _approve(store, _request())
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
 
     monkeypatch.setattr(events_mod, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError))
-    store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9")
     monkeypatch.setattr(events_mod, "append_event", real_append)
 
     assert store.repair() == 1
@@ -748,11 +799,15 @@ def test_ac7_rec_repair_after_reopening_the_store(
         db, authority=StubAuthority(), events_path=events_path, now=lambda: NOW
     ) as first:
         digest = _approve(first, request)
-        first.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+        tok = first.prepare(
+            request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+        ).dispatch_token
         monkeypatch.setattr(
             events_mod, "append_event", lambda *a, **k: (_ for _ in ()).throw(OSError)
         )
-        first.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED)
+        first.settle(
+            dispatch_token=tok, idempotency_key="key-1", state=EffectState.ACKNOWLEDGED
+        )
     monkeypatch.undo()
 
     # A crashed process leaves the debt on disk; a fresh one pays it.
@@ -828,7 +883,9 @@ def test_ac9_err_a_reused_key_with_different_binding_is_refused(
 ) -> None:
     first = _request()
     first_digest = _approve(store, first)
-    store.prepare(request_digest=first_digest, idempotency_key="shared-key", adapter=ADAPTER)
+    tok = store.prepare(
+        request_digest=first_digest, idempotency_key="shared-key", adapter=ADAPTER
+    ).dispatch_token
 
     second = _request(request_id="req-2", **{field: value})
     second_digest = _approve(store, second)
@@ -851,7 +908,9 @@ def test_ac9_err_a_reused_key_with_different_binding_is_refused(
 
 def test_ac9_err_conflict_does_not_regrant_dispatch(store: EffectStore) -> None:
     first_digest = _approve(store, _request())
-    store.prepare(request_digest=first_digest, idempotency_key="shared-key", adapter=ADAPTER)
+    tok = store.prepare(
+        request_digest=first_digest, idempotency_key="shared-key", adapter=ADAPTER
+    ).dispatch_token
 
     second = _request(request_id="req-2", destination="email:other@example.com")
     second_digest = _approve(store, second)
@@ -885,3 +944,151 @@ def test_adapter_capabilities_default_to_unproven() -> None:
     adapter = AdapterCapability(adapter_id="a", adapter_version="1")
     assert adapter.remote_idempotency is False
     assert adapter.reconciliation is False
+
+
+# ── dispatcher ownership, clock, policy liveness, event identity ────────────
+
+
+def test_only_the_dispatcher_may_settle_its_attempt(store: EffectStore) -> None:
+    """Without this, a bystander could fail an in-flight attempt and reopen it,
+    which is two dispatchers on one effect by a different route."""
+    digest = _approve(store, _request())
+    granted = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.settle(
+            dispatch_token="not-the-token",
+            idempotency_key="key-1",
+            state=EffectState.FAILED,
+        )
+    assert excinfo.value.refusal.reason is RefusalReason.NOT_DISPATCHER
+    assert store.get_attempt("key-1").state is EffectState.PREPARED
+
+    settled = store.settle(
+        dispatch_token=granted.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.FAILED,
+    )
+    assert settled.state is EffectState.FAILED
+
+
+def test_a_retry_supersedes_the_previous_dispatch_token(store: EffectStore) -> None:
+    """The holder that lost the attempt must not be able to settle it later."""
+    digest = _approve(store, _request())
+    first = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(
+        dispatch_token=first.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.FAILED,
+    )
+    second = store.authorize_retry(idempotency_key="key-1", adapter=ADAPTER)
+    assert second.dispatch_token != first.dispatch_token
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.settle(
+            dispatch_token=first.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.ACKNOWLEDGED,
+        )
+    assert excinfo.value.refusal.reason is RefusalReason.NOT_DISPATCHER
+
+    store.settle(
+        dispatch_token=second.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.ACKNOWLEDGED,
+    )
+    assert store.get_attempt("key-1").state is EffectState.ACKNOWLEDGED
+
+
+def test_settle_cannot_reopen_a_failed_attempt(store: EffectStore) -> None:
+    """Reopening revalidates the approval and mints a token; settle does neither."""
+    digest = _approve(store, _request())
+    granted = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(
+        dispatch_token=granted.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.FAILED,
+    )
+
+    with pytest.raises(RefusedError):
+        store.settle(
+            dispatch_token=granted.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.EXECUTING,
+        )
+    assert store.get_attempt("key-1").state is EffectState.FAILED
+
+
+def test_a_refused_dispatch_never_carries_a_token(store: EffectStore) -> None:
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    second = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    assert second.may_dispatch is False
+    assert second.dispatch_token is None
+
+
+class _ContendedStore(EffectStore):
+    """Stands in for BEGIN IMMEDIATE blocking on busy_timeout.
+
+    Entering the write transaction advances the clock, so a timestamp read
+    BEFORE the transaction is stale by exactly the contention window and one
+    read INSIDE it is not. That is the whole difference the guard turns on.
+    """
+
+    def __init__(self, *args: object, clock: list, delay: list, **kwargs: object) -> None:
+        self._clock_ref = clock
+        self._delay_ref = delay
+        super().__init__(*args, **kwargs)  # type: ignore[arg-type]
+
+    @contextmanager
+    def _write(self):  # type: ignore[override]
+        self._clock_ref[0] = self._clock_ref[0] + self._delay_ref[0]
+        with EffectStore._write(self) as conn:
+            yield conn
+
+
+def test_expiry_is_judged_by_the_clock_inside_the_transaction(tmp_path: Path) -> None:
+    """A timestamp read before BEGIN IMMEDIATE can be stale by the whole lock
+    wait, clearing an expiration that passed while we queued."""
+    clock = [NOW]
+    delay = [_dt.timedelta(0)]
+    request = _request()
+
+    with _ContendedStore(
+        tmp_path / "approvals.db",
+        clock=clock,
+        delay=delay,
+        authority=StubAuthority(),
+        events_path=tmp_path / "events.jsonl",
+        now=lambda: clock[0],
+    ) as store:
+        store.submit(request)
+        store.decide(
+            request_digest=request.request_digest,
+            deciding_principal_id=FOUNDER,
+            decision=DecisionKind.APPROVED,
+        )
+        # The approval is still live right now, and expires during the wait.
+        assert not request.is_expired(clock[0])
+        delay[0] = _dt.timedelta(hours=2)
+
+        with pytest.raises(RefusedError) as excinfo:
+            store.prepare(
+                request_digest=request.request_digest,
+                idempotency_key="key-1",
+                adapter=ADAPTER,
+            )
+        assert excinfo.value.refusal.reason is RefusalReason.EXPIRED
+        assert store.get_attempt("key-1") is None
+
+
+def test_every_emitted_event_carries_a_stable_identity(
+    store: EffectStore, tmp_path: Path
+) -> None:
+    """Outbox delivery is at-least-once, so consumers need a dedupe key."""
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+
+    ids = [event["data"]["event_id"] for event in _events(tmp_path)]
+    assert all(ids)
+    assert len(set(ids)) == len(ids)

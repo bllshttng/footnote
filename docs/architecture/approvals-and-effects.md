@@ -66,6 +66,15 @@ The refusal names the fields and mutates nothing: the existing attempt is not su
 
 `cli/tests/integration/test_effect_idempotency.py` proves this across real processes rather than threads, because the exclusion under test is SQLite's cross-process write lock.
 
+### The dispatch token
+
+Granting dispatch also mints an opaque `dispatch_token`, and settling requires it.
+
+Winning the race is not enough on its own: without ownership, any process could settle an attempt another process is still sending, mark it `failed`, and then legitimately reopen it, which puts two dispatchers on one effect by a route that never touches the atomic seam.
+Reopening mints a fresh token, so a superseded holder can no longer settle the attempt it lost, and a slow dispatcher cannot report an outcome for a send that has already been retried out from under it.
+
+Clock reads happen **inside** the write transaction. `BEGIN IMMEDIATE` can block for the full `busy_timeout`, and a timestamp taken before that wait would judge expiration against a time that has already passed, clearing an approval that expired while the caller queued for the lock.
+
 ## Honest external outcomes
 
 | Outcome | State | Meaning |
@@ -111,6 +120,10 @@ The state change and the owed event are inserted in the same transaction, so "ac
 
 Emission happens after commit.
 If the append fails, the outbox row survives, the store stays authoritative, and `EffectStore.repair()` re-emits from the committed record.
+
+Delivery is **at-least-once**, deliberately.
+The alternative, deleting the outbox row before appending, loses the event outright when the append fails, and an event owed by a committed state change is worse to lose than to repeat.
+A crash between append and delete, or two processes draining at once, can therefore emit one payload twice, so every event carries a stable `data.event_id` minted at enqueue time and consumers dedupe on it.
 Repair never dispatches, never re-crosses the adapter boundary, and never reopens a terminal attempt for dispatch.
 
 ## Events

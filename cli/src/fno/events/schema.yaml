@@ -3060,6 +3060,9 @@ event_types:
           type: string
         expires_at:
           type: string
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
     consumers: [fno approvals ls]
 
   - name: approval_decided
@@ -3087,6 +3090,9 @@ event_types:
         transport:
           type: [string, "null"]
           description: "Where the decision arrived from. Informational, never authoritative."
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
     consumers: [fno approvals show]
 
   - name: effect_state_changed
@@ -3116,6 +3122,9 @@ event_types:
           description: "Destination-side acknowledgment reference, when the destination gave one."
         reconciliation_ref:
           type: [string, "null"]
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
     consumers: [delivery evaluation, fno approvals show]
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose

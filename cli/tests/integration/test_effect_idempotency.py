@@ -149,10 +149,16 @@ def test_ac3_con_a_settled_effect_grants_no_further_dispatch(tmp_path: Path) -> 
     digest = _seed(db, events, _request())
 
     with _open(db, events) as store:
-        assert store.prepare(
+        granted = store.prepare(
             request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
-        ).may_dispatch
-        store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="m-1")
+        )
+        assert granted.may_dispatch
+        store.settle(
+            dispatch_token=granted.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.ACKNOWLEDGED,
+            external_ref="m-1",
+        )
 
     outcomes = _race(db, events, digest, "key-1", WORKERS)
     assert all(outcome[0] == "ok" for outcome in outcomes), outcomes
@@ -217,10 +223,17 @@ def _settle_then_die(db_str: str, events_str: str, digest: str) -> None:
     from fno import events as events_mod
 
     store = _open(Path(db_str), Path(events_str))
-    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
 
     def _die(*_args: object, **_kwargs: object) -> None:
         os._exit(9)
 
     events_mod.append_event = _die  # type: ignore[assignment]
-    store.settle(idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="m-1")
+    store.settle(
+        dispatch_token=tok,
+        idempotency_key="key-1",
+        state=EffectState.ACKNOWLEDGED,
+        external_ref="m-1",
+    )

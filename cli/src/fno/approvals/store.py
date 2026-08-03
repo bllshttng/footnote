@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import secrets
 import sqlite3
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
@@ -79,12 +80,14 @@ CREATE TABLE IF NOT EXISTS attempts (
     state              TEXT NOT NULL,
     external_ref       TEXT,
     reconciliation_ref TEXT,
-    dispatch_claimed   INTEGER NOT NULL DEFAULT 0
+    dispatch_claimed   INTEGER NOT NULL DEFAULT 0,
+    dispatch_token     TEXT
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
-    seq     INTEGER PRIMARY KEY AUTOINCREMENT,
-    payload TEXT NOT NULL
+    seq      INTEGER PRIMARY KEY AUTOINCREMENT,
+    event_id TEXT NOT NULL UNIQUE,
+    payload  TEXT NOT NULL
 );
 """
 
@@ -109,8 +112,11 @@ _ALLOWED_TRANSITIONS: dict[EffectState, frozenset[EffectState]] = {
             EffectState.UNKNOWN,
         }
     ),
+    # No EXECUTING here on purpose. Reopening a settled attempt is
+    # authorize_retry's job, which revalidates the approval and mints a fresh
+    # dispatch token; letting settle() do it would route around both.
     EffectState.FAILED: frozenset(
-        {EffectState.EXECUTING, EffectState.ACKNOWLEDGED, EffectState.FAILED, EffectState.UNKNOWN}
+        {EffectState.ACKNOWLEDGED, EffectState.FAILED, EffectState.UNKNOWN}
     ),
     EffectState.UNKNOWN: frozenset({EffectState.ACKNOWLEDGED, EffectState.FAILED}),
     EffectState.ACKNOWLEDGED: frozenset(),
@@ -123,6 +129,11 @@ _UNKNOWN_RECOVERY = (
     "pass the result as a ReconciliationRead. Settle to acknowledged or failed once "
     "the destination is read."
 )
+
+
+def _new_token() -> str:
+    """Opaque proof that the holder is the dispatcher for one attempt."""
+    return secrets.token_hex(16)
 
 
 def default_db_path() -> Path:
@@ -270,8 +281,11 @@ class EffectStore:
         ``transport`` is recorded but never consulted for authorization, so a
         transport cannot add its caller to the authorized set.
         """
-        now = self._now()
         with self._write() as conn:
+            # Read the clock inside the transaction: BEGIN IMMEDIATE can block
+            # for busy_timeout, and a timestamp taken before that wait could
+            # clear an expiration that passed while we queued for the lock.
+            now = self._now()
             row = conn.execute(
                 "SELECT * FROM requests WHERE request_digest = ?", (request_digest,)
             ).fetchone()
@@ -378,10 +392,14 @@ class EffectStore:
         Reopening one is :meth:`authorize_retry`'s job, which is where the
         safety check for an ambiguous outcome lives.
         """
-        now = self._now()
         with self._write() as conn:
+            # Read the clock inside the transaction: BEGIN IMMEDIATE can block
+            # for busy_timeout, and a timestamp taken before that wait could
+            # clear an expiration that passed while we queued for the lock.
+            now = self._now()
             request = self._authorized_request(conn, request_digest, now)
 
+            token = _new_token()
             existing = conn.execute(
                 "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
@@ -408,17 +426,21 @@ class EffectStore:
                 attempt = _attempt_from_row(existing)
                 if attempt.state in (EffectState.ACKNOWLEDGED, EffectState.BLOCKED):
                     return PrepareResult(attempt=attempt, may_dispatch=False)
+                token = _new_token()
                 claimed = conn.execute(
-                    "UPDATE attempts SET dispatch_claimed = 1 WHERE idempotency_key = ?"
-                    " AND dispatch_claimed = 0",
-                    (idempotency_key,),
+                    "UPDATE attempts SET dispatch_claimed = 1, dispatch_token = ?"
+                    " WHERE idempotency_key = ? AND dispatch_claimed = 0",
+                    (token, idempotency_key),
                 ).rowcount
-                return PrepareResult(attempt=attempt, may_dispatch=claimed == 1)
+                if claimed != 1:
+                    return PrepareResult(attempt=attempt, may_dispatch=False)
+                return PrepareResult(attempt=attempt, may_dispatch=True, dispatch_token=token)
 
             conn.execute(
                 "INSERT INTO attempts (idempotency_key, effect_id, work_order_id, attempt_id,"
                 " request_digest, action_digest, destination, effect_class, adapter_id,"
-                " adapter_version, state, dispatch_claimed) VALUES (?,?,?,?,?,?,?,?,?,?,?,1)",
+                " adapter_version, state, dispatch_claimed, dispatch_token)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?)",
                 (
                     idempotency_key,
                     request["effect_id"],
@@ -431,12 +453,15 @@ class EffectStore:
                     adapter.adapter_id,
                     adapter.adapter_version,
                     EffectState.PREPARED.value,
+                    token,
                 ),
             )
             row = conn.execute(
                 "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
-            result = PrepareResult(attempt=_attempt_from_row(row), may_dispatch=True)
+            result = PrepareResult(
+                attempt=_attempt_from_row(row), may_dispatch=True, dispatch_token=token
+            )
         return result
 
     def settle(
@@ -444,6 +469,7 @@ class EffectStore:
         *,
         idempotency_key: str,
         state: EffectState,
+        dispatch_token: str,
         external_ref: str | None = None,
         reconciliation_ref: str | None = None,
     ) -> EffectAttempt:
@@ -451,6 +477,12 @@ class EffectStore:
 
         An ambiguous outcome settles to ``unknown``, never to failed or
         acknowledged.
+
+        ``dispatch_token`` must be the one this attempt's current holder was
+        granted. Only the process actually sending the effect can report what
+        happened to it; without that, another process could settle an in-flight
+        attempt as failed and then reopen it, putting two dispatchers on one
+        effect. A token superseded by authorize_retry no longer settles.
         """
         with self._write() as conn:
             row = conn.execute(
@@ -461,6 +493,18 @@ class EffectStore:
                     RefusalReason.UNKNOWN_REQUEST,
                     f"no effect attempt for idempotency key {idempotency_key}",
                     fields=["idempotency_key"],
+                )
+
+            if not row["dispatch_token"] or not secrets.compare_digest(
+                str(row["dispatch_token"]), dispatch_token
+            ):
+                _refuse(
+                    RefusalReason.NOT_DISPATCHER,
+                    f"the dispatch token presented for {idempotency_key} is not the one "
+                    f"held by its current dispatcher",
+                    fields=["dispatch_token"],
+                    recovery="Only the holder granted dispatch may settle an attempt; "
+                    "a token superseded by a retry is no longer valid.",
                 )
 
             current = EffectState(row["state"])
@@ -510,7 +554,7 @@ class EffectStore:
         idempotency_key: str,
         adapter: AdapterCapability,
         reconciliation: ReconciliationRead | None = None,
-    ) -> EffectAttempt:
+    ) -> PrepareResult:
         """Reopen a SETTLED attempt for one more dispatch, safely.
 
         Only ``failed`` and ``unknown`` may reopen. ``prepared`` and ``executing``
@@ -537,8 +581,11 @@ class EffectStore:
         A read reporting ``effect_present=True`` refuses too. The effect already
         landed, so the honest move is to settle it acknowledged, not send it again.
         """
-        now = self._now()
         with self._write() as conn:
+            # Read the clock inside the transaction: BEGIN IMMEDIATE can block
+            # for busy_timeout, and a timestamp taken before that wait could
+            # clear an expiration that passed while we queued for the lock.
+            now = self._now()
             row = conn.execute(
                 "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
@@ -599,13 +646,15 @@ class EffectStore:
 
             # Conditional on the state we validated, so the transition is the same
             # atomic fact as the check rather than a second, re-racing decision.
+            token = _new_token()
             claimed = conn.execute(
-                "UPDATE attempts SET state = ?, dispatch_claimed = 1,"
+                "UPDATE attempts SET state = ?, dispatch_claimed = 1, dispatch_token = ?,"
                 " adapter_id = ?, adapter_version = ?,"
                 " reconciliation_ref = COALESCE(?, reconciliation_ref)"
                 " WHERE idempotency_key = ? AND state = ?",
                 (
                     EffectState.EXECUTING.value,
+                    token,
                     adapter.adapter_id,
                     adapter.adapter_version,
                     reconciliation.ref if reconciliation else None,
@@ -638,8 +687,9 @@ class EffectStore:
                     "effect_id": updated.effect_id,
                 },
             )
+            result = PrepareResult(attempt=updated, may_dispatch=True, dispatch_token=token)
         self._drain()
-        return updated
+        return result
 
     # -- reads -----------------------------------------------------------
 
@@ -680,16 +730,28 @@ class EffectStore:
 
     def _enqueue(self, conn: sqlite3.Connection, event_type: str, data: dict[str, Any]) -> None:
         """Owe an event inside the caller's transaction. Committed with the state."""
+        event_id = _new_token()
         payload = {
             "ts": self._now().strftime("%Y-%m-%dT%H:%M:%SZ"),
             "type": event_type,
             "source": "approvals",
-            "data": data,
+            "data": {**data, "event_id": event_id},
         }
-        conn.execute("INSERT INTO outbox (payload) VALUES (?)", (json.dumps(payload),))
+        conn.execute(
+            "INSERT INTO outbox (event_id, payload) VALUES (?,?)",
+            (event_id, json.dumps(payload)),
+        )
 
     def _drain(self) -> int:
-        """Emit owed events. A failure here leaves the debt for :meth:`repair`."""
+        """Emit owed events. A failure here leaves the debt for :meth:`repair`.
+
+        Delivery is AT-LEAST-ONCE, deliberately. The alternative -- delete the row
+        first, then append -- loses the event outright when the append fails, and
+        an event owed by a committed state change is worse to lose than to repeat.
+        A crash between append and delete, or two processes draining at once, can
+        therefore emit one payload twice, so every event carries a stable
+        ``data.event_id`` minted at enqueue time and consumers dedupe on it.
+        """
         from fno import events as events_mod
 
         emitted = 0

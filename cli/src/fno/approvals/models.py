@@ -142,6 +142,7 @@ class RefusalReason(str, Enum):
     DENIED_EFFECT_CLASS = "denied_effect_class"
     UNSAFE_RETRY = "unsafe_retry"
     TERMINAL_STATE = "terminal_state"
+    NOT_DISPATCHER = "not_dispatcher"
 
 
 @runtime_checkable
@@ -306,11 +307,27 @@ class PrepareResult(_ApprovalModel):
     """The outcome of one atomic prepare-or-read.
 
     ``may_dispatch`` is granted to at most one caller per idempotency key. Every
-    other caller sees the same ``attempt`` with ``may_dispatch=False``.
+    other caller sees the same ``attempt`` with ``may_dispatch=False`` and no
+    token.
+
+    ``dispatch_token`` is the holder's proof of ownership, and settling requires
+    it. Without one, any process could settle an attempt another process is
+    still sending -- and then reopen it, which is two dispatchers on one effect
+    by a different route. Reopening mints a fresh token, so a superseded holder
+    can no longer settle the attempt it lost.
     """
 
     attempt: EffectAttempt
     may_dispatch: bool
+    dispatch_token: str | None = None
+
+    @model_validator(mode="after")
+    def _token_matches_grant(self) -> Self:
+        if self.may_dispatch and not self.dispatch_token:
+            raise ValueError("a granted dispatch must carry a dispatch_token")
+        if not self.may_dispatch and self.dispatch_token:
+            raise ValueError("a refused dispatch must not carry a dispatch_token")
+        return self
 
 
 _EVIDENCE_BY_STATE: dict[EffectState, EvidenceResult] = {

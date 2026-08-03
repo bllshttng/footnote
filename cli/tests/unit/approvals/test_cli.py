@@ -207,12 +207,14 @@ def test_ac10_ui_show_surfaces_an_ambiguous_outcome_and_its_recovery(
             deciding_principal_id=FOUNDER,
             decision=DecisionKind.APPROVED,
         )
-        store.prepare(
+        tok = store.prepare(
             request_digest=digest,
             idempotency_key="key-1",
             adapter=AdapterCapability(adapter_id="smtp", adapter_version="1"),
+        ).dispatch_token
+        store.settle(
+            dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN
         )
-        store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     result = _invoke("show", digest, "--db", str(db))
     assert result.exit_code == 0, result.output
@@ -231,13 +233,16 @@ def test_ac10_ui_show_never_reports_an_effect_as_delivered(db: Path, policy: Con
             deciding_principal_id=FOUNDER,
             decision=DecisionKind.APPROVED,
         )
-        store.prepare(
+        tok = store.prepare(
             request_digest=digest,
             idempotency_key="key-1",
             adapter=AdapterCapability(adapter_id="smtp", adapter_version="1"),
-        )
+        ).dispatch_token
         store.settle(
-            idempotency_key="key-1", state=EffectState.ACKNOWLEDGED, external_ref="msg-9"
+            dispatch_token=tok,
+            idempotency_key="key-1",
+            state=EffectState.ACKNOWLEDGED,
+            external_ref="msg-9",
         )
 
     result = _invoke("show", digest, "--db", str(db))
