@@ -231,25 +231,71 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
 
 
 def read_canonical_slot_blob(cli: str) -> Optional[str]:
-    """The SHARED slot credential, ignoring any ambient ``CLAUDE_CONFIG_DIR``.
+    """The credential a reader of the SHARED slot gets, ignoring ambient overrides.
 
-    ``_read_slot_blob`` honors that variable, which is right for an operator
-    verb writing the slot and wrong for an identity read: a worker pinned to
-    another account exports it, and reconciliation would then prove the pinned
-    account's principal and stamp it onto the canonical slot - or refuse a
-    repair having never looked at the credential it was repairing. usage.py's
-    ``_canonical_claude_slot_dir`` exists for exactly this reason.
+    ``_read_slot_blob`` honors ``CLAUDE_CONFIG_DIR``, which is right for an
+    operator verb writing the slot and wrong for an identity read: a worker
+    pinned to another account exports it, and reconciliation would then prove
+    the pinned account and stamp it onto the canonical slot.
+    """
+    blobs = canonical_slot_blobs(cli)
+    return blobs[0] if blobs else None
+
+
+def _read_claude_keychain_item(service: str) -> Optional[str]:
+    """One Keychain item's blob, or None when absent or a logged-out residue."""
+    out = _run_security(
+        ["find-generic-password", "-s", service, "-a", _claude_keychain_account(), "-w"]
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    blob = out.stdout.strip()
+    return blob if _token_present(blob) else None
+
+
+def canonical_slot_blobs(cli: str) -> list[str]:
+    """Every distinct credential the SHARED slot can present, ignoring overrides.
+
+    darwin keeps TWO Keychain items for the canonical dir, scoped and unscoped,
+    and they can hold different accounts - a stale scoped item beside a live
+    unscoped one is the observed reality, and the reason the usage probe tries
+    several bearers. Reconciliation has to see both: proving the first and
+    stamping it would trust one account while a reader gets the other.
     """
     if cli != "claude":
-        return _read_slot_blob(cli)
+        blob = _read_slot_blob(cli)
+        return [blob] if blob and blob.strip() else []
     canonical = Path.home() / ".claude"
-    if _claude_slot_config_dir() == canonical:
-        # No ambient override, so the ordinary read already IS the canonical
-        # one. Routing through it keeps a single slot-read seam - the direct
-        # path below would otherwise bypass every caller's patch point and
-        # reach the real Keychain.
-        return _read_slot_blob(cli)
-    return _read_claude_blob(canonical, shared=True)
+    if sys.platform != "darwin":
+        blob = _read_claude_blob(canonical, shared=True)
+        return [blob] if blob and blob.strip() else []
+    out: list[str] = []
+    for service in (_claude_scoped_service(canonical), _CLAUDE_KEYCHAIN_SERVICE):
+        blob = _read_claude_keychain_item(service)
+        if blob and blob not in out:
+            out.append(blob)
+    return out
+
+
+def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
+    """The one principal the shared slot presents, or a typed failure.
+
+    ``ambiguous-slot`` when its credentials resolve to DIFFERENT accounts. That
+    is not a tie to break: whichever we stamped, some reader would get the other
+    one, so the honest answer is to refuse and let the operator settle it.
+    """
+    blobs = canonical_slot_blobs(cli)
+    if not blobs:
+        return None, "no-slot-credential"
+    seen: list[dict] = []
+    for blob in blobs:
+        principal, failure = slot_principal(blob)
+        if principal is None:
+            return None, failure
+        seen.append(principal)
+    if len({p["account_uuid"] for p in seen}) > 1:
+        return None, "ambiguous-slot"
+    return seen[0], None
 
 
 def _read_claude_blob(cfg: Path, *, shared: bool) -> Optional[str]:
@@ -1122,7 +1168,7 @@ def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
     bound = record_principal(stamped, root)
     if bound is None:
         return None
-    principal, _failure = slot_principal(read_canonical_slot_blob(cli))
+    principal, _failure = canonical_slot_principal(cli)
     if principal is None or principal["account_uuid"] == bound["account_uuid"]:
         return None
     return {
@@ -1352,14 +1398,25 @@ def _reconcile_locked(
     if blockers:
         return ReconcileResult("slot-pinned", detail=_slot_pinned_detail(blockers))
 
-    blob = read_canonical_slot_blob(cli)
-    if blob is None or not blob.strip():
+    blobs = canonical_slot_blobs(cli)
+    if not blobs:
         return ReconcileResult(
             "no-slot-credential",
             detail=f"no live {cli} login in the shared slot; sign in, then reconcile",
         )
-    principal, failure = slot_principal(blob)
+    blob = blobs[0]
+    principal, failure = canonical_slot_principal(cli)
     if principal is None:
+        if failure == "ambiguous-slot":
+            return ReconcileResult(
+                "ambiguous-slot",
+                detail=(
+                    f"the {cli} slot presents credentials belonging to different "
+                    "accounts (a stale scoped Keychain item beside a live unscoped "
+                    "one); whichever was stamped, some reader would get the other - "
+                    "sign out and back in to settle it"
+                ),
+            )
         return ReconcileResult(
             failure or "profile-unavailable",
             detail=(
@@ -1405,7 +1462,7 @@ def _reconcile_locked(
     # bytes are still what the slot holds. Re-reading is what actually closes
     # the profile-call window: a writer that rewrote the slot and exited during
     # it leaves nothing for a liveness check to find.
-    if read_canonical_slot_blob(cli) != blob:
+    if canonical_slot_blobs(cli) != blobs:
         return ReconcileResult(
             "slot-changed",
             detail=(
@@ -1426,7 +1483,7 @@ def _reconcile_locked(
     # look. An out-of-band writer that slipped in during the writes above leaves
     # the taint set: the refreshed snapshot and stamp are then merely stale
     # (self-correcting on the next pass) rather than stale-and-believed.
-    if read_canonical_slot_blob(cli) != blob:
+    if canonical_slot_blobs(cli) != blobs:
         # SET the taint rather than merely leaving it: this path is also reached
         # from an untainted drift repair, where "the taint stands" would be a
         # lie and the stamp we just wrote would be trusted over a slot we know

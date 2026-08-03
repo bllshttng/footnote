@@ -1581,7 +1581,7 @@ class TestReconcileSlot:
         root = store / ".fno" / "providers"
         managed.stamp_active_slot("claude", "readyrule", root)
         managed.write_record_principal("readyrule", {"account_uuid": "acct-a"}, root)
-        monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: "{}")
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
         monkeypatch.setattr(
             managed, "slot_principal",
             lambda blob: ({"account_uuid": "acct-b", "email": "other@example.com"}, None),
@@ -1616,7 +1616,7 @@ class TestReconcileSlot:
         root = store / ".fno" / "providers"
         managed.stamp_active_slot("claude", "readyrule", root)
         managed.write_record_principal("readyrule", {"account_uuid": "acct-a"}, root)
-        monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: "{}")
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
         monkeypatch.setattr(
             managed, "slot_principal", lambda blob: ({"account_uuid": "acct-a"}, None)
         )

@@ -70,6 +70,10 @@ def fake_slot(monkeypatch):
         managed, "_write_slot_blob", lambda cli, blob, config_dir=None: slot.__setitem__(cli, blob)
     )
     monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+    monkeypatch.setattr(
+        managed, "canonical_slot_blobs",
+        lambda cli: [slot[cli]] if slot.get(cli) else [],
+    )
     return slot
 
 
@@ -1169,6 +1173,10 @@ def _cli_slot(monkeypatch):
         managed, "_write_slot_blob", lambda cli, blob, config_dir=None: slot.__setitem__(cli, blob)
     )
     monkeypatch.setattr(managed, "pinning_sessions", lambda config_dir=None: [])
+    monkeypatch.setattr(
+        managed, "canonical_slot_blobs",
+        lambda cli: [slot[cli]] if slot.get(cli) else [],
+    )
     return slot
 
 
@@ -1675,6 +1683,7 @@ class TestCanonicalSlotRead:
         kill - arriving through the repair meant to prevent it."""
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-alt"))
+        monkeypatch.setattr(managed.sys, "platform", "linux")
         asked: list[tuple] = []
 
         def _record(cfg, *, shared):
@@ -1686,19 +1695,72 @@ class TestCanonicalSlotRead:
         assert managed.read_canonical_slot_blob("claude") == _blob("CANONICAL")
         assert asked == [(tmp_path / ".claude", True)]
 
-    def test_without_an_override_it_routes_through_the_one_slot_seam(
+    def test_both_keychain_items_are_candidates(self, tmp_path, monkeypatch):
+        """darwin keeps a scoped and an unscoped item for the canonical dir, and
+        they can hold different accounts."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        items = {
+            managed._claude_scoped_service(tmp_path / ".claude"): _blob("SCOPED"),
+            managed._CLAUDE_KEYCHAIN_SERVICE: _blob("UNSCOPED"),
+        }
+        monkeypatch.setattr(
+            managed, "_read_claude_keychain_item", lambda service: items.get(service)
+        )
+        assert managed.canonical_slot_blobs("claude") == [
+            _blob("SCOPED"), _blob("UNSCOPED")
+        ]
+
+    def test_identical_items_collapse_to_one_candidate(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        monkeypatch.setattr(
+            managed, "_read_claude_keychain_item", lambda service: _blob("SAME")
+        )
+        assert managed.canonical_slot_blobs("claude") == [_blob("SAME")]
+
+    def test_two_accounts_in_one_slot_refuses_rather_than_picking(
         self, fake_slot, tmp_path, monkeypatch
     ):
-        """Keeping the single seam is what stops a second read path from
-        silently reaching the real Keychain in tests."""
-        monkeypatch.setenv("HOME", str(tmp_path))
-        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        """Not a tie to break: whichever was stamped, some reader would get the
+        other one."""
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-a", "acct-a", tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
         monkeypatch.setattr(
-            managed, "_read_claude_blob",
-            lambda cfg, *, shared: pytest.fail("bypassed the patched slot seam"),
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("SCOPED"), _blob("UNSCOPED")],
         )
-        fake_slot["claude"] = _blob("VIA_SEAM")
-        assert managed.read_canonical_slot_blob("claude") == _blob("VIA_SEAM")
+        by_blob = {_blob("SCOPED"): "acct-a", _blob("UNSCOPED"): "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile(by_blob[blob])), None),
+        )
+        before = _store_state(tmp_path)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "ambiguous-slot"
+        assert _store_state(tmp_path) == before
+
+    def test_agreeing_items_reconcile_normally(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        managed._set_slot_taint("claude", tmp_path, True, [])
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("SCOPED"), _blob("UNSCOPED")],
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-b")), None),
+        )
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-b"
 
 
 class TestReconcileCommitsOnlyWhatItProved:
