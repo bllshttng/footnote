@@ -128,6 +128,16 @@ LINKED="$TMP_BASE/arbitrary linked path"
 make_repo "$LINK_CANONICAL"
 git -C "$LINK_CANONICAL" worktree add -q "$LINKED" -b feature/linked
 assert_allow "arbitrary-base linked worktree allows" "$(payload "$LINKED")"
+assert_allow \
+    "canonical session can patch a linked worktree by absolute path" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Update File: $LINKED/README.md
+*** End Patch")"
+assert_block \
+    "canonical session still blocks an absolute canonical target" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Update File: $LINK_CANONICAL/README.md
+*** End Patch")"
 assert_block \
     "linked worktree cannot patch canonical checkout by absolute path" \
     "$(payload "$LINKED" "*** Begin Patch
@@ -154,6 +164,23 @@ assert_block \
 *** End Patch")"
 git -C "$LINKED" checkout -q --detach
 assert_allow "detached linked worktree allows" "$(payload "$LINKED")"
+
+NO_TARGET_PAYLOAD="$(jq -nc --arg cwd "$LINK_CANONICAL" '{
+    cwd: $cwd,
+    tool_name: "apply_patch",
+    tool_input: {command: ""}
+}')"
+assert_block "canonical cwd remains the fail-closed fallback without targets" "$NO_TARGET_PAYLOAD"
+
+NEVER_REPO="$TMP_BASE/never-policy-vault"
+make_repo "$NEVER_REPO"
+mkdir -p "$NEVER_REPO/.fno" "$NEVER_REPO/plans"
+printf '[worktree]\npolicy = "never"\n' > "$NEVER_REPO/.fno/config.toml"
+assert_allow \
+    "canonical session can write a plan in a never-policy repo" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Add File: $NEVER_REPO/plans/example.md
+*** End Patch")"
 
 SPACE_REPO="$TMP_BASE/canonical with spaces"
 make_repo "$SPACE_REPO"
