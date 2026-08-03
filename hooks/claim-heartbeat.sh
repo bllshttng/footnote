@@ -22,6 +22,8 @@
 
 set -uo pipefail
 
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 # Refresh at most once per THROTTLE seconds of activity. Well under the claim's
 # default 2h TTL, so an actively-working session stays LIVE with wide margin.
 # ponytail: a plain stamp-mtime throttle, not half-life arithmetic - refresh is
@@ -30,7 +32,7 @@ set -uo pipefail
 THROTTLE="${FNO_CLAIM_HEARTBEAT_THROTTLE:-1200}"  # 20 min
 
 # Separate from claim TTL: a 30s stamp stays fresh inside the 120s peer window.
-LIVE_THROTTLE="${FNO_WORKTREE_LIVE_THROTTLE:-30}"
+LIVE_THROTTLE=30
 
 # Re-arm to the node claim's canonical 2h window. `fno claim refresh` with no
 # --ttl defaults to MIN_TTL (1 min) and does NOT guard against shortening, so an
@@ -66,10 +68,14 @@ fi
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
 
 # Stamp before the manifest/holder gates: non-owner activity is still overlap.
+# Git's administrative directory is physical-worktree-specific even when a
+# Claude WorktreeCreate path has shared the checkout's whole .fno directory.
 LIVE_SESSION_ID="$CUR_CLAUDE_SID"
 [[ "$IS_CODEX_HOOK" -eq 1 ]] && LIVE_SESSION_ID="$CUR_CODEX_THREAD_ID"
-if [[ -d "$CWD/.fno" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
-  live_stamp="$CWD/.fno/live/$LIVE_SESSION_ID"
+live_helper="$SCRIPT_DIR/helpers/worktree-live-peers.sh"
+LIVE_DIR="$(bash "$live_helper" --live-dir "$CWD" </dev/null 2>/dev/null || true)"
+if [[ -n "$LIVE_DIR" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  live_stamp="$LIVE_DIR/$LIVE_SESSION_ID"
   live_now="$(date +%s 2>/dev/null || echo 0)"
   live_mtime="$(stat -f %m "$live_stamp" 2>/dev/null || stat -c %Y "$live_stamp" 2>/dev/null || echo 0)"
   if (( live_now <= 0 || live_mtime <= 0 || live_now - live_mtime >= LIVE_THROTTLE )); then

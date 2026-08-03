@@ -35,6 +35,8 @@ setup_env() {
   TMP_DIR="$(mktemp -d)"
   CWD="${TMP_DIR}/proj"
   mkdir -p "${CWD}/.fno"
+  git init -q "$CWD"
+  LIVE_DIR="$(git -C "$CWD" rev-parse --absolute-git-dir)/fno/live"
   CALLLOG="${TMP_DIR}/fno-calls.log"
   : > "$CALLLOG"
 
@@ -191,10 +193,10 @@ rm -f "${CWD}/.fno/target-state.md"
 export STUB_HOLDER="target-session:20260707T203700Z-cl55246-f3fe72"
 run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1; rc=$?
 if [[ "$rc" -eq 0 && ! -s "$CALLLOG" \
-      && -f "${CWD}/.fno/live/182b29c8-owner-uuid" ]]; then
+      && -f "${LIVE_DIR}/182b29c8-owner-uuid" ]]; then
   pass "T5 no manifest -> activity stamped, no fno call"
 else
-  fail "T5 rc=$rc calls=$(cat "$CALLLOG") stamp=$(test -f "${CWD}/.fno/live/182b29c8-owner-uuid" && echo yes || echo no)"
+  fail "T5 rc=$rc calls=$(cat "$CALLLOG") stamp=$(test -f "${LIVE_DIR}/182b29c8-owner-uuid" && echo yes || echo no)"
 fi
 teardown_env
 
@@ -341,7 +343,7 @@ teardown_env
 setup_env
 export STUB_HOLDER="target-session:some-other-session"
 run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
-if [[ -f "${CWD}/.fno/live/182b29c8-owner-uuid" ]] \
+if [[ -f "${LIVE_DIR}/182b29c8-owner-uuid" ]] \
     && ! grep -q "claim refresh" "$CALLLOG"; then
   pass "T17 current session stamps even when it is not the claim holder"
 else
@@ -352,11 +354,11 @@ teardown_env
 # ── T18: fresh activity stamp takes the cheap stat-and-exit path ─────────────
 setup_env
 export STUB_HOLDER="target-session:some-other-session"
-mkdir -p "${CWD}/.fno/live"
-touch -t 202001010000 "${CWD}/.fno/live/182b29c8-owner-uuid"
-before="$(mtime_of "${CWD}/.fno/live/182b29c8-owner-uuid")"
-FNO_WORKTREE_LIVE_THROTTLE=999999999 run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
-after="$(mtime_of "${CWD}/.fno/live/182b29c8-owner-uuid")"
+mkdir -p "$LIVE_DIR"
+touch -t 203001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
 if [[ "$after" == "$before" ]]; then
   pass "T18 fresh activity stamp is not rewritten"
 else
@@ -367,11 +369,11 @@ teardown_env
 # ── T19: aged activity stamp advances after the throttle window ─────────────
 setup_env
 export STUB_HOLDER="target-session:some-other-session"
-mkdir -p "${CWD}/.fno/live"
-touch -t 202001010000 "${CWD}/.fno/live/182b29c8-owner-uuid"
-before="$(mtime_of "${CWD}/.fno/live/182b29c8-owner-uuid")"
-FNO_WORKTREE_LIVE_THROTTLE=30 run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
-after="$(mtime_of "${CWD}/.fno/live/182b29c8-owner-uuid")"
+mkdir -p "$LIVE_DIR"
+touch -t 202001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
 if (( after > before )); then
   pass "T19 aged activity stamp advances"
 else
