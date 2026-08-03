@@ -315,7 +315,7 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
         data = json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         for event, command in _manifest_event_commands(data, source=name):
             for script in _referenced_hook_scripts(command, REPO_ROOT):
-                if not script.exists():
+                if not script.is_file():
                     failures.append(f"{name}/{event}: missing script {script}")
             if event in _PROBE_LAUNCH_EVENTS:
                 samples.setdefault(name, command)
@@ -333,8 +333,13 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
 
     # The advertised fail-open itself: an UNRESOLVED root must make every
     # manifest's PreToolUse launch fail. Asserted per manifest so a broken root
-    # on one harness cannot be masked by another.
-    assert samples, "no PreToolUse hook found to probe"
+    # on one harness cannot be masked by another; requiring every manifest to
+    # contribute a sample means dropping PreToolUse from one manifest fails here
+    # instead of being hidden by the other.
+    expected = {name for name, _rel, _root in _PROBE_MANIFESTS}
+    assert set(samples) == expected, (
+        f"every manifest must carry a PreToolUse gate to probe; got {sorted(samples)}"
+    )
     for name, command in samples.items():
         empty_root = _launch_plugin_hook(command, root_value="", shell=shell)
         assert _is_hook_launch_failure(empty_root), (

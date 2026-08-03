@@ -1990,9 +1990,24 @@ def _plugin_hooks_launch_report() -> dict[str, Any]:
                  "path": str(path)}
             )
             continue
+        # Nested malformation: an event whose groups are not an array (the silent
+        # skip in _manifest_event_commands would otherwise read as zero commands,
+        # a false green). Deeper shape errors are skipped without raising.
+        bad_events = [
+            ev for ev, grp in data["hooks"].items()
+            if ev != "state" and not isinstance(grp, list)
+        ]
+        if bad_events:
+            manifest_errors.append(
+                {"manifest": name,
+                 "issue": "malformed: event group(s) not arrays: "
+                          + ", ".join(bad_events[:3]),
+                 "path": str(path)}
+            )
+            continue
         for event, command in _manifest_event_commands(data, source=name):
             for script in _referenced_hook_scripts(command, manifest_root):
-                if not script.exists():
+                if not script.is_file():
                     missing.append(
                         {"manifest": name, "event": event, "script": str(script)}
                     )
