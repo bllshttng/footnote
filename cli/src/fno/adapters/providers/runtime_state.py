@@ -781,12 +781,17 @@ def read_usage(
     return snap
 
 
-def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> None:
-    """Persist ``snapshot`` under ``usage[provider_id]``, carrying other state.
+def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> bool:
+    """Persist ``snapshot`` under ``usage[provider_id]``; True if it landed.
 
     Serializes on the same ``.update.lock`` as health/cursor writes. On lock
     timeout the write is skipped (last-known-good stays on disk) and logged -
     a stale snapshot degrades to UNKNOWN on the next read, never an error.
+
+    The bool exists so a caller can report persistence degradation WITHOUT
+    discarding the snapshot it already holds in memory: losing the write race
+    is a cache outcome, not a probe outcome, and collapsing the two is how a
+    successful live probe turns into a displayed ``unknown``.
     """
     if now is None:
         now = time.time()
@@ -816,6 +821,82 @@ def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> N
             "(snapshot degrades to UNKNOWN until next successful probe).",
             snapshot.provider_id,
         )
+        return False
+    return True
+
+
+@dataclasses.dataclass(frozen=True)
+class UsageRefresh:
+    """One refresh observation: what was read, why it is unknown, did it persist.
+
+    The invariant this type exists to hold: if a probe returns snapshot ``S``
+    during a refresh, THIS object carries ``S`` and the caller renders ``S`` -
+    no second cache read, no chance for a losing write race or a stale TTL to
+    turn a successful live reading into ``unknown``.
+
+    - ``snapshot``  - the reading, or None when nothing is known
+    - ``reason``    - a stable non-secret slug, non-None exactly when the
+      observation is unknown (see :func:`refresh_usage_detailed`)
+    - ``persisted`` - True written, False write skipped (lock contention),
+      None no write attempted (cache hit, or nothing to write). Cache
+      persistence and displayability are separate outcomes and must not be
+      collapsed into one boolean.
+    """
+
+    snapshot: UsageSnapshot | None
+    reason: str | None = None
+    persisted: bool | None = None
+
+    @property
+    def known(self) -> bool:
+        """True when this observation has usable windows to display."""
+        return self.snapshot is not None and bool(self.snapshot.windows)
+
+
+def refresh_usage_detailed(
+    provider_id: str,
+    ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
+    now: float | None = None,
+) -> UsageRefresh:
+    """Return the full refresh observation for ``provider_id``.
+
+    A cache hit (fresh within TTL) returns immediately without probing. On a
+    miss, resolve the provider record, probe, and persist. Everything degrades
+    fail-open to an unknown observation, never an exception.
+
+    Unknown reasons, on top of the four :func:`probe_usage_detail` slugs:
+
+    - ``config-unreadable`` - the provider config could not be loaded
+    - ``record-missing``    - no configured record has this id
+    - ``no-windows``        - a snapshot exists but reports no windows
+
+    ``no-windows`` is decided here rather than in the probe so the cache-hit and
+    fresh-probe paths cannot disagree about what counts as displayable.
+    """
+    if now is None:
+        now = time.time()
+    cached = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+    if cached is not None:
+        return UsageRefresh(cached, None if cached.windows else "no-windows")
+    # Local import: loader pulls in rotation/model; keep the module-load graph
+    # acyclic (runtime_state is imported by rotation at call time).
+    from fno.adapters.providers.loader import load_providers
+    from fno.adapters.providers.usage import probe_usage_detail
+
+    try:
+        record = load_providers().by_id.get(provider_id)
+    except Exception:  # noqa: BLE001 - a config read must never break a probe
+        return UsageRefresh(None, "config-unreadable")
+    if record is None:
+        return UsageRefresh(None, "record-missing")
+    snapshot, reason = probe_usage_detail(record, now=now)
+    if snapshot is None:
+        return UsageRefresh(None, reason)
+    # Persist, then report the SNAPSHOT regardless of how the write went.
+    persisted = write_usage_snapshot(snapshot, now=now)
+    return UsageRefresh(
+        snapshot, None if snapshot.windows else "no-windows", persisted
+    )
 
 
 def refresh_usage(
@@ -825,32 +906,11 @@ def refresh_usage(
 ) -> UsageSnapshot | None:
     """Return a fresh snapshot for ``provider_id``, probing if the cache is stale.
 
-    A cache hit (fresh within TTL) returns immediately without probing. On a
-    miss, resolve the provider record, probe, and persist the result. Any
-    failure (unknown provider, probe returns None) returns None fail-open -
-    the caller treats it as UNKNOWN headroom.
+    Compatibility wrapper over :func:`refresh_usage_detailed` for callers that
+    only need ``UsageSnapshot | None`` (headroom and its consumers). Any failure
+    returns None fail-open - the caller treats it as UNKNOWN headroom.
     """
-    if now is None:
-        now = time.time()
-    cached = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
-    if cached is not None:
-        return cached
-    # Local import: loader pulls in rotation/model; keep the module-load graph
-    # acyclic (runtime_state is imported by rotation at call time).
-    from fno.adapters.providers.loader import load_providers
-    from fno.adapters.providers.usage import probe_usage
-
-    try:
-        record = load_providers().by_id.get(provider_id)
-    except Exception:  # noqa: BLE001 - a config read must never break a probe
-        return None
-    if record is None:
-        return None
-    snapshot = probe_usage(record, now=now)
-    if snapshot is None:
-        return None
-    write_usage_snapshot(snapshot, now=now)
-    return snapshot
+    return refresh_usage_detailed(provider_id, ttl_seconds=ttl_seconds, now=now).snapshot
 
 
 # ---------------------------------------------------------------------------

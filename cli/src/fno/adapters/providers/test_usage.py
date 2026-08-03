@@ -28,6 +28,7 @@ from fno.adapters.providers.usage import (
     UsageSnapshot,
     UsageWindow,
     probe_usage,
+    probe_usage_detail,
 )
 
 # Captured at import time, before the autouse keychain stub replaces the module
@@ -403,6 +404,159 @@ def test_iso_to_epoch_handles_z_suffix() -> None:
     assert _iso_to_epoch(1234567890) == 1234567890.0
     assert _iso_to_epoch("garbage") is None
     assert _iso_to_epoch(None) is None
+
+
+# ---------------------------------------------------------------------------
+# Typed refresh observation (x-0aec): a successful probe survives a failed cache
+# write, and every unknown names the boundary that produced it.
+# ---------------------------------------------------------------------------
+
+
+class TestProbeUnknownReason:
+    """AC3-ERR: `None` is one value with four causes; name them."""
+
+    def test_unattributed_record(self) -> None:
+        rec = ProviderRecord(
+            id="k", name="K", harness="claude", auth="api_key",
+            env={"ANTHROPIC_API_KEY": "x"},
+        )
+        assert probe_usage_detail(rec) == (None, "unattributed")
+
+    def test_harness_without_a_probe(self, tmp_path: Path) -> None:
+        rec = ProviderRecord(
+            id="g", name="G", harness="gemini", auth="oauth_dir",
+            credentials_source=tmp_path,
+        )
+        assert probe_usage_detail(rec) == (None, "harness-unsupported")
+
+    def test_probe_returning_none(self, tmp_path: Path) -> None:
+        # No credential file and no keychain blob -> the claude probe runs and
+        # reads nothing. Attribution succeeded, so this is NOT `unattributed`.
+        assert probe_usage_detail(_claude_record(tmp_path)) == (None, "probe-failed")
+
+    def test_probe_raising(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.usage as usage_mod
+
+        def _boom(record: ProviderRecord, now: float) -> None:
+            raise RuntimeError("endpoint drift")
+
+        monkeypatch.setitem(usage_mod._PROBES, "claude", _boom)
+        assert probe_usage_detail(_claude_record(tmp_path)) == (None, "probe-error")
+
+    def test_probe_usage_delegates_to_the_detail_path(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """One probe implementation, not two: the wrapper must not fork.
+
+        A guard or a stub on one of two reachable probe paths is decorative, so
+        pin that `probe_usage` is exactly `probe_usage_detail(...)[0]`.
+        """
+        import fno.adapters.providers.usage as usage_mod
+
+        snap = _snap("claude-primary", UsageWindow("5h", 7.0, 9000.0))
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda record, now: snap)
+        rec = _claude_record(tmp_path)
+        assert probe_usage(rec) is probe_usage_detail(rec)[0] is snap
+
+
+class TestRefreshObservation:
+    def test_a_probed_snapshot_survives_a_failed_cache_write(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2-FR: losing the write race is a cache outcome, not a probe outcome.
+
+        Failure Modes / Errors: "a cache lock timeout reports persistence
+        degradation without discarding a successful snapshot."
+        """
+        from fno.adapters.providers import runtime_state as rs
+
+        snap = _snap("p1", UsageWindow("5h", 12.0, 9000.0))
+        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None: False)
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: type(
+                "C", (), {"by_id": {"p1": _claude_record(state_path.parent)}}
+            )(),
+        )
+        monkeypatch.setattr(
+            "fno.adapters.providers.usage.probe_usage_detail",
+            lambda record, now=None: (snap, None),
+        )
+
+        obs = rs.refresh_usage_detailed("p1", ttl_seconds=0, now=2000.0)
+        assert obs.snapshot is snap
+        assert obs.persisted is False
+        assert obs.reason is None
+        assert obs.known is True
+        # The compatibility wrapper still yields the same snapshot.
+        assert rs.refresh_usage("p1", ttl_seconds=0, now=2000.0) is snap
+
+    def test_write_reports_success(self, state_path: Path) -> None:
+        assert write_usage_snapshot(_snap("p1", UsageWindow("5h", 1.0, 9000.0))) is True
+
+    def test_write_reports_lock_contention(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import filelock
+
+        from fno.adapters.providers import runtime_state as rs
+
+        class _AlwaysContended:
+            def __init__(self, *a: object, **k: object) -> None: ...
+
+            def __enter__(self) -> None:
+                raise filelock.Timeout("busy")
+
+            def __exit__(self, *a: object) -> None: ...
+
+        monkeypatch.setattr(rs.filelock, "FileLock", _AlwaysContended)
+        assert write_usage_snapshot(_snap("p1", UsageWindow("5h", 1.0, 9000.0))) is False
+
+    def test_missing_record_is_named(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers import runtime_state as rs
+
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: type("C", (), {"by_id": {}})(),
+        )
+        obs = rs.refresh_usage_detailed("ghost", ttl_seconds=0, now=2000.0)
+        assert (obs.snapshot, obs.reason, obs.known) == (None, "record-missing", False)
+
+    def test_unreadable_config_is_named(
+        self, state_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers import runtime_state as rs
+
+        def _boom(*a: object, **k: object) -> None:
+            raise OSError("config gone")
+
+        monkeypatch.setattr("fno.adapters.providers.loader.load_providers", _boom)
+        obs = rs.refresh_usage_detailed("p1", ttl_seconds=0, now=2000.0)
+        assert obs.reason == "config-unreadable"
+
+    def test_a_snapshot_with_no_windows_is_unknown_with_a_reason(
+        self, state_path: Path
+    ) -> None:
+        from fno.adapters.providers import runtime_state as rs
+
+        write_usage_snapshot(_snap("p1", probed_at=1000.0), now=1000.0)
+        obs = rs.refresh_usage_detailed("p1", ttl_seconds=300, now=1100.0)
+        assert obs.snapshot is not None
+        assert (obs.reason, obs.known) == ("no-windows", False)
+
+    def test_a_cache_hit_attempts_no_write(self, state_path: Path) -> None:
+        from fno.adapters.providers import runtime_state as rs
+
+        write_usage_snapshot(
+            _snap("p1", UsageWindow("5h", 3.0, 9000.0), probed_at=1000.0), now=1000.0
+        )
+        obs = rs.refresh_usage_detailed("p1", ttl_seconds=300, now=1100.0)
+        assert obs.known is True
+        assert obs.persisted is None  # tri-state: no write was attempted
 
 
 class TestSnapshotStorage:

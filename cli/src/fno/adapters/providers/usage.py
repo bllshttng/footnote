@@ -634,20 +634,26 @@ _PROBES: dict[str, Callable[[ProviderRecord, float], "UsageSnapshot | None"]] = 
 }
 
 
-def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
-    """Return a fresh usage snapshot for ``record``, or None if unknown.
+def probe_usage_detail(
+    record: ProviderRecord, now: float | None = None
+) -> tuple[UsageSnapshot | None, str | None]:
+    """``(snapshot, unknown_reason)`` - the probe plus WHY it came back unknown.
 
-    Dispatches by ``record.harness``. NEVER raises: any exception inside a per-CLI
-    probe is contained here (AC1-FR), logged once at debug, and mapped to None
-    so a dispatch decision proceeds fail-open. api_key records and CLIs without
-    a probe (gemini, glm, openclaw, hermes) return None in v1.
+    The single implementation; :func:`probe_usage` is the compatibility wrapper
+    over it, so there is exactly one probe path to stub, guard, or reason about.
 
-    The gate is attribution, not auth strategy: a record is probeable when a
-    credential provably its own is resolvable (see
-    :func:`_attributed_credential_dir`). The old ``auth != "oauth_dir"`` refusal
-    made every ``managed`` account permanently UNKNOWN - the whole reason
-    ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
-    the bearer discovery, and the parser all worked.
+    A bare ``None`` is one value with four causes, and telling them apart is the
+    difference between "repair attribution" and "the endpoint moved". A five-day
+    quota outage looked exactly like a cold cache because both printed
+    ``unknown``. The reason is a stable, non-secret slug - never a token, a
+    bearer, or a remote response body:
+
+    - ``unattributed``       - no credential provably belongs to this record
+    - ``harness-unsupported``- no probe registered for ``record.harness``
+    - ``probe-failed``       - the probe ran and could not read usage
+    - ``probe-error``        - the probe raised (contained here, AC1-FR)
+
+    ``reason`` is None exactly when ``snapshot`` is not None.
     """
     if now is None:
         now = time.time()
@@ -658,14 +664,36 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
         # case this record correctly stays unknown and that one becomes
         # probeable on its own probe.
         if not _reconcile_tainted_slot(record, now):
-            return None
+            return None, "unattributed"
         if not _attributed_credential_dir(record)[0]:
-            return None
+            return None, "unattributed"
     probe = _PROBES.get(record.harness)
     if probe is None:
-        return None
+        return None, "harness-unsupported"
     try:
-        return probe(record, now)
+        snapshot = probe(record, now)
     except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)
         logger.debug("usage probe crashed for %r: %s", record.id, exc)
-        return None
+        return None, "probe-error"
+    if snapshot is None:
+        return None, "probe-failed"
+    return snapshot, None
+
+
+def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
+    """Return a fresh usage snapshot for ``record``, or None if unknown.
+
+    Compatibility wrapper over :func:`probe_usage_detail` for callers that only
+    need the snapshot. Dispatches by ``record.harness``. NEVER raises: any
+    exception inside a per-CLI probe is contained (AC1-FR), logged once at debug,
+    and mapped to None so a dispatch decision proceeds fail-open. api_key records
+    and CLIs without a probe (gemini, glm, openclaw, hermes) return None in v1.
+
+    The gate is attribution, not auth strategy: a record is probeable when a
+    credential provably its own is resolvable (see
+    :func:`_attributed_credential_dir`). The old ``auth != "oauth_dir"`` refusal
+    made every ``managed`` account permanently UNKNOWN - the whole reason
+    ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
+    the bearer discovery, and the parser all worked.
+    """
+    return probe_usage_detail(record, now)[0]
