@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -11,8 +12,13 @@ ROOT = Path(__file__).resolve().parents[3]
 
 def _read_with_positive_control(relative: str, marker: str) -> str:
     """Read one owned path only after an anchored ripgrep control finds it."""
+    source = (ROOT / relative).read_text(encoding="utf-8")
+    rg = shutil.which("rg")
+    if rg is None:
+        assert marker in source, f"positive control {marker!r} missing from {relative}"
+        return source
     found = subprocess.run(
-        ["rg", "-n", "--glob", "!/target/**", marker, relative],
+        [rg, "-n", "--glob", "!/target/**", marker, relative],
         cwd=ROOT,
         text=True,
         capture_output=True,
@@ -20,7 +26,16 @@ def _read_with_positive_control(relative: str, marker: str) -> str:
     assert found.returncode == 0, (
         f"positive control {marker!r} missing from {relative}: {found.stderr}"
     )
-    return (ROOT / relative).read_text(encoding="utf-8")
+    return source
+
+
+def test_positive_control_falls_back_without_ripgrep(monkeypatch) -> None:
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    source = _read_with_positive_control(
+        "skills/target/scripts/dispatch-node.sh",
+        "dispatch-node.sh",
+    )
+    assert "fno dispatch resolve" in source
 
 
 def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
