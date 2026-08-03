@@ -160,6 +160,33 @@ def test_codex_hooks_block_canonical_edit_tools() -> None:
     )
 
 
+def test_worktree_write_guard_wired_into_claude_and_codex_pretooluse() -> None:
+    """Both harnesses must judge writes through the same location guard."""
+    guard = "hooks/worktree-write-protect.sh"
+    assert (REPO_ROOT / guard).is_file(), f"guard missing at {guard}"
+
+    for path, root_var in (
+        (HOOKS_JSON, "CLAUDE_PLUGIN_ROOT"),
+        (CODEX_HOOKS_JSON, "PLUGIN_ROOT"),
+    ):
+        registrations = json.loads(path.read_text(encoding="utf-8"))["hooks"][
+            "PreToolUse"
+        ]
+        wired = [
+            registration
+            for registration in registrations
+            if registration.get("matcher") == "Edit|Write"
+            and any(
+                hook.get("command") == f"bash ${{{root_var}}}/{guard}"
+                for hook in registration.get("hooks", [])
+            )
+        ]
+        assert len(wired) == 1, (
+            f"{path.name} must carry exactly one Edit|Write PreToolUse "
+            f"registration routing through {guard}"
+        )
+
+
 def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
     for config_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
         data = json.loads(config_path.read_text(encoding="utf-8"))
