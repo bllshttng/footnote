@@ -690,3 +690,8 @@ entries:
     branch: feature/x-b1c3
     delta: 146
     reason: 'Identity-free peer gating requires Rust to derive a composite cross-model requirement, preserve legacy login behavior, and add head-pinned fail-closed tests.'
+  - date: 2026-08-03
+    pr: null
+    branch: feature/x-4c7c
+    delta: 66
+    reason: 'Read-only worktree concurrency observation (x-4c7c Stage 1 + Stage 2): +66 across four hook files. hooks/claim-heartbeat.sh (+15) writes a 30-second per-session PostToolUse stamp before its existing manifest and holder gates; hooks/helpers/worktree-live-peers.sh (+31) is the sole predicate and treats only another stamp inside the 120-second reader window as live; hooks/session-start.sh (+11) carries the note through the Codex wrapper; hooks/worktree-peers-session-start.sh (+9) is the separate Claude carrier required because hooks.json does not invoke that wrapper. No PreToolUse registration, refusal path, claim verb, harness-identity predicate, or Stage 3 write lock is added. The honest reduction pass cut the first green implementation from +84 to +66 by collapsing duplicate stamp-state and wrapper-format branches; the remaining writer, one reader, and two carriers are the compiled deliverable.'
