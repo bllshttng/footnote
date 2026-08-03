@@ -61,7 +61,9 @@ def _full_pack() -> PackManifest:
         assets=(AssetDeclaration(id="brand-voice", source="plugins/growth-studio/assets/brand-voice.md"),),
         permissions=(EffectDeclaration(effect_class="external.publication", destination="social-network"),),
         scenarios=(
-            ScenarioDeclaration(id="launch-smoke", command="fno growth launch --dry-run", recorded_result=EvidenceResult.PASSED),
+            # `true` is on PATH on every POSIX host (local + CI), so the fixture
+            # does not depend on fno being installed to satisfy runnability.
+            ScenarioDeclaration(id="launch-smoke", command="true", recorded_result=EvidenceResult.PASSED),
         ),
     )
 
