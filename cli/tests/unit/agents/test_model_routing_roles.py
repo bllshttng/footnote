@@ -570,6 +570,24 @@ def test_default_production_lookup_blocks_unreadable_layer_at_spawn_seam(
     assert "PermissionError" in (caught.value.result.detail or "")
 
 
+def test_default_production_lookup_blocks_invalid_role_root_at_spawn_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    root.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+    monkeypatch.setattr(mr, "_routing_block", lambda settings: _settings().model_routing)
+
+    with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
+        mr.resolve_spawn_route("coordinate")
+
+    assert caught.value.result.reason is RoleResolutionReason.INVALID_MANIFEST
+    assert caught.value.result.source_layer is None
+    assert caught.value.result.source_id == str(root)
+    assert "not a directory" in (caught.value.result.detail or "")
+
+
 @pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
 def test_default_lookup_keeps_protected_roles_short_circuited_before_discovery(
     resolver: Callable[..., object],

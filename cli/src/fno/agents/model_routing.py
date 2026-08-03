@@ -920,6 +920,7 @@ def _default_business_lookup(
 ) -> "ManifestRoutingResolution | RoleResolutionBlocked":
     """Discover conventional manifests only when a role root actually exists."""
     from pathlib import Path
+    import stat
 
     from fno.company.contracts import RoleRef
     from fno.roles import (
@@ -931,11 +932,29 @@ def _default_business_lookup(
 
     configured_root = os.environ.get("FNO_ROLES_ROOT")
     root = Path(configured_root).expanduser() if configured_root else Path.cwd() / ".fno" / "roles"
-    if not root.is_dir():
+    try:
+        root_status = root.stat()
+    except FileNotFoundError:
         return RoleResolutionBlocked(
             role=RoleRef(id=role, function_id="unavailable"),
             reason=RoleResolutionReason.NOT_FOUND,
             reference=role,
+        )
+    except OSError as exc:
+        return RoleResolutionBlocked(
+            role=RoleRef(id=role, function_id="unavailable"),
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_id=str(root),
+            reference=role,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if not stat.S_ISDIR(root_status.st_mode):
+        return RoleResolutionBlocked(
+            role=RoleRef(id=role, function_id="unavailable"),
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_id=str(root),
+            reference=role,
+            detail="role root exists but is not a directory",
         )
     return resolve_manifest_routing(role, discover_role_definitions(root=root))
 
