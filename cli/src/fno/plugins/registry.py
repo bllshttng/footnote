@@ -138,6 +138,12 @@ class PackRegistry(_RegistryModel):
         seen: dict[str, str] = {}
         for receipt in self.receipts:
             for path in receipt.written_paths:
+                # Reject non-normalized paths so an aliased entry like
+                # plugin/a/../b/role.json cannot bypass the string uniqueness
+                # check and shadow another pack's file.
+                segments = path.split("/")
+                if path.startswith("/") or ".." in segments or "" in segments:
+                    raise ValueError(f"non-normalized receipt path {path!r}")
                 if path in seen:
                     raise ValueError(
                         f"path {path!r} owned by receipts {seen[path]!r} and {receipt.pack_id!r}"

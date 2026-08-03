@@ -134,26 +134,28 @@ def _stage_and_swap(
 
     backups: list[tuple[Path, Path]] = []
     fresh: list[Path] = []
-    completed: list[tuple[Path, Path | None]] = []
     try:
         for target, tmp in staged:
-            backup: Path | None = None
             if target.exists():
                 backup = Path(str(target) + ".pre-activate-bak")
                 os.replace(target, backup)
                 backups.append((target, backup))
+            else:
+                backup = None
             os.replace(tmp, target)
-            completed.append((target, backup))
             if backup is None:
                 fresh.append(target)
     except OSError as exc:
-        # Restore every completed target: backed-up ones to their backup, fresh
-        # ones removed. Then drop any staging temps still on disk.
-        for target, backup in completed:
+        # Restore every target whose prior content was moved aside (this includes
+        # the target whose swap just failed, since its backup was recorded before
+        # the failing replace) and remove every fresh target already created.
+        for target, backup in backups:
             if target.exists():
                 target.unlink(missing_ok=True)
-            if backup is not None and backup.exists():
+            if backup.exists():
                 os.replace(backup, target)
+        for target in fresh:
+            target.unlink(missing_ok=True)
         for _target, tmp in staged:
             tmp.unlink(missing_ok=True)
         raise ActivationRefusal(
@@ -163,7 +165,11 @@ def _stage_and_swap(
     return backups, fresh
 
 
-def _rollback_swap(backups: list[tuple[Path, Path]], fresh: list[Path]) -> None:
+def _rollback_swap(
+    backups: list[tuple[Path, Path]],
+    fresh: list[Path],
+    stale_backups: list[tuple[Path, Path]],
+) -> None:
     """Restore the layer to its pre-activation state after a post-swap failure."""
     for target, backup in backups:
         if target.exists():
@@ -172,6 +178,11 @@ def _rollback_swap(backups: list[tuple[Path, Path]], fresh: list[Path]) -> None:
             os.replace(backup, target)
     for target in fresh:
         target.unlink(missing_ok=True)
+    for original, backup in stale_backups:
+        if original.exists():
+            original.unlink(missing_ok=True)
+        if backup.exists():
+            os.replace(backup, original)
 
 
 def _definition_document(
@@ -268,7 +279,7 @@ def activate(
                         ActivationRefusalReason.DIFFERENT_PACK_OWNS_PATH,
                         f"{source_id} is owned by pack {owner[0]}",
                     )
-                if owner is None and resolved.exists():
+                if owner is None and (resolved.exists() or resolved.is_symlink()):
                     raise ActivationRefusal(
                         ActivationRefusalReason.PATH_OCCUPIED,
                         f"{source_id} exists but no receipt owns it",
@@ -288,18 +299,27 @@ def activate(
 
             backups, fresh = _stage_and_swap(planned)
             written = [source_id for source_id, _resolved, _definition in planned]
+            stale_backups: list[tuple[Path, Path]] = []
             try:
-                # Remove prior receipt paths the new manifest no longer carries.
-                # Each was containment-checked above; a non-file entry (a
-                # directory or symlink the pack did not write) is refused and the
-                # whole transaction rolls back rather than deleting it.
+                # Stage prior receipt paths the new manifest no longer carries by
+                # renaming them aside (not unlinking), so a later registry-save
+                # failure can restore the whole layer. Each was containment-checked
+                # above; a symlink (followed by is_file) or non-file entry is
+                # refused and rolls back rather than deleting something unintended.
                 for prior in prior_paths:
                     if prior in new_set:
                         continue
                     prior_path = root / prior
+                    if prior_path.is_symlink():
+                        raise ActivationRefusal(
+                            ActivationRefusalReason.UNWRITABLE_LAYER,
+                            f"stale path {prior} is a symlink",
+                        )
                     if prior_path.is_file():
-                        prior_path.unlink()
-                    elif prior_path.exists() or prior_path.is_symlink():
+                        stale_backup = Path(str(prior_path) + ".stale-bak")
+                        os.replace(prior_path, stale_backup)
+                        stale_backups.append((prior_path, stale_backup))
+                    elif prior_path.exists():
                         raise ActivationRefusal(
                             ActivationRefusalReason.UNWRITABLE_LAYER,
                             f"stale path {prior} is not a regular file",
@@ -317,12 +337,15 @@ def activate(
                 registry = store._record_activation_locked(registry, receipt)
                 store._save(registry)
             except BaseException:
-                # A stale removal or registry save failure rolls the swap back so
-                # the layer never holds role files inconsistent with a receipt.
-                _rollback_swap(backups, fresh)
+                # A stale staging or registry save failure rolls the swap AND the
+                # staged stale files back, so the layer never holds role files
+                # inconsistent with a receipt.
+                _rollback_swap(backups, fresh, stale_backups)
                 raise
             for _target, backup in backups:
                 backup.unlink(missing_ok=True)
+            for _original, stale_backup in stale_backups:
+                stale_backup.unlink(missing_ok=True)
             return ActivationOutcome(receipt=receipt, already_active=already_active)
     except RegistryCorrupt as exc:
         raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
@@ -369,7 +392,8 @@ def deactivate(
                 continue
             path = root / source_id
             if not path.exists() and not path.is_symlink():
-                removed.append(source_id)  # already gone
+                # Already absent: cleared from the receipt, not reported as removed
+                # (nothing was unlinked) nor left behind.
                 continue
             try:
                 path.unlink()
