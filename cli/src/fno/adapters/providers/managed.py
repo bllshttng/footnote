@@ -1445,6 +1445,14 @@ def register_slot_snapshot(
         # no snapshot just tells the next switch to run register.
         if persist is not None:
             persist()
+        # Taint BEFORE the trusted writes, not after them. The writes take
+        # time; a crash, or a Keychain read that fails at the end, would
+        # otherwise leave an untainted stamp naming this record while the slot
+        # holds whoever logged in during the window - and the next switch would
+        # capture that credential into this record's snapshot. Provisional taint
+        # means "this stamp is not verified yet", which is what the marker is
+        # for, and makes every abrupt exit fail safe.
+        _set_slot_taint(record.harness, root, True, [])
         adir = write_snapshot(record, blobs[0], root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
@@ -1455,15 +1463,15 @@ def register_slot_snapshot(
         # and stamp another account before this stamp overwrote it - leaving the
         # stamp naming this record while the slot holds the other one.
         stamp_active_slot(record.harness, record.id, root)
-        # The writes above take time, and an out-of-band login during them would
-        # leave an UNTAINTED stamp naming this record while the slot holds
-        # someone else - and the next switch would capture that credential into
-        # this record's snapshot. Taint it so nothing trusts the stamp until a
-        # reconciliation proves who is really there. The account is registered
-        # either way; only the stamp's trustworthiness is in question.
-        if canonical_slot_blobs(record.harness) != blobs:
-            _set_slot_taint(record.harness, root, True, [])
+        try:
+            settled = canonical_slot_blobs(record.harness) == blobs
+        except ManagedStoreError:
+            settled = False  # could not confirm, so do not clear the taint
+        if not settled:
+            # The account IS registered; only the stamp's trustworthiness is in
+            # question, so this reports success with a warning, not a refusal.
             return adir, principal, "slot-moved-after-write"
+        _set_slot_taint(record.harness, root, False)
         return adir, principal, failure
     finally:
         lock.release()
@@ -1519,7 +1527,9 @@ def reconcile_slot(
     On a unique match: refresh that record's snapshot from the live blob, stamp
     it active, clear the taint. On anything else - endpoint down, malformed
     body, no matching record, two matching records - write nothing at all and
-    return the typed reason. That asymmetry is the point: a wrong clear files
+    return the typed reason. The one exception is a change detected AFTER the
+    commit began: the taint set at its start simply stays, which is a write in
+    the safe direction (nothing trusts the stamp) rather than a repair. That asymmetry is the point: a wrong clear files
     one account's usage under another's name, which is worse than staying
     UNKNOWN.
     """
@@ -1659,20 +1669,25 @@ def _reconcile_locked(
 
     # Snapshot first, stamp second, clear taint last: a crash at any point
     # leaves the taint set, which is the safe direction to fail.
+    # Taint FIRST, so the marker covers the whole window in which the stamp
+    # exists but is not yet verified. This path is also reached from an
+    # UNTAINTED drift repair, where there would otherwise be no marker at all
+    # while the writes ran - and a crash between them would leave a freshly
+    # written, unverified stamp fully trusted. The recorded pids are dropped
+    # deliberately: the live-writer gate above already passed, so they no longer
+    # gate anything, and an empty list lets a retry proceed once the slot settles.
+    _set_slot_taint(cli, root, True, [])
     write_snapshot(by_id[matched], blob, root)
     write_record_principal(matched, principal, root)
     stamp_active_slot(cli, matched, root)
     # Clearing the taint is what makes the stamp TRUSTED, so it gets the last
-    # look. An out-of-band writer that slipped in during the writes above leaves
-    # the taint set: the refreshed snapshot and stamp are then merely stale
-    # (self-correcting on the next pass) rather than stale-and-believed.
-    if canonical_slot_blobs(cli) != blobs:
-        # SET the taint rather than merely leaving it: this path is also reached
-        # from an untainted drift repair, where "the taint stands" would be a
-        # lie and the stamp we just wrote would be trusted over a slot we know
-        # has moved. No recorded pids, so a retry proceeds once it settles.
+    # look - and a look we could not take counts as unsettled.
+    try:
+        settled = canonical_slot_blobs(cli) == blobs
+    except ManagedStoreError:
+        settled = False
+    if not settled:
         clear_slot_principal_cache(cli, root)
-        _set_slot_taint(cli, root, True, [])
         return ReconcileResult(
             "slot-changed",
             detail=(

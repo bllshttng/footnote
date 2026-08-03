@@ -2416,3 +2416,116 @@ class TestRegisterPostWriteSlotMove:
 
         assert failure is None
         assert not managed.slot_tainted("claude", tmp_path)
+
+
+class TestProvisionalTaintSpansTheCommit:
+    """A stamp exists but is unverified for the length of the commit. The taint
+    has to cover that whole window, or a crash - or a Keychain read that fails
+    at the end - leaves an unverified stamp fully trusted."""
+
+    def test_registration_taints_before_writing_and_clears_after(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+        tainted_when_stamped: list[bool] = []
+        real_stamp = managed.stamp_active_slot
+
+        def _stamp(cli, record_id, root=None):
+            tainted_when_stamped.append(managed.slot_tainted(cli, root))
+            real_stamp(cli, record_id, root)
+
+        monkeypatch.setattr(managed, "stamp_active_slot", _stamp)
+
+        _adir, _principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None
+        assert tainted_when_stamped == [True]  # covered while unverified
+        assert not managed.slot_tainted("claude", tmp_path)  # cleared once settled
+
+    def test_a_failed_final_read_leaves_the_stamp_untrusted(
+        self, tmp_path, monkeypatch
+    ):
+        """A look we could not take counts as unsettled, not as settled."""
+        reads = {"n": 0}
+
+        def _blobs(cli):
+            reads["n"] += 1
+            if reads["n"] >= 3:
+                raise managed.KeychainError("`security` timed out")
+            return [_blob("A")]
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _blobs)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        _adir, _principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure == "slot-moved-after-write"
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"
+        assert managed.slot_tainted("claude", tmp_path)
+
+    def test_an_untainted_drift_repair_is_tainted_while_it_commits(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """The drift path starts with no marker at all, so without this there
+        would be no window cover during its writes."""
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-a", "acct-a", tmp_path)
+        assert not managed.slot_tainted("claude", tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A_FRESH")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+        tainted_when_stamped: list[bool] = []
+        real_stamp = managed.stamp_active_slot
+
+        def _stamp(cli, record_id, root=None):
+            tainted_when_stamped.append(managed.slot_tainted(cli, root))
+            real_stamp(cli, record_id, root)
+
+        monkeypatch.setattr(managed, "stamp_active_slot", _stamp)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-a"
+        assert tainted_when_stamped == [True]
+        assert not managed.slot_tainted("claude", tmp_path)
+
+    def test_a_failed_final_read_during_reconcile_keeps_the_taint(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-a", "acct-a", tmp_path)
+        reads = {"n": 0}
+
+        def _blobs(cli):
+            reads["n"] += 1
+            if reads["n"] >= 3:
+                raise managed.KeychainError("denied")
+            return [_blob("A_FRESH")]
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _blobs)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "slot-changed"
+        assert managed.slot_tainted("claude", tmp_path)
