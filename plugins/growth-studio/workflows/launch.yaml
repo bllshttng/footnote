@@ -1,0 +1,16 @@
+# Packaged workflow template for a growth-studio launch.
+#
+# Content, not code: this template is consumed by the company coordinator's
+# topology selection (owned by the sibling company-coordinator lane), never by a
+# branch in cli/src/fno/plugins/. It names the staged deliverables a launch
+# produces and the evaluators each stage requires; it grants no effect and opens
+# no authority.
+name: launch
+stages:
+  - name: draft
+    produces: [campaign-plan, press-draft, rendered-mock, social-calendar]
+    requires_evidence: [factual-review, brand-review]
+  - name: publish
+    produces: [published-post, social-post]
+    requires_evidence: [factual-review, brand-review]
+    requires_approval_floor: founder
