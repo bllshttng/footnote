@@ -298,7 +298,8 @@ Clearing a taint without proof would file one account's usage under another's na
 
 It also refuses with `slot-pinned` while a session that was pinning when the taint was written is still alive.
 Proving the principal proves it now, and that session was launched under the outgoing account, so its next token refresh can overwrite the slot with that account's credential.
-The taint marker records those pids for exactly this check: a session started after the switch already read the new credential and never blocks a repair, which matters because on the shared slot the pinning session is usually the account being proven.
+The taint marker records those sessions for exactly this check: a session started after the switch already read the new credential and never blocks a repair, which matters because on the shared slot the pinning session is usually the account being proven.
+Each is recorded as a pid *and* its start time, because pids are reused and a recycled one wearing a dead session's number would hold the repair open permanently.
 Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pinned to another account exports it and reconciliation would otherwise prove the pinned account and stamp it onto the canonical slot.
 The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
 A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.

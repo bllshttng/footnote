@@ -801,17 +801,33 @@ def _set_slot_taint(
     """
     path = _slot_taint_path(cli, root)
     if tainted:
-        _atomic_write_private(path, json.dumps({"pids": list(pids)}))
+        # A pid alone is not an identity: pids are reused, and a recycled one
+        # would make an unrelated process look like the tainting session and
+        # block the repair FOREVER. The start time pins which process it was.
+        writers = [{"pid": pid, "started": _process_started_at(pid)} for pid in pids]
+        _atomic_write_private(
+            path, json.dumps({"pids": [w["pid"] for w in writers], "writers": writers})
+        )
     else:
         path.unlink(missing_ok=True)
 
 
-def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
-    """Pids recorded in the taint marker, or None when it records none.
+def _process_started_at(pid: int) -> Optional[float]:
+    """A process's creation time, or None when it cannot be read."""
+    try:
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001 - gone or denied; the caller decides
+        return None
 
-    None means "this marker cannot say", which is a legacy marker written before
-    pids were recorded - the caller falls back to a conservative live scan. An
-    empty tuple is a real answer: nothing was pinning.
+
+def tainting_writers(
+    cli: str, root: Path
+) -> Optional[list[tuple[int, Optional[float]]]]:
+    """``(pid, started_at)`` for each recorded taint writer, or None if unrecorded.
+
+    None means "this marker cannot say" - a legacy marker written before writers
+    were recorded - and the caller falls back to a conservative live scan. An
+    empty list is a real answer: nothing was pinning.
     """
     try:
         raw = _slot_taint_path(cli, root).read_text(encoding="utf-8")
@@ -821,10 +837,31 @@ def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
         data = json.loads(raw)
     except (ValueError, TypeError):
         return None
-    pids = data.get("pids") if isinstance(data, dict) else None
+    if not isinstance(data, dict):
+        return None
+    writers = data.get("writers")
+    if isinstance(writers, list):
+        out: list[tuple[int, Optional[float]]] = []
+        for entry in writers:
+            if isinstance(entry, dict) and isinstance(entry.get("pid"), int):
+                started = entry.get("started")
+                out.append(
+                    (entry["pid"], float(started) if isinstance(started, (int, float)) else None)
+                )
+        return out
+    pids = data.get("pids")
     if not isinstance(pids, list):
         return None
-    return tuple(p for p in pids if isinstance(p, int))
+    # A marker from before start times were recorded: pid-only, so a recycled
+    # pid still over-blocks there. Refusing is the safe direction, and the entry
+    # is replaced by the next switch.
+    return [(pid, None) for pid in pids if isinstance(pid, int)]
+
+
+def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
+    """Just the pids from :func:`tainting_writers`, or None when unrecorded."""
+    writers = tainting_writers(cli, root)
+    return None if writers is None else tuple(pid for pid, _started in writers)
 
 
 def taint_writers_still_live(cli: str, root: Path) -> list[str]:
@@ -844,16 +881,23 @@ def taint_writers_still_live(cli: str, root: Path) -> list[str]:
         # verb exists for, and the one where a live pin is routinely the very
         # session running it.
         return []
-    recorded = tainting_pids(cli, root)
+    recorded = tainting_writers(cli, root)
     if recorded is None:
         return [f"pid {session.pid}" for session in pinning_sessions_for(cli)]
     alive: list[str] = []
-    for pid in recorded:
-        try:
-            still_here = psutil.pid_exists(pid)
-        except Exception:  # noqa: BLE001 - unreadable means assume it is still there
-            still_here = True
-        if still_here:
+    for pid, started in recorded:
+        current = _process_started_at(pid)
+        if current is None:
+            try:
+                if not psutil.pid_exists(pid):
+                    continue  # gone: it can no longer write anything
+            except Exception:  # noqa: BLE001 - unreadable, so assume it is there
+                pass
+            alive.append(f"pid {pid}")
+            continue
+        # A pid that exists but started at a different time is a DIFFERENT
+        # process wearing a recycled number, and must not hold the repair.
+        if started is None or abs(current - started) < 1.0:
             alive.append(f"pid {pid}")
     return alive
 

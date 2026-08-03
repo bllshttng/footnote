@@ -1794,3 +1794,75 @@ class TestForcedRebindNeverLeavesAStalePrincipal:
         managed.capture_record_principal(record, root=tmp_path)
 
         assert managed.record_principal("work-a", tmp_path)["account_uuid"] == "acct-a"
+
+
+class TestTaintWriterIdentity:
+    """A pid is not an identity. Pids get reused, and a recycled one wearing the
+    number of a long-gone session would hold the repair open forever - a
+    permanent refusal, which is worse than the transient one it imitates."""
+
+    @staticmethod
+    def _arm(fake_slot, tmp_path, monkeypatch, pids):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        fake_slot["claude"] = _blob("B_ROTATED")
+        managed._set_slot_taint("claude", tmp_path, True, pids)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-b")), None),
+        )
+        return by_id
+
+    def test_the_start_time_is_recorded_alongside_the_pid(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        import os
+
+        self._arm(fake_slot, tmp_path, monkeypatch, [os.getpid()])
+        writers = managed.tainting_writers("claude", tmp_path)
+        assert writers is not None and writers[0][0] == os.getpid()
+        assert writers[0][1] == pytest.approx(
+            managed._process_started_at(os.getpid())
+        )
+
+    def test_a_recycled_pid_does_not_hold_the_repair(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Same number, different process: it never touched this slot."""
+        import os
+
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [os.getpid()])
+        # Rewrite the marker so the recorded start time predates this process.
+        managed._atomic_write_private(
+            managed._slot_taint_path("claude", tmp_path),
+            json.dumps({"writers": [{"pid": os.getpid(), "started": 1.0}]}),
+        )
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-b"
+
+    def test_the_original_process_still_holds_it(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        import os
+
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [os.getpid()])
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+        assert result.outcome == "slot-pinned" and str(os.getpid()) in result.detail
+
+    def test_a_pid_only_marker_still_blocks_conservatively(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A marker written before start times existed cannot distinguish, so it
+        refuses; the next switch replaces it with a full record."""
+        import os
+
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [])
+        managed._atomic_write_private(
+            managed._slot_taint_path("claude", tmp_path),
+            json.dumps({"pids": [os.getpid()]}),
+        )
+        assert managed.reconcile_slot(
+            "claude", by_id=by_id, root=tmp_path
+        ).outcome == "slot-pinned"
