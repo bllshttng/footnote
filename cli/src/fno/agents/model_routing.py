@@ -502,11 +502,12 @@ def resolve_route(
         env: environment mapping for key lookup; ``os.environ`` when None.
         notice: optional one-line-notice sink for fail-safe fallbacks.
     """
-    name = _normalize(role)
+    requested_role = (role or "").strip()
+    name = _normalize(requested_role)
     if not name:
         return None
 
-    business_role = _resolve_business_role(name, business_lookup)
+    business_role = _resolve_business_role(requested_role, business_lookup)
 
     # A protected role never routes, even if config or a business manifest
     # asks it to. Discovery still runs first so a malformed manifest cannot
@@ -769,11 +770,12 @@ def resolve_codex_route(
     path never raises; an opted-in business lookup fails closed with the same
     typed errors as the Claude lane.
     """
-    name = _normalize(role)
+    requested_role = (role or "").strip()
+    name = _normalize(requested_role)
     if not name:
         return None
 
-    business_role = _resolve_business_role(name, business_lookup)
+    business_role = _resolve_business_role(requested_role, business_lookup)
     if name in PROTECTED_ROLES:
         return None
 

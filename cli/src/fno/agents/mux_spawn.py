@@ -1132,15 +1132,22 @@ def dispatch_spawn_pane(
     # just the CLI seam -- an in-process caller passing model="opus" under a
     # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
     # that dies on its first turn. Fail closed before anything is created.
-    from fno.agents.model_routing import check_spawn_tier_remap, emit_env_scrub_warning
-
-    check_spawn_tier_remap(
-        provider,
-        model,
-        role=role,
-        route_env=route_env,
-        account_env=account_env,
+    from fno.agents.model_routing import (
+        RouteCompositionError,
+        check_spawn_tier_remap,
+        emit_env_scrub_warning,
     )
+
+    try:
+        check_spawn_tier_remap(
+            provider,
+            model,
+            role=role,
+            route_env=route_env,
+            account_env=account_env,
+        )
+    except RouteCompositionError as exc:
+        raise DispatchAskError(str(exc), exit_code=2) from exc
     # Same seam, same reason as the tier-remap check above: a permission-pinned
     # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
     # approvals, so warn on every reachable path, not just the CLI seam.
@@ -1159,10 +1166,7 @@ def dispatch_spawn_pane(
         )
 
     if provider == "claude" and (role is not None or route_env):
-        from fno.agents.model_routing import (
-            RouteCompositionError,
-            resolve_spawn_route,
-        )
+        from fno.agents.model_routing import resolve_spawn_route
 
         try:
             route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
@@ -1171,10 +1175,7 @@ def dispatch_spawn_pane(
 
     codex_route = None
     if provider == "codex" and role is not None:
-        from fno.agents.model_routing import (
-            RouteCompositionError,
-            resolve_codex_route,
-        )
+        from fno.agents.model_routing import resolve_codex_route
 
         try:
             codex_route = resolve_codex_route(role)

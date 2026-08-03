@@ -681,7 +681,13 @@ def _refuse_inherited_tier_remap(args: Sequence[str]) -> None:
     one call covers both runtimes (the Rust client has no ANTHROPIC_* handling
     at all, so a Python-only guard would be decorative). The in-process spawn
     APIs enforce the same invariant via ``check_spawn_tier_remap``."""
-    found = inherited_tier_remap(args)
+    from fno.agents.model_routing import RouteCompositionError
+
+    try:
+        found = inherited_tier_remap(args)
+    except RouteCompositionError as exc:
+        print(f"fno agents spawn: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
     if found is None:
         return
     from fno.agents.model_routing import remap_conflict_message

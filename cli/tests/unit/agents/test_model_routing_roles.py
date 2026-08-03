@@ -472,6 +472,52 @@ def test_business_manifest_without_routing_hint_ignores_same_name_legacy_route(
     assert resolver("publisher", settings=settings, env=env) is None
 
 
+def test_business_manifest_lookup_preserves_exact_mixed_case_role_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    _write_business_role(
+        root,
+        role_id="Publisher",
+        provider="zai",
+        model="business-model",
+    )
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+
+    route = mr.resolve_route(
+        "Publisher",
+        settings=_settings(),
+        env={"ZAI_API_KEY": "zai-key"},
+    )
+
+    assert route is not None
+    assert route["ANTHROPIC_MODEL"] == "business-model"
+
+
+def test_codex_business_lookup_preserves_exact_mixed_case_role_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    _write_business_role(
+        root,
+        role_id="Publisher",
+        provider="oai",
+        model="gpt-business",
+    )
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+
+    route = mr.resolve_codex_route(
+        "Publisher",
+        settings=_settings(providers=OPENAI_PROVIDER),
+        env={"OPENAI_API_KEY": "openai-key"},
+    )
+
+    assert route is not None
+    assert "model='gpt-business'" in " ".join(route.config_args)
+
+
 def test_default_lookup_uses_fixed_precedence_and_accepts_tightening_overlay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

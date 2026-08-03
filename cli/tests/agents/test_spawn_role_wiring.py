@@ -140,6 +140,54 @@ def test_direct_pane_spawn_refuses_managed_route_before_mux(
         )
 
 
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_tier_remap_preflight_normalizes_business_role_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    def blocked(*args: Any, **kwargs: Any) -> None:
+        raise model_routing.BusinessRoleRoutingProjectionError(
+            "invalid business role during tier preflight"
+        )
+
+    monkeypatch.setattr(model_routing, "check_spawn_tier_remap", blocked)
+
+    with pytest.raises(
+        DispatchAskError,
+        match="invalid business role during tier preflight",
+    ) as exc_info:
+        if substrate == "worker":
+            dispatch_spawn(
+                name="tier-worker",
+                message="work",
+                provider="claude",
+                cwd=tmp_path,
+                role="publisher",
+                model="opus",
+            )
+        else:
+            dispatch_spawn_pane(
+                name="tier-pane",
+                message="work",
+                provider="claude",
+                cwd=tmp_path,
+                role="publisher",
+                model="opus",
+                runner=lambda *_args, **_kwargs: pytest.fail(
+                    "refusal must precede pane launch"
+                ),
+            )
+
+    assert exc_info.value.exit_code == 2
+
+
 @pytest.mark.parametrize("adapter", ["bg_create", "headless_create"])
 def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str
