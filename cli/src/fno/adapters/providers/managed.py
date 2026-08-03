@@ -242,14 +242,35 @@ def read_canonical_slot_blob(cli: str) -> Optional[str]:
     return blobs[0] if blobs else None
 
 
+# `security find-generic-password` exits 44 for errSecItemNotFound (verified on
+# darwin 25.3). Any OTHER nonzero status is a read that FAILED - denied, locked
+# keychain, a broken tool - which is a different thing entirely.
+_SECURITY_ITEM_NOT_FOUND = 44
+
+
 def _read_claude_keychain_item(service: str) -> Optional[str]:
-    """One Keychain item's blob, or None when absent or a logged-out residue."""
+    """One Keychain item's blob, or None when absent or a logged-out residue.
+
+    A read that FAILS raises rather than reporting absence. Collapsing the two
+    would silently drop a candidate: if the scoped item holds account B but the
+    read is denied while the unscoped item holds A, the slot would look
+    unambiguous, A would be proven and stamped and the taint cleared - with
+    claude still able to read B. An unreadable source has to stop attribution,
+    not shrink the set it is computed over.
+    """
     out = _run_security(
         ["find-generic-password", "-s", service, "-a", _claude_keychain_account(), "-w"]
     )
-    if out.returncode != 0 or not out.stdout.strip():
+    if out.returncode == _SECURITY_ITEM_NOT_FOUND:
         return None
+    if out.returncode != 0:
+        raise KeychainError(
+            f"`security find-generic-password -s {service}` exited "
+            f"{out.returncode}: {out.stderr.strip()}"
+        )
     blob = out.stdout.strip()
+    if not blob:
+        return None
     return blob if _token_present(blob) else None
 
 

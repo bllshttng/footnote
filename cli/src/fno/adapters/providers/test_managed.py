@@ -2780,3 +2780,45 @@ class TestCredentialFileIsACandidate:
         )
 
         assert managed.canonical_slot_blobs("claude") == [_blob("LIVE")]
+
+
+class TestUnreadableKeychainItemStopsAttribution:
+    """Collapsing "denied" into "absent" silently shrinks the candidate set: the
+    scoped item could hold account B while the read fails, leaving the slot
+    looking unambiguous and A stamped - with claude still able to read B."""
+
+    @staticmethod
+    def _security(monkeypatch, returncode, stdout="", stderr=""):
+        class _Out:
+            def __init__(self):
+                self.returncode = returncode
+                self.stdout = stdout
+                self.stderr = stderr
+
+        monkeypatch.setattr(managed, "_run_security", lambda args: _Out())
+
+    def test_item_not_found_is_absence(self, monkeypatch):
+        self._security(monkeypatch, 44, stderr="could not be found in the keychain")
+        assert managed._read_claude_keychain_item("svc") is None
+
+    def test_any_other_failure_raises(self, monkeypatch):
+        self._security(monkeypatch, 51, stderr="User interaction is not allowed.")
+        with pytest.raises(managed.KeychainError) as exc:
+            managed._read_claude_keychain_item("svc")
+        assert "51" in str(exc.value)
+
+    def test_a_denied_read_refuses_reconciliation(self, tmp_path, monkeypatch):
+        """It must surface as a typed refusal, not a narrower candidate set."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+
+        def _item(service):
+            if service == managed._CLAUDE_KEYCHAIN_SERVICE:
+                return _blob("READABLE")
+            raise managed.KeychainError("User interaction is not allowed.")
+
+        monkeypatch.setattr(managed, "_read_claude_keychain_item", _item)
+
+        result = managed.reconcile_slot("claude", by_id={}, root=tmp_path)
+
+        assert result.outcome == "slot-unreadable"
