@@ -60,6 +60,11 @@
 #      would otherwise make the probe read ITS credential and file the usage
 #      under the wrong account id. Read-only; footnote stores nothing there.
 #      test_usage.py is its test, which builds a fake slot under tmp_path.
+#      managed.py resolves the same canonical path for the same reason, in
+#      reconcile-slot: an identity read must not follow an ambient
+#      CLAUDE_CONFIG_DIR, or the repair proves the pinned account and stamps
+#      it onto the shared slot. test_managed.py is its test and asserts on
+#      exactly that path, again under tmp_path.
 #      The mux Connections UI (crates/fno/src/connections_view.rs) belongs
 #      here too: its login-wizard default config dir `~/.claude-<id>` is a
 #      per-account CLAUDE_CONFIG_DIR (a Claude Code config dir, not footnote
@@ -142,6 +147,7 @@ cli/src/fno/adapters/providers/test_cli.py
 cli/src/fno/adapters/providers/test_dispatch.py
 cli/src/fno/adapters/providers/test_failover.py
 cli/src/fno/adapters/providers/test_loader.py
+cli/src/fno/adapters/providers/test_managed.py
 cli/src/fno/adapters/providers/test_model.py
 cli/src/fno/adapters/providers/test_rotation.py
 cli/src/fno/adapters/providers/test_staging.py

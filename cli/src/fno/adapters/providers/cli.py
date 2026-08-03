@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Optional, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, cast
 
 import typer
 
@@ -588,17 +588,47 @@ def register_provider(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
-    # Refuse a credential another account already holds, BEFORE writing a blob.
-    # Two captures taken while the same account was signed in file one credential
-    # under two ids, and every later per-account decision is then arithmetic on a
-    # duplicate. Digests only - no token or fragment reaches stdout/stderr.
-    holder = managed.duplicate_credential_holder(
-        managed._read_slot_blob(record.harness), exclude_id=record.id
-    )
-    if holder is not None:
+    # One locked capture serves the proof, the snapshot, and the binding.
+    # Proving one read and snapshotting another is how account A's identity ends
+    # up bound to account B's credential - via an ambient CLAUDE_CONFIG_DIR on
+    # the second read, or a concurrent switch between them.
+    # No pre-lock load: `_persist` re-reads the authoritative config under the
+    # slot lock, and a second read here would only be a staler copy of it.
+    repo_root = _get_repo_root()
+
+    from fno.adapters.providers.model import ProvidersConfig
+
+    def _persist() -> None:
+        # Re-read under the lock. The load above happened before it, so two
+        # concurrent registrations would otherwise each merge into the same
+        # stale record set and the later save would silently drop the earlier
+        # account.
+        current = load_providers(repo_root=repo_root)
+        new_records = [r for r in current.records if r.id != record.id]
+        new_records.append(record)
+        save_providers(
+            ProvidersConfig(records=new_records, active=current.active),  # type: ignore[arg-type]
+            scope=cast('Literal["project", "global"]', scope),
+        )
+
+    try:
+        adir, _proven, identity_failure = managed.register_slot_snapshot(
+            record, persist=_persist
+        )
+    except managed.ManagedStoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except OSError as exc:
+        typer.echo(f"error: failed to write config: {exc}", err=True)
+        raise typer.Exit(1)
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+    if identity_failure and identity_failure.startswith("duplicate-credential:"):
+        holder_id = identity_failure.split(":", 1)[1]
         typer.echo(
             f"error: the current {record.harness} login is already registered as "
-            f"'{holder}'; registering it again as '{record.id}' would store one "
+            f"'{holder_id}'; registering it again as '{record.id}' would store one "
             f"credential under two ids.\n"
             f"  sign into the {record.id} account first:  {record.harness} /logout && "
             f"{record.harness} /login\n"
@@ -607,41 +637,62 @@ def register_provider(
             err=True,
         )
         raise typer.Exit(1)
-
-    # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
-    try:
-        adir = managed.snapshot_current(record)
-    except managed.ManagedStoreError as exc:
-        typer.echo(f"error: {exc}", err=True)
+    if identity_failure and identity_failure.startswith("duplicate-principal:"):
+        holder_id = identity_failure.split(":", 1)[1]
+        typer.echo(
+            f"error: that account is already registered as '{holder_id}'.\n"
+            f"  a rotated token hides this from the credential check, but the "
+            f"proven identity is the same, so two ids would share one quota pool "
+            f"and reconciliation could never tell them apart.\n"
+            f"  sign into the {record.id} account first:  {record.harness} /logout && "
+            f"{record.harness} /login",
+            err=True,
+        )
         raise typer.Exit(1)
-
-    repo_root = _get_repo_root()
-    try:
-        config = load_providers(repo_root=repo_root)
-    except ProviderConfigError as exc:
-        typer.echo(f"error loading existing config: {exc}", err=True)
+    if identity_failure == "ambiguous-slot":
+        typer.echo(
+            f"error: the {record.harness} slot currently holds credentials for two "
+            f"different accounts, so registering '{record.id}' could bind the wrong "
+            f"one.\n  sign out and back in as {record.id}, then re-run this command",
+            err=True,
+        )
         raise typer.Exit(1)
-
-    from fno.adapters.providers.model import ProvidersConfig
-
-    new_records = [r for r in config.records if r.id != record.id]
-    new_records.append(record)
-    try:
-        save_providers(ProvidersConfig(records=new_records, active=config.active), scope=scope)  # type: ignore[arg-type]
-    except OSError as exc:
-        typer.echo(f"error: failed to write config: {exc}", err=True)
+    if identity_failure and identity_failure.startswith("slot-pinned:"):
+        who = identity_failure.split(":", 1)[1]
+        typer.echo(
+            f"error: {who} was pinning the {record.harness} slot when it was "
+            f"tainted and can still overwrite it, so registering '{record.id}' now "
+            f"could stamp a credential that is about to change.\n"
+            f"  stop it and re-run this command",
+            err=True,
+        )
         raise typer.Exit(1)
-
-    # The captured login IS what currently sits in this CLI's slot: stamp it
-    # active so the next switch captures-before-overwrite the right account. A
-    # stamp write failure is non-fatal (the record is saved) but must be loud,
-    # not a raw traceback - it degrades to no active-marker + no first capture.
-    try:
-        managed.stamp_active_slot(record.harness, record.id)
-    except OSError as exc:
-        typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
+    if identity_failure == "slot-changed":
+        typer.echo(
+            f"error: the {record.harness} slot changed while '{record.id}' was being "
+            f"registered (an out-of-band /login), so nothing was written.\n"
+            f"  re-run this command once the slot settles",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if adir is None:
+        # The capture reports "wrote nothing" structurally, so a failure value
+        # added later cannot fall through as a registration that never happened.
+        typer.echo(
+            f"error: registering '{record.id}' failed ({identity_failure}); "
+            "nothing was written",
+            err=True,
+        )
+        raise typer.Exit(1)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
+    if identity_failure == "slot-moved-after-write":
+        typer.echo(
+            f"warning: the {record.harness} slot changed while registering, so its "
+            f"active stamp is marked tainted rather than trusted; run "
+            f"`fno config accounts reconcile-slot {record.harness}` once it settles",
+            err=True,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -922,6 +973,22 @@ def _doctor_findings() -> list[dict]:
                     "detail": f"stored credential expired {stamp}",
                 })
 
+        if (
+            record.auth == "managed"
+            and record.harness == "claude"
+            and record.config_dir is None
+            and managed.record_principal(record.id) is None
+        ):
+            findings.append({
+                "record": record.id,
+                "problem": "unbound-principal",
+                "detail": (
+                    "no proven identity is bound, so shared-slot usage cannot be "
+                    "attributed to it and reads unknown; sign this account in and "
+                    f"run `fno config accounts register {record.id}` to bind it"
+                ),
+            })
+
         if record.config_dir is not None:
             from fno.agents.account_env import _login_present
 
@@ -944,7 +1011,7 @@ def _doctor_findings() -> list[dict]:
     for harness_kind in sorted({r.harness for r in config.records}):
         try:
             tainted = managed.slot_tainted(harness_kind, managed.store_root())
-        except OSError:
+        except (OSError, managed.ManagedStoreError):
             continue
         if tainted:
             findings.append({
@@ -952,7 +1019,43 @@ def _doctor_findings() -> list[dict]:
                 "problem": "tainted-slot",
                 "detail": (
                     "the active stamp was written while sessions were pinned, so "
-                    "the slot may hold a credential the stamp does not describe"
+                    "the slot may hold a credential the stamp does not describe; "
+                    "usage stays unknown until identity is proven - repair with "
+                    f"`fno config accounts reconcile-slot {harness_kind}`"
+                ),
+            })
+
+        # Taint watches the door footnote controls; `claude /login` uses the
+        # other one and leaves a stamp that is wrong AND untainted, so nothing
+        # downstream hesitates. Comparing the stamp against the live principal
+        # is what turns that into a finding instead of silently wrong billing.
+        try:
+            drift = managed.slot_identity_drift(harness_kind)
+        except (OSError, managed.ManagedStoreError):
+            # A denied or timed-out Keychain read is a diagnosis we could not
+            # make, not a crash in a read-only verb.
+            drift = None
+        if drift and drift.get("ambiguous"):
+            findings.append({
+                "record": f"slot:{harness_kind}",
+                "problem": "ambiguous-slot",
+                "detail": (
+                    "the slot's stored credentials belong to different accounts "
+                    "(a stale scoped Keychain item beside a live unscoped one), so "
+                    "whichever is stamped, some reader gets the other; sign out and "
+                    f"back in, then `fno config accounts reconcile-slot {harness_kind}`"
+                ),
+            })
+        elif drift:
+            findings.append({
+                "record": f"slot:{harness_kind}",
+                "problem": "slot-identity-drift",
+                "detail": (
+                    f"the stamp names '{drift['stamped']}' but the live slot "
+                    f"credential belongs to {drift['live']} (an out-of-band "
+                    f"`{harness_kind} /login`), so usage is being attributed to the "
+                    f"wrong account - repair with "
+                    f"`fno config accounts reconcile-slot {harness_kind}`"
                 ),
             })
 
@@ -988,6 +1091,39 @@ def doctor_providers(
 
     if findings:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# reconcile-slot (the taint's missing clearer, and out-of-band /login adoption)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("reconcile-slot")
+def reconcile_slot_cmd(
+    harness_name: str = typer.Argument(
+        "claude", help="claude (the only CLI with a shared-slot principal endpoint)"
+    ),
+) -> None:
+    """Prove who holds a CLI's shared credential slot, and repair the store to match.
+
+    Deliberately NOT a `clear-taint` verb. It reads the live slot credential,
+    resolves its principal, and acts only when that principal binds to exactly
+    one registered account - then it refreshes that account's snapshot, stamps
+    it active, and clears any taint. Anything less than proof (endpoint
+    unreachable, unregistered principal, two accounts fingerprinted alike)
+    writes nothing and exits non-zero naming which way it failed.
+
+    This is also how a manual `claude /login` gets adopted: that path writes the
+    Keychain directly and tells footnote nothing, so the stamp is the state
+    known to drift, and the live credential is the only thing that can correct it.
+    """
+    config = _load()
+    result = managed.reconcile_slot(harness_name, by_id=config.by_id)
+    if result.ok:
+        typer.echo(f"reconcile-slot: {result.detail}")
+        return
+    typer.echo(f"reconcile-slot: refused ({result.outcome}): {result.detail}", err=True)
+    raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------

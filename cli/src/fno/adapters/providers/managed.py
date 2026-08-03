@@ -30,10 +30,13 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import filelock
 import psutil
@@ -45,6 +48,22 @@ _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
 _CODEX_LOGIN_TIMEOUT_S = 5
 _CODEX_AUTH_ENV_VARS = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY")
+
+# The claude OAuth profile endpoint. Verified live 2026-08-03: it answers the
+# one question the store cannot answer about itself - WHO the credential now in
+# the slot belongs to - as non-secret identity (`account.uuid`, `organization`,
+# `email`), with no token echoed back. It is what makes an out-of-band
+# `claude /login` observable at all: that path writes the Keychain directly and
+# tells footnote nothing, so the stamp is the state known to drift.
+_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+_PROFILE_TIMEOUT_S = 10  # same budget usage.py gives the sibling usage endpoint
+_PROFILE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
+# How long a REFUSED auto-reconcile is backed off. Only failures are cached, and
+# only as backoff, never as proof: a success clears both the taint and this file.
+_RECONCILE_BACKOFF_S = 300
+# How long PROVEN slot-principal evidence stays good. Bounds the cost of
+# checking a stamp against the live credential on every fresh probe.
+_PRINCIPAL_TTL_S = 900
 
 
 class ManagedStoreError(RuntimeError):
@@ -75,8 +94,17 @@ class SwitchDeferred(ManagedStoreError):
 
 @dataclass(frozen=True)
 class PinningSession:
+    """A live process pinning a shared slot.
+
+    ``started`` is sampled during the scan, not later: between a scan and the
+    taint write a process can exit and its pid be recycled, and a start time
+    read afterwards would describe the replacement - fingerprinting exactly the
+    process the start time was added to exclude.
+    """
+
     pid: int
     cmdline: str
+    started: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -199,6 +227,129 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
     # claude
     default_cfg = _claude_slot_config_dir()
     cfg = config_dir or default_cfg
+    return _read_claude_blob(cfg, shared=cfg == default_cfg)
+
+
+def read_canonical_slot_blob(cli: str) -> Optional[str]:
+    """The credential a reader of the SHARED slot gets, ignoring ambient overrides.
+
+    ``_read_slot_blob`` honors ``CLAUDE_CONFIG_DIR``, which is right for an
+    operator verb writing the slot and wrong for an identity read: a worker
+    pinned to another account exports it, and reconciliation would then prove
+    the pinned account and stamp it onto the canonical slot.
+    """
+    blobs = canonical_slot_blobs(cli)
+    return blobs[0] if blobs else None
+
+
+def _read_claude_keychain_item(service: str) -> Optional[str]:
+    """One Keychain item's blob, or None when absent or a logged-out residue."""
+    out = _run_security(
+        ["find-generic-password", "-s", service, "-a", _claude_keychain_account(), "-w"]
+    )
+    if out.returncode != 0 or not out.stdout.strip():
+        return None
+    blob = out.stdout.strip()
+    return blob if _token_present(blob) else None
+
+
+def canonical_slot_blobs(cli: str) -> list[str]:
+    """Every distinct credential the SHARED slot can present, ignoring overrides.
+
+    darwin keeps TWO Keychain items for the canonical dir, scoped and unscoped,
+    and they can hold different accounts - a stale scoped item beside a live
+    unscoped one is the observed reality, and the reason the usage probe tries
+    several bearers. The on-disk ``.credentials.json`` is a third source, read
+    first by that probe. All of them are candidates: proving one and stamping it
+    would trust one account while a reader gets another.
+    """
+    if cli != "claude":
+        blob = _read_slot_blob(cli)
+        return [blob] if blob and blob.strip() else []
+    canonical = Path.home() / ".claude"
+    if sys.platform != "darwin":
+        blob = _read_claude_blob(canonical, shared=True)
+        return [blob] if blob and blob.strip() else []
+    out: list[str] = []
+    for service in (_claude_scoped_service(canonical), _CLAUDE_KEYCHAIN_SERVICE):
+        blob = _read_claude_keychain_item(service)
+        if blob and blob not in out:
+            out.append(blob)
+    # The on-disk credential file counts too, even on darwin where claude reads
+    # the Keychain: the usage probe reads it FIRST, so a stale file bearer could
+    # prove out and have its quota reported while the Keychain account is the
+    # one actually occupying the slot. The candidate set has to be every source
+    # anything reads, or "is this slot unambiguous" answers a narrower question
+    # than the one that matters.
+    try:
+        blob = (canonical / ".credentials.json").read_text(encoding="utf-8")
+    except OSError:
+        blob = ""
+    if blob.strip() and _token_present(blob) and blob not in out:
+        out.append(blob)
+    return out
+
+
+def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
+    """The one principal the shared slot presents, or a typed failure."""
+    principal, _blob, failure = canonical_slot_identity(cli)
+    return principal, failure
+
+
+def canonical_slot_identity(
+    cli: str,
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """``(principal, the blob it was proven from, failure)`` for the shared slot."""
+    return principal_of_blobs(canonical_slot_blobs(cli))
+
+
+def principal_of_blobs(
+    blobs: list[str],
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """``(principal, proven_blob, failure)`` for a captured set of credentials.
+
+    Takes the bytes rather than re-reading the slot so a caller can prove, store
+    and bind THE SAME credential: proving one read and snapshotting another is
+    how account A's identity ends up bound to account B's blob.
+
+    EVERY distinct candidate must prove, and they must all name one account.
+    Anything less is not attributable: whichever credential we stamped, some
+    reader could get the other one - and on macOS claude reads the scoped item
+    first while the usage probe reads the unscoped one, so "some reader" is not
+    hypothetical. ``ambiguous-slot`` (two accounts) is therefore not a tie to
+    break, and a candidate that failed to prove is not one to set aside.
+    """
+    if not blobs:
+        return None, None, "no-slot-credential"
+    resolved: list[tuple[dict, str]] = []
+    for blob in blobs:
+        principal, failure = slot_principal(blob)
+        if principal is None:
+            # No candidate is set aside, whatever the reason it did not prove.
+            # A 401 rejects an ACCESS token while its refresh token may still be
+            # live, so claude can refresh that account straight back into the
+            # slot it reads first; and an unanswered call says nothing at all.
+            # Either way we cannot show the slot holds one account, which is the
+            # only thing that makes it attributable.
+            return None, None, failure
+        resolved.append((principal, blob))
+    keys = {identity_key(principal) for principal, _blob in resolved}
+    if None in keys:
+        return None, None, "malformed-profile"
+    if len(keys) > 1:
+        return None, None, "ambiguous-slot"
+    principal, blob = resolved[0]
+    return principal, blob, None
+
+
+def _read_claude_blob(cfg: Path, *, shared: bool) -> Optional[str]:
+    """Read claude's credential for ``cfg``; ``shared`` allows the unscoped item.
+
+    ``shared`` is a parameter rather than a ``cfg == default`` test inside so a
+    canonical read stays canonical under an ambient override: the unscoped
+    Keychain item belongs to the shared slot, and whether we may read it is a
+    property of which slot we asked for, not of the environment.
+    """
     if sys.platform == "darwin":
         acct = _claude_keychain_account()
         # The unscoped Keychain item belongs to the default ~/.claude account
@@ -208,7 +359,7 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
         # only in its scoped item, so falling through would return the default
         # account's credential under the alternate dir (a misattribution).
         services = [_claude_scoped_service(cfg)]
-        if cfg == default_cfg:
+        if shared:
             services.append(_CLAUDE_KEYCHAIN_SERVICE)
         for service in services:
             out = _run_security(["find-generic-password", "-s", service, "-a", acct, "-w"])
@@ -431,7 +582,7 @@ def _pinning_sessions(
     default_resolved = _safe_resolve(default_dir) or default_dir
     me = os.getpid()
     found: list[PinningSession] = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
             if proc.info["pid"] == me:
                 continue
@@ -441,7 +592,7 @@ def _pinning_sessions(
             try:
                 env = proc.environ()
             except Exception:  # noqa: BLE001 - unreadable env: assume it pins the default slot
-                found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
+                found.append(_pinning_session(proc, cmdline))
                 continue
             override = env.get(env_var)
             proc_dir = _safe_resolve(Path(override)) if override else default_resolved
@@ -449,10 +600,19 @@ def _pinning_sessions(
             # unresolvable proc dir (proc_dir is None) is treated as pinning
             # (conservative: under-detecting a live session is the unsafe way).
             if proc_dir is None or proc_dir == slot:
-                found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
+                found.append(_pinning_session(proc, cmdline))
         except Exception:  # noqa: BLE001 - a vanished/denied process is not our switch's problem
             continue
     return found
+
+
+def _pinning_session(proc, cmdline: list[str]) -> PinningSession:
+    started = proc.info.get("create_time")
+    return PinningSession(
+        proc.info["pid"],
+        " ".join(cmdline),
+        float(started) if isinstance(started, (int, float)) else None,
+    )
 
 
 def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
@@ -551,6 +711,20 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
             f"no current {record.harness} login to snapshot for '{record.id}' "
             "(sign in first, then register)"
         )
+    return write_snapshot(record, blob, root)
+
+
+def write_snapshot(record: ProviderRecord, blob: str, root: Path | None = None) -> Path:
+    """Store ``blob`` as ``record``'s snapshot (dir 700, blob 600).
+
+    Split out of :func:`snapshot_current` so reconciliation can store the exact
+    blob whose principal it just proved, rather than re-reading the slot and
+    trusting that nothing moved in between.
+
+    Any previously proven ``principal`` survives the rewrite: it identifies the
+    ACCOUNT, not the credential, so a capture-before-overwrite that dropped it
+    would silently disarm the reconciliation that depends on it.
+    """
     try:
         adir = account_dir(record.id, root)
         adir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +736,10 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
             "captured_at": _utc_now_iso(),
             "kind": "keychain" if (record.harness == "claude" and sys.platform == "darwin") else "file",
         }
+        prior = read_meta(record.id, root) or {}
+        for key in ("principal", "principal_at"):
+            if key in prior:
+                meta[key] = prior[key]
         _atomic_write_private(_meta_path(record.id, root), json.dumps(meta, indent=2))
     except OSError as exc:
         raise ManagedStoreError(f"failed to write snapshot for '{record.id}': {exc}") from exc
@@ -716,12 +894,882 @@ def slot_tainted(cli: str, root: Path) -> bool:
     return _slot_taint_path(cli, root).exists()
 
 
-def _set_slot_taint(cli: str, root: Path, tainted: bool) -> None:
+def _set_slot_taint(
+    cli: str,
+    root: Path,
+    tainted: bool,
+    pids: "Sequence[int | tuple[int, Optional[float]]]" = (),
+) -> None:
+    """Write or clear the taint marker, recording WHICH sessions caused it.
+
+    The pids are what make the taint clearable later. Those processes were
+    launched under the OUTGOING account, so each is a live candidate to
+    overwrite the slot with that account's refreshed credential; a session
+    started afterwards already read the new credential and is harmless. Without
+    the list, a repair could only ask "is anything pinned right now?", which on
+    the shared slot is almost always yes - including the very session doing the
+    repair.
+    """
     path = _slot_taint_path(cli, root)
     if tainted:
-        _atomic_write_private(path, "1")
+        # A pid alone is not an identity: pids are reused, and a recycled one
+        # would make an unrelated process look like the tainting session and
+        # block the repair FOREVER. The start time pins which process it was.
+        # A caller that already scanned passes (pid, started) so the sample is
+        # not taken after the process may have exited and been replaced.
+        writers = [
+            {"pid": entry[0], "started": entry[1]}
+            if isinstance(entry, tuple)
+            else {"pid": entry, "started": _process_started_at(entry)}
+            for entry in pids
+        ]
+        _atomic_write_private(
+            path, json.dumps({"pids": [w["pid"] for w in writers], "writers": writers})
+        )
     else:
         path.unlink(missing_ok=True)
+
+
+def _process_started_at(pid: int) -> Optional[float]:
+    """A process's creation time, or None when it cannot be read."""
+    try:
+        return float(psutil.Process(pid).create_time())
+    except Exception:  # noqa: BLE001 - gone or denied; the caller decides
+        return None
+
+
+def tainting_writers(
+    cli: str, root: Path
+) -> Optional[list[tuple[int, Optional[float]]]]:
+    """``(pid, started_at)`` for each recorded taint writer, or None if unrecorded.
+
+    None means "this marker cannot say" - a legacy marker written before writers
+    were recorded - and the caller falls back to a conservative live scan. An
+    empty list is a real answer: nothing was pinning.
+    """
+    try:
+        raw = _slot_taint_path(cli, root).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    writers = data.get("writers")
+    if isinstance(writers, list):
+        out: list[tuple[int, Optional[float]]] = []
+        for entry in writers:
+            if isinstance(entry, dict) and isinstance(entry.get("pid"), int):
+                started = entry.get("started")
+                out.append(
+                    (entry["pid"], float(started) if isinstance(started, (int, float)) else None)
+                )
+        return out
+    pids = data.get("pids")
+    if not isinstance(pids, list):
+        return None
+    # A marker from before start times were recorded: pid-only, so a recycled
+    # pid still over-blocks there. Refusing is the safe direction, and the entry
+    # is replaced by the next switch.
+    return [(pid, None) for pid in pids if isinstance(pid, int)]
+
+
+def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
+    """Just the pids from :func:`tainting_writers`, or None when unrecorded."""
+    writers = tainting_writers(cli, root)
+    return None if writers is None else tuple(pid for pid, _started in writers)
+
+
+def taint_writers_still_live(cli: str, root: Path) -> list[str]:
+    """Sessions that could still rewrite the slot with a DIFFERENT credential.
+
+    Proving the live principal proves it NOW. A session that was pinning when
+    the taint was written holds the previous account's token and can flush a
+    refresh of it into the slot at any moment, so clearing the taint while one
+    is alive restores exactly the condition the taint records - and the next
+    capture-before-overwrite would then file that credential under the record we
+    just stamped.
+    """
+    if not slot_tainted(cli, root):
+        # No taint means nothing recorded a writer, which is different from a
+        # marker that cannot say. Falling through to a live scan here would let
+        # any pinned session block the out-of-band-/login repair - the case the
+        # verb exists for, and the one where a live pin is routinely the very
+        # session running it.
+        return []
+    recorded = tainting_writers(cli, root)
+    if recorded is None:
+        return [f"pid {session.pid}" for session in pinning_sessions_for(cli)]
+    alive: list[str] = []
+    for pid, started in recorded:
+        current = _process_started_at(pid)
+        if current is None:
+            try:
+                if not psutil.pid_exists(pid):
+                    continue  # gone: it can no longer write anything
+            except Exception:  # noqa: BLE001 - unreadable, so assume it is there
+                pass
+            alive.append(f"pid {pid}")
+            continue
+        # A pid that exists but started at a different time is a DIFFERENT
+        # process wearing a recycled number, and must not hold the repair.
+        if started is None or abs(current - started) < 1.0:
+            alive.append(f"pid {pid}")
+    return alive
+
+
+# ---------------------------------------------------------------------------
+# Principal reconciliation: the live credential is the truth, the store is cache
+#
+# Everything above assumes footnote performs every slot transition. `claude
+# /login` breaks that assumption - it writes the Keychain directly and tells us
+# nothing - and the taint marker written under live pins has no clearer, so a
+# false taint made every quota read UNKNOWN with no way back. Both are the same
+# gap: the store has no way to ask who is actually in the slot. Asking the
+# credential itself is the answer, and it must be an ANSWER, never a guess:
+# taint clears only when the live principal binds to exactly one record.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Why reconciliation did or did not repair the slot.
+
+    ``outcome`` is the typed reason a caller branches on and a receipt prints;
+    every value other than ``matched`` means NOTHING was written.
+    """
+
+    outcome: str
+    record_id: Optional[str] = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "matched"
+
+
+def principal_fingerprint(profile: object) -> Optional[dict]:
+    """The smallest stable non-secret identity in a ``/api/oauth/profile`` body.
+
+    ``account.uuid`` is the whole discriminator: it names the human, so it
+    survives every token refresh, and it differs across configured accounts.
+    ``organization_uuid`` and ``email`` ride along only to make a refusal
+    readable. A MATCH is decided by :func:`identity_key`, which requires both
+    the account and the organization: Claude Code usage is organization-scoped,
+    so the account uuid alone would let a bearer for another organization pass
+    as this record. Returns None when the payload carries no stable account
+    uuid, which the caller reports as ``malformed-profile`` rather than
+    treating an unknown shape as a match.
+    """
+    if not isinstance(profile, dict):
+        return None
+    account = profile.get("account")
+    if not isinstance(account, dict):
+        return None
+    uuid = account.get("uuid")
+    if not isinstance(uuid, str) or not uuid:
+        return None
+    out: dict = {"account_uuid": uuid}
+    org = profile.get("organization")
+    if isinstance(org, dict) and isinstance(org.get("uuid"), str) and org["uuid"]:
+        out["organization_uuid"] = org["uuid"]
+    email = account.get("email")
+    if isinstance(email, str) and email:
+        out["email"] = email
+    return out
+
+
+def slot_principal(blob: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+    """``(principal, failure)`` for the credential inside ``blob``.
+
+    Exactly one side is ever set. ``failure`` is ``profile-unavailable`` (no
+    bearer, network error, timeout, 401) or ``malformed-profile`` (a 200 whose
+    body carries no stable principal). An unavailable endpoint proves NOTHING -
+    not that the slot changed and not that it did not - so it can never clear a
+    taint. The bearer is used and dropped: never returned, logged, or stored.
+    """
+    from fno.adapters.providers.usage import _token_from_blob
+
+    bearer = _token_from_blob(blob)
+    if not bearer:
+        # No usable bearer at all: nothing can present this as a live identity,
+        # so it is a dead candidate rather than an unanswered question.
+        return None, "credential-rejected"
+    return principal_of_bearer(bearer)
+
+
+def principal_of_bearer(bearer: str) -> tuple[Optional[dict], Optional[str]]:
+    """``(principal, failure)`` for one exact OAuth bearer.
+
+    Taking the bearer rather than a slot location is what lets a caller prove
+    the identity of the CREDENTIAL IT WILL ACTUALLY USE. Proving one credential
+    and then measuring another is the same misattribution by a longer route:
+    the scoped and unscoped Keychain items can hold different accounts, and a
+    stale scoped item is exactly why the usage probe tries several bearers.
+    """
+    req = urllib.request.Request(
+        _PROFILE_URL,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": _PROFILE_USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_PROFILE_TIMEOUT_S) as resp:
+            body = resp.read()
+    except urllib.error.HTTPError as exc:
+        # 401/403 is the endpoint ANSWERING: this credential is not usable, so
+        # it cannot be what anyone is billing. Every other status - 429, 5xx -
+        # is the question going unanswered, which is a different thing and must
+        # not be mistaken for a dead credential.
+        if exc.code in (401, 403):
+            return None, "credential-rejected"
+        return None, "profile-unavailable"
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None, "profile-unavailable"
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None, "malformed-profile"
+    fingerprint = principal_fingerprint(payload)
+    if fingerprint is None:
+        return None, "malformed-profile"
+    return fingerprint, None
+
+
+def identity_key(principal: Optional[dict]) -> Optional[str]:
+    """The comparable identity in a principal, or None when it is incomplete.
+
+    Both the account AND the organization, because Claude Code usage is
+    organization-scoped: one human can belong to two organizations, and
+    comparing the account uuid alone would let an org-B bearer pass as the
+    org-A record and file its usage there. An identity missing either half is
+    not comparable at all - fail closed rather than match on the half we have.
+    """
+    if not isinstance(principal, dict):
+        return None
+    account = principal.get("account_uuid")
+    org = principal.get("organization_uuid")
+    if not isinstance(account, str) or not account:
+        return None
+    if not isinstance(org, str) or not org:
+        return None
+    return f"{account}/{org}"
+
+
+def record_principal(record_id: str, root: Path | None = None) -> Optional[dict]:
+    """``record_id``'s proven principal, or None when it has never been bound."""
+    meta = read_meta(record_id, root) or {}
+    principal = meta.get("principal")
+    if isinstance(principal, dict) and principal.get("account_uuid"):
+        return principal
+    return None
+
+
+def write_record_principal(record_id: str, principal: dict, root: Path | None = None) -> None:
+    """Bind ``principal`` to ``record_id`` in its private metadata (600).
+
+    Private store metadata, never a receipt and never the graph: it is identity
+    for matching, and the less of it that travels the better.
+    """
+    meta = read_meta(record_id, root) or {}
+    meta["principal"] = principal
+    meta["principal_at"] = _utc_now_iso()
+    _atomic_write_private(_meta_path(record_id, root), json.dumps(meta, indent=2))
+
+
+def capture_record_principal(
+    record: ProviderRecord,
+    blob: Optional[str] = None,
+    root: Path | None = None,
+    *,
+    force: bool = False,
+) -> Optional[dict]:
+    """Best-effort: prove and store ``record``'s principal from its credential.
+
+    Called where footnote KNOWS which account a blob belongs to (register, and
+    the tail of a verified switch), so the binding is established while the
+    answer is certain. Never raises and never blocks its caller: a record with
+    no bound principal is simply unmatchable later, and reconciliation refuses
+    loudly instead of guessing.
+
+    ``force`` re-binds an already-bound record. Register sets it (re-registering
+    an id is how an operator rebinds it to a different account); switch does
+    not, so a routine switch of an already-bound record costs no network call.
+    """
+    if record.harness != "claude":
+        return None
+    if not force and record_principal(record.id, root) is not None:
+        return None
+    material = blob if blob is not None else read_blob(record.id, root)
+    principal, _failure = slot_principal(material)
+    if principal is None:
+        if force:
+            # Re-registering an id points it at whatever is signed in NOW, while
+            # `write_snapshot` deliberately preserves the previous principal for
+            # capture-before-overwrite. Leaving that binding here would claim the
+            # new credential belongs to the old account - a confident lie is
+            # worse than an unmatchable record, so drop it.
+            _clear_record_principal(record.id, root)
+        return None
+    try:
+        write_record_principal(record.id, principal, root)
+    except OSError:
+        return None
+    return principal
+
+
+def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
+    """``{stamped, live}`` when the stamp and the live slot disagree, else None.
+
+    The taint marker only watches the door footnote controls. An out-of-band
+    `claude /login` walks through the other one, leaving a stamp that is wrong
+    and UNTAINTED - so attribution proceeds confidently and files the new
+    account's usage under the old account's name. This is the read that makes
+    that loud.
+
+    Read-only, and free until it can answer: with no bound principal there is
+    nothing to compare, so an unbound store never pays for a profile call.
+    """
+    if cli != "claude":
+        return None
+    try:
+        stamped = active_slot_id(cli, root)
+    except OSError:
+        return None
+    if not stamped:
+        return None
+    bound = record_principal(stamped, root)
+    if bound is None:
+        return None
+    try:
+        principal, failure = canonical_slot_principal(cli)
+    except ManagedStoreError:
+        return None  # an unreadable slot cannot demonstrate drift
+    if failure == "ambiguous-slot":
+        # Reporting healthy here would hide two accounts sharing one slot.
+        return {"stamped": stamped, "live": None, "ambiguous": True}
+    if principal is None or identity_key(principal) == identity_key(bound):
+        return None
+    return {
+        "stamped": stamped,
+        "live": principal.get("email") or principal.get("account_uuid"),
+        "ambiguous": False,
+    }
+
+
+def _clear_record_principal(record_id: str, root: Path | None = None) -> None:
+    """Drop a record's principal binding, leaving the rest of its metadata."""
+    meta = read_meta(record_id, root) or {}
+    if not meta.pop("principal", None) and "principal_at" not in meta:
+        return
+    meta.pop("principal_at", None)
+    try:
+        _atomic_write_private(_meta_path(record_id, root), json.dumps(meta, indent=2))
+    except OSError:
+        pass
+
+
+def _principal_cache_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".principal")
+
+
+def cached_slot_principal(
+    cli: str,
+    root: Path,
+    credential: Optional[str],
+    *,
+    now: float | None = None,
+    ttl: float = _PRINCIPAL_TTL_S,
+) -> Optional[str]:
+    """The account uuid last PROVEN for exactly ``blob``, while still fresh.
+
+    Keyed on a digest of the credential, not just the harness. Time alone is the
+    wrong key: an out-of-band `/login` inside the TTL would otherwise reuse
+    evidence about the credential it replaced, and the check built to catch that
+    login would be the thing that hides it.
+
+    Successful evidence only. A failure is never cached here - it would become
+    an excuse to skip the next check, the opposite of what an unproven identity
+    should cause.
+    """
+    digest = credential_digest(credential)
+    if digest is None:
+        return None
+    try:
+        data = json.loads(_principal_cache_path(cli, root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("credential") != digest:
+        return None
+    uuid, at = data.get("account_uuid"), data.get("at")
+    if not isinstance(uuid, str) or not isinstance(at, (int, float)):
+        return None
+    return uuid if (now if now is not None else time.time()) - at < ttl else None
+
+
+def note_slot_principal(
+    cli: str,
+    root: Path,
+    identity: str,
+    credential: Optional[str],
+    *,
+    now: float | None = None,
+) -> None:
+    digest = credential_digest(credential)
+    if digest is None:
+        return
+    try:
+        _atomic_write_private(
+            _principal_cache_path(cli, root),
+            json.dumps({
+                "account_uuid": identity,
+                "credential": digest,
+                "at": now if now is not None else time.time(),
+            }),
+        )
+    except OSError:
+        pass
+
+
+def clear_slot_principal_cache(cli: str, root: Path) -> None:
+    _principal_cache_path(cli, root).unlink(missing_ok=True)
+
+
+def bearer_principal_verdict(
+    cli: str,
+    record_id: str,
+    root: Path,
+    bearer: str,
+    *,
+    now: float | None = None,
+    ttl: float = _PRINCIPAL_TTL_S,
+) -> str:
+    """Does ``bearer`` belong to ``record_id``? ``match``/``mismatch``/``unprovable``.
+
+    The taint marker only watches the door footnote controls, so an out-of-band
+    `claude /login` leaves a stamp that is wrong AND untainted and attribution
+    proceeds confidently. This is the check that catches it - and it takes the
+    exact bearer so the credential proven is the credential measured.
+
+    ``unprovable`` (no bound principal, or the endpoint could not answer) is NOT
+    a pass. Shared-slot attribution without fresh proof is exactly the confident
+    wrong number this module exists to stop, and refusing costs little: the
+    usage endpoint that would consume the attribution shares a host with the
+    profile endpoint, so an outage hiding identity has already taken the
+    measurement with it. `doctor` reports an unbound principal so the resulting
+    unknown always carries a reason and a fix.
+    """
+    bound = record_principal(record_id, root)
+    if bound is None:
+        return "unprovable"
+    want = identity_key(bound)
+    if want is None:
+        return "unprovable"  # an incomplete binding cannot vouch for anything
+    cached = cached_slot_principal(cli, root, bearer, now=now, ttl=ttl)
+    if cached is not None:
+        return "match" if cached == want else "mismatch"
+    principal, _failure = principal_of_bearer(bearer)
+    got = identity_key(principal)
+    if got is None:
+        return "unprovable"
+    note_slot_principal(cli, root, got, bearer, now=now)
+    return "match" if got == want else "mismatch"
+
+
+def principal_holder(
+    identity: Optional[str], *, exclude_id: str, root: Path | None = None
+) -> Optional[str]:
+    """Another shared-slot record already bound to ``identity``, or None.
+
+    ``duplicate_credential_holder`` compares TOKENS, which rotate, so the same
+    account registered again after a rotation slips past it and creates two
+    records for one quota pool - and reconciliation then matches both and
+    refuses forever as ``ambiguous-match``. Principals do not rotate, so this
+    catches what the digest cannot.
+    """
+    if identity is None:
+        return None
+    base = root or store_root()
+    try:
+        entries = sorted(entry for entry in base.iterdir() if entry.is_dir())
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name == exclude_id:
+            continue
+        if identity_key(record_principal(entry.name, root)) == identity:
+            return entry.name
+    return None
+
+
+def register_slot_snapshot(
+    record: ProviderRecord,
+    root: Path | None = None,
+    *,
+    lock_timeout: float = 10,
+    persist: Optional[Callable[[], None]] = None,
+) -> tuple[Optional[Path], Optional[dict], Optional[str]]:
+    """Capture the shared slot for ``record`` and bind the identity of THOSE bytes.
+
+    ``(account_dir, principal, failure)``, where a ``None`` account_dir means
+    NOTHING was written - the caller reports a refusal on exactly that, rather
+    than on a list of failure names a new value could slip past. One read serves the proof, the
+    snapshot, and the binding, under the same mutex a switch takes - otherwise
+    the identity proved and the credential stored can be two different accounts,
+    either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
+    because a concurrent switch replaces the slot between them.
+
+    ``ambiguous-slot``, ``duplicate-principal:<id>``,
+    ``duplicate-credential:<id>`` and ``slot-changed`` write nothing;
+    ``slot-moved-after-write`` DID register, but the slot moved during the
+    writes, so the stamp is tainted rather than trusted: with two
+    accounts in the slot there is no way to know which one the operator meant,
+    and a principal another record already holds would create two records for
+    one quota pool. Any other failure still snapshots (registration must work
+    offline) and leaves the record unbound, which `doctor` reports.
+
+    ``persist`` (the caller's config save) runs inside the lock and BEFORE any
+    store write: a failed save must not leave a snapshot behind, because that
+    residue is what a later registration reads as a duplicate credential and
+    refuses. The stamp comes last, and is written here rather than by the
+    caller, because the captured credential IS what the slot holds at that
+    moment - and stamping an unconfigured orphan would make every configured
+    shared account unattributable behind it.
+    """
+    root = root or store_root()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=lock_timeout)
+    try:
+        lock.acquire()
+    except filelock.Timeout as exc:
+        raise SwitchDeferred(
+            "another slot transition is in progress; try again"
+        ) from exc
+    try:
+        blobs = canonical_slot_blobs(record.harness)
+        if not blobs:
+            raise ManagedStoreError(
+                f"no current {record.harness} login to snapshot for '{record.id}' "
+                "(sign in first, then register)"
+            )
+        if record.harness == "claude":
+            principal, proven_blob, failure = principal_of_blobs(blobs)
+        else:
+            # Only claude has a principal endpoint. Running a codex auth blob
+            # through the claude parser would report it as a dead credential
+            # and refuse a registration that had already been written.
+            principal, proven_blob, failure = None, blobs[0], None
+        if failure == "ambiguous-slot":
+            return None, None, failure
+        # A session recorded as tainting the slot can still overwrite it after
+        # the final read, so the provisional taint below must not simply
+        # discard it. Registration establishes a new truth; it cannot do that
+        # while something else can still change the slot underneath it.
+        blockers = taint_writers_still_live(record.harness, root)
+        if blockers:
+            return None, None, f"slot-pinned:{', '.join(blockers)}"
+        holder = principal_holder(
+            identity_key(principal), exclude_id=record.id, root=root
+        )
+        if holder is not None:
+            return None, None, f"duplicate-principal:{holder}"
+        # The token check belongs in here too, and must hash THE BLOB WE WILL
+        # STORE: an expired scoped candidate in front of a live unscoped one
+        # shifts what gets stored, and hashing the first candidate would then
+        # miss a duplicate and file it under a second id. A concurrent switch
+        # can also replace the slot after any check made outside this lock, and
+        # with the profile endpoint unavailable the principal check above cannot
+        # catch what the digest would.
+        stored_blob = proven_blob or blobs[0]
+        token_holder = duplicate_credential_holder(
+            stored_blob, exclude_id=record.id, root=root
+        )
+        if token_holder is not None:
+            return None, None, f"duplicate-credential:{token_holder}"
+        # The profile request above is a network round trip. Re-verify the
+        # capture before committing anything, so an out-of-band login during it
+        # cannot leave a registration stamped for the account we proved while
+        # the slot holds the one that replaced it.
+        if canonical_slot_blobs(record.harness) != blobs:
+            return None, None, "slot-changed"
+        # Persist the record FIRST. Everything after this writes to the store,
+        # and store residue from a failed registration is what later reads as a
+        # duplicate credential and refuses a legitimate one; a config entry with
+        # no snapshot just tells the next switch to run register.
+        if persist is not None:
+            persist()
+        # Taint BEFORE the trusted writes, not after them. The writes take
+        # time; a crash, or a Keychain read that fails at the end, would
+        # otherwise leave an untainted stamp naming this record while the slot
+        # holds whoever logged in during the window - and the next switch would
+        # capture that credential into this record's snapshot. Provisional taint
+        # means "this stamp is not verified yet", which is what the marker is
+        # for, and makes every abrupt exit fail safe.
+        _set_slot_taint(record.harness, root, True, [])
+        adir = write_snapshot(record, stored_blob, root)
+        if principal is not None:
+            write_record_principal(record.id, principal, root)
+        else:
+            _clear_record_principal(record.id, root)
+        # Stamp INSIDE the lock: the captured credential is what the slot holds
+        # right now, and releasing first would let a concurrent switch install
+        # and stamp another account before this stamp overwrote it - leaving the
+        # stamp naming this record while the slot holds the other one.
+        stamp_active_slot(record.harness, record.id, root)
+        try:
+            settled = canonical_slot_blobs(record.harness) == blobs
+        except ManagedStoreError:
+            settled = False  # could not confirm, so do not clear the taint
+        if not settled:
+            # The account IS registered; only the stamp's trustworthiness is in
+            # question, so this reports success with a warning, not a refusal.
+            return adir, principal, "slot-moved-after-write"
+        _set_slot_taint(record.harness, root, False)
+        return adir, principal, failure
+    finally:
+        lock.release()
+
+
+def _reconcile_backoff_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".reconcile-attempt")
+
+
+def reconcile_backoff_active(
+    cli: str, root: Path, *, now: float | None = None, window: float = _RECONCILE_BACKOFF_S
+) -> bool:
+    """True when a refused auto-reconcile is still inside its backoff window.
+
+    Bounds the cost of a slot whose principal matches nothing: without it every
+    usage probe would re-hit the profile endpoint. Only the EXPLICIT
+    ``reconcile-slot`` verb ignores this, so an operator repairing the store is
+    never told to wait.
+    """
+    try:
+        stamp = float(_reconcile_backoff_path(cli, root).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return (now if now is not None else time.time()) - stamp < window
+
+
+def note_reconcile_attempt(cli: str, root: Path, *, now: float | None = None) -> None:
+    try:
+        _atomic_write_private(
+            _reconcile_backoff_path(cli, root), str(now if now is not None else time.time())
+        )
+    except OSError:
+        pass
+
+
+def _clear_reconcile_backoff(cli: str, root: Path) -> None:
+    _reconcile_backoff_path(cli, root).unlink(missing_ok=True)
+
+
+def reconcile_slot(
+    cli: str,
+    *,
+    by_id: dict[str, ProviderRecord],
+    root: Path | None = None,
+    lock_timeout: float = 10,
+) -> ReconcileResult:
+    """Prove who is in ``cli``'s shared slot and repair the store to match.
+
+    Takes the SAME mutex as :func:`switch`, and reads the slot INSIDE it, so a
+    concurrent footnote switch can never make this observation stale between
+    the read and the write it justifies.
+
+    On a unique match: refresh that record's snapshot from the live blob, stamp
+    it active, clear the taint. On anything else - endpoint down, malformed
+    body, no matching record, two matching records - write nothing at all and
+    return the typed reason. The one exception is a change detected AFTER the
+    commit began: the taint set at its start simply stays, which is a write in
+    the safe direction (nothing trusts the stamp) rather than a repair. That asymmetry is the point: a wrong clear files
+    one account's usage under another's name, which is worse than staying
+    UNKNOWN.
+    """
+    if cli != "claude":
+        return ReconcileResult(
+            "unsupported-harness",
+            detail=(
+                f"'{cli}' has no principal endpoint to prove slot identity with; "
+                "only claude slots can be reconciled"
+            ),
+        )
+    root = root or store_root()
+    if not root.is_dir():
+        # Creating the store here would be a write on a path that cannot
+        # possibly match anything, breaking the guarantee that only `matched`
+        # touches disk. Nothing is registered, so the answer is already known.
+        return ReconcileResult(
+            "no-managed-store",
+            detail=(
+                f"no managed store at {root}; register an account while it is "
+                "signed in before there is anything to reconcile against"
+            ),
+        )
+    lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=lock_timeout)
+    try:
+        lock.acquire()
+    except filelock.Timeout:
+        return ReconcileResult(
+            "lock-timeout", detail="another slot transition is in progress; try again"
+        )
+    try:
+        return _reconcile_locked(cli, by_id=by_id, root=root)
+    except ManagedStoreError as exc:
+        # A `security` timeout or denial is a slot we could not read, which is
+        # a refusal like any other - not a traceback out of an operator verb.
+        return ReconcileResult("slot-unreadable", detail=str(exc))
+    finally:
+        lock.release()
+
+
+def _slot_pinned_detail(blockers: list[str]) -> str:
+    return (
+        f"{', '.join(blockers)} was pinning the slot when it was tainted and can "
+        "still write the previous account's refreshed credential, so proving the "
+        "identity now would not keep it true; stop it and retry"
+    )
+
+
+def _reconcile_locked(
+    cli: str, *, by_id: dict[str, ProviderRecord], root: Path
+) -> ReconcileResult:
+    # The pin gate runs FIRST. Resolving the principal is a network round trip,
+    # and a recorded writer that rewrites the slot and exits during that call
+    # would pass a liveness check made afterwards - leaving us to stamp a
+    # credential we proved before it was replaced.
+    blockers = taint_writers_still_live(cli, root)
+    if blockers:
+        return ReconcileResult("slot-pinned", detail=_slot_pinned_detail(blockers))
+
+    blobs = canonical_slot_blobs(cli)
+    if not blobs:
+        return ReconcileResult(
+            "no-slot-credential",
+            detail=f"no live {cli} login in the shared slot; sign in, then reconcile",
+        )
+    # Prove THE CAPTURE, not a second read: an A -> B -> A flip between the two
+    # would prove B, survive the later comparison against the captured A, and
+    # cache A's bearer under B's identity.
+    principal, proven_blob, failure = principal_of_blobs(blobs)
+    blob = proven_blob or blobs[0]
+    if principal is None:
+        if failure == "ambiguous-slot":
+            return ReconcileResult(
+                "ambiguous-slot",
+                detail=(
+                    f"the {cli} slot presents credentials belonging to different "
+                    "accounts (a stale scoped Keychain item beside a live unscoped "
+                    "one); whichever was stamped, some reader would get the other - "
+                    "sign out and back in to settle it"
+                ),
+            )
+        return ReconcileResult(
+            failure or "profile-unavailable",
+            detail=(
+                "could not prove who the live slot credential belongs to; "
+                "taint, stamp and snapshots are unchanged"
+            ),
+        )
+
+    # A record with its OWN config_dir is attributable without the shared slot
+    # (usage.py accepts its dir before taint is ever consulted), so it is not a
+    # candidate for the slot's identity and must not be able to claim it.
+    matches = [
+        record_id
+        for record_id, record in sorted(by_id.items())
+        if record.harness == cli
+        and record.auth == "managed"
+        and record.config_dir is None
+        and identity_key(record_principal(record_id, root)) == identity_key(principal)
+    ]
+    who = principal.get("email") or principal.get("account_uuid") or "an unknown account"
+    if not matches:
+        return ReconcileResult(
+            "zero-match",
+            detail=(
+                f"the live slot holds {who}, which matches no registered account's "
+                "proven identity; sign that account in and run "
+                "`fno config accounts register <id>` to bind it"
+            ),
+        )
+    if len(matches) > 1:
+        return ReconcileResult(
+            "ambiguous-match",
+            detail=(
+                f"the live slot holds {who}, which matches {len(matches)} records "
+                f"({', '.join(matches)}); one of them was registered while the other "
+                "was signed in"
+            ),
+        )
+
+    matched = matches[0]
+    # Identity was proven about the bytes read above, so commit only if those
+    # bytes are still what the slot holds. Re-reading is what actually closes
+    # the profile-call window: a writer that rewrote the slot and exited during
+    # it leaves nothing for a liveness check to find.
+    if canonical_slot_blobs(cli) != blobs:
+        return ReconcileResult(
+            "slot-changed",
+            detail=(
+                "the slot credential changed while its identity was being "
+                "proven; nothing was written, retry once it settles"
+            ),
+        )
+    blockers = taint_writers_still_live(cli, root)
+    if blockers:
+        return ReconcileResult("slot-pinned", detail=_slot_pinned_detail(blockers))
+
+    # Snapshot first, stamp second, clear taint last: a crash at any point
+    # leaves the taint set, which is the safe direction to fail.
+    # Taint FIRST, so the marker covers the whole window in which the stamp
+    # exists but is not yet verified. This path is also reached from an
+    # UNTAINTED drift repair, where there would otherwise be no marker at all
+    # while the writes ran - and a crash between them would leave a freshly
+    # written, unverified stamp fully trusted. The recorded pids are dropped
+    # deliberately: the live-writer gate above already passed, so they no longer
+    # gate anything, and an empty list lets a retry proceed once the slot settles.
+    _set_slot_taint(cli, root, True, [])
+    write_snapshot(by_id[matched], blob, root)
+    write_record_principal(matched, principal, root)
+    stamp_active_slot(cli, matched, root)
+    # Clearing the taint is what makes the stamp TRUSTED, so it gets the last
+    # look - and a look we could not take counts as unsettled.
+    try:
+        settled = canonical_slot_blobs(cli) == blobs
+    except ManagedStoreError:
+        settled = False
+    if not settled:
+        clear_slot_principal_cache(cli, root)
+        return ReconcileResult(
+            "slot-changed",
+            detail=(
+                f"'{matched}' was proven and its snapshot refreshed, but the slot "
+                "changed again before the stamp could be trusted; the slot is "
+                "marked tainted so nothing reads it - retry once it settles"
+            ),
+        )
+    _set_slot_taint(cli, root, False)
+    _clear_reconcile_backoff(cli, root)
+    # Key the evidence on the BEARER inside the blob, not the blob, so the usage
+    # probe's per-bearer lookup finds this entry instead of re-proving it.
+    from fno.adapters.providers.usage import _token_from_blob
+
+    note_slot_principal(
+        cli, root, identity_key(principal) or "", _token_from_blob(blob)
+    )
+    return ReconcileResult(
+        "matched",
+        record_id=matched,
+        detail=(
+            f"the live {cli} slot belongs to '{matched}' (proven by live profile); "
+            "snapshot refreshed, stamped active, taint cleared"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -777,6 +1825,31 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
     except OSError as exc:
         return f"active stamp could not be cleared ({exc})"
     return "active stamp cleared because the slot occupant is unverified"
+
+
+def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
+    """Re-snapshot the outgoing account's current slot credential. True if done.
+
+    Reads the SAME canonical candidates the identity path resolves, because
+    those two must not disagree about which credential belongs to a record:
+    reconciliation may have stored the proven (unscoped) blob while a
+    scoped-first read here would capture the other one straight back over it.
+
+    More than one distinct credential in the slot means we cannot say which is
+    this record's, so it captures nothing and the older snapshot stands. That
+    loses a rotated refresh token at worst - recoverable with a login - where
+    guessing would file another account's credential under this record, which
+    is silent and is not. It is the same "skip capture rather than poison it"
+    stance the taint check above already takes.
+
+    A read failure still propagates: overwriting the slot without capturing a
+    live credential we could not read would lose the outgoing token for real.
+    """
+    blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
+    if len(blobs) != 1:
+        return False
+    write_snapshot(outgoing, blobs[0], root)
+    return True
 
 
 def switch(
@@ -862,17 +1935,7 @@ def _switch_locked(
     # stamped account's snapshot with them.
     rollback_blob: Optional[str] = _read_slot_blob(target.harness)
     if outgoing_id and outgoing_id in by_id and not slot_tainted(target.harness, root):
-        try:
-            snapshot_current(by_id[outgoing_id], root)
-        except KeychainError:
-            # A real read failure over a live credential must NOT be swallowed:
-            # proceeding would overwrite the slot and lose the outgoing account's
-            # rotated refresh token. Abort with the receipt; slot still untouched.
-            raise
-        except ManagedStoreError:
-            # No readable outgoing login (fresh slot / already cleared): nothing
-            # to capture, so nothing to lose. Proceed.
-            pass
+        _capture_outgoing(by_id[outgoing_id], root)
 
     _write_slot_blob(target.harness, target_blob)
 
@@ -947,7 +2010,23 @@ def _switch_locked(
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.harness, target.id, root)
-    _set_slot_taint(target.harness, root, bool(pinned_by))
+    _set_slot_taint(
+        target.harness,
+        root,
+        bool(pinned_by),
+        [(session.pid, session.started) for session in pins],
+    )
+    # The slot now holds a different credential, so any cached principal
+    # evidence describes the previous occupant.
+    clear_slot_principal_cache(target.harness, root)
+    # Deliberately NOT binding target's principal here. A switch materializes
+    # the record's STORED snapshot, and a snapshot's provenance is the store,
+    # not the operator: an earlier out-of-band login plus capture-before-
+    # overwrite can leave one account's credential filed under another's id
+    # (the `duplicate-credential` doctor finding exists for that). Binding from
+    # it would manufacture confident attribution to the wrong account, which is
+    # the failure this module is about. Only `register` - where the operator
+    # asserts that the signed-in account IS this record - is trusted provenance.
     if emit_fn is not None:
         event: dict[str, object] = {
             "provider": target.id,

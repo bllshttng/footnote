@@ -692,3 +692,444 @@ class TestRequiredBotHeadroomCheck:
         now = _t.time()
         write_usage_snapshot(_snap("codex-pro", UsageWindow("5h", 20.0, now + 3600), probed_at=now), now=now)
         assert pcli.required_bot_headroom_check() == []
+
+
+# ---------------------------------------------------------------------------
+# x-4b8d: a fresh probe self-heals a PROVEN false taint (AC4-FR)
+# ---------------------------------------------------------------------------
+
+
+class TestTaintSelfHeal:
+    """A tainted slot used to be a terminal state: the probe refused, the taint
+    had no clearer, and every quota consumer read UNKNOWN until someone deleted
+    a marker file by hand. A fresh probe now asks the reconciliation primitive
+    once, and resumes only if identity was PROVEN."""
+
+    @staticmethod
+    def _slot(tmp_path, monkeypatch, token: str = "slot-token"):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir(exist_ok=True)
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": token}})
+        )
+        return slot
+
+    @staticmethod
+    def _record(record_id: str = "primary") -> ProviderRecord:
+        return ProviderRecord(
+            id=record_id, name=record_id, harness="claude", auth="managed"
+        )
+
+    def test_proven_match_clears_taint_and_reports_real_usage(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4-FR: reconciliation proves the record, so the probe resumes."""
+        import fno.adapters.providers.usage as usage_mod
+
+        self._slot(tmp_path, monkeypatch)
+        rec = self._record()
+        attributable = {"value": False}
+        calls: list[str] = []
+
+        monkeypatch.setattr(
+            usage_mod, "_is_active_slot_occupant", lambda r: attributable["value"]
+        )
+
+        def _reconcile(cli, *, by_id, root=None, lock_timeout=10):
+            calls.append(cli)
+            attributable["value"] = True  # the taint cleared
+            from fno.adapters.providers.managed import ReconcileResult
+
+            return ReconcileResult("matched", record_id=rec.id, detail="proven")
+
+        # The probe table binds the function at import; patching the module
+        # attribute alone would leave the real probe wired up.
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: UsageSnapshot(
+            provider_id=r.id,
+            windows=(UsageWindow(label="5h", used_pct=22.0, resets_at=now + 60),),
+            probed_at=now,
+            source="oauth-endpoint",
+        ))
+        self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True)
+
+        snap = probe_usage(rec, now=1000.0)
+
+        assert calls == ["claude"]
+        assert snap is not None and snap.windows[0].used_pct == 22.0
+
+    def test_unproven_identity_stays_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC4-FR: reconciliation could not prove the match, so UNKNOWN stands."""
+        import fno.adapters.providers.usage as usage_mod
+
+        self._slot(tmp_path, monkeypatch)
+        rec = self._record()
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: False)
+        monkeypatch.setitem(
+            usage_mod._PROBES, "claude",
+            lambda r, now: pytest.fail("an unproven slot must never be probed"),
+        )
+
+        def _reconcile(cli, *, by_id, root=None, lock_timeout=10):
+            from fno.adapters.providers.managed import ReconcileResult
+
+            return ReconcileResult("profile-unavailable", detail="endpoint down")
+
+        self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True)
+        assert probe_usage(rec, now=1000.0) is None
+
+    def test_an_untainted_refusal_never_calls_reconciliation(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A non-occupant is simply not this slot's account: nothing to repair."""
+        import fno.adapters.providers.usage as usage_mod
+
+        self._slot(tmp_path, monkeypatch)
+        rec = self._record("other")
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: False)
+
+        def _reconcile(cli, **kwargs):
+            pytest.fail("an untainted slot must not trigger reconciliation")
+
+        self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=False)
+        assert probe_usage(rec, now=1000.0) is None
+
+    def test_config_dir_record_never_reconciles(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Boundaries: its own dir is attributable, so taint cannot touch it."""
+        import fno.adapters.providers.usage as usage_mod
+
+        own = tmp_path / "claude-alt"
+        own.mkdir()
+        rec = ProviderRecord(
+            id="alt", name="alt", harness="claude", auth="managed", config_dir=own
+        )
+
+        def _reconcile(cli, **kwargs):
+            pytest.fail("a config_dir record must never enter slot reconciliation")
+
+        self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True)
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: None)
+        assert probe_usage(rec, now=1000.0) is None
+
+    def test_a_refusal_is_backed_off_not_retried_every_probe(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Only backoff is cached, never proof: a failure must not hammer the
+        endpoint, and it must not become a reason to skip a later repair."""
+        import fno.adapters.providers.usage as usage_mod
+
+        self._slot(tmp_path, monkeypatch)
+        rec = self._record()
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: False)
+        calls: list[str] = []
+
+        def _reconcile(cli, *, by_id, root=None, lock_timeout=10):
+            calls.append(cli)
+            from fno.adapters.providers.managed import ReconcileResult
+
+            return ReconcileResult("zero-match", detail="unregistered principal")
+
+        self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True, root=tmp_path)
+        probe_usage(rec, now=1000.0)
+        probe_usage(rec, now=1000.0)
+        assert calls == ["claude"]
+        # Past the window the repair is attempted again.
+        probe_usage(rec, now=1000.0 + 3600)
+        assert calls == ["claude", "claude"]
+
+    @staticmethod
+    def _arm(monkeypatch, usage_mod, rec, reconcile_fn, *, tainted: bool, root=None):
+        """Point the probe's reconciliation hook at a fake store."""
+        from fno.adapters.providers import managed as managed_mod
+        from fno.adapters.providers.model import ProvidersConfig
+
+        store = root if root is not None else Path("/nonexistent-store")
+        monkeypatch.setattr(managed_mod, "store_root", lambda: store)
+        monkeypatch.setattr(
+            managed_mod, "slot_tainted", lambda cli, r: tainted
+        )
+        monkeypatch.setattr(managed_mod, "reconcile_slot", reconcile_fn)
+        monkeypatch.setattr(
+            usage_mod, "_load_records", lambda: ProvidersConfig(records=[rec]).by_id
+        )
+
+
+class TestUntaintedStampDrift:
+    """The taint watches the door footnote controls. `claude /login` uses the
+    other one and leaves a stamp that is wrong AND untainted, so attribution
+    proceeds confidently and bills the wrong account - observed live."""
+
+    @staticmethod
+    def _record(record_id: str = "primary") -> ProviderRecord:
+        return ProviderRecord(
+            id=record_id, name=record_id, harness="claude", auth="managed"
+        )
+
+    @staticmethod
+    def _slot(tmp_path, monkeypatch, token: str = "slot-token"):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir(exist_ok=True)
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": token}})
+        )
+
+    @staticmethod
+    def _arm(monkeypatch, rec, *, verdicts, used, reconciled=None, root=None):
+        """Point the per-bearer verdict at a lookup table and record the bearer
+        the usage request actually spends."""
+        from pathlib import Path as _Path
+
+        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import managed as managed_mod
+        from fno.adapters.providers.model import ProvidersConfig
+
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: True)
+        monkeypatch.setattr(
+            managed_mod, "store_root", lambda: root or _Path("/nonexistent-store")
+        )
+        monkeypatch.setattr(managed_mod, "slot_tainted", lambda cli, r: False)
+        monkeypatch.setattr(
+            managed_mod, "bearer_principal_verdict",
+            lambda cli, record_id, r, bearer, **kw: verdicts[bearer],
+        )
+        monkeypatch.setattr(
+            managed_mod, "reconcile_slot",
+            lambda cli, **kw: (reconciled.append(cli) if reconciled is not None else None)
+            or managed_mod.ReconcileResult("zero-match", detail="nothing bound"),
+        )
+        monkeypatch.setattr(
+            usage_mod, "_load_records", lambda: ProvidersConfig(records=[rec]).by_id
+        )
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "five_hour": {
+                        "utilization": 22.0, "resets_at": "2026-08-03T10:00:00+00:00"
+                    }
+                }).encode()
+
+        def _urlopen(req, timeout=None):
+            used.append(req.headers["Authorization"].removeprefix("Bearer "))
+            return _Resp()
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _urlopen)
+
+    def test_the_credential_proven_is_the_credential_measured(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole finding: the probe tries several bearers because a stale
+        scoped Keychain item 401s while the unscoped one is live. A check that
+        proved one credential while the request spent another would report
+        account B's usage under account A's name."""
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        self._slot(tmp_path, monkeypatch)
+        monkeypatch.setattr(
+            usage_mod, "_read_claude_keychain_blobs",
+            lambda cfg: [json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})],
+        )
+        used: list[str] = []
+        self._arm(
+            monkeypatch, rec,
+            verdicts={"slot-token": "mismatch", "unscoped": "match"},
+            used=used, root=tmp_path,
+        )
+
+        snap = probe_usage(rec, now=1000.0)
+
+        assert snap is not None and snap.windows[0].used_pct == 22.0
+        # The mismatching bearer was never spent on a usage request.
+        assert used == ["unscoped"]
+
+    def test_every_candidate_unattributable_reports_unknown_and_repairs_once(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        rec = self._record()
+        self._slot(tmp_path, monkeypatch)
+        used: list[str] = []
+        reconciled: list[str] = []
+        self._arm(
+            monkeypatch, rec, verdicts={"slot-token": "mismatch"},
+            used=used, reconciled=reconciled, root=tmp_path,
+        )
+
+        assert probe_usage(rec, now=1000.0) is None
+        assert used == []  # no other account's usage was even fetched
+        assert reconciled == ["claude"]
+
+    def test_an_unprovable_identity_is_refused_not_assumed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Shared-slot attribution needs FRESH proof. Refusing costs little: the
+        usage endpoint that would consume the attribution shares a host with the
+        profile endpoint, so an outage hiding identity has already taken the
+        measurement with it."""
+        rec = self._record()
+        self._slot(tmp_path, monkeypatch)
+        used: list[str] = []
+        self._arm(
+            monkeypatch, rec, verdicts={"slot-token": "unprovable"},
+            used=used, root=tmp_path,
+        )
+
+        assert probe_usage(rec, now=1000.0) is None
+        assert used == []
+
+    def test_a_config_dir_record_is_never_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Boundaries: its own dir is attributable without the shared slot."""
+        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        own = tmp_path / "claude-alt"
+        own.mkdir()
+        (own / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "own-token"}})
+        )
+        rec = ProviderRecord(
+            id="alt", name="alt", harness="claude", auth="managed", config_dir=own
+        )
+        monkeypatch.setattr(
+            managed_mod, "bearer_principal_verdict",
+            lambda *a, **k: pytest.fail("a config_dir record consulted the slot"),
+        )
+        used: list[str] = []
+
+        class _Resp:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "five_hour": {
+                        "utilization": 4.0, "resets_at": "2026-08-03T10:00:00+00:00"
+                    }
+                }).encode()
+
+        def _urlopen(req, timeout=None):
+            used.append(req.headers["Authorization"])
+            return _Resp()
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _urlopen)
+        assert probe_usage(rec, now=1000.0) is not None
+        assert len(used) == 1
+
+    def test_a_codex_record_never_consults_a_principal(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """codex can never prove a slot principal, so refusing there would
+        silence its measurement permanently for no gain. Its probe simply does
+        not go through the bearer check."""
+        from fno.adapters.providers import managed as managed_mod
+
+        monkeypatch.setattr(
+            managed_mod, "bearer_principal_verdict",
+            lambda *a, **k: pytest.fail("a codex probe consulted a principal"),
+        )
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        (sessions / "s.jsonl").write_text(json.dumps({
+            "type": "event_msg",
+            "payload": {"rate_limits": {
+                "primary": {"used_percent": 4.0, "resets_at": 1783807404},
+            }},
+        }))
+        rec = ProviderRecord(
+            id="cx", name="cx", harness="codex", auth="oauth_dir",
+            credentials_source=tmp_path,
+        )
+        assert probe_usage(rec, now=1000.0) is not None
+
+
+class TestPrincipalEvidenceTTL:
+    def test_proven_evidence_is_reused_then_expires(self, tmp_path: Path) -> None:
+        """Cached briefly so an attribution check costs no call on the common
+        path."""
+        from fno.adapters.providers import managed
+
+        managed.note_slot_principal("claude", tmp_path, "acct-a", "tok-1", now=1000.0)
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, "tok-1", now=1000.0 + 60
+        ) == "acct-a"
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, "tok-1", now=1000.0 + 100_000
+        ) is None
+
+    def test_a_changed_credential_invalidates_the_cache_within_the_ttl(
+        self, tmp_path: Path
+    ) -> None:
+        """Time alone is the wrong key: an out-of-band /login inside the TTL
+        would otherwise reuse evidence about the credential it replaced, and the
+        check built to catch that login would be the thing hiding it."""
+        from fno.adapters.providers import managed
+
+        managed.note_slot_principal("claude", tmp_path, "acct-a", "tok-1", now=1000.0)
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, "tok-2", now=1000.0 + 60
+        ) is None
+
+    def test_an_unbound_record_is_unprovable(self, tmp_path: Path) -> None:
+        from fno.adapters.providers import managed
+
+        assert managed.bearer_principal_verdict(
+            "claude", "never-bound", tmp_path, "tok-1"
+        ) == "unprovable"
+
+
+class TestAmbiguousSlotIsNotAttributable:
+    def test_two_credentials_in_the_slot_report_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """claude reads the scoped Keychain item first while this probe reads
+        the unscoped one, so a bearer that proves out here can still be a
+        different account from the one actually being billed."""
+        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})
+        )
+        rec = ProviderRecord(
+            id="primary", name="primary", harness="claude", auth="managed"
+        )
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: True)
+        monkeypatch.setattr(managed_mod, "slot_tainted", lambda cli, r: False)
+        monkeypatch.setattr(
+            managed_mod, "canonical_slot_blobs", lambda cli: ["scoped-a", "unscoped-b"]
+        )
+        monkeypatch.setattr(
+            managed_mod, "bearer_principal_verdict",
+            lambda *a, **k: pytest.fail("asked about one bearer in an ambiguous slot"),
+        )
+        monkeypatch.setattr(
+            managed_mod, "reconcile_slot",
+            lambda cli, **kw: managed_mod.ReconcileResult("ambiguous-slot", detail="two"),
+        )
+        # Exercise the real probe: the check lives per-bearer inside it, so
+        # stubbing the probe out would test nothing.
+        monkeypatch.setattr(
+            usage_mod.urllib.request, "urlopen",
+            lambda *a, **k: pytest.fail("queried usage for an ambiguous slot"),
+        )
+
+        assert probe_usage(rec, now=1000.0) is None

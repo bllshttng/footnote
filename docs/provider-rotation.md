@@ -271,9 +271,88 @@ One read-only verb reporting the store's real condition, exiting non-zero when a
 - a stored credential past its expiry
 - a `config_dir` that is missing or holds no login
 - a tainted slot
+- a shared-slot account with no proven identity bound (why its usage reads `unknown`)
+- a stamp the live slot credential contradicts (an out-of-band `/login`)
 
 `register` refuses a duplicate credential up front, but that guard is register-time only.
 `doctor` is the surface that reports stores predating it, and the verb that confirms a `--config-dir` conversion took.
+It stays read-only: for the one finding it cannot merely report, it names `fno config accounts reconcile-slot <harness>` as the repair.
+
+### `fno config accounts reconcile-slot <harness>`
+
+The store assumes footnote performs every slot transition, and two things break that assumption.
+A switch that proceeds under live pins marks the slot **tainted**, which makes every usage read for that account `unknown` until the taint clears.
+And `claude /login` replaces the shared credential directly, telling footnote nothing, so the active stamp keeps naming whoever was there before.
+
+`reconcile-slot` closes both by treating the live credential as the source of truth and the store as a cache.
+It reads the slot credential, resolves its principal from the live OAuth profile, and compares that against each registered account's proven identity.
+On exactly one match it refreshes that account's snapshot from the live blob, stamps it active, and clears the taint, all under the same mutex a switch takes.
+
+```bash
+fno config accounts reconcile-slot claude
+```
+
+It is deliberately **not** a `clear-taint` verb, and it will not act on anything short of proof.
+An unreachable profile endpoint, a malformed response, a slot `security` could not read, a principal matching no registered account, or one matching two of them each leave the stamp, the snapshots, and the taint byte-identical, and exit non-zero naming which of those happened.
+Clearing a taint without proof would file one account's usage under another's name, which is worse than staying `unknown`.
+
+It also refuses with `slot-pinned` while a session that was pinning when the taint was written is still alive.
+Proving the principal proves it now, and that session was launched under the outgoing account, so its next token refresh can overwrite the slot with that account's credential.
+The taint marker records those sessions for exactly this check: a session started after the switch already read the new credential and never blocks a repair, which matters because on the shared slot the pinning session is usually the account being proven.
+Each is recorded as a pid *and* its start time, because pids are reused and a recycled one wearing a dead session's number would hold the repair open permanently.
+Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pinned to another account exports it and reconciliation would otherwise prove the pinned account and stamp it onto the canonical slot.
+On macOS the shared slot has two Keychain items, scoped and unscoped, and a stale one can sit beside a live one holding a different account.
+The on-disk `~/.claude/.credentials.json` is a third source: the usage probe reads it first even on macOS, so a stale file bearer could otherwise prove out and have its quota reported while the Keychain account occupies the slot.
+Reconciliation resolves both and refuses with `ambiguous-slot` when they name different accounts: that is not a tie to break, because whichever was stamped, some reader would get the other one.
+Every distinct candidate must prove, and they must all name one account.
+No candidate is set aside, whatever the reason it did not prove: a 401 rejects an access token while its refresh token may still be live, so `claude` can refresh that account straight back into the slot it reads first, and an unanswered call says nothing at all.
+The same rule reaches the usage probe, which reports `unknown` for a slot presenting more than one distinct credential however well the bearer it holds proves out, since `claude` reads the scoped Keychain item first while the probe reads the unscoped one.
+Capture-before-overwrite reads the same candidates, so the two cannot disagree about which credential belongs to a record; with more than one distinct credential present it captures nothing, since a lost rotated token is recoverable with a login while another account's credential filed under this record is silent.
+The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
+A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
+
+A record's principal is bound only at `register`, which is the one moment the operator asserts that the signed-in account IS this record.
+`register` reads the slot once, under the same mutex a switch takes, and that single read serves the proof, the snapshot, and the binding.
+It refuses outright when the slot holds two different accounts, so it can never bind a stale credential under a new id; proving one read and snapshotting another is exactly how account A's identity would end up bound to account B's credential.
+It also refuses when the proven identity already belongs to another record.
+The existing duplicate check compares tokens, which rotate, so the same account registered again after a rotation would slip past it and leave two records sharing one quota pool that reconciliation could never tell apart.
+It re-checks the slot after resolving the identity, so an out-of-band login during that network round trip refuses with `slot-changed` rather than stamping the account it proved.
+The config save happens inside that same lock and before any store write, because store residue from a failed registration is what a later attempt reads as a duplicate credential and refuses; the active stamp comes last.
+The save re-reads the record set under the lock, so two concurrent registrations cannot each merge into the same stale set and drop one another.
+The slot is tainted for the whole commit and cleared only after a final stable read, so a crash or a Keychain read that fails at the end can never leave an unverified stamp trusted.
+A login that landed during the writes leaves the account registered but its stamp tainted, with a warning naming `reconcile-slot`.
+Reconciliation commits the same way, which matters most on the out-of-band `/login` path: that one starts with no marker at all, so without a provisional taint there would be no cover at all while it wrote.
+Stamping first would leave the stamp naming an unconfigured orphan if the save failed, and every configured shared account unattributable behind it.
+The identity compared is the account *and* the organization, because Claude Code usage is organization-scoped and one human can belong to two organizations; an identity missing either half is not comparable and fails closed.
+A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.
+An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
+
+A fresh usage probe also checks the stamp it is about to trust.
+An out-of-band `/login` leaves a stamp that is wrong and *untainted*, so nothing upstream hesitates and the live account's usage gets filed under the stamped record's name.
+When the stamped record's live principal provably belongs to someone else, the probe repairs once and otherwise reports `unknown` rather than a confident wrong number.
+Proven principal evidence is cached briefly so this costs no call on the common path.
+
+Shared-slot attribution needs *fresh proof*, so an identity that cannot be proven is refused rather than assumed.
+Refusing costs little: the usage endpoint that would consume the attribution shares a host with the profile endpoint, so an outage that hides identity has already taken the measurement with it.
+A store registered before principals existed therefore reads `unknown` until you re-register its accounts, which is what binds them; `doctor` reports `unbound-principal` and names the command, so the `unknown` is never silent.
+
+A harness with no principal endpoint is a different case and keeps the stamp-trusting behavior.
+Codex can never prove a slot principal, so refusing there would silence its measurement permanently for no gain.
+Records with their own `config_dir` are exempt too, since they are attributable without the shared slot at all.
+
+The check runs per credential, immediately before that credential is spent on a usage request.
+The probe tries several bearers because a stale scoped Keychain item can 401 while the unscoped one is live, so a check anchored to "the slot" could prove one credential while the request used another - the same misattribution by a longer route.
+A bearer that fails the check is skipped rather than measured, so another account's usage is never fetched at all.
+
+Proven evidence is cached against a digest of the credential it was proven about, not just against time.
+Time alone would let an out-of-band `/login` inside the TTL reuse evidence about the credential it replaced, making the check built to catch that login the thing that hides it.
+
+A tainted slot self-heals the same way: before a fresh usage probe refuses a tainted managed occupant, it runs the same primitive once, and resumes only if identity was proven.
+A refusal is backed off briefly so an unmatchable slot cannot re-hit the endpoint on every probe; only failures are cached, and only as backoff, never as proof.
+
+Two boundaries are worth knowing.
+A record with its own `config_dir` is attributable without the shared slot at all, so it never enters reconciliation and taint can never affect it.
+And the active shared-slot occupant correctly keeps `config_dir = None`, because interactive `claude` reads `~/.claude`; that is not a defect to fix by giving it a dir.
 
 ---
 

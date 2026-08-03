@@ -36,10 +36,10 @@ Before trusting a guard, enumerate every path a caller can reach (in-process tes
 
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
-Footnote's receipt lines, manifest snapshots, process argv, and liveness probes have each been caught lying about a live session; only the live lockfile and the transcript told the truth at every point. `fno target start` can print `plan: none` while a plan is bound, `node=already-claimed` while the claim is free, and `base=origin/main` while the branch is stale. Verify the load-bearing lines against source: `fno backlog get <id>` for status and plan, `fno claim status node:<id>` for the holder, `git rev-list --count HEAD..origin/main` for the real base, and the transcript mtime for liveness.
+Receipt lines, manifest snapshots, process argv, and liveness probes have each lied about a live session; only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` while a plan is bound, `node=already-claimed` while the claim is free, and `base=origin/main` while the branch is stale. Verify the load-bearing lines against source: `fno backlog get <id>` for status and plan, `fno claim status node:<id>` for the holder, `git fetch origin main && git rev-list --count HEAD..origin/main` for the real base (skip the fetch and a stale ref answers 0), and the transcript mtime for liveness.
 
-- specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster, and the rule that manifest claim fields are an init-time snapshot, not ownership truth).
-- graduates-to: the receipt-truth contract (init auto-first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed session liveness.
+- specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
+- graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed liveness.
 - added: 2026-07-23
 
 ### Judgment delegated to a subprocess on a truncated context produces junk

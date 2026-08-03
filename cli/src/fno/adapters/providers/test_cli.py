@@ -1231,12 +1231,21 @@ class TestDoctor:
         monkeypatch.setenv("PWD", str(tmp_path))
         monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
         root = tmp_path / ".fno" / "providers"
+        from fno.adapters.providers import managed
+
         for rid, tok in (("readyrule", "tok-a"), ("makers", "tok-b")):
             (root / rid).mkdir(parents=True)
             (root / rid / "blob").write_text(
                 _json.dumps({
                     "claudeAiOauth": {"accessToken": tok, "expiresAt": 4102444800000}
                 })
+            )
+            # A shared-slot account with no proven identity is no longer
+            # healthy: its usage cannot be attributed, so doctor says so.
+            managed.write_record_principal(
+                rid,
+                {"account_uuid": f"acct-{rid}", "organization_uuid": "org-1"},
+                root,
             )
         result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0, result.output
@@ -1465,3 +1474,369 @@ class TestPickOptInAndOverlay:
         for var in SCRUB_AUTH_VARS:
             assert var in emitted, f"{var} not carried for scrubbing"
             assert emitted[var] == "", f"{var} should be cleared, not set"
+
+
+# ---------------------------------------------------------------------------
+# x-4b8d: fno config accounts reconcile-slot (the taint's missing clearer)
+# ---------------------------------------------------------------------------
+
+
+class TestReconcileSlot:
+    """`doctor` could report a tainted slot but never repair one, and no verb
+    could. The repair is deliberately not a blind `clear-taint`: it acts only on
+    proven identity, so its refusals are as load-bearing as its successes."""
+
+    @pytest.fixture()
+    def store(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+        _write_settings(tmp_path / ".fno" / "config.toml", _managed_pair_config("readyrule"))
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("PWD", str(tmp_path))
+        monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+        root = tmp_path / ".fno" / "providers"
+        root.mkdir(parents=True, exist_ok=True)
+        return tmp_path
+
+    def test_success_names_the_matched_record_and_no_credential(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-HP: a non-secret receipt naming the record reconciliation proved."""
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "reconcile_slot",
+            lambda cli, **kw: managed.ReconcileResult(
+                "matched", record_id="readyrule",
+                detail="the live claude slot belongs to 'readyrule'; taint cleared",
+            ),
+        )
+        result = _invoke(["reconcile-slot", "claude"], cwd=store, home=store)
+        assert result.exit_code == 0, result.output
+        assert "readyrule" in result.output
+        assert "token" not in result.output.lower()
+
+    @pytest.mark.parametrize(
+        "outcome",
+        ["profile-unavailable", "malformed-profile", "zero-match",
+         "ambiguous-match", "lock-timeout", "no-slot-credential"],
+    )
+    def test_every_refusal_exits_nonzero_and_names_its_type(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch, outcome: str
+    ) -> None:
+        """AC3-ERR: US3 - an outage must be loud, and say which way it failed."""
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "reconcile_slot",
+            lambda cli, **kw: managed.ReconcileResult(outcome, detail="why it refused"),
+        )
+        result = _invoke(["reconcile-slot", "claude"], cwd=store, home=store)
+        assert result.exit_code != 0, result.output
+        assert outcome in result.output
+        assert "why it refused" in result.output
+
+    def test_unknown_harness_refuses_without_touching_the_store(
+        self, store: Path
+    ) -> None:
+        result = _invoke(["reconcile-slot", "gemini"], cwd=store, home=store)
+        assert result.exit_code != 0
+        assert "claude" in result.output
+
+    def test_doctor_names_the_repair_command_for_a_tainted_slot(
+        self, store: Path
+    ) -> None:
+        """A finding an operator cannot act on is only half a diagnosis."""
+        from fno.adapters.providers import managed
+
+        managed._set_slot_taint("claude", store / ".fno" / "providers", True)
+        result = _invoke(["doctor"], cwd=store, home=store)
+        assert result.exit_code != 0, result.output
+        assert "tainted-slot" in result.output
+        assert "fno config accounts reconcile-slot claude" in result.output
+
+    def test_register_binds_the_principal_it_just_captured(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration is where footnote KNOWS whose credential it holds, so it
+        is the only place a principal can be bound without proving anything."""
+        import json as _json
+
+        from fno.adapters.providers import managed
+
+        blob = _json.dumps({"claudeAiOauth": {"accessToken": "live-token"}})
+        monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: blob)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [blob])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda b: (
+                {"account_uuid": "acct-1", "organization_uuid": "org-1",
+                 "email": "jn@example.com"},
+                None,
+            ),
+        )
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+        assert result.exit_code == 0, result.output
+        root = store / ".fno" / "providers"
+        bound = managed.record_principal("readyrule", root)
+        assert bound is not None and bound["account_uuid"] == "acct-1"
+        assert "acct-1" not in result.output
+
+    def test_register_refuses_while_the_slot_holds_two_accounts(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binding whichever credential the snapshot happened to pick would file
+        a stale account's identity under the new id."""
+        import json as _json
+
+        from fno.adapters.providers import managed
+
+        a = _json.dumps({"claudeAiOauth": {"accessToken": "scoped"}})
+        b = _json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [a, b])
+        seen = {a: "acct-a", b: "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": seen[blob], "organization_uuid": "org-1"}, None
+            ),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code != 0
+        assert "two different accounts" in result.output
+        assert managed.record_principal(
+            "readyrule", store / ".fno" / "providers"
+        ) is None
+
+    def test_doctor_reports_an_ambiguous_slot(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two accounts in one slot must not read as healthy."""
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "readyrule", root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["a", "b"])
+        keys = {"a": "acct-a", "b": "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": keys[blob], "organization_uuid": "org-1"}, None
+            ),
+        )
+
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "ambiguous-slot" in result.output
+        assert "fno config accounts reconcile-slot claude" in result.output
+
+    def test_doctor_names_an_out_of_band_login_as_drift(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The stamp is untainted and wrong: nothing downstream hesitates, so
+        doctor is the only place this becomes visible before the bill does."""
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "readyrule", root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-b", "organization_uuid": "org-1",
+                 "email": "other@example.com"},
+                None,
+            ),
+        )
+
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "slot-identity-drift" in result.output
+        assert "readyrule" in result.output and "other@example.com" in result.output
+        assert "fno config accounts reconcile-slot claude" in result.output
+
+    def test_doctor_pays_no_profile_call_without_a_bound_principal(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Free until it can answer: with nothing to compare there is no question."""
+        from fno.adapters.providers import managed
+
+        managed.stamp_active_slot("claude", "readyrule", store / ".fno" / "providers")
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: pytest.fail("an unbound store must not reach the endpoint"),
+        )
+        result = _invoke(["doctor"], cwd=store, home=store)
+        assert "slot-identity-drift" not in result.output
+
+    def test_a_matching_principal_is_not_drift(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "readyrule", root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-a", "organization_uuid": "org-1"}, None
+            ),
+        )
+        result = _invoke(["doctor"], cwd=store, home=store)
+        assert "slot-identity-drift" not in result.output
+
+    def test_doctor_names_an_unbound_principal_as_the_reason_for_unknown(
+        self, store: Path
+    ) -> None:
+        """Fail-closed attribution must not be silent - the silence is the
+        original disease. doctor is where 'unknown' gets a reason and a fix."""
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "unbound-principal" in result.output
+        assert "fno config accounts register readyrule" in result.output
+
+    def test_a_bound_record_is_not_reported_unbound(
+        self, store: Path
+    ) -> None:
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        for rid in ("readyrule", "makers"):
+            managed.write_record_principal(
+                rid,
+                {"account_uuid": f"acct-{rid}", "organization_uuid": "org-1"},
+                root,
+            )
+        result = _invoke(["doctor"], cwd=store, home=store)
+        assert "unbound-principal" not in result.output
+
+    @pytest.mark.parametrize(
+        "failure,needle",
+        [
+            ("slot-changed", "changed while"),
+            ("some-future-failure", "some-future-failure"),
+        ],
+    )
+    def test_a_capture_that_wrote_nothing_never_reports_success(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch, failure: str, needle: str
+    ) -> None:
+        """A typed failure with no handler wrote nothing, so printing
+        'Registered' would be a lie - including for a failure added later."""
+        from fno.adapters.providers import managed
+
+        # A None account_dir is how the capture says it wrote nothing.
+        monkeypatch.setattr(
+            managed, "register_slot_snapshot",
+            lambda record, *a, **kw: (None, None, failure),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert needle in result.output
+        assert "Registered managed account" not in result.output
+
+    def test_an_unprovable_identity_still_registers(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration must work offline; the record is simply unbound."""
+        from pathlib import Path as _P
+
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "register_slot_snapshot",
+            lambda record, *a, **kw: (_P("/x"), None, "profile-unavailable"),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code == 0, result.output
+        assert "Registered managed account" in result.output
+
+    def test_a_late_slot_move_registers_with_a_warning(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The account IS registered; only the stamp's trustworthiness is in
+        question, so refusing would be as wrong as staying silent."""
+        from pathlib import Path as _P
+
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "register_slot_snapshot",
+            lambda record, *a, **kw: (_P("/x"), None, "slot-moved-after-write"),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code == 0, result.output
+        assert "Registered managed account" in result.output
+        assert "marked tainted" in result.output
+        assert "reconcile-slot claude" in result.output
+
+    def test_concurrent_registrations_do_not_drop_each_other(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """`_persist` runs under the slot lock and must re-read there: merging
+        into the record set loaded before the lock would let the later save
+        silently drop the earlier account."""
+        import json as _json
+
+        from fno.adapters.providers import managed
+        from fno.adapters.providers.loader import load_providers
+
+        blob = _json.dumps({"claudeAiOauth": {"accessToken": "live"}})
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [blob])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda b: (
+                {"account_uuid": "acct-new", "organization_uuid": "org-1"}, None
+            ),
+        )
+        # A rival registration lands between the pre-lock load and _persist.
+        real = managed.register_slot_snapshot
+
+        def _racing(record, *a, **kw):
+            persist = kw.get("persist")
+
+            def _wrapped() -> None:
+                from fno.adapters.providers.loader import save_providers
+                from fno.adapters.providers.model import ProviderRecord, ProvidersConfig
+
+                existing = load_providers(repo_root=store)
+                save_providers(
+                    ProvidersConfig(
+                        records=[*existing.records,
+                                 ProviderRecord(id="rival", name="rival",
+                                                harness="claude", auth="managed")],
+                        active=existing.active,
+                    ),
+                    scope="global",
+                )
+                if persist is not None:
+                    persist()
+
+            kw["persist"] = _wrapped
+            return real(record, *a, **kw)
+
+        monkeypatch.setattr(managed, "register_slot_snapshot", _racing)
+
+        result = _invoke(["register", "fresh"], cwd=store, home=store)
+
+        assert result.exit_code == 0, result.output
+        ids = {r.id for r in load_providers(repo_root=store).records}
+        assert {"rival", "fresh"} <= ids
