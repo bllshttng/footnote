@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
+import pytest
 from typer.testing import CliRunner
 
 from fno.company.contracts import FunctionRef, RoleRef
@@ -60,9 +61,7 @@ def _write_source(
         source_id=f"{layer.value}/{name}.json",
         snapshot_revision="snapshot-1",
         role=role,
-        manifest=_manifest(role_id, function_id)
-        if status is DefinitionStatus.VALID
-        else None,
+        manifest=_manifest(role_id, function_id) if status is DefinitionStatus.VALID else None,
         status=status,
         error=error,
     )
@@ -219,13 +218,13 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
 
     blocked_result = _invoke(
         "roles",
-            "resolve",
-            "unavailable",
-            "--work-order",
-            "x-a8c0",
-            "--attempt",
-            "attempt-1",
-            "-J",
+        "resolve",
+        "unavailable",
+        "--work-order",
+        "x-a8c0",
+        "--attempt",
+        "attempt-1",
+        "-J",
     )
     assert blocked_result.exit_code == 1
     blocked = _assert_pretty_sorted_json(blocked_result.output)
@@ -258,6 +257,68 @@ def test_ac_r7_ui_resolve_is_typed_inert_and_has_stable_exit_codes(
     assert dispatch_calls == []
     assert _snapshot_tree(graph_root) == before_graph
     assert _snapshot_tree(claims_root) == before_claims
+
+
+@pytest.mark.parametrize("failure", ["malformed", "unreadable"])
+def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
+    tmp_path: Path,
+    monkeypatch,
+    failure: str,
+) -> None:
+    roles_root = tmp_path / "roles"
+    _write_source(
+        roles_root,
+        layer=RoleLayer.BUILT_IN,
+        name="owner",
+        role_id="owner",
+        function_id="marketing",
+    )
+    if failure == "malformed":
+        unchecked = roles_root / RoleLayer.PROJECT.value / "broken.json"
+        unchecked.parent.mkdir(parents=True)
+        unchecked.write_text("{not-json", encoding="utf-8")
+        source_args: tuple[str, ...] = ()
+        expected_source = "project/broken.json"
+    else:
+        unchecked = tmp_path / "does-not-exist.json"
+        source_args = ("--source", f"project={unchecked}")
+        expected_source = str(unchecked)
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(roles_root))
+    monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
+
+    resolved = _invoke(
+        "roles",
+        *source_args,
+        "resolve",
+        "owner",
+        "--work-order",
+        "x-a8c0",
+        "--attempt",
+        "attempt-1",
+        "-J",
+    )
+
+    assert resolved.exit_code == 1
+    blocked = _assert_pretty_sorted_json(resolved.output)
+    assert blocked["reason"] == "invalid_manifest"
+    assert blocked["source_layer"] == "project"
+    assert blocked["source_id"] == expected_source
+    assert blocked["detail"]
+
+    listed = _invoke("roles", *source_args, "ls", "-J")
+    assert listed.exit_code == 0
+    rows = _assert_pretty_sorted_json(listed.output)
+    assert any(
+        row["source"] == expected_source
+        and row["role_id"] is None
+        and row["status"] in {"invalid", "unreadable"}
+        for row in rows
+    )
+
+    shown = _invoke("roles", *source_args, "show", "owner", "-J")
+    assert shown.exit_code == 0
+    shown_rows = _assert_pretty_sorted_json(shown.output)
+    assert any(row["source"] == expected_source for row in shown_rows)
 
 
 def test_ac_r7_ui_roles_is_hidden_lazy_and_discoverable() -> None:

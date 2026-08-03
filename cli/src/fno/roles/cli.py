@@ -112,9 +112,12 @@ def _matches(
     return tuple(
         record
         for record in records
-        if record.role is not None
-        and record.role.id == role_id
-        and (function_id is None or record.role.function_id == function_id)
+        if (record.role is None and record.status.value in {"invalid", "unreadable"})
+        or (
+            record.role is not None
+            and record.role.id == role_id
+            and (function_id is None or record.role.function_id == function_id)
+        )
     )
 
 
@@ -149,7 +152,13 @@ def _show_row(
     highest: DiscoveredRoleDefinition,
 ) -> dict[str, Any]:
     return {
-        "disposition": "contributing" if record is highest else "shadowed",
+        "disposition": (
+            "unchecked"
+            if record.role is None
+            else "contributing"
+            if record is highest
+            else "shadowed"
+        ),
         "error": record.error,
         "function_id": record.role.function_id if record.role is not None else None,
         "layer": record.layer.value,
@@ -173,11 +182,7 @@ def show_role(
 ) -> None:
     """Show ordered raw definitions, validity, and shadowing."""
     records = _matches(_discover(ctx), role)
-    rows = (
-        [_show_row(record, highest=records[-1]) for record in records]
-        if records
-        else []
-    )
+    rows = [_show_row(record, highest=records[-1]) for record in records] if records else []
     if _json_requested(ctx, json_output):
         _emit_json(rows)
         return
@@ -190,8 +195,7 @@ def show_role(
         if row["error"]:
             typer.echo(f"  error: {row['error']}")
         typer.echo(
-            "  raw: "
-            + json.dumps(row["raw_definition"], sort_keys=True, separators=(",", ":"))
+            "  raw: " + json.dumps(row["raw_definition"], sort_keys=True, separators=(",", ":"))
         )
 
 
@@ -267,12 +271,9 @@ def resolve_role_command(
     definitions = tuple(
         definition
         for record in records
-        if record.role == role_ref
-        and (definition := record.definition) is not None
+        if record.role == role_ref and (definition := record.definition) is not None
     )
-    revision = snapshot or (
-        definitions[0].snapshot_revision if definitions else "unavailable"
-    )
+    revision = snapshot or (definitions[0].snapshot_revision if definitions else "unavailable")
     result = resolve_role(
         role=role_ref,
         definitions=definitions,
@@ -295,6 +296,7 @@ def resolve_role_command(
             max_references=32,
             max_bytes=10_000_000,
         ),
+        unchecked_definitions=records,
     )
     payload = result.model_dump(mode="json")
     if _json_requested(ctx, json_output):

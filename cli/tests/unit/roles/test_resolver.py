@@ -120,9 +120,7 @@ def _resolve(
 ):
     return resolve_role(
         role=role,
-        definitions=definitions or (
-            _source(RoleLayer.BUILT_IN, "builtin/owner", role=role),
-        ),
+        definitions=definitions or (_source(RoleLayer.BUILT_IN, "builtin/owner", role=role),),
         capability_facts=capabilities
         if capabilities is not None
         else (
@@ -133,9 +131,7 @@ def _resolve(
                 snapshot_revision=REVISION,
             ),
         ),
-        context_catalog=context
-        if context is not None
-        else (_context(work_order=work_order),),
+        context_catalog=context if context is not None else (_context(work_order=work_order),),
         work_order=work_order,
         clock=NOW,
         snapshot_revision=REVISION,
@@ -145,8 +141,7 @@ def _resolve(
 
 def test_ac_r1_hp_resolution_is_deterministic_and_records_fixed_layer_order() -> None:
     definitions = tuple(
-        _source(layer, f"{layer.value}/owner")
-        for layer in reversed(tuple(RoleLayer))
+        _source(layer, f"{layer.value}/owner") for layer in reversed(tuple(RoleLayer))
     )
 
     first = _resolve(definitions=definitions)
@@ -156,7 +151,11 @@ def test_ac_r1_hp_resolution_is_deterministic_and_records_fixed_layer_order() ->
     assert first == second
     assert tuple(source.layer for source in first.source_chain) == tuple(RoleLayer)
     assert [source.disposition for source in first.source_chain] == [
-        "shadowed", "shadowed", "shadowed", "shadowed", "contributing"
+        "shadowed",
+        "shadowed",
+        "shadowed",
+        "shadowed",
+        "contributing",
     ]
     assert len(first.manifest_digest) == len(first.context_bundle.digest) == 64
     assert first.routing_projection == RoutingHint(provider="codex", model="gpt-5")
@@ -167,7 +166,14 @@ def test_ac_r1_hp_resolution_is_deterministic_and_records_fixed_layer_order() ->
     [
         ((), (_context(),), RoleResolutionReason.MISSING_CAPABILITY, "connector.read"),
         (
-            (CapabilityFact(capability="connector.read", available=True, source_id="runtime", snapshot_revision=REVISION),),
+            (
+                CapabilityFact(
+                    capability="connector.read",
+                    available=True,
+                    source_id="runtime",
+                    snapshot_revision=REVISION,
+                ),
+            ),
             (),
             RoleResolutionReason.MISSING_CONTEXT,
             "brief:company-brief",
@@ -191,10 +197,77 @@ def test_ac_r3_err_missing_requirements_fail_closed_with_source_attribution(
     )
 
 
+def test_capability_fact_from_another_principal_cannot_satisfy_the_attempt() -> None:
+    work_order = WorkOrderRef(
+        node_id="x-a8c0",
+        attempt_id="attempt-1",
+        principal_id="principal-a",
+        role_id=ROLE.id,
+    )
+    other_principal = WorkOrderRef(
+        node_id=work_order.node_id,
+        attempt_id=work_order.attempt_id,
+        principal_id="principal-b",
+        role_id=ROLE.id,
+    )
+
+    result = _resolve(
+        work_order=work_order,
+        capabilities=(
+            CapabilityFact(
+                capability="connector.read",
+                available=True,
+                source_id="observed-for-principal-b",
+                snapshot_revision=REVISION,
+                work_order_scope=other_principal,
+            ),
+        ),
+        context=(_context(work_order=work_order),),
+    )
+
+    assert result == RoleResolutionBlocked(
+        role=ROLE,
+        reason=RoleResolutionReason.MISSING_CAPABILITY,
+        source_layer=RoleLayer.BUILT_IN,
+        source_id="builtin/owner",
+        reference="connector.read",
+    )
+
+
+def test_matching_principal_scoped_capability_fact_satisfies_the_attempt() -> None:
+    work_order = WorkOrderRef(
+        node_id="x-a8c0",
+        attempt_id="attempt-1",
+        principal_id="principal-a",
+        role_id=ROLE.id,
+    )
+
+    result = _resolve(
+        work_order=work_order,
+        capabilities=(
+            CapabilityFact(
+                capability="connector.read",
+                available=True,
+                source_id="observed-for-principal-a",
+                snapshot_revision=REVISION,
+                work_order_scope=work_order,
+            ),
+        ),
+        context=(_context(work_order=work_order),),
+    )
+
+    assert not isinstance(result, RoleResolutionBlocked)
+    assert result.work_order == work_order
+
+
 def test_ac_r5_con_captured_result_retains_digests_after_inputs_change() -> None:
     captured = _resolve()
     changed = _resolve(
-        definitions=(_source(RoleLayer.BUILT_IN, "builtin/owner", manifest=_manifest(mission="Changed later.")),),
+        definitions=(
+            _source(
+                RoleLayer.BUILT_IN, "builtin/owner", manifest=_manifest(mission="Changed later.")
+            ),
+        ),
         context=(_context(digest="b" * 64),),
     )
 
@@ -211,14 +284,18 @@ def test_corrupt_or_unreadable_layer_remains_visible_and_blocks(status: Definiti
     result = _resolve(
         definitions=(
             _source(RoleLayer.BUILT_IN, "builtin/owner"),
-            _source(RoleLayer.PROJECT, "project/roles.toml", status=status, error="invalid document"),
+            _source(
+                RoleLayer.PROJECT, "project/roles.toml", status=status, error="invalid document"
+            ),
         )
     )
 
     assert isinstance(result, RoleResolutionBlocked)
     assert result.reason == RoleResolutionReason.INVALID_MANIFEST
     assert (result.source_layer, result.source_id, result.detail) == (
-        RoleLayer.PROJECT, "project/roles.toml", "invalid document"
+        RoleLayer.PROJECT,
+        "project/roles.toml",
+        "invalid document",
     )
 
 
@@ -252,7 +329,9 @@ def test_smallest_bundle_selection_is_stable_under_catalog_reordering() -> None:
 
     assert not isinstance(first, RoleResolutionBlocked)
     assert first == second
-    assert tuple(reference.identifier for reference in first.context_bundle.references) == ("small-a",)
+    assert tuple(reference.identifier for reference in first.context_bundle.references) == (
+        "small-a",
+    )
 
 
 def test_manifests_are_frozen_extra_forbidden_and_non_granting() -> None:
@@ -537,9 +616,7 @@ def test_identity_mismatch_is_not_a_representable_overlay() -> None:
         _source(
             RoleLayer.PLAN,
             "plans/launch.md",
-            manifest=_manifest(
-                role=RoleRef(id="other-role", function_id=ROLE.function_id)
-            ),
+            manifest=_manifest(role=RoleRef(id="other-role", function_id=ROLE.function_id)),
         )
 
 

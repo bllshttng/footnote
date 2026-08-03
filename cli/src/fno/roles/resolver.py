@@ -17,6 +17,7 @@ from fno.roles.models import (
     ContextReference,
     ContextSelector,
     DefinitionStatus,
+    ManifestRoutingResolution,
     ResolvedRole,
     ResolvedSource,
     RoleDefinitionSource,
@@ -27,7 +28,7 @@ from fno.roles.models import (
     RoleResolutionReason,
     Sensitivity,
 )
-from fno.roles.registry import RegistryError, RoleRegistry
+from fno.roles.registry import DiscoveredRoleDefinition, RegistryError, RoleRegistry
 
 _AUTHORITY_RANK = {
     AuthorityCeiling.ADVISORY: 0,
@@ -143,12 +144,8 @@ def _overlay_violation(
         return RoleResolutionReason.INVALID_OVERLAY, "default_topology"
     if previous.routing_hint is not None:
         for field in ("provider", "model"):
-            if (
-                getattr(previous.routing_hint, field) is not None
-                and (
-                    candidate.routing_hint is None
-                    or getattr(candidate.routing_hint, field) is None
-                )
+            if getattr(previous.routing_hint, field) is not None and (
+                candidate.routing_hint is None or getattr(candidate.routing_hint, field) is None
             ):
                 return RoleResolutionReason.INVALID_OVERLAY, f"routing_hint.{field}"
     return None
@@ -196,6 +193,23 @@ def _same_work_order_scope(scope: WorkOrderRef | None, work_order: WorkOrderRef)
     if scope.principal_id is not None and scope.principal_id != work_order.principal_id:
         return False
     return True
+
+
+def _capability_fact_applies(
+    fact: CapabilityFact,
+    *,
+    work_order: WorkOrderRef,
+    role: RoleRef,
+) -> bool:
+    scope = fact.work_order_scope
+    if scope is None:
+        return work_order.principal_id is None
+    return (
+        scope.node_id == work_order.node_id
+        and scope.attempt_id == work_order.attempt_id
+        and scope.principal_id == work_order.principal_id
+        and scope.role_id == role.id
+    )
 
 
 def _candidate_key(reference: ContextReference) -> tuple[object, ...]:
@@ -255,10 +269,12 @@ def _context_failure(
         ),
         (
             RoleResolutionReason.SENSITIVITY_REFUSED,
-            lambda item: _SENSITIVITY_RANK[item.sensitivity]
-            > min(
-                _SENSITIVITY_RANK[selector.max_sensitivity],
-                _SENSITIVITY_RANK[bounds.max_sensitivity],
+            lambda item: (
+                _SENSITIVITY_RANK[item.sensitivity]
+                > min(
+                    _SENSITIVITY_RANK[selector.max_sensitivity],
+                    _SENSITIVITY_RANK[bounds.max_sensitivity],
+                )
             ),
         ),
     )
@@ -271,7 +287,9 @@ def _context_failure(
                 source=source,
                 source_id=item.provenance,
                 reference=f"{item.kind.value}:{item.identifier}",
-                detail=item.unavailable_reason if reason is RoleResolutionReason.UNREADABLE_CONTEXT else None,
+                detail=item.unavailable_reason
+                if reason is RoleResolutionReason.UNREADABLE_CONTEXT
+                else None,
             ).model_copy(update={"source_layer": source.layer, "source_id": item.provenance})
     return None
 
@@ -417,6 +435,7 @@ def resolve_role(
     clock: datetime,
     snapshot_revision: str,
     bundle_bounds: ContextBundleBounds,
+    unchecked_definitions: Sequence[DiscoveredRoleDefinition] = (),
 ) -> RoleResolution:
     """Resolve one role without reads, writes, grants, or implicit fallback."""
     if clock.tzinfo is None:
@@ -428,12 +447,24 @@ def resolve_role(
             reference="work_order.role_id",
             detail="work order role does not match requested role",
         )
+    for record in unchecked_definitions:
+        if record.role is None and record.status is not DefinitionStatus.VALID:
+            return RoleResolutionBlocked(
+                role=role,
+                reason=RoleResolutionReason.INVALID_MANIFEST,
+                source_layer=record.layer,
+                source_id=record.source_id,
+                reference=role.id,
+                detail=record.error or "source identity could not be validated",
+            )
     registry = RoleRegistry(records=tuple(definitions))
     try:
         ordered = registry.definitions_for(role)
     except RegistryError as exc:
         matches = [item for item in definitions if item.role == role]
-        source = sorted(matches, key=lambda item: (tuple(RoleLayer).index(item.layer), item.source_id))[0]
+        source = sorted(
+            matches, key=lambda item: (tuple(RoleLayer).index(item.layer), item.source_id)
+        )[0]
         return _blocked(
             role,
             RoleResolutionReason.INVALID_OVERLAY,
@@ -477,18 +508,28 @@ def resolve_role(
         manifest = next_manifest
     highest_source = valid_sources[-1]
 
-    fact_by_capability = {
-        fact.capability: fact for fact in sorted(capability_facts, key=lambda item: (item.capability, item.source_id))
-    }
     for capability in manifest.required_capabilities:
-        fact = fact_by_capability.get(capability)
-        if fact is None or not fact.available:
+        matching_facts = tuple(
+            fact
+            for fact in sorted(
+                capability_facts,
+                key=lambda item: (item.capability, item.source_id),
+            )
+            if fact.capability == capability
+            and fact.available
+            and _capability_fact_applies(fact, work_order=work_order, role=role)
+        )
+        if not matching_facts:
             return _blocked(
                 role,
                 RoleResolutionReason.MISSING_CAPABILITY,
                 source=highest_source,
                 reference=capability,
             )
+        current_facts = tuple(
+            fact for fact in matching_facts if fact.snapshot_revision == snapshot_revision
+        )
+        fact = current_facts[0] if current_facts else matching_facts[0]
         if fact.snapshot_revision != snapshot_revision:
             return _blocked(
                 role,
@@ -533,5 +574,121 @@ def resolve_role(
         authority_ceiling=manifest.authority_ceiling,
         review_policy=manifest.review_policy,
         delivery_policy=manifest.delivery_policy,
+        routing_projection=manifest.routing_hint,
+    )
+
+
+def resolve_manifest_routing(
+    role_id: str,
+    records: Sequence[DiscoveredRoleDefinition],
+) -> ManifestRoutingResolution | RoleResolutionBlocked:
+    """Validate discovered manifests and return only their routing projection."""
+    candidates = tuple(
+        record for record in records if record.role is not None and record.role.id == role_id
+    )
+    functions = sorted({record.role.function_id for record in candidates if record.role})
+    role = RoleRef(
+        id=role_id,
+        function_id=functions[0] if len(functions) == 1 else "unavailable",
+    )
+    unchecked = next(
+        (
+            record
+            for record in records
+            if record.role is None and record.status is not DefinitionStatus.VALID
+        ),
+        None,
+    )
+    if unchecked is not None:
+        return RoleResolutionBlocked(
+            role=role,
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_layer=unchecked.layer,
+            source_id=unchecked.source_id,
+            reference=role_id,
+            detail=unchecked.error or "source identity could not be validated",
+        )
+    if len(functions) > 1:
+        source = candidates[0]
+        return RoleResolutionBlocked(
+            role=role,
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_layer=source.layer,
+            source_id=source.source_id,
+            reference=role_id,
+            detail=(f"role {role_id!r} exists in multiple functions: " + ", ".join(functions)),
+        )
+    if not candidates:
+        return RoleResolutionBlocked(
+            role=role,
+            reason=RoleResolutionReason.NOT_FOUND,
+            reference=role_id,
+        )
+    missing_definition = next(
+        (record for record in candidates if record.definition is None),
+        None,
+    )
+    if missing_definition is not None:
+        return RoleResolutionBlocked(
+            role=role,
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_layer=missing_definition.layer,
+            source_id=missing_definition.source_id,
+            reference=role_id,
+            detail=missing_definition.error or "source could not be validated",
+        )
+    definitions = tuple(record.definition for record in candidates if record.definition is not None)
+    registry = RoleRegistry(records=definitions)
+    try:
+        ordered = registry.definitions_for(role)
+    except RegistryError as exc:
+        candidate_source = candidates[0]
+        return RoleResolutionBlocked(
+            role=role,
+            reason=RoleResolutionReason.INVALID_OVERLAY,
+            source_layer=candidate_source.layer,
+            source_id=candidate_source.source_id,
+            reference=role_id,
+            detail=str(exc),
+        )
+    revision = ordered[0].snapshot_revision
+    manifest: RoleManifest | None = None
+    for definition_source in ordered:
+        if definition_source.snapshot_revision != revision:
+            return _blocked(
+                role,
+                RoleResolutionReason.MIXED_REVISION,
+                source=definition_source,
+                reference=definition_source.snapshot_revision,
+            )
+        if (
+            definition_source.status is not DefinitionStatus.VALID
+            or definition_source.manifest is None
+        ):
+            return _blocked(
+                role,
+                RoleResolutionReason.INVALID_MANIFEST,
+                source=definition_source,
+                reference=role_id,
+                detail=definition_source.error,
+            )
+        if manifest is not None:
+            violation = _overlay_violation(manifest, definition_source.manifest)
+            if violation is not None:
+                reason, reference = violation
+                return _blocked(
+                    role,
+                    reason,
+                    source=definition_source,
+                    reference=reference,
+                )
+        manifest = definition_source.manifest
+    assert manifest is not None
+    return ManifestRoutingResolution(
+        role=role,
+        source_digest=_digest(
+            "role-routing-sources",
+            [source.model_dump(mode="json") for source in ordered],
+        ),
         routing_projection=manifest.routing_hint,
     )

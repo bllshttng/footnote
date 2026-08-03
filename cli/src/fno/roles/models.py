@@ -175,6 +175,7 @@ class CapabilityFact(_RoleModel):
     available: bool
     source_id: NonEmptyStr
     snapshot_revision: NonEmptyStr
+    work_order_scope: WorkOrderRef | None = None
 
 
 class ContextReference(_RoleModel):
@@ -243,6 +244,14 @@ class ResolvedRole(_RoleModel):
     authority_ceiling: AuthorityCeiling
     review_policy: ReviewPolicy
     delivery_policy: DeliveryPolicy
+    routing_projection: RoutingHint | None = None
+
+
+class ManifestRoutingResolution(_RoleModel):
+    """Routing-only projection of a validated business-role manifest chain."""
+
+    role: RoleRef
+    source_digest: Sha256Digest
     routing_projection: RoutingHint | None = None
 
 
