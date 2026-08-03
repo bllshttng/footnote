@@ -250,6 +250,7 @@ def env_cmd(
     half-eval'd block would point a session at z.ai with no auth).
     """
     from fno.agents.model_routing import (
+        RouteCompositionError,
         _parse_target,
         _role_target,
         effective_providers,
@@ -277,7 +278,11 @@ def env_cmd(
     else:
         tgt = _role_target(spec.strip().lower(), block)
         target_pname = tgt[0] if tgt else None
-        route = resolve_route(spec, notice=notes.append)
+        try:
+            route = resolve_route(spec, notice=notes.append)
+        except RouteCompositionError as exc:
+            typer.echo(f"route env: {exc}", err=True)
+            raise typer.Exit(1) from exc
 
     if not route:
         reason = "; ".join(notes)

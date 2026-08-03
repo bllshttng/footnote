@@ -864,7 +864,13 @@ def _mesh_env_wrapper(
             # override it and send the routed pane back to Anthropic. `env -u`
             # on an unset var is a harmless no-op. `unset +=` (not `=`) so the
             # account/provenance unsets above are preserved.
-            unset += ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
+            if provider == "claude":
+                unset += [
+                    "-u",
+                    "ANTHROPIC_API_KEY",
+                    "-u",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                ]
             pairs += [f"{k}={v}" for k, v in route.items()]
     return ["env", *unset, *pairs, *argv]
 

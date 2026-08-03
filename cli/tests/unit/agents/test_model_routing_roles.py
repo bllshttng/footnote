@@ -649,15 +649,24 @@ def test_default_production_lookup_blocks_unreadable_layer_at_spawn_seam(
     root = tmp_path / "roles"
     unreadable_layer = root / RoleLayer.PROJECT.value
     unreadable_layer.mkdir(parents=True)
-    unreadable_layer.chmod(0)
+    from fno.roles import registry
+
+    real_walk = registry.os.walk
+
+    def deny_project_walk(directory, **kwargs):
+        if Path(directory) == unreadable_layer:
+            kwargs["onerror"](
+                PermissionError(13, "Permission denied", str(unreadable_layer))
+            )
+            return iter(())
+        return real_walk(directory, **kwargs)
+
+    monkeypatch.setattr(registry.os, "walk", deny_project_walk)
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
     monkeypatch.setattr(mr, "_routing_block", lambda settings: _settings().model_routing)
 
-    try:
-        with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
-            mr.resolve_spawn_route("coordinate")
-    finally:
-        unreadable_layer.chmod(0o700)
+    with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
+        mr.resolve_spawn_route("coordinate")
 
     assert caught.value.result.reason is RoleResolutionReason.INVALID_MANIFEST
     assert caught.value.result.source_layer is RoleLayer.PROJECT

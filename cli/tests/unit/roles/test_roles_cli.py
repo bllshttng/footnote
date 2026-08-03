@@ -418,23 +418,32 @@ def test_resolve_fails_closed_when_a_layer_directory_cannot_be_enumerated(
     )
     unreadable_layer = roles_root / RoleLayer.PROJECT.value
     unreadable_layer.mkdir()
-    unreadable_layer.chmod(0)
+    from fno.roles import registry
+
+    real_walk = registry.os.walk
+
+    def deny_project_walk(directory, **kwargs):
+        if Path(directory) == unreadable_layer:
+            kwargs["onerror"](
+                PermissionError(13, "Permission denied", str(unreadable_layer))
+            )
+            return iter(())
+        return real_walk(directory, **kwargs)
+
+    monkeypatch.setattr(registry.os, "walk", deny_project_walk)
     monkeypatch.setenv("FNO_ROLES_ROOT", str(roles_root))
     monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
 
-    try:
-        resolved = _invoke(
-            "roles",
-            "resolve",
-            "owner",
-            "--work-order",
-            "x-a8c0",
-            "--attempt",
-            "attempt-1",
-            "-J",
-        )
-    finally:
-        unreadable_layer.chmod(0o700)
+    resolved = _invoke(
+        "roles",
+        "resolve",
+        "owner",
+        "--work-order",
+        "x-a8c0",
+        "--attempt",
+        "attempt-1",
+        "-J",
+    )
 
     assert resolved.exit_code == 1
     blocked = _assert_pretty_sorted_json(resolved.output)

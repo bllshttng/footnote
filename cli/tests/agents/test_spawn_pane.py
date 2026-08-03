@@ -1315,6 +1315,27 @@ def test_mesh_env_wrapper_routed_pane_scrubs_anthropic_creds(monkeypatch):
     assert "ANTHROPIC_AUTH_TOKEN=zk" in wrapped
 
 
+def test_mesh_env_wrapper_codex_route_preserves_anthropic_credentials():
+    """An OpenAI route must not scrub unrelated inherited Claude auth."""
+    from fno.agents import mux_spawn
+
+    wrapped = mux_spawn._mesh_env_wrapper(
+        "w",
+        "codex",
+        None,
+        ["codex"],
+        route_env={
+            "OPENAI_BASE_URL": "https://example.test/v1",
+            "OPENAI_API_KEY": "key",
+        },
+    )
+
+    assert "ANTHROPIC_API_KEY" not in wrapped
+    assert "CLAUDE_CODE_OAUTH_TOKEN" not in wrapped
+    assert "OPENAI_BASE_URL=https://example.test/v1" in wrapped
+    assert "OPENAI_API_KEY=key" in wrapped
+
+
 def test_mesh_env_wrapper_unrouted_pane_adds_no_unset(monkeypatch):
     """No role -> no route -> no AUTH scrub.
 
