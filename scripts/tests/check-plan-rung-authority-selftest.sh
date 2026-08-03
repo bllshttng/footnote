@@ -18,7 +18,7 @@ if ! bash "$FIXTURE_ROOT/scripts/ci/check-plan-rung-authority.sh" >/dev/null; th
     exit 1
 fi
 
-printf '\nconst _FORBIDDEN_PLAN_STATUS_PREFIX: &str = "status:";\n' \
+printf '\nfn forbidden_status_lookup(mapping: &serde_yaml_ng::Mapping) {\n    let _ = mapping.get(serde_yaml_ng::Value::from("status"));\n}\n' \
     >> "$FIXTURE_ROOT/crates/fno-agents/src/delivery_completion.rs"
 
 output=""

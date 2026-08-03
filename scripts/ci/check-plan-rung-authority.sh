@@ -151,15 +151,16 @@ else
     note "OK: the registered Rust plan-reader set is unchanged"
 fi
 
-# Narrowed to a FRONTMATTER key extraction (`"status" =>` in a match arm, or a
-# `status:` line prefix test). A bare `status` token is meaningless here -
+# Narrowed to a FRONTMATTER key extraction (`"status" =>` in a match arm, a
+# `status:` line prefix test, or the serde YAML key-construction form used by
+# the delivery reader). A bare `status` token is meaningless here because
 # kill_criteria.rs legitimately shells `git status --porcelain`. Scan every
 # registered reader so growing the allowlist cannot silently weaken the guard.
 fm_status=""
 while IFS= read -r reader; do
     [ -n "$reader" ] || continue
     matches="$(
-        grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:' \
+        grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:|Value::from[[:space:]]*\([[:space:]]*"status"' \
             "$reader" 2>/dev/null || true
     )"
     if [ -n "$matches" ]; then
