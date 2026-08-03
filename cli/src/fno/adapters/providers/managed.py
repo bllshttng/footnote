@@ -310,14 +310,23 @@ def principal_of_blobs(
         return None, None, "no-slot-credential"
     resolved: list[tuple[dict, str]] = []
     first_failure: Optional[str] = None
+    unanswered = False
     for blob in blobs:
         principal, failure = slot_principal(blob)
         if principal is None:
             first_failure = first_failure or failure
+            # A REJECTED credential is dead and can be set aside. An unanswered
+            # one cannot: a live account whose profile call merely timed out
+            # would otherwise be skipped, and the other candidate stamped, while
+            # claude keeps reading the one we failed to ask about.
+            if failure != "credential-rejected":
+                unanswered = True
             continue
         resolved.append((principal, blob))
     if not resolved:
         return None, None, first_failure or "profile-unavailable"
+    if unanswered:
+        return None, None, "profile-unavailable"
     keys = {identity_key(principal) for principal, _blob in resolved}
     if None in keys:
         return None, None, "malformed-profile"
@@ -1079,7 +1088,9 @@ def slot_principal(blob: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
 
     bearer = _token_from_blob(blob)
     if not bearer:
-        return None, "profile-unavailable"
+        # No usable bearer at all: nothing can present this as a live identity,
+        # so it is a dead candidate rather than an unanswered question.
+        return None, "credential-rejected"
     return principal_of_bearer(bearer)
 
 
@@ -1103,6 +1114,14 @@ def principal_of_bearer(bearer: str) -> tuple[Optional[dict], Optional[str]]:
     try:
         with urllib.request.urlopen(req, timeout=_PROFILE_TIMEOUT_S) as resp:
             body = resp.read()
+    except urllib.error.HTTPError as exc:
+        # 401/403 is the endpoint ANSWERING: this credential is not usable, so
+        # it cannot be what anyone is billing. Every other status - 429, 5xx -
+        # is the question going unanswered, which is a different thing and must
+        # not be mistaken for a dead credential.
+        if exc.code in (401, 403):
+            return None, "credential-rejected"
+        return None, "profile-unavailable"
     except (urllib.error.URLError, OSError, TimeoutError, ValueError):
         return None, "profile-unavailable"
     try:

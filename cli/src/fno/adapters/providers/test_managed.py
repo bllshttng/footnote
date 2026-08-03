@@ -1374,7 +1374,8 @@ class TestPrincipalFingerprint:
         assert managed.principal_fingerprint(payload) is None
 
     def test_slot_principal_classifies_failures(self, monkeypatch):
-        """A refusal must say WHICH way identity went unproven (US3)."""
+        """A refusal must say WHICH way identity went unproven (US3), and a dead
+        credential is not the same as an unanswered question."""
         import urllib.error
 
         def _raise(exc):
@@ -1382,17 +1383,41 @@ class TestPrincipalFingerprint:
                 raise exc
             return _urlopen
 
-        monkeypatch.setattr(
-            managed.urllib.request, "urlopen",
-            _raise(urllib.error.HTTPError(managed._PROFILE_URL, 401, "no", {}, None)),
-        )
-        assert managed.slot_principal(_blob("T")) == (None, "profile-unavailable")
+        def _http(code):
+            return _raise(
+                urllib.error.HTTPError(managed._PROFILE_URL, code, "no", {}, None)
+            )
 
+        # The endpoint ANSWERED: this credential is dead.
+        monkeypatch.setattr(managed.urllib.request, "urlopen", _http(401))
+        assert managed.slot_principal(_blob("T")) == (None, "credential-rejected")
+        monkeypatch.setattr(managed.urllib.request, "urlopen", _http(403))
+        assert managed.slot_principal(_blob("T")) == (None, "credential-rejected")
+
+        # The question went unanswered - a different thing entirely.
+        monkeypatch.setattr(managed.urllib.request, "urlopen", _http(429))
+        assert managed.slot_principal(_blob("T")) == (None, "profile-unavailable")
+        monkeypatch.setattr(managed.urllib.request, "urlopen", _http(503))
+        assert managed.slot_principal(_blob("T")) == (None, "profile-unavailable")
         monkeypatch.setattr(managed.urllib.request, "urlopen", _raise(TimeoutError()))
         assert managed.slot_principal(_blob("T")) == (None, "profile-unavailable")
 
-        # A blob with no bearer never reaches the network.
-        assert managed.slot_principal("{}") == (None, "profile-unavailable")
+        # A blob with no usable bearer never reaches the network, and is dead.
+        assert managed.slot_principal("{}") == (None, "credential-rejected")
+
+    def test_an_unanswered_candidate_blocks_the_whole_slot(self, monkeypatch):
+        """A live account whose profile call merely timed out must not be skipped
+        while the other candidate is stamped - claude may be reading the one we
+        failed to ask about."""
+        def _principal(blob):
+            if blob == _blob("SILENT"):
+                return None, "profile-unavailable"
+            return managed.principal_fingerprint(_profile("acct-b")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+        assert managed.principal_of_blobs([_blob("SILENT"), _blob("B")]) == (
+            None, None, "profile-unavailable"
+        )
 
 
 class TestReconcileSlot:
@@ -2546,7 +2571,7 @@ class TestEveryCandidateIsResolved:
 
         def _principal(blob):
             if blob == _blob("EXPIRED"):
-                return None, "profile-unavailable"
+                return None, "credential-rejected"  # 401: the endpoint answered
             return managed.principal_fingerprint(_profile("acct-live")), None
 
         monkeypatch.setattr(managed, "slot_principal", _principal)
@@ -2582,7 +2607,7 @@ class TestEveryCandidateIsResolved:
 
         def _principal(blob):
             if blob == _blob("EXPIRED"):
-                return None, "profile-unavailable"
+                return None, "credential-rejected"  # 401: the endpoint answered
             return managed.principal_fingerprint(_profile("acct-b")), None
 
         monkeypatch.setattr(managed, "slot_principal", _principal)
@@ -2650,7 +2675,7 @@ class TestRegisterRespectsALiveTaintWriter:
 
         def _principal(blob):
             if blob == _blob("EXPIRED"):
-                return None, "profile-unavailable"
+                return None, "credential-rejected"  # 401: the endpoint answered
             return managed.principal_fingerprint(_profile("acct-live")), None
 
         monkeypatch.setattr(managed, "slot_principal", _principal)
