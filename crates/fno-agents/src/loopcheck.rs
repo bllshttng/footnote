@@ -5,9 +5,9 @@
 //! decision object. The manifest is NEVER mutated; the only write surface is
 //! append-only event logs.
 //!
-//! Module name starts with "loop" to match the LOC-ratchet glob
-//! `crates/fno-agents/src/loop*`.
+//! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
+use crate::completion_output::allow_output;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +22,7 @@ use std::process::{Command, Stdio};
 pub enum TerminationReason {
     DonePRGreen,
     DoneAdvisory,
+    DoneDelivery,
     /// A batch-lane member (batch-lane Wave 2/3): its commits live on a shared
     /// batch branch and ship via the batch PR, not its own, so there is no
     /// per-node PR to go green. Terminal, but NOT a ship reason - the batch's
@@ -49,16 +50,6 @@ pub enum TerminationReason {
     NoProgress,
     Interrupted,
     Aborted,
-}
-
-/// The JSON object written to stdout on every fire.
-#[derive(Debug, Serialize)]
-pub struct LoopCheckOutput {
-    pub decision: String, // "allow" | "block"
-    pub termination_reason: Option<TerminationReason>,
-    pub message: String,
-    pub fires: u64,
-    pub fingerprint: Option<String>,
 }
 
 // ── manifest parsing ──────────────────────────────────────────────────────────
@@ -3654,6 +3645,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
     }
 
+    let generic = crate::delivery_completion::evaluate_manifest(
+        &cwd,
+        manifest.plan_path.as_deref(),
+        &project_events,
+    );
     // ── Check gh binary availability ──────────────────────────────────────────
     // Probe by attempting to spawn; if the binary doesn't exist at all (NotFound
     // error kind), treat as absent. Exit-code failures from valid gh commands
@@ -3670,7 +3666,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         }
     };
 
-    if !gh_available {
+    if !gh_available
+        && matches!(
+            generic,
+            crate::delivery_completion::DeliveryCompletion::Inactive
+        )
+    {
         if !manifest.attended && !manifest.advisory {
             // Unattended + no advisory + no gh -> Interrupted
             emit(
@@ -3892,13 +3893,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // done() fails simply blocks with the named reason.
     const MUTE_PROBE_N: u64 = 2;
 
-    // Operator review-finding gate input (x-f8d4). Resolve this session's node
-    // (graph_node_id in the frontmatter; the appended target_claim_key is the
-    // fallback) and scan events.jsonl for open findings. Node-scoped, NOT
-    // head-pinned: read here so both the promise arms and the mute-probe
-    // DonePRGreen path below see the same evidence. A malformed finding line
-    // never blocks (AC3-FR) but is surfaced as an audit notice so a truncated
-    // write can't vanish.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
@@ -3918,6 +3912,13 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
     }
 
+    // Operator review-finding gate input (x-f8d4). Resolve this session's node
+    // (graph_node_id in the frontmatter; the appended target_claim_key is the
+    // fallback) and scan events.jsonl for open findings. Node-scoped, NOT
+    // head-pinned: read here so both the promise arms and the mute-probe
+    // DonePRGreen path below see the same evidence. A malformed finding line
+    // never blocks (AC3-FR) but is surfaced as an audit notice so a truncated
+    // write can't vanish.
     // Run done() on intent OR backstop OR mute-probe
     if intent != Intent::None || backstop_tripped || consecutive_after >= MUTE_PROBE_N {
         // Handle aborted first
@@ -3997,6 +3998,19 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 0,
                 allow_output("block", None, &reason, this_fire, Some(fingerprint)),
             );
+        }
+
+        if let Some(output) = crate::delivery_completion::gate_output(
+            &generic,
+            intent == Intent::Promise,
+            &project_events,
+            &global_events,
+            &session_id,
+            &intent_source,
+            &fingerprint,
+            this_fire,
+        ) {
+            return (0, output);
         }
 
         // Plan-only unit: a plan-only thread reached the plan boundary. Checked
@@ -5624,23 +5638,6 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
-}
-
-fn allow_output(
-    decision: &str,
-    termination_reason: Option<TerminationReason>,
-    message: &str,
-    fires: u64,
-    fingerprint: Option<String>,
-) -> String {
-    let out = LoopCheckOutput {
-        decision: decision.to_string(),
-        termination_reason,
-        message: message.to_string(),
-        fires,
-        fingerprint,
-    };
-    serde_json::to_string(&out).unwrap_or_else(|_| r#"{"decision":"allow","termination_reason":null,"message":"serialization error","fires":0,"fingerprint":null}"#.to_string())
 }
 
 // ── public entry points ───────────────────────────────────────────────────────

@@ -16,6 +16,7 @@ from pydantic import (
     model_validator,
 )
 
+from fno.approvals import EffectAttempt, EffectState, evidence_projection
 from fno.company.contracts import (
     CompanyWorkRefs,
     DeliverableRef,
@@ -108,6 +109,7 @@ def adapt_delivery_event(
     *,
     fresh_until: datetime,
     fact_revision: str,
+    approval_request_event: Mapping[str, object] | object | None = None,
 ) -> tuple[DeliveryEvidenceFact, ...]:
     """Normalize one authoritative event into its exact declared evidence slots.
 
@@ -178,18 +180,64 @@ def adapt_delivery_event(
             return ()
         state = _nonempty(data, "state")
         previous_state = _nonempty(data, "previous_state")
-        state_results = {
-            "acknowledged": EvidenceResult.PASSED,
-            "failed": EvidenceResult.FAILED,
-            "blocked": EvidenceResult.BLOCKED,
-            "prepared": EvidenceResult.UNKNOWN,
-            "executing": EvidenceResult.UNKNOWN,
-            "unknown": EvidenceResult.UNKNOWN,
-        }
-        if state not in state_results or previous_state not in state_results:
+        states = {state.value: state for state in EffectState}
+        if state not in states or previous_state not in states:
+            return ()
+        if not isinstance(approval_request_event, Mapping):
+            return ()
+        try:
+            request_event = _ProducerEvent.model_validate(approval_request_event)
+        except ValidationError:
+            return ()
+        request_data = request_event.data
+        if request_event.type != "approval_requested" or any(
+            _nonempty(request_data, key) is None
+            for key in (
+                "request_digest",
+                "work_order_id",
+                "attempt_id",
+                "effect_id",
+                "effect_class",
+                "destination",
+                "action_digest",
+            )
+        ):
+            return ()
+        if any(
+            request_data.get(key) != data.get(key)
+            for key in ("request_digest", "work_order_id", "attempt_id", "effect_id")
+        ):
+            return ()
+        if (
+            request_data["effect_class"] != binding.effect_class
+            or request_data["destination"] != binding.destination
+        ):
+            return ()
+        attempt = EffectAttempt(
+            effect_id=binding.id,
+            work_order_id=binding.work_order_id,
+            attempt_id=binding.attempt_id,
+            request_digest=data["request_digest"],
+            idempotency_key=data["idempotency_key"],
+            action_digest=request_data["action_digest"],
+            destination=binding.destination,
+            effect_class=binding.effect_class,
+            adapter_id="event:approvals",
+            adapter_version=EFFECT_EVENT_ADAPTER_VERSION,
+            state=states[state],
+            external_ref=data.get("external_ref"),
+            reconciliation_ref=data.get("reconciliation_ref"),
+        )
+        projection = evidence_projection(attempt)
+        if (
+            projection.work_order_id != binding.work_order_id
+            or projection.attempt_id != binding.attempt_id
+            or projection.subject_kind is not EvidenceSubjectKind.EFFECT
+            or projection.subject_id != binding.id
+        ):
             return ()
         effect_id = binding.id
-        result = state_results[state]
+        result = projection.result
         key = _nonempty(data, "idempotency_key")
         source_revision = f"effect:{key}:state:{state}"
         adapter_version = EFFECT_EVENT_ADAPTER_VERSION

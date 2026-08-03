@@ -12,6 +12,9 @@ NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length
 
 DELIVERY_EVIDENCE_FACT_VERSION: Literal["delivery-evidence-fact.v1"] = "delivery-evidence-fact.v1"
 DELIVERY_EVALUATOR_VERSION: Literal["delivery-evaluator.v1"] = "delivery-evaluator.v1"
+DELIVERY_EVALUATE_RESPONSE_VERSION: Literal["delivery-evaluate-response.v1"] = (
+    "delivery-evaluate-response.v1"
+)
 
 
 class _DeliveryModel(BaseModel):
@@ -54,6 +57,7 @@ class DeliveryVerdict(_DeliveryModel):
     """Complete deterministic coverage for one work-order attempt."""
 
     evaluator_version: Literal["delivery-evaluator.v1"] = DELIVERY_EVALUATOR_VERSION
+    session_id: NonEmptyStr | None = None
     work_order_node_id: NonEmptyStr
     attempt_id: NonEmptyStr
     aggregate: EvidenceResult
@@ -84,3 +88,22 @@ class DeliveryVerdictEvaluatedEvent(_DeliveryModel):
     type: Literal["delivery_verdict_evaluated"]
     source: NonEmptyStr
     data: DeliveryVerdict
+
+
+class DeliveryEvaluateResponse(_DeliveryModel):
+    """Strict process boundary consumed by loop-check."""
+
+    version: Literal["delivery-evaluate-response.v1"] = DELIVERY_EVALUATE_RESPONSE_VERSION
+    status: Literal["inactive", "evaluated", "undeterminable"]
+    fact_revision: NonEmptyStr | None = None
+    verdict: DeliveryVerdict | None = None
+    diagnostics: tuple[NonEmptyStr, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_status_payload(self) -> Self:
+        if self.status == "evaluated":
+            if self.verdict is None or self.fact_revision is None:
+                raise ValueError("evaluated response requires verdict and fact_revision")
+        elif self.verdict is not None:
+            raise ValueError(f"{self.status} response must not carry a verdict")
+        return self

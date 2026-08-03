@@ -16,6 +16,7 @@
 //! - archived/missing manifest (delegated path): no-op, exit 0.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -32,6 +33,8 @@ struct Env {
     handoffs: PathBuf,
     postmortems: PathBuf,
     calls_log: PathBuf,
+    bin_dir: PathBuf,
+    gh_calls: PathBuf,
 }
 
 /// Build a hermetic env. `register_fails` makes the register-task stub exit 1.
@@ -53,6 +56,16 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     fs::create_dir_all(&handoffs).unwrap();
 
     let calls_log = cwd.join("calls.log");
+    let bin_dir = root.join("bin");
+    let gh_calls = cwd.join("gh-calls.log");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let gh = bin_dir.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
 
     // Manifest (frontmatter + body graph_node_id, like the real one).
     let state = cwd.join(".fno/target-state.md");
@@ -136,6 +149,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
         handoffs,
         postmortems,
         calls_log,
+        bin_dir,
+        gh_calls,
     }
 }
 
@@ -162,6 +177,15 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
         // pypath (PYTHONPATH entries prepend to sys.path) so the stubs win over
         // any site-packages/editable install of the real package.
         .env("PYTHONPATH", &env.pypath)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                env.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("GH_CALLS_LOG", &env.gh_calls)
         .current_dir(&env.cwd)
         .output()
         .expect("run finalize")
@@ -336,6 +360,63 @@ fn finalize_advisory_ship_graduates() {
         c.contains("stamp-plan graduate"),
         "advisory ship graduates to done (no merge event to flip it): {c}"
     );
+}
+
+#[test]
+fn generic_completion_finalize_consumes_selected_verdict_without_pr_paths() {
+    let env = setup("S-delivery", false);
+    fs::write(
+        &env.events,
+        serde_json::json!({
+            "ts": "2026-08-02T12:00:00Z",
+            "type": "delivery_verdict_evaluated",
+            "source": "target",
+            "data": {
+                "evaluator_version": "delivery-evaluator.v1",
+                "session_id": "S-delivery",
+                "work_order_node_id": "ab-testnode",
+                "attempt_id": "attempt-1",
+                "aggregate": "passed",
+                "fact_revision": "sha256:abc",
+                "requirements": [],
+                "diagnostics": []
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("register-task reason=DoneDelivery"));
+    assert!(c.contains("stamp-plan stamp"));
+    assert!(c.contains("stamp-plan graduate"));
+    assert!(!c.contains("verify-advise"));
+    let handoff = fs::read_to_string(&handoff_files(&env)[0]).unwrap();
+    assert!(handoff.contains("fno-delivery://ab-testnode/attempt-1/sha256:abc"));
+    assert!(handoff.contains("generic delivery receipt"));
+    assert!(fs::read_to_string(&env.gh_calls)
+        .unwrap_or_default()
+        .is_empty());
+}
+
+#[test]
+fn generic_completion_finalize_missing_selected_event_fails_closed() {
+    let env = setup("S-delivery-missing", false);
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert_eq!(
+        count_event(&env.events, "session_finalize_failed", "S-delivery-missing"),
+        1
+    );
+    assert!(events_text(&env.events).contains("delivery_receipt"));
 }
 
 /// Idempotency: N stop-hook fires after a successful finalize produce exactly

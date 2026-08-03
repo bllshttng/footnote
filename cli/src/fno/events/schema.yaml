@@ -3170,6 +3170,9 @@ event_types:
         evaluator_version:
           type: string
           enum: [delivery-evaluator.v1]
+        session_id:
+          type: [string, "null"]
+          description: "Target session that selected this verdict for terminal delivery."
         work_order_node_id:
           type: string
         attempt_id:

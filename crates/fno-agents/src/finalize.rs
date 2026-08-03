@@ -121,7 +121,7 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|DoneBatched|DoneAwaitingMerge|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 
@@ -524,7 +524,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
         return 0;
     };
 
-    let ship = SHIP_REASONS.contains(&reason.as_str());
+    let legacy_ship = SHIP_REASONS.contains(&reason.as_str());
+    let delivery_ship = reason == "DoneDelivery";
+    let ship = legacy_ship || delivery_ship;
 
     // Idempotency, ship-aware (sigma-review HIGH): a prior COMPLETED ship means
     // the whole session is done. A prior non-ship finalize means only the ledger
@@ -598,14 +600,14 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // `graduate` verb and the cross-project safety net.
     let mut stamped = false;
     let mut handoff_path: Option<String> = None;
-    if ship {
+    if legacy_ship {
         let plan = m.plan_path.clone().unwrap_or_default();
         if !plan.is_empty() {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
             let do_graduate = reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
-            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate) {
+            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
                 Ok(()) => stamped = true,
                 Err(step) => {
                     eprintln!("finalize: {step} failed");
@@ -672,6 +674,51 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
+    if delivery_ship {
+        match crate::delivery_completion::selected_receipt(
+            &project_events,
+            m.graph_node_id.as_deref(),
+            &session_id,
+        ) {
+            Some(receipt) => {
+                let plan = m.plan_path.clone().unwrap_or_default();
+                if !plan.is_empty() {
+                    let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
+                    let do_graduate = !m.cross_project || expected.is_some();
+                    match stamp_and_graduate(
+                        &cwd,
+                        &plan,
+                        &session_id,
+                        expected,
+                        do_graduate,
+                        Some(&receipt.uri),
+                    ) {
+                        Ok(()) => stamped = true,
+                        Err(step) => failed.push(step),
+                    }
+                }
+                let dir = resolve_handoffs_dir(
+                    a.handoffs_dir.as_deref(),
+                    a.settings.as_deref(),
+                    &cwd,
+                    home.as_deref(),
+                );
+                match crate::delivery_completion::write_receipt_handoff(&dir, &session_id, &receipt)
+                {
+                    Ok(path) => handoff_path = Some(path),
+                    Err(error) => {
+                        eprintln!("finalize: generic handoff failed: {error}");
+                        failed.push("handoff".into());
+                    }
+                }
+            }
+            None => {
+                eprintln!("finalize: selected delivery verdict event missing");
+                failed.push("delivery_receipt".into());
+            }
+        }
+    }
+
     // ── STUCK ONLY: postmortem artifact (ab-1a92b677) ──────────────────────
     // A stuck terminal (NoProgress/Budget/Interrupted/Aborted) means the session
     // gave up, ran out of budget, or was cancelled mid-wedge without shipping.
@@ -733,7 +780,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // in the extended envelope. Best-effort; the pull leg (events.jsonl) is
     // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
     // PR url only on a ship terminal.
-    let run_summary_pr = if ship { gh_pr_url(&cwd) } else { None };
+    let run_summary_pr = if legacy_ship { gh_pr_url(&cwd) } else { None };
     emit_run_summary(
         &project_events,
         &global_events,
@@ -749,7 +796,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // Runs in the always-run tail (first fire of every reason), so it stamps
     // even a non-ship/awaiting-merge terminal that left an open PR. Non-fatal;
     // deliberately not returned into `failed`.
-    stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+    if !delivery_ship {
+        stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+    }
 
     // ── guarded do-provenance backstop (x-0469) ────────────────────────────
     // Same shape and same fatality as the stamp above: log-only, deliberately
@@ -1038,8 +1087,9 @@ fn stamp_and_graduate(
     session_id: &str,
     expected_url_count: Option<u32>,
     do_graduate: bool,
+    url_override: Option<&str>,
 ) -> Result<(), String> {
-    let pr_url = gh_pr_url(cwd);
+    let pr_url = url_override.map(str::to_owned).or_else(|| gh_pr_url(cwd));
     let mut stamp = py_module(cwd);
     stamp
         .arg("-m")
@@ -2970,7 +3020,7 @@ mod tests {
         for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
             assert!(POSTMORTEM_REASONS.contains(&stuck));
         }
-        for not_stuck in ["DonePRGreen", "DoneAdvisory", "NoWork"] {
+        for not_stuck in ["DonePRGreen", "DoneAdvisory", "DoneDelivery", "NoWork"] {
             assert!(!POSTMORTEM_REASONS.contains(&not_stuck));
         }
     }

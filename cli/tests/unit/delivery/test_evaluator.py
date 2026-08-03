@@ -601,6 +601,11 @@ def test_ac_d2_hp_producer_events_normalize_only_their_declared_source_fact(
         _producer_event(event_type, **changes),
         fresh_until=NOW + timedelta(minutes=5),
         fact_revision="event-snapshot-1",
+        approval_request_event=(
+            _producer_event("approval_requested")
+            if event_type == "effect_state_changed"
+            else None
+        ),
     )
 
     assert {fact.evidence.id: fact.evidence.result for fact in facts} == expected
@@ -608,6 +613,42 @@ def test_ac_d2_hp_producer_events_normalize_only_their_declared_source_fact(
     assert {fact.evidence.attempt_id for fact in facts} == {ATTEMPT_ID}
     assert {fact.producer for fact in facts} == {f"event:approvals:{event_type}"}
     assert {fact.fact_revision for fact in facts} == {"event-snapshot-1"}
+
+
+def test_ac_d2_err_effect_event_without_request_metadata_is_not_evidence() -> None:
+    assert (
+        adapt_delivery_event(
+            _producer_company_work(),
+            _producer_event("effect_state_changed"),
+            fresh_until=NOW + timedelta(minutes=5),
+            fact_revision="event-snapshot-1",
+        )
+        == ()
+    )
+
+
+def test_ac_d6_inv_effect_normalization_uses_public_evidence_projection(monkeypatch) -> None:
+    calls = []
+
+    def project(attempt):
+        from fno.approvals import evidence_projection as public_projection
+
+        calls.append(attempt)
+        return public_projection(attempt)
+
+    monkeypatch.setattr("fno.delivery.adapters.evidence_projection", project)
+
+    facts = adapt_delivery_event(
+        _producer_company_work(),
+        _producer_event("effect_state_changed"),
+        fresh_until=NOW + timedelta(minutes=5),
+        fact_revision="event-snapshot-1",
+        approval_request_event=_producer_event("approval_requested"),
+    )
+
+    assert len(calls) == 1
+    assert calls[0].adapter_id == "event:approvals"
+    assert {fact.evidence.result for fact in facts} == {EvidenceResult.PASSED}
 
 
 def test_ac_d2_edge_requested_approval_does_not_require_optional_identity_fields() -> None:

@@ -156,7 +156,9 @@ struct PolicyUnitEntry {
 fn is_done_reason(r: &TerminationReason) -> bool {
     matches!(
         r,
-        TerminationReason::DonePRGreen | TerminationReason::DoneAdvisory
+        TerminationReason::DonePRGreen
+            | TerminationReason::DoneAdvisory
+            | TerminationReason::DoneDelivery
     )
 }
 

@@ -211,6 +211,7 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
     match reason {
         TerminationReason::DonePRGreen
         | TerminationReason::DoneAdvisory
+        | TerminationReason::DoneDelivery
         | TerminationReason::DoneBatched
         // DoneAwaitingMerge: work complete, human-merge-gated past proven main
         // red - a clean stop like the other Done* terminals. The reason string
