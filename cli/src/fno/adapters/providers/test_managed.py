@@ -2723,3 +2723,60 @@ class TestCaptureBeforeOverwriteAgreesWithIdentity:
         monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [])
         managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
         assert (tmp_path / "work-b" / "blob").read_text() == _blob("B0")
+
+
+class TestCredentialFileIsACandidate:
+    """The usage probe reads `~/.claude/.credentials.json` FIRST, even on darwin
+    where claude reads the Keychain. A stale file bearer could otherwise prove
+    out and have its quota reported while the Keychain account occupies the
+    slot."""
+
+    def test_the_file_joins_the_candidate_set_on_darwin(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(_blob("FILE"))
+        monkeypatch.setattr(
+            managed, "_read_claude_keychain_item",
+            lambda service: _blob("KEYCHAIN")
+            if service == managed._CLAUDE_KEYCHAIN_SERVICE
+            else None,
+        )
+
+        assert managed.canonical_slot_blobs("claude") == [
+            _blob("KEYCHAIN"), _blob("FILE")
+        ]
+
+    def test_a_file_matching_the_keychain_adds_no_ambiguity(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(_blob("SAME"))
+        monkeypatch.setattr(
+            managed, "_read_claude_keychain_item", lambda service: _blob("SAME")
+        )
+
+        assert managed.canonical_slot_blobs("claude") == [_blob("SAME")]
+
+    def test_a_logged_out_file_residue_is_not_a_candidate(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setattr(managed.sys, "platform", "darwin")
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "", "refreshToken": ""}})
+        )
+        monkeypatch.setattr(
+            managed, "_read_claude_keychain_item",
+            lambda service: _blob("LIVE")
+            if service == managed._CLAUDE_KEYCHAIN_SERVICE
+            else None,
+        )
+
+        assert managed.canonical_slot_blobs("claude") == [_blob("LIVE")]

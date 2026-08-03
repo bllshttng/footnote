@@ -302,6 +302,7 @@ The taint marker records those sessions for exactly this check: a session starte
 Each is recorded as a pid *and* its start time, because pids are reused and a recycled one wearing a dead session's number would hold the repair open permanently.
 Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pinned to another account exports it and reconciliation would otherwise prove the pinned account and stamp it onto the canonical slot.
 On macOS the shared slot has two Keychain items, scoped and unscoped, and a stale one can sit beside a live one holding a different account.
+The on-disk `~/.claude/.credentials.json` is a third source: the usage probe reads it first even on macOS, so a stale file bearer could otherwise prove out and have its quota reported while the Keychain account occupies the slot.
 Reconciliation resolves both and refuses with `ambiguous-slot` when they name different accounts: that is not a tie to break, because whichever was stamped, some reader would get the other one.
 Every distinct candidate must prove, and they must all name one account.
 No candidate is set aside, whatever the reason it did not prove: a 401 rejects an access token while its refresh token may still be live, so `claude` can refresh that account straight back into the slot it reads first, and an unanswered call says nothing at all.

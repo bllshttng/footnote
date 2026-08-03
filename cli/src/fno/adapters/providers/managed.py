@@ -259,8 +259,9 @@ def canonical_slot_blobs(cli: str) -> list[str]:
     darwin keeps TWO Keychain items for the canonical dir, scoped and unscoped,
     and they can hold different accounts - a stale scoped item beside a live
     unscoped one is the observed reality, and the reason the usage probe tries
-    several bearers. Reconciliation has to see both: proving the first and
-    stamping it would trust one account while a reader gets the other.
+    several bearers. The on-disk ``.credentials.json`` is a third source, read
+    first by that probe. All of them are candidates: proving one and stamping it
+    would trust one account while a reader gets another.
     """
     if cli != "claude":
         blob = _read_slot_blob(cli)
@@ -274,6 +275,18 @@ def canonical_slot_blobs(cli: str) -> list[str]:
         blob = _read_claude_keychain_item(service)
         if blob and blob not in out:
             out.append(blob)
+    # The on-disk credential file counts too, even on darwin where claude reads
+    # the Keychain: the usage probe reads it FIRST, so a stale file bearer could
+    # prove out and have its quota reported while the Keychain account is the
+    # one actually occupying the slot. The candidate set has to be every source
+    # anything reads, or "is this slot unambiguous" answers a narrower question
+    # than the one that matters.
+    try:
+        blob = (canonical / ".credentials.json").read_text(encoding="utf-8")
+    except OSError:
+        blob = ""
+    if blob.strip() and _token_present(blob) and blob not in out:
+        out.append(blob)
     return out
 
 
