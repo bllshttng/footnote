@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog]
+      enum: [target, megawalk, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -3012,6 +3012,121 @@ event_types:
           enum: [worked, failed, abandoned]
           description: "Result of the attempt. Enum is documented for the emit instruction and the consumer's outcome match; only the two required fields are validator-enforced (advisory crumb)."
     consumers: [target resume, self-handoff successor, postmortem]
+
+  # ── approval / effect lifecycle family (x-4530) ─────────────────────────
+  # Three types, one per durable transition kind. The vocabulary stays distinct:
+  # requested, approved, declined, executing, acknowledged, failed, blocked, and
+  # unknown are separately auditable. Approval is not execution, execution is not
+  # acknowledgment, and acknowledgment is not an aggregate delivery verdict --
+  # only the delivery evaluator may declare that.
+  #
+  # Emitted from a transactional outbox: the store commits the state change and
+  # the owed event together, so a failed append is repaired from the committed
+  # record without re-crossing the adapter boundary.
+  #
+  # The `decision` and `state` enums below are ADVISORY at the validator layer,
+  # matching the `outcome` crumb further down: both validators check required
+  # fields and envelope shape, not per-type data enums, unless a type opts into a
+  # hardcoded check. Real enforcement is at the only emitter -- fno.approvals'
+  # DecisionKind and EffectState are typed enums, so an out-of-vocabulary value
+  # cannot be constructed. Promote to a hardcoded check in BOTH validators (and
+  # add invalid corpus fixtures) if a second, untyped emitter ever appears.
+
+  - name: approval_requested
+    description: "One exact consequential effect was proposed for decision. Not an approval."
+    sources: [approvals, test]
+    data:
+      required: [request_digest, work_order_id, attempt_id, effect_id, effect_class, destination, action_digest, expires_at]
+      properties:
+        request_digest:
+          type: string
+          description: "Digest over every bound field; changing any field yields a new digest."
+        request_id:
+          type: string
+        principal_id:
+          type: string
+          description: "Principal the request was raised for; not an authorization."
+        work_order_id:
+          type: string
+        attempt_id:
+          type: string
+        effect_id:
+          type: string
+        effect_class:
+          type: string
+        destination:
+          type: string
+        action_digest:
+          type: string
+        expires_at:
+          type: string
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
+    consumers: [fno approvals ls]
+
+  - name: approval_decided
+    description: "An authorized principal approved or declined one exact request digest. Approval alone never satisfies execution or delivery evidence."
+    sources: [approvals, test]
+    data:
+      required: [request_digest, decision, deciding_principal_id, work_order_id, attempt_id, effect_id]
+      properties:
+        request_digest:
+          type: string
+        decision:
+          type: string
+          enum: [approved, declined]
+        deciding_principal_id:
+          type: string
+        work_order_id:
+          type: string
+        attempt_id:
+          type: string
+        effect_id:
+          type: string
+        authority_source:
+          type: string
+          description: "The independent policy source consulted. Transports never widen it."
+        transport:
+          type: [string, "null"]
+          description: "Where the decision arrived from. Informational, never authoritative."
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
+    consumers: [fno approvals show]
+
+  - name: effect_state_changed
+    description: "One durable effect-attempt transition. `unknown` means the external outcome is ambiguous, never that it failed or succeeded."
+    sources: [approvals, test]
+    data:
+      required: [idempotency_key, state, request_digest, work_order_id, attempt_id, effect_id]
+      properties:
+        idempotency_key:
+          type: string
+        state:
+          type: string
+          enum: [prepared, executing, acknowledged, failed, blocked, unknown]
+        previous_state:
+          type: string
+          enum: [prepared, executing, acknowledged, failed, blocked, unknown]
+          description: "The state left behind. ABSENT on the first event for an attempt, because creating one has no previous state; present on every later transition."
+        request_digest:
+          type: string
+        work_order_id:
+          type: string
+        attempt_id:
+          type: string
+        effect_id:
+          type: string
+        external_ref:
+          type: [string, "null"]
+          description: "Destination-side acknowledgment reference, when the destination gave one."
+        reconciliation_ref:
+          type: [string, "null"]
+        event_id:
+          type: string
+          description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
+    consumers: [delivery evaluation, fno approvals show]
 
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.

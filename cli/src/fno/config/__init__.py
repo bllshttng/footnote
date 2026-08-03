@@ -674,6 +674,29 @@ class AgentRouteBlock(BaseModel):
         return stripped
 
 
+class ApprovalsBlock(BaseModel):
+    """Who may approve a consequential effect (nested under 'config.approvals').
+
+    This is the independent policy source the approval store consults at decision
+    time and again at execution time. It lives in config, not in a role manifest
+    or a plugin declaration, precisely so that no runtime object can add itself
+    to the authorized set: a role may declare an authority ceiling but cannot
+    grant one, and a transport carries a decision without minting its semantics.
+
+    Maps an effect class to the principal ids allowed to decide it. The key `*`
+    matches every class, which is the solo-founder shape. Absent or empty means
+    NOBODY may approve: a fresh install can inspect pending approvals but cannot
+    decide one until a human writes the policy down.
+
+    Core policy denies financial, signature, employment, and destructive effect
+    classes outright; listing a principal here never overrides that.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    authorized_principals: dict[str, list[str]] = Field(default_factory=dict)
+
+
 class ReviewBlock(BaseModel):
     """External-review gate settings (nested under 'config.review').
 
@@ -2858,6 +2881,7 @@ class ConfigBlock(BaseModel):
     post_merge: PostMergeBlock = Field(default_factory=PostMergeBlock)
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
+    approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
     # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
     # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs),
     # which runs it alongside a plan's own `done_probes` and refuses DonePRGreen
