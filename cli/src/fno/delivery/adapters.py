@@ -2,29 +2,52 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
-from pydantic import AwareDatetime, BaseModel, ConfigDict, Field, StringConstraints, model_validator
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from fno.company.contracts import (
     CompanyWorkRefs,
     DeliverableRef,
+    EffectRef,
     EvidenceRef,
     EvidenceResult,
     EvidenceSubjectKind,
     WorkOrderRef,
 )
-from fno.delivery.contracts import DeliveryEvidenceFact, DeliveryVerdict
+from fno.delivery.contracts import (
+    DeliveryEvidenceFact,
+    DeliveryEvidenceObservedEvent,
+    DeliveryVerdict,
+)
 from fno.delivery.evaluator import evaluate_delivery
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 LEGACY_PR_ADAPTER_VERSION = "legacy-pr-adapter.v1"
 LEGACY_RESEARCH_ADAPTER_VERSION = "legacy-research-adapter.v1"
+APPROVAL_EVENT_ADAPTER_VERSION = "approval-event-adapter.v1"
+EFFECT_EVENT_ADAPTER_VERSION = "effect-event-adapter.v1"
 
 
 class _ImmutableModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class _ProducerEvent(_ImmutableModel):
+    ts: AwareDatetime
+    type: Literal["approval_requested", "approval_decided", "effect_state_changed"]
+    source: Literal["approvals"]
+    data: dict[str, object]
 
 
 class _LegacySnapshot(_ImmutableModel):
@@ -77,6 +100,227 @@ class LegacyDeliveryShadow(_ImmutableModel):
     company_work: CompanyWorkRefs
     facts: tuple[DeliveryEvidenceFact, ...]
     verdict: DeliveryVerdict
+
+
+def adapt_delivery_event(
+    company_work: CompanyWorkRefs,
+    event: Mapping[str, object] | object,
+    *,
+    fresh_until: datetime,
+    fact_revision: str,
+) -> tuple[DeliveryEvidenceFact, ...]:
+    """Normalize one authoritative event into its exact declared evidence slots.
+
+    The adapter is a pure projection. It does not authorize a decision, advance
+    an effect, or evaluate aggregate delivery. Unreadable, unknown, mismatched,
+    or ambiguously bound inputs return no fact, which leaves coverage unknown.
+    """
+    if not isinstance(event, Mapping):
+        return ()
+    if event.get("type") == "delivery_evidence_observed":
+        return _adapt_observed_event(company_work, event)
+    try:
+        producer_event = _ProducerEvent.model_validate(event)
+    except ValidationError:
+        return ()
+    data = producer_event.data
+    binding = _producer_binding(company_work, data)
+    if binding is None:
+        return ()
+    event_type = producer_event.type
+    if event_type in {"approval_requested", "approval_decided"}:
+        request_digest = _nonempty(data, "request_digest")
+        if request_digest is None or (
+            binding.approval_id is not None and binding.approval_id != request_digest
+        ):
+            return ()
+        declared = _match_slot(company_work, EvidenceSubjectKind.APPROVAL, request_digest)
+        if declared is None:
+            return ()
+        if event_type == "approval_requested":
+            if not _has_nonempty(
+                data,
+                "effect_class",
+                "destination",
+                "action_digest",
+                "expires_at",
+            ):
+                return ()
+            if (
+                data["effect_class"] != binding.effect_class
+                or data["destination"] != binding.destination
+            ):
+                return ()
+            result = EvidenceResult.UNKNOWN
+            source_revision = f"request:{request_digest}:requested"
+        else:
+            if not _has_nonempty(data, "deciding_principal_id"):
+                return ()
+            decision = _nonempty(data, "decision")
+            if decision not in {"approved", "declined"}:
+                return ()
+            result = EvidenceResult.PASSED if decision == "approved" else EvidenceResult.BLOCKED
+            source_revision = f"request:{request_digest}:decision:{decision}"
+        adapter_version = APPROVAL_EVENT_ADAPTER_VERSION
+    else:
+        if not _has_nonempty(
+            data,
+            "idempotency_key",
+            "state",
+            "previous_state",
+            "request_digest",
+        ):
+            return ()
+        if (
+            binding.idempotency_key is not None
+            and data["idempotency_key"] != binding.idempotency_key
+        ) or (binding.approval_id is not None and data["request_digest"] != binding.approval_id):
+            return ()
+        state = _nonempty(data, "state")
+        previous_state = _nonempty(data, "previous_state")
+        state_results = {
+            "acknowledged": EvidenceResult.PASSED,
+            "failed": EvidenceResult.FAILED,
+            "blocked": EvidenceResult.BLOCKED,
+            "prepared": EvidenceResult.UNKNOWN,
+            "executing": EvidenceResult.UNKNOWN,
+            "unknown": EvidenceResult.UNKNOWN,
+        }
+        if state not in state_results or previous_state not in state_results:
+            return ()
+        effect_id = binding.id
+        result = state_results[state]
+        key = _nonempty(data, "idempotency_key")
+        source_revision = f"effect:{key}:state:{state}"
+        adapter_version = EFFECT_EVENT_ADAPTER_VERSION
+        kinds = [EvidenceSubjectKind.EFFECT]
+        if state == "acknowledged":
+            kinds.append(EvidenceSubjectKind.ACKNOWLEDGMENT)
+        declared_slots = tuple(
+            declared
+            for kind in kinds
+            if (declared := _match_slot(company_work, kind, effect_id)) is not None
+        )
+        return tuple(
+            _event_fact(
+                declared,
+                result=result,
+                producer_event=producer_event,
+                source_revision=source_revision,
+                fresh_until=fresh_until,
+                adapter_version=adapter_version,
+                fact_revision=fact_revision,
+            )
+            for declared in declared_slots
+        )
+    return (
+        _event_fact(
+            declared,
+            result=result,
+            producer_event=producer_event,
+            source_revision=source_revision,
+            fresh_until=fresh_until,
+            adapter_version=adapter_version,
+            fact_revision=fact_revision,
+        ),
+    )
+
+
+def _adapt_observed_event(
+    company_work: CompanyWorkRefs, event: Mapping[str, object]
+) -> tuple[DeliveryEvidenceFact, ...]:
+    if event.get("source") != "target":
+        return ()
+    try:
+        fact = DeliveryEvidenceObservedEvent.model_validate(event).data
+    except ValidationError:
+        return ()
+    declared = _match_slot(
+        company_work,
+        fact.evidence.subject_kind,
+        fact.evidence.subject_id,
+        evidence_id=fact.evidence.id,
+    )
+    work_order = company_work.work_order
+    if declared is None or work_order is None:
+        return ()
+    if (
+        fact.evidence.work_order_id != work_order.node_id
+        or fact.evidence.attempt_id != work_order.attempt_id
+    ):
+        return ()
+    return (fact,)
+
+
+def _event_fact(
+    declared: EvidenceRef,
+    *,
+    result: EvidenceResult,
+    producer_event: _ProducerEvent,
+    source_revision: str,
+    fresh_until: datetime,
+    adapter_version: str,
+    fact_revision: str,
+) -> DeliveryEvidenceFact:
+    return DeliveryEvidenceFact(
+        evidence=declared.model_copy(update={"result": result}),
+        producer=f"event:approvals:{producer_event.type}",
+        observed_at=producer_event.ts,
+        source_revision=source_revision,
+        fresh_until=fresh_until,
+        adapter_version=adapter_version,
+        fact_revision=fact_revision,
+    )
+
+
+def _producer_binding(
+    company_work: CompanyWorkRefs, data: Mapping[str, object]
+) -> EffectRef | None:
+    work_order_id = _nonempty(data, "work_order_id")
+    attempt_id = _nonempty(data, "attempt_id")
+    effect_id = _nonempty(data, "effect_id")
+    work_order = company_work.work_order
+    if (
+        work_order is None
+        or work_order_id != work_order.node_id
+        or attempt_id != work_order.attempt_id
+        or effect_id is None
+    ):
+        return None
+    effects = [effect for effect in company_work.effects if effect.id == effect_id]
+    return effects[0] if len(effects) == 1 else None
+
+
+def _match_slot(
+    company_work: CompanyWorkRefs,
+    subject_kind: EvidenceSubjectKind,
+    subject_id: str,
+    *,
+    evidence_id: str | None = None,
+) -> EvidenceRef | None:
+    required_ids = {
+        required_id
+        for deliverable in company_work.deliverables
+        for required_id in deliverable.required_evidence_ids
+    }
+    matches = [
+        evidence
+        for evidence in company_work.evidence
+        if evidence.id in required_ids
+        and (evidence_id is None or evidence.id == evidence_id)
+        and evidence.subject_kind is subject_kind
+        and evidence.subject_id == subject_id
+    ]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _nonempty(data: Mapping[str, object], key: str) -> str | None:
+    value = data.get(key)
+    return value if isinstance(value, str) and value.strip() else None
+
+
+def _has_nonempty(data: Mapping[str, object], *keys: str) -> bool:
+    return all(_nonempty(data, key) is not None for key in keys)
 
 
 def adapt_legacy_pr(snapshot: LegacyPRSnapshot, *, evaluated_at: datetime) -> LegacyDeliveryShadow:

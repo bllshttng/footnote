@@ -10,8 +10,8 @@ from fno.company.contracts import EvidenceRef, EvidenceResult, EvidenceSubjectKi
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 
-DELIVERY_EVIDENCE_FACT_VERSION = "delivery-evidence-fact.v1"
-DELIVERY_EVALUATOR_VERSION = "delivery-evaluator.v1"
+DELIVERY_EVIDENCE_FACT_VERSION: Literal["delivery-evidence-fact.v1"] = "delivery-evidence-fact.v1"
+DELIVERY_EVALUATOR_VERSION: Literal["delivery-evaluator.v1"] = "delivery-evaluator.v1"
 
 
 class _DeliveryModel(BaseModel):
@@ -60,3 +60,27 @@ class DeliveryVerdict(_DeliveryModel):
     fact_revision: NonEmptyStr | None = None
     requirements: tuple[DeliveryRequirementVerdict, ...]
     diagnostics: tuple[NonEmptyStr, ...] = ()
+
+
+class DeliveryEvidenceObservedEvent(_DeliveryModel):
+    """Canonical event envelope for one already-produced runtime fact."""
+
+    ts: AwareDatetime
+    type: Literal["delivery_evidence_observed"]
+    source: NonEmptyStr
+    data: DeliveryEvidenceFact
+
+    @model_validator(mode="after")
+    def _validate_observation_time(self) -> Self:
+        if self.ts != self.data.observed_at:
+            raise ValueError("event ts must match evidence observed_at")
+        return self
+
+
+class DeliveryVerdictEvaluatedEvent(_DeliveryModel):
+    """Canonical event envelope for the pure evaluator's derived result."""
+
+    ts: AwareDatetime
+    type: Literal["delivery_verdict_evaluated"]
+    source: NonEmptyStr
+    data: DeliveryVerdict

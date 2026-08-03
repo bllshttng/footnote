@@ -3128,6 +3128,64 @@ event_types:
           description: "Stable identity minted when the store owed this event. Outbox delivery is at-least-once, so consumers dedupe on it."
     consumers: [delivery evaluation, fno approvals show]
 
+  # ── generic delivery evidence family ────────────────────────────────────
+  # These events serialize immutable source facts and derived verdicts. They
+  # do not execute effects, grant authority, or mutate approval/effect state.
+
+  - name: delivery_evidence_observed
+    description: "One immutable, attempt-bound runtime fact observed by an evidence adapter. The declared company-work evidence slot remains the binding authority."
+    sources: [target, test]
+    data:
+      required: [version, evidence, producer, observed_at, source_revision, fresh_until, adapter_version, fact_revision]
+      properties:
+        version:
+          type: string
+          enum: [delivery-evidence-fact.v1]
+        evidence:
+          type: object
+          description: "Canonical EvidenceRef projection containing evidence ID, work order, attempt, subject, and four-state source result."
+        producer:
+          type: string
+        observed_at:
+          type: string
+          format: rfc3339-utc
+        source_revision:
+          type: string
+        fresh_until:
+          type: string
+          format: rfc3339-utc
+        adapter_version:
+          type: string
+        fact_revision:
+          type: string
+          description: "Coherent snapshot revision shared by facts evaluated together."
+    consumers: [delivery evaluation]
+
+  - name: delivery_verdict_evaluated
+    description: "The pure delivery evaluator retained aggregate and per-requirement results for one attempt. This derived event is not an evidence producer."
+    sources: [target, test]
+    data:
+      required: [evaluator_version, work_order_node_id, attempt_id, aggregate, fact_revision, requirements, diagnostics]
+      properties:
+        evaluator_version:
+          type: string
+          enum: [delivery-evaluator.v1]
+        work_order_node_id:
+          type: string
+        attempt_id:
+          type: string
+        aggregate:
+          type: string
+          enum: [passed, failed, blocked, unknown]
+        fact_revision:
+          type: [string, "null"]
+        requirements:
+          type: array
+          description: "Complete ordered per-requirement verdict rows; aggregate never hides them."
+        diagnostics:
+          type: array
+    consumers: [fno-agents loop-check, finalize handoff]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

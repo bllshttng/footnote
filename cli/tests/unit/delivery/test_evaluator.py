@@ -9,12 +9,14 @@ from pydantic import ValidationError
 from fno.company.contracts import (
     CompanyWorkRefs,
     DeliverableRef,
+    EffectRef,
     EvidenceRef,
     EvidenceResult,
     EvidenceSubjectKind,
     FunctionRef,
     WorkOrderRef,
 )
+from fno.delivery.adapters import adapt_delivery_event
 from fno.delivery import (
     DELIVERY_EVALUATOR_VERSION,
     DELIVERY_EVIDENCE_FACT_VERSION,
@@ -105,9 +107,7 @@ def test_ac_d1_hp_complete_five_slot_coverage_passes_in_declaration_order() -> N
     assert verdict.attempt_id == ATTEMPT_ID
     assert verdict.fact_revision == "snapshot-7"
     assert verdict.aggregate is EvidenceResult.PASSED
-    assert [row.evidence_id for row in verdict.requirements] == [
-        item[0] for item in REQUIREMENTS
-    ]
+    assert [row.evidence_id for row in verdict.requirements] == [item[0] for item in REQUIREMENTS]
     assert {row.result for row in verdict.requirements} == {EvidenceResult.PASSED}
 
 
@@ -126,13 +126,15 @@ def test_ac_d1_err_projection_only_passed_values_are_not_runtime_evidence() -> N
         (lambda: _facts()[1:], "artifact-ready", "missing runtime fact"),
         (
             lambda: (
-                _fact(
-                    "artifact-ready",
-                    observed_at=NOW - timedelta(minutes=10),
-                    fresh_until=NOW - timedelta(seconds=1),
-                ),
-            )
-            + _facts()[1:],
+                (
+                    _fact(
+                        "artifact-ready",
+                        observed_at=NOW - timedelta(minutes=10),
+                        fresh_until=NOW - timedelta(seconds=1),
+                    ),
+                )
+                + _facts()[1:]
+            ),
             "artifact-ready",
             "stale",
         ),
@@ -143,14 +145,16 @@ def test_ac_d1_err_projection_only_passed_values_are_not_runtime_evidence() -> N
         ),
         (
             lambda: (
-                _fact("artifact-ready", producer="adapter:a"),
-                _fact(
-                    "artifact-ready",
-                    producer="adapter:b",
-                    result=EvidenceResult.FAILED,
-                ),
-            )
-            + _facts()[1:],
+                (
+                    _fact("artifact-ready", producer="adapter:a"),
+                    _fact(
+                        "artifact-ready",
+                        producer="adapter:b",
+                        result=EvidenceResult.FAILED,
+                    ),
+                )
+                + _facts()[1:]
+            ),
             "artifact-ready",
             "adapter:a",
         ),
@@ -175,9 +179,7 @@ def test_ac_d2_err_malformed_and_unknown_version_facts_name_the_source() -> None
     malformed["version"] = "delivery-evidence-fact.v999"
     malformed["producer"] = "adapter:future"
 
-    verdict = evaluate_delivery(
-        _company_work(), (malformed,) + _facts()[1:], evaluated_at=NOW
-    )
+    verdict = evaluate_delivery(_company_work(), (malformed,) + _facts()[1:], evaluated_at=NOW)
 
     row = verdict.requirements[0]
     assert row.result is EvidenceResult.UNKNOWN
@@ -298,9 +300,7 @@ def test_ac_d4_compat_pr_shadow_passes_only_with_all_five_legacy_reads() -> None
     assert {fact.source_revision for fact in shadow.facts} == {"pr-42:head-sha"}
     assert {fact.fact_revision for fact in shadow.facts} == {"pr-snapshot-1"}
     assert {fact.observed_at for fact in shadow.facts} == {NOW}
-    assert {fact.fresh_until for fact in shadow.facts} == {
-        NOW + timedelta(minutes=5)
-    }
+    assert {fact.fresh_until for fact in shadow.facts} == {NOW + timedelta(minutes=5)}
 
 
 @pytest.mark.parametrize(
@@ -447,3 +447,307 @@ def test_ac_d4_compat_legacy_snapshots_and_shadow_results_are_immutable() -> Non
         snapshot.pr_open = False
     with pytest.raises(ValidationError, match="frozen"):
         shadow.legacy_passed = False
+
+
+def _producer_company_work(*, duplicate_approval_slot: bool = False) -> CompanyWorkRefs:
+    evidence = [
+        EvidenceRef(
+            id="approval-ready",
+            work_order_id=NODE_ID,
+            attempt_id=ATTEMPT_ID,
+            subject_kind=EvidenceSubjectKind.APPROVAL,
+            subject_id="request-digest-1",
+            result=EvidenceResult.UNKNOWN,
+        ),
+        EvidenceRef(
+            id="effect-acknowledged",
+            work_order_id=NODE_ID,
+            attempt_id=ATTEMPT_ID,
+            subject_kind=EvidenceSubjectKind.EFFECT,
+            subject_id="effect-1",
+            result=EvidenceResult.UNKNOWN,
+        ),
+        EvidenceRef(
+            id="destination-acknowledged",
+            work_order_id=NODE_ID,
+            attempt_id=ATTEMPT_ID,
+            subject_kind=EvidenceSubjectKind.ACKNOWLEDGMENT,
+            subject_id="effect-1",
+            result=EvidenceResult.UNKNOWN,
+        ),
+    ]
+    if duplicate_approval_slot:
+        evidence.append(evidence[0].model_copy(update={"id": "approval-ready-duplicate"}))
+    return CompanyWorkRefs(
+        work_order=WorkOrderRef(node_id=NODE_ID, attempt_id=ATTEMPT_ID),
+        deliverables=(
+            DeliverableRef(
+                id="external-send",
+                kind="arbitrary-external-effect",
+                work_order_id=NODE_ID,
+                attempt_id=ATTEMPT_ID,
+                required_evidence_ids=tuple(item.id for item in evidence),
+                effect_id="effect-1",
+            ),
+        ),
+        effects=(
+            EffectRef(
+                id="effect-1",
+                work_order_id=NODE_ID,
+                attempt_id=ATTEMPT_ID,
+                deliverable_id="external-send",
+                effect_class="communication.external",
+                destination="email:customer@example.com",
+                idempotency_key="effect-key-1",
+                approval_id="request-digest-1",
+            ),
+        ),
+        evidence=tuple(evidence),
+    )
+
+
+def _producer_event(event_type: str, **changes: object) -> dict[str, object]:
+    data: dict[str, object]
+    if event_type == "approval_requested":
+        data = {
+            "request_digest": "request-digest-1",
+            "request_id": "request-1",
+            "principal_id": "principal-1",
+            "work_order_id": NODE_ID,
+            "attempt_id": ATTEMPT_ID,
+            "effect_id": "effect-1",
+            "effect_class": "communication.external",
+            "destination": "email:customer@example.com",
+            "action_digest": "action-digest-1",
+            "expires_at": "2026-08-02T13:00:00Z",
+        }
+    elif event_type == "approval_decided":
+        data = {
+            "request_digest": "request-digest-1",
+            "decision": "approved",
+            "deciding_principal_id": "principal-1",
+            "work_order_id": NODE_ID,
+            "attempt_id": ATTEMPT_ID,
+            "effect_id": "effect-1",
+        }
+    else:
+        data = {
+            "idempotency_key": "effect-key-1",
+            "state": "acknowledged",
+            "previous_state": "executing",
+            "request_digest": "request-digest-1",
+            "work_order_id": NODE_ID,
+            "attempt_id": ATTEMPT_ID,
+            "effect_id": "effect-1",
+            "external_ref": "message-42",
+            "reconciliation_ref": None,
+        }
+    data.update(changes)
+    return {
+        "ts": NOW.isoformat().replace("+00:00", "Z"),
+        "type": event_type,
+        "source": "approvals",
+        "data": data,
+    }
+
+
+@pytest.mark.parametrize(
+    ("event_type", "changes", "expected"),
+    [
+        ("approval_requested", {}, {"approval-ready": EvidenceResult.UNKNOWN}),
+        ("approval_decided", {}, {"approval-ready": EvidenceResult.PASSED}),
+        (
+            "approval_decided",
+            {"decision": "declined"},
+            {"approval-ready": EvidenceResult.BLOCKED},
+        ),
+        (
+            "effect_state_changed",
+            {},
+            {
+                "effect-acknowledged": EvidenceResult.PASSED,
+                "destination-acknowledged": EvidenceResult.PASSED,
+            },
+        ),
+        (
+            "effect_state_changed",
+            {"state": "failed"},
+            {"effect-acknowledged": EvidenceResult.FAILED},
+        ),
+        (
+            "effect_state_changed",
+            {"state": "blocked"},
+            {"effect-acknowledged": EvidenceResult.BLOCKED},
+        ),
+        (
+            "effect_state_changed",
+            {"state": "executing"},
+            {"effect-acknowledged": EvidenceResult.UNKNOWN},
+        ),
+        (
+            "effect_state_changed",
+            {"state": "unknown"},
+            {"effect-acknowledged": EvidenceResult.UNKNOWN},
+        ),
+    ],
+)
+def test_ac_d2_hp_producer_events_normalize_only_their_declared_source_fact(
+    event_type: str,
+    changes: dict[str, object],
+    expected: dict[str, EvidenceResult],
+) -> None:
+    facts = adapt_delivery_event(
+        _producer_company_work(),
+        _producer_event(event_type, **changes),
+        fresh_until=NOW + timedelta(minutes=5),
+        fact_revision="event-snapshot-1",
+    )
+
+    assert {fact.evidence.id: fact.evidence.result for fact in facts} == expected
+    assert {fact.evidence.work_order_id for fact in facts} == {NODE_ID}
+    assert {fact.evidence.attempt_id for fact in facts} == {ATTEMPT_ID}
+    assert {fact.producer for fact in facts} == {f"event:approvals:{event_type}"}
+    assert {fact.fact_revision for fact in facts} == {"event-snapshot-1"}
+
+
+def test_ac_d2_edge_requested_approval_does_not_require_optional_identity_fields() -> None:
+    event = _producer_event("approval_requested")
+    assert isinstance(event["data"], dict)
+    event["data"].pop("request_id")
+    event["data"].pop("principal_id")
+
+    facts = adapt_delivery_event(
+        _producer_company_work(),
+        event,
+        fresh_until=NOW + timedelta(minutes=5),
+        fact_revision="event-snapshot-1",
+    )
+
+    assert len(facts) == 1
+    assert facts[0].evidence.result is EvidenceResult.UNKNOWN
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"type": "approval_decided", "source": "approvals", "data": {}},
+        _producer_event("approval_decided", decision="maybe"),
+        _producer_event("effect_state_changed", state="delivered"),
+        _producer_event("approval_decided", work_order_id="x-other"),
+        _producer_event("approval_decided", attempt_id="attempt-old"),
+        _producer_event("effect_state_changed", effect_id="effect-other"),
+        _producer_event("approval_requested", destination="email:attacker@example.com"),
+        _producer_event("effect_state_changed", idempotency_key="effect-key-other"),
+        _producer_event("effect_state_changed", request_digest="request-digest-other"),
+        {**_producer_event("approval_decided"), "source": "test"},
+        {**_producer_event("approval_decided"), "type": "unknown_event"},
+    ],
+)
+def test_ac_d2_err_malformed_unknown_and_mismatched_events_produce_no_fact(
+    event: dict[str, object],
+) -> None:
+    assert (
+        adapt_delivery_event(
+            _producer_company_work(),
+            event,
+            fresh_until=NOW + timedelta(minutes=5),
+            fact_revision="event-snapshot-1",
+        )
+        == ()
+    )
+
+
+def test_ac_d2_err_ambiguous_declared_slot_match_produces_no_fact() -> None:
+    facts = adapt_delivery_event(
+        _producer_company_work(duplicate_approval_slot=True),
+        _producer_event("approval_decided"),
+        fresh_until=NOW + timedelta(minutes=5),
+        fact_revision="event-snapshot-1",
+    )
+
+    assert facts == ()
+
+
+def test_ac_d3_err_conflicting_producer_events_never_resolve_by_last_writer() -> None:
+    company_work = _producer_company_work()
+    facts = tuple(
+        fact
+        for decision in ("approved", "declined")
+        for fact in adapt_delivery_event(
+            company_work,
+            _producer_event("approval_decided", decision=decision),
+            fresh_until=NOW + timedelta(minutes=5),
+            fact_revision="event-snapshot-1",
+        )
+    )
+
+    verdict = evaluate_delivery(company_work, facts, evaluated_at=NOW)
+
+    approval = next(row for row in verdict.requirements if row.evidence_id == "approval-ready")
+    assert approval.result is EvidenceResult.UNKNOWN
+    assert verdict.aggregate is EvidenceResult.UNKNOWN
+    assert "conflicting duplicate facts" in " ".join(approval.diagnostics)
+
+
+def test_ac_d2_hp_delivery_evidence_observed_round_trips_a_declared_fact() -> None:
+    declared = _producer_company_work()
+    source_fact = DeliveryEvidenceFact(
+        evidence=declared.evidence[1].model_copy(update={"result": EvidenceResult.PASSED}),
+        producer="adapter:destination-api",
+        observed_at=NOW,
+        source_revision="message-42",
+        fresh_until=NOW + timedelta(minutes=5),
+        adapter_version="destination-api.v1",
+        fact_revision="event-snapshot-1",
+    )
+    event = {
+        "ts": "2026-08-02T12:00:00Z",
+        "type": "delivery_evidence_observed",
+        "source": "target",
+        "data": source_fact.model_dump(mode="json"),
+    }
+
+    assert adapt_delivery_event(
+        declared,
+        event,
+        fresh_until=NOW + timedelta(days=1),
+        fact_revision="ignored-for-canonical-event",
+    ) == (source_fact,)
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"version": "delivery-evidence-fact.v999"},
+        {"evidence": {"id": "effect-acknowledged"}},
+    ],
+)
+def test_ac_d2_err_malformed_delivery_evidence_observed_produces_no_fact(
+    change: dict[str, object],
+) -> None:
+    declared = _producer_company_work()
+    source_fact = DeliveryEvidenceFact(
+        evidence=declared.evidence[1],
+        producer="adapter:destination-api",
+        observed_at=NOW,
+        source_revision="message-42",
+        fresh_until=NOW + timedelta(minutes=5),
+        adapter_version="destination-api.v1",
+        fact_revision="event-snapshot-1",
+    ).model_dump(mode="json")
+    source_fact.update(change)
+
+    assert (
+        adapt_delivery_event(
+            declared,
+            {
+                "ts": "2026-08-02T12:00:00Z",
+                "type": "delivery_evidence_observed",
+                "source": "target",
+                "data": source_fact,
+            },
+            fresh_until=NOW + timedelta(minutes=5),
+            fact_revision="event-snapshot-1",
+        )
+        == ()
+    )
