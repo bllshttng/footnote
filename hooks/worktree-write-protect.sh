@@ -115,13 +115,19 @@ fi
 # and over-reaches into an unrelated project's checkout, which this hook is not
 # responsible for. Resolving one root instead also costs one helper call rather
 # than one per target.
+#
+# Failing to NAME the root is not the same as answering "not protected": a repo
+# whose HEAD is corrupt fails `worktree list` while the location helper still
+# reads it as canonical-protected off its `pwd` fallback. So an unnameable root
+# hands the payload back to the cwd gate rather than approving it.
+_undeterminable_root() { _block_if_canonical "$CWD"; _approve; }
 _root="$(git -C "$CWD" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
-[[ -n "$_root" && -d "$_root" ]] || _approve
-_location="$(_location_of "$_root")" || _approve
+[[ -n "$_root" && -d "$_root" ]] || _undeterminable_root
+_location="$(_location_of "$_root")" || _undeterminable_root
 [[ "$(_field verdict "$_location")" == "canonical-protected" ]] || _approve
 PROTECTED_BRANCH="$(_field branch "$_location")"
 PROTECTED_ROOT="$(cd -P "$_root" 2>/dev/null && pwd -P)"
-[[ -n "$PROTECTED_ROOT" ]] || _approve
+[[ -n "$PROTECTED_ROOT" ]] || _undeterminable_root
 
 # _target_safe PHYSICAL_PATH -> 0 when this write cannot change protected content.
 #
@@ -147,7 +153,7 @@ _target_safe() {
         *) return 0 ;;
     esac
     [[ "$phys" != "$PROTECTED_ROOT" ]] || return 1
-    git -C "$PROTECTED_ROOT" check-ignore -q "$phys" 2>/dev/null
+    git -C "$PROTECTED_ROOT" check-ignore -q -- "$phys" 2>/dev/null
 }
 
 # One blocked target denies the whole call: safe siblings cannot launder an
