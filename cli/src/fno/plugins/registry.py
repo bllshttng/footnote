@@ -112,6 +112,13 @@ class PackRegistry(_RegistryModel):
                 return receipt.pack_digest
         return None
 
+    def owner_of_path(self, written_path: str) -> tuple[str, str] | None:
+        """The (pack_id, pack_digest) whose receipt recorded this path, or None."""
+        for receipt in self.receipts:
+            if written_path in receipt.written_paths:
+                return (receipt.pack_id, receipt.pack_digest)
+        return None
+
 
 class PackRegistryStore:
     """Lock-guarded, atomically-written persistence for the pack registry."""
@@ -139,6 +146,9 @@ class PackRegistryStore:
 
     def owner_digest_of_path(self, written_path: str) -> str | None:
         return self.load().owner_digest_of_path(written_path)
+
+    def owner_of_path(self, written_path: str) -> tuple[str, str] | None:
+        return self.load().owner_of_path(written_path)
 
     def install(self, manifest: PackManifest, manifest_path: Path) -> InstalledPack:
         """Record (or refresh) a pack as installed and return its record."""
