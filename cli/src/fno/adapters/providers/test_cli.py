@@ -1840,3 +1840,155 @@ class TestReconcileSlot:
         assert result.exit_code == 0, result.output
         ids = {r.id for r in load_providers(repo_root=store).records}
         assert {"rival", "fresh"} <= ids
+
+
+# ---------------------------------------------------------------------------
+# usage --refresh: the probe result IS the displayed result (x-0aec)
+#
+# The defect these pin: `probe_usage` returned real 5h/weekly windows while
+# `fno config accounts usage --refresh` printed `unknown` in the same revision.
+# Two reads of one observation can disagree; one read cannot.
+# ---------------------------------------------------------------------------
+
+
+def _usage_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    _write_settings(tmp_path / ".fno" / "config.toml", _config_dir_pair(tmp_path))
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("PWD", str(tmp_path))
+    monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
+    monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "runtime-state.json"))
+    return tmp_path
+
+
+def _stub_probe(monkeypatch: pytest.MonkeyPatch, snapshots: dict) -> None:
+    """Make the single probe path return a known snapshot per record id."""
+    monkeypatch.setattr(
+        "fno.adapters.providers.usage.probe_usage_detail",
+        lambda record, now=None: (
+            (snapshots[record.id], None)
+            if record.id in snapshots
+            else (None, "probe-failed")
+        ),
+    )
+
+
+class TestUsageRefreshContract:
+    def test_the_probed_snapshot_is_the_json_output(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC1-HP: same invocation, same observation, field for field."""
+        import json as _json
+
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        probed = UsageSnapshot(
+            provider_id="readyrule",
+            windows=(
+                UsageWindow("5h", 9.0, 1_800_000_000.0),
+                UsageWindow("weekly", 95.0, 1_800_600_000.0),
+            ),
+            probed_at=1_700_000_000.0,
+            source="oauth-endpoint",
+        )
+        _stub_probe(monkeypatch, {"readyrule": probed})
+
+        result = _invoke(["usage", "--refresh", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        entry = _json.loads(result.output.strip())["readyrule"]
+
+        assert entry["source"] == probed.source
+        assert entry["probed_at"] == probed.probed_at
+        assert entry["windows"] == [
+            {"label": w.label, "used_pct": w.used_pct, "resets_at": w.resets_at}
+            for w in probed.windows
+        ]
+
+    def test_a_failed_cache_write_still_displays_the_snapshot(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC2-FR: persistence degradation is reported, not substituted."""
+        import json as _json
+
+        from fno.adapters.providers import runtime_state as rs
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        probed = UsageSnapshot(
+            "readyrule", (UsageWindow("5h", 12.0, 1_800_000_000.0),), 1_700_000_000.0, "oauth-endpoint"
+        )
+        _stub_probe(monkeypatch, {"readyrule": probed})
+        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None: False)
+
+        result = _invoke(["usage", "--refresh", "--json"], cwd=tmp_path, home=tmp_path)
+        entry = _json.loads(result.output.strip())["readyrule"]
+        assert entry["windows"][0]["used_pct"] == 12.0
+        assert entry["persisted"] is False
+
+    def test_unknown_names_the_boundary_that_failed(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """AC3-ERR: JSON carries a machine-readable reason; no credentials."""
+        import json as _json
+
+        _usage_env(tmp_path, monkeypatch)
+        _stub_probe(monkeypatch, {})  # every record probes to unknown
+
+        result = _invoke(["usage", "--refresh", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["readyrule"] == {"state": "unknown", "reason": "probe-failed"}
+        assert payload["makers"] == {"state": "unknown", "reason": "probe-failed"}
+
+    def test_an_unattributable_record_never_borrows_other_windows(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Failure Modes / Boundaries: unknown stays unknown, never inherited."""
+        import json as _json
+
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        probed = UsageSnapshot(
+            "readyrule", (UsageWindow("5h", 9.0, 1_800_000_000.0),), 1_700_000_000.0, "oauth-endpoint"
+        )
+        monkeypatch.setattr(
+            "fno.adapters.providers.usage.probe_usage_detail",
+            lambda record, now=None: (
+                (probed, None) if record.id == "readyrule" else (None, "unattributed")
+            ),
+        )
+
+        result = _invoke(["usage", "--refresh", "--json"], cwd=tmp_path, home=tmp_path)
+        payload = _json.loads(result.output.strip())
+        assert payload["readyrule"]["windows"][0]["used_pct"] == 9.0
+        assert payload["makers"] == {"state": "unknown", "reason": "unattributed"}
+
+    def test_human_output_stays_one_compact_line_per_state(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
+
+        _usage_env(tmp_path, monkeypatch)
+        import time as _time
+
+        probed = UsageSnapshot(
+            "readyrule", (UsageWindow("5h", 9.0, _time.time() + 3600),), _time.time(), "oauth-endpoint"
+        )
+        _stub_probe(monkeypatch, {"readyrule": probed})
+
+        result = _invoke(["usage", "--refresh"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        assert "readyrule  [claude]  5h" in result.output
+        assert "makers  [claude]  unknown (probe-failed)" in result.output
+
+    def test_without_refresh_an_unprobed_record_says_so(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import json as _json
+
+        _usage_env(tmp_path, monkeypatch)
+        result = _invoke(["usage", "--json"], cwd=tmp_path, home=tmp_path)
+        assert result.exit_code == 0, result.output
+        payload = _json.loads(result.output.strip())
+        assert payload["readyrule"] == {"state": "unknown", "reason": "not-probed"}

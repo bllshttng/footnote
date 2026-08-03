@@ -1349,7 +1349,17 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
 ### CLI
 
 - `fno config accounts usage [--json/-J] [--refresh]` - per-provider windows (used %,
-  resets-in). `--refresh` forces a probe past the TTL cache.
+  resets-in). `--refresh` forces a probe past the TTL cache and renders that probe's
+  own result, with no second cache read: two reads of one observation can disagree,
+  and that disagreement is what once printed `unknown` while the probe returned real
+  windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON
+  and `unknown (<slug>)` in human output, where the slug names the boundary that
+  failed - `unattributed` (no credential provably this record's), `harness-unsupported`,
+  `probe-failed`, `probe-error`, `record-missing`, `config-unreadable`, `no-windows`,
+  or `not-probed` (no `--refresh` and no fresh snapshot). A known provider additionally
+  carries `"persisted": false` when the reading is good but its cache write lost the
+  update-lock race; the reading is still displayed, because persistence and
+  displayability are separate outcomes.
 - `fno config accounts list` gains a compact `headroom=` column.
 - `fno config accounts required-bot-check [--json]` - the pre-promise early warning.
 

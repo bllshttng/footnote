@@ -176,12 +176,23 @@ def usage_providers(
     A provider with no fresh snapshot (never probed, probe failed, or CLI
     without a probe) shows ``unknown`` and the command still exits 0 - probing
     is advisory and fail-open (AC1-ERR).
+
+    ``--refresh`` renders the observation the probe just produced, in memory,
+    with no second cache read: re-reading the cache after refreshing creates a
+    SECOND observation, and a losing write race or a TTL edge then turns a
+    successful live probe into a displayed ``unknown`` (AC1-HP, x-0aec).
+    Every unknown names the boundary it failed at, so an operator can tell
+    "repair attribution" from "the endpoint moved" (AC3-ERR).
     """
     import json as _json
     import time as _time
 
     from fno.adapters.providers.loader import load_quota_config
-    from fno.adapters.providers.runtime_state import read_usage, refresh_usage
+    from fno.adapters.providers.runtime_state import (
+        UsageRefresh,
+        read_usage,
+        refresh_usage_detailed,
+    )
 
     config = _load()
     now = _time.time()
@@ -190,20 +201,31 @@ def usage_providers(
     out: dict[str, object] = {}
     for record in config.records:
         if refresh:
-            snap = refresh_usage(record.id, ttl_seconds=0, now=now)
+            obs = refresh_usage_detailed(record.id, ttl_seconds=0, now=now)
         else:
-            snap = read_usage(record.id, ttl_seconds=ttl, now=now)
-        if snap is None or not snap.windows:
-            out[record.id] = "unknown"
-        else:
-            out[record.id] = {
-                "source": snap.source,
-                "probed_at": snap.probed_at,
-                "windows": [
-                    {"label": w.label, "used_pct": w.used_pct, "resets_at": w.resets_at}
-                    for w in snap.windows
-                ],
-            }
+            cached = read_usage(record.id, ttl_seconds=ttl, now=now)
+            obs = (
+                UsageRefresh(None, "not-probed")
+                if cached is None
+                else UsageRefresh(cached, None if cached.windows else "no-windows")
+            )
+        if not obs.known:
+            out[record.id] = {"state": "unknown", "reason": obs.reason or "unknown"}
+            continue
+        snap = obs.snapshot
+        assert snap is not None  # obs.known implies a snapshot with windows
+        entry: dict[str, object] = {
+            "source": snap.source,
+            "probed_at": snap.probed_at,
+            "windows": [
+                {"label": w.label, "used_pct": w.used_pct, "resets_at": w.resets_at}
+                for w in snap.windows
+            ],
+        }
+        if obs.persisted is False:
+            # Additive: the reading is good, only its cache write lost the race.
+            entry["persisted"] = False
+        out[record.id] = entry
 
     if json_output:
         typer.echo(_json.dumps(out))
@@ -214,10 +236,10 @@ def usage_providers(
         return
     for record in config.records:
         entry = out[record.id]
-        if entry == "unknown":
-            typer.echo(f"{record.id}  [{record.harness}]  unknown")
-            continue
         assert isinstance(entry, dict)
+        if entry.get("state") == "unknown":
+            typer.echo(f"{record.id}  [{record.harness}]  unknown ({entry['reason']})")
+            continue
         for w in entry["windows"]:  # type: ignore[index]
             typer.echo(
                 f"{record.id}  [{record.harness}]  {w['label']:<8} "
