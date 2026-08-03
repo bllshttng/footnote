@@ -222,7 +222,7 @@ def _current_evidence_events(
         tuple[datetime | None, datetime | None, list[dict[str, object]]],
     ] = {}
     requests: dict[str, _LatestEvent] = {}
-    approvals: dict[str, _LatestEvent] = {}
+    approvals: dict[str, dict[str, _LatestEvent]] = {}
     unkeyed_approvals: dict[str, _LatestEvent] = {}
     effects: dict[str, _LatestEvent] = {}
     producer_event_ids: dict[str, tuple[object, ...]] = {}
@@ -315,7 +315,11 @@ def _current_evidence_events(
         elif event_type == "approval_decided":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
-                _select_latest(approvals, digest, event)
+                decision = data.get("decision")
+                decision_key = (
+                    decision if isinstance(decision, str) and decision else "<malformed>"
+                )
+                _select_latest(approvals.setdefault(digest, {}), decision_key, event)
             else:
                 effect_id = data.get("effect_id")
                 if isinstance(effect_id, str) and effect_id:
@@ -341,11 +345,18 @@ def _current_evidence_events(
                 continue
             selected_events.append((event, None))
     for digest, current_request in requests.items():
-        selected_events.append((approvals.get(digest, current_request).event, None))
+        decisions = approvals.get(digest)
+        if decisions:
+            selected_events.extend(
+                (decisions[key].event, None) for key in sorted(decisions)
+            )
+        else:
+            selected_events.append((current_request.event, None))
     selected_events.extend(
-        (current.event, None)
-        for digest, current in approvals.items()
+        (decisions[key].event, None)
+        for digest, decisions in approvals.items()
         if digest not in requests
+        for key in sorted(decisions)
     )
     selected_events.extend(
         (current.event, None) for current in unkeyed_approvals.values()

@@ -534,6 +534,27 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     assert "attempt-old" in diagnostics
     assert "rejected binding" in diagnostics
 
+    conflicting_decision = json.loads(json.dumps(rows[1]))
+    conflicting_decision["ts"] = "2026-08-02T12:06:00Z"
+    conflicting_decision["data"].update(
+        {
+            "decision": "declined",
+            "event_id": "event-decision-conflicting",
+        }
+    )
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [conflicting_decision])
+    )
+    _, conflicting_decision_payload = _invoke(plan, events)
+    assert conflicting_decision_payload["verdict"]["aggregate"] == "unknown"
+    approval_row = next(
+        row
+        for row in conflicting_decision_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "approval-ready"
+    )
+    assert approval_row["result"] == "unknown"
+    assert "conflicting duplicate facts" in " ".join(approval_row["diagnostics"])
+
     events.write_text(
         "".join(json.dumps(row) + "\n" for row in rows + [rows[-1]])
     )
