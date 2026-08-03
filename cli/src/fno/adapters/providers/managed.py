@@ -284,7 +284,16 @@ def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
     is not a tie to break: whichever we stamped, some reader would get the other
     one, so the honest answer is to refuse and let the operator settle it.
     """
-    blobs = canonical_slot_blobs(cli)
+    return principal_of_blobs(canonical_slot_blobs(cli))
+
+
+def principal_of_blobs(blobs: list[str]) -> tuple[Optional[dict], Optional[str]]:
+    """The one principal ``blobs`` agree on, or a typed failure.
+
+    Takes the bytes rather than re-reading the slot so a caller can prove, store
+    and bind THE SAME credential: proving one read and snapshotting another is
+    how account A's identity ends up bound to account B's blob.
+    """
     if not blobs:
         return None, "no-slot-credential"
     seen: list[dict] = []
@@ -1324,6 +1333,51 @@ def bearer_principal_verdict(
         return "unprovable"
     note_slot_principal(cli, root, got, bearer, now=now)
     return "match" if got == want else "mismatch"
+
+
+def register_slot_snapshot(
+    record: ProviderRecord, root: Path | None = None, *, lock_timeout: float = 10
+) -> tuple[Path, Optional[dict], Optional[str]]:
+    """Capture the shared slot for ``record`` and bind the identity of THOSE bytes.
+
+    ``(account_dir, principal, failure)``. One read serves the proof, the
+    snapshot, and the binding, under the same mutex a switch takes - otherwise
+    the identity proved and the credential stored can be two different accounts,
+    either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
+    because a concurrent switch replaces the slot between them.
+
+    ``ambiguous-slot`` writes nothing: with two accounts in the slot there is no
+    way to know which one the operator meant to register. Any other failure
+    still snapshots (registration must work offline) and leaves the record
+    unbound, which `doctor` reports.
+    """
+    root = root or store_root()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=lock_timeout)
+    try:
+        lock.acquire()
+    except filelock.Timeout as exc:
+        raise SwitchDeferred(
+            "another slot transition is in progress; try again"
+        ) from exc
+    try:
+        blobs = canonical_slot_blobs(record.harness)
+        if not blobs:
+            raise ManagedStoreError(
+                f"no current {record.harness} login to snapshot for '{record.id}' "
+                "(sign in first, then register)"
+            )
+        principal, failure = principal_of_blobs(blobs)
+        if failure == "ambiguous-slot":
+            return account_dir(record.id, root), None, failure
+        adir = write_snapshot(record, blobs[0], root)
+        if principal is not None:
+            write_record_principal(record.id, principal, root)
+        else:
+            _clear_record_principal(record.id, root)
+        return adir, principal, failure
+    finally:
+        lock.release()
 
 
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:

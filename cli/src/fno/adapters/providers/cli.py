@@ -593,7 +593,7 @@ def register_provider(
     # under two ids, and every later per-account decision is then arithmetic on a
     # duplicate. Digests only - no token or fragment reaches stdout/stderr.
     holder = managed.duplicate_credential_holder(
-        managed._read_slot_blob(record.harness), exclude_id=record.id
+        managed.read_canonical_slot_blob(record.harness), exclude_id=record.id
     )
     if holder is not None:
         typer.echo(
@@ -608,10 +608,15 @@ def register_provider(
         )
         raise typer.Exit(1)
 
-    # The slot can present two credentials on macOS (scoped + unscoped), and a
-    # stale one can name a different account. Binding whichever the snapshot
-    # happened to pick would file that account's identity under this new id.
-    proven, identity_failure = managed.canonical_slot_principal(record.harness)
+    # One locked capture serves the proof, the snapshot, and the binding.
+    # Proving one read and snapshotting another is how account A's identity ends
+    # up bound to account B's credential - via an ambient CLAUDE_CONFIG_DIR on
+    # the second read, or a concurrent switch between them.
+    try:
+        adir, proven, identity_failure = managed.register_slot_snapshot(record)
+    except managed.ManagedStoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
     if identity_failure == "ambiguous-slot":
         typer.echo(
             f"error: the {record.harness} slot currently holds credentials for two "
@@ -619,13 +624,6 @@ def register_provider(
             f"one.\n  sign out and back in as {record.id}, then re-run this command",
             err=True,
         )
-        raise typer.Exit(1)
-
-    # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
-    try:
-        adir = managed.snapshot_current(record)
-    except managed.ManagedStoreError as exc:
-        typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
     repo_root = _get_repo_root()
@@ -659,14 +657,6 @@ def register_provider(
     # what lets `reconcile-slot` recognize the account later, when the only
     # available evidence is the credential itself. Best-effort by design: a
     # record that never got bound is unmatchable, and reconciliation says so.
-    # Bind the principal already proven above rather than re-resolving it, so
-    # the identity stored is the one the ambiguity check cleared. When it could
-    # not be proven (offline, or an endpoint change) the record simply stays
-    # unbound and `doctor` reports it.
-    if proven is not None:
-        managed.write_record_principal(record.id, proven)
-    else:
-        managed._clear_record_principal(record.id)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
 

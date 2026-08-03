@@ -2029,3 +2029,77 @@ class TestOrganizationScopedIdentity:
         assert managed.reconcile_slot(
             "claude", by_id=by_id, root=tmp_path
         ).outcome == "ambiguous-slot"
+
+
+class TestRegisterCapturesOneCredential:
+    """Proving one read and snapshotting another is how account A's identity
+    ends up bound to account B's credential."""
+
+    def test_the_proved_bytes_are_the_stored_bytes(self, tmp_path, monkeypatch):
+        """An ambient CLAUDE_CONFIG_DIR redirects `_read_slot_blob` but must not
+        reach the capture, which reads the canonical slot once."""
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("CANONICAL")]
+        )
+        monkeypatch.setattr(
+            managed, "_read_slot_blob",
+            lambda cli, config_dir=None: pytest.fail("re-read the slot after proving"),
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None and principal["account_uuid"] == "acct-a"
+        assert (adir / "blob").read_text() == _blob("CANONICAL")
+        assert managed.record_principal("work-a", tmp_path)["account_uuid"] == "acct-a"
+
+    def test_an_ambiguous_slot_writes_nothing(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A"), _blob("B")]
+        )
+        who = {_blob("A"): "acct-a", _blob("B"): "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile(who[blob])), None),
+        )
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure == "ambiguous-slot" and principal is None
+        assert not (tmp_path / "work-a" / "blob").exists()
+
+    def test_an_unprovable_identity_still_registers_but_unbound(
+        self, tmp_path, monkeypatch
+    ):
+        """Registration must work offline; the record is then simply unbound and
+        `doctor` says so."""
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("OFFLINE")]
+        )
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+        assert principal is None and failure == "profile-unavailable"
+        assert (adir / "blob").read_text() == _blob("OFFLINE")
+        assert managed.record_principal("work-a", tmp_path) is None
+
+    def test_it_serializes_against_a_switch(self, tmp_path, monkeypatch):
+        import filelock
+
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("X")]
+        )
+        held = filelock.FileLock(str(managed._switch_lock_path(tmp_path)), timeout=1)
+        held.acquire()
+        try:
+            with pytest.raises(managed.SwitchDeferred):
+                managed.register_slot_snapshot(_rec("work-a"), tmp_path, lock_timeout=0.2)
+        finally:
+            held.release()
