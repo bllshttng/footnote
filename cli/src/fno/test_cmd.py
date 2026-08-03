@@ -166,6 +166,9 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
         for a in pytest_args
     )
     if not has_target:
+        pytest_args.extend(
+            ["-n", "auto", "--maxprocesses=4", "--dist=loadgroup"]
+        )
         pytest_args.append(str((root / "cli" / "tests").resolve()))
 
     env = _child_env(root)
