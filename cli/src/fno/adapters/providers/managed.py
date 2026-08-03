@@ -908,6 +908,38 @@ def capture_record_principal(
     return principal
 
 
+def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
+    """``{stamped, live}`` when the stamp and the live slot disagree, else None.
+
+    The taint marker only watches the door footnote controls. An out-of-band
+    `claude /login` walks through the other one, leaving a stamp that is wrong
+    and UNTAINTED - so attribution proceeds confidently and files the new
+    account's usage under the old account's name. This is the read that makes
+    that loud.
+
+    Read-only, and free until it can answer: with no bound principal there is
+    nothing to compare, so an unbound store never pays for a profile call.
+    """
+    if cli != "claude":
+        return None
+    try:
+        stamped = active_slot_id(cli, root)
+    except OSError:
+        return None
+    if not stamped:
+        return None
+    bound = record_principal(stamped, root)
+    if bound is None:
+        return None
+    principal, _failure = slot_principal(_read_slot_blob(cli))
+    if principal is None or principal["account_uuid"] == bound["account_uuid"]:
+        return None
+    return {
+        "stamped": stamped,
+        "live": principal.get("email") or principal["account_uuid"],
+    }
+
+
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:
     return _active_stamp_path(cli, root).with_suffix(".reconcile-attempt")
 

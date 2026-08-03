@@ -274,6 +274,35 @@ One read-only verb reporting the store's real condition, exiting non-zero when a
 
 `register` refuses a duplicate credential up front, but that guard is register-time only.
 `doctor` is the surface that reports stores predating it, and the verb that confirms a `--config-dir` conversion took.
+It stays read-only: for the one finding it cannot merely report, it names `fno config accounts reconcile-slot <harness>` as the repair.
+
+### `fno config accounts reconcile-slot <harness>`
+
+The store assumes footnote performs every slot transition, and two things break that assumption.
+A switch that proceeds under live pins marks the slot **tainted**, which makes every usage read for that account `unknown` until the taint clears.
+And `claude /login` replaces the shared credential directly, telling footnote nothing, so the active stamp keeps naming whoever was there before.
+
+`reconcile-slot` closes both by treating the live credential as the source of truth and the store as a cache.
+It reads the slot credential, resolves its principal from the live OAuth profile, and compares that against each registered account's proven identity.
+On exactly one match it refreshes that account's snapshot from the live blob, stamps it active, and clears the taint, all under the same mutex a switch takes.
+
+```bash
+fno config accounts reconcile-slot claude
+```
+
+It is deliberately **not** a `clear-taint` verb, and it will not act on anything short of proof.
+An unreachable profile endpoint, a malformed response, a principal matching no registered account, or one matching two of them each leave the stamp, the snapshots, and the taint byte-identical, and exit non-zero naming which of those happened.
+Clearing a taint without proof would file one account's usage under another's name, which is worse than staying `unknown`.
+
+A record's principal is bound where footnote knows whose credential it holds: at `register`, and at the tail of a verified switch for a record not yet bound.
+An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
+
+A tainted slot also self-heals: before a fresh usage probe refuses a tainted managed occupant, it runs the same primitive once, and resumes only if identity was proven.
+A refusal is backed off briefly so an unmatchable slot cannot re-hit the endpoint on every probe; only failures are cached, and only as backoff, never as proof.
+
+Two boundaries are worth knowing.
+A record with its own `config_dir` is attributable without the shared slot at all, so it never enters reconciliation and taint can never affect it.
+And the active shared-slot occupant correctly keeps `config_dir = None`, because interactive `claude` reads `~/.claude`; that is not a defect to fix by giving it a dir.
 
 ---
 

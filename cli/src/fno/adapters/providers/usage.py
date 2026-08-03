@@ -219,6 +219,57 @@ def _attributed_credential_dir(record: ProviderRecord) -> tuple[bool, Path | Non
     return False, None
 
 
+def _load_records() -> dict[str, ProviderRecord]:
+    """Configured records by id, for the reconciliation hook; ``{}`` on failure.
+
+    Read here rather than threaded through ``probe_usage``: reconciliation needs
+    every record's proven identity to answer "is this match unique?", and no
+    probe caller has that set. An unreadable config yields no candidates, so
+    reconciliation refuses with ``zero-match`` instead of guessing.
+    """
+    try:
+        from fno.adapters.providers.loader import load_providers
+
+        return load_providers().by_id
+    except Exception:  # noqa: BLE001 - a probe must never break on a config read
+        return {}
+
+
+def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
+    """Try ONCE to prove a tainted shared slot's identity. True if it repaired.
+
+    A taint used to be terminal: it made ``_is_active_slot_occupant`` False
+    forever, the probe degraded to None by design, and nothing announced it -
+    a five-day silent outage ended by deleting a marker file by hand. A fresh
+    probe now asks the reconciliation primitive whether the taint is a false
+    positive, and resumes ONLY if identity was proven.
+
+    Two boundaries keep the hook honest. A record with its own ``config_dir`` is
+    attributable without the slot, so it never reaches here. And a REFUSAL is
+    backed off briefly - a slot whose principal matches nothing must not re-hit
+    the profile endpoint on every probe - while never being cached as proof:
+    the backoff only delays the next attempt, it never satisfies one.
+    """
+    if record.auth != "managed" or _record_credential_dir(record) is not None:
+        return False
+    try:
+        from fno.adapters.providers import managed
+
+        root = managed.store_root()
+        if not managed.slot_tainted(record.harness, root):
+            return False  # not a taint refusal; there is nothing to repair
+        if managed.reconcile_backoff_active(record.harness, root, now=now):
+            return False
+        # Note the attempt BEFORE making it, so a crash mid-reconcile still
+        # backs off. A success clears this file along with the taint.
+        managed.note_reconcile_attempt(record.harness, root, now=now)
+        return managed.reconcile_slot(
+            record.harness, by_id=_load_records(), root=root
+        ).ok
+    except Exception:  # noqa: BLE001 - repair is best-effort; UNKNOWN is the fallback
+        return False
+
+
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
     """All candidate OAuth bearer tokens for ``record``, in preference order.
 
@@ -536,7 +587,15 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     if now is None:
         now = time.time()
     if not _attributed_credential_dir(record)[0]:
-        return None
+        # A tainted slot may be a FALSE taint (the five-day outage). Ask once
+        # whether identity can be proven, then re-read attribution - a proven
+        # slot may well belong to a different record than this one, in which
+        # case this record correctly stays unknown and that one becomes
+        # probeable on its own probe.
+        if not _reconcile_tainted_slot(record, now):
+            return None
+        if not _attributed_credential_dir(record)[0]:
+            return None
     probe = _PROBES.get(record.harness)
     if probe is None:
         return None

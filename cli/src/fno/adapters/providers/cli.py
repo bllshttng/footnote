@@ -641,6 +641,13 @@ def register_provider(
     except OSError as exc:
         typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
+    # Registration is the one moment footnote KNOWS whose credential this is -
+    # the operator just signed in as that account. Binding the principal here is
+    # what lets `reconcile-slot` recognize the account later, when the only
+    # available evidence is the credential itself. Best-effort by design: a
+    # record that never got bound is unmatchable, and reconciliation says so.
+    managed.capture_record_principal(record, force=True)
+
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
 
 
@@ -952,7 +959,30 @@ def _doctor_findings() -> list[dict]:
                 "problem": "tainted-slot",
                 "detail": (
                     "the active stamp was written while sessions were pinned, so "
-                    "the slot may hold a credential the stamp does not describe"
+                    "the slot may hold a credential the stamp does not describe; "
+                    "usage stays unknown until identity is proven - repair with "
+                    f"`fno config accounts reconcile-slot {harness_kind}`"
+                ),
+            })
+
+        # Taint watches the door footnote controls; `claude /login` uses the
+        # other one and leaves a stamp that is wrong AND untainted, so nothing
+        # downstream hesitates. Comparing the stamp against the live principal
+        # is what turns that into a finding instead of silently wrong billing.
+        try:
+            drift = managed.slot_identity_drift(harness_kind)
+        except OSError:
+            drift = None
+        if drift:
+            findings.append({
+                "record": f"slot:{harness_kind}",
+                "problem": "slot-identity-drift",
+                "detail": (
+                    f"the stamp names '{drift['stamped']}' but the live slot "
+                    f"credential belongs to {drift['live']} (an out-of-band "
+                    f"`{harness_kind} /login`), so usage is being attributed to the "
+                    f"wrong account - repair with "
+                    f"`fno config accounts reconcile-slot {harness_kind}`"
                 ),
             })
 
@@ -988,6 +1018,39 @@ def doctor_providers(
 
     if findings:
         raise typer.Exit(1)
+
+
+# ---------------------------------------------------------------------------
+# reconcile-slot (the taint's missing clearer, and out-of-band /login adoption)
+# ---------------------------------------------------------------------------
+
+
+@cli.command("reconcile-slot")
+def reconcile_slot_cmd(
+    harness_name: str = typer.Argument(
+        "claude", help="claude (the only CLI with a shared-slot principal endpoint)"
+    ),
+) -> None:
+    """Prove who holds a CLI's shared credential slot, and repair the store to match.
+
+    Deliberately NOT a `clear-taint` verb. It reads the live slot credential,
+    resolves its principal, and acts only when that principal binds to exactly
+    one registered account - then it refreshes that account's snapshot, stamps
+    it active, and clears any taint. Anything less than proof (endpoint
+    unreachable, unregistered principal, two accounts fingerprinted alike)
+    writes nothing and exits non-zero naming which way it failed.
+
+    This is also how a manual `claude /login` gets adopted: that path writes the
+    Keychain directly and tells footnote nothing, so the stamp is the state
+    known to drift, and the live credential is the only thing that can correct it.
+    """
+    config = _load()
+    result = managed.reconcile_slot(harness_name, by_id=config.by_id)
+    if result.ok:
+        typer.echo(f"reconcile-slot: {result.detail}")
+        return
+    typer.echo(f"reconcile-slot: refused ({result.outcome}): {result.detail}", err=True)
+    raise typer.Exit(1)
 
 
 # ---------------------------------------------------------------------------
