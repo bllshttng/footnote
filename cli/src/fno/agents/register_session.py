@@ -36,6 +36,21 @@ _RESTAMP_ROW_WAIT_S = 10.0
 _RESTAMP_ROW_POLL_S = 0.25
 
 
+def _row_exists(name: str, harness: str) -> bool:
+    """True when this worker's row is already in the registry.
+
+    Fails to ``True`` (do not wait) on any read error: a registry we cannot read
+    is not evidence that the row is missing, and sleeping on that guess would
+    delay session start for a reason we cannot even state.
+    """
+    from fno.agents.registry import load_registry
+
+    try:
+        return any(e.name == name and e.harness == harness for e in load_registry())
+    except Exception:  # noqa: BLE001 -- unreadable registry is not "row absent"
+        return True
+
+
 def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     """Re-point a SPAWNED worker's own row at its live session id, then stop.
 
@@ -65,7 +80,15 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
             entry = restamp_harness_session_id(
                 name=agent_self, harness=harness, session_id=session_id
             )
-            if entry is not None or time.monotonic() >= deadline:
+            # None is ambiguous: no such row YET, or a row that already matches.
+            # Only the first is worth waiting on. Without this test the ordinary
+            # pinned-id path - where the spawner writes an already-correct row -
+            # polls out the full deadline and adds that delay to EVERY spawned
+            # worker's session start, which is a far worse regression than the
+            # race the wait exists to close.
+            if entry is not None or _row_exists(agent_self, harness):
+                break
+            if time.monotonic() >= deadline:
                 break
             time.sleep(_RESTAMP_ROW_POLL_S)
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)

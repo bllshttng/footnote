@@ -3633,19 +3633,24 @@ def reconcile_agents(
                 new_status = "live" if reachable else "orphaned"
 
         elif entry.harness == "claude":
-            # An id-less claude PANE row is a steady state, not a transient: on
-            # the happy route the spawn cannot pin --session-id (happy discards
-            # it), so the row waits for the worker's own SessionStart restamp.
-            # Reconcile it from the PANE, exactly as the codex arm above does for
-            # the same shape and the same reason. Without this the row falls to
-            # `missing-claude-short-id` (a mux row's short_id is deliberately
-            # empty - one live ref per row) and is never orphaned, so a dead pane
-            # holds its name against every future spawn of that name, forever.
+            # EVERY claude PANE row reconciles from the pane, with or without a
+            # session id. A mux row's short_id is deliberately empty (one live ref
+            # per row), so the `claude logs` probe below - which is keyed on
+            # short_id - can never reach one; without this arm a pane row falls to
+            # `missing-claude-short-id`, which only reports and never changes
+            # status, so a dead pane holds its name against every future spawn of
+            # that name, forever.
+            #
+            # Gating this on `not harness_session_id` was the earlier shape and it
+            # was the AGENTS.md path-uniqueness trap in miniature: it covered the
+            # pane only until its worker restamped, and a pane that then died was
+            # unreachable by any arm. The pane is the reachability oracle for a
+            # pane-hosted row for its whole life, not just before it has an id.
             #
             # Deliberately ahead of the claude-on-PATH guard: this probes the mux
             # and the pid, never the claude CLI, so a host where claude was
             # removed can still retire a provably dead pane.
-            if not entry.harness_session_id and entry.mux:
+            if entry.mux:
                 if entry.status in _TERMINAL_AGENT_STATUSES:
                     continue
 
@@ -3680,6 +3685,22 @@ def reconcile_agents(
                     if live_pid is not None and probe_pid in (None, live_pid):
                         probe_pid = live_pid
                         probe_start = _process_start_time(probe_pid)
+                # A live pane with no usable pid is INCONCLUSIVE, never dead.
+                # `_lookup_child_pid` is best-effort, so folding its miss into
+                # `False` would orphan a healthy worker on absent evidence - and
+                # `orphaned` is terminal here while a later restamp only promotes
+                # `spawning`, so that mistake is permanent. Stay pending, exactly
+                # as the codex arm does with `codex-pane-pid-pending`.
+                if pane_state is True and probe_pid is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-pane-pid-pending",
+                        }
+                    )
+                    continue
                 pid_state = (
                     _pid_alive(probe_pid, probe_start)
                     if pane_state is True and probe_pid is not None
@@ -3696,8 +3717,10 @@ def reconcile_agents(
                     )
                     continue
                 if pid_state is True:
-                    # Alive and still owed its restamp. Waiting is the correct
-                    # state here, so it is not an error and not a status change.
+                    # The pane is up. Leave the status alone: a row still owed
+                    # its restamp is correctly `spawning`, and one that already
+                    # got it was promoted to `live` by the restamp itself. Either
+                    # way this pass has nothing to correct.
                     continue
                 new_status = "orphaned"
 

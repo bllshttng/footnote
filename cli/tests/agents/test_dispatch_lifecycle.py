@@ -1223,6 +1223,64 @@ def test_reconcile_orphans_a_dead_idless_claude_pane(
     assert load_registry()[0].status == "orphaned"
 
 
+def test_reconcile_orphans_a_dead_claude_pane_that_already_restamped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pane is the oracle for a pane row's whole life, not just before it has
+    an id. Gating the arm on a missing id covered the row only until its worker
+    restamped, and a pane that died after that was reachable by no arm at all."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="live",
+            harness_session_id="019fb024-2327-75f3-8b80-06e9d5ade05f",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: False)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: False)
+
+    dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "orphaned"
+
+
+def test_reconcile_keeps_a_live_claude_pane_with_no_pid_pending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Missing pid evidence is inconclusive, never dead. `orphaned` is terminal
+    and a later restamp only promotes `spawning`, so orphaning a live pane on an
+    absent pid would strand a healthy worker permanently."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_a: None)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "spawning"
+    assert any(e["reason"] == "claude-pane-pid-pending" for e in result.errors)
+
+
 def test_reconcile_keeps_a_live_idless_claude_pane_waiting(
     tmp_path: Path, monkeypatch
 ) -> None:
