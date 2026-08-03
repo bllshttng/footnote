@@ -693,43 +693,36 @@ destructive).
 
 ---
 
-## `send <name> "<message>"` - message a peer over the bus
+## `send` - message an agent or project over the bus
 
-> Prefer the dedicated **`/mail`** skill for messaging (send / reply / unread /
-> ack) - it is the runner-less front door over `fno mail`. This `send` verb stays
-> here as a convenience so a spawn-and-message flow does not need a second skill.
+> Prefer the dedicated **`/mail`** skill for messaging (send / reply / unread / ack), which is the runner-less front door over `fno mail`.
+> This convenience verb keeps a spawn-and-message flow inside one skill.
 
-Addressed delivery on the shipped jsonl bus (the cv-d54ddd45 fix): the message
-is appended addressed-by-name and drained at the recipient's next loop boundary,
-with the sender excluded. This is the default free claude<->claude channel.
-`send` is NOT a live tail - delivery happens at the recipient's boundary, not
-instantly.
+The accepted forms are explicit and positional:
 
-1. Parse the recipient name (first token after `send`) and the body (the rest;
-   strip smart quotes the same way normalize does for spawn).
-2. Refuse an empty recipient or empty body before writing anything.
-3. Run the genuine wire (reuse `fno mail send`; do NOT reimplement the bus):
+```bash
+fno mail send "<agent>" "<body>"
+fno mail send "<agent>" --kind heads-up "<body>"
+fno mail send --to-project "<project>" --kind "<kind>" "<body>"
+```
 
-   ```bash
-   fno mail send "<name>" "<message>"
-   # cross-project broadcast instead of a single peer:
-   #   fno mail send --to-project "<project>" "<message>"
-   ```
+`<kind>` is one of `heads-up`, `question`, or `fyi`.
+Only an explicit `--kind` token selects a kind.
+A final body word such as `question`, `heads-up`, or `fyi` remains body text.
 
-4. **REPORT** the real outcome line. `fno mail send` prints one line
-   (`msg-<id> delivered (hosted)` or `msg-<id> queued (durable)`); relay the
-   message id and the resolved recipient so delivery is auditable. Exit 0 covers
-   both, so the receipt is the only signal: `delivered (hosted)` landed in the
-   recipient's session; `queued (durable)` did NOT, and waits on a drain that may
-   never come. Report a durable receipt as not delivered and offer the recovery
-   ladder the CLI prints (`peek` / `resume` + re-send / `attach`) - an idle
-   session can be brought back now instead of waiting on it.
-   - **Unknown name** (`fno mail send` exits 16): report "unknown agent
-     <name>" and that nothing was written. Do NOT guess a recipient.
-   - Any other nonzero exit: report FAILED with the captured stderr; never
-     report a phantom delivery.
+1. Parse `send project <project> --kind <kind> "<body>"` as project mode and parse `send <agent> [--kind <kind>] "<body>"` as agent mode.
+2. Refuse an empty recipient, project, kind value, or body before running anything, but do not interpret any body token as grammar.
+3. Map project mode to `fno mail send --to-project "<project>" --kind "<kind>" "<body>"` and agent mode to `fno mail send "<agent>" "<body>"`, inserting `--kind "<kind>"` only where the user explicitly supplied it.
+4. Pass every syntactically valid explicit kind to the genuine CLI, including `question` or `fyi` with an agent recipient.
+5. Let the CLI remain the single kind/addressee authority: it accepts handle-scoped `heads-up`, accepts all three project kinds, and refuses handle-scoped `question` or `fyi` before any durable write.
+6. On a CLI refusal, relay its stderr unchanged so the user sees the live-agent and project-note alternatives instead of a skill-layer paraphrase.
+7. On success, relay the real message id and routing receipt exactly as printed.
 
-`send` is free and never confirms (it is not a billed launch).
+`delivered (hosted)` confirms that the message landed in the recipient session.
+`queued (durable)` is not delivered; it is durable fallback awaiting the recipient's next active boundary or recovery.
+Never upgrade queued mail to delivered, and never invent a receipt when the CLI printed none.
+An unknown agent exits 16 and writes nothing, so report that exact failure without guessing another recipient.
+`send` is free and never confirms because it is not a billed launch.
 
 ---
 

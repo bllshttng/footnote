@@ -79,6 +79,79 @@ def test_send_then_unread_then_ack(runner, mailbox):
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
+def test_handle_heads_up_is_accepted_by_cli_authority(
+    runner, mailbox, monkeypatch
+):
+    from fno.bus.log import iter_messages
+
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "worker-a", "Migration is ready",
+            "--kind", "heads-up", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[param-forced: --kind heads-up]" in result.stdout
+    messages = list(iter_messages())
+    assert [(message.to, message.kind, message.body) for message in messages] == [
+        ("worker-a", "heads-up", "Migration is ready")
+    ]
+
+
+@pytest.mark.parametrize("kind", ["question", "fyi"])
+def test_handle_question_and_fyi_are_refused_before_any_write(
+    runner, mailbox, kind
+):
+    from fno.bus.log import iter_messages
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "worker-a", "Should this route?",
+            "--kind", kind, "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert f"--kind {kind} to a session handle" in result.stderr
+    assert "Drop --kind to inject it live" in result.stderr
+    assert "add --to-project <project>" in result.stderr
+    assert list(iter_messages()) == []
+    assert list(mailbox.glob("**/*.md")) == []
+
+
+@pytest.mark.parametrize("kind", ["heads-up", "question", "fyi"])
+def test_all_explicit_project_kinds_remain_valid(
+    runner, mailbox, monkeypatch, kind
+):
+    from fno.bus.log import iter_messages
+
+    monkeypatch.setattr("fno.mail.cli._escalate_to_human", lambda *a, **k: "notified")
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "--to-project", "ready-web", "--kind", kind,
+            "Which contract should win?", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    messages = list(iter_messages())
+    assert [(message.to, message.kind, message.body) for message in messages] == [
+        ("ready-web", kind, "Which contract should win?")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # AC1-EDGE: a deleted render is regenerated from the log, no message lost
 # ---------------------------------------------------------------------------
