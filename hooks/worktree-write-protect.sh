@@ -116,18 +116,23 @@ fi
 # responsible for. Resolving one root instead also costs one helper call rather
 # than one per target.
 #
-# Failing to NAME the root is not the same as answering "not protected": a repo
-# whose HEAD is corrupt fails `worktree list` while the location helper still
-# reads it as canonical-protected off its `pwd` fallback. So an unnameable root
-# hands the payload back to the cwd gate rather than approving it.
+# NAMING the root is cheap (one `git worktree list`); asking whether it is
+# PROTECTED is not - that verdict resolves the project's worktree policy through
+# a Python CLI, and this hook runs on every Edit and Write. So the object
+# question is asked first and the verdict only when a target actually looks
+# unsafe: a session editing inside its own worktree never pays for it. Failing
+# to name the root is not an answer of "not protected" either - a repo whose
+# HEAD is corrupt fails `worktree list` while the location helper still reads it
+# as canonical-protected off its own `pwd` fallback - so that case hands the
+# payload back to the cwd gate rather than approving it.
 _undeterminable_root() { _block_if_canonical "$CWD"; _approve; }
 _root="$(git -C "$CWD" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
 [[ -n "$_root" && -d "$_root" ]] || _undeterminable_root
-_location="$(_location_of "$_root")" || _undeterminable_root
-[[ "$(_field verdict "$_location")" == "canonical-protected" ]] || _approve
-PROTECTED_BRANCH="$(_field branch "$_location")"
 PROTECTED_ROOT="$(cd -P "$_root" 2>/dev/null && pwd -P)"
 [[ -n "$PROTECTED_ROOT" ]] || _undeterminable_root
+
+# An unsafe target only matters while the root is actually protected.
+_unsafe_target() { _block_if_canonical "$PROTECTED_ROOT"; _approve; }
 
 # _target_safe PHYSICAL_PATH -> 0 when this write cannot change protected content.
 #
@@ -160,11 +165,11 @@ _target_safe() {
 # unsafe one. A target that will not resolve physically is unknown, not safe -
 # including when the shared resolver failed to source, which leaves the guard
 # with no way to see through a symlink.
-declare -F fno_physical_path >/dev/null 2>&1 || _deny_canonical "$PROTECTED_BRANCH"
+declare -F fno_physical_path >/dev/null 2>&1 || _unsafe_target
 for t in "${TARGETS[@]}"; do
-    phys="$(fno_physical_path "$(_absolute "$t")")" || _deny_canonical "$PROTECTED_BRANCH"
-    [[ -n "$phys" ]] || _deny_canonical "$PROTECTED_BRANCH"
-    _target_safe "$phys" || _deny_canonical "$PROTECTED_BRANCH"
+    phys="$(fno_physical_path "$(_absolute "$t")")" || _unsafe_target
+    [[ -n "$phys" ]] || _unsafe_target
+    _target_safe "$phys" || _unsafe_target
 done
 
 _approve
