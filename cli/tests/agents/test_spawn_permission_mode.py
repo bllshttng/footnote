@@ -355,6 +355,67 @@ def test_think_worker_reads_config_default(monkeypatch):
     assert captured["cmd"][i + 1] == "plan"
 
 
+def test_think_worker_codex_uses_shared_dispatch_default(monkeypatch):
+    from fno.provenance import spawn_think
+
+    captured = _capture_spawn(monkeypatch, spawn_think)
+    settings = SimpleNamespace(
+        agents=SimpleNamespace(spawn_permission_mode=""),
+        dispatch=SimpleNamespace(
+            harness="",
+            substrate="",
+            command="",
+            auto_merge=False,
+            allowed_verbs=["/target", "/think"],
+        ),
+    )
+    monkeypatch.setattr(spawn_think, "_settings_for", lambda root: settings)
+
+    spawn_think._spawn_think_worker(
+        "x-test",
+        "/think x-test\n\nfull context",
+        None,
+        "slug",
+        provider="codex",
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--harness") + 1] == "codex"
+    assert cmd[cmd.index("--substrate") + 1] == "headless"
+    assert cmd[-1] == "$fno:think x-test\n\nfull context"
+
+
+def test_think_worker_explicit_pane_uses_shared_capability_gate(monkeypatch):
+    from fno.provenance import spawn_think
+
+    captured = _capture_spawn(monkeypatch, spawn_think)
+    settings = SimpleNamespace(
+        agents=SimpleNamespace(spawn_permission_mode="plan"),
+        dispatch=SimpleNamespace(
+            harness="",
+            substrate="pane",
+            command="",
+            auto_merge=False,
+            allowed_verbs=["/target", "/think"],
+        ),
+    )
+    monkeypatch.setattr(spawn_think, "_settings_for", lambda root: settings)
+
+    spawn_think._spawn_think_worker(
+        "x-test",
+        "/think x-test\n\nfull context",
+        None,
+        "slug",
+        provider="codex",
+    )
+
+    cmd = captured["cmd"]
+    assert cmd[cmd.index("--harness") + 1] == "codex"
+    assert cmd[cmd.index("--substrate") + 1] == "pane"
+    assert cmd[cmd.index("--permission-mode") + 1] == "plan"
+    assert cmd[-1] == "$fno:think x-test\n\nfull context"
+
+
 # --- bash surface: /agent spawn (spawn.sh) ----------------------------------
 
 import shutil  # noqa: E402

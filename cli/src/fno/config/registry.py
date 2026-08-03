@@ -269,10 +269,6 @@ FIELD_META: dict[str, Meta] = {
         "inherits max_per_run and daily_cap). Worth it only when the epic is large enough "
         "that inline-filling every child blows one session's context budget.",
     ),
-    "think_spawn.substrate": Meta(
-        "advanced",
-        "Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.",
-    ),
     # --- config.active_backlog.* ---
     "active_backlog.enabled": Meta(
         "advanced",

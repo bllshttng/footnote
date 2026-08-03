@@ -1742,10 +1742,6 @@ class ThinkSpawnBlock(BaseModel):
     # inline-fill blows the context budget. Inherits max_per_run and daily_cap;
     # it adds no ceiling of its own.
     on_decompose_wave0: bool = False
-    # Substrate for EVERY think spawn, not just the fan-out. `bg` (the previous
-    # hardcode at the shared choke point) is claude-only, so an install on
-    # another harness had no way to dispatch a /think at all.
-    substrate: str = "bg"
     # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
@@ -1821,21 +1817,6 @@ class ThinkSpawnBlock(BaseModel):
         if isinstance(v, str) and v.strip().lower() == "spawn":
             return "spawn"
         return "offer"
-
-    @field_validator("substrate", mode="before")
-    @classmethod
-    def _coerce_substrate(cls, v: object) -> str:
-        """Fail-safe to ``bg``: an unknown substrate would fail loud at spawn.
-
-        Unlike the boolean opt-ins, the dangerous direction here is not "on" -
-        it is dispatching onto a substrate `fno agents spawn` cannot host, which
-        surfaces as a spawn error rather than a silently wrong decision. So this
-        keeps the enum tight and falls back to the previous hardcoded value.
-        """
-        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
-            return v.strip().lower()
-        return "bg"
-
 
 def _coerce_affirmative(v: object, default: bool) -> bool:
     """Map a settings value to a bool with the bash get_config truth table.
