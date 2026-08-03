@@ -12,7 +12,7 @@ import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import TYPE_CHECKING, NamedTuple, Optional, cast
+from typing import TYPE_CHECKING, Literal, NamedTuple, Optional, cast
 
 import typer
 
@@ -588,17 +588,42 @@ def register_provider(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
 
-    # Refuse a credential another account already holds, BEFORE writing a blob.
-    # Two captures taken while the same account was signed in file one credential
-    # under two ids, and every later per-account decision is then arithmetic on a
-    # duplicate. Digests only - no token or fragment reaches stdout/stderr.
-    holder = managed.duplicate_credential_holder(
-        managed.read_canonical_slot_blob(record.harness), exclude_id=record.id
-    )
-    if holder is not None:
+    # One locked capture serves the proof, the snapshot, and the binding.
+    # Proving one read and snapshotting another is how account A's identity ends
+    # up bound to account B's credential - via an ambient CLAUDE_CONFIG_DIR on
+    # the second read, or a concurrent switch between them.
+    repo_root = _get_repo_root()
+    try:
+        config = load_providers(repo_root=repo_root)
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
+        raise typer.Exit(1)
+
+    from fno.adapters.providers.model import ProvidersConfig
+
+    def _persist() -> None:
+        new_records = [r for r in config.records if r.id != record.id]
+        new_records.append(record)
+        save_providers(
+            ProvidersConfig(records=new_records, active=config.active),  # type: ignore[arg-type]
+            scope=cast('Literal["project", "global"]', scope),
+        )
+
+    try:
+        adir, _proven, identity_failure = managed.register_slot_snapshot(
+            record, persist=_persist
+        )
+    except managed.ManagedStoreError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(1)
+    except OSError as exc:
+        typer.echo(f"error: failed to write config: {exc}", err=True)
+        raise typer.Exit(1)
+    if identity_failure and identity_failure.startswith("duplicate-credential:"):
+        holder_id = identity_failure.split(":", 1)[1]
         typer.echo(
             f"error: the current {record.harness} login is already registered as "
-            f"'{holder}'; registering it again as '{record.id}' would store one "
+            f"'{holder_id}'; registering it again as '{record.id}' would store one "
             f"credential under two ids.\n"
             f"  sign into the {record.id} account first:  {record.harness} /logout && "
             f"{record.harness} /login\n"
@@ -606,16 +631,6 @@ def register_provider(
             f"--config-dir ~/.claude-{record.id}",
             err=True,
         )
-        raise typer.Exit(1)
-
-    # One locked capture serves the proof, the snapshot, and the binding.
-    # Proving one read and snapshotting another is how account A's identity ends
-    # up bound to account B's credential - via an ambient CLAUDE_CONFIG_DIR on
-    # the second read, or a concurrent switch between them.
-    try:
-        adir, proven, identity_failure = managed.register_slot_snapshot(record)
-    except managed.ManagedStoreError as exc:
-        typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
     if identity_failure and identity_failure.startswith("duplicate-principal:"):
         holder_id = identity_failure.split(":", 1)[1]
@@ -637,30 +652,6 @@ def register_provider(
             err=True,
         )
         raise typer.Exit(1)
-
-    repo_root = _get_repo_root()
-    try:
-        config = load_providers(repo_root=repo_root)
-    except ProviderConfigError as exc:
-        typer.echo(f"error loading existing config: {exc}", err=True)
-        raise typer.Exit(1)
-
-    from fno.adapters.providers.model import ProvidersConfig
-
-    new_records = [r for r in config.records if r.id != record.id]
-    new_records.append(record)
-    try:
-        save_providers(ProvidersConfig(records=new_records, active=config.active), scope=scope)  # type: ignore[arg-type]
-    except OSError as exc:
-        typer.echo(f"error: failed to write config: {exc}", err=True)
-        raise typer.Exit(1)
-
-
-    # Registration is the one moment footnote KNOWS whose credential this is -
-    # the operator just signed in as that account. Binding the principal here is
-    # what lets `reconcile-slot` recognize the account later, when the only
-    # available evidence is the credential itself. Best-effort by design: a
-    # record that never got bound is unmatchable, and reconciliation says so.
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
 

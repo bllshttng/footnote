@@ -2235,3 +2235,64 @@ class TestRegisterRejectsADuplicatePrincipal:
         managed.register_slot_snapshot(_rec("work-a"), tmp_path)
         assert stamped == ["work-a"]
         assert managed.active_slot_id("claude", tmp_path) == "work-a"
+
+
+class TestRegisterCommitOrder:
+    @staticmethod
+    def _arm(monkeypatch, uuid="acct-a", blob_token="LIVE"):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob(blob_token)]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile(uuid)), None),
+        )
+
+    def test_a_failed_config_save_leaves_no_stamp(self, tmp_path, monkeypatch):
+        """Stamping an unconfigured orphan would make every configured shared
+        account unattributable behind it."""
+        self._arm(monkeypatch)
+
+        def _boom() -> None:
+            raise OSError("disk full")
+
+        with pytest.raises(OSError):
+            managed.register_slot_snapshot(_rec("work-a"), tmp_path, persist=_boom)
+
+        assert managed.active_slot_id("claude", tmp_path) is None
+
+    def test_persist_runs_inside_the_lock(self, tmp_path, monkeypatch):
+        """Releasing before the save would let a switch land between them."""
+        self._arm(monkeypatch)
+        seen: list[bool] = []
+
+        def _persist() -> None:
+            seen.append(managed._switch_lock_path(tmp_path).exists())
+
+        managed.register_slot_snapshot(_rec("work-a"), tmp_path, persist=_persist)
+        assert seen == [True]
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"
+
+    def test_the_token_duplicate_check_runs_against_the_captured_blob(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A check made outside the lock can be invalidated by a concurrent
+        switch, and with the profile endpoint down the principal check cannot
+        cover for it."""
+        fake_slot["claude"] = _blob("SHARED")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("SHARED")]
+        )
+        # Endpoint unavailable, so only the digest can catch this.
+        monkeypatch.setattr(
+            managed, "slot_principal", lambda blob: (None, "profile-unavailable")
+        )
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-b"), tmp_path
+        )
+
+        assert failure == "duplicate-credential:work-a" and principal is None
+        assert not (tmp_path / "work-b" / "blob").exists()
+        assert managed.active_slot_id("claude", tmp_path) is None

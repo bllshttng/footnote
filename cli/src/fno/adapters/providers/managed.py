@@ -1362,7 +1362,11 @@ def principal_holder(
 
 
 def register_slot_snapshot(
-    record: ProviderRecord, root: Path | None = None, *, lock_timeout: float = 10
+    record: ProviderRecord,
+    root: Path | None = None,
+    *,
+    lock_timeout: float = 10,
+    persist: Optional[Callable[[], None]] = None,
 ) -> tuple[Path, Optional[dict], Optional[str]]:
     """Capture the shared slot for ``record`` and bind the identity of THOSE bytes.
 
@@ -1372,14 +1376,18 @@ def register_slot_snapshot(
     either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
     because a concurrent switch replaces the slot between them.
 
-    ``ambiguous-slot`` and ``duplicate-principal:<id>`` write nothing: with two
+    ``ambiguous-slot``, ``duplicate-principal:<id>`` and
+    ``duplicate-credential:<id>`` write nothing: with two
     accounts in the slot there is no way to know which one the operator meant,
     and a principal another record already holds would create two records for
     one quota pool. Any other failure still snapshots (registration must work
     offline) and leaves the record unbound, which `doctor` reports.
 
-    The active stamp is written here too, inside the lock, because the captured
-    credential IS what the slot holds at that moment.
+    ``persist`` (the caller's config save) runs inside the lock, before the
+    active stamp: stamping an unconfigured orphan would make every configured
+    shared account unattributable behind it. The stamp is written here rather
+    than by the caller because the captured credential IS what the slot holds
+    at that moment.
     """
     root = root or store_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -1405,11 +1413,29 @@ def register_slot_snapshot(
         )
         if holder is not None:
             return account_dir(record.id, root), None, f"duplicate-principal:{holder}"
+        # The token check belongs in here too, against the CAPTURED blob: a
+        # concurrent switch can replace the slot after any check made outside
+        # this lock, and with the profile endpoint unavailable the principal
+        # check above cannot catch what the digest would.
+        token_holder = duplicate_credential_holder(
+            blobs[0], exclude_id=record.id, root=root
+        )
+        if token_holder is not None:
+            return (
+                account_dir(record.id, root),
+                None,
+                f"duplicate-credential:{token_holder}",
+            )
         adir = write_snapshot(record, blobs[0], root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
         else:
             _clear_record_principal(record.id, root)
+        # Persist the record BEFORE stamping, still inside the lock. Stamping
+        # first would leave the stamp naming an unconfigured orphan if the save
+        # failed, and every configured shared account unattributable behind it.
+        if persist is not None:
+            persist()
         # Stamp INSIDE the lock: the captured credential is what the slot holds
         # right now, and releasing first would let a concurrent switch install
         # and stamp another account before this stamp overwrote it - leaving the
