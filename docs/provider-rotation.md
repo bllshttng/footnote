@@ -313,6 +313,8 @@ It also refuses when the proven identity already belongs to another record.
 The existing duplicate check compares tokens, which rotate, so the same account registered again after a rotation would slip past it and leave two records sharing one quota pool that reconciliation could never tell apart.
 It re-checks the slot after resolving the identity, so an out-of-band login during that network round trip refuses with `slot-changed` rather than stamping the account it proved.
 The config save happens inside that same lock and before any store write, because store residue from a failed registration is what a later attempt reads as a duplicate credential and refuses; the active stamp comes last.
+The save re-reads the record set under the lock, so two concurrent registrations cannot each merge into the same stale set and drop one another.
+After the writes it looks at the slot once more: a login that landed during them leaves the account registered but its stamp tainted rather than trusted, with a warning naming `reconcile-slot`.
 Stamping first would leave the stamp naming an unconfigured orphan if the save failed, and every configured shared account unattributable behind it.
 The identity compared is the account *and* the organization, because Claude Code usage is organization-scoped and one human can belong to two organizations; an identity missing either half is not comparable and fails closed.
 A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.

@@ -1379,8 +1379,10 @@ def register_slot_snapshot(
     either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
     because a concurrent switch replaces the slot between them.
 
-    ``ambiguous-slot``, ``duplicate-principal:<id>`` and
-    ``duplicate-credential:<id>`` write nothing: with two
+    ``ambiguous-slot``, ``duplicate-principal:<id>``,
+    ``duplicate-credential:<id>`` and ``slot-changed`` write nothing;
+    ``slot-moved-after-write`` DID register, but the slot moved during the
+    writes, so the stamp is tainted rather than trusted: with two
     accounts in the slot there is no way to know which one the operator meant,
     and a principal another record already holds would create two records for
     one quota pool. Any other failure still snapshots (registration must work
@@ -1453,6 +1455,15 @@ def register_slot_snapshot(
         # and stamp another account before this stamp overwrote it - leaving the
         # stamp naming this record while the slot holds the other one.
         stamp_active_slot(record.harness, record.id, root)
+        # The writes above take time, and an out-of-band login during them would
+        # leave an UNTAINTED stamp naming this record while the slot holds
+        # someone else - and the next switch would capture that credential into
+        # this record's snapshot. Taint it so nothing trusts the stamp until a
+        # reconciliation proves who is really there. The account is registered
+        # either way; only the stamp's trustworthiness is in question.
+        if canonical_slot_blobs(record.harness) != blobs:
+            _set_slot_taint(record.harness, root, True, [])
+            return adir, principal, "slot-moved-after-write"
         return adir, principal, failure
     finally:
         lock.release()

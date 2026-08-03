@@ -2369,3 +2369,50 @@ class TestUnreadableSlotIsARefusal:
 
         monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
         assert managed.slot_identity_drift("claude", tmp_path) is None
+
+
+class TestRegisterPostWriteSlotMove:
+    def test_a_login_during_the_writes_taints_the_stamp(self, tmp_path, monkeypatch):
+        """The writes take time. An out-of-band login during them would leave an
+        UNTAINTED stamp naming this record while the slot holds someone else,
+        and the next switch would capture that credential into this snapshot."""
+        reads = {"n": 0}
+
+        def _blobs(cli):
+            reads["n"] += 1
+            # Reads 1 and 2 are the capture and its pre-commit re-check; the
+            # third is the post-write look, by which time someone has logged in.
+            return [_blob("A")] if reads["n"] <= 2 else [_blob("B")]
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _blobs)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        # Registered, but the stamp is explicitly not trusted.
+        assert failure == "slot-moved-after-write"
+        assert principal["account_uuid"] == "acct-a"
+        assert (adir / "blob").read_text() == _blob("A")
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"
+        assert managed.slot_tainted("claude", tmp_path)
+
+    def test_a_stable_slot_leaves_the_stamp_trusted(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        _adir, _principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None
+        assert not managed.slot_tainted("claude", tmp_path)

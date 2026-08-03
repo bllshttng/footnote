@@ -488,11 +488,14 @@ def add_provider(
 # register (managed credential store, US1)
 # ---------------------------------------------------------------------------
 
-# The only capture failures that still register the account, unbound: the
-# identity could not be PROVEN, but nothing about it is contradictory. Every
-# other typed failure wrote nothing, so it must refuse rather than report a
-# registration that did not happen.
-_REGISTERS_UNBOUND = frozenset({None, "profile-unavailable", "malformed-profile"})
+# Capture outcomes under which the account IS registered. The first two could
+# not PROVE the identity but found nothing contradictory (so the record lands
+# unbound); the third registered fine but saw the slot move during the writes.
+# Every other typed failure wrote nothing, so it must refuse rather than report
+# a registration that did not happen.
+_STILL_REGISTERS = frozenset({
+    None, "profile-unavailable", "malformed-profile", "slot-moved-after-write",
+})
 
 
 def _register_config_dir_account(
@@ -599,20 +602,22 @@ def register_provider(
     # Proving one read and snapshotting another is how account A's identity ends
     # up bound to account B's credential - via an ambient CLAUDE_CONFIG_DIR on
     # the second read, or a concurrent switch between them.
+    # No pre-lock load: `_persist` re-reads the authoritative config under the
+    # slot lock, and a second read here would only be a staler copy of it.
     repo_root = _get_repo_root()
-    try:
-        config = load_providers(repo_root=repo_root)
-    except ProviderConfigError as exc:
-        typer.echo(f"error loading existing config: {exc}", err=True)
-        raise typer.Exit(1)
 
     from fno.adapters.providers.model import ProvidersConfig
 
     def _persist() -> None:
-        new_records = [r for r in config.records if r.id != record.id]
+        # Re-read under the lock. The load above happened before it, so two
+        # concurrent registrations would otherwise each merge into the same
+        # stale record set and the later save would silently drop the earlier
+        # account.
+        current = load_providers(repo_root=repo_root)
+        new_records = [r for r in current.records if r.id != record.id]
         new_records.append(record)
         save_providers(
-            ProvidersConfig(records=new_records, active=config.active),  # type: ignore[arg-type]
+            ProvidersConfig(records=new_records, active=current.active),  # type: ignore[arg-type]
             scope=cast('Literal["project", "global"]', scope),
         )
 
@@ -625,6 +630,9 @@ def register_provider(
         raise typer.Exit(1)
     except OSError as exc:
         typer.echo(f"error: failed to write config: {exc}", err=True)
+        raise typer.Exit(1)
+    except ProviderConfigError as exc:
+        typer.echo(f"error loading existing config: {exc}", err=True)
         raise typer.Exit(1)
     if identity_failure and identity_failure.startswith("duplicate-credential:"):
         holder_id = identity_failure.split(":", 1)[1]
@@ -667,7 +675,7 @@ def register_provider(
             err=True,
         )
         raise typer.Exit(1)
-    if identity_failure not in _REGISTERS_UNBOUND:
+    if identity_failure not in _STILL_REGISTERS:
         # A typed failure with no handler above wrote nothing, so reporting
         # success would be a lie. Refuse generically rather than let a future
         # failure value fall through as a registration that never happened.
@@ -679,6 +687,13 @@ def register_provider(
         raise typer.Exit(1)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
+    if identity_failure == "slot-moved-after-write":
+        typer.echo(
+            f"warning: the {record.harness} slot changed while registering, so its "
+            f"active stamp is marked tainted rather than trusted; run "
+            f"`fno config accounts reconcile-slot {record.harness}` once it settles",
+            err=True,
+        )
 
 
 # ---------------------------------------------------------------------------
