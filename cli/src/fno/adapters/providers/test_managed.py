@@ -2635,3 +2635,29 @@ class TestRegisterRespectsALiveTaintWriter:
 
         assert failure is None and principal["account_uuid"] == "acct-a"
         assert not managed.slot_tainted("claude", tmp_path)
+
+    def test_a_duplicate_is_caught_on_the_blob_that_will_be_stored(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """An expired candidate in front of a live one shifts what gets stored,
+        so hashing the first candidate would miss the duplicate."""
+        fake_slot["claude"] = _blob("LIVE")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("EXPIRED"), _blob("LIVE")],
+        )
+
+        def _principal(blob):
+            if blob == _blob("EXPIRED"):
+                return None, "profile-unavailable"
+            return managed.principal_fingerprint(_profile("acct-live")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-b"), tmp_path
+        )
+
+        assert failure == "duplicate-credential:work-a" and principal is None
+        assert not (tmp_path / "work-b" / "blob").exists()

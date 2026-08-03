@@ -1448,12 +1448,16 @@ def register_slot_snapshot(
         )
         if holder is not None:
             return account_dir(record.id, root), None, f"duplicate-principal:{holder}"
-        # The token check belongs in here too, against the CAPTURED blob: a
-        # concurrent switch can replace the slot after any check made outside
-        # this lock, and with the profile endpoint unavailable the principal
-        # check above cannot catch what the digest would.
+        # The token check belongs in here too, and must hash THE BLOB WE WILL
+        # STORE: an expired scoped candidate in front of a live unscoped one
+        # shifts what gets stored, and hashing the first candidate would then
+        # miss a duplicate and file it under a second id. A concurrent switch
+        # can also replace the slot after any check made outside this lock, and
+        # with the profile endpoint unavailable the principal check above cannot
+        # catch what the digest would.
+        stored_blob = proven_blob or blobs[0]
         token_holder = duplicate_credential_holder(
-            blobs[0], exclude_id=record.id, root=root
+            stored_blob, exclude_id=record.id, root=root
         )
         if token_holder is not None:
             return (
@@ -1481,7 +1485,7 @@ def register_slot_snapshot(
         # means "this stamp is not verified yet", which is what the marker is
         # for, and makes every abrupt exit fail safe.
         _set_slot_taint(record.harness, root, True, [])
-        adir = write_snapshot(record, proven_blob or blobs[0], root)
+        adir = write_snapshot(record, stored_blob, root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
         else:
