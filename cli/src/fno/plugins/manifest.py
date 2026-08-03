@@ -221,6 +221,29 @@ class PackManifest(_PackModel):
             raise ValueError("a pack must declare at least one component")
         return self
 
+    @model_validator(mode="after")
+    def _versions_are_pep440(self) -> Self:
+        # Pack and compatibility versions must be PEP 440 so range comparisons in
+        # verification are meaningful; a malformed version is a load-time error,
+        # not a verification-time surprise. packaging is ubiquitous but imported
+        # lazily so the model never hard-fails if it is unexpectedly absent.
+        try:
+            from packaging.version import InvalidVersion, Version
+        except ImportError:
+            return self
+        endpoints: list[tuple[str, str]] = [
+            ("version", self.version),
+            ("footnote_compat.minimum", self.footnote_compat.minimum),
+        ]
+        if self.footnote_compat.maximum is not None:
+            endpoints.append(("footnote_compat.maximum", self.footnote_compat.maximum))
+        for label, value in endpoints:
+            try:
+                Version(value)
+            except InvalidVersion as exc:
+                raise ValueError(f"{label} {value!r} is not a valid (PEP 440) version: {exc}") from exc
+        return self
+
 
 def pack_digest(manifest: PackManifest) -> str:
     """Stable sha256 over the canonical pack-manifest serialization."""

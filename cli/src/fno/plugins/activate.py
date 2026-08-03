@@ -102,14 +102,17 @@ def _contained_under(source_id: str, root: Path, anchor: Path) -> bool:
         return False
 
 
-def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> None:
+def _stage_and_swap(
+    planned: list[tuple[str, Path, RoleDefinitionSource]],
+) -> tuple[list[tuple[Path, Path]], list[Path]]:
     """Stage every definition to a temp file, then swap all into place.
 
-    Staging writes temp files without touching targets, so a staging failure
-    leaves prior definitions intact. The swap backs up each existing target
-    before replacing it and restores every backup if a later replace fails, so a
-    failed swap rolls the layer back to its pre-activation state rather than
-    leaving mixed revisions.
+    Returns ``(backups, fresh)``: ``backups`` is ``(target, backup)`` for targets
+    that had a prior file (moved aside), and ``fresh`` is the targets that were
+    newly created. Both are retained for the caller to roll back the whole
+    transaction (swap + stale removal + registry save) on any later failure, and
+    to discard the backups once the commit succeeds. Staging failures clean up
+    only the temp files; swap failures back up and restore inline.
     """
     staged: list[tuple[Path, Path]] = []
     try:
@@ -130,20 +133,23 @@ def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> No
         ) from exc
 
     backups: list[tuple[Path, Path]] = []
-    completed: list[Path] = []
+    fresh: list[Path] = []
+    completed: list[tuple[Path, Path | None]] = []
     try:
         for target, tmp in staged:
-            backup = None
+            backup: Path | None = None
             if target.exists():
                 backup = Path(str(target) + ".pre-activate-bak")
                 os.replace(target, backup)
                 backups.append((target, backup))
             os.replace(tmp, target)
-            completed.append(target)
+            completed.append((target, backup))
+            if backup is None:
+                fresh.append(target)
     except OSError as exc:
-        # Restore every target already swapped to its backup and drop any new
-        # content placed before the failure; clean staging temps left behind.
-        for target, backup in backups:
+        # Restore every completed target: backed-up ones to their backup, fresh
+        # ones removed. Then drop any staging temps still on disk.
+        for target, backup in completed:
             if target.exists():
                 target.unlink(missing_ok=True)
             if backup is not None and backup.exists():
@@ -154,8 +160,18 @@ def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> No
             ActivationRefusalReason.UNWRITABLE_LAYER,
             f"cannot commit a definition file: {exc}",
         ) from exc
-    for _target, backup in backups:
-        backup.unlink(missing_ok=True)
+    return backups, fresh
+
+
+def _rollback_swap(backups: list[tuple[Path, Path]], fresh: list[Path]) -> None:
+    """Restore the layer to its pre-activation state after a post-swap failure."""
+    for target, backup in backups:
+        if target.exists():
+            target.unlink(missing_ok=True)
+        if backup.exists():
+            os.replace(backup, target)
+    for target in fresh:
+        target.unlink(missing_ok=True)
 
 
 def _definition_document(
@@ -270,30 +286,43 @@ def activate(
                         f"prior receipt path {prior!r} escapes the plugin root"
                     )
 
-            _stage_and_swap(planned)
+            backups, fresh = _stage_and_swap(planned)
             written = [source_id for source_id, _resolved, _definition in planned]
+            try:
+                # Remove prior receipt paths the new manifest no longer carries.
+                # Each was containment-checked above; a non-file entry (a
+                # directory or symlink the pack did not write) is refused and the
+                # whole transaction rolls back rather than deleting it.
+                for prior in prior_paths:
+                    if prior in new_set:
+                        continue
+                    prior_path = root / prior
+                    if prior_path.is_file():
+                        prior_path.unlink()
+                    elif prior_path.exists() or prior_path.is_symlink():
+                        raise ActivationRefusal(
+                            ActivationRefusalReason.UNWRITABLE_LAYER,
+                            f"stale path {prior} is not a regular file",
+                        )
 
-            # Remove prior receipt paths the new manifest no longer carries. Each
-            # was already containment-checked above, so the layer cannot delete
-            # outside the plugin root here.
-            for prior in prior_paths:
-                if prior in new_set:
-                    continue
-                prior_path = root / prior
-                if prior_path.is_file():
-                    prior_path.unlink()
-
-            receipt = ActivationReceipt(
-                pack_id=manifest.id,
-                pack_digest=digest,
-                resolved_version=manifest.version,
-                written_paths=tuple(written),
-                activated_at=datetime.now(UTC),
-                conformance=conformance_for(manifest),
-            )
-            registry, _pack = store._install_locked(registry, manifest, target)
-            registry = store._record_activation_locked(registry, receipt)
-            store._save(registry)
+                receipt = ActivationReceipt(
+                    pack_id=manifest.id,
+                    pack_digest=digest,
+                    resolved_version=manifest.version,
+                    written_paths=tuple(written),
+                    activated_at=datetime.now(UTC),
+                    conformance=conformance_for(manifest),
+                )
+                registry, _pack = store._install_locked(registry, manifest, target)
+                registry = store._record_activation_locked(registry, receipt)
+                store._save(registry)
+            except BaseException:
+                # A stale removal or registry save failure rolls the swap back so
+                # the layer never holds role files inconsistent with a receipt.
+                _rollback_swap(backups, fresh)
+                raise
+            for _target, backup in backups:
+                backup.unlink(missing_ok=True)
             return ActivationOutcome(receipt=receipt, already_active=already_active)
     except RegistryCorrupt as exc:
         raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc

@@ -162,9 +162,13 @@ class PackRegistryStore:
         definitions. Fail closed so the corruption is surfaced and fixed.
         """
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            text = self.path.read_text(encoding="utf-8")
         except FileNotFoundError:
             return PackRegistry()
+        except (UnicodeDecodeError, OSError) as exc:
+            raise RegistryCorrupt(f"registry at {self.path} is unreadable: {exc}") from exc
+        try:
+            raw = json.loads(text)
         except json.JSONDecodeError as exc:
             raise RegistryCorrupt(f"registry at {self.path} is not valid JSON: {exc}") from exc
         try:
