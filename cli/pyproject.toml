@@ -126,4 +126,5 @@ markers = [
     "slow_e2e_25min: very slow e2e tests (up to 25-30 min); run in nightly CI only",
     "e2e: end-to-end tests requiring slower setup; run explicitly with -m e2e",
     "smoke: real-binary smoke tests (e.g. against real gemini); gated by GEMINI_SMOKE=1, excluded from CI",
+    "serial: known parallel racer; grouped onto one xdist worker and still executed",
 ]

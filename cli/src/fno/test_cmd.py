@@ -1397,8 +1397,8 @@ def _run_census_deferred(args: Sequence[str]) -> int:
         "propagated, rtk is bypassed (RTK_DISABLED=1), and PYTHONPATH is "
         "pinned to the worktree's cli/src. Use this, never a bare `pytest` in "
         "a worktree: that imports the canonical fno, lets rtk re-wrap the run, "
-        "and masks the exit code. Bare `fno test` is serial and captures to "
-        ".fno/last-test.log (the transcript gets PASS or the failing tail); "
+        "and masks the exit code. Bare `fno test` runs the Python suite in parallel "
+        "and captures to .fno/last-test.log (the transcript gets PASS or the failing tail); "
         "--stream restores full inherited-stdio output."
     ),
 )

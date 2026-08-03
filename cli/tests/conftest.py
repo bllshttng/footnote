@@ -8,6 +8,42 @@ from pathlib import Path
 import pytest
 
 
+_SERIAL_TEST_SUFFIXES = frozenset(
+    {
+        (
+            "tests/unit/test_graph_sidecar_window.py::"
+            "test_ac3hp_concurrent_writes_never_surface_corruption"
+        ),
+        (
+            "tests/unit/test_mutex_steal.py::TestEventsMutex::"
+            "test_AC3_FR_concurrent_stealers_both_land"
+        ),
+        (
+            "tests/unit/test_mutex_steal.py::TestEventsMutex::"
+            "test_AC3_FR_only_one_stealer_wins_the_rename"
+        ),
+        (
+            "tests/agents/test_follow_signal.py::"
+            "test_subprocess_follow_clean_sigint_exit"
+        ),
+        (
+            "tests/agents/test_codex_signal_handling.py::"
+            "test_create_sigint_mid_stream_propagates_and_releases_child"
+        ),
+    }
+)
+
+
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Keep filed parallel racers on one worker without skipping them."""
+    for item in items:
+        nodeid = item.nodeid.replace("\\", "/")
+        if any(nodeid.endswith(suffix) for suffix in _SERIAL_TEST_SUFFIXES):
+            item.add_marker(pytest.mark.serial)
+            item.add_marker(pytest.mark.xdist_group(name="serial"))
+
+
 @pytest.fixture(autouse=True)
 def _stable_fno_py_cmd(monkeypatch):
     """Pin source self-shellouts to a bare ``["fno-py"]`` prefix (x-69b3).
