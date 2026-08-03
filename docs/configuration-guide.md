@@ -108,14 +108,14 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `dispatch.on_exhaustion` | str | `defer` | advanced | On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `keep_going.enabled` | bool | `false` | advanced | Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap). |
-| `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
+| `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node; actual launches use the shared config.dispatch harness and substrate. |
 | `think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |
 | `think_spawn.idle_threshold_s` | int | `0` | advanced | Idle seconds before an attended operator downgrades to away (0 = off). |
 | `think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
 | `think_spawn.on_retro` | bool | `false` | advanced | A2: dispatch a context /think when `fno backlog done` closes a node (default OFF). |
 | `think_spawn.daily_cap` | int | `20` | advanced | Per-install per-day ceiling on /think spawns (firehose guard; 0 = off). |
 | `think_spawn.on_decompose_wave0` | bool | `false` | advanced | Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; inherits max_per_run and daily_cap). Worth it only when the epic is large enough that inline-filling every child blows one session's context budget. |
-| `think_spawn.substrate` | str | `bg` | advanced | Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'. |
+| `think_spawn.substrate` | str (optional) | _(none)_ | advanced | Deprecated compatibility fallback for existing configs; used only when dispatch.substrate is unset. Configure new routing under config.dispatch. |
 | `think_spawn.attended` | str | `offer` | advanced | Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think). |
 | `active_backlog.enabled` | bool | dict[str, bool] | `false` | advanced | Always-on backlog drain: true (every project) or a per-project map. |
 | `active_backlog.interval` | str | `5m` | advanced | Poll-floor cadence for the drain daemon (e.g. 5m, 30s). |

@@ -12,6 +12,7 @@ import pytest
 from fno.agents.harness_map import (
     MAP_VERSION,
     DispatchResolveError,
+    capabilities,
     dispatch_command,
     normalize_command,
     resolve_dispatch,
@@ -91,6 +92,75 @@ def test_map_version_bumped_for_dispatch_command():
     # A consumer asserting the shape it was written against must see the bump.
     assert MAP_VERSION >= 3
     assert resolve_dispatch(harness="claude")["map_version"] == MAP_VERSION
+
+
+# --- autonomous pane capabilities ----------------------------------------- #
+
+
+def test_codex_autonomous_pane_is_capability_allowed_without_changing_default():
+    explicit = resolve_dispatch(
+        harness="codex",
+        substrate="pane",
+        node_id="x-abcd",
+        trigger="autonomous",
+    )
+
+    assert capabilities("codex")["autonomous_pane"] is True
+    assert explicit["substrate"] == "pane"
+    assert resolve_dispatch(harness="codex", node_id="x-abcd")["substrate"] == "headless"
+
+
+@pytest.mark.parametrize("harness", ["claude", "agy", "opencode"])
+def test_unverified_harness_autonomous_pane_fails_closed(harness):
+    assert capabilities(harness)["autonomous_pane"] is False
+
+    with pytest.raises(
+        DispatchResolveError,
+        match=rf"harness {harness!r}.*autonomous_pane",
+    ):
+        resolve_dispatch(
+            harness=harness,
+            substrate="pane",
+            node_id="x-abcd",
+            trigger="autonomous",
+        )
+
+
+def test_missing_autonomous_pane_capability_fails_closed(monkeypatch):
+    import fno.agents.harness_map as harness_map
+
+    monkeypatch.delitem(harness_map._HARNESS_CAPS["opencode"], "autonomous_pane")
+
+    with pytest.raises(
+        DispatchResolveError,
+        match=r"harness 'opencode'.*autonomous_pane",
+    ):
+        resolve_dispatch(
+            harness="opencode",
+            substrate="pane",
+            node_id="x-abcd",
+            trigger="autonomous",
+        )
+
+
+def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
+    with pytest.raises(DispatchResolveError, match="unknown dispatch trigger"):
+        resolve_dispatch(
+            harness="codex",
+            substrate="pane",
+            node_id="x-abcd",
+            trigger="autonamous",
+        )
+
+
+def test_pane_capability_does_not_enable_codex_bg():
+    with pytest.raises(DispatchResolveError, match="bg is claude-only"):
+        resolve_dispatch(
+            harness="codex",
+            substrate="bg",
+            node_id="x-abcd",
+            trigger="autonomous",
+        )
 
 
 # --- the normalizer (x-a5e4) ------------------------------------------------ #

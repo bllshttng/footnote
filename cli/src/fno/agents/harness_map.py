@@ -33,7 +33,7 @@ from typing import Mapping, Optional
 
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
-MAP_VERSION = 5  # opencode resume: native-continue -> native-session (x-830c)
+MAP_VERSION = 6  # autonomous_pane + route_on_pane capabilities
 
 # Command surface: HOW a footnote slash `/verb` is natively invoked on a harness.
 # One axis, the single source both dispatch surfaces normalize through
@@ -73,11 +73,32 @@ def _refused_reason(harness: str) -> str:
 # harness carries a `command_surface` (x-a5e4): the invocation form its native
 # footnote skill takes, or `refused` where the harness is deprecated. A slash
 # harness also carries `slash_prefix` (the plugin namespace). `bg` is claude-only.
+#
+# Two pane capabilities, both EVIDENCE-GATED and read fail-closed (a missing key
+# reads false), because each one used to be a blanket rule that was true of at
+# most one harness:
+#   autonomous_pane  Does a fire-and-forget pane worker on this harness run to
+#                    completion without an operator? The old guard refused pane
+#                    for EVERY harness on the claim that "a pane stalls waiting
+#                    for a human". That claim is per-harness, not universal, and
+#                    each true value here must be backed by an unattended journey
+#                    test (see cli/tests/agents/test_spawn_pane.py) - never by
+#                    another harness's result.
+#   route_on_pane    Can a model route's complete environment reach a pane child
+#                    on this harness? The pane launcher materializes a route via
+#                    mux_spawn._mesh_env_wrapper, whose endpoint/auth/model
+#                    assignment + inherited-credential scrub is claude-shaped;
+#                    a harness whose route env semantics are not covered end to
+#                    end stays false.
+# Neither key changes `substrate_default`: permission to use pane is a separate
+# decision from preferring it, and the defaults are unchanged.
 _HARNESS_CAPS: dict[str, dict] = {
     "claude": {
         "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-session",  # session store + --resume <uuid>
         "bg": True,  # claude --bg
+        "autonomous_pane": False,
+        "route_on_pane": True,
         "stop_hook": "native",
         # Native slash-command invocation of the target skill (verified).
         "command_surface": _SLASH,
@@ -87,6 +108,8 @@ _HARNESS_CAPS: dict[str, dict] = {
         "permission_bypass": ["--dangerously-bypass-approvals-and-sandbox"],
         "resume": "native-thread",  # CODEX_THREAD_ID + exec resume
         "bg": False,  # -> headless
+        "autonomous_pane": True,
+        "route_on_pane": False,
         "stop_hook": "native",
         # `$fno:target` invokes the footnote plugin skill. VERIFIED: `codex exec`
         # injects the fno skill definitions and expands `$fno:verb` (not a
@@ -97,6 +120,8 @@ _HARNESS_CAPS: dict[str, dict] = {
         "permission_bypass": ["--yolo"],
         "resume": "native-continue",
         "bg": False,
+        "autonomous_pane": False,
+        "route_on_pane": False,
         "stop_hook": "native",
         # gemini CLI is deprecated (agy is its successor); its build lane is a
         # loud refusal, not a maintained brief (x-de43). No dispatch surface.
@@ -111,6 +136,8 @@ _HARNESS_CAPS: dict[str, dict] = {
         "permission_bypass": ["--dangerously-skip-permissions"],
         "resume": "native-continue",
         "bg": False,
+        "autonomous_pane": False,
+        "route_on_pane": False,
         "stop_hook": "native",
         "command_surface": _SLASH,
         "slash_prefix": "",
@@ -128,6 +155,8 @@ _HARNESS_CAPS: dict[str, dict] = {
         # project has none rather than refusing - never a resume.
         "resume": "native-session",
         "bg": False,
+        "autonomous_pane": False,
+        "route_on_pane": False,
         "stop_hook": "native",
         "command_surface": _SLASH,
         "slash_prefix": "fno:",
@@ -216,7 +245,7 @@ def capabilities(harness: str) -> dict:
 
 def substrate_default(harness: str) -> str:
     """Per-harness default substrate: ``bg`` where supported (claude), else
-    ``headless``. Never ``pane`` - a pane stalls an autonomous dispatch."""
+    ``headless``. Pane permission is independent from substrate preference."""
     return "bg" if capabilities(harness)["bg"] else "headless"
 
 
@@ -271,18 +300,24 @@ def resolve_dispatch(
     at 8 KB with an explicit error, never truncated.
 
     ``trigger`` is ``autonomous`` (fire-and-forget) or ``attended``. An
-    autonomous trigger may never resolve ``pane`` (it stalls waiting for a human).
+    autonomous pane requires evidence-backed per-harness capability.
 
     ``node_id`` when given is substituted into the command's ``{id}`` (exactly
     once, else an error); when absent the template is returned literally (a bare
     ``--harness`` resolution just wants the harness/substrate decision).
 
     Raises :class:`DispatchResolveError` on: an unknown harness (naming the map),
-    an explicit ``bg`` on a non-bg harness (pointing at ``headless``), ``pane``
-    under an autonomous trigger, an unknown substrate, or an empty / unsubstituted
-    command. ``dispatch_cfg`` overrides the config read (for tests)."""
+    an explicit ``bg`` on a non-bg harness (pointing at ``headless``), an
+    unsupported autonomous ``pane``, an unknown trigger or substrate, or an
+    empty / unsubstituted command. ``dispatch_cfg`` overrides the config read
+    (for tests)."""
     cfg = dict(dispatch_cfg) if dispatch_cfg is not None else _load_dispatch_cfg(settings)
     decision: list[str] = []
+    chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
+    if chosen_trigger not in ("autonomous", "attended"):
+        raise DispatchResolveError(
+            f"unknown dispatch trigger {trigger!r}; valid: autonomous, attended"
+        )
 
     # 1. harness. An explicit flag is distinguished by ``is not None`` (present
     # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
@@ -335,13 +370,17 @@ def resolve_dispatch(
             f"substrate 'bg' is unsupported on harness {chosen_harness!r} "
             f"(bg is claude-only); use 'headless'"
         )
-    # Autonomous triggers never resolve pane (it stalls waiting for a human) -
-    # Invariant, fail CLOSED: only an explicit 'attended' trigger opts out, so a
-    # malformed/unknown trigger is treated as autonomous and the guard still fires.
-    if chosen_substrate == "pane" and (trigger or "").strip().lower() != "attended":
+    # Only an explicit attended trigger bypasses the autonomy capability check.
+    # A missing key is false so newly added or partially specified harnesses stay
+    # closed until an unattended journey proves the pane can complete by itself.
+    if (
+        chosen_substrate == "pane"
+        and chosen_trigger != "attended"
+        and not caps.get("autonomous_pane", False)
+    ):
         raise DispatchResolveError(
-            "autonomous triggers never resolve substrate 'pane' "
-            "(a pane stalls waiting for a human); use 'bg' or 'headless'"
+            f"harness {chosen_harness!r} does not have the evidence-backed "
+            "autonomous_pane capability; use 'bg' or 'headless'"
         )
 
     # 3. command template. Precedence: explicit --command > node verb > config

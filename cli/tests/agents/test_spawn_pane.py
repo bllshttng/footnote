@@ -362,6 +362,172 @@ def test_late_codex_identity_composes_across_every_peer_surface(
         shutil.rmtree(mux_dir, ignore_errors=True)
 
 
+def test_codex_autonomous_pane_journey_completes_without_operator_input(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A fake Codex pane receives its task, exits, and leaves readable output."""
+    use_tmpdir(monkeypatch, tmp_path)
+    repo = Path(__file__).resolve().parents[3]
+    manifest = repo / "crates" / "fno" / "Cargo.toml"
+    fno_bin = repo / "crates" / "fno" / "target" / "debug" / "fno"
+    cargo_path = shutil.which("cargo")
+    if cargo_path is None:
+        pytest.skip("cargo not on PATH; this journey drives the real fno binary")
+    cargo = Path(cargo_path)
+    cargo_home = cargo.parent.parent
+    built = subprocess.run(
+        [str(cargo), "build", "--manifest-path", str(manifest), "--bin", "fno"],
+        cwd=repo,
+        env={
+            **os.environ,
+            "CARGO_HOME": str(cargo_home),
+            "RUSTUP_HOME": str(cargo_home.parent / ".rustup"),
+        },
+        text=True,
+        capture_output=True,
+    )
+    assert built.returncode == 0, built.stderr
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    fake_codex = fake_bin / "codex"
+    fake_codex.write_text(
+        """#!/bin/sh
+for arg in "$@"; do prompt="$arg"; done
+printf '%s' "$prompt" > "$FAKE_CODEX_PROMPT_FILE"
+printf '\033]133;C\aAUTONOMOUS-CODEX-DONE\n\033]133;D;0\a'
+sleep 5
+""",
+        encoding="utf-8",
+    )
+    fake_codex.chmod(0o755)
+
+    agents_home = tmp_path / "agents"
+    mux_dir = Path("/tmp") / f"fno-a-{os.getpid()}-{uuid.uuid4().hex[:6]}"
+    mux_dir.mkdir()
+    prompt_file = tmp_path / "received-prompt"
+    session = f"auto-{uuid.uuid4().hex[:6]}"
+    env = {
+        **os.environ,
+        "PATH": f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+        "FNO_BIN": str(fno_bin),
+        "FNO_AGENTS_HOME": str(agents_home),
+        "FNO_MUX_DIR": str(mux_dir),
+        "FNO_CLAIMS_ROOT": str(tmp_path / "claims"),
+        "FNO_E2E": "1",
+        "FAKE_CODEX_PROMPT_FILE": str(prompt_file),
+    }
+    for key, value in env.items():
+        monkeypatch.setenv(key, value)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+
+    keeper = subprocess.run(
+        [
+            str(fno_bin),
+            "mux",
+            "pane",
+            "run",
+            "--session",
+            session,
+            "--cwd",
+            str(repo),
+            "--",
+            "/bin/sh",
+            "-c",
+            "sleep 60",
+        ],
+        cwd=repo,
+        env=env,
+        text=True,
+        capture_output=True,
+    )
+    assert keeper.returncode == 0, keeper.stderr
+
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    spawned = None
+    try:
+        spawned = dispatch_spawn_pane(
+            name="autonomous-codex-proof",
+            message="AUTONOMOUS-PANE-TASK",
+            provider="codex",
+            cwd=repo,
+            session=session,
+            codex_sessions_dir=tmp_path / "no-rollouts",
+        )
+
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline and not prompt_file.exists():
+            time.sleep(0.05)
+        assert prompt_file.read_text(encoding="utf-8") == "AUTONOMOUS-PANE-TASK"
+
+        settled = subprocess.run(
+            [
+                str(fno_bin),
+                "mux",
+                "pane",
+                "wait",
+                "--session",
+                session,
+                str(spawned.pane_id),
+                "--pattern",
+                "AUTONOMOUS-CODEX-DONE",
+                "--timeout",
+                "10",
+            ],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert settled.returncode == 10, settled.stderr
+        observed = subprocess.run(
+            [
+                str(fno_bin),
+                "mux",
+                "pane",
+                "read",
+                "--session",
+                session,
+                str(spawned.pane_id),
+            ],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert observed.returncode == 0, observed.stderr
+        assert "AUTONOMOUS-CODEX-DONE" in observed.stdout
+
+        observed_exit = subprocess.run(
+            [
+                str(fno_bin),
+                "mux",
+                "pane",
+                "wait",
+                "--session",
+                session,
+                str(spawned.pane_id),
+                "--timeout",
+                "10",
+            ],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        assert observed_exit.returncode == 12, observed_exit.stderr
+    finally:
+        subprocess.run(
+            [str(fno_bin), "mux", "kill-server", session, "--json"],
+            cwd=repo,
+            env=env,
+            text=True,
+            capture_output=True,
+        )
+        shutil.rmtree(mux_dir, ignore_errors=True)
+
+
 def test_opencode_spawn_stamps_the_captured_session_id(
     tmp_path: Path, monkeypatch
 ) -> None:

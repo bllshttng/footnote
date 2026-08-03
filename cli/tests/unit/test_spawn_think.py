@@ -111,9 +111,9 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     stamp_calls: list[tuple] = []
 
     def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth",
-                   invocation_suffix=None, model=None, provider=None):
+                   invocation_suffix=None, model=None, provider=None, node=None):
         spawn_calls.append(
-            (node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model, provider)
+            (node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model, provider, node)
         )
         return "deadbeef"
 
@@ -1348,7 +1348,7 @@ def test_over_budget_provenance_identity_fails_closed_instead_of_shaving():
 
 
 # ---------------------------------------------------------------------------
-# think_spawn.substrate + on_decompose_wave0 (x-3571 wave 2)
+# shared dispatch substrate + on_decompose_wave0
 # ---------------------------------------------------------------------------
 
 
@@ -1364,20 +1364,42 @@ def test_AC10_HP_absent_substrate_key_still_yields_bg(monkeypatch, tmp_path):
     assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
 
 
-def test_AC10_HP_configured_substrate_reaches_every_spawn(monkeypatch, tmp_path):
-    """Set at the shared choke point, so it applies to ALL think spawns."""
+def test_AC10_HP_configured_dispatch_substrate_reaches_every_spawn(monkeypatch, tmp_path):
+    """The shared dispatch selector applies to every context-think spawn."""
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"headless\"\n")
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "headless"
+
+
+def test_legacy_think_spawn_substrate_remains_a_compatibility_fallback(
+    monkeypatch, tmp_path
+):
     _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
     assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "headless"
 
 
-def test_a_garbage_substrate_falls_back_to_bg(monkeypatch, tmp_path):
-    """An unknown substrate would fail loud at spawn; keep the enum tight."""
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"quantum\"\n")
+def test_shared_dispatch_substrate_overrides_legacy_compatibility_key(
+    monkeypatch, tmp_path
+):
+    _write_config(
+        tmp_path,
+        '[think_spawn]\nsubstrate = "headless"\n\n[dispatch]\nsubstrate = "bg"\n',
+    )
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
     assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
+
+
+def test_a_garbage_dispatch_substrate_fails_loud(monkeypatch, tmp_path):
+    from fno.agents.harness_map import DispatchResolveError
+
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"quantum\"\n")
+    _capture_spawn_cmd(monkeypatch)
+    with pytest.raises(DispatchResolveError, match="unknown substrate"):
+        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
 
 
 def test_AC8_HP_wave0_fanout_is_off_by_default(tmp_path, monkeypatch):
@@ -1465,11 +1487,13 @@ def test_a_pane_receipt_without_short_id_is_still_a_launch(monkeypatch, tmp_path
     marked the child unowned and inline-filled it out from under a live pane
     worker - the exact double-write the ownership receipt prevents.
     """
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"pane\"\n")
     _capture_with_stdout(
         monkeypatch, '{"status":"live","mux_session":"m1","pane_id":"%1"}\n'
     )
-    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    handle = st._spawn_think_worker(
+        "x-1", "prompt", str(tmp_path), "slug", provider="codex"
+    )
     assert handle, "a launched pane worker must return an addressable handle"
 
 
@@ -1483,7 +1507,7 @@ def test_a_headless_reply_launches_but_stamps_no_session_pointer(
     `think_session_id` and resolve to nothing on every successful spawn. Empty
     is the honest answer; the `think_spawned` event still carries `agent_name`.
     """
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"headless\"\n")
     _capture_with_stdout(monkeypatch, "I have finished the design pass.\n")
     handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
     assert handle == ""
@@ -1510,15 +1534,17 @@ def test_the_non_bg_handle_is_the_agent_name_not_a_fabricated_id(
     monkeypatch, tmp_path
 ):
     """It must address a real worker: `fno agents logs <name>` has to work."""
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"pane\"\n")
     cap = _capture_with_stdout(monkeypatch, '{"pane_id":"%1"}\n')
-    handle = st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    handle = st._spawn_think_worker(
+        "x-1", "prompt", str(tmp_path), "slug", provider="codex"
+    )
     assert handle == cap["cmd"][cap["cmd"].index("--name") + 1]
 
 
 def test_bg_still_REQUIRES_a_short_id_receipt(monkeypatch, tmp_path):
     """Unchanged where the receipt contract holds - no blanket loosening."""
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"bg\"\n")
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"bg\"\n")
     _capture_with_stdout(monkeypatch, "some banner with no receipt\n")
     with pytest.raises(st.SpawnError):
         st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
@@ -1526,7 +1552,7 @@ def test_bg_still_REQUIRES_a_short_id_receipt(monkeypatch, tmp_path):
 
 def test_a_nonzero_exit_still_raises_on_every_substrate(monkeypatch, tmp_path):
     """Exit 0 is the launch signal; a real failure must still surface."""
-    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"pane\"\n")
+    _write_config(tmp_path, "[dispatch]\nsubstrate = \"pane\"\n")
 
     class _Proc:
         returncode = 1
@@ -1535,4 +1561,6 @@ def test_a_nonzero_exit_still_raises_on_every_substrate(monkeypatch, tmp_path):
 
     monkeypatch.setattr(st.subprocess, "run", lambda cmd, **kw: _Proc())
     with pytest.raises(st.SpawnError):
-        st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+        st._spawn_think_worker(
+            "x-1", "prompt", str(tmp_path), "slug", provider="codex"
+        )

@@ -1147,17 +1147,23 @@ def cmd_spawn(
     route_env: dict[str, str] | None = None
     route_provider: str | None = None
     if route is not None:
-        # Explicit routes remain limited to the bg/headless contract; role routing
-        # is the pane-capable path. The explicit monitor adds one narrow
-        # exception: a zai route selected for this pane.
-        monitored_zai_pane = (
-            monitor == "happy" and provider == "claude" and substrate == "pane"
-        )
-        if provider != "claude" or (
-            substrate not in ("bg", "headless") and not monitored_zai_pane
-        ):
+        # Pane routing is a per-harness evidence claim, independent from both
+        # pane autonomy and substrate preference. Missing capability stays
+        # closed so a newly added harness cannot inherit Claude's route contract.
+        if substrate == "pane":
+            from fno.agents.harness_map import capabilities
+
+            if not capabilities(provider).get("route_on_pane", False):
+                print(
+                    f"harness {provider!r} does not have the evidence-backed "
+                    "route_on_pane capability; no worker launched, node stays "
+                    "dispatchable.",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=2)
+        if provider != "claude":
             print(
-                "--route is claude on --substrate bg or headless only; "
+                "--route requires the claude harness; "
                 f"got provider {provider!r} substrate {substrate!r}.",
                 file=sys.stderr,
             )

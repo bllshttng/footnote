@@ -8,6 +8,7 @@ Layers:
 """
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, Dict
 
@@ -101,16 +102,117 @@ def test_route_unknown_provider_refused(monkeypatch: pytest.MonkeyPatch) -> None
     assert result.exit_code == 2, result.output
 
 
-def test_route_rejected_on_pane_substrate(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_route_allowed_on_capability_enabled_pane(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fno.agents import mux_spawn, spawn_gate
     from fno.agents.cli import agents_app
+    from fno.agents.model_routing import (
+        DEFAULT_ZAI_BASE_URL,
+        DEFAULT_ZAI_HAIKU_MODEL,
+        MODEL_ENV_KEYS,
+    )
+    from fno.agents.mux_spawn import MuxSpawnResult
 
-    # Default substrate is pane; --route is claude+bg only.
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch(**kwargs: Any) -> MuxSpawnResult:
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="main",
+            pane_id=1,
+            child_pid=None,
+            session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
     result = runner.invoke(
         agents_app,
         ["spawn", "--name", "w1", "hi", "--harness", "claude", "--route", "zai,glm-5.2"],
     )
+    assert result.exit_code == 0, result.output
+    assert captured["provider"] == "claude"
+    assert captured["route_provider"] == "zai"
+    route_env = captured["route_env"]
+    assert route_env["ANTHROPIC_BASE_URL"] == DEFAULT_ZAI_BASE_URL
+    assert route_env["ANTHROPIC_AUTH_TOKEN"] == "zk-live"
+    for key in MODEL_ENV_KEYS:
+        if key == "ANTHROPIC_DEFAULT_HAIKU_MODEL":
+            continue
+        assert route_env[key] == "glm-5.2"
+    assert route_env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == DEFAULT_ZAI_HAIKU_MODEL
+
+
+@pytest.mark.parametrize("missing", [False, True])
+def test_route_on_pane_capability_fails_closed_before_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
+) -> None:
+    import fno.agents.harness_map as harness_map
+    from fno.agents import mux_spawn, spawn_gate
+    from fno.agents.cli import agents_app
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    if missing:
+        monkeypatch.delitem(harness_map._HARNESS_CAPS["claude"], "route_on_pane")
+    else:
+        monkeypatch.setitem(harness_map._HARNESS_CAPS["claude"], "route_on_pane", False)
+    gate_calls: list[int] = []
+    monkeypatch.setattr(
+        spawn_gate,
+        "run_gate",
+        lambda *a, **k: gate_calls.append(1) or _Gate(),
+    )
+    monkeypatch.setattr(
+        mux_spawn,
+        "dispatch_spawn_pane",
+        lambda **kwargs: pytest.fail("pane dispatch called"),
+    )
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--route", "zai,glm-5.2"],
+    )
+
     assert result.exit_code == 2, result.output
-    assert "bg" in result.output.lower()
+    assert "route_on_pane" in result.output
+    assert gate_calls == []
+
+
+def test_route_on_pane_complete_environment_reaches_child_wrapper() -> None:
+    from fno.agents.model_routing import MODEL_ENV_KEYS, resolve_explicit_route
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    route_env = resolve_explicit_route(
+        "zai",
+        "glm-5.2",
+        env={"ZAI_API_KEY": "zk-live"},
+    )
+    assert route_env is not None
+
+    wrapped = _mesh_env_wrapper(
+        "peer",
+        "claude",
+        None,
+        ["claude", "hello"],
+        route_env=route_env,
+    )
+
+    first_assignment = next(i for i, token in enumerate(wrapped) if "=" in token)
+    unset_region = wrapped[:first_assignment]
+    assert "ANTHROPIC_API_KEY" in unset_region
+    assert "CLAUDE_CODE_OAUTH_TOKEN" in unset_region
+    for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", *MODEL_ENV_KEYS):
+        assert f"{key}={route_env[key]}" in wrapped
 
 
 # ---------------------------------------------------------------------------

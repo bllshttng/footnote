@@ -277,7 +277,7 @@ enabled = false
 enabled = false
 
 [think_spawn]
-# Born-with-why: spawn/offer a context-carrying /think for a generated idea node.
+# Born-with-why: spawn/offer a context-carrying /think for a generated idea node; actual launches use the shared config.dispatch harness and substrate.
 enabled = false
 # Blast-radius cap on /think spawns per node-generation run.
 max_per_run = 5
@@ -291,8 +291,8 @@ on_retro = false
 daily_cap = 20
 # Dispatch a /think for each WAVE-0 child at `fno backlog decompose` (default OFF; inherits max_per_run and daily_cap). Worth it only when the epic is large enough that inline-filling every child blows one session's context budget.
 on_decompose_wave0 = false
-# Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.
-substrate = "bg"
+# Deprecated compatibility fallback for existing configs; used only when dispatch.substrate is unset. Configure new routing under config.dispatch.
+# substrate = <unset>   # optional; no default
 # Attended born-with-why behavior: 'offer' (default, handoff line) or 'spawn' (real bg /think).
 attended = "offer"
 

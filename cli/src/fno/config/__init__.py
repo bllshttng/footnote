@@ -1717,6 +1717,10 @@ class ThinkSpawnBlock(BaseModel):
     ``idle_threshold_s`` is the discretionary activity-recency refinement
     (Claude's Discretion 1); ``0`` (default) disables it so the primary
     attended-vs-headless signal stands alone.
+
+    Actual context-think launches use the shared ``config.dispatch`` profile;
+    this block controls when to offer or launch them, not their harness or
+    substrate.
     """
 
     model_config = ConfigDict(extra="ignore")
@@ -1742,10 +1746,10 @@ class ThinkSpawnBlock(BaseModel):
     # inline-fill blows the context budget. Inherits max_per_run and daily_cap;
     # it adds no ceiling of its own.
     on_decompose_wave0: bool = False
-    # Substrate for EVERY think spawn, not just the fan-out. `bg` (the previous
-    # hardcode at the shared choke point) is claude-only, so an install on
-    # another harness had no way to dispatch a /think at all.
-    substrate: str = "bg"
+    # Deprecated read-time compatibility alias. New configuration belongs at
+    # config.dispatch.substrate; this value is consulted only when that shared
+    # setting is absent so upgrades preserve an operator's prior launch shape.
+    substrate: Optional[str] = None
     # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
@@ -1824,14 +1828,15 @@ class ThinkSpawnBlock(BaseModel):
 
     @field_validator("substrate", mode="before")
     @classmethod
-    def _coerce_substrate(cls, v: object) -> str:
-        """Fail-safe to ``bg``: an unknown substrate would fail loud at spawn.
+    def _coerce_legacy_substrate(cls, v: object) -> Optional[str]:
+        """Preserve previously accepted values without restoring authority.
 
-        Unlike the boolean opt-ins, the dangerous direction here is not "on" -
-        it is dispatching onto a substrate `fno agents spawn` cannot host, which
-        surfaces as a spawn error rather than a silently wrong decision. So this
-        keeps the enum tight and falls back to the previous hardcoded value.
+        An absent key remains ``None`` so ``config.dispatch`` and its harness
+        default decide. A present malformed legacy value keeps the historical
+        fail-safe to Claude ``bg`` behavior.
         """
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
         if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
             return v.strip().lower()
         return "bg"

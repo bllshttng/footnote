@@ -243,7 +243,9 @@ FIELD_META: dict[str, Meta] = {
     "keep_going.enabled": Meta("advanced", "Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap)."),
     # --- config.think_spawn.* ---
     "think_spawn.enabled": Meta(
-        "advanced", "Born-with-why: spawn/offer a context-carrying /think for a generated idea node."
+        "advanced",
+        "Born-with-why: spawn/offer a context-carrying /think for a generated idea node; "
+        "actual launches use the shared config.dispatch harness and substrate.",
     ),
     "think_spawn.max_per_run": Meta(
         "advanced", "Blast-radius cap on /think spawns per node-generation run."
@@ -271,7 +273,8 @@ FIELD_META: dict[str, Meta] = {
     ),
     "think_spawn.substrate": Meta(
         "advanced",
-        "Substrate for every /think spawn: 'bg' (default, claude-only), 'pane', or 'headless'.",
+        "Deprecated compatibility fallback for existing configs; used only when "
+        "dispatch.substrate is unset. Configure new routing under config.dispatch.",
     ),
     # --- config.active_backlog.* ---
     "active_backlog.enabled": Meta(

@@ -227,19 +227,6 @@ def _daily_cap(project_root: Optional[Path]) -> int:
         return 20
 
 
-def _think_spawn_substrate(node_cwd: Optional[str]) -> str:
-    """Spawn substrate from the NODE's repo config, fail-safe to ``bg``.
-
-    ``bg`` was the hardcoded value before this was configurable, so the fallback
-    is byte-for-byte the old behavior on any settings read failure.
-    """
-    try:
-        root = Path(node_cwd) if node_cwd else None
-        return str(_settings_for(root).think_spawn.substrate) or "bg"
-    except Exception:  # noqa: BLE001 - fail-safe to the historical hardcode
-        return "bg"
-
-
 def think_spawn_on_decompose_wave0(
     *,
     project_root: Optional[Path] = None,
@@ -725,8 +712,9 @@ def _spawn_think_worker(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    node: Optional[dict] = None,
 ) -> str:
-    """Dispatch a fire-and-forget ``/think`` claude bg worker carrying the seed.
+    """Dispatch a fire-and-forget ``/think`` worker carrying the seed.
 
     Mirrors advance._spawn_worker: ``/think`` rides as the command prompt (NOT
     an env var), the agent is named ``think-<node-id>[-<reason>]-<slug>``, the
@@ -735,58 +723,77 @@ def _spawn_think_worker(
     SpawnAlreadyRunning on a name-collision and SpawnError otherwise.
     """
     agent_name = _worker_agent_name(node_id, node_slug, reason, invocation_suffix)
-    # x-2c27: a conversational /think handoff is a DETACHED thread, so route it
-    # off the x-3ab8 default `pane`, which would land an owned-PTY pane that
-    # stalls a fire-and-forget dispatch.
-    # provider defaults to claude (the `bg` substrate is claude-only); a dispatch
-    # flag overriding it rides through and fails loud downstream if the substrate
-    # cannot host it, rather than being silently dropped.
-    #
-    # x-3571: `bg` was hardcoded here, which is the shared choke point for EVERY
-    # think spawn - so an install on a harness without `bg` had no way to
-    # dispatch a /think at all. Now `config.think_spawn.substrate`, read here so
-    # every spawn path gains the knob at once rather than growing a
-    # caller-local override each time one is needed.
-    prov = (provider or "").strip()
-    substrate = _think_spawn_substrate(node_cwd)
-    cmd = [*_subprocess_util.fno_py_cmd(), "agents", "spawn"]
-    # An explicit node pin always wins. Absent one, only `bg` implies claude -
-    # that substrate IS claude-only, which is why the default was hardcoded here
-    # before it was configurable. Carrying that default onto `pane`/`headless`
-    # would defeat the point of making substrate configurable: a codex or gemini
-    # install choosing a substrate its own harness supports would still be
-    # dispatched at `--harness claude` and fail every spawn when claude is not
-    # installed. Omitting the flag lets `fno agents spawn` resolve the invoking
-    # harness itself.
-    if not prov and substrate == "bg":
-        prov = "claude"
-    if prov:
-        cmd += ["--harness", prov]
-    cmd += ["--substrate", substrate]
+    root = Path(node_cwd) if node_cwd else None
+    try:
+        settings_obj = _settings_for(root)
+    except Exception:  # noqa: BLE001 - resolver defaults stay available
+        settings_obj = object()
+
+    from fno.agents.harness_map import resolve_dispatch
+
+    dispatch_settings = getattr(settings_obj, "dispatch", None)
+    shared_substrate = (
+        getattr(dispatch_settings, "substrate", "") or ""
+    ).strip()
+    think_spawn_settings = getattr(settings_obj, "think_spawn", None)
+    legacy_substrate = (
+        getattr(think_spawn_settings, "substrate", None)
+        if not shared_substrate
+        else None
+    )
+
+    resolved = resolve_dispatch(
+        harness=(provider or "").strip() or None,
+        substrate=legacy_substrate,
+        node_id=node_id,
+        verb="/think",
+        trigger="autonomous",
+        settings=settings_obj,
+    )
+    resolved_harness = resolved["harness"]
+    substrate = resolved["substrate"]
+    native_think = resolved["command"]
+    resolved_model = (model or "").strip() or None
+    if resolved_model is None and node is not None:
+        resolved_model = _route_resolve.node_model(
+            node,
+            provider=resolved_harness,
+        )
+    portable_think = f"/think {node_id}"
+    rendered_prompt = (
+        native_think + prompt[len(portable_think) :]
+        if prompt.startswith(portable_think)
+        else prompt
+    )
+
+    cmd = [
+        *_subprocess_util.fno_py_cmd(),
+        "agents",
+        "spawn",
+        "--harness",
+        resolved_harness,
+        "--substrate",
+        substrate,
+    ]
     if node_cwd:
         cmd += ["--cwd", node_cwd]
     else:
         cmd += ["--fresh"]
     # x-571f: a pinned node's /think worker also runs on the pin (US1 honors it
     # on the claude/bg arm). Empty/None = provider default, unchanged.
-    if model:
-        cmd += ["--model", model]
+    if resolved_model:
+        cmd += ["--model", resolved_model]
     # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
     # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
     mode = (permission_mode or "").strip()
     if not mode:
         try:
-            mode = (
-                _settings_for(
-                    Path(node_cwd) if node_cwd else None
-                ).agents.spawn_permission_mode
-                or ""
-            ).strip()
+            mode = (settings_obj.agents.spawn_permission_mode or "").strip()
         except Exception:  # noqa: BLE001 - fail-safe to unset (unchanged)
             mode = ""
-    if mode:
+    if mode and (resolved_harness == "claude" or substrate == "pane"):
         cmd += ["--permission-mode", mode]
-    cmd += ["--name", agent_name, prompt]
+    cmd += ["--name", agent_name, rendered_prompt]
 
     proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
     if proc.returncode != 0:
@@ -1358,8 +1365,9 @@ def maybe_spawn_think(
             node_slug,
             reason,
             invocation_suffix,
-            model=_route_resolve.node_model(node, provider=node.get("provider")),
+            model=node.get("model"),
             provider=node.get("provider"),
+            node=node,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)
