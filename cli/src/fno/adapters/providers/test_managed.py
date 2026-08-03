@@ -1866,3 +1866,51 @@ class TestTaintWriterIdentity:
         assert managed.reconcile_slot(
             "claude", by_id=by_id, root=tmp_path
         ).outcome == "slot-pinned"
+
+
+class TestSwitchNeverBindsAnIdentity:
+    def test_a_switch_does_not_bind_an_unbound_record(self, fake_slot, tmp_path):
+        """A switch materializes the record's STORED snapshot, whose provenance
+        is the store, not the operator. An earlier out-of-band login plus
+        capture-before-overwrite can leave one account's credential filed under
+        another's id, so binding from it would manufacture confident attribution
+        to the wrong account."""
+        by_id = _register_two(fake_slot, tmp_path)
+
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+        assert managed.record_principal("work-a", tmp_path) is None
+
+    def test_a_switch_invalidates_cached_principal_evidence(
+        self, fake_slot, tmp_path
+    ):
+        """The slot now holds a different credential, so evidence about the
+        previous occupant must not survive it."""
+        by_id = _register_two(fake_slot, tmp_path)
+        managed.note_slot_principal("claude", tmp_path, "acct-b", "B0", now=1000.0)
+
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, "B0", now=1000.0 + 1
+        ) is None
+
+    def test_the_pin_scan_carries_each_start_time_into_the_taint(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Sampling the start time after the scan would read the REPLACEMENT of
+        a pid that exited in between - fingerprinting the process the start time
+        exists to exclude."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(77, "claude", 4242.0)],
+        )
+        monkeypatch.setattr(
+            managed, "_process_started_at",
+            lambda pid: pytest.fail("re-sampled a start time after the scan"),
+        )
+
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+        assert managed.tainting_writers("claude", tmp_path) == [(77, 4242.0)]

@@ -304,7 +304,8 @@ Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pi
 The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
 A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
 
-A record's principal is bound where footnote knows whose credential it holds: at `register`, and at the tail of a verified switch for a record not yet bound.
+A record's principal is bound only at `register`, which is the one moment the operator asserts that the signed-in account IS this record.
+A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
 
 A fresh usage probe also checks the stamp it is about to trust.

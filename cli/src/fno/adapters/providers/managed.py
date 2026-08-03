@@ -36,7 +36,7 @@ import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Callable, Optional
+from typing import Callable, Optional, Sequence
 
 import filelock
 import psutil
@@ -94,8 +94,17 @@ class SwitchDeferred(ManagedStoreError):
 
 @dataclass(frozen=True)
 class PinningSession:
+    """A live process pinning a shared slot.
+
+    ``started`` is sampled during the scan, not later: between a scan and the
+    taint write a process can exit and its pid be recycled, and a start time
+    read afterwards would describe the replacement - fingerprinting exactly the
+    process the start time was added to exclude.
+    """
+
     pid: int
     cmdline: str
+    started: Optional[float] = None
 
 
 # ---------------------------------------------------------------------------
@@ -483,7 +492,7 @@ def _pinning_sessions(
     default_resolved = _safe_resolve(default_dir) or default_dir
     me = os.getpid()
     found: list[PinningSession] = []
-    for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+    for proc in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
         try:
             if proc.info["pid"] == me:
                 continue
@@ -493,7 +502,7 @@ def _pinning_sessions(
             try:
                 env = proc.environ()
             except Exception:  # noqa: BLE001 - unreadable env: assume it pins the default slot
-                found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
+                found.append(_pinning_session(proc, cmdline))
                 continue
             override = env.get(env_var)
             proc_dir = _safe_resolve(Path(override)) if override else default_resolved
@@ -501,10 +510,19 @@ def _pinning_sessions(
             # unresolvable proc dir (proc_dir is None) is treated as pinning
             # (conservative: under-detecting a live session is the unsafe way).
             if proc_dir is None or proc_dir == slot:
-                found.append(PinningSession(proc.info["pid"], " ".join(cmdline)))
+                found.append(_pinning_session(proc, cmdline))
         except Exception:  # noqa: BLE001 - a vanished/denied process is not our switch's problem
             continue
     return found
+
+
+def _pinning_session(proc, cmdline: list[str]) -> PinningSession:
+    started = proc.info.get("create_time")
+    return PinningSession(
+        proc.info["pid"],
+        " ".join(cmdline),
+        float(started) if isinstance(started, (int, float)) else None,
+    )
 
 
 def pinning_sessions(config_dir: Path | None = None) -> list[PinningSession]:
@@ -787,7 +805,10 @@ def slot_tainted(cli: str, root: Path) -> bool:
 
 
 def _set_slot_taint(
-    cli: str, root: Path, tainted: bool, pids: tuple[int, ...] | list[int] = ()
+    cli: str,
+    root: Path,
+    tainted: bool,
+    pids: "Sequence[int | tuple[int, Optional[float]]]" = (),
 ) -> None:
     """Write or clear the taint marker, recording WHICH sessions caused it.
 
@@ -804,7 +825,14 @@ def _set_slot_taint(
         # A pid alone is not an identity: pids are reused, and a recycled one
         # would make an unrelated process look like the tainting session and
         # block the repair FOREVER. The start time pins which process it was.
-        writers = [{"pid": pid, "started": _process_started_at(pid)} for pid in pids]
+        # A caller that already scanned passes (pid, started) so the sample is
+        # not taken after the process may have exited and been replaced.
+        writers = [
+            {"pid": entry[0], "started": entry[1]}
+            if isinstance(entry, tuple)
+            else {"pid": entry, "started": _process_started_at(entry)}
+            for entry in pids
+        ]
         _atomic_write_private(
             path, json.dumps({"pids": [w["pid"] for w in writers], "writers": writers})
         )
@@ -1653,12 +1681,23 @@ def _switch_locked(
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.harness, target.id, root)
-    _set_slot_taint(target.harness, root, bool(pinned_by), pinned_by)
-    # We just proved this blob is target's by materializing and verifying it, so
-    # this is the cheapest moment to bind target's principal - the binding a
-    # later reconciliation needs in order to recognize the account at all.
+    _set_slot_taint(
+        target.harness,
+        root,
+        bool(pinned_by),
+        [(session.pid, session.started) for session in pins],
+    )
+    # The slot now holds a different credential, so any cached principal
+    # evidence describes the previous occupant.
     clear_slot_principal_cache(target.harness, root)
-    capture_record_principal(target, target_blob, root)
+    # Deliberately NOT binding target's principal here. A switch materializes
+    # the record's STORED snapshot, and a snapshot's provenance is the store,
+    # not the operator: an earlier out-of-band login plus capture-before-
+    # overwrite can leave one account's credential filed under another's id
+    # (the `duplicate-credential` doctor finding exists for that). Binding from
+    # it would manufacture confident attribution to the wrong account, which is
+    # the failure this module is about. Only `register` - where the operator
+    # asserts that the signed-in account IS this record - is trusted provenance.
     if emit_fn is not None:
         event: dict[str, object] = {
             "provider": target.id,
