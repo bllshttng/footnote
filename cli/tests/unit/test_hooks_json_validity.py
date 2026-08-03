@@ -268,3 +268,55 @@ def test_plan_location_guard_wired_into_claude_and_codex_pretooluse() -> None:
             f"{path.name} must carry exactly one PreToolUse registration "
             f"routing matcher {matcher!r} through {guard}"
         )
+
+
+def test_every_manifest_hook_launches_through_real_shell_path() -> None:
+    """Every manifest command must start under the real ``$SHELL -lc`` launch path.
+
+    A hook whose command cannot resolve (PLUGIN_ROOT empty/unset, or a script
+    removed) fails OPEN in Codex: it exits 127/2 and the guard was silently
+    absent - the defect x-d991 exists to close. Verifying the hand-expanded
+    absolute path always passes, because that path cannot reproduce a
+    placeholder-expansion failure; only the configured string through the shell
+    Codex actually invokes (codex-rs/hooks engine command_runner.rs) can.
+
+    This is the CI-catchable half (the live-install half is `fno doctor`, which
+    probes the resolved root on the user's machine). Reuses the doctor launcher
+    so the isolated-temp-cwd safety invariant lives in one place: action hooks
+    read ``.fno/target-state.md`` off cwd, so the launch must never run from a
+    real worktree.
+
+    A genuine launch failure is a command that could not be executed at all
+    (rc 126/127, or rc 2 with a file-not-found signature) or a referenced script
+    that is not on disk. Action hooks that react to the synthetic probe payload
+    with a nonzero exit or a timeout are NOT launch failures - the probe catches
+    the silent fail-open, not hook-correctness - so they are tolerated.
+    """
+    shell = os.environ.get("SHELL")
+    if not shell:
+        pytest.skip("$SHELL unset; cannot reproduce the real launch path")
+
+    from fno.doctor import (
+        _is_hook_launch_failure,
+        _iter_plugin_manifest_commands,
+        _launch_plugin_hook,
+        _referenced_hook_scripts,
+    )
+
+    failures: list[str] = []
+    for manifest, command in _iter_plugin_manifest_commands(REPO_ROOT):
+        for script in _referenced_hook_scripts(command, REPO_ROOT):
+            if not script.exists():
+                failures.append(f"{manifest}: missing script {script}")
+        result = _launch_plugin_hook(
+            command, root_value=str(REPO_ROOT), shell=shell
+        )
+        if _is_hook_launch_failure(result):
+            failures.append(
+                f"{manifest}: rc={result['rc']} cmd={result['resolved']} "
+                f"{result['stderr'][:120]}"
+            )
+    assert not failures, (
+        "manifest hooks failed to launch through $SHELL -lc:\n  "
+        + "\n  ".join(failures)
+    )
