@@ -293,7 +293,10 @@ def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
         if principal is None:
             return None, failure
         seen.append(principal)
-    if len({p["account_uuid"] for p in seen}) > 1:
+    keys = {identity_key(p) for p in seen}
+    if None in keys:
+        return None, "malformed-profile"
+    if len(keys) > 1:
         return None, "ambiguous-slot"
     return seen[0], None
 
@@ -1012,9 +1015,12 @@ def principal_fingerprint(profile: object) -> Optional[dict]:
     ``account.uuid`` is the whole discriminator: it names the human, so it
     survives every token refresh, and it differs across configured accounts.
     ``organization_uuid`` and ``email`` ride along only to make a refusal
-    readable - a match is decided on ``account_uuid`` alone. Returns None when
-    the payload carries no stable uuid, which the caller reports as
-    ``malformed-profile`` rather than treating an unknown shape as a match.
+    readable. A MATCH is decided by :func:`identity_key`, which requires both
+    the account and the organization: Claude Code usage is organization-scoped,
+    so the account uuid alone would let a bearer for another organization pass
+    as this record. Returns None when the payload carries no stable account
+    uuid, which the caller reports as ``malformed-profile`` rather than
+    treating an unknown shape as a match.
     """
     if not isinstance(profile, dict):
         return None
@@ -1081,6 +1087,26 @@ def principal_of_bearer(bearer: str) -> tuple[Optional[dict], Optional[str]]:
     if fingerprint is None:
         return None, "malformed-profile"
     return fingerprint, None
+
+
+def identity_key(principal: Optional[dict]) -> Optional[str]:
+    """The comparable identity in a principal, or None when it is incomplete.
+
+    Both the account AND the organization, because Claude Code usage is
+    organization-scoped: one human can belong to two organizations, and
+    comparing the account uuid alone would let an org-B bearer pass as the
+    org-A record and file its usage there. An identity missing either half is
+    not comparable at all - fail closed rather than match on the half we have.
+    """
+    if not isinstance(principal, dict):
+        return None
+    account = principal.get("account_uuid")
+    org = principal.get("organization_uuid")
+    if not isinstance(account, str) or not account:
+        return None
+    if not isinstance(org, str) or not org:
+        return None
+    return f"{account}/{org}"
 
 
 def record_principal(record_id: str, root: Path | None = None) -> Optional[dict]:
@@ -1168,12 +1194,16 @@ def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
     bound = record_principal(stamped, root)
     if bound is None:
         return None
-    principal, _failure = canonical_slot_principal(cli)
-    if principal is None or principal["account_uuid"] == bound["account_uuid"]:
+    principal, failure = canonical_slot_principal(cli)
+    if failure == "ambiguous-slot":
+        # Reporting healthy here would hide two accounts sharing one slot.
+        return {"stamped": stamped, "live": None, "ambiguous": True}
+    if principal is None or identity_key(principal) == identity_key(bound):
         return None
     return {
         "stamped": stamped,
-        "live": principal.get("email") or principal["account_uuid"],
+        "live": principal.get("email") or principal.get("account_uuid"),
+        "ambiguous": False,
     }
 
 
@@ -1230,7 +1260,7 @@ def cached_slot_principal(
 def note_slot_principal(
     cli: str,
     root: Path,
-    account_uuid: str,
+    identity: str,
     credential: Optional[str],
     *,
     now: float | None = None,
@@ -1242,7 +1272,7 @@ def note_slot_principal(
         _atomic_write_private(
             _principal_cache_path(cli, root),
             json.dumps({
-                "account_uuid": account_uuid,
+                "account_uuid": identity,
                 "credential": digest,
                 "at": now if now is not None else time.time(),
             }),
@@ -1282,14 +1312,18 @@ def bearer_principal_verdict(
     bound = record_principal(record_id, root)
     if bound is None:
         return "unprovable"
+    want = identity_key(bound)
+    if want is None:
+        return "unprovable"  # an incomplete binding cannot vouch for anything
     cached = cached_slot_principal(cli, root, bearer, now=now, ttl=ttl)
     if cached is not None:
-        return "match" if cached == bound["account_uuid"] else "mismatch"
+        return "match" if cached == want else "mismatch"
     principal, _failure = principal_of_bearer(bearer)
-    if principal is None:
+    got = identity_key(principal)
+    if got is None:
         return "unprovable"
-    note_slot_principal(cli, root, principal["account_uuid"], bearer, now=now)
-    return "match" if principal["account_uuid"] == bound["account_uuid"] else "mismatch"
+    note_slot_principal(cli, root, got, bearer, now=now)
+    return "match" if got == want else "mismatch"
 
 
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:
@@ -1434,10 +1468,9 @@ def _reconcile_locked(
         if record.harness == cli
         and record.auth == "managed"
         and record.config_dir is None
-        and (record_principal(record_id, root) or {}).get("account_uuid")
-        == principal["account_uuid"]
+        and identity_key(record_principal(record_id, root)) == identity_key(principal)
     ]
-    who = principal.get("email") or principal["account_uuid"]
+    who = principal.get("email") or principal.get("account_uuid") or "an unknown account"
     if not matches:
         return ReconcileResult(
             "zero-match",
@@ -1504,7 +1537,9 @@ def _reconcile_locked(
     # probe's per-bearer lookup finds this entry instead of re-proving it.
     from fno.adapters.providers.usage import _token_from_blob
 
-    note_slot_principal(cli, root, principal["account_uuid"], _token_from_blob(blob))
+    note_slot_principal(
+        cli, root, identity_key(principal) or "", _token_from_blob(blob)
+    )
     return ReconcileResult(
         "matched",
         record_id=matched,

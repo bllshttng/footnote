@@ -1560,9 +1560,14 @@ class TestReconcileSlot:
 
         blob = _json.dumps({"claudeAiOauth": {"accessToken": "live-token"}})
         monkeypatch.setattr(managed, "_read_slot_blob", lambda cli, config_dir=None: blob)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [blob])
         monkeypatch.setattr(
             managed, "slot_principal",
-            lambda b: ({"account_uuid": "acct-1", "email": "jn@example.com"}, None),
+            lambda b: (
+                {"account_uuid": "acct-1", "organization_uuid": "org-1",
+                 "email": "jn@example.com"},
+                None,
+            ),
         )
         result = _invoke(["register", "readyrule"], cwd=store, home=store)
         assert result.exit_code == 0, result.output
@@ -1570,6 +1575,60 @@ class TestReconcileSlot:
         bound = managed.record_principal("readyrule", root)
         assert bound is not None and bound["account_uuid"] == "acct-1"
         assert "acct-1" not in result.output
+
+    def test_register_refuses_while_the_slot_holds_two_accounts(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Binding whichever credential the snapshot happened to pick would file
+        a stale account's identity under the new id."""
+        import json as _json
+
+        from fno.adapters.providers import managed
+
+        a = _json.dumps({"claudeAiOauth": {"accessToken": "scoped"}})
+        b = _json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [a, b])
+        seen = {a: "acct-a", b: "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": seen[blob], "organization_uuid": "org-1"}, None
+            ),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code != 0
+        assert "two different accounts" in result.output
+        assert managed.record_principal(
+            "readyrule", store / ".fno" / "providers"
+        ) is None
+
+    def test_doctor_reports_an_ambiguous_slot(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Two accounts in one slot must not read as healthy."""
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        managed.stamp_active_slot("claude", "readyrule", root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["a", "b"])
+        keys = {"a": "acct-a", "b": "acct-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": keys[blob], "organization_uuid": "org-1"}, None
+            ),
+        )
+
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "ambiguous-slot" in result.output
+        assert "fno config accounts reconcile-slot claude" in result.output
 
     def test_doctor_names_an_out_of_band_login_as_drift(
         self, store: Path, monkeypatch: pytest.MonkeyPatch
@@ -1580,11 +1639,17 @@ class TestReconcileSlot:
 
         root = store / ".fno" / "providers"
         managed.stamp_active_slot("claude", "readyrule", root)
-        managed.write_record_principal("readyrule", {"account_uuid": "acct-a"}, root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
         monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
         monkeypatch.setattr(
             managed, "slot_principal",
-            lambda blob: ({"account_uuid": "acct-b", "email": "other@example.com"}, None),
+            lambda blob: (
+                {"account_uuid": "acct-b", "organization_uuid": "org-1",
+                 "email": "other@example.com"},
+                None,
+            ),
         )
 
         result = _invoke(["doctor"], cwd=store, home=store)
@@ -1615,10 +1680,15 @@ class TestReconcileSlot:
 
         root = store / ".fno" / "providers"
         managed.stamp_active_slot("claude", "readyrule", root)
-        managed.write_record_principal("readyrule", {"account_uuid": "acct-a"}, root)
+        managed.write_record_principal(
+            "readyrule", {"account_uuid": "acct-a", "organization_uuid": "org-1"}, root
+        )
         monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: ["{}"])
         monkeypatch.setattr(
-            managed, "slot_principal", lambda blob: ({"account_uuid": "acct-a"}, None)
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "acct-a", "organization_uuid": "org-1"}, None
+            ),
         )
         result = _invoke(["doctor"], cwd=store, home=store)
         assert "slot-identity-drift" not in result.output

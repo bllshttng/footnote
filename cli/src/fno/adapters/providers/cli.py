@@ -608,6 +608,19 @@ def register_provider(
         )
         raise typer.Exit(1)
 
+    # The slot can present two credentials on macOS (scoped + unscoped), and a
+    # stale one can name a different account. Binding whichever the snapshot
+    # happened to pick would file that account's identity under this new id.
+    proven, identity_failure = managed.canonical_slot_principal(record.harness)
+    if identity_failure == "ambiguous-slot":
+        typer.echo(
+            f"error: the {record.harness} slot currently holds credentials for two "
+            f"different accounts, so registering '{record.id}' could bind the wrong "
+            f"one.\n  sign out and back in as {record.id}, then re-run this command",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     # Snapshot the current login FIRST - refuse cleanly if nothing to capture.
     try:
         adir = managed.snapshot_current(record)
@@ -646,7 +659,14 @@ def register_provider(
     # what lets `reconcile-slot` recognize the account later, when the only
     # available evidence is the credential itself. Best-effort by design: a
     # record that never got bound is unmatchable, and reconciliation says so.
-    managed.capture_record_principal(record, force=True)
+    # Bind the principal already proven above rather than re-resolving it, so
+    # the identity stored is the one the ambiguity check cleared. When it could
+    # not be proven (offline, or an endpoint change) the record simply stays
+    # unbound and `doctor` reports it.
+    if proven is not None:
+        managed.write_record_principal(record.id, proven)
+    else:
+        managed._clear_record_principal(record.id)
 
     typer.echo(f"Registered managed account '{record.id}' (snapshot at {adir}, scope={scope}).")
 
@@ -989,7 +1009,18 @@ def _doctor_findings() -> list[dict]:
             drift = managed.slot_identity_drift(harness_kind)
         except OSError:
             drift = None
-        if drift:
+        if drift and drift.get("ambiguous"):
+            findings.append({
+                "record": f"slot:{harness_kind}",
+                "problem": "ambiguous-slot",
+                "detail": (
+                    "the slot's stored credentials belong to different accounts "
+                    "(a stale scoped Keychain item beside a live unscoped one), so "
+                    "whichever is stamped, some reader gets the other; sign out and "
+                    f"back in, then `fno config accounts reconcile-slot {harness_kind}`"
+                ),
+            })
+        elif drift:
             findings.append({
                 "record": f"slot:{harness_kind}",
                 "problem": "slot-identity-drift",

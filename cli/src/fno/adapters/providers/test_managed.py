@@ -1976,3 +1976,56 @@ class TestSwitchNeverBindsAnIdentity:
         managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
 
         assert managed.tainting_writers("claude", tmp_path) == [(77, 4242.0)]
+
+
+class TestOrganizationScopedIdentity:
+    """Claude Code usage is organization-scoped, and one human can belong to two
+    organizations. Comparing the account uuid alone would let an org-B bearer
+    pass as the org-A record and file its usage there."""
+
+    def test_identity_needs_both_halves(self):
+        assert managed.identity_key(
+            {"account_uuid": "a", "organization_uuid": "o"}
+        ) == "a/o"
+        assert managed.identity_key({"account_uuid": "a"}) is None
+        assert managed.identity_key({"organization_uuid": "o"}) is None
+        assert managed.identity_key(None) is None
+
+    def test_same_account_different_org_is_a_mismatch(self, tmp_path, monkeypatch):
+        managed.write_record_principal(
+            "org-a", {"account_uuid": "human-1", "organization_uuid": "org-a"}, tmp_path
+        )
+        monkeypatch.setattr(
+            managed, "principal_of_bearer",
+            lambda bearer: (
+                {"account_uuid": "human-1", "organization_uuid": "org-b"}, None
+            ),
+        )
+        assert managed.bearer_principal_verdict(
+            "claude", "org-a", tmp_path, "tok"
+        ) == "mismatch"
+
+    def test_an_incomplete_binding_cannot_vouch_for_anything(self, tmp_path):
+        managed.write_record_principal("half", {"account_uuid": "human-1"}, tmp_path)
+        assert managed.bearer_principal_verdict(
+            "claude", "half", tmp_path, "tok"
+        ) == "unprovable"
+
+    def test_two_orgs_in_one_slot_is_ambiguous_not_a_match(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A"), _blob("B")]
+        )
+        orgs = {_blob("A"): "org-a", _blob("B"): "org-b"}
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (
+                {"account_uuid": "human-1", "organization_uuid": orgs[blob]}, None
+            ),
+        )
+        assert managed.canonical_slot_principal("claude") == (None, "ambiguous-slot")
+        assert managed.reconcile_slot(
+            "claude", by_id=by_id, root=tmp_path
+        ).outcome == "ambiguous-slot"

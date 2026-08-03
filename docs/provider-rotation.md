@@ -307,6 +307,8 @@ The pin check runs before the profile call rather than after it, and the slot is
 A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
 
 A record's principal is bound only at `register`, which is the one moment the operator asserts that the signed-in account IS this record.
+`register` resolves the slot's identity first and refuses outright when the slot holds two different accounts, so it can never bind a stale credential under a new id.
+The identity compared is the account *and* the organization, because Claude Code usage is organization-scoped and one human can belong to two organizations; an identity missing either half is not comparable and fails closed.
 A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
 
