@@ -7,12 +7,15 @@ returning dispatchable; a peer that won a visibility-lagged race surfaces as a
 different holder and this dispatcher skips with duplicate-claim so exactly one
 worker launches.
 """
+from concurrent.futures import ThreadPoolExecutor
 import json
+import threading
 from types import SimpleNamespace
 
 from typer.testing import CliRunner
 
-from fno.agents.cli import agents_app
+from fno.agents.cli import _spawn_guard_decision, agents_app
+from fno.agents.harness_map import resolve_dispatch
 
 runner = CliRunner()
 
@@ -41,6 +44,42 @@ def test_spawn_guard_serializes_two_callers(monkeypatch, tmp_path):
     v2 = _last_json(r2.output)
     assert v2["verdict"] == "already-running"
     assert v2["reason"] in ("reservation-held", "duplicate-claim")
+
+
+def test_allowed_codex_panes_deduplicate_simultaneous_callers(monkeypatch, tmp_path):
+    """Two allowed pane callers that observe a free node produce one launch."""
+    _route_to(monkeypatch, tmp_path)
+
+    from fno.claims import core as claims_core
+
+    original_acquire = claims_core.acquire_claim
+    simultaneous_acquire = threading.Barrier(2)
+
+    def racing_acquire(key, *args, **kwargs):
+        if key == "dispatch:N":
+            simultaneous_acquire.wait(timeout=5)
+        return original_acquire(key, *args, **kwargs)
+
+    monkeypatch.setattr(claims_core, "acquire_claim", racing_acquire)
+
+    def decide(holder):
+        dispatch = resolve_dispatch(
+            harness="codex",
+            substrate="pane",
+            node_id="N",
+            trigger="autonomous",
+        )
+        assert dispatch["substrate"] == "pane"
+        verdict, exit_code = _spawn_guard_decision("N", holder, ttl="3m")
+        assert exit_code == 0
+        return verdict
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        verdicts = list(executor.map(decide, ("A", "B")))
+
+    assert [item["verdict"] for item in verdicts].count("dispatchable") == 1
+    loser = next(item for item in verdicts if item["verdict"] != "dispatchable")
+    assert loser == {"verdict": "already-running", "reason": "reservation-held"}
 
 
 def test_barrier_catches_peer_after_acquire(monkeypatch, tmp_path):

@@ -1717,6 +1717,10 @@ class ThinkSpawnBlock(BaseModel):
     ``idle_threshold_s`` is the discretionary activity-recency refinement
     (Claude's Discretion 1); ``0`` (default) disables it so the primary
     attended-vs-headless signal stands alone.
+
+    Actual context-think launches use the shared ``config.dispatch`` profile;
+    this block controls when to offer or launch them, not their harness or
+    substrate.
     """
 
     model_config = ConfigDict(extra="ignore")

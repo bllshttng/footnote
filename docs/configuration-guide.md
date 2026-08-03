@@ -108,7 +108,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `dispatch.on_exhaustion` | str | `defer` | advanced | On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'. |
 | `auto_continue.enabled` | bool | `false` | advanced | Auto-dispatch the next ready node after a PR merges. |
 | `keep_going.enabled` | bool | `false` | advanced | Autonomous keep-going: the merged-PR ritual classifies surviving carve-outs and dispatches follow-up /think or /target work (firehose-capped via think_spawn.daily_cap). |
-| `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node. |
+| `think_spawn.enabled` | bool | `false` | advanced | Born-with-why: spawn/offer a context-carrying /think for a generated idea node; actual launches use the shared config.dispatch harness and substrate. |
 | `think_spawn.max_per_run` | int | `5` | advanced | Blast-radius cap on /think spawns per node-generation run. |
 | `think_spawn.idle_threshold_s` | int | `0` | advanced | Idle seconds before an attended operator downgrades to away (0 = off). |
 | `think_spawn.on_work_start` | bool | `false` | advanced | A2: dispatch a context /think when /target claims a node to work it (default OFF). |
