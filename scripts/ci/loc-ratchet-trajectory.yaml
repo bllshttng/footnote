@@ -31,7 +31,7 @@ entries:
   - date: 2026-08-02
     pr: null
     branch: feature/x-76a2
-    delta: 53
+    delta: 74
     reason: 'generic delivery terminal and durable cross-hook finalize retry: DoneDelivery is additive and leaves DonePRGreen and DoneAdvisory unchanged; worktree-scoped snapshots keep required receipt, stamp, handoff, and terminal writes retryable when the live manifest disappears between decision and finalize. The hook behavior is idempotent, activates only for generic delivery finalization, and is pinned through both real hook paths; normalization, evaluator, schema, and integration tests remain outside the ratchet manifest.'
   - date: 2026-07-27
     pr: null

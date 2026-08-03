@@ -225,6 +225,7 @@ def _current_evidence_events(
     approvals: dict[str, _LatestEvent] = {}
     unkeyed_approvals: dict[str, _LatestEvent] = {}
     effects: dict[str, _LatestEvent] = {}
+    producer_event_ids: dict[str, tuple[object, ...]] = {}
     for event in events:
         event_type = event.get("type")
         data = event.get("data")
@@ -278,6 +279,22 @@ def _current_evidence_events(
             }:
                 raise ValueError(f"malformed {event_type} event: data is not an object")
             continue
+        if event_type in {
+            "approval_requested",
+            "approval_decided",
+            "effect_state_changed",
+        }:
+            event_id = data.get("event_id")
+            if isinstance(event_id, str) and event_id:
+                producer_identity = (event_type, event.get("source"), data)
+                prior_identity = producer_event_ids.get(event_id)
+                if prior_identity is not None:
+                    if prior_identity != producer_identity:
+                        raise ValueError(
+                            f"conflicting producer event_id {event_id}"
+                        )
+                    continue
+                producer_event_ids[event_id] = producer_identity
         if event_type == "approval_requested":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:

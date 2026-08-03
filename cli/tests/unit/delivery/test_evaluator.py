@@ -665,6 +665,23 @@ def test_ac_d2_err_effect_event_without_request_metadata_is_not_evidence() -> No
     )
 
 
+def test_ac_d2_hp_initial_prepared_effect_without_previous_state_stays_unknown() -> None:
+    event = _producer_event("effect_state_changed", state="prepared")
+    event["data"].pop("previous_state")
+
+    facts = adapt_delivery_event(
+        _producer_company_work(),
+        event,
+        fresh_until=NOW + timedelta(minutes=5),
+        fact_revision="event-snapshot-1",
+        approval_request_event=_producer_event("approval_requested"),
+    )
+
+    assert facts
+    assert {fact.evidence.result for fact in facts} == {EvidenceResult.UNKNOWN}
+    assert all(fact.evidence.result is not EvidenceResult.PASSED for fact in facts)
+
+
 def test_ac_d6_inv_effect_normalization_uses_public_evidence_projection(monkeypatch) -> None:
     calls = []
 

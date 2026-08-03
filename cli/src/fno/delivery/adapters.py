@@ -170,7 +170,6 @@ def adapt_delivery_event(
             data,
             "idempotency_key",
             "state",
-            "previous_state",
             "request_digest",
         ):
             return ()
@@ -182,7 +181,11 @@ def adapt_delivery_event(
         state = _nonempty(data, "state")
         previous_state = _nonempty(data, "previous_state")
         states = {state.value: state for state in EffectState}
-        if state not in states or previous_state not in states:
+        if (
+            state not in states
+            or (previous_state is None and state != EffectState.PREPARED.value)
+            or (previous_state is not None and previous_state not in states)
+        ):
             return ()
         if not isinstance(approval_request_event, Mapping):
             return ()

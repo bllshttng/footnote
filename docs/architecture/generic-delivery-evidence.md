@@ -78,10 +78,12 @@ Observation subjects are excluded, so later business performance cannot rewrite 
 Approval and effect lifecycle state remains owned by `fno.approvals`.
 Delivery consumes the public `evidence_projection` seam and the documented approval and effect events.
 The adapter selects current source events from one coherent snapshot, validates work-order and attempt bindings, and projects facts into uniquely matching required slots.
+Current approval and effect events deduplicate on their producer-owned data.event_id; legacy and test events without that optional identity retain the binding-and-timestamp fallback.
 It never authorizes a decision, dispatches an effect, mutates the effect journal, or declares aggregate success.
 
 An acknowledged effect may cover separately declared effect and destination-acknowledgment slots for the same effect ID.
 `failed` remains failed, `blocked` remains blocked, and `prepared`, `executing`, or `unknown` remain unknown.
+An initial prepared transition may omit previous_state because no prior state exists, but delivery never infers execution or acknowledgment from that absence.
 A declined approval is a blocked prerequisite rather than evidence that the deliverable failed.
 
 ## CLI Contract

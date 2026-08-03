@@ -474,12 +474,13 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
         "destination": "email:customer@example.com",
         "action_digest": "action-digest-1",
         "expires_at": "2026-08-03T12:00:00Z",
+        "event_id": "event-request-1",
     }
     rows = [
         {"ts": "2026-08-02T12:00:00Z", "type": "approval_requested", "source": "approvals", "data": request},
-        {"ts": "2026-08-02T12:01:00Z", "type": "approval_decided", "source": "approvals", "data": {**base, "decision": "approved", "deciding_principal_id": "principal-1"}},
-        {"ts": "2026-08-02T12:02:00Z", "type": "effect_state_changed", "source": "approvals", "data": {**base, "idempotency_key": "effect-key-1", "state": "executing", "previous_state": "prepared"}},
-        {"ts": "2026-08-02T12:03:00Z", "type": "effect_state_changed", "source": "approvals", "data": {**base, "idempotency_key": "effect-key-1", "state": "acknowledged", "previous_state": "executing", "external_ref": "message-42"}},
+        {"ts": "2026-08-02T12:01:00Z", "type": "approval_decided", "source": "approvals", "data": {**base, "decision": "approved", "deciding_principal_id": "principal-1", "event_id": "event-decision-1"}},
+        {"ts": "2026-08-02T12:02:00Z", "type": "effect_state_changed", "source": "approvals", "data": {**base, "idempotency_key": "effect-key-1", "state": "executing", "previous_state": "prepared", "event_id": "event-effect-1"}},
+        {"ts": "2026-08-02T12:03:00Z", "type": "effect_state_changed", "source": "approvals", "data": {**base, "idempotency_key": "effect-key-1", "state": "acknowledged", "previous_state": "executing", "external_ref": "message-42", "event_id": "event-effect-2"}},
     ]
     events = tmp_path / "effect-events.jsonl"
     events.write_text("".join(json.dumps(row) + "\n" for row in rows))
@@ -490,6 +491,24 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     assert payload["status"] == "evaluated"
     assert payload["verdict"]["aggregate"] == "passed"
     assert {row["result"] for row in payload["verdict"]["requirements"]} == {"passed"}
+
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [rows[-1]])
+    )
+    _, duplicate_payload = _invoke(plan, events)
+    assert duplicate_payload["evidence_revision"] == payload["evidence_revision"]
+
+    conflicting_duplicate = json.loads(json.dumps(rows[1]))
+    conflicting_duplicate["data"]["decision"] = "declined"
+    events.write_text(
+        "".join(
+            json.dumps(row) + "\n"
+            for row in rows + [conflicting_duplicate]
+        )
+    )
+    _, conflicting_payload = _invoke(plan, events)
+    assert conflicting_payload["status"] == "undeterminable"
+    assert "event_id" in " ".join(conflicting_payload["diagnostics"])
 
     malformed_decision = {
         "ts": "2026-08-02T12:04:00Z",
@@ -548,6 +567,9 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     ):
         for timestamp in (None, "not-a-timestamp"):
             malformed_timestamp = json.loads(json.dumps(source_event))
+            malformed_timestamp["data"]["event_id"] = (
+                f'{source_event["data"]["event_id"]}-malformed-{timestamp}'
+            )
             if timestamp is None:
                 malformed_timestamp.pop("ts")
             else:
