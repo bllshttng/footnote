@@ -120,8 +120,9 @@ def _print_human(record: dict[str, Any]) -> None:
         typer.echo(f"  {'effect':<12}{attempt['idempotency_key']}: {attempt['state']}")
         if attempt["state"] == EffectState.UNKNOWN.value:
             typer.echo(
-                "               outcome ambiguous: reconcile with the destination, or retry"
-                " only through an adapter that enforces this idempotency key remotely"
+                "               outcome ambiguous: retry only through an adapter that"
+                " enforces this idempotency key remotely, or read the destination and"
+                " supply that reconciliation result"
             )
         if attempt["external_ref"]:
             typer.echo(f"               destination ref: {attempt['external_ref']}")

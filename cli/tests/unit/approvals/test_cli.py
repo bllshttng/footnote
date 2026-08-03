@@ -218,7 +218,7 @@ def test_ac10_ui_show_surfaces_an_ambiguous_outcome_and_its_recovery(
     assert result.exit_code == 0, result.output
     assert "key-1: unknown" in result.output
     assert "ambiguous" in result.output
-    assert "reconcile" in result.output.lower()
+    assert "reconciliation" in result.output.lower()
 
 
 def test_ac10_ui_show_never_reports_an_effect_as_delivered(db: Path, policy: ConfigAuthority) -> None:

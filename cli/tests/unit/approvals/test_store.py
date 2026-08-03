@@ -16,6 +16,7 @@ from fno.approvals import (
     EffectStore,
     RefusalReason,
     RefusedError,
+    ReconciliationRead,
     action_digest,
     classify_effect,
     effect_ref_projection,
@@ -306,21 +307,152 @@ def test_ac4_err_unknown_retry_is_refused_without_a_proven_capability(
 
     refusal = excinfo.value.refusal
     assert refusal.reason is RefusalReason.UNSAFE_RETRY
-    assert refusal.recovery is not None and "reconcile" in refusal.recovery.lower()
+    assert refusal.recovery is not None and "reconciliation" in refusal.recovery.lower()
     assert store.get_attempt("key-1").state is EffectState.UNKNOWN
 
 
-@pytest.mark.parametrize("adapter", [IDEMPOTENT_ADAPTER, RECONCILING_ADAPTER])
-def test_ac4_err_unknown_retry_is_allowed_once_proven_safe(
-    store: EffectStore, adapter: AdapterCapability
+def test_ac4_err_remote_idempotency_alone_makes_an_unknown_retry_safe(
+    store: EffectStore,
 ) -> None:
     digest = _approve(store, _request())
     store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
     store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
 
-    reopened = store.authorize_retry(idempotency_key="key-1", adapter=adapter)
+    reopened = store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
     assert reopened.state is EffectState.EXECUTING
     assert reopened.idempotency_key == "key-1"
+
+
+def test_ac4_err_a_reconciliation_read_proving_absence_makes_a_retry_safe(
+    store: EffectStore,
+) -> None:
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+
+    reopened = store.authorize_retry(
+        idempotency_key="key-1",
+        adapter=RECONCILING_ADAPTER,
+        reconciliation=ReconciliationRead(ref="read-1", effect_present=False),
+    )
+    assert reopened.state is EffectState.EXECUTING
+    assert reopened.reconciliation_ref == "read-1"
+
+
+def test_ac4_err_reconciliation_capability_without_the_read_is_not_proof(
+    store: EffectStore,
+) -> None:
+    """Being able to read the destination is not the same as having read it."""
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=RECONCILING_ADAPTER)
+
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert store.get_attempt("key-1").state is EffectState.UNKNOWN
+
+
+def test_ac4_err_a_read_finding_the_effect_present_refuses_the_retry(
+    store: EffectStore,
+) -> None:
+    """The effect already landed, so resending it would duplicate it."""
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(
+            idempotency_key="key-1",
+            adapter=RECONCILING_ADAPTER,
+            reconciliation=ReconciliationRead(ref="read-1", effect_present=True),
+        )
+
+    refusal = excinfo.value.refusal
+    assert refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert "effect_present" in refusal.fields
+    assert refusal.recovery is not None and "acknowledged" in refusal.recovery
+    assert store.get_attempt("key-1").state is EffectState.UNKNOWN
+
+
+def test_ac4_err_a_read_cannot_substitute_for_an_adapter_that_cannot_read(
+    store: EffectStore,
+) -> None:
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.UNKNOWN)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(
+            idempotency_key="key-1",
+            adapter=BLIND_ADAPTER,
+            reconciliation=ReconciliationRead(ref="read-1", effect_present=False),
+        )
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+
+
+@pytest.mark.parametrize("state", [EffectState.PREPARED, EffectState.EXECUTING])
+def test_ac3_con_an_in_flight_attempt_cannot_be_reopened(
+    store: EffectStore, state: EffectState
+) -> None:
+    """An in-flight attempt already has a live dispatcher; reopening it would
+    hand a second caller dispatch on the same effect."""
+    digest = _approve(store, _request())
+    first = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    assert first.may_dispatch is True
+    if state is EffectState.EXECUTING:
+        store.settle(idempotency_key="key-1", state=EffectState.EXECUTING)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
+
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert store.get_attempt("key-1").state is state
+
+
+def test_ac3_con_a_reopened_attempt_cannot_be_reopened_again(store: EffectStore) -> None:
+    """Two workers retrying one failed attempt: the first reopens it to executing,
+    and the second must not be handed dispatch on the same effect."""
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+
+    assert store.authorize_retry(
+        idempotency_key="key-1", adapter=ADAPTER
+    ).state is EffectState.EXECUTING
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=ADAPTER)
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+
+
+def test_ac1_sec_retry_cannot_outlive_the_approval(
+    store: EffectStore, clock: list[_dt.datetime]
+) -> None:
+    """prepare() revalidates expiration at execution time; so must a retry."""
+    request = _request()
+    digest = _approve(store, request)
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    clock[0] = request.expires_at + _dt.timedelta(seconds=1)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
+    assert excinfo.value.refusal.reason is RefusalReason.EXPIRED
+    assert store.get_attempt("key-1").state is EffectState.FAILED
+
+
+def test_ac2_sec_retry_cannot_outlive_the_principal_authority(store: EffectStore) -> None:
+    digest = _approve(store, _request())
+    store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(idempotency_key="key-1", state=EffectState.FAILED)
+    store.authority.allowed = set()  # type: ignore[attr-defined]
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
+    assert excinfo.value.refusal.reason is RefusalReason.UNAUTHORIZED_PRINCIPAL
+    assert store.get_attempt("key-1").state is EffectState.FAILED
 
 
 def test_ac4_err_failed_retry_needs_no_capability_proof(store: EffectStore) -> None:

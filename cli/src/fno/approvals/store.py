@@ -20,7 +20,7 @@ import sqlite3
 from collections.abc import Callable, Iterable
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 from fno.approvals.models import (
     AdapterCapability,
@@ -32,6 +32,7 @@ from fno.approvals.models import (
     EffectDisposition,
     EffectState,
     PrepareResult,
+    ReconciliationRead,
     Refusal,
     RefusalReason,
     RefusedError,
@@ -88,8 +89,8 @@ CREATE TABLE IF NOT EXISTS outbox (
 """
 
 # Terminal states accept no further transition. UNKNOWN never reaches EXECUTING
-# through settle(): only authorize_retry() may reopen it, and only against a
-# proven adapter capability.
+# through settle(): only authorize_retry() may reopen it, and only against remote
+# idempotency or a reconciliation read proving the effect is absent.
 _ALLOWED_TRANSITIONS: dict[EffectState, frozenset[EffectState]] = {
     EffectState.PREPARED: frozenset(
         {
@@ -117,9 +118,10 @@ _ALLOWED_TRANSITIONS: dict[EffectState, frozenset[EffectState]] = {
 }
 
 _UNKNOWN_RECOVERY = (
-    "The destination may or may not have applied this effect. Reconcile with the "
-    "destination, or retry only through an adapter that enforces this idempotency "
-    "key remotely. Settle to acknowledged or failed once the destination is read."
+    "The destination may or may not have applied this effect. Retry only through an "
+    "adapter that enforces this idempotency key remotely, or read the destination and "
+    "pass the result as a ReconciliationRead. Settle to acknowledged or failed once "
+    "the destination is read."
 )
 
 
@@ -136,7 +138,7 @@ def _refuse(
     fields: Iterable[str] = (),
     authority_source: str | None = None,
     recovery: str | None = None,
-) -> None:
+) -> NoReturn:
     raise RefusedError(
         Refusal(
             reason=reason,
@@ -503,20 +505,39 @@ class EffectStore:
         return updated
 
     def authorize_retry(
-        self, *, idempotency_key: str, adapter: AdapterCapability
+        self,
+        *,
+        idempotency_key: str,
+        adapter: AdapterCapability,
+        reconciliation: ReconciliationRead | None = None,
     ) -> EffectAttempt:
-        """Regrant dispatch on a non-terminal attempt, safely.
+        """Reopen a SETTLED attempt for one more dispatch, safely.
 
-        A ``failed`` attempt needs no capability proof: an explicit rejection
-        means the destination did not apply the effect, so retrying the same key
-        cannot duplicate it. An ``unknown`` attempt does, because nobody knows
-        whether it happened. Safe there means the adapter enforces this
-        idempotency key remotely, or a reconciliation read can prove whether the
-        effect already occurred. Without either, the retry is refused: Footnote
-        guarantees one local dispatcher but makes no external exactly-once claim.
+        Only ``failed`` and ``unknown`` may reopen. ``prepared`` and ``executing``
+        are in flight and already have a live dispatcher, so reopening one would
+        hand a second caller dispatch on the same effect and defeat the whole
+        one-local-dispatcher guarantee. ``acknowledged`` and ``blocked`` are
+        terminal.
 
-        ``acknowledged`` and ``blocked`` are terminal and never reopen.
+        A ``failed`` attempt needs no proof: an explicit rejection means the
+        destination did not apply the effect, so retrying the same key cannot
+        duplicate it.
+
+        An ``unknown`` attempt needs one of two proofs, because nobody knows
+        whether it happened:
+
+        * ``adapter.remote_idempotency`` -- the destination itself enforces this
+          key, so a duplicate request cannot become a duplicate effect.
+        * a ``reconciliation`` read reporting ``effect_present=False`` -- somebody
+          actually looked and the effect is absent. The adapter's
+          ``reconciliation`` flag alone is NOT enough: it says the adapter can
+          read the destination, not that it did, and redispatching on capability
+          would duplicate an effect whose response was merely lost.
+
+        A read reporting ``effect_present=True`` refuses too. The effect already
+        landed, so the honest move is to settle it acknowledged, not send it again.
         """
+        now = self._now()
         with self._write() as conn:
             row = conn.execute(
                 "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)
@@ -535,27 +556,70 @@ class EffectStore:
                     f"effect {idempotency_key} is already {current.value}",
                     fields=["state"],
                 )
-            if current is EffectState.UNKNOWN and not (
-                adapter.remote_idempotency or adapter.reconciliation
-            ):
+            if current not in (EffectState.FAILED, EffectState.UNKNOWN):
                 _refuse(
                     RefusalReason.UNSAFE_RETRY,
-                    f"adapter {adapter.adapter_id} proves neither remote idempotency nor "
-                    f"reconciliation, so retrying an unknown effect may duplicate it",
-                    fields=["remote_idempotency", "reconciliation"],
-                    recovery=_UNKNOWN_RECOVERY,
+                    f"effect {idempotency_key} is {current.value} and still in flight; "
+                    f"only a settled failed or unknown attempt may be reopened",
+                    fields=["state"],
+                    recovery="Settle the attempt against its real outcome first.",
                 )
 
-            conn.execute(
+            # Execution-time revalidation, exactly as prepare() does. A retry must
+            # not outlive its approval's expiration or its principal's authority.
+            self._authorized_request(conn, row["request_digest"], now)
+
+            if current is EffectState.UNKNOWN and not adapter.remote_idempotency:
+                if reconciliation is None:
+                    _refuse(
+                        RefusalReason.UNSAFE_RETRY,
+                        f"adapter {adapter.adapter_id} does not enforce this idempotency key "
+                        f"remotely, so an unknown effect may only be retried with a "
+                        f"reconciliation read proving it is absent",
+                        fields=["remote_idempotency", "reconciliation"],
+                        recovery=_UNKNOWN_RECOVERY,
+                    )
+                if not adapter.reconciliation:
+                    _refuse(
+                        RefusalReason.UNSAFE_RETRY,
+                        f"adapter {adapter.adapter_id} cannot read {row['destination']}, "
+                        f"so it cannot produce a reconciliation read for this effect",
+                        fields=["reconciliation"],
+                        recovery=_UNKNOWN_RECOVERY,
+                    )
+                if reconciliation.effect_present:
+                    _refuse(
+                        RefusalReason.UNSAFE_RETRY,
+                        f"reconciliation read {reconciliation.ref} found the effect already "
+                        f"present at {row['destination']}; retrying would duplicate it",
+                        fields=["effect_present"],
+                        recovery="Settle this attempt acknowledged with the reconciliation "
+                        "reference instead of retrying.",
+                    )
+
+            # Conditional on the state we validated, so the transition is the same
+            # atomic fact as the check rather than a second, re-racing decision.
+            claimed = conn.execute(
                 "UPDATE attempts SET state = ?, dispatch_claimed = 1,"
-                " adapter_id = ?, adapter_version = ? WHERE idempotency_key = ?",
+                " adapter_id = ?, adapter_version = ?,"
+                " reconciliation_ref = COALESCE(?, reconciliation_ref)"
+                " WHERE idempotency_key = ? AND state = ?",
                 (
                     EffectState.EXECUTING.value,
                     adapter.adapter_id,
                     adapter.adapter_version,
+                    reconciliation.ref if reconciliation else None,
                     idempotency_key,
+                    current.value,
                 ),
-            )
+            ).rowcount
+            if claimed != 1:
+                _refuse(
+                    RefusalReason.UNSAFE_RETRY,
+                    f"effect {idempotency_key} left {current.value} before this retry could "
+                    f"claim it; another dispatcher reopened it",
+                    fields=["state"],
+                )
             updated = _attempt_from_row(
                 conn.execute(
                     "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)

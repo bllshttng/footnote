@@ -75,11 +75,33 @@ The refusal names the fields and mutates nothing: the existing attempt is not su
 | Missing capability or prerequisite | `blocked` | Refused before dispatch |
 | Timeout, connection loss after dispatch, malformed acknowledgment, unavailable reconciliation read | `unknown` | Ambiguous, never guessed either way |
 
-An `unknown` attempt is not blindly redispatched.
-`authorize_retry` refuses unless the adapter proves remote idempotency for the same key or a reconciliation read can prove whether the effect already happened.
-`AdapterCapability` defaults both to `False`, because absence of a claim is not proof of a capability.
+### Reopening an attempt
 
-Without either property, Footnote guarantees one local dispatcher and makes no external exactly-once claim.
+`authorize_retry` is the only way an attempt regains dispatch permission, and it reopens only a **settled** one.
+
+| State | Reopens? |
+|---|---|
+| `failed` | Yes, no proof needed: an explicit rejection means the effect was not applied |
+| `unknown` | Only against one of the two proofs below |
+| `prepared`, `executing` | No: still in flight, and a live dispatcher already holds it |
+| `acknowledged`, `blocked` | No: terminal |
+
+Refusing an in-flight attempt is what keeps the one-dispatcher guarantee intact end to end.
+Allowing it would hand a second caller dispatch on an effect someone else is already sending, which is the same duplicate the atomic seam exists to prevent.
+The transition is a conditional `UPDATE ... WHERE state = ?` on the state that was just validated, so the check and the transition are one atomic fact rather than two separately-racing decisions.
+
+For an `unknown` attempt, exactly two things count as proof:
+
+- `adapter.remote_idempotency` -- the destination itself enforces this key, so a duplicate request cannot become a duplicate effect.
+- A `ReconciliationRead` reporting `effect_present=False` -- somebody actually looked and the effect is absent.
+
+The adapter's `reconciliation` flag alone is **not** proof. It says the adapter *can* read the destination, not that it *did*, and redispatching on capability would duplicate an effect whose response was merely lost.
+A read reporting `effect_present=True` refuses too: the effect already landed, so the honest move is to settle it acknowledged rather than send it again.
+
+A retry also revalidates its approval, exactly as `prepare` does.
+An attempt whose request has expired, or whose deciding principal has since lost authority, cannot be retried into execution through the back door.
+
+Without one of the two proofs, Footnote guarantees one local dispatcher and makes no external exactly-once claim.
 That limit is deliberate and stated rather than papered over: an ambiguous timeout at a non-idempotent destination can duplicate a public post, a message, a ticket, or a system-of-record mutation.
 
 ## Durable state and event repair

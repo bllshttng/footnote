@@ -41,6 +41,7 @@ __all__ = [
     "EffectState",
     "INERT_EFFECT_CLASSES",
     "PrepareResult",
+    "ReconciliationRead",
     "Refusal",
     "RefusalReason",
     "RefusedError",
@@ -246,12 +247,30 @@ class ApprovalDecision(_ApprovalModel):
 
 
 class AdapterCapability(_ApprovalModel):
-    """What an adapter actually proves. Both default False: absence is not proof."""
+    """What an adapter actually proves. Both default False: absence is not proof.
+
+    ``reconciliation`` says the adapter CAN read the destination, which is not the
+    same as having read it. Authorizing a retry on the capability alone would
+    redispatch an effect that may already have landed, so the read itself must be
+    supplied as a :class:`ReconciliationRead`.
+    """
 
     adapter_id: NonEmptyStr
     adapter_version: NonEmptyStr
     remote_idempotency: bool = False
     reconciliation: bool = False
+
+
+class ReconciliationRead(_ApprovalModel):
+    """The result of actually reading the destination for an ambiguous effect.
+
+    ``effect_present`` is the whole point: True means the destination already has
+    the effect, so a retry would duplicate it and the attempt should be settled
+    acknowledged instead. False is the only value that makes a retry safe.
+    """
+
+    ref: NonEmptyStr
+    effect_present: bool
 
 
 class EffectAttempt(_ApprovalModel):
