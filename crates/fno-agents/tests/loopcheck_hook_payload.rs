@@ -664,3 +664,35 @@ fn agy_stale_pending_cannot_bypass_a_live_session() {
     assert!(cwd.join(".fno/live-loopchecked").exists());
     assert!(!cwd.join(".fno/stale-finalized").exists());
 }
+
+#[test]
+fn agy_foreign_conversation_cannot_judge_a_live_session() {
+    let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let payload = serde_json::json!({
+        "conversationId": "conversation-foreign",
+        "transcriptPath": transcript,
+        "workspacePaths": [cwd],
+        "fullyIdle": true
+    })
+    .to_string();
+    let mut child = Command::new("bash")
+        .arg(&shim)
+        .current_dir(&cwd)
+        .env("FNO_AGENTS_BIN", &mock)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert_eq!(String::from_utf8(output.stdout).unwrap().trim(), "{}");
+    assert!(!cwd.join(".fno/live-loopchecked").exists());
+    assert!(!cwd.join(".fno/stale-finalized").exists());
+}

@@ -92,6 +92,10 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_HARNESS_ID=$(grep '^harness_session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' \
         | grep -Ev '^(null)?$' | head -1 || true)
+    if [[ -n "$CONVERSATION_ID" && -n "$LIVE_HARNESS_ID" \
+        && "$CONVERSATION_ID" != "$LIVE_HARNESS_ID" ]]; then
+        emit '{}'
+    fi
     DELIVERY_RETRY_OWNER="${CONVERSATION_ID:-${LIVE_HARNESS_ID:-harness}}"
     DELIVERY_RETRY_ID="${DELIVERY_RETRY_OWNER}.${LIVE_SESSION_ID:-session}"
     DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${DELIVERY_RETRY_ID}.md"
