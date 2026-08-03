@@ -119,8 +119,15 @@ fi
 # fallback above keeps a missing resolver from routing every target down this
 # branch; a payload with no targets still takes the fail-closed cwd path above.
 for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
-    target_dir="$(_target_directory "$(_absolute "$t")")" || continue
+    absolute_target="$(_absolute "$t")"
+    target_dir="$(_target_directory "$absolute_target")" || continue
     [[ -n "$target_dir" ]] || continue
+    # Gitignored state is intentionally writable on canonical main. Omit
+    # --no-index: a tracked path that later matches an ignore pattern remains
+    # protected because the index is the authority for shared content.
+    if git -C "$target_dir" check-ignore -q -- "$absolute_target" 2>/dev/null; then
+        continue
+    fi
     _block_if_canonical "$target_dir"
 done
 

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
-# test_plan_location_guard.sh - both halves of the plan-save-location gate
-# (x-5349): the positive guard (plan-location-guard.sh) and the plans-dir
-# carve-out in the negative guard (worktree-write-protect.sh).
+# test_plan_location_guard.sh - both halves of the plan-save-location gate:
+# the positive plan guard and the target-based worktree location guard.
 #
 # Self-contained. A fake `fno` on PATH stands in for the real resolver so the
 # tests pin behavior against a known plans dir instead of the developer's
@@ -75,7 +74,7 @@ expect() {
     if [[ "$got" == "$want" ]]; then pass "$name ($got)"; else fail "$name: want $want got $got"; fi
 }
 
-# expect_wp NAME WANT PAYLOAD  (negative guard carve-out)
+# expect_wp NAME WANT PAYLOAD  (target-based worktree location guard)
 expect_wp() {
     local name="$1" want="$2" got
     got=$(decision_of "$WPROTECT" "$FAKE_PATH" "$3")
@@ -152,7 +151,7 @@ got=$(decision_of "$GUARD" "$NOFNO_PATH" \
   "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$TMP/repo/docs/my-plan.md\",\"content\":\"$PLAN_FM\"}}")
 [[ "$got" == "approve" ]] && pass "D1: unresolvable plans dir fails open ($got)" || fail "D1: want approve got $got"
 
-# ── E. the carve-out: the reported bug ───────────────────────────────────────
+# ── E. target paths override the session cwd: the reported bug ───────────────
 # A session on canonical main writing INTO the plans dir was denied; that denial
 # is what drove the .fno/drafts-then-mv workaround.
 #
@@ -172,31 +171,31 @@ else
 
     # Every case below uses cwd=$CANON. An earlier version ran E1/E2 from a
     # non-git temp dir, where _block_if_canonical returns before reaching any
-    # verdict - so both passed with the carve-out deleted and proved nothing.
+    # verdict, so both passed before the target-path fix and proved nothing.
     expect_wp "E1: canonical-main plan write approved (the bug)" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
 
-    # The file_path half of the carve-out. Distinct from E1: that payload shape
+    # The file_path half of the target parser. Distinct from E1: that payload shape
     # was not parsed at all before this change, so nothing else covers it.
     expect_wp "E2: canonical-main plan write via file_path approved" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}"
 
-    # Positive control: without the carve-out this cwd blocks everything, so a
-    # blocked source write proves the gate is live and E1/E2 are real changes.
+    # Positive control: a tracked source target still blocks, proving the gate
+    # is live and E1/E2 are real target-based changes.
     expect_wp "E3: canonical-main source write still blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
 
-    # The carve-out must not become a general bypass: a mixed patch that also
+    # Target-based approval must not become a general bypass: a mixed patch that
     # touches source still faces the location gate.
     expect_wp "E4: mixed plan+source patch still blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Add File: $PLANS/20260730-p.md\\n*** Add File: src/thing.py\\n*** End Patch\"}}"
 
     # An unparseable payload keeps the old blunt behavior rather than opening a
-    # hole: no known targets means no carve-out.
+    # hole: no known targets means the cwd fallback still blocks.
     expect_wp "E5: no parseable target keeps the blunt block" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"echo hi\"}}"
 
-    # All four apply_patch header kinds feed the carve-out, not just Add File.
+    # All four apply_patch header kinds feed target resolution, not just Add File.
     # Pinned in both directions so a header-set change cannot drift unnoticed.
     expect_wp "E6: Update File inside the plans dir approved" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: $PLANS/20260730-p.md\\n*** End Patch\"}}"
@@ -210,13 +209,9 @@ else
     expect_wp "E8: file_path into a canonical checkout blocked from a safe cwd" block \
       "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}"
 
-    # ── F. the carve-out cannot disable the gate it carves out of ────────────
-    # A plans dir that is an ancestor of the checkout ("." is legal config) would
-    # otherwise exempt every write, and a TRACKED plans dir inside the checkout
-    # would let plan writes land on the shared branch like any source file.
-    # The target MUST be `.md`: the carve-out short-circuits on a non-markdown
-    # target before the safety predicate is ever consulted, so a `.py` target
-    # here would pass no matter what the predicate said.
+    # ── F. plan configuration never exempts tracked canonical content ────────
+    # A plans dir that is an ancestor of the checkout ("." is legal config) or
+    # a tracked plans dir inside it must not alter the location verdict.
     write_fake_fno "$CANON"
     expect_wp "F1: plans dir == repo root does not bypass the gate" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.md\"}}"
@@ -231,7 +226,7 @@ else
     git -C "$CANON" add -A >/dev/null 2>&1
     git -C "$CANON" -c user.email=t@t -c user.name=t commit -q -m plans >/dev/null 2>&1
     write_fake_fno "$CANON/docs/plans"
-    expect_wp "F2: tracked in-repo plans dir does not carve out" block \
+    expect_wp "F2: tracked in-repo plans dir stays blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/docs/plans/20260730-p.md\"}}"
 
     # Same repo, cwd one directory deep. Keyed on the cwd instead of the
@@ -242,39 +237,33 @@ else
 
     # The DEFAULT config shape: plans dir inside the checkout but git-ignored.
     # Nothing else reaches the check-ignore success branch, so without this a
-    # guard that never carved out for default installs would look green.
+    # guard that blocks default state paths would look green.
     mkdir -p "$CANON/.fno/plans"
     printf '.fno/\nfno/\n' > "$CANON/.gitignore"
     git -C "$CANON" add .gitignore >/dev/null 2>&1
     git -C "$CANON" -c user.email=t@t -c user.name=t commit -q -m ignore >/dev/null 2>&1
     write_fake_fno "$CANON/.fno/plans"
-    expect_wp "F3: git-ignored in-repo plans dir still carves out" approve \
+    expect_wp "F3: git-ignored in-repo plans target is allowed" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/20260730-p.md\"}}"
 
-    # A non-markdown write into the plans dir gets no carve-out. This is the
-    # documented behavior of the .md gate, not an accident of ordering.
-    expect_wp "F4: non-md write into the plans dir is not carved out" block \
+    # Ignore status is the authority, not a markdown suffix.
+    expect_wp "F4: non-md git-ignored target is also allowed" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/notes.txt\"}}"
 
-    # `/` as a plans dir must never carve out. Belt-and-braces: the explicit
-    # refusal in the safety predicate and the containment test (which compares
-    # against the literal prefix `//`) each reject it independently, so this
-    # pins the OUTCOME rather than either mechanism.
+    # A plans dir of `/` cannot exempt tracked canonical source.
     write_fake_fno ""
-    expect_wp "F5: plans dir of / does not carve out" block \
+    expect_wp "F5: plans dir of / leaves tracked source blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.md\"}}"
 
     # ── G. a plans dir that does not exist yet ───────────────────────────────
     # The first plan saved in any fresh clone or worktree. Resolving a path to
-    # its deepest EXISTING ancestor lands on the plans dir's PARENT, which made
-    # the guard call the one correct destination "outside" itself and made the
-    # carve-out silently never fire.
+    # its deepest existing ancestor must preserve the external target verdict.
     ABSENT="$TMP/never-created/fno/plans"
     write_fake_fno "$ABSENT"
     expect "G1: correct save into an absent plans dir approved" approve \
       "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$ABSENT/20260730-my-plan.md\",\"content\":\"$PLAN_FM\"}}"
 
-    expect_wp "G2: carve-out still fires for an absent plans dir" approve \
+    expect_wp "G2: absent external plans target is allowed" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$ABSENT/20260730-p.md\"}}"
 
     # ── H. containment cannot be talked around ──────────────────────────────
@@ -285,27 +274,25 @@ else
     expect "H1: a .. path out of the plans dir is blocked" block \
       "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$PLANS/../../repo/docs/evil.md\",\"content\":\"$PLAN_FM\"}}"
 
-    expect_wp "H1b: a .. path out of the plans dir does not carve out" block \
+    expect_wp "H1b: resolved canonical target remains blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/../../../$(basename "$CANON")/src/thing.md\"}}"
 
     # H1/H1b run where every intermediate directory exists, so `cd -P` folds the
     # `..` correctly and they pass either way. The refusal is load-bearing only
     # when the `..` sits in the MISSING tail: there is nothing on disk to resolve
-    # it against, so it is carried into the compared string and the path reads as
-    # inside the plans dir while resolving one level above it.
+    # it against, so the positive plan guard must still reject the path.
     write_fake_fno "$ABSENT"
     expect "H1c: a .. inside an absent plans dir tail is blocked" block \
       "{\"tool_name\":\"Write\",\"tool_input\":{\"file_path\":\"$ABSENT/../escape.md\",\"content\":\"$PLAN_FM\"}}"
 
-    expect_wp "H1d: the same .. tail does not carve out" block \
+    expect_wp "H1d: the location guard allows the external resolved target" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$ABSENT/../escape.md\"}}"
 
     write_fake_fno "$PLANS"
 
-    # A symlink LEADING OUT of an existing plans dir must not carve itself out:
-    # the physical resolver must follow the directory link OUT of the plans dir.
+    # A symlink leading into canonical source must be judged at its destination.
     ln -s "$CANON/src" "$PLANS/sneak" 2>/dev/null
-    expect_wp "H2: symlink out of the plans dir does not carve out" block \
+    expect_wp "H2: directory symlink into canonical source stays blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/sneak/evil.md\"}}"
 
     # H2 only covers a DIRECTORY link. A link to a FILE fails the `-d` test the
@@ -314,7 +301,7 @@ else
     # symlinked notes makes this the ordinary shape, not an exotic one.
     : > "$CANON/src/thing.md"
     ln -s "$CANON/src/thing.md" "$PLANS/decoy.md" 2>/dev/null
-    expect_wp "H2b: leaf file symlink out of the plans dir does not carve out" block \
+    expect_wp "H2b: file symlink into canonical source stays blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/decoy.md\"}}"
 
     expect "H2c: leaf file symlink is judged at its destination" block \
@@ -350,13 +337,13 @@ STUBEOF
       "{\"tool_name\":\"Write\",\"cwd\":\"$TMP/projB\",\"tool_input\":{\"file_path\":\"$TMP/projB/fno/plans/p.md\",\"content\":\"$PLAN_FM\"}}"
 
     mkdir -p "$CANON/fno/plans"
-    expect_wp "I2: carve-out resolves from the payload cwd" approve \
+    expect_wp "I2: gitignored target under the payload cwd is allowed" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/fno/plans/p.md\"}}"
 
     # ── J. a half-sourced helper degrades, never opens ───────────────────────
     # bash defines functions as it parses, so a truncated helper leaves the
-    # first defined and the rest missing. The guard must fall back to the blunt
-    # behavior, not lose its per-target check.
+    # first defined and the rest missing. The location guard must keep its
+    # per-target fallback instead of reverting to the session cwd.
     HALF="$TMP/half"
     mkdir -p "$HALF/helpers"
     cp "$REPO_ROOT/hooks/worktree-write-protect.sh" "$HALF/"
@@ -364,17 +351,15 @@ STUBEOF
     sed -n '/^fno_plans_dir()/,/^}/p' "$REPO_ROOT/hooks/helpers/plans-dir.sh" > "$HALF/helpers/plans-dir.sh"
     out=$(printf '%s' "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$PLANS/20260730-p.md\"}}" \
         | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
-    if printf '%s' "$out" | grep -q '"block"'; then
-        pass "J1: half-sourced helper falls back to the blunt block"
+    if [[ "$out" == "{}" ]]; then
+        pass "J1: half-sourced helper still allows an external target"
     else
-        fail "J1: half-sourced helper approved: $out"
+        fail "J1: half-sourced helper rejected an external target: $out"
     fi
 
-    # J1 blocks on the cwd gate alone, so it cannot see whether the PER-TARGET
-    # check survived. From a SAFE cwd only the per-target check can block, so
-    # this is what proves the degraded mode is not weaker than the guard was
-    # before the helper existed - without the dirname fallback, every target
-    # exits 127 and is silently skipped.
+    # J1 approves an external target, so it cannot prove the per-target fallback
+    # still blocks canonical content. From a safe cwd only the target can block;
+    # without the dirname fallback, every target exits 127 and is skipped.
     out=$(printf '%s' "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}" \
         | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
     if printf '%s' "$out" | grep -q '"block"'; then

@@ -138,6 +138,23 @@ assert_block \
     "$(payload "$LINK_CANONICAL" "*** Begin Patch
 *** Update File: $LINK_CANONICAL/README.md
 *** End Patch")"
+printf '.fno/\n' > "$LINK_CANONICAL/.gitignore"
+git -C "$LINK_CANONICAL" add .gitignore
+git -C "$LINK_CANONICAL" commit -q -m ignore-state
+assert_allow \
+    "canonical session can patch a gitignored canonical target" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Add File: $LINK_CANONICAL/.fno/what-if/result.md
+*** End Patch")"
+mkdir -p "$LINK_CANONICAL/.fno"
+printf 'tracked despite ignore\n' > "$LINK_CANONICAL/.fno/tracked.md"
+git -C "$LINK_CANONICAL" add -f .fno/tracked.md
+git -C "$LINK_CANONICAL" commit -q -m track-ignored-path
+assert_block \
+    "tracked canonical target stays blocked despite an ignore pattern" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Update File: $LINK_CANONICAL/.fno/tracked.md
+*** End Patch")"
 assert_block \
     "linked worktree cannot patch canonical checkout by absolute path" \
     "$(payload "$LINKED" "*** Begin Patch
