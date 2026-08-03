@@ -2096,6 +2096,58 @@ def _pane_run_argv(runner: "FakeRunner") -> list[str]:
     raise AssertionError("no `mux pane run` call recorded")
 
 
+def test_codex_pane_applies_business_role_route_before_launch(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents import model_routing
+
+    monkeypatch.setattr(
+        model_routing,
+        "resolve_codex_route",
+        lambda role, **kwargs: model_routing.CodexRoute(
+            env={"OPENAI_API_KEY": "business-key"},
+            config_args=["-c", "model='gpt-business'"],
+        ),
+    )
+
+    _, runner = _spawn(
+        monkeypatch,
+        tmp_path,
+        provider="codex",
+        role="publisher",
+    )
+
+    argv = _pane_run_argv(runner)
+    assert "OPENAI_API_KEY=business-key" in argv
+    codex_index = argv.index("codex")
+    assert argv[codex_index : codex_index + 3] == [
+        "codex",
+        "-c",
+        "model='gpt-business'",
+    ]
+
+
+def test_codex_pane_maps_business_role_error_before_launch(tmp_path: Path, monkeypatch) -> None:
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskError
+
+    def blocked(*args, **kwargs):
+        raise model_routing.BusinessRoleRoutingProjectionError("invalid pane business role")
+
+    monkeypatch.setattr(model_routing, "resolve_codex_route", blocked)
+    runner = FakeRunner()
+
+    with pytest.raises(DispatchAskError, match="invalid pane business role") as exc_info:
+        _spawn(
+            monkeypatch,
+            tmp_path,
+            provider="codex",
+            role="publisher",
+            runner=runner,
+        )
+
+    assert exc_info.value.exit_code == 2
+    assert runner.calls == []
+
+
 def test_routed_claude_pane_launches_through_happy_when_enabled(
     tmp_path: Path, monkeypatch
 ) -> None:

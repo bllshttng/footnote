@@ -22,7 +22,6 @@ Both are covered here.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pytest
@@ -57,8 +56,48 @@ def _read_events(tmp_path: Path) -> list[dict]:
 
 class _FakeLockHandle:
     """Minimal lock handle stub for _codex_create_path tests."""
+
     def detach(self) -> None:
         pass
+
+
+def test_business_role_routing_error_maps_to_stable_dispatch_refusal(
+    tmp_path: Path, monkeypatch
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+
+    from fno.agents.dispatch import DispatchAskError, _codex_create_path
+    from fno.agents.model_routing import BusinessRoleRoutingProjectionError
+    from fno.agents.providers import codex as codex_mod
+
+    def fake_create(**_kwargs):
+        raise BusinessRoleRoutingProjectionError("invalid business routing")
+
+    monkeypatch.setattr(codex_mod, "create", fake_create)
+
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+
+    with pytest.raises(DispatchAskError, match="invalid business routing") as exc_info:
+        _codex_create_path(
+            name="invalid-business-role",
+            message="msg",
+            cwd=cwd,
+            from_name="orchestrator",
+            yolo=False,
+            timeout_sec=10.0,
+            lock_handle=_FakeLockHandle(),
+            role="publisher",
+        )
+
+    assert exc_info.value.exit_code == 2
+    events = _read_events(tmp_path)
+    assert any(
+        event.get("kind") == "agent_ask_failed"
+        and event.get("stage") == "codex-route"
+        and event.get("name") == "invalid-business-role"
+        for event in events
+    )
 
 
 def test_codex_invocation_error_maps_to_exit_1(

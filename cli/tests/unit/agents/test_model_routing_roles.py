@@ -440,6 +440,38 @@ def test_business_manifest_without_optional_routing_hint_uses_primary_route(
     assert resolver("publisher", settings=_settings(), env={}) is None
 
 
+@pytest.mark.parametrize(
+    ("resolver", "settings", "env"),
+    [
+        (
+            mr.resolve_route,
+            _settings(roles={"publisher": "zai/legacy-model"}),
+            {"ZAI_API_KEY": "zai-key"},
+        ),
+        (
+            mr.resolve_codex_route,
+            _settings(
+                providers=OPENAI_PROVIDER,
+                roles={"publisher": "oai/legacy-model"},
+            ),
+            {"OPENAI_API_KEY": "openai-key"},
+        ),
+    ],
+)
+def test_business_manifest_without_routing_hint_ignores_same_name_legacy_route(
+    resolver: Callable[..., object],
+    settings: SettingsModel,
+    env: dict[str, str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    _write_business_role(root, provider=None, model=None)
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+
+    assert resolver("publisher", settings=settings, env=env) is None
+
+
 def test_default_lookup_uses_fixed_precedence_and_accepts_tightening_overlay(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

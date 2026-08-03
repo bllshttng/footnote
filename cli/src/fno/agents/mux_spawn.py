@@ -1169,6 +1169,21 @@ def dispatch_spawn_pane(
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
 
+    codex_route = None
+    if provider == "codex" and role is not None:
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_codex_route,
+        )
+
+        try:
+            codex_route = resolve_codex_route(role)
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        # An empty mapping marks the Codex lane as deliberately unrouted and
+        # prevents the generic env wrapper from resolving a Claude route.
+        route_env = dict(codex_route.env) if codex_route is not None else {}
+
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
         try:
@@ -1193,6 +1208,8 @@ def dispatch_spawn_pane(
         tools=tools,
         deny_tools=deny_tools,
     )
+    if codex_route is not None:
+        argv = [argv[0], *codex_route.config_args, *argv[1:]]
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "

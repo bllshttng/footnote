@@ -985,7 +985,7 @@ def _business_role_target(
 
     projection = business_role.routing_projection
     if projection is None:
-        return legacy_target
+        return None
     provider = projection.provider if projection is not None else None
     model = projection.model if projection is not None else None
     if legacy_target is not None:

@@ -881,6 +881,7 @@ def _codex_create_path(
     - registry write failure post-create  -> 12 (with cleanup hint)
     """
     from fno.agents.providers import codex as codex_mod
+    from fno.agents.model_routing import RouteCompositionError
 
     output_path = _codex_output_path(name)
 
@@ -897,6 +898,15 @@ def _codex_create_path(
             reasoning_effort=effort,
             add_dir=add_dir,
         )
+    except RouteCompositionError as exc:
+        events.emit(
+            "agent_ask_failed",
+            stage="codex-route",
+            name=name,
+            provider="codex",
+            role=role,
+        )
+        raise DispatchAskError(str(exc), exit_code=2) from exc
     except codex_mod.NoSessionIdError as exc:
         events.emit(
             "agent_ask_failed",
