@@ -39,6 +39,12 @@ class AuthorityCeiling(str, Enum):
     EXTERNAL = "external"
 
 
+class ApprovalFloor(str, Enum):
+    NONE = "none"
+    PRINCIPAL = "principal"
+    FOUNDER = "founder"
+
+
 class ContextKind(str, Enum):
     PLAN = "plan"
     BRIEF = "brief"
@@ -110,6 +116,7 @@ class ContextSelector(_RoleModel):
     kind: ContextKind
     identifier: NonEmptyStr | None = None
     max_sensitivity: Sensitivity = Sensitivity.INTERNAL
+    requires_freshness: bool = False
 
     @property
     def reference(self) -> str:
@@ -128,6 +135,7 @@ class RoleManifest(_RoleModel):
     review_policy: ReviewPolicy
     delivery_policy: DeliveryPolicy
     default_topology: NonEmptyStr
+    approval_floor: ApprovalFloor = ApprovalFloor.NONE
     routing_hint: RoutingHint | None = None
 
     @model_validator(mode="after")
@@ -242,6 +250,7 @@ class ResolvedRole(_RoleModel):
     context_bundle: ContextBundle
     required_capabilities: tuple[NonEmptyStr, ...]
     authority_ceiling: AuthorityCeiling
+    approval_floor: ApprovalFloor = ApprovalFloor.NONE
     review_policy: ReviewPolicy
     delivery_policy: DeliveryPolicy
     routing_projection: RoutingHint | None = None

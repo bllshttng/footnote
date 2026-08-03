@@ -10,6 +10,7 @@ from typing import Iterable, Sequence
 
 from fno.company.contracts import RoleRef, WorkOrderRef
 from fno.roles.models import (
+    ApprovalFloor,
     AuthorityCeiling,
     CapabilityFact,
     ContextBundle,
@@ -34,6 +35,11 @@ _AUTHORITY_RANK = {
     AuthorityCeiling.ADVISORY: 0,
     AuthorityCeiling.INTERNAL: 1,
     AuthorityCeiling.EXTERNAL: 2,
+}
+_APPROVAL_RANK = {
+    ApprovalFloor.NONE: 0,
+    ApprovalFloor.PRINCIPAL: 1,
+    ApprovalFloor.FOUNDER: 2,
 }
 _SENSITIVITY_RANK = {
     Sensitivity.PUBLIC: 0,
@@ -73,9 +79,17 @@ def _context_overlay_violation(
         )
         if not compatible_identifier:
             return _selector_field(selector, "identifier")
-        compatible_sensitivity = tuple(
+        compatible_freshness = tuple(
             index
             for index in compatible_identifier
+            if not previous.context_selectors[index].requires_freshness
+            or selector.requires_freshness
+        )
+        if not compatible_freshness:
+            return _selector_field(selector, "requires_freshness")
+        compatible_sensitivity = tuple(
+            index
+            for index in compatible_freshness
             if _SENSITIVITY_RANK[selector.max_sensitivity]
             <= _SENSITIVITY_RANK[previous.context_selectors[index].max_sensitivity]
         )
@@ -112,6 +126,8 @@ def _overlay_violation(
         return RoleResolutionReason.INVALID_OVERLAY, "function"
     if _AUTHORITY_RANK[candidate.authority_ceiling] > _AUTHORITY_RANK[previous.authority_ceiling]:
         return RoleResolutionReason.AUTHORITY_EXPANSION, "authority_ceiling"
+    if _APPROVAL_RANK[candidate.approval_floor] < _APPROVAL_RANK[previous.approval_floor]:
+        return RoleResolutionReason.AUTHORITY_EXPANSION, "approval_floor"
     if not set(candidate.deliverable_kinds).issubset(previous.deliverable_kinds):
         return RoleResolutionReason.INVALID_OVERLAY, "deliverable_kinds"
     if not _delegation_keys(candidate).issubset(_delegation_keys(previous)):
@@ -265,7 +281,12 @@ def _context_failure(
         ),
         (
             RoleResolutionReason.STALE_CONTEXT,
-            lambda item: item.fresh_until is not None and item.fresh_until < clock,
+            lambda item: (
+                selector.requires_freshness
+                and item.fresh_until is None
+                or item.fresh_until is not None
+                and item.fresh_until < clock
+            ),
         ),
         (
             RoleResolutionReason.SENSITIVITY_REFUSED,
@@ -315,6 +336,7 @@ def _eligible(
                 if item.snapshot_revision == snapshot_revision
                 and item.readable
                 and _same_work_order_scope(item.work_order_scope, work_order)
+                and (not selector.requires_freshness or item.fresh_until is not None)
                 and (item.fresh_until is None or item.fresh_until >= clock)
                 and _SENSITIVITY_RANK[item.sensitivity] <= ceiling
             ),
@@ -572,6 +594,7 @@ def resolve_role(
         context_bundle=bundle,
         required_capabilities=manifest.required_capabilities,
         authority_ceiling=manifest.authority_ceiling,
+        approval_floor=manifest.approval_floor,
         review_policy=manifest.review_policy,
         delivery_policy=manifest.delivery_policy,
         routing_projection=manifest.routing_hint,

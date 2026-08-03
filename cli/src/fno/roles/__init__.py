@@ -1,6 +1,7 @@
 """Public immutable contracts for role discovery and bounded resolution."""
 
 from fno.roles.models import (
+    ApprovalFloor,
     AuthorityCeiling,
     CapabilityFact,
     ContextBundle,
@@ -34,6 +35,7 @@ from fno.roles.registry import (
 from fno.roles.resolver import resolve_manifest_routing, resolve_role
 
 __all__ = [
+    "ApprovalFloor",
     "AuthorityCeiling",
     "CapabilityFact",
     "ContextBundle",

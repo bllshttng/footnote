@@ -44,7 +44,7 @@ Resolution is deterministic over explicit definitions, capability facts, context
 
 | Contract | Purpose |
 |---|---|
-| `RoleManifest` | Declares identity, mission, deliverables, required capabilities, authority ceiling, context selectors, review and delivery requirements, topology, and an optional routing hint. |
+| `RoleManifest` | Declares identity, mission, deliverables, required capabilities, authority ceiling, approval floor, context selectors, review and delivery requirements, topology, and an optional routing hint. |
 | `RoleDefinitionSource` | Attributes a manifest or validation failure to one discovery layer, source, and snapshot revision. |
 | `CapabilityFact` | Reports independently supplied capability availability for an optional work-order scope; it does not grant the capability. |
 | `ContextReference` | Describes provenance, scope, digest, revision, freshness, sensitivity, size, and readability without copying source content. |
@@ -58,15 +58,16 @@ Role manifests reuse `FunctionRef`, `RoleRef`, and `WorkOrderRef` from the compa
 
 ## Tightening-Only Overlays
 
-A higher layer may narrow deliverable kinds, delegation targets, required capabilities, context selectors, and sensitivity; lower the authority ceiling; strengthen review requirements; make delivery requirements stricter; or choose a more specific routing hint.
-It may not change role identity, widen authority or context, add delegation or deliverable scope, remove required capabilities, weaken review, or relax delivery requirements.
+A higher layer may narrow deliverable kinds, delegation targets, required capabilities, context selectors, and sensitivity; require freshness metadata; lower the authority ceiling; raise the approval floor; strengthen review requirements; make delivery requirements stricter; or choose a more specific routing hint.
+It may not change role identity, widen authority or context, add delegation, deliverable, or capability scope, drop a freshness requirement, lower the approval floor, weaken review, or relax delivery requirements.
+The approval floor is ordered `none`, `principal`, then `founder`, so a founder-approved public-publication role cannot be overlaid into autonomous execution.
 The complete candidate overlay is validated before publication, so a violation returns a typed refusal and never exposes a partially broadened role.
 
 ## Capability and Context Boundaries
 
 For a principal-bound work order, a required capability is satisfied only by a fact scoped to the same node, attempt, principal, and role.
 Unscoped capability facts are accepted only for work orders without a principal.
-Context references follow the same work-order boundary and must also match the requested snapshot, be readable and fresh, fit the selector sensitivity, and remain within bundle limits.
+Context references follow the same work-order boundary and must also match the requested snapshot, be readable, satisfy any declared freshness requirement, fit the selector sensitivity, and remain within bundle limits.
 Naming a context reference does not grant access to its content; consumers must still enforce access at the read boundary.
 
 ## Routing Compatibility
@@ -86,7 +87,7 @@ The commands do not spawn agents, acquire claims, mutate the graph, change defin
 
 ## Out of Scope
 
-Role resolution does not implement a coordinator, approval workflow, effect state, evidence verdict, or delivery evaluation.
+An approval floor is a declarative minimum only; role resolution does not implement a coordinator, approval workflow, approval receipt, effect state, evidence verdict, or delivery evaluation.
 `DeliveryPolicy` declares future evidence requirements only; sibling systems remain responsible for evaluating them and recording outcomes.
 
 ## Verification

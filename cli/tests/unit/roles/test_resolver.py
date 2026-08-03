@@ -8,6 +8,7 @@ from pydantic import ValidationError
 
 from fno.company.contracts import FunctionRef, RoleRef, WorkOrderRef
 from fno.roles import (
+    ApprovalFloor,
     AuthorityCeiling,
     CapabilityFact,
     ContextBundleBounds,
@@ -159,6 +160,37 @@ def test_ac_r1_hp_resolution_is_deterministic_and_records_fixed_layer_order() ->
     ]
     assert len(first.manifest_digest) == len(first.context_bundle.digest) == 64
     assert first.routing_projection == RoutingHint(provider="codex", model="gpt-5")
+
+
+def test_fresh_context_requirement_rejects_missing_freshness_metadata() -> None:
+    manifest = _manifest(
+        context_selectors=(
+            ContextSelector(
+                kind=ContextKind.BRIEF,
+                identifier="company-brief",
+                max_sensitivity=Sensitivity.SENSITIVE,
+                requires_freshness=True,
+            ),
+        )
+    )
+    context_without_freshness = _context().model_copy(update={"fresh_until": None})
+
+    result = _resolve(
+        definitions=(_source(RoleLayer.BUILT_IN, "builtin/owner", manifest=manifest),),
+        context=(context_without_freshness,),
+    )
+
+    assert isinstance(result, RoleResolutionBlocked)
+    assert result.reason is RoleResolutionReason.STALE_CONTEXT
+    assert result.reference == "brief:company-brief"
+
+
+def test_context_without_freshness_requirement_accepts_missing_metadata() -> None:
+    context_without_freshness = _context().model_copy(update={"fresh_until": None})
+
+    result = _resolve(context=(context_without_freshness,))
+
+    assert not isinstance(result, RoleResolutionBlocked)
 
 
 @pytest.mark.parametrize(
@@ -438,6 +470,25 @@ def test_ac_r2_hp_all_layers_may_only_tighten_the_full_manifest() -> None:
     assert result.authority_ceiling is AuthorityCeiling.INTERNAL
 
 
+def test_ac_r2_sec_founder_approval_floor_cannot_become_autonomous() -> None:
+    base = _manifest(
+        deliverable_kinds=("public-publication",),
+        approval_floor=ApprovalFloor.FOUNDER,
+    )
+    autonomous = base.model_copy(update={"approval_floor": ApprovalFloor.NONE})
+
+    result = _resolve(
+        definitions=(
+            _source(RoleLayer.BUILT_IN, "builtin/publisher", manifest=base),
+            _source(RoleLayer.PROJECT, "project/publisher", manifest=autonomous),
+        )
+    )
+
+    assert isinstance(result, RoleResolutionBlocked)
+    assert result.reason is RoleResolutionReason.AUTHORITY_EXPANSION
+    assert result.reference == "approval_floor"
+
+
 @pytest.mark.parametrize(
     ("base_overrides", "overlay_overrides", "reason", "reference"),
     [
@@ -558,6 +609,28 @@ def test_ac_r2_hp_all_layers_may_only_tighten_the_full_manifest() -> None:
             },
             RoleResolutionReason.INVALID_OVERLAY,
             "context_selectors[brief:company-brief].max_sensitivity",
+        ),
+        (
+            {
+                "context_selectors": (
+                    ContextSelector(
+                        kind=ContextKind.BRIEF,
+                        identifier="company-brief",
+                        requires_freshness=True,
+                    ),
+                )
+            },
+            {
+                "context_selectors": (
+                    ContextSelector(
+                        kind=ContextKind.BRIEF,
+                        identifier="company-brief",
+                        requires_freshness=False,
+                    ),
+                )
+            },
+            RoleResolutionReason.INVALID_OVERLAY,
+            "context_selectors[brief:company-brief].requires_freshness",
         ),
         (
             {"mission": "Produce one bounded artifact."},
