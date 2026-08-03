@@ -150,6 +150,14 @@ def test_evaluated_response_requires_coherent_revisions() -> None:
             evidence_revision="sha256:evidence",
             verdict=verdict,
         )
+    with pytest.raises(ValidationError):
+        DeliveryEvaluateResponse(
+            status="evaluated",
+            fact_revision="snapshot-7",
+            evidence_revision="sha256:evidence",
+            verdict=verdict,
+            diagnostics=("outer-only",),
+        )
 
 
 def test_ac_d1_err_projection_only_passed_values_are_not_runtime_evidence() -> None:

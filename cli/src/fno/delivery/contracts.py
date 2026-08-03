@@ -170,6 +170,8 @@ class DeliveryEvaluateResponse(_DeliveryModel):
                 )
             if self.verdict.fact_revision != self.fact_revision:
                 raise ValueError("response and verdict fact revisions must match")
+            if self.diagnostics != self.verdict.diagnostics:
+                raise ValueError("response and verdict diagnostics must match")
         elif self.verdict is not None:
             raise ValueError(f"{self.status} response must not carry a verdict")
         return self

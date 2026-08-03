@@ -644,9 +644,10 @@ fn parse_response(raw: &[u8]) -> DeliveryCompletion {
         return nonpassing("unknown delivery evaluator response version".into(), None);
     }
     match response.status.as_str() {
-        "inactive" if response.fact_revision.is_null() && response.verdict.is_null() => {
-            DeliveryCompletion::Inactive
-        }
+        "inactive" if response.fact_revision.is_null() && response.verdict.is_null() => nonpassing(
+            "active delivery plan evaluator returned inactive".into(),
+            response.evidence_revision,
+        ),
         "undeterminable" if response.fact_revision.is_null() && response.verdict.is_null() => {
             nonpassing(response.diagnostics.join("; "), response.evidence_revision)
         }
@@ -659,6 +660,12 @@ fn parse_response(raw: &[u8]) -> DeliveryCompletion {
 }
 
 fn parse_evaluated(response: Response) -> DeliveryCompletion {
+    if !response.diagnostics.is_empty() {
+        return nonpassing(
+            "evaluated response carries diagnostics".into(),
+            response.evidence_revision,
+        );
+    }
     let Some(fact_revision) = response.fact_revision.as_str() else {
         return nonpassing(
             "evaluated response has no fact revision".into(),

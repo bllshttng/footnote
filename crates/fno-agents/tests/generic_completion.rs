@@ -530,3 +530,30 @@ fn generic_completion_rejects_blank_strict_boundary_values() {
         );
     }
 }
+
+#[test]
+fn generic_completion_active_plan_rejects_inactive_evaluator_response() {
+    let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+    response["status"] = json!("inactive");
+    response["fact_revision"] = Value::Null;
+    response["evidence_revision"] = Value::Null;
+    response["verdict"] = Value::Null;
+    let env = setup(&response.to_string());
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    assert!(output["termination_reason"].is_null());
+}
+
+#[test]
+fn generic_completion_rejects_outer_diagnostics_on_a_passed_verdict() {
+    let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+    response["diagnostics"] = json!(["outer-only"]);
+    let env = setup(&response.to_string());
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    assert!(output["termination_reason"].is_null());
+}
