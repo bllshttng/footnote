@@ -271,6 +271,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/hooks/test_manifest_immutable.sh\n"
      "bash tests/hooks/test_graph_write_protect.sh\n"
      "bash tests/hooks/test_worktree_write_protect.sh\n"
+     "bash tests/hooks/test_plan_location_guard.sh\n"
      "bash tests/hooks/test_worktree_live_peers.sh\n"
      "bash tests/hooks/test_setup_nudge_session_start.sh\n"
      "bash tests/hooks/test_init_target_session_id.sh\n"
