@@ -273,6 +273,11 @@ def activate(
 
             existing = registry.receipt_for(manifest.id)
             for source_id, resolved, _definition in planned:
+                if resolved.is_symlink() or (resolved.exists() and not resolved.is_file()):
+                    raise ActivationRefusal(
+                        ActivationRefusalReason.PATH_OCCUPIED,
+                        f"{source_id} is a symlink or non-regular file",
+                    )
                 owner = registry.owner_of_path(source_id)
                 if owner is not None and owner[0] != manifest.id:
                     raise ActivationRefusal(
@@ -391,7 +396,12 @@ def deactivate(
                 left_alone.append(source_id)
                 continue
             path = root / source_id
-            if not path.exists() and not path.is_symlink():
+            if path.is_symlink() or (path.exists() and not path.is_file()):
+                # Refuse to unlink a symlink or non-regular file: keep the receipt
+                # so the path keeps an owner and the operator sees the anomaly.
+                left_alone.append(source_id)
+                continue
+            if not path.exists():
                 # Already absent: cleared from the receipt, not reported as removed
                 # (nothing was unlinked) nor left behind.
                 continue
@@ -399,8 +409,6 @@ def deactivate(
                 path.unlink()
                 removed.append(source_id)
             except OSError:
-                # a directory, broken symlink, or permission issue: keep the
-                # receipt so the path keeps an owner and the operator sees it.
                 left_alone.append(source_id)
         if left_alone:
             residual = receipt.model_copy(update={"written_paths": tuple(left_alone)})

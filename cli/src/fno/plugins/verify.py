@@ -181,14 +181,31 @@ def load_manifest(path: Path) -> tuple[PackManifest | None, Condition | None]:
     return manifest, None
 
 
+def _is_safe_path_component(value: str) -> bool:
+    # Same rule activation enforces: an id becomes a path segment under
+    # <root>/plugin/<pack>/<role>.json, so it must be a single safe component.
+    return bool(
+        value
+        and "/" not in value
+        and "\\" not in value
+        and value not in (".", "..")
+        and "\x00" not in value
+    )
+
+
 def _identity_conditions(manifest: PackManifest, path: str) -> list[Condition]:
+    pack_id_safe = _is_safe_path_component(manifest.id)
     conditions: list[Condition] = [
         Condition(
             ConditionFamily.IDENTITY,
             "pack-id",
             checked=True,
-            result=EvidenceResult.PASSED,
-            detail=f"id={manifest.id} version={manifest.version}",
+            result=EvidenceResult.PASSED if pack_id_safe else EvidenceResult.FAILED,
+            detail=(
+                f"id={manifest.id} version={manifest.version}"
+                if pack_id_safe
+                else f"unsafe pack id {manifest.id!r}: must be a single path component"
+            ),
         )
     ]
     first = pack_digest(manifest)
@@ -204,6 +221,16 @@ def _identity_conditions(manifest: PackManifest, path: str) -> list[Condition]:
     )
     role_ids = [role.role.id for role in manifest.roles]
     function_ids = {role.function.id for role in manifest.roles}
+    unsafe_role_ids = [rid for rid in role_ids if not _is_safe_path_component(rid)]
+    conditions.append(
+        Condition(
+            ConditionFamily.IDENTITY,
+            "role-ids-safe",
+            checked=True,
+            result=EvidenceResult.PASSED if not unsafe_role_ids else EvidenceResult.FAILED,
+            detail=None if not unsafe_role_ids else f"unsafe role id {unsafe_role_ids[0]!r}",
+        )
+    )
     duplicate = next((value for value in role_ids if role_ids.count(value) > 1), None)
     conditions.append(
         Condition(

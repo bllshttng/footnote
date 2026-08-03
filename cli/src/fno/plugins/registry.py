@@ -142,7 +142,7 @@ class PackRegistry(_RegistryModel):
                 # plugin/a/../b/role.json cannot bypass the string uniqueness
                 # check and shadow another pack's file.
                 segments = path.split("/")
-                if path.startswith("/") or ".." in segments or "" in segments:
+                if path.startswith("/") or "." in segments or ".." in segments or "" in segments:
                     raise ValueError(f"non-normalized receipt path {path!r}")
                 if path in seen:
                     raise ValueError(
@@ -256,7 +256,11 @@ class PackRegistryStore:
         return registry.model_copy(update={"receipts": (*receipts, receipt)})
 
     def _save(self, registry: PackRegistry) -> None:
-        payload = json.dumps(registry.model_dump(mode="json"), sort_keys=True, indent=2)
+        # Re-validate before persisting: the locked mutators build the next state
+        # with model_copy, which bypasses validators, so reconstruct to run the
+        # uniqueness and path-normalization checks before the bytes land.
+        validated = PackRegistry.model_validate(registry.model_dump(mode="json"))
+        payload = json.dumps(validated.model_dump(mode="json"), sort_keys=True, indent=2)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         descriptor, tmp_name = tempfile.mkstemp(
             dir=str(self.path.parent), prefix=".pack-registry-", suffix=".tmp"
