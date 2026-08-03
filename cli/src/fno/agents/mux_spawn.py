@@ -834,7 +834,17 @@ def _mesh_env_wrapper(
     ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN``) for a node-driven spawn; empty values
     are dropped so an ad-hoc pane exports nothing new (the starship module hides
     absent vars via ``when``)."""
-    pairs = [f"FNO_AGENT_SELF={name}", f"FNO_AGENT_PROVIDER={provider}"]
+    # FNO_AGENT_ROW_PENDING marks the one substrate whose row is written AFTER
+    # the child starts (the pane id does not exist until `mux pane run` returns),
+    # so only here may a worker's SessionStart hook wait for its own row. Headless
+    # one-shots set FNO_AGENT_SELF too and deliberately never get a row, so
+    # keying the wait on FNO_AGENT_SELF alone would make every one-shot sit out
+    # the full deadline before its first prompt.
+    pairs = [
+        f"FNO_AGENT_SELF={name}",
+        f"FNO_AGENT_PROVIDER={provider}",
+        "FNO_AGENT_ROW_PENDING=1",
+    ]
     unset: list[str] = []
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.

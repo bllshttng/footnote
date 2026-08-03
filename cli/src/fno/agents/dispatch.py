@@ -3676,7 +3676,8 @@ def reconcile_agents(
                 # before trusting a live answer. Unlike the codex arm this never
                 # stamps an identity from the pid, so an unconfirmed pid only ever
                 # keeps the row waiting - it can never bind a stranger.
-                if pane_state is not False and probe_start is None:
+                confirmed = probe_start is not None
+                if pane_state is not False and not confirmed:
                     live_pid = _lookup_child_pid(
                         str(entry.mux["session"]),
                         int(entry.mux["pane_id"]),
@@ -3685,6 +3686,7 @@ def reconcile_agents(
                     if live_pid is not None and probe_pid in (None, live_pid):
                         probe_pid = live_pid
                         probe_start = _process_start_time(probe_pid)
+                        confirmed = True
                 # A live pane with no usable pid is INCONCLUSIVE, never dead.
                 # `_lookup_child_pid` is best-effort, so folding its miss into
                 # `False` would orphan a healthy worker on absent evidence - and
@@ -3698,6 +3700,23 @@ def reconcile_agents(
                             "provider": "claude",
                             "id": None,
                             "reason": "claude-pane-pid-pending",
+                        }
+                    )
+                    continue
+                # An uncorrelated pid may not be this pane's at all. A legacy row
+                # carries no incarnation token, so `_pid_alive` degrades to bare
+                # existence there; a mux restart can hand `(session, pane_id)` to
+                # a different child while the recorded pid has been RECYCLED and
+                # is alive. Trusting that keeps the row `live` and points
+                # name-based delivery at a stranger. Only a DEAD pane is decided
+                # without correlation, since nothing can be bound to it.
+                if pane_state is True and not confirmed:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-pane-pid-unconfirmed",
                         }
                     )
                     continue

@@ -577,6 +577,7 @@ def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
 
     monkeypatch.setattr(rs, "_row_exists", _late_row)
     monkeypatch.setattr(rs, "_RESTAMP_ROW_POLL_S", 0.0)
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "1")
 
     assert rs._restamp("target-x-f0c2", "claude", REMINT) == 0
 
@@ -585,6 +586,26 @@ def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
     rows = load_registry()
     assert len(rows) == 1
     assert rows[0].harness_session_id == REMINT, "the late row must still be restamped"
+
+
+def test_restamp_never_waits_for_a_row_a_headless_one_shot_will_not_get(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rowless headless one-shot sets FNO_AGENT_SELF too. Keying the wait on
+    that alone made every one-shot sit out the whole deadline before its first
+    prompt, waiting for a row that is never coming."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    monkeypatch.delenv("FNO_AGENT_ROW_PENDING", raising=False)
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("a rowless substrate must not wait")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
+
+    assert rs._restamp("worker-headless", "claude", REMINT) == 0
 
 
 def test_restamp_does_not_poll_when_the_row_is_already_current(

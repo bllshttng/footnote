@@ -21,6 +21,7 @@ reserved for the session preamble).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from typing import Optional, Sequence
@@ -74,7 +75,14 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     perfectly healthy. The wait is bounded and still fail-soft: exhausting it
     returns 0 exactly as a genuine no-row miss always did.
     """
-    deadline = time.monotonic() + _RESTAMP_ROW_WAIT_S
+    # Only the pane substrate writes its row after the child starts, and it says
+    # so explicitly. Every other spawn either has its row already or never gets
+    # one - a headless one-shot sets FNO_AGENT_SELF and deliberately has no row,
+    # so waiting on that signal alone would delay every one-shot's first prompt
+    # by the full deadline for a row that is never coming.
+    deadline = time.monotonic() + (
+        _RESTAMP_ROW_WAIT_S if os.environ.get("FNO_AGENT_ROW_PENDING") == "1" else 0.0
+    )
     try:
         while True:
             # Observe the row BEFORE restamping, not after. None from the restamp
