@@ -556,4 +556,29 @@ fn generic_completion_rejects_outer_diagnostics_on_a_passed_verdict() {
 
     assert_eq!(output["decision"], "block");
     assert!(output["termination_reason"].is_null());
+    assert!(
+        output["message"].as_str().unwrap().contains("outer-only"),
+        "{output}"
+    );
+}
+
+#[test]
+fn generic_completion_surfaces_requirement_rejection_context() {
+    let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+    response["verdict"]["aggregate"] = json!("unknown");
+    response["verdict"]["requirements"][0]["result"] = json!("unknown");
+    response["verdict"]["requirements"][0]["diagnostics"] =
+        json!(["stale after 2026-08-02T12:00:01Z"]);
+    let env = setup(&response.to_string());
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    let message = output["message"].as_str().unwrap();
+    assert!(message.contains("output/artifact-ready"), "{message}");
+    assert!(message.contains("adapter:test"), "{message}");
+    assert!(
+        message.contains("stale after 2026-08-02T12:00:01Z"),
+        "{message}"
+    );
 }

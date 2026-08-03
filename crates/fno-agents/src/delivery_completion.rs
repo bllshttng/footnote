@@ -661,8 +661,9 @@ fn parse_response(raw: &[u8]) -> DeliveryCompletion {
 
 fn parse_evaluated(response: Response) -> DeliveryCompletion {
     if !response.diagnostics.is_empty() {
+        let details = response.diagnostics.join("; ");
         return nonpassing(
-            "evaluated response carries diagnostics".into(),
+            format!("evaluated response diagnostics: {details}"),
             response.evidence_revision,
         );
     }
@@ -688,10 +689,16 @@ fn parse_evaluated(response: Response) -> DeliveryCompletion {
         );
     }
     let Some(verdict) = strict_passed_verdict(&response.verdict, fact_revision) else {
-        return nonpassing(
-            "delivery verdict is nonpassing or incomplete".into(),
-            Some(evidence_revision),
-        );
+        let details = verdict_rejection_diagnostics(&response.verdict);
+        let reason = if details.is_empty() {
+            "delivery verdict is nonpassing or incomplete".into()
+        } else {
+            format!(
+                "delivery verdict is nonpassing or incomplete: {}",
+                details.join("; ")
+            )
+        };
+        return nonpassing(reason, Some(evidence_revision));
     };
     DeliveryCompletion::Passed {
         fact_revision: fact_revision.to_string(),
@@ -735,6 +742,42 @@ fn strict_passed_verdict(value: &Value, fact_revision: &str) -> Option<Verdict> 
         && verdict.requirements.iter().all(valid_passed_requirement)
         && verdict.diagnostics.is_empty();
     complete.then_some(verdict)
+}
+
+fn verdict_rejection_diagnostics(value: &Value) -> Vec<String> {
+    let Ok(verdict) = serde_json::from_value::<Verdict>(value.clone()) else {
+        return Vec::new();
+    };
+    let mut details: Vec<String> = verdict
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| nonblank(diagnostic))
+        .map(|diagnostic| format!("verdict: {diagnostic}"))
+        .collect();
+    for requirement in &verdict.requirements {
+        if requirement.result == "passed" && requirement.diagnostics.is_empty() {
+            continue;
+        }
+        let producers = if requirement.producers.is_empty() {
+            "none".into()
+        } else {
+            requirement.producers.join(",")
+        };
+        let diagnostics = if requirement.diagnostics.is_empty() {
+            "no diagnostic supplied".into()
+        } else {
+            requirement.diagnostics.join(", ")
+        };
+        details.push(format!(
+            "{}/{} result={} producers=[{}]: {}",
+            requirement.deliverable_id,
+            requirement.evidence_id,
+            requirement.result,
+            producers,
+            diagnostics,
+        ));
+    }
+    details
 }
 
 fn valid_passed_requirement(requirement: &Requirement) -> bool {
