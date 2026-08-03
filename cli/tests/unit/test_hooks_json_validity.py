@@ -270,53 +270,67 @@ def test_plan_location_guard_wired_into_claude_and_codex_pretooluse() -> None:
         )
 
 
-def test_every_manifest_hook_launches_through_real_shell_path() -> None:
-    """Every manifest command must start under the real ``$SHELL -lc`` launch path.
+def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
+    """Every manifest command must be wired (script exists), and the read-only
+    PreToolUse gates must start under the real ``$SHELL -lc`` launch path.
 
     A hook whose command cannot resolve (PLUGIN_ROOT empty/unset, or a script
     removed) fails OPEN in Codex: it exits 127/2 and the guard was silently
-    absent - the defect x-d991 exists to close. Verifying the hand-expanded
-    absolute path always passes, because that path cannot reproduce a
-    placeholder-expansion failure; only the configured string through the shell
-    Codex actually invokes (codex-rs/hooks engine command_runner.rs) can.
+    absent. Verifying the hand-expanded absolute path always passes, because that
+    path cannot reproduce a placeholder-expansion failure; only the configured
+    string through the shell Codex actually invokes (codex-rs/hooks engine
+    command_runner.rs) can.
 
-    This is the CI-catchable half (the live-install half is `fno doctor`, which
-    probes the resolved root on the user's machine). Reuses the doctor launcher
-    so the isolated-temp-cwd safety invariant lives in one place: action hooks
-    read ``.fno/target-state.md`` off cwd, so the launch must never run from a
-    real worktree.
-
-    A genuine launch failure is a command that could not be executed at all
-    (rc 126/127, or rc 2 with a file-not-found signature) or a referenced script
-    that is not on disk. Action hooks that react to the synthetic probe payload
-    with a nonzero exit or a timeout are NOT launch failures - the probe catches
-    the silent fail-open, not hook-correctness - so they are tolerated.
+    Only PreToolUse gates are LAUNCHED: SessionStart/Stop and other stateful
+    hooks mutate ~/.fno when executed (inject-mail-drain advances the real mail
+    cursor), so running them from a test would damage live state. Stateful
+    events still get an existence check. This is the CI-catchable half; the
+    live-install half is `fno doctor`. Reuses the doctor launcher so the
+    isolated-temp-cwd and event-scope invariants live in one place.
     """
     shell = os.environ.get("SHELL")
     if not shell:
         pytest.skip("$SHELL unset; cannot reproduce the real launch path")
 
     from fno.doctor import (
+        _PROBE_LAUNCH_EVENTS,
+        _PROBE_MANIFESTS,
         _is_hook_launch_failure,
-        _iter_plugin_manifest_commands,
         _launch_plugin_hook,
+        _manifest_event_commands,
         _referenced_hook_scripts,
     )
 
     failures: list[str] = []
-    for manifest, command in _iter_plugin_manifest_commands(REPO_ROOT):
-        for script in _referenced_hook_scripts(command, REPO_ROOT):
-            if not script.exists():
-                failures.append(f"{manifest}: missing script {script}")
-        result = _launch_plugin_hook(
-            command, root_value=str(REPO_ROOT), shell=shell
-        )
-        if _is_hook_launch_failure(result):
-            failures.append(
-                f"{manifest}: rc={result['rc']} cmd={result['resolved']} "
-                f"{result['stderr'][:120]}"
-            )
+    sample_pretooluse: tuple[str, str] | None = None
+    for name, rel, _root_var in _PROBE_MANIFESTS:
+        data = json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
+        for event, command in _manifest_event_commands(data, source=name):
+            for script in _referenced_hook_scripts(command, REPO_ROOT):
+                if not script.exists():
+                    failures.append(f"{name}/{event}: missing script {script}")
+            if event in _PROBE_LAUNCH_EVENTS:
+                if sample_pretooluse is None:
+                    sample_pretooluse = (name, command)
+                result = _launch_plugin_hook(
+                    command, root_value=str(REPO_ROOT), shell=shell
+                )
+                if _is_hook_launch_failure(result):
+                    failures.append(
+                        f"{name}/{event}: rc={result['rc']} cmd={result['resolved'][:70]}"
+                    )
     assert not failures, (
-        "manifest hooks failed to launch through $SHELL -lc:\n  "
+        "manifest hooks missing or failing to launch through $SHELL -lc:\n  "
         + "\n  ".join(failures)
     )
+
+    # The advertised fail-open itself: an UNRESOLVED root must make a PreToolUse
+    # launch fail (rc 126/127). This is the case the probe exists for; asserting
+    # it pins the detection so a future change cannot silently turn it green.
+    assert sample_pretooluse is not None, "no PreToolUse hook found to probe"
+    _name, command = sample_pretooluse
+    empty_root = _launch_plugin_hook(command, root_value="", shell=shell)
+    assert _is_hook_launch_failure(empty_root), (
+        f"empty plugin root must fail the launch (the fail-open), got rc={empty_root['rc']}"
+    )
+
