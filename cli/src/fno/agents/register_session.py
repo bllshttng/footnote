@@ -22,10 +22,18 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from typing import Optional, Sequence
 
 from fno.agents import events
 from fno.agents.registry import register_existing_session, restamp_harness_session_id
+
+#: How long a spawned worker waits for its own row to appear before giving up.
+#: Covers the spawner's post-`mux pane run` tail (child-pid lookup, the <=1s
+#: readiness probe, the registry lock) with room to spare. A miss costs
+#: addressability, never the session: the hook exits 0 regardless.
+_RESTAMP_ROW_WAIT_S = 10.0
+_RESTAMP_ROW_POLL_S = 0.25
 
 
 def _restamp(agent_self: str, harness: str, session_id: str) -> int:
@@ -38,11 +46,28 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     re-mintable id, so routing a re-minted worker through it appends a SECOND
     row for one worker instead of fixing the first -- which is why this returns
     rather than falling through.
+
+    RETRIES on a missing row, briefly. The spawner creates the row AFTER
+    ``mux pane run`` returns (it needs the pane id, and a half-created row is
+    worse than a late one), so a worker whose harness boots fast enough can run
+    this hook before its own row exists. `restamp_harness_session_id` cannot
+    distinguish "no such row" from "not yet" and returns None either way, so
+    without a wait the handoff silently loses the race. That is unrecoverable on
+    any route where this restamp is the ONLY path to an id - a happy-hosted
+    claude pane cannot be given one at spawn, because happy discards it - and the
+    worker would stay id-less and `spawning` for its whole life while being
+    perfectly healthy. The wait is bounded and still fail-soft: exhausting it
+    returns 0 exactly as a genuine no-row miss always did.
     """
+    deadline = time.monotonic() + _RESTAMP_ROW_WAIT_S
     try:
-        entry = restamp_harness_session_id(
-            name=agent_self, harness=harness, session_id=session_id
-        )
+        while True:
+            entry = restamp_harness_session_id(
+                name=agent_self, harness=harness, session_id=session_id
+            )
+            if entry is not None or time.monotonic() >= deadline:
+                break
+            time.sleep(_RESTAMP_ROW_POLL_S)
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(
             "session_restamp_failed",

@@ -1191,6 +1191,66 @@ def test_reconcile_backfills_late_codex_pane_identity_without_index(
     ]
 
 
+def test_reconcile_orphans_a_dead_idless_claude_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A happy-hosted claude pane has no session id until its worker restamps.
+
+    Before this arm existed the row fell to `missing-claude-short-id` (a mux row's
+    short_id is deliberately empty) and was never orphaned, so a dead pane held
+    its name against every future spawn of that name.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: False)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: False)
+
+    dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "orphaned"
+
+
+def test_reconcile_keeps_a_live_idless_claude_pane_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Still alive and still owed its restamp: waiting is correct, not an error."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: pid == 4242)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "spawning"
+    assert not any(e["reason"] == "missing-claude-short-id" for e in result.errors)
+
+
 def test_reconcile_keeps_live_unresolved_codex_pane_pending(
     tmp_path: Path, monkeypatch
 ) -> None:

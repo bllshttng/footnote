@@ -1505,7 +1505,7 @@ def dispatch_spawn_pane(
             # Keep that transition explicit instead of calling it live - for the
             # happy-hosted claude route as much as for codex, where an id-less
             # row reporting "live" is exactly the corpse that passes every
-            # liveness check the tooling offers (x-ee43).
+            # liveness check the tooling offers.
             row_status = (
                 "spawning"
                 if stored_session_uuid is None

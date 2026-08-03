@@ -1983,7 +1983,7 @@ def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
 
 def test_happy_pane_argv_refuses_a_pinned_session_id(monkeypatch) -> None:
     """happy strips --session-id and never re-adds it under its hook server, so a
-    pinned uuid would make the receipt name a session that never exists (x-ee43)."""
+    pinned uuid would make the receipt name a session that never exists."""
     import fno.agents.mux_spawn as mux_spawn
     from fno.agents.dispatch import DispatchAskError
 
@@ -2253,7 +2253,7 @@ def _happy_spawn(monkeypatch, tmp_path, **kwargs):
 
 
 def test_happy_spawn_never_pins_a_session_id(tmp_path: Path, monkeypatch) -> None:
-    """happy discards --session-id, so fno must not mint one and report it (x-ee43)."""
+    """happy discards --session-id, so fno must not mint one and report it."""
     result, runner = _happy_spawn(monkeypatch, tmp_path)
 
     run_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "run"])
@@ -2268,7 +2268,7 @@ def test_happy_spawn_is_not_reported_live_without_a_proven_session(
 ) -> None:
     """The spawn cannot know a happy pane's session id, so it must not claim one.
 
-    This is the x-ee43 corpse: a real pid, a real pane, and status "live" for
+    This is the reported corpse: a real pid, a real pane, and status "live" for
     ~55 minutes with no session behind it. The row waits for the worker to name
     itself via the SessionStart restamp instead of guessing.
     """

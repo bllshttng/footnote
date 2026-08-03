@@ -566,7 +566,7 @@ def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
 
     write_registry([
         AgentEntry(
-            name="target-x-ee43-happy",
+            name="worker-happy-pane",
             harness="claude",
             harness_session_id=None,
             cwd="/proj",
@@ -576,7 +576,7 @@ def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
         )
     ])
     entry = restamp_harness_session_id(
-        name="target-x-ee43-happy", harness="claude", session_id=REMINT
+        name="worker-happy-pane", harness="claude", session_id=REMINT
     )
 
     assert entry is not None
@@ -596,7 +596,7 @@ def test_restamp_does_not_disturb_a_non_spawning_status(
 
     write_registry([
         AgentEntry(
-            name="target-x-ee43-idle",
+            name="worker-idle-pane",
             harness="claude",
             harness_session_id=BIRTH,
             cwd="/proj",
@@ -606,7 +606,7 @@ def test_restamp_does_not_disturb_a_non_spawning_status(
         )
     ])
     restamp_harness_session_id(
-        name="target-x-ee43-idle", harness="claude", session_id=REMINT
+        name="worker-idle-pane", harness="claude", session_id=REMINT
     )
 
     assert load_registry()[0].status == "idle"
