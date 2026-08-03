@@ -33,7 +33,7 @@ now="$(date +%s 2>/dev/null || echo 0)"
 shopt -s nullglob
 for stamp in "$LIVE_DIR"/*; do
   [[ -f "$stamp" && "${stamp##*/}" != "$SELF_ID" ]] || continue
-  mtime="$(stat -f %m "$stamp" 2>/dev/null || stat -c %Y "$stamp" 2>/dev/null || echo 0)"
+  mtime="$(stat -c %Y "$stamp" 2>/dev/null || stat -f %m "$stamp" 2>/dev/null || echo 0)"
   if (( mtime > 0 && mtime <= now && now - mtime < WINDOW )); then
     echo '- Another session is working in this worktree. [fno-overlap-observed]'
     exit 0

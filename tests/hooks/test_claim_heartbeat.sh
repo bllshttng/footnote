@@ -74,7 +74,7 @@ EOF
 teardown_env() { rm -rf "$TMP_DIR"; unset STUB_HOLDER STUB_REFRESH_RC; }
 
 mtime_of() {
-  stat -f %m "$1" 2>/dev/null || stat -c %Y "$1" 2>/dev/null
+  stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null
 }
 
 run_hook() {
@@ -378,6 +378,37 @@ if (( after > before )); then
   pass "T19 aged activity stamp advances"
 else
   fail "T19 aged activity stamp did not advance: before=$before after=$after"
+fi
+teardown_env
+
+# ── T20: GNU stat's successful textual -f output never reaches arithmetic ───
+setup_env
+export STUB_HOLDER="target-session:some-other-session"
+mkdir -p "$LIVE_DIR"
+touch -t 202001010000 "${LIVE_DIR}/182b29c8-owner-uuid"
+before="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+gnu_stat_bin="${TMP_DIR}/gnu-stat-bin"
+mkdir -p "$gnu_stat_bin"
+cat >"$gnu_stat_bin/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -c && "${2:-}" == %Y ]]; then
+  echo 1
+  exit 0
+fi
+if [[ "${1:-}" == -f ]]; then
+  printf '  File: "fake"\n    ID: 0\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$gnu_stat_bin/stat"
+PATH="$gnu_stat_bin:$PATH" run_hook_sid "182b29c8-owner-uuid" >/dev/null 2>&1
+rc=$?
+after="$(mtime_of "${LIVE_DIR}/182b29c8-owner-uuid")"
+if [[ "$rc" -eq 0 ]] && (( after > before )); then
+  pass "T20 GNU stat output cannot break activity-stamp arithmetic"
+else
+  fail "T20 GNU stat compatibility: rc=$rc before=$before after=$after"
 fi
 teardown_env
 

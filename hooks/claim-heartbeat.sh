@@ -77,7 +77,7 @@ LIVE_DIR="$(bash "$live_helper" --live-dir "$CWD" </dev/null 2>/dev/null || true
 if [[ -n "$LIVE_DIR" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
   live_stamp="$LIVE_DIR/$LIVE_SESSION_ID"
   live_now="$(date +%s 2>/dev/null || echo 0)"
-  live_mtime="$(stat -f %m "$live_stamp" 2>/dev/null || stat -c %Y "$live_stamp" 2>/dev/null || echo 0)"
+  live_mtime="$(stat -c %Y "$live_stamp" 2>/dev/null || stat -f %m "$live_stamp" 2>/dev/null || echo 0)"
   if (( live_now <= 0 || live_mtime <= 0 || live_now - live_mtime >= LIVE_THROTTLE )); then
     mkdir -p "${live_stamp%/*}" 2>/dev/null && touch "$live_stamp" 2>/dev/null || true
   fi
@@ -132,7 +132,7 @@ fi
 STAMP="$CWD/.fno/.claim-heartbeat.stamp"
 if [[ -f "$STAMP" ]]; then
   now="$(date +%s 2>/dev/null || echo 0)"
-  mtime="$(stat -f %m "$STAMP" 2>/dev/null || stat -c %Y "$STAMP" 2>/dev/null || echo 0)"
+  mtime="$(stat -c %Y "$STAMP" 2>/dev/null || stat -f %m "$STAMP" 2>/dev/null || echo 0)"
   (( now > 0 && mtime > 0 && now - mtime < THROTTLE )) && exit 0
 fi
 

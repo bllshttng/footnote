@@ -94,6 +94,32 @@ else
   fail "Codex writer-to-reader journey: rc=$rc out=[$out]"
 fi
 
+# GNU stat accepts -f as a filesystem-report flag and prints text, so the
+# reader must prefer -c rather than trusting a successful BSD-shaped call.
+reset_live
+touch "$LIVE_DIR/peer-session"
+GNU_STAT_BIN="$TMP_DIR/gnu-stat-bin"
+mkdir -p "$GNU_STAT_BIN"
+cat >"$GNU_STAT_BIN/stat" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-}" == -c && "${2:-}" == %Y ]]; then
+  date +%s
+  exit 0
+fi
+if [[ "${1:-}" == -f ]]; then
+  printf '  File: "fake"\n    ID: 0\n'
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$GNU_STAT_BIN/stat"
+out="$(PATH="$GNU_STAT_BIN:$PATH" run_helper self-session 2>/dev/null)"; rc=$?
+if [[ "$rc" -eq 0 && "$out" == *"fno-overlap-observed"* ]]; then
+  pass "GNU stat output cannot break peer-stamp arithmetic"
+else
+  fail "GNU stat reader compatibility: rc=$rc out=[$out]"
+fi
+
 # A whole-directory .fno symlink must not leak activity across worktrees.
 REPO="$TMP_DIR/repo"
 PEER_WORKTREE="$TMP_DIR/peer-worktree"
