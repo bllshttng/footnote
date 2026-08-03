@@ -80,6 +80,7 @@ def verify_command(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit stable structured JSON."),
 ) -> None:
     """Verify a pack on two axes; exit non-zero unless every condition passed."""
+    merge_json_flag(ctx, json_output)
     store, _ = _store(ctx)
     try:
         installed = store.installed_index()
@@ -110,6 +111,7 @@ def activate_command(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit stable structured JSON."),
 ) -> None:
     """Activate a verified pack into the plugin role layer. Grants nothing."""
+    merge_json_flag(ctx, json_output)
     store, root = _store(ctx)
     try:
         outcome = activate(path, registry_store=store, role_root=root)
@@ -139,6 +141,7 @@ def deactivate_command(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit stable structured JSON."),
 ) -> None:
     """Remove only the definition paths this pack's receipt recorded."""
+    merge_json_flag(ctx, json_output)
     store, root = _store(ctx)
     try:
         outcome = deactivate(pack_id, registry_store=store, role_root=root)
@@ -167,6 +170,7 @@ def list_command(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit stable structured JSON."),
 ) -> None:
     """List installed packs with version, activation state, and declared effect ceiling."""
+    merge_json_flag(ctx, json_output)
     store, _ = _store(ctx)
     try:
         registry = store.load()
@@ -204,6 +208,7 @@ def inspect_command(
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit stable structured JSON."),
 ) -> None:
     """Print a pack's manifest with declarations labeled as declarations."""
+    merge_json_flag(ctx, json_output)
     store, _ = _store(ctx)
     try:
         registry = store.load()

@@ -241,6 +241,11 @@ def activate(
 
     revision = _revision_for(manifest)
     plugin_root = root / "plugin"
+    if plugin_root.is_symlink() or (plugin_root.exists() and not plugin_root.is_dir()):
+        raise ActivationRefusal(
+            ActivationRefusalReason.INVALID_IDENTITY,
+            "plugin role root is a symlink or not a directory",
+        )
     # Resolve every target and prove it stays under the plugin root before any
     # write: a containment failure refuses up front rather than mid-activation.
     planned: list[tuple[str, Path, RoleDefinitionSource]] = []
@@ -387,8 +392,10 @@ def deactivate(
         receipt = registry.receipt_for(pack_id)
         if receipt is None:
             return DeactivationOutcome(removed=(), left_alone=())
+        token = os.urandom(4).hex()
         removed: list[str] = []
         left_alone: list[str] = []
+        backups: list[tuple[Path, Path]] = []
         for source_id in receipt.written_paths:
             if not _contained_under(source_id, root, plugin_root):
                 left_alone.append(source_id)
@@ -399,8 +406,8 @@ def deactivate(
                 continue
             path = root / source_id
             if path.is_symlink() or (path.exists() and not path.is_file()):
-                # Refuse to unlink a symlink or non-regular file: keep the receipt
-                # so the path keeps an owner and the operator sees the anomaly.
+                # Refuse a symlink or non-regular file: keep the receipt so the
+                # path keeps an owner and the operator sees the anomaly.
                 left_alone.append(source_id)
                 continue
             if not path.exists():
@@ -408,7 +415,11 @@ def deactivate(
                 # (nothing was unlinked) nor left behind.
                 continue
             try:
-                path.unlink()
+                # Rename aside (not unlink) so a registry-save failure can restore
+                # the file rather than leaving it deleted under the old receipt.
+                backup = Path(f"{path}.deact-{token}.bak")
+                os.replace(path, backup)
+                backups.append((path, backup))
                 removed.append(source_id)
             except OSError:
                 left_alone.append(source_id)
@@ -417,5 +428,15 @@ def deactivate(
             receipts = tuple(r if r.pack_id != pack_id else residual for r in registry.receipts)
         else:
             receipts = tuple(r for r in registry.receipts if r.pack_id != pack_id)
-        store._save(registry.model_copy(update={"receipts": receipts}))
+        try:
+            store._save(registry.model_copy(update={"receipts": receipts}))
+        except BaseException:
+            for original, backup in backups:
+                if original.exists():
+                    original.unlink(missing_ok=True)
+                if backup.exists():
+                    os.replace(backup, original)
+            raise
+        for _original, backup in backups:
+            backup.unlink(missing_ok=True)
         return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))
