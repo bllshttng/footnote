@@ -16,7 +16,7 @@ SECTION="$(sed -n '/^## `send/,/^---$/p' "$SKILL")"
 
 require_text() {
   local label="$1" needle="$2"
-  if printf '%s\n' "$SECTION" | rg -F -- "$needle" >/dev/null; then
+  if [[ "$SECTION" == *"$needle"* ]]; then
     pass "$label"
   else
     fail "$label: missing $needle"
