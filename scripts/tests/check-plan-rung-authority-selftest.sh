@@ -107,4 +107,31 @@ if ! grep -q 'rogue_reader.rs' <<<"$output"; then
     exit 1
 fi
 
+git -C "$FIXTURE_ROOT" rm --force --quiet crates/fno-agents/src/rogue_reader.rs
+TYPED_READER="$FIXTURE_ROOT/crates/fno-agents/src/typed_rogue_reader.rs"
+cat > "$TYPED_READER" <<'EOF'
+#[derive(serde::Deserialize)]
+struct PlanHeader {
+    status: String,
+}
+
+fn forbidden(path: &std::path::Path) {
+    let document = std::fs::read_to_string(path).unwrap();
+    let _: PlanHeader = serde_yaml_ng::from_str(&document).unwrap();
+}
+EOF
+git -C "$FIXTURE_ROOT" add crates/fno-agents/src/typed_rogue_reader.rs
+output=""
+actual_exit=0
+output="$(bash "$FIXTURE_ROOT/scripts/ci/check-plan-rung-authority.sh" 2>&1)" \
+    || actual_exit=$?
+if [[ "$actual_exit" -eq 0 ]]; then
+    echo 'FAIL: a typed Rust status reader passed the authority guard' >&2
+    exit 1
+fi
+if ! grep -q 'typed_rogue_reader.rs' <<<"$output"; then
+    echo 'FAIL: the typed-reader violation did not name the rogue reader' >&2
+    exit 1
+fi
+
 echo "PASS: Rust plan readers cannot introduce frontmatter status parsing"
