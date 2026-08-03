@@ -62,26 +62,19 @@ HELPER="$HOOK_DIR/helpers/check-impl-location.sh"
 # shellcheck source=helpers/plans-dir.sh
 source "$HOOK_DIR/helpers/plans-dir.sh" 2>/dev/null || true
 
-_block_if_canonical() {
-    local dir="$1" location verdict branch
-    location="$(cd "$dir" && bash "$HELPER" 2>/dev/null)" || return
-    verdict="$(printf '%s\n' "$location" | sed -n 's/^verdict=//p' | head -1)"
-    [[ "$verdict" == "canonical-protected" ]] || return
-
-    branch="$(printf '%s\n' "$location" | sed -n 's/^branch=//p' | head -1)"
-    _block "Canonical ${branch:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
+_deny_canonical() {
+    _block "Canonical ${1:-checkout} is shared; edit blocked before it lands. For a footnote target, run \`fno target start <node>\`, then continue in a relocated or new Codex session from the \`worktree=\` path in its receipt. Or use Codex Worktree mode or Handoff before retrying."
 }
 
-# _target_directory delegates to the shared resolver so this guard and
-# plan-location-guard.sh agree on where a not-yet-created path lives. The
-# fallback matters: the source above is swallowed, and without it a missing
-# helper would make every per-target check exit 127 and skip - leaving the
-# degraded mode WEAKER than the guard was before the helper existed.
-if declare -F fno_resolve_dir >/dev/null 2>&1; then
-    _target_directory() { fno_resolve_dir "$1"; }
-else
-    _target_directory() { dirname "$1"; }
-fi
+_location_of() { (cd "$1" && bash "$HELPER" 2>/dev/null); }
+_field() { printf '%s\n' "$2" | sed -n "s/^$1=//p" | head -1; }
+
+_block_if_canonical() {
+    local location
+    location="$(_location_of "$1")" || return
+    [[ "$(_field verdict "$location")" == "canonical-protected" ]] || return
+    _deny_canonical "$(_field branch "$location")"
+}
 
 # _absolute PATH -> PATH anchored against the session cwd when relative.
 _absolute() {
@@ -107,63 +100,65 @@ if [[ -n "$PATCH_COMMAND" ]]; then
     done <<< "$PATCH_COMMAND"
 fi
 
-# ── plans-dir carve-out (x-5349) ──────────────────────────────────────────────
-# The canonical-checkout gate below keys on the SESSION cwd, so a session
-# sitting on canonical main was denied every write - including the correct save
-# of a plan into the configured plans dir, which is usually reached through the
-# internal/ symlink and is not the shared checkout at all. That denial is what
-# drove the .fno/drafts-then-mv workaround. A write whose targets all land in
-# the configured plans dir is allowed, PROVIDED that directory cannot itself
-# reach the shared checkout (fno_plans_dir_carveout_safe decides; a plans dir
-# that is an ancestor of the cwd, or a tracked dir inside it, would otherwise
-# turn this exemption into a blanket bypass of the gate below).
-#
-# Gated on a `.md` target first: resolving the plans dir shells a Python CLI
-# (~0.5s), and every Edit/Write reaches here. A plan is always markdown, so the
-# cheap test keeps that cost off the source-edit path, mirroring the payload
-# pre-filter plan-location-guard.sh carries for the same reason. It is
-# BEHAVIORAL, not merely a speed-up: a non-markdown write into the plans dir
-# gets no carve-out and faces the gate like any other file.
-#
-# Requires targets to be known AND resolvable, and requires the WHOLE helper to
-# have sourced - bash defines functions as it parses, so a truncated helper
-# leaves the first one defined and the rest missing. An unparseable payload or a
-# half-sourced helper keeps the old blunt behavior rather than opening a hole.
-_has_md_target() {
-    local t
-    for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
-        [[ "$t" == *.md ]] && return 0
-    done
-    return 1
-}
-
-if [[ ${#TARGETS[@]} -gt 0 ]] && _has_md_target \
-   && declare -F fno_plans_dir fno_resolve_dir fno_under_plans_dir \
-        fno_physical_path fno_plans_dir_carveout_safe >/dev/null 2>&1; then
-    # Resolve from the SESSION cwd, not the cwd the harness happened to spawn
-    # this hook in: `fno plan path` is repo-anchored, so an ambient cwd names a
-    # different project's plans dir and the carve-out silently never fires.
-    PLANS_DIR="$(cd "$CWD" 2>/dev/null && fno_plans_dir 2>/dev/null || true)"
-    if [[ -n "$PLANS_DIR" ]] && fno_plans_dir_carveout_safe "$PLANS_DIR" "$CWD"; then
-        all_in_plans=1
-        for t in "${TARGETS[@]}"; do
-            fno_under_plans_dir "$PLANS_DIR" "$(_absolute "$t")" || { all_in_plans=0; break; }
-        done
-        [[ $all_in_plans -eq 1 ]] && _approve
-    fi
+# A payload that names no object cannot be judged by object: the session cwd is
+# the only thing left, and a protected one fails closed exactly as before.
+if [[ ${#TARGETS[@]} -eq 0 ]]; then
+    _block_if_canonical "$CWD"
+    _approve
 fi
 
-_block_if_canonical "$CWD"
+# ── one protected root, judged per object ─────────────────────────────────────
+# The guard owns exactly one checkout: the canonical worktree of the session's
+# own git common dir (`worktree list` prints it first). Asking each TARGET's
+# directory whether IT is canonical over-blocks a Git-ignored path inside this
+# project - `.fno/what-if/` inherits `canonical-protected` from the repo root -
+# and over-reaches into an unrelated project's checkout, which this hook is not
+# responsible for. Resolving one root instead also costs one helper call rather
+# than one per target.
+_root="$(git -C "$CWD" worktree list --porcelain 2>/dev/null | sed -n 's/^worktree //p' | head -1)"
+[[ -n "$_root" && -d "$_root" ]] || _approve
+_location="$(_location_of "$_root")" || _approve
+[[ "$(_field verdict "$_location")" == "canonical-protected" ]] || _approve
+PROTECTED_BRANCH="$(_field branch "$_location")"
+PROTECTED_ROOT="$(cd -P "$_root" 2>/dev/null && pwd -P)"
+[[ -n "$PROTECTED_ROOT" ]] || _approve
 
-# Known ceiling: a target that resolves to nothing is skipped. Re-asking about
-# $CWD here would be dead code, since the unconditional call above already
-# exited on that verdict, and only an absolute path with a symlink loop deeper
-# than the resolver's hop cap can reach it. The `dirname` fallback above is what
-# keeps a missing helper from routing EVERY target down this branch.
-for t in "${TARGETS[@]+"${TARGETS[@]}"}"; do
-    target_dir="$(_target_directory "$(_absolute "$t")")" || continue
-    [[ -n "$target_dir" ]] || continue
-    _block_if_canonical "$target_dir"
+# _target_safe PHYSICAL_PATH -> 0 when this write cannot change protected content.
+#
+# Containment is decided on the PHYSICAL path, so an `internal/` symlink out to
+# the vault is external and an ignored symlink back onto a tracked file is not.
+# Inside the root, only git may grant the exception: no literal directory name
+# is trusted, so a renamed ignored dir keeps working and a tracked file under an
+# ignored-looking name does not. `check-ignore` runs WITHOUT `--no-index`
+# precisely because that flag reports the ignore-pattern match for a force-added
+# TRACKED file, which would hand out the exception for shared content. Exit 1
+# (not ignored) and exit 128 (unanswerable) are both refusals.
+_target_safe() {
+    local phys="$1"
+    # A `..` that survived resolution sat under a directory that does not exist,
+    # so nothing could fold it away. It is textually under one prefix and points
+    # at another: `check-ignore` reads `scratch/nope/../src/app.py` as ignored by
+    # `scratch/` while the write lands on tracked `src/app.py`. Refuse.
+    case "$phys" in
+        */../*|*/..) return 1 ;;
+    esac
+    case "$phys/" in
+        "$PROTECTED_ROOT/"*) ;;
+        *) return 0 ;;
+    esac
+    [[ "$phys" != "$PROTECTED_ROOT" ]] || return 1
+    git -C "$PROTECTED_ROOT" check-ignore -q "$phys" 2>/dev/null
+}
+
+# One blocked target denies the whole call: safe siblings cannot launder an
+# unsafe one. A target that will not resolve physically is unknown, not safe -
+# including when the shared resolver failed to source, which leaves the guard
+# with no way to see through a symlink.
+declare -F fno_physical_path >/dev/null 2>&1 || _deny_canonical "$PROTECTED_BRANCH"
+for t in "${TARGETS[@]}"; do
+    phys="$(fno_physical_path "$(_absolute "$t")")" || _deny_canonical "$PROTECTED_BRANCH"
+    [[ -n "$phys" ]] || _deny_canonical "$PROTECTED_BRANCH"
+    _target_safe "$phys" || _deny_canonical "$PROTECTED_BRANCH"
 done
 
 _approve
