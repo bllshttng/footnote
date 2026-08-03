@@ -227,6 +227,25 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
+# The Codex wrapper is its sole SessionStart carrier; Claude registers a small
+# dedicated carrier in hooks.json. Both render this one read-only predicate.
+peer_helper="${SCRIPT_DIR}/helpers/worktree-live-peers.sh"
+peer_note=""
+if [[ -f "$peer_helper" ]]; then
+    if [[ -n "$CONTEXT_HOOK_INPUT" && -f "$CONTEXT_HOOK_INPUT" ]]; then
+        peer_note="$(bash "$peer_helper" <"$CONTEXT_HOOK_INPUT" 2>/dev/null || true)"
+    else
+        peer_note="$(bash "$peer_helper" </dev/null 2>/dev/null || true)"
+    fi
+fi
+if [[ -n "$peer_note" ]]; then
+    if [[ -n "$hygiene_content" ]]; then
+        hygiene_content="${hygiene_content}"$'\n'"${peer_note}"
+    else
+        hygiene_content="## Worktree hygiene"$'\n'"${peer_note}"
+    fi
+fi
+
 # 5. first-run setup nudge — points a brand-new user (no fno config yet) at the
 #    setup wizard. Silent once any settings file exists. On Claude Code this
 #    fires as its own hooks.json entry; here it rides the wrapper so Codex and
