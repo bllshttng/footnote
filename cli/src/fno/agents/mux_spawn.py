@@ -678,6 +678,12 @@ def _backfill_codex_session_id(
 # A happy-hosted claude writes its transcript once the child claude actually
 # starts, which is one extra process hop behind a codex rollout. Wider window,
 # same shape. Paid only on the happy route.
+#
+# ponytail: fixed window, not an adaptive wait. It fails in one direction - a
+# healthy worker whose SessionStart hooks run long enough to push the transcript
+# past ~6s is reported `spawning` rather than `live`, costing addressability but
+# never the spawn. Widen ATTEMPTS if that shows up in practice; the cost is spawn
+# latency on a genuinely dead pane, which is the case that already lost an hour.
 _CLAUDE_BACKFILL_ATTEMPTS = 8
 _CLAUDE_BACKFILL_DELAY_S = 0.75
 
