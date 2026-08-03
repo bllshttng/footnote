@@ -28,7 +28,7 @@ from __future__ import annotations
 
 from typing import Self
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from fno.company.contracts import EvidenceResult, NonEmptyStr
 from fno.roles.models import ContextKind, RoleManifest, canonical_digest
@@ -181,28 +181,26 @@ class PackManifest(_PackModel):
 
     @model_validator(mode="after")
     def _declarations_are_unique(self) -> Self:
-        def identity(field: str, item: object) -> object:
-            if field == "roles":
-                return item.role.id  # type: ignore[union-attr]
-            if field == "permissions":
-                return (item.effect_class, item.destination)  # type: ignore[union-attr]
-            return item.id  # type: ignore[union-attr]
-
-        for field in (
-            "roles",
-            "skills",
-            "workflows",
-            "adapters",
-            "evaluators",
-            "assets",
+        self._check_unique("roles", [role.role.id for role in self.roles])
+        self._check_unique(
             "permissions",
-            "scenarios",
+            [(item.effect_class, item.destination) for item in self.permissions],
+        )
+        for field_name, items in (
+            ("skills", self.skills),
+            ("workflows", self.workflows),
+            ("adapters", self.adapters),
+            ("evaluators", self.evaluators),
+            ("assets", self.assets),
+            ("scenarios", self.scenarios),
         ):
-            items = getattr(self, field)
-            keys = [identity(field, item) for item in items]
-            if len(set(keys)) != len(keys):
-                raise ValueError(f"duplicate {field} declaration {keys[0]!r}")
+            self._check_unique(field_name, [item.id for item in items])
         return self
+
+    @staticmethod
+    def _check_unique(field_name: str, keys: list[object]) -> None:
+        if len(set(keys)) != len(keys):
+            raise ValueError(f"duplicate {field_name} declaration {keys[0]!r}")
 
     @model_validator(mode="after")
     def _pack_is_not_empty(self) -> Self:
