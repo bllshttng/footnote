@@ -29,6 +29,11 @@ set -uo pipefail
 # correct and the cheapest thing that keeps a live claim from lapsing.
 THROTTLE="${FNO_CLAIM_HEARTBEAT_THROTTLE:-1200}"  # 20 min
 
+# Record worktree-local activity often enough for the SessionStart peer notice.
+# This is deliberately separate from the claim refresh throttle: claim TTL and
+# "working here now" answer different questions.
+LIVE_THROTTLE="${FNO_WORKTREE_LIVE_THROTTLE:-30}"
+
 # Re-arm to the node claim's canonical 2h window. `fno claim refresh` with no
 # --ttl defaults to MIN_TTL (1 min) and does NOT guard against shortening, so an
 # omitted ttl would SHRINK the very claim we mean to keep alive. 2h matches the
@@ -61,6 +66,26 @@ else
   CUR_CLAUDE_SID="$HOOK_SESSION_ID"
 fi
 [[ -z "$CWD" ]] && CWD="${CLAUDE_PROJECT_DIR:-$PWD}"
+
+# Stamp every identified session before any target-manifest or holder gate.
+# A hand-started peer may not own this worktree's target manifest, but its tool
+# activity is still the overlap the advisory reader needs to observe.
+LIVE_SESSION_ID="$CUR_CLAUDE_SID"
+[[ "$IS_CODEX_HOOK" -eq 1 ]] && LIVE_SESSION_ID="$CUR_CODEX_THREAD_ID"
+if [[ -d "$CWD/.fno" && "$LIVE_SESSION_ID" =~ ^[A-Za-z0-9_-]+$ ]]; then
+  LIVE_DIR="$CWD/.fno/live"
+  LIVE_STAMP="$LIVE_DIR/$LIVE_SESSION_ID"
+  LIVE_STAMP_FRESH=0
+  if [[ -f "$LIVE_STAMP" ]]; then
+    live_now="$(date +%s 2>/dev/null || echo 0)"
+    live_mtime="$(stat -f %m "$LIVE_STAMP" 2>/dev/null || stat -c %Y "$LIVE_STAMP" 2>/dev/null || echo 0)"
+    (( live_now > 0 && live_mtime > 0 && live_now - live_mtime < LIVE_THROTTLE )) \
+      && LIVE_STAMP_FRESH=1
+  fi
+  if [[ "$LIVE_STAMP_FRESH" -eq 0 ]]; then
+    mkdir -p "$LIVE_DIR" 2>/dev/null && touch "$LIVE_STAMP" 2>/dev/null || true
+  fi
+fi
 
 MANIFEST="$CWD/.fno/target-state.md"
 [[ -f "$MANIFEST" ]] || exit 0   # no target session here -> nothing to refresh
