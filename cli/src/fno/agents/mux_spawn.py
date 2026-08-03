@@ -840,10 +840,18 @@ def _mesh_env_wrapper(
     # one-shots set FNO_AGENT_SELF too and deliberately never get a row, so
     # keying the wait on FNO_AGENT_SELF alone would make every one-shot sit out
     # the full deadline before its first prompt.
+    #
+    # It carries the NAME, not a bare flag, and the hook waits only when the two
+    # agree. A pane worker that itself launches a headless one-shot passes this
+    # whole environment down; every spawn path overwrites FNO_AGENT_SELF but none
+    # of them clears an inherited marker, so a bare `=1` would silently re-enable
+    # the wait for a nested child that will never have a row. Scoping it to the
+    # identity makes the stale value self-invalidating instead of requiring every
+    # present and future spawn path to remember to unset it.
     pairs = [
         f"FNO_AGENT_SELF={name}",
         f"FNO_AGENT_PROVIDER={provider}",
-        "FNO_AGENT_ROW_PENDING=1",
+        f"FNO_AGENT_ROW_PENDING={name}",
     ]
     unset: list[str] = []
     if provider == "claude":

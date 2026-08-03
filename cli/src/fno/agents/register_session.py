@@ -76,12 +76,20 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     returns 0 exactly as a genuine no-row miss always did.
     """
     # Only the pane substrate writes its row after the child starts, and it says
-    # so explicitly. Every other spawn either has its row already or never gets
-    # one - a headless one-shot sets FNO_AGENT_SELF and deliberately has no row,
-    # so waiting on that signal alone would delay every one-shot's first prompt
-    # by the full deadline for a row that is never coming.
+    # so by name. Every other spawn either has its row already or never gets one -
+    # a headless one-shot sets FNO_AGENT_SELF and deliberately has no row, so
+    # waiting on that signal alone would delay every one-shot's first prompt by
+    # the full deadline for a row that is never coming.
+    #
+    # Comparing to THIS worker's name, not just testing presence: a pane worker
+    # passes its whole environment to any one-shot it launches, so the marker is
+    # inherited by children that are not the pane. It names the pane, the child
+    # overwrites FNO_AGENT_SELF with its own name, and the mismatch cancels the
+    # wait without any spawn path having to remember to clear it.
     deadline = time.monotonic() + (
-        _RESTAMP_ROW_WAIT_S if os.environ.get("FNO_AGENT_ROW_PENDING") == "1" else 0.0
+        _RESTAMP_ROW_WAIT_S
+        if os.environ.get("FNO_AGENT_ROW_PENDING") == agent_self
+        else 0.0
     )
     try:
         while True:

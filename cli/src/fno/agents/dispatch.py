@@ -3676,8 +3676,16 @@ def reconcile_agents(
                 # before trusting a live answer. Unlike the codex arm this never
                 # stamps an identity from the pid, so an unconfirmed pid only ever
                 # keeps the row waiting - it can never bind a stranger.
-                confirmed = probe_start is not None
-                if pane_state is not False and not confirmed:
+                # ALWAYS re-derive the pane's current child, even when the row
+                # carries an incarnation token. That token proves only that the
+                # stored pid's incarnation is alive; it says nothing about which
+                # pane that process now belongs to. A mux restart can hand
+                # `(session, pane_id)` to a different child while the original is
+                # still running, and then `_mux_pane_alive` and `_pid_alive` are
+                # both true about DIFFERENT processes - which preserves the row as
+                # live and points delivery at the stranger's pane.
+                confirmed = False
+                if pane_state is not False:
                     live_pid = _lookup_child_pid(
                         str(entry.mux["session"]),
                         int(entry.mux["pane_id"]),
@@ -3685,7 +3693,10 @@ def reconcile_agents(
                     )
                     if live_pid is not None and probe_pid in (None, live_pid):
                         probe_pid = live_pid
-                        probe_start = _process_start_time(probe_pid)
+                        # Keep a stored incarnation token: it is stronger than a
+                        # fresh read, which cannot see a pid recycled since.
+                        if probe_start is None:
+                            probe_start = _process_start_time(probe_pid)
                         confirmed = True
                 # A live pane with no usable pid is INCONCLUSIVE, never dead.
                 # `_lookup_child_pid` is best-effort, so folding its miss into

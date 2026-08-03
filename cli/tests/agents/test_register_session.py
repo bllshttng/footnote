@@ -577,7 +577,7 @@ def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
 
     monkeypatch.setattr(rs, "_row_exists", _late_row)
     monkeypatch.setattr(rs, "_RESTAMP_ROW_POLL_S", 0.0)
-    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "1")
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "target-x-f0c2")
 
     assert rs._restamp("target-x-f0c2", "claude", REMINT) == 0
 
@@ -586,6 +586,27 @@ def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
     rows = load_registry()
     assert len(rows) == 1
     assert rows[0].harness_session_id == REMINT, "the late row must still be restamped"
+
+
+def test_restamp_ignores_a_pending_marker_inherited_from_its_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pane worker passes its whole environment to any one-shot it launches, so
+    the marker is inherited by children that are not the pane. It names the pane
+    and the child overwrites FNO_AGENT_SELF, so the mismatch cancels the wait
+    without any spawn path having to remember to clear it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "the-parent-pane")
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("an inherited marker must not re-enable the wait")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
+
+    assert rs._restamp("the-nested-one-shot", "claude", REMINT) == 0
 
 
 def test_restamp_never_waits_for_a_row_a_headless_one_shot_will_not_get(

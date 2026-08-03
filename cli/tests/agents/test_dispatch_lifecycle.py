@@ -1253,6 +1253,39 @@ def test_reconcile_orphans_a_dead_claude_pane_that_already_restamped(
     assert load_registry()[0].status == "orphaned"
 
 
+def test_reconcile_correlates_the_pane_child_even_with_an_incarnation_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`pid_start_time` proves the stored pid's incarnation is alive, never which
+    pane it now belongs to. After a mux restart recycles (session, pane_id) the
+    original child can still be running while the pane is someone else's, and pane
+    liveness and pid liveness are then both true about different processes."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="live",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: True)
+    # The pane now hosts a different child than the one this row recorded.
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_a: 9999)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "live", "preserved, never asserted"
+    assert any(e["reason"] == "claude-pane-pid-unconfirmed" for e in result.errors)
+
+
 def test_reconcile_never_trusts_an_uncorrelated_claude_pane_pid(
     tmp_path: Path, monkeypatch
 ) -> None:
