@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 import os
 from pathlib import Path
+import stat
 from typing import Any, Sequence
 
 from pydantic import Field, ValidationError
@@ -183,8 +184,67 @@ def _read_definition(path: Path, *, layer: RoleLayer, root: Path) -> DiscoveredR
     )
 
 
-def _explicit_paths(specs: Sequence[str]) -> tuple[tuple[RoleLayer, Path], ...]:
+def _unreadable_path(
+    *,
+    layer: RoleLayer,
+    path: Path,
+    root: Path,
+    error: OSError,
+) -> DiscoveredRoleDefinition:
+    return DiscoveredRoleDefinition(
+        layer=layer,
+        source_id=_source_id(path, root),
+        status=DefinitionStatus.UNREADABLE,
+        role=None,
+        raw_definition=None,
+        definition=None,
+        error=f"{type(error).__name__}: {error}",
+    )
+
+
+def _walk_json_paths(
+    directory: Path,
+    *,
+    layer: RoleLayer,
+    root: Path,
+) -> tuple[tuple[Path, ...], tuple[DiscoveredRoleDefinition, ...]]:
+    paths: list[Path] = []
+    errors: list[DiscoveredRoleDefinition] = []
+
+    def record_error(error: OSError) -> None:
+        failed_path = Path(error.filename) if error.filename else directory
+        errors.append(
+            _unreadable_path(
+                layer=layer,
+                path=failed_path,
+                root=root,
+                error=error,
+            )
+        )
+
+    for current, directories, filenames in os.walk(
+        directory,
+        topdown=True,
+        onerror=record_error,
+        followlinks=False,
+    ):
+        directories.sort()
+        paths.extend(
+            Path(current) / filename for filename in sorted(filenames) if filename.endswith(".json")
+        )
+    return tuple(paths), tuple(errors)
+
+
+def _explicit_paths(
+    specs: Sequence[str],
+    *,
+    root: Path,
+) -> tuple[
+    tuple[tuple[RoleLayer, Path], ...],
+    tuple[DiscoveredRoleDefinition, ...],
+]:
     parsed: list[tuple[RoleLayer, Path]] = []
+    errors: list[DiscoveredRoleDefinition] = []
     for spec in specs:
         layer_text, separator, path_text = spec.partition("=")
         if not separator or not path_text:
@@ -197,11 +257,18 @@ def _explicit_paths(specs: Sequence[str]) -> tuple[tuple[RoleLayer, Path], ...]:
                 f"unknown role layer {layer_text!r}; expected one of {choices}"
             ) from exc
         path = Path(path_text).expanduser()
-        if path.is_dir():
-            parsed.extend((layer, item) for item in sorted(path.rglob("*.json")))
-        else:
+        try:
+            path_status = path.stat()
+        except OSError:
             parsed.append((layer, path))
-    return tuple(parsed)
+            continue
+        if not stat.S_ISDIR(path_status.st_mode):
+            parsed.append((layer, path))
+            continue
+        paths, walk_errors = _walk_json_paths(path, layer=layer, root=root)
+        parsed.extend((layer, item) for item in paths)
+        errors.extend(walk_errors)
+    return tuple(parsed), tuple(errors)
 
 
 def discover_role_definitions(
@@ -216,19 +283,51 @@ def discover_role_definitions(
         else Path(os.environ.get("FNO_ROLES_ROOT", Path.cwd() / ".fno" / "roles"))
     ).expanduser()
     candidates: list[tuple[RoleLayer, Path]] = []
+    discovered_errors: list[DiscoveredRoleDefinition] = []
     for layer in RoleLayer:
         layer_root = resolved_root / layer.value
-        if layer_root.is_dir():
-            candidates.extend((layer, path) for path in sorted(layer_root.rglob("*.json")))
-    candidates.extend(_explicit_paths(source_specs))
-    unique = {
-        (layer, path.resolve()): (layer, path)
-        for layer, path in candidates
-    }
-    records = (
-        _read_definition(path, layer=layer, root=resolved_root)
-        for layer, path in unique.values()
-    )
+        try:
+            layer_status = layer_root.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            discovered_errors.append(
+                _unreadable_path(
+                    layer=layer,
+                    path=layer_root,
+                    root=resolved_root,
+                    error=exc,
+                )
+            )
+            continue
+        if not stat.S_ISDIR(layer_status.st_mode):
+            discovered_errors.append(
+                DiscoveredRoleDefinition(
+                    layer=layer,
+                    source_id=_source_id(layer_root, resolved_root),
+                    status=DefinitionStatus.INVALID,
+                    role=None,
+                    raw_definition=None,
+                    definition=None,
+                    error="role layer exists but is not a directory",
+                )
+            )
+            continue
+        paths, walk_errors = _walk_json_paths(
+            layer_root,
+            layer=layer,
+            root=resolved_root,
+        )
+        candidates.extend((layer, path) for path in paths)
+        discovered_errors.extend(walk_errors)
+    explicit_paths, explicit_errors = _explicit_paths(source_specs, root=resolved_root)
+    candidates.extend(explicit_paths)
+    discovered_errors.extend(explicit_errors)
+    unique = {(layer, path.resolve()): (layer, path) for layer, path in candidates}
+    records = [
+        _read_definition(path, layer=layer, root=resolved_root) for layer, path in unique.values()
+    ]
+    records.extend(discovered_errors)
     return tuple(
         sorted(
             records,

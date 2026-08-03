@@ -131,7 +131,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Executor resolution (locked-decision parser + surface inference)",
         {"hidden": True},
     ),
-    "roles": ("fno.roles.cli:roles_app", "Inspect bounded business-role definitions and resolutions.", {"hidden": True}),
+    "roles": (
+        "fno.roles.cli:roles_app",
+        "Inspect bounded business-role definitions and resolutions.",
+        {"hidden": True},
+    ),
     "config": ("fno.config_cli:app", "Configuration management"),
     "notify": (
         "fno.notify:notify_app",
@@ -719,9 +723,7 @@ def review(
         from fno.worker.review import resolve_session_id, review_assurance
 
         sid = resolve_session_id(session, state or Path(".fno/target-state.md"))
-        verdict = review_assurance(
-            sid, size=policy_size, risk_surfaces=list(risk_surface or [])
-        )
+        verdict = review_assurance(sid, size=policy_size, risk_surfaces=list(risk_surface or []))
         typer.echo(json.dumps(verdict))
         # Fail closed so a direct CLI caller gets the same block the skill does:
         # an unsatisfied high-assurance policy must not read as a clean pass.

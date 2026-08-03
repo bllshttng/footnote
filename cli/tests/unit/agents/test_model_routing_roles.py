@@ -547,6 +547,29 @@ def test_default_production_lookup_blocks_corrupt_source_at_spawn_seam(
         mr.resolve_spawn_route("publisher")
 
 
+def test_default_production_lookup_blocks_unreadable_layer_at_spawn_seam(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    unreadable_layer = root / RoleLayer.PROJECT.value
+    unreadable_layer.mkdir(parents=True)
+    unreadable_layer.chmod(0)
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+    monkeypatch.setattr(mr, "_routing_block", lambda settings: _settings().model_routing)
+
+    try:
+        with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
+            mr.resolve_spawn_route("coordinate")
+    finally:
+        unreadable_layer.chmod(0o700)
+
+    assert caught.value.result.reason is RoleResolutionReason.INVALID_MANIFEST
+    assert caught.value.result.source_layer is RoleLayer.PROJECT
+    assert caught.value.result.source_id == "project"
+    assert "PermissionError" in (caught.value.result.detail or "")
+
+
 @pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
 def test_default_lookup_keeps_protected_roles_short_circuited_before_discovery(
     resolver: Callable[..., object],

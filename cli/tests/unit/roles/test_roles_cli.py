@@ -324,6 +324,46 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
     assert any(row["source"] == expected_source for row in shown_rows)
 
 
+def test_resolve_fails_closed_when_a_layer_directory_cannot_be_enumerated(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    roles_root = tmp_path / "roles"
+    _write_source(
+        roles_root,
+        layer=RoleLayer.BUILT_IN,
+        name="owner",
+        role_id="owner",
+        function_id="marketing",
+    )
+    unreadable_layer = roles_root / RoleLayer.PROJECT.value
+    unreadable_layer.mkdir()
+    unreadable_layer.chmod(0)
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(roles_root))
+    monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
+
+    try:
+        resolved = _invoke(
+            "roles",
+            "resolve",
+            "owner",
+            "--work-order",
+            "x-a8c0",
+            "--attempt",
+            "attempt-1",
+            "-J",
+        )
+    finally:
+        unreadable_layer.chmod(0o700)
+
+    assert resolved.exit_code == 1
+    blocked = _assert_pretty_sorted_json(resolved.output)
+    assert blocked["reason"] == "invalid_manifest"
+    assert blocked["source_layer"] == "project"
+    assert blocked["source_id"] == "project"
+    assert "PermissionError" in blocked["detail"]
+
+
 def test_ac_r7_ui_roles_is_hidden_lazy_and_discoverable() -> None:
     from fno.cli import LAZY_SUBCOMMANDS
 
