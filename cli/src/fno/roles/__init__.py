@@ -22,7 +22,14 @@ from fno.roles.models import (
     RoutingHint,
     Sensitivity,
 )
-from fno.roles.registry import RegistryError, RoleRegistry, ordered_definitions
+from fno.roles.registry import (
+    DiscoveredRoleDefinition,
+    DiscoveryInputError,
+    RegistryError,
+    RoleRegistry,
+    discover_role_definitions,
+    ordered_definitions,
+)
 from fno.roles.resolver import resolve_role
 
 __all__ = [
@@ -35,6 +42,8 @@ __all__ = [
     "ContextSelector",
     "DefinitionStatus",
     "DeliveryPolicy",
+    "DiscoveredRoleDefinition",
+    "DiscoveryInputError",
     "RegistryError",
     "ResolvedRole",
     "ResolvedSource",
@@ -48,6 +57,7 @@ __all__ = [
     "RoleResolutionReason",
     "RoutingHint",
     "Sensitivity",
+    "discover_role_definitions",
     "ordered_definitions",
     "resolve_role",
 ]
