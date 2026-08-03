@@ -28,6 +28,7 @@ from fno.company.contracts import (
 )
 from fno.delivery.contracts import (
     DeliveryEvidenceFact,
+    DeliveryEvidenceRejection,
     DeliveryEvidenceObservedEvent,
     DeliveryVerdict,
 )
@@ -274,6 +275,136 @@ def adapt_delivery_event(
     )
 
 
+def reject_delivery_event(
+    company_work: CompanyWorkRefs,
+    event: Mapping[str, object] | object,
+    *,
+    fact_revision: str,
+) -> tuple[DeliveryEvidenceRejection, ...]:
+    """Retain a rejected producer read when its requirement is identifiable."""
+    if not isinstance(event, Mapping):
+        return ()
+    event_type = event.get("type")
+    data = event.get("data")
+    if not isinstance(event_type, str) or not isinstance(data, Mapping):
+        return ()
+    producer = _rejected_producer(event_type, data)
+    diagnostics = _rejected_binding_diagnostics(company_work, event_type, event, data)
+    if not diagnostics:
+        return ()
+    evidence_ids = _rejected_evidence_ids(company_work, event_type, data)
+    return tuple(
+        DeliveryEvidenceRejection(
+            evidence_id=evidence_id,
+            producer=producer,
+            diagnostic=f"requirement {evidence_id} from {producer} rejected binding: "
+            + ", ".join(diagnostics),
+            fact_revision=fact_revision,
+        )
+        for evidence_id in evidence_ids
+    )
+
+
+def _rejected_producer(event_type: str, data: Mapping[str, object]) -> str:
+    if event_type == "delivery_evidence_observed":
+        producer = _nonempty(data, "producer")
+        return producer or "unknown producer"
+    source = "approvals" if event_type in {
+        "approval_requested",
+        "approval_decided",
+        "effect_state_changed",
+    } else "unknown"
+    return f"event:{source}:{event_type}"
+
+
+def _rejected_evidence_ids(
+    company_work: CompanyWorkRefs,
+    event_type: str,
+    data: Mapping[str, object],
+) -> tuple[str, ...]:
+    required_ids = {
+        evidence_id
+        for deliverable in company_work.deliverables
+        for evidence_id in deliverable.required_evidence_ids
+    }
+    if event_type == "delivery_evidence_observed":
+        evidence = data.get("evidence")
+        evidence_id = evidence.get("id") if isinstance(evidence, Mapping) else None
+        return (evidence_id,) if isinstance(evidence_id, str) and evidence_id in required_ids else ()
+    if event_type in {"approval_requested", "approval_decided"}:
+        request_digest = _nonempty(data, "request_digest")
+        kinds = (EvidenceSubjectKind.APPROVAL,)
+        subject_id = request_digest
+    elif event_type == "effect_state_changed":
+        subject_id = _nonempty(data, "effect_id")
+        kinds = (EvidenceSubjectKind.EFFECT, EvidenceSubjectKind.ACKNOWLEDGMENT)
+    else:
+        return ()
+    if subject_id is None:
+        return ()
+    return tuple(
+        evidence.id
+        for evidence in company_work.evidence
+        if evidence.id in required_ids
+        and evidence.subject_kind in kinds
+        and evidence.subject_id == subject_id
+    )
+
+
+def _rejected_binding_diagnostics(
+    company_work: CompanyWorkRefs,
+    event_type: str,
+    event: Mapping[str, object],
+    data: Mapping[str, object],
+) -> list[str]:
+    diagnostics: list[str] = []
+    if event_type == "delivery_evidence_observed":
+        try:
+            DeliveryEvidenceObservedEvent.model_validate(event)
+        except ValidationError:
+            diagnostics.append("malformed delivery_evidence_observed event")
+        if event.get("source") != "target":
+            diagnostics.append(f"source {event.get('source')}")
+        return diagnostics
+    if event.get("source") != "approvals":
+        diagnostics.append(f"source {event.get('source')}")
+    work_order = company_work.work_order
+    if work_order is not None:
+        if data.get("work_order_id") != work_order.node_id:
+            diagnostics.append(f"work order {data.get('work_order_id')}")
+        if data.get("attempt_id") != work_order.attempt_id:
+            diagnostics.append(f"attempt {data.get('attempt_id')}")
+    required = {
+        "approval_requested": (
+            "request_digest",
+            "effect_id",
+            "effect_class",
+            "destination",
+            "action_digest",
+            "expires_at",
+        ),
+        "approval_decided": (
+            "request_digest",
+            "decision",
+            "deciding_principal_id",
+            "effect_id",
+        ),
+        "effect_state_changed": (
+            "idempotency_key",
+            "state",
+            "previous_state",
+            "request_digest",
+            "effect_id",
+        ),
+    }.get(event_type, ())
+    missing = [key for key in required if _nonempty(data, key) is None]
+    if missing:
+        diagnostics.append(f"missing {', '.join(missing)}")
+    if not diagnostics:
+        diagnostics.append("producer event did not match its declared slot")
+    return diagnostics
+
+
 def _adapt_observed_event(
     company_work: CompanyWorkRefs, event: Mapping[str, object]
 ) -> tuple[DeliveryEvidenceFact, ...]:
@@ -471,6 +602,36 @@ def adapt_legacy_research(
         legacy_passed=legacy_passed,
         evaluated_at=evaluated_at,
     )
+
+
+def adapt_legacy_research_grade(
+    grade: object,
+    *,
+    work_order_node_id: str,
+    attempt_id: str,
+    artifact_read: bool,
+    sidecar_read: bool,
+    observed_at: datetime,
+    fresh_until: datetime,
+    source_revision: str,
+    fact_revision: str,
+    evaluated_at: datetime,
+) -> LegacyDeliveryShadow:
+    """Adapt the actual GradeResult/current setup reads without copying its verdict."""
+    snapshot = LegacyResearchSnapshot(
+        work_order_node_id=work_order_node_id,
+        attempt_id=attempt_id,
+        uncited_claims=getattr(grade, "uncited_claims"),
+        dead_urls=getattr(grade, "dead_urls"),
+        sections_uncovered=tuple(getattr(grade, "sections_uncovered")),
+        artifact_read=artifact_read,
+        sidecar_read=sidecar_read,
+        observed_at=observed_at,
+        fresh_until=fresh_until,
+        source_revision=source_revision,
+        fact_revision=fact_revision,
+    )
+    return adapt_legacy_research(snapshot, evaluated_at=evaluated_at)
 
 
 def _evaluate_shadow(

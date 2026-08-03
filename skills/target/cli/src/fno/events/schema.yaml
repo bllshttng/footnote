@@ -1746,7 +1746,7 @@ event_types:
           description: "Target session identifier."
         reason:
           type: string
-          enum: [DonePRGreen, DoneAdvisory, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          enum: [DonePRGreen, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
           description: "TerminationReason enum value."
         axis:
           type: string
@@ -1967,7 +1967,7 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [DonePRGreen, DoneAdvisory, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          enum: [DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted, Aborted]
           description: "Walk-level TerminationReason value."
         iterations_used:
           type: integer
@@ -3165,7 +3165,7 @@ event_types:
     description: "The pure delivery evaluator retained aggregate and per-requirement results for one attempt. This derived event is not an evidence producer."
     sources: [target, test]
     data:
-      required: [evaluator_version, work_order_node_id, attempt_id, aggregate, fact_revision, requirements, diagnostics]
+      required: [evaluator_version, work_order_node_id, attempt_id, aggregate, fact_revision, required_requirements, requirements, diagnostics]
       properties:
         evaluator_version:
           type: string
@@ -3182,6 +3182,9 @@ event_types:
           enum: [passed, failed, blocked, unknown]
         fact_revision:
           type: [string, "null"]
+        required_requirements:
+          type: array
+          description: "Exact ordered deliverable/evidence bindings that the requirement rows must cover."
         requirements:
           type: array
           description: "Complete ordered per-requirement verdict rows; aggregate never hides them."

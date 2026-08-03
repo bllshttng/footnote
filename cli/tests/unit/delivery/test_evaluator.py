@@ -23,6 +23,7 @@ from fno.delivery import (
     DeliveryEvidenceFact,
     evaluate_delivery,
 )
+from fno.evals.research_grade import GradeResult
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=timezone.utc)
 NODE_ID = "x-delivery"
@@ -377,6 +378,43 @@ def test_ac_d4_compat_research_shadow_preserves_exact_grade_and_setup_reads() ->
         "legacy-research-dead-urls",
         "legacy-research-section-coverage",
     ]
+
+
+@pytest.mark.parametrize(
+    ("grade_changes", "artifact_read", "sidecar_read"),
+    [
+        ({}, True, True),
+        ({"uncited_claims": 1}, True, True),
+        ({"dead_urls": 1}, True, True),
+        ({"sections_uncovered": ["Findings"]}, True, True),
+        ({}, False, True),
+        ({}, True, False),
+    ],
+)
+def test_ac_d4_compat_research_adapter_consumes_actual_grade_result_current_reads(
+    grade_changes: dict[str, object], artifact_read: bool, sidecar_read: bool
+) -> None:
+    from fno.delivery import adapt_legacy_research_grade
+
+    grade = GradeResult(brief="brief.md", golden="golden.md", sidecar="sources.jsonl")
+    for field, value in grade_changes.items():
+        setattr(grade, field, value)
+
+    shadow = adapt_legacy_research_grade(
+        grade,
+        work_order_node_id=NODE_ID,
+        attempt_id=ATTEMPT_ID,
+        artifact_read=artifact_read,
+        sidecar_read=sidecar_read,
+        observed_at=NOW,
+        fresh_until=NOW + timedelta(minutes=5),
+        source_revision="brief-sha:sidecar-sha",
+        fact_revision="research-snapshot-current",
+        evaluated_at=NOW,
+    )
+
+    assert shadow.legacy_passed is (grade.green and artifact_read and sidecar_read)
+    assert (shadow.verdict.aggregate is EvidenceResult.PASSED) is shadow.legacy_passed
 
 
 @pytest.mark.parametrize(

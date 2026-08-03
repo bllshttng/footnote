@@ -40,6 +40,15 @@ class DeliveryEvidenceFact(_DeliveryModel):
         return self
 
 
+class DeliveryEvidenceRejection(_DeliveryModel):
+    """A producer read that can be bound to a requirement but not accepted."""
+
+    evidence_id: NonEmptyStr
+    producer: NonEmptyStr
+    diagnostic: NonEmptyStr
+    fact_revision: NonEmptyStr
+
+
 class DeliveryRequirementVerdict(_DeliveryModel):
     """The retained result for one declared deliverable requirement."""
 
@@ -53,6 +62,13 @@ class DeliveryRequirementVerdict(_DeliveryModel):
     diagnostics: tuple[NonEmptyStr, ...] = ()
 
 
+class DeliveryRequirementBinding(_DeliveryModel):
+    """The declared identity of one required coverage row."""
+
+    deliverable_id: NonEmptyStr
+    evidence_id: NonEmptyStr
+
+
 class DeliveryVerdict(_DeliveryModel):
     """Complete deterministic coverage for one work-order attempt."""
 
@@ -62,8 +78,23 @@ class DeliveryVerdict(_DeliveryModel):
     attempt_id: NonEmptyStr
     aggregate: EvidenceResult
     fact_revision: NonEmptyStr | None = None
+    required_requirements: tuple[DeliveryRequirementBinding, ...]
     requirements: tuple[DeliveryRequirementVerdict, ...]
     diagnostics: tuple[NonEmptyStr, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_complete_requirement_join(self) -> Self:
+        declared = tuple(
+            (item.deliverable_id, item.evidence_id) for item in self.required_requirements
+        )
+        evaluated = tuple(
+            (item.deliverable_id, item.evidence_id) for item in self.requirements
+        )
+        if declared != evaluated:
+            raise ValueError("requirements must exactly cover required_requirements")
+        if len(set(declared)) != len(declared):
+            raise ValueError("required_requirements must be unique")
+        return self
 
 
 class DeliveryEvidenceObservedEvent(_DeliveryModel):

@@ -1,3 +1,4 @@
+use fno_agents::delivery_completion::pr_passes;
 use fno_agents::loopcheck::TerminationReason;
 use serde_json::{json, Value};
 use std::fs;
@@ -30,7 +31,7 @@ fn setup(response: &str) -> GenericEnv {
     .unwrap();
     fs::write(
         cwd.join("plan.md"),
-        "---\nnode: x-delivery\ncompletion: delivery\n---\n",
+        "---\nnode: x-delivery\nstatus: ready\ncreated: 2026-08-02\ncompletion: delivery\ncompany_work:\n  work_order:\n    node_id: x-delivery\n    attempt_id: attempt-1\n  deliverables:\n    - id: output\n      kind: arbitrary-output\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      required_evidence_ids: [artifact-ready]\n  evidence:\n    - id: artifact-ready\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      subject_kind: artifact\n      subject_id: artifact-1\n      result: passed\n---\n",
     )
     .unwrap();
     let transcript = cwd.join("transcript.jsonl");
@@ -107,6 +108,10 @@ fn passed_response() -> String {
             "attempt_id": "attempt-1",
             "aggregate": "passed",
             "fact_revision": "sha256:abc",
+            "required_requirements": [{
+                "deliverable_id": "output",
+                "evidence_id": "artifact-ready"
+            }],
             "requirements": [{
                 "deliverable_id": "output",
                 "evidence_id": "artifact-ready",
@@ -122,6 +127,69 @@ fn passed_response() -> String {
         "diagnostics": []
     })
     .to_string()
+}
+
+fn canonical_setup() -> GenericEnv {
+    let env = setup(&passed_response());
+    fs::write(
+        env.cwd.join("plan.md"),
+        "---\nnode: x-delivery\nstatus: ready\ncreated: 2026-08-02\ncompletion: delivery\ncompany_work:\n  work_order:\n    node_id: x-delivery\n    attempt_id: attempt-1\n  deliverables:\n    - id: output\n      kind: arbitrary-output\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      required_evidence_ids: [artifact-ready, review-ready]\n  evidence:\n    - id: artifact-ready\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      subject_kind: artifact\n      subject_id: artifact-1\n      result: passed\n    - id: review-ready\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      subject_kind: review\n      subject_id: review-1\n      result: passed\n---\n",
+    )
+    .unwrap();
+    let event = |id: &str, kind: &str, subject: &str, producer: &str| {
+        json!({
+            "ts": "2026-08-02T12:00:00Z",
+            "type": "delivery_evidence_observed",
+            "source": "target",
+            "data": {
+                "version": "delivery-evidence-fact.v1",
+                "evidence": {
+                    "id": id,
+                    "work_order_id": "x-delivery",
+                    "attempt_id": "attempt-1",
+                    "subject_kind": kind,
+                    "subject_id": subject,
+                    "result": "passed"
+                },
+                "producer": producer,
+                "observed_at": "2026-08-02T12:00:00Z",
+                "source_revision": format!("{id}-source"),
+                "fresh_until": "2099-08-02T12:00:00Z",
+                "adapter_version": "test.v1",
+                "fact_revision": "producer-snapshot"
+            }
+        })
+        .to_string()
+    };
+    fs::write(
+        &env.events,
+        format!(
+            "{}\n{}\n",
+            event(
+                "artifact-ready",
+                "artifact",
+                "artifact-1",
+                "adapter:artifact"
+            ),
+            event("review-ready", "review", "review-1", "adapter:review"),
+        ),
+    )
+    .unwrap();
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    fs::write(
+        &env.evaluator,
+        format!(
+            "#!/bin/sh\nexec uv run --project '{}' fno-py \"$@\"\n",
+            repo.join("cli").display(),
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&env.evaluator, fs::Permissions::from_mode(0o755)).unwrap();
+    env
 }
 
 fn event_types(path: &Path) -> Vec<String> {
@@ -146,12 +214,25 @@ fn generic_completion_preserves_legacy_terminal_serialization() {
 }
 
 #[test]
+fn generic_completion_ac_d4_compat_counterfactuals_match_pr_authority() {
+    assert!(pr_passes(true, true, true, true, true));
+    for failing_read in 0..5 {
+        let mut reads = [true; 5];
+        reads[failing_read] = false;
+        assert!(
+            !pr_passes(reads[0], reads[1], reads[2], reads[3], reads[4]),
+            "legacy PR authority bypassed current read {failing_read}"
+        );
+    }
+}
+
+#[test]
 fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() {
     let env = setup(&passed_response());
 
     let output = run(&env);
 
-    assert_eq!(output["decision"], "allow");
+    assert_eq!(output["decision"], "allow", "{output}");
     assert_eq!(output["termination_reason"], "DoneDelivery");
     assert!(event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
     let events = fs::read_to_string(&env.events).unwrap();
@@ -191,6 +272,77 @@ fn generic_completion_ac_d10_err_verdict_must_be_durably_appended() {
     let env = setup(&passed_response());
     fs::remove_file(&env.events).unwrap();
     fs::create_dir(&env.events).unwrap();
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    assert!(output["termination_reason"].is_null());
+}
+
+#[test]
+fn generic_completion_ac_d5_inv_valid_incomplete_declaration_uses_legacy_path() {
+    let env = setup(&passed_response());
+    fs::write(
+        env.cwd.join("plan.md"),
+        "---\nnode: x-delivery\nstatus: ready\ncreated: 2026-08-02\ncompletion: delivery\ncompany_work:\n  work_order:\n    node_id: x-delivery\n    attempt_id: attempt-1\n  deliverables:\n    - id: output\n      kind: arbitrary-output\n      work_order_id: x-delivery\n      attempt_id: attempt-1\n      required_evidence_ids: []\n---\n",
+    )
+    .unwrap();
+
+    let output = run(&env);
+
+    assert_eq!(output["termination_reason"], "DoneAdvisory");
+}
+
+#[test]
+fn generic_completion_malformed_explicit_plan_never_falls_through_to_advisory() {
+    let env = setup(&passed_response());
+    fs::write(
+        env.cwd.join("plan.md"),
+        "---\ncompletion: delivery\ncompany_work: [\n---\n",
+    )
+    .unwrap();
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    assert!(output["termination_reason"].is_null());
+}
+
+#[test]
+fn generic_completion_ac_d6_arch_real_cli_evaluates_full_plan_and_journal() {
+    let env = canonical_setup();
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "allow", "{output}");
+    assert_eq!(output["termination_reason"], "DoneDelivery");
+}
+
+#[test]
+fn generic_completion_ac_d6_arch_dropped_requirement_stays_nonterminal() {
+    let env = canonical_setup();
+    let first = fs::read_to_string(&env.events)
+        .unwrap()
+        .lines()
+        .next()
+        .unwrap()
+        .to_string();
+    fs::write(&env.events, format!("{first}\n")).unwrap();
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block");
+    assert!(output["termination_reason"].is_null());
+}
+
+#[test]
+fn generic_completion_ac_d6_arch_incomplete_pass_response_is_rejected() {
+    let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+    response["verdict"]["required_requirements"] = json!([
+        {"deliverable_id": "output", "evidence_id": "artifact-ready"},
+        {"deliverable_id": "output", "evidence_id": "review-ready"}
+    ]);
+    let env = setup(&response.to_string());
 
     let output = run(&env);
 

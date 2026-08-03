@@ -2,6 +2,7 @@
 
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -24,6 +25,11 @@ pub struct DeliveryReceipt {
     pub uri: String,
 }
 
+/// Exact current-read conjunction that authorizes the legacy PR terminal.
+pub fn pr_passes(open: bool, ci: bool, reviewed: bool, head: bool, probes: bool) -> bool {
+    open && ci && reviewed && head && probes
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Response {
@@ -44,8 +50,16 @@ struct Verdict {
     attempt_id: String,
     aggregate: String,
     fact_revision: Value,
+    required_requirements: Vec<RequirementBinding>,
     requirements: Vec<Requirement>,
     diagnostics: Vec<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequirementBinding {
+    deliverable_id: String,
+    evidence_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,8 +76,10 @@ struct Requirement {
 }
 
 pub fn evaluate(fno_bin: &str, cwd: &Path, plan_path: &Path, events: &Path) -> DeliveryCompletion {
-    if !explicitly_activated(plan_path) {
-        return DeliveryCompletion::Inactive;
+    match activation(plan_path) {
+        Activation::Inactive => return DeliveryCompletion::Inactive,
+        Activation::Invalid(reason) => return DeliveryCompletion::Nonpassing(reason),
+        Activation::Active => {}
     }
     let output = match Command::new(fno_bin)
         .args(["delivery", "evaluate", "--json", "--plan-path"])
@@ -252,15 +268,13 @@ pub fn selected_receipt(
         if data.get("session_id")?.as_str()? != session_id {
             return None;
         }
-        if data.get("aggregate")?.as_str()? != "passed" {
-            return None;
-        }
-        let node = data.get("work_order_node_id")?.as_str()?;
+        let revision = data.get("fact_revision")?.as_str()?;
+        let verdict = strict_passed_verdict(data, revision)?;
+        let node = verdict.work_order_node_id.as_str();
         if expected_node.is_some_and(|expected| expected != node) {
             return None;
         }
-        let attempt = data.get("attempt_id")?.as_str()?;
-        let revision = data.get("fact_revision")?.as_str()?;
+        let attempt = verdict.attempt_id.as_str();
         Some(DeliveryReceipt {
             node: node.into(),
             attempt: attempt.into(),
@@ -289,24 +303,76 @@ pub fn write_receipt_handoff(
     Ok(path.to_string_lossy().into_owned())
 }
 
-fn explicitly_activated(plan_path: &Path) -> bool {
-    let Ok(text) = std::fs::read_to_string(plan_path) else {
-        return false;
+enum Activation {
+    Inactive,
+    Active,
+    Invalid(String),
+}
+
+fn activation(plan_path: &Path) -> Activation {
+    let text = match std::fs::read_to_string(plan_path) {
+        Ok(text) => text,
+        Err(error) => {
+            return Activation::Invalid(format!("delivery plan could not be read: {error}"))
+        }
     };
     let Some(rest) = text.strip_prefix("---") else {
-        return false;
+        return Activation::Inactive;
     };
     let Some(end) = rest.find("\n---") else {
-        return false;
+        return Activation::Invalid("delivery plan frontmatter is unterminated".into());
     };
-    let Ok(frontmatter) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&rest[..end]) else {
-        return false;
+    let frontmatter = match serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&rest[..end]) {
+        Ok(frontmatter) => frontmatter,
+        Err(error) => {
+            return Activation::Invalid(format!("delivery plan frontmatter is malformed: {error}"))
+        }
     };
-    frontmatter
-        .as_mapping()
-        .and_then(|mapping| mapping.get(serde_yaml_ng::Value::from("completion")))
+    let Some(mapping) = frontmatter.as_mapping() else {
+        return Activation::Invalid("delivery plan frontmatter is not a mapping".into());
+    };
+    if mapping
+        .get(serde_yaml_ng::Value::from("completion"))
         .and_then(serde_yaml_ng::Value::as_str)
-        == Some("delivery")
+        != Some("delivery")
+    {
+        return Activation::Inactive;
+    }
+    let Some(company) = mapping
+        .get(serde_yaml_ng::Value::from("company_work"))
+        .and_then(serde_yaml_ng::Value::as_mapping)
+    else {
+        return Activation::Inactive;
+    };
+    let work_order_valid = company
+        .get(serde_yaml_ng::Value::from("work_order"))
+        .and_then(serde_yaml_ng::Value::as_mapping)
+        .is_some_and(|work_order| {
+            ["node_id", "attempt_id"].iter().all(|key| {
+                work_order
+                    .get(serde_yaml_ng::Value::from(*key))
+                    .and_then(serde_yaml_ng::Value::as_str)
+                    .is_some_and(|value| !value.trim().is_empty())
+            })
+        });
+    let Some(deliverables) = company
+        .get(serde_yaml_ng::Value::from("deliverables"))
+        .and_then(serde_yaml_ng::Value::as_sequence)
+    else {
+        return Activation::Inactive;
+    };
+    let has_required = deliverables.iter().any(|deliverable| {
+        deliverable
+            .as_mapping()
+            .and_then(|item| item.get(serde_yaml_ng::Value::from("required_evidence_ids")))
+            .and_then(serde_yaml_ng::Value::as_sequence)
+            .is_some_and(|ids| !ids.is_empty())
+    });
+    if work_order_valid && !deliverables.is_empty() && has_required {
+        Activation::Active
+    } else {
+        Activation::Inactive
+    }
 }
 
 fn parse_response(raw: &[u8]) -> DeliveryCompletion {
@@ -339,21 +405,7 @@ fn parse_evaluated(response: Response) -> DeliveryCompletion {
     let Some(fact_revision) = response.fact_revision.as_str() else {
         return DeliveryCompletion::Nonpassing("evaluated response has no fact revision".into());
     };
-    let verdict: Verdict = match serde_json::from_value(response.verdict.clone()) {
-        Ok(verdict) => verdict,
-        Err(error) => {
-            return DeliveryCompletion::Nonpassing(format!("malformed delivery verdict: {error}"))
-        }
-    };
-    let complete = verdict.evaluator_version == "delivery-evaluator.v1"
-        && !verdict.work_order_node_id.is_empty()
-        && !verdict.attempt_id.is_empty()
-        && verdict.aggregate == "passed"
-        && verdict.fact_revision.as_str() == Some(fact_revision)
-        && !verdict.requirements.is_empty()
-        && verdict.requirements.iter().all(valid_passed_requirement)
-        && verdict.diagnostics.is_empty();
-    if !complete {
+    if strict_passed_verdict(&response.verdict, fact_revision).is_none() {
         return DeliveryCompletion::Nonpassing(
             "delivery verdict is nonpassing or incomplete".into(),
         );
@@ -362,6 +414,32 @@ fn parse_evaluated(response: Response) -> DeliveryCompletion {
         fact_revision: fact_revision.to_string(),
         verdict: response.verdict,
     }
+}
+
+fn strict_passed_verdict(value: &Value, fact_revision: &str) -> Option<Verdict> {
+    let verdict: Verdict = serde_json::from_value(value.clone()).ok()?;
+    let required: Vec<_> = verdict
+        .required_requirements
+        .iter()
+        .map(|item| (item.deliverable_id.as_str(), item.evidence_id.as_str()))
+        .collect();
+    let rows: Vec<_> = verdict
+        .requirements
+        .iter()
+        .map(|item| (item.deliverable_id.as_str(), item.evidence_id.as_str()))
+        .collect();
+    let unique: HashSet<_> = required.iter().copied().collect();
+    let complete = verdict.evaluator_version == "delivery-evaluator.v1"
+        && !verdict.work_order_node_id.is_empty()
+        && !verdict.attempt_id.is_empty()
+        && verdict.aggregate == "passed"
+        && verdict.fact_revision.as_str() == Some(fact_revision)
+        && !required.is_empty()
+        && required == rows
+        && unique.len() == required.len()
+        && verdict.requirements.iter().all(valid_passed_requirement)
+        && verdict.diagnostics.is_empty();
+    complete.then_some(verdict)
 }
 
 fn valid_passed_requirement(requirement: &Requirement) -> bool {

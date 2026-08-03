@@ -7,7 +7,7 @@
 //!
 //! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
-use crate::completion_output::allow_output;
+use crate::{completion_output::allow_output, delivery_completion::pr_passes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -4244,8 +4244,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // done_probes: the FINAL DonePRGreen conjunct. Gated on
                 // every other conjunct already holding, so a plan with no probes
                 // spawns no subprocess and a red/unreviewed PR never pays for one.
-                let mut probe_block: Option<String> = None;
-                let mut probe_results = Value::Null;
+                let (mut probe_block, mut probe_results) = (None, Value::Null);
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     match evaluate_done_probes(
                         manifest.plan_path.as_deref(),
@@ -4264,7 +4263,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                if pr_open && ci_ok && pr_info.reviewed && head_shipped && probe_block.is_none() {
+                let (reviewed, probes_passed) = (pr_info.reviewed, probe_block.is_none());
+                if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
                     // AC1-UI: name any rate-limited bot the gate proceeded
                     // without, so the terminal message and the emitted event
                     // agree on why a required bot is absent from the evidence.

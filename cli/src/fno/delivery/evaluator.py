@@ -11,6 +11,8 @@ from fno.company.contracts import CompanyWorkRefs, EvidenceRef, EvidenceResult, 
 from fno.delivery.contracts import (
     DELIVERY_EVALUATOR_VERSION,
     DeliveryEvidenceFact,
+    DeliveryEvidenceRejection,
+    DeliveryRequirementBinding,
     DeliveryRequirementVerdict,
     DeliveryVerdict,
 )
@@ -18,7 +20,9 @@ from fno.delivery.contracts import (
 
 def evaluate_delivery(
     company_work: CompanyWorkRefs,
-    facts: Iterable[DeliveryEvidenceFact | Mapping[str, object] | object],
+    facts: Iterable[
+        DeliveryEvidenceFact | DeliveryEvidenceRejection | Mapping[str, object] | object
+    ],
     *,
     evaluated_at: datetime,
 ) -> DeliveryVerdict:
@@ -36,11 +40,26 @@ def evaluate_delivery(
         for evidence_id in deliverable.required_evidence_ids
     )
     required_ids = {evidence_id for _, evidence_id, _ in requirements}
+    required_bindings = tuple(
+        DeliveryRequirementBinding(
+            deliverable_id=deliverable_id,
+            evidence_id=evidence_id,
+        )
+        for deliverable_id, evidence_id, _ in requirements
+    )
     valid_by_id: dict[str, list[DeliveryEvidenceFact]] = {}
     rejected_by_id: dict[str, list[str]] = {}
     global_diagnostics: list[str] = []
+    rejected_revisions: set[str] = set()
 
     for raw_fact in facts:
+        if isinstance(raw_fact, DeliveryEvidenceRejection):
+            if raw_fact.evidence_id in required_ids:
+                rejected_by_id.setdefault(raw_fact.evidence_id, []).append(
+                    raw_fact.diagnostic
+                )
+                rejected_revisions.add(raw_fact.fact_revision)
+            continue
         fact, evidence_id, diagnostic = _parse_fact(raw_fact)
         if fact is None:
             if evidence_id in required_ids:
@@ -55,7 +74,8 @@ def evaluate_delivery(
         valid_by_id.setdefault(fact.evidence.id, []).append(fact)
 
     revisions = sorted(
-        {
+        rejected_revisions
+        | {
             fact.fact_revision
             for evidence_id, evidence_facts in valid_by_id.items()
             if evidence_id in required_ids
@@ -65,8 +85,14 @@ def evaluate_delivery(
     if len(revisions) > 1:
         diagnostic = f"mixed fact revisions: {', '.join(revisions)}"
         rows = tuple(
-            _unknown_row(deliverable_id, evidence, diagnostic)
-            for deliverable_id, _, evidence in requirements
+            _row(
+                deliverable_id,
+                evidence,
+                EvidenceResult.UNKNOWN,
+                valid_by_id.get(evidence_id, []),
+                rejected_by_id.get(evidence_id, []) + [diagnostic],
+            )
+            for deliverable_id, evidence_id, evidence in requirements
         )
         return DeliveryVerdict(
             evaluator_version=DELIVERY_EVALUATOR_VERSION,
@@ -74,6 +100,7 @@ def evaluate_delivery(
             attempt_id=work_order.attempt_id,
             aggregate=EvidenceResult.UNKNOWN,
             fact_revision=None,
+            required_requirements=required_bindings,
             requirements=rows,
             diagnostics=tuple(global_diagnostics + [diagnostic]),
         )
@@ -112,6 +139,7 @@ def evaluate_delivery(
         attempt_id=work_order.attempt_id,
         aggregate=aggregate,
         fact_revision=revisions[0] if len(revisions) == 1 else None,
+        required_requirements=required_bindings,
         requirements=rows,
         diagnostics=tuple(global_diagnostics),
     )

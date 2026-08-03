@@ -8,6 +8,7 @@ from fno.delivery.adapters import (
     LegacyResearchSnapshot,
     adapt_legacy_pr,
     adapt_legacy_research,
+    adapt_legacy_research_grade,
 )
 
 from fno.delivery.contracts import (
@@ -16,7 +17,9 @@ from fno.delivery.contracts import (
     DELIVERY_EVIDENCE_FACT_VERSION,
     DeliveryEvaluateResponse,
     DeliveryEvidenceFact,
+    DeliveryEvidenceRejection,
     DeliveryRequirementVerdict,
+    DeliveryRequirementBinding,
     DeliveryVerdict,
 )
 from fno.delivery.evaluator import evaluate_delivery
@@ -30,13 +33,16 @@ __all__ = [
     "DELIVERY_EVIDENCE_FACT_VERSION",
     "DeliveryEvaluateResponse",
     "DeliveryEvidenceFact",
+    "DeliveryEvidenceRejection",
     "DeliveryRequirementVerdict",
+    "DeliveryRequirementBinding",
     "DeliveryVerdict",
     "LegacyDeliveryShadow",
     "LegacyPRSnapshot",
     "LegacyResearchSnapshot",
     "adapt_legacy_pr",
     "adapt_legacy_research",
+    "adapt_legacy_research_grade",
     "evaluate_delivery",
     "evaluate_plan_delivery",
 ]

@@ -24,6 +24,14 @@ def evaluate_command(
     if json_output:
         typer.echo(json.dumps(payload, separators=(",", ":")))
         return
-    typer.echo(f"delivery: {response.status}")
+    if response.verdict is None:
+        typer.echo(f"delivery: {response.status}")
+    else:
+        typer.echo(f"delivery: {response.verdict.aggregate.value}")
+        for row in response.verdict.requirements:
+            if row.result.value == "passed":
+                continue
+            detail = "; ".join(row.diagnostics) or "no diagnostic"
+            typer.echo(f"- {row.evidence_id}: {row.result.value} - {detail}")
     for diagnostic in response.diagnostics:
         typer.echo(f"- {diagnostic}")
