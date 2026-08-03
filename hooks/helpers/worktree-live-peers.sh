@@ -3,7 +3,7 @@
 
 worktree_live_dir() {
   local cwd="$1" git_dir
-  git_dir="$(git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null || true)"
+  git_dir="$(unset GIT_DIR GIT_WORK_TREE; git -C "$cwd" rev-parse --absolute-git-dir 2>/dev/null || true)"
   [[ -n "$git_dir" && -d "$git_dir" ]] || return 1
   printf '%s/fno/live\n' "$git_dir"
 }

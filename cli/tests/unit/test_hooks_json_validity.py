@@ -197,6 +197,19 @@ def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> N
         assert helper in (REPO_ROOT / "hooks" / carrier).read_text(encoding="utf-8")
 
 
+def test_worktree_activity_writer_is_carried_by_both_posttooluse_manifests() -> None:
+    """Both harnesses must feed activity into the shared peer reader."""
+    for manifest_path in (HOOKS_JSON, CODEX_HOOKS_JSON):
+        commands = [
+            hook["command"]
+            for registration in json.loads(manifest_path.read_text(encoding="utf-8"))[
+                "hooks"
+            ]["PostToolUse"]
+            for hook in registration.get("hooks", [])
+        ]
+        assert sum("claim-heartbeat.sh" in command for command in commands) == 1
+
+
 def test_release_codex_marketplace_points_at_repo_plugin_root() -> None:
     marketplace = json.loads(
         (REPO_ROOT / ".agents" / "plugins" / "marketplace.json").read_text(

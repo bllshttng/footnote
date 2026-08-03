@@ -82,6 +82,18 @@ else
   fail "writer-to-reader journey: rc=$rc out=[$out]"
 fi
 
+# The same journey must use Codex's thread identity as the stamp name.
+reset_live
+printf '{"cwd":"%s","session_id":"ignored","tool_name":"Edit"}' "$PROJECT" \
+  | FNO_PLATFORM=codex CODEX_THREAD_ID=peer-codex bash "$HEARTBEAT" >/dev/null 2>&1
+out="$(run_helper self-session 2>/dev/null)"; rc=$?
+if [[ "$rc" -eq 0 && -f "$LIVE_DIR/peer-codex" \
+      && "$out" == *"fno-overlap-observed"* ]]; then
+  pass "Codex PostToolUse activity is consumed by the shared reader"
+else
+  fail "Codex writer-to-reader journey: rc=$rc out=[$out]"
+fi
+
 # A whole-directory .fno symlink must not leak activity across worktrees.
 REPO="$TMP_DIR/repo"
 PEER_WORKTREE="$TMP_DIR/peer-worktree"
@@ -96,6 +108,13 @@ git -C "$REPO" worktree add -q "$PEER_WORKTREE"
 mkdir -p "$SHARED_FNO"
 ln -s "$SHARED_FNO" "$REPO/.fno"
 ln -s "$SHARED_FNO" "$PEER_WORKTREE/.fno"
+ambient_dir="$(GIT_DIR="$(git -C "$REPO" rev-parse --absolute-git-dir)" \
+  GIT_WORK_TREE="$REPO" bash "$HELPER" --live-dir "$PROJECT")"
+if [[ "$ambient_dir" == "$LIVE_DIR" ]]; then
+  pass "explicit cwd overrides ambient Git repository selection"
+else
+  fail "ambient Git environment redirected live dir to [$ambient_dir]"
+fi
 printf '{"cwd":"%s","session_id":"peer-session","tool_name":"Edit"}' "$REPO" \
   | CODEX_THREAD_ID= bash "$HEARTBEAT" >/dev/null 2>&1
 other_out="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PEER_WORKTREE" \
