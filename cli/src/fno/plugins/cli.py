@@ -117,6 +117,8 @@ def activate_command(
         outcome = activate(path, registry_store=store, role_root=root)
     except ActivationRefusal as exc:
         _error(ctx, f"refused ({exc.reason.value}): {exc.detail}")
+    except Exception as exc:
+        _error(ctx, f"activation failed: {exc}")
     receipt = outcome.receipt
     payload = {
         "pack_id": receipt.pack_id,
@@ -147,6 +149,8 @@ def deactivate_command(
         outcome = deactivate(pack_id, registry_store=store, role_root=root)
     except RegistryCorrupt as exc:
         _error(ctx, f"registry corrupt; cannot deactivate safely: {exc}")
+    except Exception as exc:
+        _error(ctx, f"deactivation failed: {exc}")
     payload = {
         "pack_id": pack_id,
         "removed": list(outcome.removed),

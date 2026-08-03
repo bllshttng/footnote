@@ -227,6 +227,11 @@ def activate(
     target = Path(path).expanduser()
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
+    if root.is_symlink():
+        raise ActivationRefusal(
+            ActivationRefusalReason.INVALID_IDENTITY,
+            "role root is a symlink; refusing to project through it",
+        )
     base = target.parent if target.is_file() else target
 
     manifest, load_failure = load_manifest(target)
@@ -385,6 +390,8 @@ def deactivate(
     """
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
+    if root.is_symlink():
+        return DeactivationOutcome(removed=(), left_alone=())
     plugin_root = root / "plugin"
 
     with store.lock:
