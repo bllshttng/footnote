@@ -92,14 +92,18 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_HARNESS_ID=$(grep '^harness_session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' \
         | grep -Ev '^(null)?$' | head -1 || true)
-    DELIVERY_RETRY_ID="${CONVERSATION_ID:-${LIVE_HARNESS_ID:-${LIVE_SESSION_ID:-session}}}"
+    DELIVERY_RETRY_OWNER="${CONVERSATION_ID:-${LIVE_HARNESS_ID:-harness}}"
+    DELIVERY_RETRY_ID="${DELIVERY_RETRY_OWNER}.${LIVE_SESSION_ID:-session}"
     DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${DELIVERY_RETRY_ID}.md"
     [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 else
     DELIVERY_PENDING_STATE=""
-    if [[ -n "$CONVERSATION_ID" && -f "${DELIVERY_PENDING_PREFIX}${CONVERSATION_ID}.md" ]]; then
-        DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${CONVERSATION_ID}.md"
-    fi
+    for pending in "${DELIVERY_PENDING_PREFIX}${CONVERSATION_ID}."*.md; do
+        if [[ -n "$CONVERSATION_ID" && -f "$pending" ]] \
+            && { [[ -z "$DELIVERY_PENDING_STATE" ]] || [[ "$pending" -nt "$DELIVERY_PENDING_STATE" ]]; }; then
+            DELIVERY_PENDING_STATE="$pending"
+        fi
+    done
     for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
         [[ -n "$DELIVERY_PENDING_STATE" ]] && break
         PENDING_HARNESS_ID=$(grep '^harness_session_id:' "$pending" 2>/dev/null \
@@ -107,7 +111,6 @@ else
             | grep -Ev '^(null)?$' | head -1 || true)
         if [[ -n "$CONVERSATION_ID" && "$PENDING_HARNESS_ID" == "$CONVERSATION_ID" ]]; then
             DELIVERY_PENDING_STATE="$pending"
-            break
         fi
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"

@@ -403,6 +403,17 @@ fn write_other_pending(cwd: &Path) {
     .unwrap();
 }
 
+fn write_same_harness_pending(cwd: &Path) {
+    fs::write(
+        git_path(
+            cwd,
+            "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
+        ),
+        "---\nsession_id: session-old\nharness_session_id: sess-delivery-retry\nclaude_session_id: sess-delivery-retry\n---\n",
+    )
+    .unwrap();
+}
+
 #[test]
 fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     let (_tmp, cwd, transcript, mock) = delivery_finalize_retry_fixture();
@@ -426,8 +437,12 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
         child.wait().unwrap().code()
     };
 
+    write_same_harness_pending(&cwd);
     assert_eq!(fire(), Some(2));
-    let retry = git_path(&cwd, "fno-delivery-finalize-pending-sess-delivery-retry.md");
+    let retry = git_path(
+        &cwd,
+        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+    );
     assert!(
         retry.exists(),
         "missing retry snapshot at {}",
@@ -480,7 +495,13 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
         String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
     };
 
+    write_same_harness_pending(&cwd);
     assert!(fire().contains("generic delivery finalization failed"));
+    assert!(git_path(
+        &cwd,
+        "fno-delivery-finalize-pending-sess-delivery-retry.sess-delivery-retry.md",
+    )
+    .exists());
     write_other_pending(&cwd);
     assert_eq!(fire().trim(), "{}");
     assert!(cwd.join(".fno/finalize-complete").exists());
@@ -546,14 +567,14 @@ fn stale_pending_with_live_session_fixture() -> (TempDir, PathBuf, PathBuf, Path
     let (tmp, cwd, transcript, _mock) = delivery_finalize_retry_fixture();
     fs::write(
         cwd.join(".fno/target-state.md"),
-        "---\nsession_id: session-live\nclaude_session_id: null\n---\n",
+        "---\nsession_id: session-live\nharness_session_id: sess-delivery-retry\nclaude_session_id: sess-delivery-retry\n---\n",
     )
     .unwrap();
     let pending = Command::new("git")
         .args([
             "rev-parse",
             "--git-path",
-            "fno-delivery-finalize-pending-session-old.md",
+            "fno-delivery-finalize-pending-sess-delivery-retry.session-old.md",
         ])
         .current_dir(&cwd)
         .output()
@@ -566,7 +587,7 @@ fn stale_pending_with_live_session_fixture() -> (TempDir, PathBuf, PathBuf, Path
     };
     fs::write(
         &pending,
-        "---\nsession_id: session-old\nclaude_session_id: null\n---\n",
+        "---\nsession_id: session-old\nharness_session_id: sess-delivery-retry\nclaude_session_id: sess-delivery-retry\n---\n",
     )
     .unwrap();
     let mock = make_script(
@@ -615,7 +636,7 @@ fn agy_stale_pending_cannot_bypass_a_live_session() {
     let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
     let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
     let payload = serde_json::json!({
-        "conversationId": "session-live",
+        "conversationId": "sess-delivery-retry",
         "transcriptPath": transcript,
         "workspacePaths": [cwd],
         "fullyIdle": true
