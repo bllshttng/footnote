@@ -188,6 +188,42 @@ def test_tier_remap_preflight_normalizes_business_role_refusal(
     assert exc_info.value.exit_code == 2
 
 
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_tier_remap_preflight_normalizes_actual_conflict(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2")
+
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    with pytest.raises(DispatchAskError, match="--model opus is ambiguous") as exc_info:
+        if substrate == "worker":
+            dispatch_spawn(
+                name="remap-worker",
+                message="work",
+                provider="claude",
+                cwd=tmp_path,
+                model="opus",
+            )
+        else:
+            dispatch_spawn_pane(
+                name="remap-pane",
+                message="work",
+                provider="claude",
+                cwd=tmp_path,
+                model="opus",
+                runner=lambda *_args, **_kwargs: pytest.fail(
+                    "refusal must precede pane launch"
+                ),
+            )
+
+    assert exc_info.value.exit_code == 2
+
+
 @pytest.mark.parametrize("adapter", ["bg_create", "headless_create"])
 def test_direct_claude_adapter_refuses_managed_route_before_subprocess(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, adapter: str

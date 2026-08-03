@@ -213,7 +213,7 @@ MODEL_ENV_KEYS = (
 )
 
 
-class TierRemapConflict(ValueError):
+class TierRemapConflict(RouteCompositionError):
     """A claude spawn names a tier alias the ambient environment redefines.
 
     ``claude --bg`` resolves the model tier alias against the CALLER's
