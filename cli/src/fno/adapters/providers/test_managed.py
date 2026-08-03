@@ -2556,66 +2556,89 @@ class TestProvisionalTaintSpansTheCommit:
         assert managed.slot_tainted("claude", tmp_path)
 
 
-class TestEveryCandidateIsResolved:
-    """Stopping at the first failure lets an expired scoped item sitting in
-    front of a live unscoped login look like a plain offline registration - and
-    then get snapshotted and stamped as the account."""
+class TestEveryCandidateMustProve:
+    """No candidate is set aside, whatever the reason it did not prove. A 401
+    rejects an ACCESS token while its refresh token may still be live, so claude
+    can refresh that account straight back into the slot it reads first."""
 
-    def test_an_expired_first_candidate_does_not_hide_a_live_second(
-        self, tmp_path, monkeypatch
-    ):
+    def test_an_unprovable_candidate_blocks_the_slot(self, tmp_path, monkeypatch):
         monkeypatch.setattr(
             managed, "canonical_slot_blobs",
-            lambda cli: [_blob("EXPIRED"), _blob("LIVE")],
+            lambda cli: [_blob("REJECTED"), _blob("LIVE")],
         )
 
         def _principal(blob):
-            if blob == _blob("EXPIRED"):
-                return None, "credential-rejected"  # 401: the endpoint answered
+            if blob == _blob("REJECTED"):
+                return None, "credential-rejected"
             return managed.principal_fingerprint(_profile("acct-live")), None
 
         monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure == "credential-rejected" and principal is None
+        # Registered unbound rather than bound to a slot we cannot vouch for.
+        assert (tmp_path / "work-a" / "blob").exists()
+
+    def test_one_candidate_that_proves_is_stored_and_bound(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("LIVE")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-live")), None),
+        )
 
         adir, principal, failure = managed.register_slot_snapshot(
             _rec("work-a"), tmp_path
         )
 
-        assert failure is None
-        assert principal["account_uuid"] == "acct-live"
-        # The credential STORED is the one that proved, not the expired residue.
+        assert failure is None and principal["account_uuid"] == "acct-live"
         assert (adir / "blob").read_text() == _blob("LIVE")
 
-    def test_all_candidates_unprovable_registers_unbound(self, tmp_path, monkeypatch):
+    def test_a_codex_slot_registers_without_a_principal(self, tmp_path, monkeypatch):
+        """Only claude has a principal endpoint. Running a codex auth blob
+        through the claude parser reported it as a dead credential and refused a
+        registration that had already been written."""
         monkeypatch.setattr(
-            managed, "canonical_slot_blobs", lambda cli: [_blob("A"), _blob("B")]
+            managed, "canonical_slot_blobs", lambda cli: [_codex_blob("cx")]
         )
-        _adir, principal, failure = managed.register_slot_snapshot(
-            _rec("work-a"), tmp_path
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: pytest.fail("resolved a claude principal for a codex slot"),
         )
-        assert principal is None and failure == "profile-unavailable"
 
-    def test_reconciliation_snapshots_the_blob_that_proved(
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("cx-a", "codex"), tmp_path
+        )
+
+        assert failure is None and principal is None
+        assert adir is not None and (adir / "blob").read_text() == _codex_blob("cx")
+
+    def test_a_duplicate_is_caught_on_the_blob_that_will_be_stored(
         self, fake_slot, tmp_path, monkeypatch
     ):
-        by_id = _register_two(fake_slot, tmp_path)
-        _bind("work-b", "acct-b", tmp_path)
-        managed._set_slot_taint("claude", tmp_path, True, [])
+        fake_slot["claude"] = _blob("LIVE")
+        managed.snapshot_current(_rec("work-a"), root=tmp_path)
         monkeypatch.setattr(
-            managed, "canonical_slot_blobs",
-            lambda cli: [_blob("EXPIRED"), _blob("LIVE_B")],
+            managed, "canonical_slot_blobs", lambda cli: [_blob("LIVE")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-live")), None),
         )
 
-        def _principal(blob):
-            if blob == _blob("EXPIRED"):
-                return None, "credential-rejected"  # 401: the endpoint answered
-            return managed.principal_fingerprint(_profile("acct-b")), None
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-b"), tmp_path
+        )
 
-        monkeypatch.setattr(managed, "slot_principal", _principal)
-
-        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
-
-        assert result.outcome == "matched" and result.record_id == "work-b"
-        assert (tmp_path / "work-b" / "blob").read_text() == _blob("LIVE_B")
+        assert failure == "duplicate-credential:work-a" and principal is None
+        assert adir is None  # nothing written, reported structurally
+        assert not (tmp_path / "work-b" / "blob").exists()
 
 
 class TestRegisterRespectsALiveTaintWriter:
@@ -2660,32 +2683,6 @@ class TestRegisterRespectsALiveTaintWriter:
 
         assert failure is None and principal["account_uuid"] == "acct-a"
         assert not managed.slot_tainted("claude", tmp_path)
-
-    def test_a_duplicate_is_caught_on_the_blob_that_will_be_stored(
-        self, fake_slot, tmp_path, monkeypatch
-    ):
-        """An expired candidate in front of a live one shifts what gets stored,
-        so hashing the first candidate would miss the duplicate."""
-        fake_slot["claude"] = _blob("LIVE")
-        managed.snapshot_current(_rec("work-a"), root=tmp_path)
-        monkeypatch.setattr(
-            managed, "canonical_slot_blobs",
-            lambda cli: [_blob("EXPIRED"), _blob("LIVE")],
-        )
-
-        def _principal(blob):
-            if blob == _blob("EXPIRED"):
-                return None, "credential-rejected"  # 401: the endpoint answered
-            return managed.principal_fingerprint(_profile("acct-live")), None
-
-        monkeypatch.setattr(managed, "slot_principal", _principal)
-
-        _adir, principal, failure = managed.register_slot_snapshot(
-            _rec("work-b"), tmp_path
-        )
-
-        assert failure == "duplicate-credential:work-a" and principal is None
-        assert not (tmp_path / "work-b" / "blob").exists()
 
 
 class TestCaptureBeforeOverwriteAgreesWithIdentity:

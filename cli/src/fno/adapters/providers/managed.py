@@ -299,34 +299,27 @@ def principal_of_blobs(
     and bind THE SAME credential: proving one read and snapshotting another is
     how account A's identity ends up bound to account B's blob.
 
-    Every candidate is resolved, and the one that PROVED is handed back. Both
-    matter. Stopping at the first failure would let an expired scoped item
-    sitting in front of a live unscoped login look like a plain offline
-    registration - and then get snapshotted and stamped as the account. And
-    ``ambiguous-slot`` when two resolve to different identities is not a tie to
-    break: whichever we stamped, some reader would get the other one.
+    EVERY distinct candidate must prove, and they must all name one account.
+    Anything less is not attributable: whichever credential we stamped, some
+    reader could get the other one - and on macOS claude reads the scoped item
+    first while the usage probe reads the unscoped one, so "some reader" is not
+    hypothetical. ``ambiguous-slot`` (two accounts) is therefore not a tie to
+    break, and a candidate that failed to prove is not one to set aside.
     """
     if not blobs:
         return None, None, "no-slot-credential"
     resolved: list[tuple[dict, str]] = []
-    first_failure: Optional[str] = None
-    unanswered = False
     for blob in blobs:
         principal, failure = slot_principal(blob)
         if principal is None:
-            first_failure = first_failure or failure
-            # A REJECTED credential is dead and can be set aside. An unanswered
-            # one cannot: a live account whose profile call merely timed out
-            # would otherwise be skipped, and the other candidate stamped, while
-            # claude keeps reading the one we failed to ask about.
-            if failure != "credential-rejected":
-                unanswered = True
-            continue
+            # No candidate is set aside, whatever the reason it did not prove.
+            # A 401 rejects an ACCESS token while its refresh token may still be
+            # live, so claude can refresh that account straight back into the
+            # slot it reads first; and an unanswered call says nothing at all.
+            # Either way we cannot show the slot holds one account, which is the
+            # only thing that makes it attributable.
+            return None, None, failure
         resolved.append((principal, blob))
-    if not resolved:
-        return None, None, first_failure or "profile-unavailable"
-    if unanswered:
-        return None, None, "profile-unavailable"
     keys = {identity_key(principal) for principal, _blob in resolved}
     if None in keys:
         return None, None, "malformed-profile"
@@ -1406,10 +1399,12 @@ def register_slot_snapshot(
     *,
     lock_timeout: float = 10,
     persist: Optional[Callable[[], None]] = None,
-) -> tuple[Path, Optional[dict], Optional[str]]:
+) -> tuple[Optional[Path], Optional[dict], Optional[str]]:
     """Capture the shared slot for ``record`` and bind the identity of THOSE bytes.
 
-    ``(account_dir, principal, failure)``. One read serves the proof, the
+    ``(account_dir, principal, failure)``, where a ``None`` account_dir means
+    NOTHING was written - the caller reports a refusal on exactly that, rather
+    than on a list of failure names a new value could slip past. One read serves the proof, the
     snapshot, and the binding, under the same mutex a switch takes - otherwise
     the identity proved and the credential stored can be two different accounts,
     either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
@@ -1448,25 +1443,27 @@ def register_slot_snapshot(
                 f"no current {record.harness} login to snapshot for '{record.id}' "
                 "(sign in first, then register)"
             )
-        principal, proven_blob, failure = principal_of_blobs(blobs)
+        if record.harness == "claude":
+            principal, proven_blob, failure = principal_of_blobs(blobs)
+        else:
+            # Only claude has a principal endpoint. Running a codex auth blob
+            # through the claude parser would report it as a dead credential
+            # and refuse a registration that had already been written.
+            principal, proven_blob, failure = None, blobs[0], None
         if failure == "ambiguous-slot":
-            return account_dir(record.id, root), None, failure
+            return None, None, failure
         # A session recorded as tainting the slot can still overwrite it after
         # the final read, so the provisional taint below must not simply
         # discard it. Registration establishes a new truth; it cannot do that
         # while something else can still change the slot underneath it.
         blockers = taint_writers_still_live(record.harness, root)
         if blockers:
-            return (
-                account_dir(record.id, root),
-                None,
-                f"slot-pinned:{', '.join(blockers)}",
-            )
+            return None, None, f"slot-pinned:{', '.join(blockers)}"
         holder = principal_holder(
             identity_key(principal), exclude_id=record.id, root=root
         )
         if holder is not None:
-            return account_dir(record.id, root), None, f"duplicate-principal:{holder}"
+            return None, None, f"duplicate-principal:{holder}"
         # The token check belongs in here too, and must hash THE BLOB WE WILL
         # STORE: an expired scoped candidate in front of a live unscoped one
         # shifts what gets stored, and hashing the first candidate would then
@@ -1479,17 +1476,13 @@ def register_slot_snapshot(
             stored_blob, exclude_id=record.id, root=root
         )
         if token_holder is not None:
-            return (
-                account_dir(record.id, root),
-                None,
-                f"duplicate-credential:{token_holder}",
-            )
+            return None, None, f"duplicate-credential:{token_holder}"
         # The profile request above is a network round trip. Re-verify the
         # capture before committing anything, so an out-of-band login during it
         # cannot leave a registration stamped for the account we proved while
         # the slot holds the one that replaced it.
         if canonical_slot_blobs(record.harness) != blobs:
-            return account_dir(record.id, root), None, "slot-changed"
+            return None, None, "slot-changed"
         # Persist the record FIRST. Everything after this writes to the store,
         # and store residue from a failed registration is what later reads as a
         # duplicate credential and refuses a legitimate one; a config entry with

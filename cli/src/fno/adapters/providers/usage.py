@@ -307,6 +307,14 @@ def _bearer_verdict(record: ProviderRecord, bearer: str, now: float) -> str:
     try:
         from fno.adapters.providers import managed
 
+        # A slot presenting more than one distinct credential is not
+        # attributable at all, however well this particular bearer proves out:
+        # claude reads the scoped Keychain item first while this probe reads the
+        # unscoped one, so a matching bearer here can still be a different
+        # account from the one actually being billed. Checked offline - the
+        # candidate count alone settles it, no profile call needed.
+        if len(managed.canonical_slot_blobs(record.harness)) > 1:
+            return "unprovable"
         return managed.bearer_principal_verdict(
             record.harness, record.id, managed.store_root(), bearer, now=now
         )

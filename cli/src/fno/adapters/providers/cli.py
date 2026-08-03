@@ -488,16 +488,6 @@ def add_provider(
 # register (managed credential store, US1)
 # ---------------------------------------------------------------------------
 
-# Capture outcomes under which the account IS registered. The first two could
-# not PROVE the identity but found nothing contradictory (so the record lands
-# unbound); the third registered fine but saw the slot move during the writes.
-# Every other typed failure wrote nothing, so it must refuse rather than report
-# a registration that did not happen.
-_STILL_REGISTERS = frozenset({
-    None, "profile-unavailable", "malformed-profile", "slot-moved-after-write",
-})
-
-
 def _register_config_dir_account(
     provider_id: str,
     harness_name: str,
@@ -685,10 +675,9 @@ def register_provider(
             err=True,
         )
         raise typer.Exit(1)
-    if identity_failure not in _STILL_REGISTERS:
-        # A typed failure with no handler above wrote nothing, so reporting
-        # success would be a lie. Refuse generically rather than let a future
-        # failure value fall through as a registration that never happened.
+    if adir is None:
+        # The capture reports "wrote nothing" structurally, so a failure value
+        # added later cannot fall through as a registration that never happened.
         typer.echo(
             f"error: registering '{record.id}' failed ({identity_failure}); "
             "nothing was written",

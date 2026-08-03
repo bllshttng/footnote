@@ -1735,13 +1735,12 @@ class TestReconcileSlot:
     ) -> None:
         """A typed failure with no handler wrote nothing, so printing
         'Registered' would be a lie - including for a failure added later."""
-        from pathlib import Path as _P
-
         from fno.adapters.providers import managed
 
+        # A None account_dir is how the capture says it wrote nothing.
         monkeypatch.setattr(
             managed, "register_slot_snapshot",
-            lambda record, *a, **kw: (_P("/x"), None, failure),
+            lambda record, *a, **kw: (None, None, failure),
         )
 
         result = _invoke(["register", "readyrule"], cwd=store, home=store)

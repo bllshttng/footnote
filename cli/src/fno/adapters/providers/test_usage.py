@@ -1091,3 +1091,45 @@ class TestPrincipalEvidenceTTL:
         assert managed.bearer_principal_verdict(
             "claude", "never-bound", tmp_path, "tok-1"
         ) == "unprovable"
+
+
+class TestAmbiguousSlotIsNotAttributable:
+    def test_two_credentials_in_the_slot_report_unknown(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """claude reads the scoped Keychain item first while this probe reads
+        the unscoped one, so a bearer that proves out here can still be a
+        different account from the one actually being billed."""
+        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        slot = tmp_path / ".claude"
+        slot.mkdir()
+        (slot / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "unscoped"}})
+        )
+        rec = ProviderRecord(
+            id="primary", name="primary", harness="claude", auth="managed"
+        )
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: True)
+        monkeypatch.setattr(managed_mod, "slot_tainted", lambda cli, r: False)
+        monkeypatch.setattr(
+            managed_mod, "canonical_slot_blobs", lambda cli: ["scoped-a", "unscoped-b"]
+        )
+        monkeypatch.setattr(
+            managed_mod, "bearer_principal_verdict",
+            lambda *a, **k: pytest.fail("asked about one bearer in an ambiguous slot"),
+        )
+        monkeypatch.setattr(
+            managed_mod, "reconcile_slot",
+            lambda cli, **kw: managed_mod.ReconcileResult("ambiguous-slot", detail="two"),
+        )
+        # Exercise the real probe: the check lives per-bearer inside it, so
+        # stubbing the probe out would test nothing.
+        monkeypatch.setattr(
+            usage_mod.urllib.request, "urlopen",
+            lambda *a, **k: pytest.fail("queried usage for an ambiguous slot"),
+        )
+
+        assert probe_usage(rec, now=1000.0) is None
