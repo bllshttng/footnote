@@ -104,15 +104,17 @@ def _contained_under(source_id: str, root: Path, anchor: Path) -> bool:
 
 def _stage_and_swap(
     planned: list[tuple[str, Path, RoleDefinitionSource]],
+    token: str,
 ) -> tuple[list[tuple[Path, Path]], list[Path]]:
     """Stage every definition to a temp file, then swap all into place.
 
     Returns ``(backups, fresh)``: ``backups`` is ``(target, backup)`` for targets
     that had a prior file (moved aside), and ``fresh`` is the targets that were
-    newly created. Both are retained for the caller to roll back the whole
-    transaction (swap + stale removal + registry save) on any later failure, and
-    to discard the backups once the commit succeeds. Staging failures clean up
-    only the temp files; swap failures back up and restore inline.
+    newly created. Backup names carry a per-activation ``token`` so a backup left
+    behind by a crashed prior activation can never be clobbered. Both lists are
+    retained for the caller to roll back the whole transaction (swap + stale
+    removal + registry save) on any later failure and to discard the backups once
+    the commit succeeds.
     """
     staged: list[tuple[Path, Path]] = []
     try:
@@ -136,19 +138,17 @@ def _stage_and_swap(
     fresh: list[Path] = []
     try:
         for target, tmp in staged:
-            if target.exists():
-                backup = Path(str(target) + ".pre-activate-bak")
+            had_prior = target.exists()
+            if had_prior:
+                backup = Path(f"{target}.bak-{token}")
                 os.replace(target, backup)
                 backups.append((target, backup))
-            else:
-                backup = None
             os.replace(tmp, target)
-            if backup is None:
+            if not had_prior:
                 fresh.append(target)
     except OSError as exc:
-        # Restore every target whose prior content was moved aside (this includes
-        # the target whose swap just failed, since its backup was recorded before
-        # the failing replace) and remove every fresh target already created.
+        # Restore every target whose prior content was moved aside (including the
+        # target whose swap just failed) and remove every fresh target created.
         for target, backup in backups:
             if target.exists():
                 target.unlink(missing_ok=True)
@@ -302,7 +302,7 @@ def activate(
                         f"prior receipt path {prior!r} escapes the plugin root"
                     )
 
-            backups, fresh = _stage_and_swap(planned)
+            backups, fresh = _stage_and_swap(planned, os.urandom(8).hex())
             written = [source_id for source_id, _resolved, _definition in planned]
             stale_backups: list[tuple[Path, Path]] = []
             try:
@@ -321,7 +321,7 @@ def activate(
                             f"stale path {prior} is a symlink",
                         )
                     if prior_path.is_file():
-                        stale_backup = Path(str(prior_path) + ".stale-bak")
+                        stale_backup = Path(f"{prior_path}.stale-{os.urandom(4).hex()}.bak")
                         os.replace(prior_path, stale_backup)
                         stale_backups.append((prior_path, stale_backup))
                     elif prior_path.exists():
@@ -338,7 +338,7 @@ def activate(
                     activated_at=datetime.now(UTC),
                     conformance=conformance_for(manifest),
                 )
-                registry, _pack = store._install_locked(registry, manifest, target)
+                registry, _pack = store._install_locked(registry, manifest, target.resolve())
                 registry = store._record_activation_locked(registry, receipt)
                 store._save(registry)
             except BaseException:

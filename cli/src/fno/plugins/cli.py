@@ -147,7 +147,7 @@ def deactivate_command(
     else:
         typer.echo(f"deactivated {pack_id}: removed {len(outcome.removed)} definition(s)")
         for left in outcome.left_alone:
-            typer.echo(f"  left alone (not receipted as current): {left}")
+            typer.echo(f"  left alone (receipt retained): {left}")
     if outcome.left_alone:
         # A partial deactivation leaves files behind with a residual receipt; it
         # is not a clean success, so the operator sees a non-zero exit.
