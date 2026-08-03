@@ -349,10 +349,10 @@ fn delivery_finalize_retry_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .unwrap();
     fs::write(
         cwd.join(".fno/target-state.md"),
-        "---\nsession_id: sess-delivery-retry\nclaude_session_id: null\n---\n",
+        "---\nsession_id: sess-delivery-retry\nharness_session_id: sess-delivery-retry\nclaude_session_id: null\n---\n",
     )
     .unwrap();
-    let transcript = cwd.join("transcript.jsonl");
+    let transcript = cwd.join("sess-delivery-retry.jsonl");
     fs::write(&transcript, "").unwrap();
     let mock = make_script(
         tmp.path(),
@@ -360,23 +360,47 @@ fn delivery_finalize_retry_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         r#"
 if [ "$1" = "--version" ]; then exit 0; fi
 if [ "$1" = "loop-check" ]; then
-  count=0; [ -f .fno/loop-count ] && count=$(cat .fno/loop-count)
-  echo $((count + 1)) > .fno/loop-count
-  rm -f .fno/target-state.md
+  mock_root="${MOCK_ROOT:-.}"
+  count=0; [ -f "$mock_root/.fno/loop-count" ] && count=$(cat "$mock_root/.fno/loop-count")
+  echo $((count + 1)) > "$mock_root/.fno/loop-count"
+  rm -f "$mock_root/.fno/target-state.md"
   echo '{"decision":"allow","termination_reason":"DoneDelivery","message":"done"}'
   exit 0
 fi
 if [ "$1" = "finalize" ]; then
-  count=0; [ -f .fno/finalize-count ] && count=$(cat .fno/finalize-count)
-  count=$((count + 1)); echo "$count" > .fno/finalize-count
+  mock_root="${MOCK_ROOT:-.}"
+  count=0; [ -f "$mock_root/.fno/finalize-count" ] && count=$(cat "$mock_root/.fno/finalize-count")
+  count=$((count + 1)); echo "$count" > "$mock_root/.fno/finalize-count"
   [ "$count" -eq 1 ] && exit 1
-  touch .fno/finalize-complete
+  touch "$mock_root/.fno/finalize-complete"
   exit 0
 fi
 exit 2
 "#,
     );
     (tmp, cwd, transcript, mock)
+}
+
+fn git_path(cwd: &Path, name: &str) -> PathBuf {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-path", name])
+        .current_dir(cwd)
+        .output()
+        .unwrap();
+    let path = PathBuf::from(String::from_utf8(output.stdout).unwrap().trim());
+    if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    }
+}
+
+fn write_other_pending(cwd: &Path) {
+    fs::write(
+        git_path(cwd, "fno-delivery-finalize-pending-000-other.md"),
+        "---\nsession_id: session-other\nharness_session_id: session-other\nclaude_session_id: session-other\n---\n",
+    )
+    .unwrap();
 }
 
 #[test]
@@ -389,6 +413,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
             .arg(&shim)
             .current_dir(&cwd)
             .env("FNO_AGENTS_BIN", &mock)
+            .env("MOCK_ROOT", &cwd)
             .stdin(Stdio::piped())
             .spawn()
             .unwrap();
@@ -402,6 +427,7 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     };
 
     assert_eq!(fire(), Some(2));
+    write_other_pending(&cwd);
     assert_eq!(fire(), Some(0));
     assert!(cwd.join(".fno/finalize-complete").exists());
     assert_eq!(
@@ -432,8 +458,9 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
     let fire = || {
         let mut child = Command::new("bash")
             .arg(&shim)
-            .current_dir(&cwd)
+            .current_dir(cwd.parent().unwrap())
             .env("FNO_AGENTS_BIN", &mock)
+            .env("MOCK_ROOT", &cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .spawn()
@@ -448,6 +475,7 @@ fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
     };
 
     assert!(fire().contains("generic delivery finalization failed"));
+    write_other_pending(&cwd);
     assert_eq!(fire().trim(), "{}");
     assert!(cwd.join(".fno/finalize-complete").exists());
     assert_eq!(

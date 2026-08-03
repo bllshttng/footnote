@@ -49,6 +49,12 @@ emit() { printf '%s\n' "$1"; exit 0; }
 HOOK_INPUT=$(cat)
 HAVE_JQ=1
 command -v jq >/dev/null 2>&1 || HAVE_JQ=0
+CONVERSATION_ID=""
+[[ $HAVE_JQ -eq 1 ]] && CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" | jq -r '.conversationId // empty' 2>/dev/null || true)
+if [[ -z "$CONVERSATION_ID" ]]; then
+    CONVERSATION_ID=$(printf '%s' "$HOOK_INPUT" \
+        | sed -n 's/.*"conversationId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+fi
 
 # Resolve the WORKSPACE ROOT, not $PWD. agy can fire Stop from a subdirectory, or
 # via the global ~/.gemini/config/hooks.json with an unrelated cwd; a relative
@@ -76,6 +82,10 @@ LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
 STATE_FILE="$LIVE_STATE_FILE"
 DELIVERY_PENDING_PREFIX=$(git -C "$ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
     || printf '%s' "$ROOT/.fno/.delivery-finalize-pending-")
+case "$DELIVERY_PENDING_PREFIX" in
+    /*) ;;
+    *) DELIVERY_PENDING_PREFIX="$ROOT/$DELIVERY_PENDING_PREFIX" ;;
+esac
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
@@ -84,15 +94,16 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
 else
     DELIVERY_PENDING_STATE=""
     for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
-        if [[ -f "$pending" ]]; then DELIVERY_PENDING_STATE="$pending"; break; fi
+        PENDING_HARNESS_ID=$(grep '^harness_session_id:' "$pending" 2>/dev/null \
+            | head -1 | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+        if [[ -n "$CONVERSATION_ID" && "$PENDING_HARNESS_ID" == "$CONVERSATION_ID" ]]; then
+            DELIVERY_PENDING_STATE="$pending"
+            break
+        fi
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
 DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
-
-# conversationId (agy's session discriminator, jq-only) -- read where jq exists;
-# the counter helper falls back to the state-file session_id when it is empty.
-CONVERSATION_ID=""
 
 # jq-free event writer (string interpolation, so it also runs on the jq-missing
 # give-up path). Fields are hook-internal and safe to interpolate.

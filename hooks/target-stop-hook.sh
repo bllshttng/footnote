@@ -45,6 +45,10 @@ STATE_FILE="$LIVE_STATE_FILE"
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 DELIVERY_PENDING_PREFIX=$(git -C "$REPO_ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
     || printf '%s' "${REPO_ROOT}/.fno/.delivery-finalize-pending-")
+case "$DELIVERY_PENDING_PREFIX" in
+    /*) ;;
+    *) DELIVERY_PENDING_PREFIX="${REPO_ROOT}/${DELIVERY_PENDING_PREFIX}" ;;
+esac
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
@@ -52,8 +56,16 @@ if [[ -f "$LIVE_STATE_FILE" ]]; then
     [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 else
     DELIVERY_PENDING_STATE=""
+    HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
+        's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+    HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
     for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
-        if [[ -f "$pending" ]]; then DELIVERY_PENDING_STATE="$pending"; break; fi
+        PENDING_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' "$pending" 2>/dev/null \
+            | head -1 | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' | tr -d '[:space:]' || true)
+        if [[ -n "$HOOK_HARNESS_ID" && "$PENDING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
+            DELIVERY_PENDING_STATE="$pending"
+            break
+        fi
     done
     [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 fi
