@@ -13,15 +13,14 @@ effect still cannot dispatch one, because the approval authority is unchanged an
 capabilities arrive as independent work-order-scoped facts.
 
 Pack and role ids become path segments, so they are validated as single path
-components and every resolved target is confirmed to stay under the plugin root:
-a manifest id of ``../x`` cannot escape the role layer. Ownership preflight,
-atomic per-file writes (temp plus ``os.replace``), stale-path reconciliation on
-upgrade, and the receipt recording run under one registry lock so two concurrent
-activations serialize and a partial activation never leaves unreceipted files.
-Activation refuses on any failed or blocked verification condition, refuses to
-overwrite a path a different pack owns, is idempotent for the same digest, and
-deactivates by removing only the paths its own receipt recorded after they are
-confirmed gone.
+components and every resolved target (and every prior receipt path removed on
+upgrade) is confirmed to stay under the plugin root. Verification runs against
+the locked registry snapshot, ownership is preflighted, definitions are staged to
+temp files and only swapped into place once every stage succeeds (so a write
+failure preserves the prior roles), and the install-plus-receipt commit is one
+locked transaction. Deactivation runs under the same lock, removes only paths the
+receipt recorded under the root, and retains the receipt if any path could not be
+removed.
 """
 
 from __future__ import annotations
@@ -58,6 +57,7 @@ class ActivationRefusalReason(str, Enum):
     VERIFICATION_FAILED = "verification_failed"
     INVALID_IDENTITY = "invalid_identity"
     DIFFERENT_PACK_OWNS_PATH = "different_pack_owns_path"
+    PATH_OCCUPIED = "path_occupied"
     UNWRITABLE_LAYER = "unwritable_layer"
     REGISTRY_CORRUPT = "registry_corrupt"
 
@@ -80,13 +80,7 @@ def _target_source_id(manifest: PackManifest, role_id: str) -> str:
 
 
 def _validate_path_component(value: str, kind: str) -> None:
-    """Reject an id that is not a single safe path component.
-
-    Pack and role ids become path segments under ``<root>/plugin/<pack>/<role>.json``.
-    A value with a separator, a traversal literal, or a NUL could escape the
-    plugin root or cross into another pack's namespace, so it is refused before
-    any filesystem touch.
-    """
+    """Reject an id that is not a single safe path component."""
     if (
         not value
         or "/" in value
@@ -100,16 +94,40 @@ def _validate_path_component(value: str, kind: str) -> None:
         )
 
 
-def _atomic_write_json(path: Path, payload: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, tmp_name = tempfile.mkstemp(dir=str(path.parent), prefix=f".{path.stem}-", suffix=".tmp")
+def _contained_under(source_id: str, root: Path, anchor: Path) -> bool:
+    """True when ``root / source_id`` resolves under ``anchor``."""
     try:
-        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
-            handle.write(payload)
-        os.replace(tmp_name, path)
-    except BaseException:
-        Path(tmp_name).unlink(missing_ok=True)
-        raise
+        (root / source_id).resolve().relative_to(anchor.resolve())
+        return True
+    except (ValueError, RuntimeError):
+        return False
+
+
+def _stage_and_swap(planned: list[tuple[str, Path, RoleDefinitionSource]]) -> None:
+    """Stage every definition to a temp file, then swap all into place.
+
+    A staging failure cleans up only the temp files; prior role definitions are
+    untouched until every stage succeeds and the swaps are applied.
+    """
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for _source_id, target, definition in planned:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            descriptor, tmp_name = tempfile.mkstemp(
+                dir=str(target.parent), prefix=f".{target.stem}-stage-", suffix=".tmp"
+            )
+            with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+                handle.write(definition.model_dump_json())
+            staged.append((target, Path(tmp_name)))
+    except OSError as exc:
+        for _target, tmp in staged:
+            tmp.unlink(missing_ok=True)
+        raise ActivationRefusal(
+            ActivationRefusalReason.UNWRITABLE_LAYER,
+            f"cannot stage a definition file: {exc}",
+        ) from exc
+    for target, tmp in staged:
+        os.replace(tmp, target)
 
 
 def _definition_document(
@@ -147,14 +165,14 @@ def activate(
 ) -> ActivationOutcome:
     """Verify then project a pack's roles into the plugin role layer.
 
-    Grants nothing: writes role definitions only. Raises
-    :class:`ActivationRefusal` on a failed/blocked verification condition, an
-    unsafe id, a path a different pack owns, an unwritable layer, or a corrupt
-    registry.
+    Grants nothing: writes role definitions only. Raises :class:`ActivationRefusal`
+    on a failed/blocked verification condition, an unsafe id, an occupied or
+    differently-owned path, an unwritable layer, or a corrupt registry.
     """
     target = Path(path).expanduser()
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
+    base = target.parent if target.is_file() else target
 
     manifest, load_failure = load_manifest(target)
     if load_failure is not None or manifest is None:
@@ -166,78 +184,67 @@ def activate(
     for role_manifest in manifest.roles:
         _validate_path_component(role_manifest.role.id, "role id")
 
-    # Verify the parsed manifest directly: no second read of the file between
-    # verification and the projection, so the bytes verified are the bytes that
-    # define the roles. UNKNOWN conditions are allowed (honest non-evaluation,
-    # e.g. a pack with no benchmark scenarios); the plan gates activation on
-    # *failed* conditions.
-    base = target.parent if target.is_file() else target
-    try:
-        report = verify_manifest(manifest, installed=store.installed_index(), base=base)
-    except RegistryCorrupt as exc:
-        raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
-    failing = [
-        condition
-        for condition in report.conditions
-        if condition.result in (EvidenceResult.FAILED, EvidenceResult.BLOCKED)
-    ]
-    if failing:
-        raise ActivationRefusal(
-            ActivationRefusalReason.VERIFICATION_FAILED,
-            "; ".join(f"{c.name}={c.result.value}" for c in failing),
-        )
-
     revision = _revision_for(manifest)
-    plugin_root = (root / "plugin").resolve()
+    plugin_root = root / "plugin"
     # Resolve every target and prove it stays under the plugin root before any
     # write: a containment failure refuses up front rather than mid-activation.
     planned: list[tuple[str, Path, RoleDefinitionSource]] = []
     for index in range(len(manifest.roles)):
         source_id, definition = _definition_document(manifest, index, revision=revision)
-        resolved = (root / source_id).resolve()
-        try:
-            resolved.relative_to(plugin_root)
-        except ValueError as exc:
+        if not _contained_under(source_id, root, plugin_root):
             raise ActivationRefusal(
                 ActivationRefusalReason.INVALID_IDENTITY,
                 f"{source_id} resolves outside the plugin role root",
-            ) from exc
-        planned.append((source_id, resolved, definition))
+            )
+        planned.append((source_id, (root / source_id), definition))
 
     try:
         with store.lock:
             registry = store.load()  # raises RegistryCorrupt
-            for source_id, _resolved, _definition in planned:
+            existing_receipt = registry.receipt_for(manifest.id)
+            already_active = (
+                existing_receipt is not None and existing_receipt.pack_digest == digest
+            )
+            # Verify against the locked snapshot so a concurrent pack update
+            # cannot invalidate the dependency versions between verify and commit.
+            installed = {p.pack_id: p.resolved_version for p in registry.packs}
+            report = verify_manifest(manifest, installed=installed, base=base)
+            failing = [
+                condition
+                for condition in report.conditions
+                if condition.result in (EvidenceResult.FAILED, EvidenceResult.BLOCKED)
+            ]
+            if failing:
+                raise ActivationRefusal(
+                    ActivationRefusalReason.VERIFICATION_FAILED,
+                    "; ".join(f"{c.name}={c.result.value}" for c in failing),
+                )
+
+            existing = registry.receipt_for(manifest.id)
+            for source_id, resolved, _definition in planned:
                 owner = registry.owner_of_path(source_id)
                 if owner is not None and owner[0] != manifest.id:
                     raise ActivationRefusal(
                         ActivationRefusalReason.DIFFERENT_PACK_OWNS_PATH,
                         f"{source_id} is owned by pack {owner[0]}",
                     )
-            existing = registry.receipt_for(manifest.id)
-            already_active = existing is not None and existing.pack_digest == digest
+                if owner is None and resolved.exists():
+                    raise ActivationRefusal(
+                        ActivationRefusalReason.PATH_OCCUPIED,
+                        f"{source_id} exists but no receipt owns it",
+                    )
 
-            written: list[str] = []
-            try:
-                for source_id, resolved, definition in planned:
-                    _atomic_write_json(resolved, definition.model_dump_json())
-                    written.append(source_id)
-            except OSError as exc:
-                # Roll back every file this activation wrote so a failed write
-                # never leaves discoverable roles without a receipt.
-                for rollback_id in written:
-                    (root / rollback_id).unlink(missing_ok=True)
-                raise ActivationRefusal(
-                    ActivationRefusalReason.UNWRITABLE_LAYER,
-                    f"cannot write a definition file: {exc}",
-                ) from exc
+            _stage_and_swap(planned)
+            written = [source_id for source_id, _resolved, _definition in planned]
 
             # An upgrade whose new manifest drops roles must not leave the old
-            # roles' files orphaned and undeactivatable: remove prior receipt
-            # paths that the new set no longer carries.
+            # roles' files orphaned: remove prior receipt paths the new set no
+            # longer carries, each confirmed to stay under the plugin root.
             new_set = set(written)
             for prior in (existing.written_paths if existing is not None else ()):
                 if prior in new_set:
+                    continue
+                if not _contained_under(prior, root, plugin_root):
                     continue
                 prior_path = root / prior
                 if prior_path.is_file():
@@ -273,45 +280,39 @@ def deactivate(
 ) -> DeactivationOutcome:
     """Remove only the definition paths this pack's receipt recorded.
 
-    The whole operation runs under one registry lock: ownership is read, files
-    are unlinked, and the receipt is removed with no window for a concurrent
-    activation to invalidate the snapshot. Each receipted path is removed only if
-    it still resolves under the role root and its current owner is still this
-    pack; a hand-written definition in the same plugin layer is never touched.
+    Runs under one registry lock. Each receipted path is removed only if it
+    resolves under the plugin root and its current owner is still this pack; the
+    receipt is dropped only when every path was removed, otherwise a residual
+    receipt is kept for the paths that remain so they keep an owner. Raises
+    :class:`RegistryCorrupt` if the registry cannot be trusted.
     """
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
-    root_resolved = root.resolve()
+    plugin_root = root / "plugin"
 
-    def contained(source_id: str) -> bool:
-        try:
-            (root / source_id).resolve().relative_to(root_resolved)
-            return True
-        except (ValueError, RuntimeError):
-            return False
-
-    try:
-        with store.lock:
-            registry = store.load()
-            receipt = registry.receipt_for(pack_id)
-            if receipt is None:
-                return DeactivationOutcome(removed=(), left_alone=())
-            removed: list[str] = []
-            left_alone: list[str] = []
-            for source_id in receipt.written_paths:
-                if not contained(source_id):
-                    left_alone.append(source_id)
-                    continue
-                owner = registry.owner_of_path(source_id)
-                if owner is not None and owner[0] != pack_id:
-                    left_alone.append(source_id)
-                    continue
-                path = root / source_id
-                if path.is_file():
-                    path.unlink()
-                removed.append(source_id)
+    with store.lock:
+        registry = store.load()  # raises RegistryCorrupt
+        receipt = registry.receipt_for(pack_id)
+        if receipt is None:
+            return DeactivationOutcome(removed=(), left_alone=())
+        removed: list[str] = []
+        left_alone: list[str] = []
+        for source_id in receipt.written_paths:
+            if not _contained_under(source_id, root, plugin_root):
+                left_alone.append(source_id)
+                continue
+            owner = registry.owner_of_path(source_id)
+            if owner is not None and owner[0] != pack_id:
+                left_alone.append(source_id)
+                continue
+            path = root / source_id
+            if path.is_file():
+                path.unlink()
+            removed.append(source_id)
+        if left_alone:
+            residual = receipt.model_copy(update={"written_paths": tuple(left_alone)})
+            receipts = tuple(r if r.pack_id != pack_id else residual for r in registry.receipts)
+        else:
             receipts = tuple(r for r in registry.receipts if r.pack_id != pack_id)
-            store._save(registry.model_copy(update={"receipts": receipts}))
-            return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))
-    except RegistryCorrupt:
-        return DeactivationOutcome(removed=(), left_alone=())
+        store._save(registry.model_copy(update={"receipts": receipts}))
+        return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))

@@ -19,6 +19,7 @@ import typer
 
 from fno.handoff.output import json_mode, merge_json_flag
 from fno.plugins.activate import ActivationRefusal, activate, deactivate
+from fno.plugins.manifest import pack_digest
 from fno.plugins.registry import PackRegistryStore, RegistryCorrupt
 from fno.plugins.verify import load_manifest, verify_pack
 from fno.roles.registry import default_role_root
@@ -131,7 +132,11 @@ def deactivate_command(
 ) -> None:
     """Remove only the definition paths this pack's receipt recorded."""
     store, root = _store(ctx)
-    outcome = deactivate(pack_id, registry_store=store, role_root=root)
+    try:
+        outcome = deactivate(pack_id, registry_store=store, role_root=root)
+    except RegistryCorrupt as exc:
+        typer.echo(f"registry corrupt; cannot deactivate safely: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
     payload = {
         "pack_id": pack_id,
         "removed": list(outcome.removed),
@@ -195,12 +200,15 @@ def inspect_command(
         typer.echo(f"manifest for {pack_id} no longer readable", err=True)
         raise typer.Exit(code=1)
     declared_roles = [role.role.id for role in manifest.roles]
+    digest_matches = pack_digest(manifest) == pack.pack_digest
     if _json_requested(ctx, json_output):
         _emit_json(
             _envelope(
                 {
                     "pack_id": manifest.id,
                     "version": manifest.version,
+                    "installed_digest": pack.pack_digest,
+                    "digest_matches_install": digest_matches,
                     "declared_roles": declared_roles,
                     "declared_permissions": [
                         {"effect_class": e.effect_class, "destination": e.destination}
@@ -220,5 +228,7 @@ def inspect_command(
         return
     typer.echo(f"{manifest.id} {manifest.version}")
     typer.echo(f"  declares roles: {', '.join(declared_roles) or 'none'}")
+    if not digest_matches:
+        typer.echo(f"  WARNING: manifest digest no longer matches installed record {pack.pack_digest[:12]}", err=True)
     for effect in manifest.permissions:
         typer.echo(f"  declares effect ceiling: {effect.effect_class} -> {effect.destination}")

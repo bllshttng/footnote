@@ -124,6 +124,27 @@ class PackRegistry(_RegistryModel):
                 return (receipt.pack_id, receipt.pack_digest)
         return None
 
+    @model_validator(mode="after")
+    def _ownership_is_unambiguous(self) -> Self:
+        # A registry with duplicate pack ids, duplicate receipts, or one path
+        # owned by two receipts makes first-match ownership queries ambiguous, so
+        # it fails validation and reads as corrupt rather than as a valid state.
+        pack_ids = [pack.pack_id for pack in self.packs]
+        if len(set(pack_ids)) != len(pack_ids):
+            raise ValueError(f"duplicate installed pack id {pack_ids[0]!r}")
+        receipt_ids = [receipt.pack_id for receipt in self.receipts]
+        if len(set(receipt_ids)) != len(receipt_ids):
+            raise ValueError(f"duplicate activation receipt for {receipt_ids[0]!r}")
+        seen: dict[str, str] = {}
+        for receipt in self.receipts:
+            for path in receipt.written_paths:
+                if path in seen:
+                    raise ValueError(
+                        f"path {path!r} owned by receipts {seen[path]!r} and {receipt.pack_id!r}"
+                    )
+                seen[path] = receipt.pack_id
+        return self
+
 
 class PackRegistryStore:
     """Lock-guarded, atomically-written persistence for the pack registry."""

@@ -199,8 +199,11 @@ class PackManifest(_PackModel):
 
     @staticmethod
     def _check_unique(field_name: str, keys: list[object]) -> None:
-        if len(set(keys)) != len(keys):
-            raise ValueError(f"duplicate {field_name} declaration {keys[0]!r}")
+        seen: set[object] = set()
+        for key in keys:
+            if key in seen:
+                raise ValueError(f"duplicate {field_name} declaration {key!r}")
+            seen.add(key)
 
     @model_validator(mode="after")
     def _pack_is_not_empty(self) -> Self:

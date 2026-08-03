@@ -24,6 +24,7 @@ role registry's rule that a corrupt source blocks rather than reading as missing
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -250,37 +251,18 @@ def _schema_conditions(manifest: PackManifest) -> list[Condition]:
 
 
 def _in_range(resolved: str, minimum: str, maximum: str | None) -> bool:
-    """True when ``resolved`` is within [minimum, maximum].
+    """True when ``resolved`` is within [minimum, maximum], strict PEP 440.
 
-    Prefers strict PEP 440 comparison via ``packaging.version`` (so prereleases
-    and post-releases compare correctly) and falls back to a naive dotted-integer
-    compare when a value is not PEP 440 parseable.
+    Raises ``packaging.version.InvalidVersion`` (a ``ValueError``) when a version
+    is not PEP 440 parseable, so a malformed version is surfaced as a failure
+    rather than silently satisfying a range via a permissive fallback.
     """
-    try:
-        from packaging.version import Version
+    from packaging.version import Version
 
-        low = Version(minimum)
-        if Version(resolved) < low:
-            return False
-        if maximum is not None and Version(resolved) > Version(maximum):
-            return False
-        return True
-    except Exception:
-        pass
-
-    def as_tuple(value: str) -> tuple[int, ...]:
-        parsed: list[int] = []
-        for chunk in str(value).split("."):
-            try:
-                parsed.append(int(chunk))
-            except ValueError:
-                parsed.append(0)
-        return tuple(parsed) or (0,)
-
-    resolved_tuple = as_tuple(resolved)
-    if resolved_tuple < as_tuple(minimum):
+    resolved_version = Version(resolved)
+    if resolved_version < Version(minimum):
         return False
-    if maximum is not None and resolved_tuple > as_tuple(maximum):
+    if maximum is not None and resolved_version > Version(maximum):
         return False
     return True
 
@@ -317,7 +299,22 @@ def _dependency_conditions(
                 )
             )
             continue
-        if not _in_range(resolved, dependency.version_range.minimum, dependency.version_range.maximum):
+        try:
+            in_range = _in_range(
+                resolved, dependency.version_range.minimum, dependency.version_range.maximum
+            )
+        except ValueError as exc:
+            conditions.append(
+                Condition(
+                    ConditionFamily.DEPENDENCY,
+                    f"dependency:{dependency.pack_id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=f"{dependency.pack_id} version {resolved!r} is not parseable: {exc}",
+                )
+            )
+            continue
+        if not in_range:
             conditions.append(
                 Condition(
                     ConditionFamily.DEPENDENCY,
@@ -531,27 +528,28 @@ def _compatibility_conditions(manifest: PackManifest) -> list[Condition]:
                 detail="running footnote version unavailable; range not evaluated",
             )
         )
-    elif _in_range(running, manifest.footnote_compat.minimum, manifest.footnote_compat.maximum):
-        conditions.append(
-            Condition(
-                ConditionFamily.COMPATIBILITY,
-                "footnote-compat-range",
-                checked=True,
-                result=EvidenceResult.PASSED,
-                detail=f"running footnote {running} within declared range",
-            )
-        )
     else:
-        conditions.append(
-            Condition(
-                ConditionFamily.COMPATIBILITY,
-                "footnote-compat-range",
-                checked=True,
-                result=EvidenceResult.FAILED,
-                detail=(
+        try:
+            ok = _in_range(
+                running, manifest.footnote_compat.minimum, manifest.footnote_compat.maximum
+            )
+            detail = f"running footnote {running} within declared range"
+            result = EvidenceResult.PASSED if ok else EvidenceResult.FAILED
+            if not ok:
+                detail = (
                     f"running footnote {running} outside "
                     f"{manifest.footnote_compat.minimum}..{manifest.footnote_compat.maximum or 'open'}"
-                ),
+                )
+        except ValueError as exc:
+            result = EvidenceResult.FAILED
+            detail = f"declared compat range is not parseable: {exc}"
+        conditions.append(
+            Condition(
+                ConditionFamily.COMPATIBILITY,
+                "footnote-compat-range",
+                checked=True,
+                result=result,
+                detail=detail,
             )
         )
     conditions.append(
@@ -574,7 +572,8 @@ _SCRIPT_SUFFIXES = frozenset((".sh", ".py", ".rb", ".js", ".pl"))
 
 def _token_resolves(token: str, base: Path) -> bool:
     if "/" in token or "\\" in token:
-        return (base / token).is_file()
+        candidate = base / token
+        return candidate.is_file() and os.access(candidate, os.X_OK)
     return shutil.which(token) is not None
 
 
@@ -582,10 +581,10 @@ def _command_is_runnable(command: str, base: Path) -> bool:
     """Static runnability check that never executes the command.
 
     Verification is pure (it never spawns), so this confirms the command is
-    structurally runnable: the runner resolves on PATH or as a repo-relative path,
-    and when an interpreter names a script file, that script exists relative to
-    the pack. Without the script check, ``bash missing.sh`` would read as runnable
-    because ``bash`` is on PATH while the script it runs is absent.
+    structurally runnable: the runner resolves on PATH or as an executable
+    repo-relative path, and when an interpreter names a script file, that script
+    exists relative to the pack. The interpreter is recognized by basename so an
+    absolute path like ``/bin/bash`` still triggers the script-existence check.
     """
     parts = command.split()
     if not parts:
@@ -593,7 +592,7 @@ def _command_is_runnable(command: str, base: Path) -> bool:
     runner = parts[0]
     if not _token_resolves(runner, base):
         return False
-    if runner in _INTERPRETERS:
+    if runner.rsplit("/", 1)[-1] in _INTERPRETERS:
         script = next((p for p in parts[1:] if not p.startswith("-")), None)
         if script is not None and ("/" in script or script.endswith(tuple(_SCRIPT_SUFFIXES))):
             if not (base / script).is_file():
