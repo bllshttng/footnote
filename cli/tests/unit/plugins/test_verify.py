@@ -12,7 +12,7 @@ from fno.plugins.verify import (
     VerificationReport,
     verify_pack,
 )
-from tests.unit.plugins.test_manifest import _full_pack
+from tests.unit.plugins.test_manifest import _full_pack, _materialize_declared_sources
 
 
 def _write_pack(tmp_path: Path, manifest: PackManifest, name: str = "growth-studio") -> Path:
@@ -20,6 +20,7 @@ def _write_pack(tmp_path: Path, manifest: PackManifest, name: str = "growth-stud
     pack_dir.mkdir()
     payload = manifest.model_dump(mode="json")
     (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(payload), encoding="utf-8")
+    _materialize_declared_sources(pack_dir, manifest)
     return pack_dir
 
 

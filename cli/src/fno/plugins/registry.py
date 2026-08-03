@@ -68,6 +68,7 @@ class ConformanceAttribution(_RegistryModel):
     """
 
     adapter_id: NonEmptyStr
+    adapter_version: NonEmptyStr
     pack_digest: Sha256Digest
     remote_idempotency: bool = False
     reconciliation: bool = False
@@ -291,6 +292,7 @@ def conformance_for(manifest: PackManifest) -> tuple[ConformanceAttribution, ...
     return tuple(
         ConformanceAttribution(
             adapter_id=adapter.conformance.adapter_id,
+            adapter_version=adapter.conformance.adapter_version,
             pack_digest=digest,
             remote_idempotency=adapter.conformance.remote_idempotency,
             reconciliation=adapter.conformance.reconciliation,

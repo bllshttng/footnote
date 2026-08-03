@@ -22,7 +22,7 @@ from fno.plugins.registry import PackRegistryStore
 from fno.roles.models import ContextBundleBounds, RoleDefinitionSource, RoleLayer, RoleResolutionBlocked
 from fno.roles.registry import discover_role_definitions
 from fno.roles.resolver import resolve_role
-from tests.unit.plugins.test_manifest import _full_pack
+from tests.unit.plugins.test_manifest import _full_pack, _materialize_declared_sources
 
 
 def _store_and_root(tmp_path):
@@ -36,6 +36,7 @@ def _write_pack(tmp_path, manifest, name="growth-studio") -> Path:
     pack_dir = tmp_path / name
     pack_dir.mkdir(exist_ok=True)
     (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(manifest.model_dump(mode="json")), encoding="utf-8")
+    _materialize_declared_sources(pack_dir, manifest)
     return pack_dir
 
 

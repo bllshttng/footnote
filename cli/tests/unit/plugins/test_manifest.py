@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -18,7 +19,6 @@ from fno.plugins import (
     PackDependency,
     PackManifest,
     ScenarioDeclaration,
-    SkillDeclaration,
     WorkflowDeclaration,
     pack_digest,
 )
@@ -44,8 +44,7 @@ def _full_pack() -> PackManifest:
         version="0.1.0",
         footnote_compat=CompatibilityRange(minimum="0.3.0"),
         roles=(_role_manifest(),),
-        skills=(SkillDeclaration(id="growth-studio", source="plugins/growth-studio/skills"),),
-        workflows=(WorkflowDeclaration(id="launch", source="plugins/growth-studio/workflows/launch.yaml"),),
+        workflows=(WorkflowDeclaration(id="launch", source="workflows/launch.yaml"),),
         adapters=(
             AdapterDeclaration(
                 id="social-publisher",
@@ -58,7 +57,7 @@ def _full_pack() -> PackManifest:
             ),
         ),
         evaluators=(EvaluatorDeclaration(id="factual-review", command="fno growth factual-check"),),
-        assets=(AssetDeclaration(id="brand-voice", source="plugins/growth-studio/assets/brand-voice.md"),),
+        assets=(AssetDeclaration(id="brand-voice", source="assets/brand-voice.md"),),
         permissions=(EffectDeclaration(effect_class="external.publication", destination="social-network"),),
         scenarios=(
             # `true` is on PATH on every POSIX host (local + CI), so the fixture
@@ -66,6 +65,20 @@ def _full_pack() -> PackManifest:
             ScenarioDeclaration(id="launch-smoke", command="true", recorded_result=EvidenceResult.PASSED),
         ),
     )
+
+
+def _materialize_declared_sources(pack_dir: Path, manifest: PackManifest) -> None:
+    """Create the declared workflow/asset/skill sources so verification finds them."""
+    for workflow in manifest.workflows:
+        target = pack_dir / Path(workflow.source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("workflow", encoding="utf-8")
+    for asset in manifest.assets:
+        target = pack_dir / Path(asset.source)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text("asset", encoding="utf-8")
+    for skill in manifest.skills:
+        (pack_dir / Path(skill.source)).mkdir(parents=True, exist_ok=True)
 
 
 def test_full_manifest_round_trips_and_reuses_role_manifest():

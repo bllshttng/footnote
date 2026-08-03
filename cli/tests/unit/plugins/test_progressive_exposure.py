@@ -43,14 +43,17 @@ def _pack(pack_id: str, role: RoleManifest) -> PackManifest:
         version="0.1.0",
         footnote_compat=CompatibilityRange(minimum="0.3.0"),
         roles=(role,),
-        assets=(AssetDeclaration(id=f"{pack_id}-asset", source=f"plugins/{pack_id}/asset.md"),),
+        assets=(AssetDeclaration(id=f"{pack_id}-asset", source=f"assets/{pack_id}-asset.md"),),
     )
 
 
 def _write_pack(tmp_path: Path, pack: PackManifest) -> Path:
+    from tests.unit.plugins.test_manifest import _materialize_declared_sources
+
     pack_dir = tmp_path / pack.id
     pack_dir.mkdir(exist_ok=True)
     (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(pack.model_dump(mode="json")), encoding="utf-8")
+    _materialize_declared_sources(pack_dir, pack)
     return pack_dir
 
 

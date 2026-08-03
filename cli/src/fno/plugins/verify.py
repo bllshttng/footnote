@@ -533,6 +533,46 @@ def _resolution_conditions(manifest: PackManifest) -> list[Condition]:
     return conditions
 
 
+def _declared_source_conditions(manifest: PackManifest, base: Path) -> list[Condition]:
+    # Each declared workflow, skill, and asset source must resolve to an existing
+    # entry beneath the pack directory, so a pack that references a missing or
+    # escaping file cannot verify (and then activate) clean. Evaluator commands
+    # are declarative for the delivery layer and are not checked here.
+    conditions: list[Condition] = []
+    declared: list[tuple[str, str, str]] = []
+    declared += [("workflow", w.id, w.source) for w in manifest.workflows]
+    declared += [("skill", s.id, s.source) for s in manifest.skills]
+    declared += [("asset", a.id, a.source) for a in manifest.assets]
+    base_resolved = base.resolve()
+    for kind, ident, source in declared:
+        try:
+            resolved = (base / source).resolve()
+            contained = resolved != base_resolved and base_resolved in resolved.parents
+        except (ValueError, RuntimeError):
+            contained = False
+        if contained and resolved.exists():
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"source:{kind}:{ident}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"{source} present",
+                )
+            )
+        else:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"source:{kind}:{ident}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=f"{source} missing or escapes the pack directory",
+                )
+            )
+    return conditions
+
+
 def _footnote_version() -> str | None:
     try:
         from importlib.metadata import version
@@ -681,6 +721,7 @@ def verify_manifest(
     conditions: list[Condition] = []
     conditions.extend(_identity_conditions(manifest, str(base_path)))
     conditions.extend(_schema_conditions(manifest))
+    conditions.extend(_declared_source_conditions(manifest, base_path))
     conditions.extend(_dependency_conditions(manifest, installed))
     conditions.extend(_capability_conditions(manifest))
     conditions.extend(_compatibility_conditions(manifest))
