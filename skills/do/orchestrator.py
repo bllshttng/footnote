@@ -59,6 +59,31 @@ _PRODUCT_MD_SEARCH_PATHS = (
 )
 
 
+# ---------------------------------------------------------------------------
+# Company topology projection (x-7741)
+# ---------------------------------------------------------------------------
+# The router projects a resolved company topology onto a work order through
+# fno.company.execution.project_execution, which carries the shape alongside the
+# work order's unchanged identity, authority ceiling, approval floor, and
+# required evidence. There is no second router: topology changes execution
+# shape only, so the same WorkOrderRef and delivery requirements pass through
+# direct, loop, squad, and pipeline unchanged. Company work is not yet flowing
+# through this router (x-edf5 is the first consumer); this is the seam.
+
+
+def apply_company_topology(resolution, work_order, authority_ceiling, approval_floor, required_evidence_ids):
+    """Project a resolved topology for a company work order without altering truth."""
+    from fno.company.execution import project_execution
+
+    return project_execution(
+        resolution=resolution,
+        work_order=work_order,
+        authority_ceiling=authority_ceiling,
+        approval_floor=approval_floor,
+        required_evidence_ids=required_evidence_ids,
+    )
+
+
 def find_product_md(repo_root: Path) -> Optional[Path]:
     """Return the first PRODUCT.md found in the canonical search order, or None."""
     for rel in _PRODUCT_MD_SEARCH_PATHS:
