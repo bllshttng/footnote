@@ -486,3 +486,47 @@ fn generic_completion_ac_d6_arch_incomplete_pass_response_is_rejected() {
     assert_eq!(output["decision"], "block");
     assert!(output["termination_reason"].is_null());
 }
+
+#[test]
+fn generic_completion_rejects_blank_strict_boundary_values() {
+    let mutations: &[(&[&str], Value)] = &[
+        (&["fact_revision"], json!("   ")),
+        (&["evidence_revision"], json!("   ")),
+        (&["verdict", "work_order_node_id"], json!("   ")),
+        (&["verdict", "attempt_id"], json!("   ")),
+        (
+            &["verdict", "requirements", "0", "producers", "0"],
+            json!("   "),
+        ),
+        (
+            &["verdict", "requirements", "0", "source_revisions", "0"],
+            json!("   "),
+        ),
+    ];
+    for (path, value) in mutations {
+        let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+        let mut current = &mut response;
+        for segment in &path[..path.len() - 1] {
+            current = if let Ok(index) = segment.parse::<usize>() {
+                &mut current[index]
+            } else {
+                &mut current[*segment]
+            };
+        }
+        let last = path[path.len() - 1];
+        if let Ok(index) = last.parse::<usize>() {
+            current[index] = value.clone();
+        } else {
+            current[last] = value.clone();
+        }
+        let env = setup(&response.to_string());
+
+        let output = run(&env);
+
+        assert_eq!(output["decision"], "block", "path={path:?}: {output}");
+        assert!(
+            output["termination_reason"].is_null(),
+            "path={path:?}: {output}"
+        );
+    }
+}

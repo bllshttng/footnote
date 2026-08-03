@@ -665,9 +665,21 @@ fn parse_evaluated(response: Response) -> DeliveryCompletion {
             response.evidence_revision,
         );
     };
+    if fact_revision.trim().is_empty() {
+        return nonpassing(
+            "evaluated response has blank fact revision".into(),
+            response.evidence_revision,
+        );
+    }
     let Some(evidence_revision) = response.evidence_revision.clone() else {
         return nonpassing("evaluated response has no evidence revision".into(), None);
     };
+    if evidence_revision.trim().is_empty() {
+        return nonpassing(
+            "evaluated response has blank evidence revision".into(),
+            None,
+        );
+    }
     let Some(verdict) = strict_passed_verdict(&response.verdict, fact_revision) else {
         return nonpassing(
             "delivery verdict is nonpassing or incomplete".into(),
@@ -703,11 +715,14 @@ fn strict_passed_verdict(value: &Value, fact_revision: &str) -> Option<Verdict> 
         .collect();
     let unique: HashSet<_> = required.iter().copied().collect();
     let complete = verdict.evaluator_version == "delivery-evaluator.v1"
-        && !verdict.work_order_node_id.is_empty()
-        && !verdict.attempt_id.is_empty()
+        && nonblank(&verdict.work_order_node_id)
+        && nonblank(&verdict.attempt_id)
         && verdict.aggregate == "passed"
         && verdict.fact_revision.as_str() == Some(fact_revision)
         && !required.is_empty()
+        && required
+            .iter()
+            .all(|(deliverable_id, evidence_id)| nonblank(deliverable_id) && nonblank(evidence_id))
         && required == rows
         && unique.len() == required.len()
         && verdict.requirements.iter().all(valid_passed_requirement)
@@ -725,12 +740,21 @@ fn valid_passed_requirement(requirement: &Requirement) -> bool {
         "deliverable",
         "effect",
     ];
-    !requirement.deliverable_id.is_empty()
-        && !requirement.evidence_id.is_empty()
+    nonblank(&requirement.deliverable_id)
+        && nonblank(&requirement.evidence_id)
         && SUBJECTS.contains(&requirement.subject_kind.as_str())
-        && !requirement.subject_id.is_empty()
+        && nonblank(&requirement.subject_id)
         && requirement.result == "passed"
         && !requirement.producers.is_empty()
+        && requirement.producers.iter().all(|value| nonblank(value))
         && !requirement.source_revisions.is_empty()
+        && requirement
+            .source_revisions
+            .iter()
+            .all(|value| nonblank(value))
         && requirement.diagnostics.is_empty()
+}
+
+fn nonblank(value: &str) -> bool {
+    !value.trim().is_empty()
 }

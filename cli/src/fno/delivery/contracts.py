@@ -94,6 +94,32 @@ class DeliveryVerdict(_DeliveryModel):
             raise ValueError("requirements must exactly cover required_requirements")
         if len(set(declared)) != len(declared):
             raise ValueError("required_requirements must be unique")
+        results = {item.result for item in self.requirements}
+        expected = (
+            EvidenceResult.FAILED
+            if EvidenceResult.FAILED in results
+            else EvidenceResult.BLOCKED
+            if EvidenceResult.BLOCKED in results
+            else EvidenceResult.UNKNOWN
+            if EvidenceResult.UNKNOWN in results or not results
+            else EvidenceResult.PASSED
+        )
+        if self.aggregate is not expected:
+            raise ValueError("aggregate must match requirement result precedence")
+        if self.aggregate is EvidenceResult.PASSED:
+            if self.fact_revision is None:
+                raise ValueError("passed verdict requires fact_revision")
+            if self.diagnostics:
+                raise ValueError("passed verdict must not carry diagnostics")
+            if any(
+                not item.producers
+                or not item.source_revisions
+                or item.diagnostics
+                for item in self.requirements
+            ):
+                raise ValueError(
+                    "passed requirements require provenance and no diagnostics"
+                )
         return self
 
 
@@ -134,8 +160,16 @@ class DeliveryEvaluateResponse(_DeliveryModel):
     @model_validator(mode="after")
     def _validate_status_payload(self) -> Self:
         if self.status == "evaluated":
-            if self.verdict is None or self.fact_revision is None:
-                raise ValueError("evaluated response requires verdict and fact_revision")
+            if (
+                self.verdict is None
+                or self.fact_revision is None
+                or self.evidence_revision is None
+            ):
+                raise ValueError(
+                    "evaluated response requires verdict and fact/evidence revisions"
+                )
+            if self.verdict.fact_revision != self.fact_revision:
+                raise ValueError("response and verdict fact revisions must match")
         elif self.verdict is not None:
             raise ValueError(f"{self.status} response must not carry a verdict")
         return self

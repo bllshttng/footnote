@@ -18,6 +18,8 @@ from fno.company.contracts import (
 )
 from fno.delivery.adapters import adapt_delivery_event
 from fno.delivery import (
+    DeliveryEvaluateResponse,
+    DeliveryVerdict,
     DELIVERY_EVALUATOR_VERSION,
     DELIVERY_EVIDENCE_FACT_VERSION,
     DeliveryEvidenceFact,
@@ -110,6 +112,44 @@ def test_ac_d1_hp_complete_five_slot_coverage_passes_in_declaration_order() -> N
     assert verdict.aggregate is EvidenceResult.PASSED
     assert [row.evidence_id for row in verdict.requirements] == [item[0] for item in REQUIREMENTS]
     assert {row.result for row in verdict.requirements} == {EvidenceResult.PASSED}
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        lambda payload: payload.update({"aggregate": "failed"}),
+        lambda payload: payload.update({"fact_revision": None}),
+        lambda payload: payload.update({"diagnostics": ["contradiction"]}),
+        lambda payload: payload["requirements"][0].update({"producers": []}),
+        lambda payload: payload["requirements"][0].update({"source_revisions": []}),
+    ],
+)
+def test_passed_verdict_public_contract_rejects_contradictions(mutate) -> None:
+    payload = evaluate_delivery(
+        _company_work(), _facts(), evaluated_at=NOW
+    ).model_dump(mode="json")
+    mutate(payload)
+
+    with pytest.raises(ValidationError):
+        DeliveryVerdict.model_validate(payload)
+
+
+def test_evaluated_response_requires_coherent_revisions() -> None:
+    verdict = evaluate_delivery(_company_work(), _facts(), evaluated_at=NOW)
+
+    with pytest.raises(ValidationError):
+        DeliveryEvaluateResponse(
+            status="evaluated",
+            fact_revision="snapshot-7",
+            verdict=verdict,
+        )
+    with pytest.raises(ValidationError):
+        DeliveryEvaluateResponse(
+            status="evaluated",
+            fact_revision="snapshot-other",
+            evidence_revision="sha256:evidence",
+            verdict=verdict,
+        )
 
 
 def test_ac_d1_err_projection_only_passed_values_are_not_runtime_evidence() -> None:

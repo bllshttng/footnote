@@ -72,9 +72,11 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
             evaluated_at=datetime.now(timezone.utc),
         )
         verdict = verdict.model_copy(update={"diagnostics": (diagnostic,)})
+        evidence_revision = _delivery_evidence_revision(verdict)
         return DeliveryEvaluateResponse(
             status="evaluated",
             fact_revision=fact_revision,
+            evidence_revision=evidence_revision,
             verdict=verdict,
             diagnostics=verdict.diagnostics,
         )
@@ -100,6 +102,8 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
     except ValueError as exc:
         return _undeterminable(str(exc))
     verdict = evaluate_delivery(company_work, facts, evaluated_at=evaluated_at)
+    if verdict.fact_revision is None:
+        verdict = verdict.model_copy(update={"fact_revision": fact_revision})
     evidence_revision = _delivery_evidence_revision(verdict)
     return DeliveryEvaluateResponse(
         status="evaluated",
