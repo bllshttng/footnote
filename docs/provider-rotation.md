@@ -293,7 +293,7 @@ fno config accounts reconcile-slot claude
 ```
 
 It is deliberately **not** a `clear-taint` verb, and it will not act on anything short of proof.
-An unreachable profile endpoint, a malformed response, a principal matching no registered account, or one matching two of them each leave the stamp, the snapshots, and the taint byte-identical, and exit non-zero naming which of those happened.
+An unreachable profile endpoint, a malformed response, a slot `security` could not read, a principal matching no registered account, or one matching two of them each leave the stamp, the snapshots, and the taint byte-identical, and exit non-zero naming which of those happened.
 Clearing a taint without proof would file one account's usage under another's name, which is worse than staying `unknown`.
 
 It also refuses with `slot-pinned` while a session that was pinning when the taint was written is still alive.
@@ -311,7 +311,8 @@ A record's principal is bound only at `register`, which is the one moment the op
 It refuses outright when the slot holds two different accounts, so it can never bind a stale credential under a new id; proving one read and snapshotting another is exactly how account A's identity would end up bound to account B's credential.
 It also refuses when the proven identity already belongs to another record.
 The existing duplicate check compares tokens, which rotate, so the same account registered again after a rotation would slip past it and leave two records sharing one quota pool that reconciliation could never tell apart.
-The config save and the active stamp happen inside that same lock, in that order.
+It re-checks the slot after resolving the identity, so an out-of-band login during that network round trip refuses with `slot-changed` rather than stamping the account it proved.
+The config save happens inside that same lock and before any store write, because store residue from a failed registration is what a later attempt reads as a duplicate credential and refuses; the active stamp comes last.
 Stamping first would leave the stamp naming an unconfigured orphan if the save failed, and every configured shared account unattributable behind it.
 The identity compared is the account *and* the organization, because Claude Code usage is organization-scoped and one human can belong to two organizations; an identity missing either half is not comparable and fails closed.
 A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.

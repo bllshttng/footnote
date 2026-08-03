@@ -972,7 +972,7 @@ def _doctor_findings() -> list[dict]:
     for harness_kind in sorted({r.harness for r in config.records}):
         try:
             tainted = managed.slot_tainted(harness_kind, managed.store_root())
-        except OSError:
+        except (OSError, managed.ManagedStoreError):
             continue
         if tainted:
             findings.append({
@@ -992,7 +992,9 @@ def _doctor_findings() -> list[dict]:
         # is what turns that into a finding instead of silently wrong billing.
         try:
             drift = managed.slot_identity_drift(harness_kind)
-        except OSError:
+        except (OSError, managed.ManagedStoreError):
+            # A denied or timed-out Keychain read is a diagnosis we could not
+            # make, not a crash in a read-only verb.
             drift = None
         if drift and drift.get("ambiguous"):
             findings.append({

@@ -1203,7 +1203,10 @@ def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
     bound = record_principal(stamped, root)
     if bound is None:
         return None
-    principal, failure = canonical_slot_principal(cli)
+    try:
+        principal, failure = canonical_slot_principal(cli)
+    except ManagedStoreError:
+        return None  # an unreadable slot cannot demonstrate drift
     if failure == "ambiguous-slot":
         # Reporting healthy here would hide two accounts sharing one slot.
         return {"stamped": stamped, "live": None, "ambiguous": True}
@@ -1383,11 +1386,13 @@ def register_slot_snapshot(
     one quota pool. Any other failure still snapshots (registration must work
     offline) and leaves the record unbound, which `doctor` reports.
 
-    ``persist`` (the caller's config save) runs inside the lock, before the
-    active stamp: stamping an unconfigured orphan would make every configured
-    shared account unattributable behind it. The stamp is written here rather
-    than by the caller because the captured credential IS what the slot holds
-    at that moment.
+    ``persist`` (the caller's config save) runs inside the lock and BEFORE any
+    store write: a failed save must not leave a snapshot behind, because that
+    residue is what a later registration reads as a duplicate credential and
+    refuses. The stamp comes last, and is written here rather than by the
+    caller, because the captured credential IS what the slot holds at that
+    moment - and stamping an unconfigured orphan would make every configured
+    shared account unattributable behind it.
     """
     root = root or store_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -1426,16 +1431,23 @@ def register_slot_snapshot(
                 None,
                 f"duplicate-credential:{token_holder}",
             )
+        # The profile request above is a network round trip. Re-verify the
+        # capture before committing anything, so an out-of-band login during it
+        # cannot leave a registration stamped for the account we proved while
+        # the slot holds the one that replaced it.
+        if canonical_slot_blobs(record.harness) != blobs:
+            return account_dir(record.id, root), None, "slot-changed"
+        # Persist the record FIRST. Everything after this writes to the store,
+        # and store residue from a failed registration is what later reads as a
+        # duplicate credential and refuses a legitimate one; a config entry with
+        # no snapshot just tells the next switch to run register.
+        if persist is not None:
+            persist()
         adir = write_snapshot(record, blobs[0], root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
         else:
             _clear_record_principal(record.id, root)
-        # Persist the record BEFORE stamping, still inside the lock. Stamping
-        # first would leave the stamp naming an unconfigured orphan if the save
-        # failed, and every configured shared account unattributable behind it.
-        if persist is not None:
-            persist()
         # Stamp INSIDE the lock: the captured credential is what the slot holds
         # right now, and releasing first would let a concurrent switch install
         # and stamp another account before this stamp overwrote it - leaving the
@@ -1529,6 +1541,10 @@ def reconcile_slot(
         )
     try:
         return _reconcile_locked(cli, by_id=by_id, root=root)
+    except ManagedStoreError as exc:
+        # A `security` timeout or denial is a slot we could not read, which is
+        # a refusal like any other - not a traceback out of an operator verb.
+        return ReconcileResult("slot-unreadable", detail=str(exc))
     finally:
         lock.release()
 

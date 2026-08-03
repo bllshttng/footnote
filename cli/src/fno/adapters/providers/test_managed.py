@@ -2296,3 +2296,76 @@ class TestRegisterCommitOrder:
         assert failure == "duplicate-credential:work-a" and principal is None
         assert not (tmp_path / "work-b" / "blob").exists()
         assert managed.active_slot_id("claude", tmp_path) is None
+
+
+class TestRegisterCommitSafety:
+    def test_a_login_during_the_profile_request_refuses(self, tmp_path, monkeypatch):
+        """The profile request is a network round trip; an out-of-band login
+        during it would otherwise stamp the account we proved while the slot
+        holds the one that replaced it."""
+        reads = {"n": 0}
+
+        def _blobs(cli):
+            reads["n"] += 1
+            return [_blob("A")] if reads["n"] == 1 else [_blob("B")]
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _blobs)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure == "slot-changed" and principal is None
+        assert not (tmp_path / "work-a" / "blob").exists()
+        assert managed.active_slot_id("claude", tmp_path) is None
+
+    def test_a_failed_save_leaves_no_store_residue(self, tmp_path, monkeypatch):
+        """Store residue from a failed registration is what a later attempt
+        reads as a duplicate credential and refuses."""
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("LIVE")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        def _boom() -> None:
+            raise OSError("disk full")
+
+        with pytest.raises(OSError):
+            managed.register_slot_snapshot(_rec("work-a"), tmp_path, persist=_boom)
+
+        assert not (tmp_path / "work-a" / "blob").exists()
+        assert managed.record_principal("work-a", tmp_path) is None
+        assert managed.active_slot_id("claude", tmp_path) is None
+
+
+class TestUnreadableSlotIsARefusal:
+    def test_a_keychain_timeout_is_typed_not_raised(self, tmp_path, monkeypatch):
+        """`security` can time out or be denied; an operator verb must report
+        that, not surface a traceback."""
+        def _boom(cli):
+            raise managed.KeychainError("`security find-generic-password` timed out")
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
+
+        result = managed.reconcile_slot("claude", by_id={}, root=tmp_path)
+
+        assert result.outcome == "slot-unreadable" and "timed out" in result.detail
+
+    def test_drift_reports_nothing_rather_than_raising(self, tmp_path, monkeypatch):
+        managed.stamp_active_slot("claude", "work-a", tmp_path)
+        managed.write_record_principal(
+            "work-a", {"account_uuid": "a", "organization_uuid": "o"}, tmp_path
+        )
+
+        def _boom(cli):
+            raise managed.KeychainError("denied")
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
+        assert managed.slot_identity_drift("claude", tmp_path) is None
