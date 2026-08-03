@@ -2046,11 +2046,11 @@ def cmd_drain_self(
 
 
 # ---------------------------------------------------------------------------
-# notify-self engine (x-39a4): stat-only turn-boundary nudge helpers, shared
-# with `fno mail status` (the sent-unclaimed count).
+# Active-turn delivery helpers. The sent-unclaimed predicate remains stat-only
+# and is shared with `fno mail status`.
 # ---------------------------------------------------------------------------
 
-# The nudge text is embedded inside a hook-owned <system-reminder> wrapper, so a
+# Mail text is embedded inside a hook-owned <system-reminder> wrapper, so a
 # sender/recipient handle carrying a literal </system-reminder> could break out
 # and inject context. Defang the delimiter (open/close, case- + whitespace-
 # insensitive) in every interpolated field, mirroring born-with-why-offer-inject.sh.
@@ -2143,31 +2143,13 @@ def _sent_unclaimed(handle: str, ttl_seconds: int) -> tuple[int, list[str]]:
 
 @mail_app.command("notify-self", hidden=True)
 def cmd_notify_self() -> None:
-    """Stat-only turn-boundary nudge: unread inbound + unclaimed sent (x-39a4).
+    """Write one atomic ``UserPromptSubmit`` mail payload, then acknowledge it.
 
-    The push half of push-first delivery, wired into every session's
-    ``UserPromptSubmit`` hook. Unlike ``drain-self`` it NEVER advances the
-    consume cursor -- a nudge is a notice, not a consume, so SessionStart's
-    ``drain-self`` and the sender-side check still see un-acted mail (the
-    load-bearing invariant: notify never eats delivery). Two stats over the one
-    global bus:
-
-      1. inbound: unread mail addressed to my handle -> one line "N unread fno
-         mail from <senders>: run `fno mail drain-self`". It points at
-         ``drain-self``, NOT ``fno mail unread``: only ``drain-self`` self-
-         resolves this session's handle and advances its consume cursor; ``fno
-         mail unread`` defaults ``--name`` to the project ("fno"), so it would
-         read the wrong inbox and never clear the nudge. Persistent: the
-         wrapping hook fires each turn, so the line re-injects while unread and
-         clears the moment ``drain-self`` advances the consume cursor.
-      2. sent-unclaimed: my own sent mail still past the recipient's cursor and
-         strictly older than ``config.inbox.unclaimed_ttl`` -> "N sent fno mail
-         unclaimed (to <recipients>, >Nm)". Closes the "queued (durable)" ==
-         "delivered" silent gap.
-
-    No harness identity in env -> silent no-op (mirror ``drain-self``).
+    The CLI owns the complete hook envelope so no shell capture can advance the
+    cursor before the JSON is ready. A write or flush failure leaves the cursor
+    unchanged; the next SessionStart or active-turn boundary can retry.
     """
-    from fno.bus.cursor import scan_unread
+    from fno.bus.cursor import advance_cursor, scan_unread
     from fno.config import load_settings
     from fno.harness_identity import canonical_handle, resolve_harness_identity
 
@@ -2180,9 +2162,16 @@ def cmd_notify_self() -> None:
 
     unread = scan_unread(handle)
     if unread:
-        senders = _bounded_names([m.from_ for m in unread])
+        lines.append(f"[fno mail] {len(unread)} message(s) for {handle}:")
+        for message in unread:
+            lines.extend(
+                (
+                    f"\n--- from {message.from_} ({message.ts})  id:{message.id} ---",
+                    message.body.rstrip("\n"),
+                )
+            )
         lines.append(
-            f"{len(unread)} unread fno mail from {senders}: run `fno mail drain-self`"
+            '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
         )
 
     ttl = load_settings().inbox.unclaimed_ttl
@@ -2194,8 +2183,31 @@ def cmd_notify_self() -> None:
             "recipient has not picked it up"
         )
 
-    if lines:
-        print("\n".join(lines))
+    if not lines:
+        return
+
+    try:
+        context = (
+            f"<system-reminder>\n"
+            f"{_defang_reminder(chr(10).join(lines))}\n"
+            f"</system-reminder>"
+        )
+        payload = json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "UserPromptSubmit",
+                    "additionalContext": context,
+                }
+            },
+            ensure_ascii=False,
+        )
+        sys.stdout.write(payload + "\n")
+        sys.stdout.flush()
+    except (OSError, TypeError, ValueError):
+        return
+
+    if unread:
+        advance_cursor(handle, unread[-1].id)
 
 
 @mail_app.command("rebuild-render", hidden=True)
