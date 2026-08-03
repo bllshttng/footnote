@@ -293,13 +293,6 @@ def _current_evidence_events(
                 and event_work_order != work_order.node_id
             ):
                 continue
-            event_attempt = data.get("attempt_id")
-            if (
-                isinstance(event_attempt, str)
-                and event_attempt
-                and event_attempt != work_order.attempt_id
-            ):
-                continue
             event_id = data.get("event_id")
             if isinstance(event_id, str) and event_id:
                 producer_identity = (event_type, event.get("source"), data)
