@@ -125,6 +125,8 @@ def test_corrupt_registry_load_raises_instead_of_resetting_to_empty(tmp_path):
     store.path.write_text("{ not valid json", encoding="utf-8")
     with pytest.raises(RegistryCorrupt):
         store.load()
+    # installed_index is strict too (a corrupt registry must not verify a pack green)
+    with pytest.raises(RegistryCorrupt):
+        store.installed_index()
     # read-only display load degrades gracefully
     assert store.load_or_empty().packs == ()
-    assert store.installed_index() == {}

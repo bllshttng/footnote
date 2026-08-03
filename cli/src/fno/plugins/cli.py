@@ -19,7 +19,7 @@ import typer
 
 from fno.handoff.output import json_mode, merge_json_flag
 from fno.plugins.activate import ActivationRefusal, activate, deactivate
-from fno.plugins.registry import PackRegistryStore
+from fno.plugins.registry import PackRegistryStore, RegistryCorrupt
 from fno.plugins.verify import load_manifest, verify_pack
 from fno.roles.registry import default_role_root
 
@@ -70,7 +70,12 @@ def verify_command(
 ) -> None:
     """Verify a pack on two axes; exit non-zero unless every condition passed."""
     store, _ = _store(ctx)
-    report = verify_pack(path, installed=store.installed_index())
+    try:
+        installed = store.installed_index()
+    except RegistryCorrupt as exc:
+        typer.echo(f"registry corrupt; cannot verify dependencies: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    report = verify_pack(path, installed=installed)
     if _json_requested(ctx, json_output):
         _emit_json(_envelope(report.as_dict()))
     else:

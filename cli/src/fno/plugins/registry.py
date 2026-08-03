@@ -159,8 +159,12 @@ class PackRegistryStore:
             return PackRegistry()
 
     def installed_index(self) -> dict[str, str]:
-        """pack_id -> resolved_version, for the verifier's dependency family."""
-        return {pack.pack_id: pack.resolved_version for pack in self.load_or_empty().packs}
+        """pack_id -> resolved_version, for the verifier's dependency family.
+
+        Fails closed on a corrupt registry so a dependency-free pack cannot verify
+        green against an index that could not be trusted.
+        """
+        return {pack.pack_id: pack.resolved_version for pack in self.load().packs}
 
     def owner_digest_of_path(self, written_path: str) -> str | None:
         return self.load().owner_digest_of_path(written_path)

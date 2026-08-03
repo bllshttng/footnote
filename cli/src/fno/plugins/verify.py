@@ -55,6 +55,7 @@ __all__ = [
     "VerificationReport",
     "load_manifest",
     "resolve_manifest_path",
+    "verify_manifest",
     "verify_pack",
 ]
 
@@ -248,21 +249,38 @@ def _schema_conditions(manifest: PackManifest) -> list[Condition]:
     ]
 
 
-def _version_tuple(value: str) -> tuple[int, ...]:
-    parsed: list[int] = []
-    for chunk in value.split("."):
-        try:
-            parsed.append(int(chunk))
-        except ValueError:
-            parsed.append(0)
-    return tuple(parsed) or (0,)
-
-
 def _in_range(resolved: str, minimum: str, maximum: str | None) -> bool:
-    rv = _version_tuple(resolved)
-    if rv < _version_tuple(minimum):
+    """True when ``resolved`` is within [minimum, maximum].
+
+    Prefers strict PEP 440 comparison via ``packaging.version`` (so prereleases
+    and post-releases compare correctly) and falls back to a naive dotted-integer
+    compare when a value is not PEP 440 parseable.
+    """
+    try:
+        from packaging.version import Version
+
+        low = Version(minimum)
+        if Version(resolved) < low:
+            return False
+        if maximum is not None and Version(resolved) > Version(maximum):
+            return False
+        return True
+    except Exception:
+        pass
+
+    def as_tuple(value: str) -> tuple[int, ...]:
+        parsed: list[int] = []
+        for chunk in str(value).split("."):
+            try:
+                parsed.append(int(chunk))
+            except ValueError:
+                parsed.append(0)
+        return tuple(parsed) or (0,)
+
+    resolved_tuple = as_tuple(resolved)
+    if resolved_tuple < as_tuple(minimum):
         return False
-    if maximum is not None and rv > _version_tuple(maximum):
+    if maximum is not None and resolved_tuple > as_tuple(maximum):
         return False
     return True
 
@@ -620,6 +638,30 @@ def _declared_test_conditions(manifest: PackManifest, base: Path) -> list[Condit
     return conditions
 
 
+def verify_manifest(
+    manifest: PackManifest,
+    *,
+    installed: Mapping[str, str] | None = None,
+    base: Path | str,
+) -> VerificationReport:
+    """Verify an already-parsed manifest against an installed-pack index.
+
+    Takes the parsed manifest directly so a caller that already loaded it (notably
+    activation) verifies the exact object it will project, with no second read of
+    the file in between. ``base`` is the pack directory used to resolve declared
+    source files and scenario commands.
+    """
+    base_path = Path(base)
+    conditions: list[Condition] = []
+    conditions.extend(_identity_conditions(manifest, str(base_path)))
+    conditions.extend(_schema_conditions(manifest))
+    conditions.extend(_dependency_conditions(manifest, installed))
+    conditions.extend(_capability_conditions(manifest))
+    conditions.extend(_compatibility_conditions(manifest))
+    conditions.extend(_declared_test_conditions(manifest, base_path))
+    return VerificationReport(pack_path=str(base_path), conditions=tuple(conditions))
+
+
 def verify_pack(
     path: Path | str,
     *,
@@ -631,16 +673,8 @@ def verify_pack(
     None the dependency family reports unchecked/unknown rather than guessing.
     """
     target = Path(path).expanduser()
-    report_path = str(target)
     manifest, load_failure = load_manifest(target)
     if load_failure is not None:
-        return VerificationReport(pack_path=report_path, conditions=(load_failure,))
+        return VerificationReport(pack_path=str(target), conditions=(load_failure,))
     assert manifest is not None
-    conditions: list[Condition] = []
-    conditions.extend(_identity_conditions(manifest, report_path))
-    conditions.extend(_schema_conditions(manifest))
-    conditions.extend(_dependency_conditions(manifest, installed))
-    conditions.extend(_capability_conditions(manifest))
-    conditions.extend(_compatibility_conditions(manifest))
-    conditions.extend(_declared_test_conditions(manifest, target.parent if target.is_file() else target))
-    return VerificationReport(pack_path=report_path, conditions=tuple(conditions))
+    return verify_manifest(manifest, installed=installed, base=target.parent if target.is_file() else target)

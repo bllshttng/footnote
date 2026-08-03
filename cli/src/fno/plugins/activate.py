@@ -40,7 +40,7 @@ from fno.plugins.registry import (
     RegistryCorrupt,
     conformance_for,
 )
-from fno.plugins.verify import load_manifest, verify_pack
+from fno.plugins.verify import load_manifest, verify_manifest
 from fno.roles.models import DefinitionStatus, RoleDefinitionSource, RoleLayer
 from fno.roles.registry import default_role_root
 
@@ -166,12 +166,14 @@ def activate(
     for role_manifest in manifest.roles:
         _validate_path_component(role_manifest.role.id, "role id")
 
-    # UNKNOWN conditions are allowed: an unknown is honest non-evaluation (a pack
-    # with no benchmark scenarios), not a defect. Dependencies are always checked
-    # here because the installed index is supplied, so the only unknown source is
-    # declared-test. The plan gates activation on *failed* conditions.
+    # Verify the parsed manifest directly: no second read of the file between
+    # verification and the projection, so the bytes verified are the bytes that
+    # define the roles. UNKNOWN conditions are allowed (honest non-evaluation,
+    # e.g. a pack with no benchmark scenarios); the plan gates activation on
+    # *failed* conditions.
+    base = target.parent if target.is_file() else target
     try:
-        report = verify_pack(target, installed=store.installed_index())
+        report = verify_manifest(manifest, installed=store.installed_index(), base=base)
     except RegistryCorrupt as exc:
         raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
     failing = [
@@ -213,19 +215,22 @@ def activate(
                         f"{source_id} is owned by pack {owner[0]}",
                     )
             existing = registry.receipt_for(manifest.id)
-            if existing is not None and existing.pack_digest == digest:
-                return ActivationOutcome(receipt=existing, already_active=True)
+            already_active = existing is not None and existing.pack_digest == digest
 
             written: list[str] = []
-            for source_id, resolved, definition in planned:
-                try:
+            try:
+                for source_id, resolved, definition in planned:
                     _atomic_write_json(resolved, definition.model_dump_json())
-                except OSError as exc:
-                    raise ActivationRefusal(
-                        ActivationRefusalReason.UNWRITABLE_LAYER,
-                        f"cannot write {resolved}: {exc}",
-                    ) from exc
-                written.append(source_id)
+                    written.append(source_id)
+            except OSError as exc:
+                # Roll back every file this activation wrote so a failed write
+                # never leaves discoverable roles without a receipt.
+                for rollback_id in written:
+                    (root / rollback_id).unlink(missing_ok=True)
+                raise ActivationRefusal(
+                    ActivationRefusalReason.UNWRITABLE_LAYER,
+                    f"cannot write a definition file: {exc}",
+                ) from exc
 
             # An upgrade whose new manifest drops roles must not leave the old
             # roles' files orphaned and undeactivatable: remove prior receipt
@@ -234,7 +239,7 @@ def activate(
             for prior in (existing.written_paths if existing is not None else ()):
                 if prior in new_set:
                     continue
-                prior_path = (root / prior)
+                prior_path = root / prior
                 if prior_path.is_file():
                     prior_path.unlink()
 
@@ -249,9 +254,9 @@ def activate(
             registry, _pack = store._install_locked(registry, manifest, target)
             registry = store._record_activation_locked(registry, receipt)
             store._save(registry)
+            return ActivationOutcome(receipt=receipt, already_active=already_active)
     except RegistryCorrupt as exc:
         raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
-    return ActivationOutcome(receipt=receipt, already_active=False)
 
 
 class DeactivationOutcome:
@@ -268,36 +273,45 @@ def deactivate(
 ) -> DeactivationOutcome:
     """Remove only the definition paths this pack's receipt recorded.
 
-    Each path is removed only if its current owner is still this pack, and the
-    receipt is retained until the removals succeed so a failed unlink keeps retry
-    evidence. A hand-written definition in the same plugin layer is never touched.
+    The whole operation runs under one registry lock: ownership is read, files
+    are unlinked, and the receipt is removed with no window for a concurrent
+    activation to invalidate the snapshot. Each receipted path is removed only if
+    it still resolves under the role root and its current owner is still this
+    pack; a hand-written definition in the same plugin layer is never touched.
     """
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
+    root_resolved = root.resolve()
+
+    def contained(source_id: str) -> bool:
+        try:
+            (root / source_id).resolve().relative_to(root_resolved)
+            return True
+        except (ValueError, RuntimeError):
+            return False
+
     try:
-        receipt = store.peek_receipt(pack_id)
+        with store.lock:
+            registry = store.load()
+            receipt = registry.receipt_for(pack_id)
+            if receipt is None:
+                return DeactivationOutcome(removed=(), left_alone=())
+            removed: list[str] = []
+            left_alone: list[str] = []
+            for source_id in receipt.written_paths:
+                if not contained(source_id):
+                    left_alone.append(source_id)
+                    continue
+                owner = registry.owner_of_path(source_id)
+                if owner is not None and owner[0] != pack_id:
+                    left_alone.append(source_id)
+                    continue
+                path = root / source_id
+                if path.is_file():
+                    path.unlink()
+                removed.append(source_id)
+            receipts = tuple(r for r in registry.receipts if r.pack_id != pack_id)
+            store._save(registry.model_copy(update={"receipts": receipts}))
+            return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))
     except RegistryCorrupt:
         return DeactivationOutcome(removed=(), left_alone=())
-    if receipt is None:
-        return DeactivationOutcome(removed=(), left_alone=())
-
-    removed: list[str] = []
-    left_alone: list[str] = []
-    try:
-        registry = store.load()
-    except RegistryCorrupt:
-        # Refuse to guess at ownership when the registry is corrupt.
-        return DeactivationOutcome(removed=(), left_alone=receipt.written_paths)
-    for source_id in receipt.written_paths:
-        owner = registry.owner_of_path(source_id)
-        path = root / source_id
-        if owner is not None and owner[0] != pack_id:
-            # Another pack reclaimed this path mid-flight; leave it alone.
-            left_alone.append(source_id)
-            continue
-        if path.is_file():
-            path.unlink()
-        removed.append(source_id)
-
-    store.remove_activation(pack_id)
-    return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))
