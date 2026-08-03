@@ -8,7 +8,7 @@
 set -euo pipefail
 
 # Raised from 37326 by 89 bytes for delivery_completion DoneDelivery terminal
-# documentation and activation logic in AGENTS.md (x-76a2).
+# documentation and activation logic in AGENTS.md.
 CEILING_BYTES=37415
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
