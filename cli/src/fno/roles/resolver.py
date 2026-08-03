@@ -28,6 +28,7 @@ from fno.roles.models import (
     RoleResolutionReason,
     Sensitivity,
     canonical_digest as _digest,
+    work_order_scope_matches as _same_work_order_scope,
 )
 from fno.roles.registry import DiscoveredRoleDefinition, RegistryError, RoleRegistry
 
@@ -184,18 +185,6 @@ def _blocked(
         reference=reference,
         detail=detail,
     )
-
-
-def _same_work_order_scope(scope: WorkOrderRef | None, work_order: WorkOrderRef) -> bool:
-    if scope is None:
-        return True
-    if scope.node_id != work_order.node_id or scope.attempt_id != work_order.attempt_id:
-        return False
-    if scope.role_id is not None and scope.role_id != work_order.role_id:
-        return False
-    if scope.principal_id is not None and scope.principal_id != work_order.principal_id:
-        return False
-    return True
 
 
 def _capability_fact_applies(

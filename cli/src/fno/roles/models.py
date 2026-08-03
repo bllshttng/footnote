@@ -36,6 +36,18 @@ def canonical_digest(domain: str, value: object) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def work_order_scope_matches(scope: WorkOrderRef | None, work_order: WorkOrderRef) -> bool:
+    if scope is None:
+        return True
+    if scope.node_id != work_order.node_id or scope.attempt_id != work_order.attempt_id:
+        return False
+    if scope.role_id is not None and scope.role_id != work_order.role_id:
+        return False
+    if scope.principal_id is not None and scope.principal_id != work_order.principal_id:
+        return False
+    return True
+
+
 class _RoleModel(BaseModel):
     model_config = ConfigDict(frozen=True, extra="forbid")
 
@@ -272,10 +284,7 @@ class ContextBundle(_RoleModel):
         for reference in self.references:
             if reference.snapshot_revision != self.snapshot_revision:
                 raise ValueError("context reference snapshot_revision must match bundle")
-            if (
-                reference.work_order_scope is not None
-                and reference.work_order_scope != self.work_order
-            ):
+            if not work_order_scope_matches(reference.work_order_scope, self.work_order):
                 raise ValueError("context reference work_order_scope must match bundle")
         digest_value = canonical_digest(
             "context-bundle",

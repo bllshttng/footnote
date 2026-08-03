@@ -221,6 +221,18 @@ def test_resolved_role_rejects_contradictory_frozen_projection(
         ResolvedRole.model_validate(payload)
 
 
+def test_context_bundle_accepts_matching_partial_work_order_scope() -> None:
+    partial_scope = WorkOrderRef(
+        node_id=WORK_ORDER.node_id,
+        attempt_id=WORK_ORDER.attempt_id,
+    )
+
+    resolved = _resolve(context=(_context(work_order=partial_scope),))
+
+    assert isinstance(resolved, ResolvedRole)
+    assert resolved.context_bundle.references[0].work_order_scope == partial_scope
+
+
 def test_fresh_context_requirement_rejects_missing_freshness_metadata() -> None:
     manifest = _manifest(
         context_selectors=(
