@@ -349,7 +349,7 @@ fn delivery_finalize_retry_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
         .unwrap();
     fs::write(
         cwd.join(".fno/target-state.md"),
-        "---\nsession_id: sess-delivery-retry\nharness_session_id: sess-delivery-retry\nclaude_session_id: null\n---\n",
+        "---\nsession_id: sess-delivery-retry\nharness_session_id: null\nclaude_session_id: null\n---\n",
     )
     .unwrap();
     let transcript = cwd.join("sess-delivery-retry.jsonl");
@@ -427,6 +427,12 @@ fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
     };
 
     assert_eq!(fire(), Some(2));
+    let retry = git_path(&cwd, "fno-delivery-finalize-pending-sess-delivery-retry.md");
+    assert!(
+        retry.exists(),
+        "missing retry snapshot at {}",
+        retry.display()
+    );
     write_other_pending(&cwd);
     assert_eq!(fire(), Some(0));
     assert!(cwd.join(".fno/finalize-complete").exists());

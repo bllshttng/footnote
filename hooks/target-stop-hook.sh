@@ -35,6 +35,9 @@ readonly MAX_UNAVAIL_RETRIES=3
 
 # ── 1. Read stdin ─────────────────────────────────────────────────────────────
 HOOK_INPUT=$(cat)
+HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
 
 # ── 2. State file: the active-session discriminator ───────────────────────────
 # No state file -> no target session here -> nothing to gate. This is the ONLY
@@ -52,16 +55,22 @@ esac
 if [[ -f "$LIVE_STATE_FILE" ]]; then
     LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
         | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
-    DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${LIVE_SESSION_ID:-session}.md"
+    LIVE_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' "$LIVE_STATE_FILE" 2>/dev/null \
+        | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
+        | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
+    DELIVERY_RETRY_ID="${HOOK_HARNESS_ID:-${LIVE_HARNESS_ID:-${LIVE_SESSION_ID:-session}}}"
+    DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${DELIVERY_RETRY_ID}.md"
     [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
 else
     DELIVERY_PENDING_STATE=""
-    HOOK_TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | sed -n \
-        's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
-    HOOK_HARNESS_ID=$(basename "$HOOK_TRANSCRIPT_PATH" .jsonl 2>/dev/null || true)
+    if [[ -n "$HOOK_HARNESS_ID" && -f "${DELIVERY_PENDING_PREFIX}${HOOK_HARNESS_ID}.md" ]]; then
+        DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${HOOK_HARNESS_ID}.md"
+    fi
     for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
+        [[ -n "$DELIVERY_PENDING_STATE" ]] && break
         PENDING_HARNESS_ID=$(grep -E '^(harness_session_id|claude_session_id):' "$pending" 2>/dev/null \
-            | head -1 | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' | tr -d '[:space:]' || true)
+            | sed -E 's/^(harness_session_id|claude_session_id):[[:space:]]*//' \
+            | grep -Ev '^(null)?$' | head -1 | tr -d '[:space:]' || true)
         if [[ -n "$HOOK_HARNESS_ID" && "$PENDING_HARNESS_ID" == "$HOOK_HARNESS_ID" ]]; then
             DELIVERY_PENDING_STATE="$pending"
             break

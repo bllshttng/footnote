@@ -226,6 +226,8 @@ def _current_evidence_events(
     unkeyed_approvals: dict[str, _LatestEvent] = {}
     effects: dict[str, _LatestEvent] = {}
     producer_event_ids: dict[str, tuple[object, ...]] = {}
+    work_order = company_work.work_order
+    assert work_order is not None
     for event in events:
         event_type = event.get("type")
         data = event.get("data")
@@ -284,6 +286,13 @@ def _current_evidence_events(
             "approval_decided",
             "effect_state_changed",
         }:
+            event_work_order = data.get("work_order_id")
+            if (
+                isinstance(event_work_order, str)
+                and event_work_order
+                and event_work_order != work_order.node_id
+            ):
+                continue
             event_id = data.get("event_id")
             if isinstance(event_id, str) and event_id:
                 producer_identity = (event_type, event.get("source"), data)
@@ -318,8 +327,6 @@ def _current_evidence_events(
                 _select_latest(effects, f"key:{key}", event)
             elif isinstance(effect_id, str) and effect_id:
                 _select_latest(effects, f"effect:{effect_id}", event)
-    work_order = company_work.work_order
-    assert work_order is not None
     selected_events: list[tuple[dict[str, object], dict[str, object] | None]] = []
     for _, _, events_for_revision in observed.values():
         for event in events_for_revision:
