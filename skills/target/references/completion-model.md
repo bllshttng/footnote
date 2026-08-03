@@ -30,7 +30,7 @@ The shim delegates all stop/allow logic to `fno-agents loop-check`. Output is on
 
 **Backstop:** A 4-component fingerprint (`HEAD sha | PR state | CI conclusion | latest review/comment ts`) unchanged across N consecutive fires (3 unattended / 5 attended) terminates with `NoProgress`. A "done but mute" session (all reads pass but no promise) resolves as a late `DonePRGreen`. Budget cap (`config.budget` nested, or flat `budget_cap` fallback) terminates with `Budget`. gh-errored fires are transparent to the streak (an outage freezes it; budget is the sole ceiling), while a no-PR fire counts as real world-state.
 
-**TerminationReason enum:** `DonePRGreen | DoneAdvisory | NoWork | Budget | NoProgress | Interrupted | Aborted`
+**TerminationReason enum:** `DonePRGreen | DoneAdvisory | DoneDelivery | NoWork | Budget | NoProgress | Interrupted | Aborted`
 
 Events land in both `.fno/events.jsonl` and `~/.fno/events.jsonl` with envelope `{ts, type, source:"hook", data}`. Event kinds: `loop_check`, `termination`, `loop_check_gh_error`, `loop_advisory_mode`, `loop_check_binary_missing`, `loop_check_legacy_manifest`.
 

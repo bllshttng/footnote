@@ -259,7 +259,7 @@ The Rust verb (`run_loop_verb_inner`) also resolves `--cli` for the dispatcher's
 
 | Code | Meaning |
 |---|---|
-| 0 | `DonePRGreen`, `DoneAdvisory`, or `NoWork` (unit terminated successfully) |
+| 0 | `DonePRGreen`, `DoneAdvisory`, `DoneDelivery`, or `NoWork` (unit terminated successfully) |
 | 1 | `Budget`, `NoProgress`, or `Aborted` (walk failed or hit ceiling) |
 | 2 | Usage error or internal error |
 | 77 | Driver binary missing from PATH (preflight failure) |
@@ -311,7 +311,7 @@ Model-fallback is a deliberate drop, not an oversight. The loop contract is type
 
 - **`next()`**: shells `fno backlog next [--project P | --all]` and parses the JSON response. A literal `null` output means the backlog is drained; `next()` returns `Ok(None)` and the walk terminates with `NoWork`. Malformed JSON or a non-zero exit is a `LoopError::Queue`.
 
-- **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory` evidence. Exit 0 yields `CloseOutcome::Closed`; exit 5 (PR OPEN, not merged) yields `CloseOutcome::AwaitingMerge`; other nonzero yields `CloseOutcome::Parked(stderr)`. `DoneAwaitingMerge` evidence maps directly to `CloseOutcome::AwaitingMerge` WITHOUT shelling `fno backlog done` (the reason already carries the fact - this fixes its earlier mis-handling as a held-claim Park). Other non-done evidence returns `CloseOutcome::Parked` without calling `fno backlog done`.
+- **`close()`**: shells `fno backlog done <id>` for `DonePRGreen | DoneAdvisory | DoneDelivery` evidence. Exit 0 yields `CloseOutcome::Closed`; exit 5 (PR OPEN, not merged) yields `CloseOutcome::AwaitingMerge`; other nonzero yields `CloseOutcome::Parked(stderr)`. `DoneAwaitingMerge` evidence maps directly to `CloseOutcome::AwaitingMerge` WITHOUT shelling `fno backlog done` (the reason already carries the fact - this fixes its earlier mis-handling as a held-claim Park). Other non-done evidence returns `CloseOutcome::Parked` without calling `fno backlog done`.
 
 **Claims.** Before returning a unit from `next()`, the queue calls `fno claim acquire node:<id> --holder target-session:<session_key> --ttl 2h`. Exit 0 records the claim and returns the unit. Exit 1 (`ClaimHeldByOther`) lets the live-claims filter inside `fno backlog next` exclude the node on the next retry; the walker never needs a skip-set - claims and selection compose without walker-side coordination. Exit 2 or other non-zero codes surface immediately as a `LoopError::Queue` (sigma-review finding 1: the previous collapse of all non-zero exits to "retry" hid validation and corruption errors). The retry bound is `MAX_CLAIM_RETRIES = 5`; exhaustion is a `LoopError::Queue`.
 

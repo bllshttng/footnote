@@ -9,10 +9,12 @@
 //!   `graph_node_id` + `provider_id` + scalar `session_id` + `cost_usd` + a new
 //!   `termination_reason`, so a node's true cost and full session list roll up
 //!   by grouping ledger entries on `graph_node_id` (US7).
-//! - **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
+//! - **Legacy ship** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
 //!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `in_review`
 //!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
 //!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
+//! - **Generic delivery** (`DoneDelivery`): consume the selected strict verdict,
+//!   stamp or safely graduate with its receipt, and write a generic handoff.
 //! - **`DonePRGreen` only**, when the manifest approves it: arm GitHub's native
 //!   auto-merge. This is the one terminal that means "green and reviewed", and
 //!   arming it HERE rather than at PR creation is the whole point (x-1951) -

@@ -62,10 +62,11 @@ Exit 0 for both allow AND block. Exit 2 for CLI misuse only.
 ### Decision algorithm
 
 1. `<aborted reason="...">` in transcript -> `Aborted` (terminate).
-2. `<promise>MISSION COMPLETE: ...</promise>` in transcript -> run `done()`:
+2. An explicitly activated generic-delivery plan evaluates its coherent evidence journal through `fno delivery evaluate --json`; a complete pass is durably selected as `DoneDelivery` after the operator-finding gate.
+3. `<promise>MISSION COMPLETE: ...</promise>` in transcript -> run `done()`:
    - If all reads pass: terminate with `DonePRGreen` (or `DoneAdvisory` in advisory mode).
    - If a read fails: block, name the failing read in `message`. Loop continues.
-3. No promise -> backstop check (see below).
+4. No promise -> backstop check (see below).
 
 ### `done()` reads
 
@@ -250,7 +251,7 @@ Legacy manifests (those with a `status:` key written by the pre-wedge init) are 
 
 ## The finalize writer (step 6)
 
-`loop-check` stays a pure read-only DECISION verb. `fno-agents finalize` is a separate WRITER the shim runs AFTER a terminal-allow decision (a non-null `termination_reason`):
+`loop-check` remains a decision verb for legacy paths. The generic-delivery branch performs one durability write before allowing `DoneDelivery`: it appends the strict session-bound selected verdict that finalize must consume. `fno-agents finalize` is the separate writer the shim runs after any terminal-allow decision (a non-null `termination_reason`):
 
 ```
 decision = fno-agents loop-check ...        # pure read-only, unchanged
@@ -261,8 +262,9 @@ if decision.allow AND decision.is_terminal:
 It splits into two trigger classes:
 
 - **Always** (any terminal reason): one ledger session-record, via `session-cost.py` + `register-task.py`, carrying `graph_node_id` + `provider_id` + scalar `session_id` + `cost_usd` + a new `termination_reason` field. Every provider session that touched a node leaves exactly one row, so a node's true cost and full session list roll up by grouping ledger entries on `graph_node_id`.
-- **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp + graduate (`stamp-plan.py`) and a git-derived handoff artifact.
+- **Legacy ship** (`DonePRGreen` / `DoneAdvisory`): plan stamp + graduate (`stamp-plan.py`) and a git-derived handoff artifact.
+- **Generic delivery** (`DoneDelivery`): consume the already selected verdict, stamp or safely graduate the plan with its deterministic `fno-delivery://` receipt, and write a generic handoff without PR or research assumptions.
 
 It is idempotent (a `session_finalized` event keyed by `session_id` short-circuits re-fires) and strictly non-fatal (a sub-step failure emits `session_finalize_failed` naming the step, runs the remaining steps, and never changes the completion decision). Nothing it writes is read by a future `loop-check` decision as a gate: the budget axis filters ledger cost by `session_id`, so a terminal write can only push the same terminating session toward termination, never away. A delegating self-handoff session writes its own ledger record (`termination_reason: delegated`, ledger-only) inside `handoff.sh` before manifest archival, because the shim's finalize cannot read the archived manifest. New event kinds: `session_finalized`, `session_finalize_failed`.
 
-The control-plane collapse is complete: a code unit's completion authority is exactly three external reads (PR + CI + reviews) plus a budget ceiling. Nothing an agent wrote to a local file is ever a precondition of `<promise>`.
+The control-plane collapse is complete: a legacy code unit's completion authority is exactly three external reads (PR + CI + reviews) plus a budget ceiling, while an explicitly activated generic unit uses its complete current delivery-evidence verdict. Nothing an agent writes as an unvalidated status flag is a precondition of `<promise>`.

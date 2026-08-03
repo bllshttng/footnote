@@ -65,7 +65,8 @@ _SAME_REPO_PROJECTS = {"footnote", "fno", "fno"}
 
 # A merged PR is a delivered node. The scoreboard fold windows every row on
 # `completed` and counts a row as shipped only when `termination_reason` is in
-# its _SHIPPED_TERMINALS allowlist (DonePRGreen | DoneAdvisory | DoneBatched);
+# its _SHIPPED_TERMINALS allowlist (DonePRGreen | DoneAdvisory | DoneDelivery |
+# DoneBatched);
 # a row missing either field is invisible to the scoreboard. So each backfilled
 # row must carry `completed` (= the merge time) and the delivered terminal.
 _SHIPPED_REASON = "DonePRGreen"

@@ -243,6 +243,6 @@ if [[ -z "$TERMINATION_REASON" && -f "$STATE_FILE" ]]; then
     fi
 fi
 
-# allow (includes DonePRGreen, DoneAdvisory, NoWork, Budget, NoProgress, etc.)
+# allow (includes DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, etc.)
 echo "target stop-hook: $MESSAGE" >&2
 exit 0

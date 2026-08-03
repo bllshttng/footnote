@@ -199,7 +199,7 @@ impl Queue for TargetQueue {
 
 /// Map a LoopOutcome walk reason to a process exit code.
 ///
-/// DonePRGreen | DoneAdvisory | NoWork -> 0  (success)
+/// DonePRGreen | DoneAdvisory | DoneDelivery | NoWork -> 0  (success)
 /// Budget | NoProgress | Aborted       -> 1  (failed / budget)
 /// Interrupted                         -> 130 (SIGINT convention)
 ///
@@ -246,7 +246,7 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
 /// ```
 ///
 /// Exit codes:
-/// - 0: DonePRGreen | DoneAdvisory | NoWork (unit terminated successfully)
+/// - 0: DonePRGreen | DoneAdvisory | DoneDelivery | NoWork (unit terminated successfully)
 /// - 1: Budget | NoProgress | Aborted (walk failed or hit ceiling)
 /// - 2: usage error / internal error
 /// - 77: driver binary missing from PATH (preflight failure)

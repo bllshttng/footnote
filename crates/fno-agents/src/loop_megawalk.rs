@@ -151,7 +151,7 @@ struct PolicyUnitEntry {
 // ── shared predicate ──────────────────────────────────────────────────────────
 
 /// Returns true when the termination reason is a successful close
-/// (DonePRGreen or DoneAdvisory). Used in three policy sites; extracted to
+/// (DonePRGreen, DoneAdvisory, or DoneDelivery). Used in three policy sites; extracted to
 /// avoid triplication (sigma-review finding 4).
 fn is_done_reason(r: &TerminationReason) -> bool {
     matches!(
@@ -171,7 +171,7 @@ fn is_done_reason(r: &TerminationReason) -> bool {
 /// ## Consecutive-failure pause (3)
 ///
 /// A unit is a "failure" when close() is called with evidence.reason NOT in
-/// {DonePRGreen, DoneAdvisory}. A successful close resets the streak. When the
+/// {DonePRGreen, DoneAdvisory, DoneDelivery}. A successful close resets the streak. When the
 /// streak reaches 3, the next next() call returns
 /// Err(LoopError::Pause{policy:"consecutive_failures", detail}).
 ///
@@ -511,7 +511,7 @@ struct ClaimEntry {
 /// is the same as `MegawalkPolicyQueue`:
 ///   - consecutive-failure streak of 3 -> Pause{consecutive_failures}
 ///   - p0 unit failure -> Pause{p0_failed} (immediate, no streak needed)
-///   - Success (DonePRGreen | DoneAdvisory) resets the streak.
+///   - Success (DonePRGreen | DoneAdvisory | DoneDelivery) resets the streak.
 ///
 /// The `priority` field from the backlog-next JSON is stored per-unit in
 /// `active_claims` so `close()` can check it for the p0 rule.
@@ -542,7 +542,7 @@ pub struct MegawalkQueue {
     /// the NEXT next() call returns a pause immediately.
     policy_p0_failure: Option<String>,
     /// Consecutive failure streak counter. A "failure" is any close with
-    /// evidence.reason NOT in {DonePRGreen, DoneAdvisory}.
+    /// evidence.reason NOT in {DonePRGreen, DoneAdvisory, DoneDelivery}.
     policy_consecutive_failures: usize,
     /// Unit IDs involved in the current streak (for Pause detail string).
     policy_streak_ids: Vec<String>,
@@ -865,7 +865,7 @@ impl Queue for MegawalkQueue {
 
     /// Mark a unit as closed.
     ///
-    /// DonePRGreen | DoneAdvisory -> shell `fno backlog done <id>`.
+    /// DonePRGreen | DoneAdvisory | DoneDelivery -> shell `fno backlog done <id>`.
     ///   Exit 0 -> CloseOutcome::Closed.
     ///   Exit 5 -> CloseOutcome::AwaitingMerge (PR OPEN, not merged; x-aba7).
     ///   Other nonzero -> CloseOutcome::Parked(stderr tail).
@@ -1212,7 +1212,7 @@ pub fn emit_walk_termination(
 /// Called from loop_target.rs when --driver megawalk is specified.
 ///
 /// Exit codes:
-/// - 0: NoWork | DonePRGreen | DoneAdvisory (walk completed or backlog empty)
+/// - 0: NoWork | DonePRGreen | DoneAdvisory | DoneDelivery (walk completed or backlog empty)
 /// - 1: Budget | NoProgress | Aborted (walk hit ceiling or failed)
 /// - 2: usage / configuration error
 /// - 77: driver binary missing from PATH (preflight failure)

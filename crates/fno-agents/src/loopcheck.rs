@@ -3962,7 +3962,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
         // Operator review-finding gate (x-f8d4, Locked Decision 3): an open
         // review_finding for this node HOLDS every success terminal-allow
-        // (DonePlanned / DoneAdvisory / DoneBatched / DonePRGreen) until an
+        // (DonePlanned / DoneAdvisory / DoneDelivery / DoneBatched / DonePRGreen) until an
         // explicit resolve - a promise cannot self-authorize past an operator's
         // open comment. Placed AFTER the Aborted arm and gated on
         // `!backstop_tripped` so the anti-wedge safety valves still win: an
