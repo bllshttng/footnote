@@ -1636,10 +1636,9 @@ def cmd_send(
             raise typer.Exit(code=2)
 
         # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
-        # (question -> wake-signal, fyi -> memory). Addressed to a bare session
-        # handle they queue durable to an inbox nothing drains, so refuse and name
-        # the two real intents. heads-up to a handle stays accepted (the production
-        # notification pattern; its emitters are programmatic, not enumerable).
+        # (question -> wake-signal, fyi -> memory). Addressed to an agent they
+        # queue durable to an inbox nothing drains, so refuse and name the two
+        # real intents. Agent heads-up stays accepted.
         if to_project is None and kind in {Kind.QUESTION.value, Kind.FYI.value}:
             print(
                 f"error: --kind {kind} to a session handle ({recipient}) has no "
@@ -1658,6 +1657,31 @@ def cmd_send(
                 )
                 raise typer.Exit(code=2)
             persist_to_memory = True
+
+        # An agent-scoped heads-up must use the same canonical session handle
+        # that notify-self and drain-self consume. Resolve registered names and
+        # every supported handle form before the durable append; an unresolved
+        # token exits without creating a stranded inbox.
+        if to_project is None:
+            from fno.agents import discover as discover_mod
+            from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
+            from fno.harness_identity import canonical_handle
+
+            resolved, suggestions = discover_mod.resolve_or_suggest(
+                recipient, require_alive=False
+            )
+            if resolved is None:
+                hint = (
+                    f" Closest sessions: {', '.join(suggestions)}."
+                    if suggestions
+                    else ""
+                )
+                print(
+                    f"unknown agent or live-session handle: {recipient!r}.{hint}",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+            recipient = canonical_handle(resolved.session_id)
 
         # Sender identity: an explicit --from-name wins; otherwise resolve the
         # current project from settings (the project-note sender default, so a

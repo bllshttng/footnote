@@ -79,10 +79,31 @@ def test_send_then_unread_then_ack(runner, mailbox):
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
-def test_handle_heads_up_is_accepted_by_cli_authority(
+def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
     runner, mailbox, monkeypatch
 ):
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
     from fno.bus.log import iter_messages
+    from fno.harness_identity import canonical_handle
+
+    session_id = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    empty = mailbox / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+    write_registry([
+        AgentEntry(
+            name="worker-a",
+            cwd="/Users/x/proj",
+            log_path="/tmp/worker-a.log",
+            harness="claude",
+            harness_session_id=session_id,
+            short_id="9a063cd3",
+        )
+    ])
 
     monkeypatch.setattr(
         "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
@@ -100,8 +121,42 @@ def test_handle_heads_up_is_accepted_by_cli_authority(
     assert "[param-forced: --kind heads-up]" in result.stdout
     messages = list(iter_messages())
     assert [(message.to, message.kind, message.body) for message in messages] == [
-        ("worker-a", "heads-up", "Migration is ready")
+        (canonical_handle(session_id), "heads-up", "Migration is ready")
     ]
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert drained.exit_code == 0, drained.output
+    assert [item["body"] for item in json.loads(drained.stdout)] == [
+        "Migration is ready"
+    ]
+
+
+def test_unknown_agent_heads_up_exits_16_without_writing(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents import discover
+    from fno.bus.log import iter_messages
+
+    empty = mailbox / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "missing-worker", "Migration is ready",
+            "--kind", "heads-up", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 16
+    assert "unknown agent or live-session handle" in result.stderr
+    assert list(iter_messages()) == []
+    assert list(mailbox.glob("**/*.md")) == []
 
 
 @pytest.mark.parametrize("kind", ["question", "fyi"])

@@ -29,8 +29,10 @@ require_text "project: explicit kind argv" 'fno mail send --to-project "<project
 require_text "grammar: only explicit token selects kind" 'Only an explicit `--kind` token selects a kind.'
 require_text "grammar: body suffix remains body" 'A final body word such as `question`, `heads-up`, or `fyi` remains body text.'
 require_text "guard: genuine CLI sees incompatible handle kind" 'Pass every syntactically valid explicit kind to the genuine CLI'
+require_text "routing: agent heads-up resolves canonically" "resolves an agent-scoped \`heads-up\` to the recipient's canonical session handle before the durable write"
 require_text "guard: exact refusal is relayed" 'relay its stderr unchanged'
 require_text "receipt: durable is not upgraded" '`queued (durable)` is not delivered'
+require_text "unknown heads-up: exit 16 without write" 'An unknown agent heads-up exits 16 and writes nothing'
 
 echo ""
 echo "agent-send-contract: $PASS passed, $FAIL failed"

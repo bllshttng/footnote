@@ -714,14 +714,14 @@ A final body word such as `question`, `heads-up`, or `fyi` remains body text.
 2. Refuse an empty recipient, project, kind value, or body before running anything, but do not interpret any body token as grammar.
 3. Map project mode to `fno mail send --to-project "<project>" --kind "<kind>" "<body>"` and agent mode to `fno mail send "<agent>" "<body>"`, inserting `--kind "<kind>"` only where the user explicitly supplied it.
 4. Pass every syntactically valid explicit kind to the genuine CLI, including `question` or `fyi` with an agent recipient.
-5. Let the CLI remain the single kind/addressee authority: it accepts handle-scoped `heads-up`, accepts all three project kinds, and refuses handle-scoped `question` or `fyi` before any durable write.
+5. Let the CLI remain the single kind/addressee authority: it resolves an agent-scoped `heads-up` to the recipient's canonical session handle before the durable write, accepts all three project kinds, and refuses agent-scoped `question` or `fyi` before any durable write.
 6. On a CLI refusal, relay its stderr unchanged so the user sees the live-agent and project-note alternatives instead of a skill-layer paraphrase.
 7. On success, relay the real message id and routing receipt exactly as printed.
 
 `delivered (hosted)` confirms that the message landed in the recipient session.
 `queued (durable)` is not delivered; it is durable fallback awaiting the recipient's next active boundary or recovery.
 Never upgrade queued mail to delivered, and never invent a receipt when the CLI printed none.
-An unknown agent exits 16 and writes nothing, so report that exact failure without guessing another recipient.
+An unknown agent heads-up exits 16 and writes nothing, so report that exact failure without guessing another recipient.
 `send` is free and never confirms because it is not a billed launch.
 
 ---
