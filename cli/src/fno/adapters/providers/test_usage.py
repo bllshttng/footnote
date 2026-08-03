@@ -699,7 +699,7 @@ class TestHeadroom:
 
 
 # ---------------------------------------------------------------------------
-# evaluate_quota_defer: the dispatcher decision core (US3: AC2-HP, AC2-FR, LD)
+# evaluate_quota_signal: the dispatcher decision core (US3: AC2-HP, AC2-FR, LD)
 # ---------------------------------------------------------------------------
 
 
@@ -711,57 +711,57 @@ class TestEvaluateQuotaDefer:
         monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: cfg)
 
     def test_off_by_default_never_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=False)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
     def test_p0_never_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p0", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p0", now=1000.0).defer
 
     def test_exhausted_defers_with_retry_at(self, state_path: Path, monkeypatch) -> None:
-        # AC2-HP core: exhausted -> defer, retry_at == the window reset.
-        from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_defer
+        # AC2-HP core: exhausted -> defer, resets_at == the window reset.
+        from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        d = evaluate_quota_defer("p1", priority="p2", now=1000.0)
-        assert d is not None
-        assert d.state is HeadroomState.EXHAUSTED
-        assert d.retry_at == 9e18
+        sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
+        assert sig.defer
+        assert sig.state is HeadroomState.EXHAUSTED
+        assert sig.resets_at == 9e18
 
     def test_low_within_horizon_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60, defer_threshold_pct=90.0)
         # reset in 30 min (< 60 horizon), 95% -> LOW -> defer.
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 1800), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is not None
+        assert evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
     def test_low_outside_horizon_proceeds(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60)
         # reset in 2h (> 60 horizon), 95% -> LOW but too far -> proceed.
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 7200), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
     def test_unknown_never_strands(self, state_path: Path, monkeypatch) -> None:
         # AC2-FR: a deferred node whose snapshot ages out degrades to UNKNOWN,
         # which never defers -> the next tick dispatches (deferral cannot outlive
-        # the evidence). No fresh snapshot -> UNKNOWN -> None. refresh_usage will
-        # try to probe; with no provider record it returns None, staying UNKNOWN.
+        # the evidence). No fresh snapshot -> UNKNOWN. refresh_usage will try to
+        # probe; with no provider record it returns None, staying UNKNOWN.
         from fno.adapters.providers.model import ProvidersConfig
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         monkeypatch.setattr(loader, "load_providers", lambda *a, **k: ProvidersConfig(records=[]))
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
 
 class TestDispatchOneQuotaDefer:

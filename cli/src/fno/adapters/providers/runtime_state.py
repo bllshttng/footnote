@@ -1001,15 +1001,6 @@ def headroom(
 
 
 @dataclasses.dataclass(frozen=True)
-class QuotaDeferDecision:
-    """A dispatcher's verdict that a node should be held for quota reasons."""
-
-    provider_id: str
-    state: HeadroomState  # EXHAUSTED or LOW
-    retry_at: float | None
-
-
-@dataclasses.dataclass(frozen=True)
 class QuotaSignal:
     """What one quota probe says about a provider for an autonomous launch.
 
@@ -1086,28 +1077,6 @@ def evaluate_quota_signal(
         if after > 0 and h.resets_at > now + after:
             cutover = True
     return QuotaSignal(provider_id, h.state, h.resets_at, defer, cutover, "probed")
-
-
-def evaluate_quota_defer(
-    provider_id: str,
-    *,
-    priority: str | None = None,
-    now: float | None = None,
-) -> QuotaDeferDecision | None:
-    """Return a defer decision for an autonomous dispatch, or None to proceed.
-
-    - EXHAUSTED -> defer with the reset as ``retry_at``.
-    - LOW with a reset within ``defer_horizon_minutes`` -> defer.
-    - OK / UNKNOWN, or no provider, or LOW with a distant/absent reset ->
-      proceed (None). UNKNOWN never defers: absence of data is not trouble.
-
-    The defer half of :func:`evaluate_quota_signal`; a caller that also wants
-    the cutover verdict should read the signal directly rather than probe twice.
-    """
-    sig = evaluate_quota_signal(provider_id, priority=priority, now=now)
-    if not sig.defer:
-        return None
-    return QuotaDeferDecision(sig.provider_id, sig.state, sig.resets_at)
 
 
 # ---------------------------------------------------------------------------
