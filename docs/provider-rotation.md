@@ -298,6 +298,8 @@ It also refuses with `slot-pinned` while a session that was pinning when the tai
 Proving the principal proves it now, and that session was launched under the outgoing account, so its next token refresh can overwrite the slot with that account's credential.
 The taint marker records those pids for exactly this check: a session started after the switch already read the new credential and never blocks a repair, which matters because on the shared slot the pinning session is usually the account being proven.
 Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pinned to another account exports it and reconciliation would otherwise prove the pinned account and stamp it onto the canonical slot.
+The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
+A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
 
 A record's principal is bound where footnote knows whose credential it holds: at `register`, and at the tail of a verified switch for a record not yet bound.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.

@@ -990,6 +990,13 @@ def capture_record_principal(
     material = blob if blob is not None else read_blob(record.id, root)
     principal, _failure = slot_principal(material)
     if principal is None:
+        if force:
+            # Re-registering an id points it at whatever is signed in NOW, while
+            # `write_snapshot` deliberately preserves the previous principal for
+            # capture-before-overwrite. Leaving that binding here would claim the
+            # new credential belongs to the old account - a confident lie is
+            # worse than an unmatchable record, so drop it.
+            _clear_record_principal(record.id, root)
         return None
     try:
         write_record_principal(record.id, principal, root)
@@ -1028,6 +1035,18 @@ def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
         "stamped": stamped,
         "live": principal.get("email") or principal["account_uuid"],
     }
+
+
+def _clear_record_principal(record_id: str, root: Path | None = None) -> None:
+    """Drop a record's principal binding, leaving the rest of its metadata."""
+    meta = read_meta(record_id, root) or {}
+    if not meta.pop("principal", None) and "principal_at" not in meta:
+        return
+    meta.pop("principal_at", None)
+    try:
+        _atomic_write_private(_meta_path(record_id, root), json.dumps(meta, indent=2))
+    except OSError:
+        pass
 
 
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:
@@ -1093,7 +1112,17 @@ def reconcile_slot(
             ),
         )
     root = root or store_root()
-    root.mkdir(parents=True, exist_ok=True)
+    if not root.is_dir():
+        # Creating the store here would be a write on a path that cannot
+        # possibly match anything, breaking the guarantee that only `matched`
+        # touches disk. Nothing is registered, so the answer is already known.
+        return ReconcileResult(
+            "no-managed-store",
+            detail=(
+                f"no managed store at {root}; register an account while it is "
+                "signed in before there is anything to reconcile against"
+            ),
+        )
     lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=lock_timeout)
     try:
         lock.acquire()
@@ -1107,9 +1136,25 @@ def reconcile_slot(
         lock.release()
 
 
+def _slot_pinned_detail(blockers: list[str]) -> str:
+    return (
+        f"{', '.join(blockers)} was pinning the slot when it was tainted and can "
+        "still write the previous account's refreshed credential, so proving the "
+        "identity now would not keep it true; stop it and retry"
+    )
+
+
 def _reconcile_locked(
     cli: str, *, by_id: dict[str, ProviderRecord], root: Path
 ) -> ReconcileResult:
+    # The pin gate runs FIRST. Resolving the principal is a network round trip,
+    # and a recorded writer that rewrites the slot and exits during that call
+    # would pass a liveness check made afterwards - leaving us to stamp a
+    # credential we proved before it was replaced.
+    blockers = taint_writers_still_live(cli, root)
+    if blockers:
+        return ReconcileResult("slot-pinned", detail=_slot_pinned_detail(blockers))
+
     blob = read_canonical_slot_blob(cli)
     if blob is None or not blob.strip():
         return ReconcileResult(
@@ -1159,20 +1204,21 @@ def _reconcile_locked(
         )
 
     matched = matches[0]
-    # Identity is proven as of NOW, which is only good enough if nothing can
-    # still change it. A session that was pinning when the taint was written
-    # holds the previous account's token, so clearing on its watch would trust
-    # a stamp the next refresh can invalidate.
-    blockers = taint_writers_still_live(cli, root)
-    if blockers:
+    # Identity was proven about the bytes read above, so commit only if those
+    # bytes are still what the slot holds. Re-reading is what actually closes
+    # the profile-call window: a writer that rewrote the slot and exited during
+    # it leaves nothing for a liveness check to find.
+    if read_canonical_slot_blob(cli) != blob:
         return ReconcileResult(
-            "slot-pinned",
+            "slot-changed",
             detail=(
-                f"the live slot proves '{matched}', but {', '.join(blockers)} was "
-                "pinning the slot when it was tainted and can still write the "
-                "previous account's refreshed credential; stop it and retry"
+                "the slot credential changed while its identity was being "
+                "proven; nothing was written, retry once it settles"
             ),
         )
+    blockers = taint_writers_still_live(cli, root)
+    if blockers:
+        return ReconcileResult("slot-pinned", detail=_slot_pinned_detail(blockers))
 
     # Snapshot first, stamp second, clear taint last: a crash at any point
     # leaves the taint set, which is the safe direction to fail.

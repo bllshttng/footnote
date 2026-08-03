@@ -1699,3 +1699,98 @@ class TestCanonicalSlotRead:
         )
         fake_slot["claude"] = _blob("VIA_SEAM")
         assert managed.read_canonical_slot_blob("claude") == _blob("VIA_SEAM")
+
+
+class TestReconcileCommitsOnlyWhatItProved:
+    """Peer-review findings on PR #712: identity was proven about bytes that
+    could already be gone, and a refusal could still touch disk."""
+
+    def test_a_writer_that_rewrites_and_exits_mid_profile_blocks_the_commit(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """The window the pid check alone cannot close: the recorded writer
+        replaces the slot DURING the profile call and then exits, so a liveness
+        check afterwards finds nothing and we would stamp a credential we never
+        looked at."""
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        fake_slot["claude"] = _blob("B_AT_READ")
+        managed._set_slot_taint("claude", tmp_path, True, [999_999])
+        monkeypatch.setattr(managed.psutil, "pid_exists", lambda pid: False)
+
+        def _profile_then_rewrite(blob):
+            fake_slot["claude"] = _blob("SOMEONE_ELSE")  # the writer's last act
+            return managed.principal_fingerprint(_profile("acct-b")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _profile_then_rewrite)
+        before = _store_state(tmp_path)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "slot-changed"
+        assert _store_state(tmp_path) == before
+        assert managed.slot_tainted("claude", tmp_path)
+
+    def test_a_live_writer_is_refused_before_the_endpoint_is_touched(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Proving identity first would spend a network round trip to answer a
+        question the pin gate already settles."""
+        import os
+
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        managed._set_slot_taint("claude", tmp_path, True, [os.getpid()])
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: pytest.fail("resolved a principal for a pinned slot"),
+        )
+
+        assert managed.reconcile_slot(
+            "claude", by_id=by_id, root=tmp_path
+        ).outcome == "slot-pinned"
+
+    def test_a_refusal_never_creates_the_store(self, fake_slot, tmp_path):
+        """`matched` is the only outcome allowed to touch disk, and that has to
+        include the store directory itself."""
+        missing = tmp_path / "no-store-here"
+
+        result = managed.reconcile_slot("claude", by_id={}, root=missing)
+
+        assert result.outcome == "no-managed-store"
+        assert not missing.exists()
+
+
+class TestForcedRebindNeverLeavesAStalePrincipal:
+    def test_a_failed_reprove_drops_the_previous_binding(self, fake_slot, tmp_path):
+        """Re-registering an id points it at whoever is signed in NOW, while
+        write_snapshot preserves the old principal for capture-before-overwrite.
+        If the reprove fails, keeping that binding would claim the new
+        credential belongs to the old account."""
+        record = _rec("work-a")
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(record, root=tmp_path)
+        _bind("work-a", "acct-old", tmp_path)
+
+        # A different account is signed in now, and the profile call fails
+        # (the autouse fixture disables the network).
+        fake_slot["claude"] = _blob("SOMEONE_ELSE")
+        managed.snapshot_current(record, root=tmp_path)
+        assert managed.record_principal("work-a", tmp_path) is not None  # preserved
+        managed.capture_record_principal(record, root=tmp_path, force=True)
+
+        assert managed.record_principal("work-a", tmp_path) is None
+        # The rest of the metadata survives.
+        assert managed.read_meta("work-a", tmp_path)["harness"] == "claude"
+
+    def test_an_unforced_capture_leaves_a_bound_record_alone(self, fake_slot, tmp_path):
+        """A switch of an already-bound record must not spend a call, nor clear
+        a binding that is still correct."""
+        record = _rec("work-a")
+        fake_slot["claude"] = _blob("A0")
+        managed.snapshot_current(record, root=tmp_path)
+        _bind("work-a", "acct-a", tmp_path)
+
+        managed.capture_record_principal(record, root=tmp_path)
+
+        assert managed.record_principal("work-a", tmp_path)["account_uuid"] == "acct-a"
