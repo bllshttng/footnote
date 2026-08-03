@@ -73,6 +73,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Evaluate generic delivery evidence.",
         {"hidden": True},
     ),
+    "company": (
+        "fno.company.cli:company_app",
+        "Company campaign inspection and proposals.",
+        {"hidden": True},
+    ),
     "log": (
         "fno.log_cmd:app",
         "Append a progress entry to the per-worktree agent-progress.jsonl",
