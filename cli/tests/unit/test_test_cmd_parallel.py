@@ -35,6 +35,39 @@ def test_bare_run_uses_capped_loadgroup_parallelism(tmp_path, monkeypatch):
     ]
 
 
+def test_bare_run_keeps_explicit_xdist_settings(tmp_path, monkeypatch):
+    captured: dict[str, list[str]] = {}
+
+    class _Proc:
+        returncode = 0
+
+    def fake_run(cmd, env=None, **kwargs):
+        captured["cmd"] = cmd
+        return _Proc()
+
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "cli" / "src" / "fno").mkdir(parents=True)
+    (tmp_path / "cli" / "src" / "fno" / "__init__.py").write_text("")
+    monkeypatch.setattr(test_cmd, "_resolve_interpreter", lambda root: sys.executable)
+    monkeypatch.setattr(test_cmd.subprocess, "run", fake_run)
+
+    assert test_cmd._run(["-n", "1", "--maxprocesses=2", "--dist", "loadscope"]) == 0
+    cmd = captured["cmd"]
+    assert cmd.index("auto") < cmd.index("1")
+    assert cmd.index("--maxprocesses=4") < cmd.index("--maxprocesses=2")
+    assert cmd.index("--dist=loadgroup") < cmd.index("--dist")
+
+
+def test_smoke_suite_uses_loadgroup_scheduler():
+    pytest_step = next(
+        command
+        for name, _cwd, command in test_cmd._STRUCTURAL_STEPS
+        if name == "Pytest (unit + integration)"
+    )
+
+    assert "-n auto --maxprocesses=4 --dist=loadgroup" in pytest_step
+
+
 def test_known_parallel_racers_are_marked_and_grouped(pytestconfig):
     conftest_path = (Path(__file__).parents[1] / "conftest.py").resolve()
     plugin = next(

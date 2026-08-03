@@ -166,9 +166,13 @@ def _run(args: Sequence[str], stream: bool = False) -> int:
         for a in pytest_args
     )
     if not has_target:
-        pytest_args.extend(
-            ["-n", "auto", "--maxprocesses=4", "--dist=loadgroup"]
-        )
+        pytest_args = [
+            "-n",
+            "auto",
+            "--maxprocesses=4",
+            "--dist=loadgroup",
+            *pytest_args,
+        ]
         pytest_args.append(str((root / "cli" / "tests").resolve()))
 
     env = _child_env(root)
@@ -248,7 +252,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     (
         "Pytest (unit + integration)",
         "cli",
-        "uv run pytest --tb=short -q -n auto --maxprocesses=4",
+        "uv run pytest --tb=short -q -n auto --maxprocesses=4 --dist=loadgroup",
     ),
     ("paths.sh hash gate", "cli", "uv run fno-py paths verify ../scripts/lib/paths.sh"),
     ("Bash events-validate harness", ".", "bash tests/events/test-bash-validator.sh"),
