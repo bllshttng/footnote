@@ -510,6 +510,21 @@ def validate(event: dict[str, Any]) -> None:
                     f"{data.get(field)!r} (allowed: {allowed})"
                 )
 
+    # worktree_overlap_observed is the recurrence key for `fno worktree
+    # overlaps`: an empty or non-list peer_session_ids would record an overlap
+    # with no peers, a self-contradiction that must fail loud at the chokepoint
+    # (the generic emit CLI is a writer here) rather than land and inflate or
+    # corrupt the fold.
+    if type_name == "worktree_overlap_observed":
+        peers = data.get("peer_session_ids")
+        if not isinstance(peers, list) or not peers or not all(
+            isinstance(p, str) and p for p in peers
+        ):
+            raise ValidationError(
+                "worktree_overlap_observed peer_session_ids must be a non-empty "
+                "list of non-empty strings"
+            )
+
     try:
         _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         serialized = (
@@ -920,6 +935,89 @@ def auto_complete_triggered(
     )
 
 
+def _overlap_observation_id(
+    repository_key: str,
+    worktree_key: str,
+    observer_session_id: str,
+    peer_session_ids: list[str],
+) -> str:
+    """Deterministic digest of the (repo, worktree, observer, sorted peers) tuple.
+
+    Unit-separator (\\x1f) delimiter so the join is unambiguous: two different
+    tuples cannot collide by concatenating to the same bytes. The peer list is
+    already sorted by the caller, so repeated deliveries of one observation
+    yield one id."""
+    blob = "\x1f".join(
+        [repository_key, worktree_key, observer_session_id, *peer_session_ids]
+    )
+    return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
+
+
+def worktree_overlap_observed(
+    *,
+    observer_session_id: str,
+    peer_session_ids: list[str],
+    repository_key: str,
+    worktree_key: str,
+    live_window_seconds: int = 120,
+    harness: str | None = None,
+    source: str = "hook",
+) -> dict[str, Any]:
+    """Build a ``worktree_overlap_observed`` event.
+
+    Advisory-only telemetry: one structured record of a SessionStart peer
+    observation, written to the machine-global journal so it survives worktree
+    cleanup. ``observation_id`` is a deterministic digest of the repository,
+    worktree, observer, and sorted peer set, so repeated deliveries of the
+    same observation dedupe in the recurrence fold. ``harness`` is diagnostic
+    metadata only; it never shapes the predicate, the observation id, or the
+    recurrence threshold.
+    """
+    if not isinstance(observer_session_id, str) or not observer_session_id:
+        raise ValidationError(
+            "worktree_overlap_observed observer_session_id cannot be empty"
+        )
+    if (
+        not isinstance(peer_session_ids, list)
+        or not peer_session_ids
+        or not all(isinstance(p, str) and p for p in peer_session_ids)
+    ):
+        raise ValidationError(
+            "worktree_overlap_observed peer_session_ids must be a non-empty "
+            "list of non-empty strings"
+        )
+    if not isinstance(repository_key, str) or not repository_key:
+        raise ValidationError(
+            "worktree_overlap_observed repository_key cannot be empty"
+        )
+    if not isinstance(worktree_key, str) or not worktree_key:
+        raise ValidationError(
+            "worktree_overlap_observed worktree_key cannot be empty"
+        )
+    if (
+        not isinstance(live_window_seconds, int)
+        or isinstance(live_window_seconds, bool)
+        or live_window_seconds <= 0
+    ):
+        raise ValidationError(
+            "worktree_overlap_observed live_window_seconds must be a positive integer"
+        )
+    sorted_peers = sorted(peer_session_ids)
+    data: dict[str, Any] = {
+        "observation_id": _overlap_observation_id(
+            repository_key, worktree_key, observer_session_id, sorted_peers
+        ),
+        "repository_key": repository_key,
+        "worktree_key": worktree_key,
+        "observer_session_id": observer_session_id,
+        "peer_session_ids": sorted_peers,
+        "live_window_seconds": live_window_seconds,
+    }
+    if harness is not None:
+        data["harness"] = harness
+    return _build("worktree_overlap_observed", source, data)
+
+
 def append_event(
     event: dict[str, Any],
     events_path: Path | None = None,
@@ -984,4 +1082,5 @@ __all__ = [
     "tally_fan_in",
     "verify_child_promise",
     "wave_advanced",
+    "worktree_overlap_observed",
 ]

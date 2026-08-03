@@ -23,6 +23,7 @@ from fno.events import (
     phase_transition,
     validate,
     wave_advanced,
+    worktree_overlap_observed,
 )
 
 
@@ -427,3 +428,53 @@ def test_validate_rejects_manifest_mutated_missing_sha_fields() -> None:
     }
     with pytest.raises(ValidationError):
         validate(event)
+
+
+def test_worktree_overlap_observed_builder_is_deterministic_and_valid() -> None:
+    """The builder sorts peers, stamps a stable observation id, and validates."""
+    a = worktree_overlap_observed(
+        observer_session_id="obs-1",
+        peer_session_ids=["peer-b", "peer-a"],
+        repository_key="/repo/.git",
+        worktree_key="/repo/.git/worktrees/wt1",
+    )
+    b = worktree_overlap_observed(
+        observer_session_id="obs-1",
+        peer_session_ids=["peer-a", "peer-b"],
+        repository_key="/repo/.git",
+        worktree_key="/repo/.git/worktrees/wt1",
+    )
+    # Envelope ts differs by call; the data payload must be byte-identical.
+    assert a["data"] == b["data"], "peer order must not change the observation"
+    assert a["data"]["peer_session_ids"] == ["peer-a", "peer-b"], "peers sorted"
+    assert a["data"]["observation_id"] == (
+        "583f1201601622a418cc8c775045aaac6c604a6ed42f74e9a6db25eeddc356aa"
+    ), "observation id pinned for parity"
+    assert validate(a) is None
+
+
+def test_worktree_overlap_observed_rejects_empty_peers_at_build_and_validate() -> None:
+    with pytest.raises(ValidationError):
+        worktree_overlap_observed(
+            observer_session_id="obs-1",
+            peer_session_ids=[],
+            repository_key="/repo/.git",
+            worktree_key="/repo/.git/worktrees/wt1",
+        )
+    # The chokepoint must also catch a peer-less payload that bypassed the builder.
+    with pytest.raises(ValidationError):
+        validate(
+            {
+                "ts": "2026-05-07T09:30:42Z",
+                "type": "worktree_overlap_observed",
+                "source": "hook",
+                "data": {
+                    "observation_id": "x",
+                    "repository_key": "/repo/.git",
+                    "worktree_key": "/repo/.git/worktrees/wt1",
+                    "observer_session_id": "obs-1",
+                    "peer_session_ids": [],
+                    "live_window_seconds": 120,
+                },
+            }
+        )
