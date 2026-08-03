@@ -83,5 +83,28 @@ assert_kill_rejected 'kill reader key comparison' \
     'fn forbidden(key: &str) -> bool { key == "status" }'
 assert_kill_rejected 'kill reader matches comparison' \
     'fn forbidden(key: &str) -> bool { matches!(key, "status") }'
+cp "$PRISTINE_KILL_READER" "$KILL_READER"
 
-echo "PASS: every registered Rust plan reader rejects frontmatter status parsing"
+ROGUE_READER="$FIXTURE_ROOT/crates/fno-agents/src/rogue_reader.rs"
+cat > "$ROGUE_READER" <<'EOF'
+fn forbidden(path: &std::path::Path) {
+    let document = std::fs::read_to_string(&path).unwrap();
+    let mapping: serde_yaml_ng::Mapping = serde_yaml_ng::from_str(&document).unwrap();
+    let _ = mapping.get("status");
+}
+EOF
+git -C "$FIXTURE_ROOT" add crates/fno-agents/src/rogue_reader.rs
+output=""
+actual_exit=0
+output="$(bash "$FIXTURE_ROOT/scripts/ci/check-plan-rung-authority.sh" 2>&1)" \
+    || actual_exit=$?
+if [[ "$actual_exit" -eq 0 ]]; then
+    echo 'FAIL: a newly tracked Rust status reader passed the authority guard' >&2
+    exit 1
+fi
+if ! grep -q 'rogue_reader.rs' <<<"$output"; then
+    echo 'FAIL: the new-reader violation did not name the rogue reader' >&2
+    exit 1
+fi
+
+echo "PASS: Rust plan readers cannot introduce frontmatter status parsing"

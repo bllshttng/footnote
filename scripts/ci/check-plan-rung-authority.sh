@@ -128,11 +128,62 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Rust must not grow a plan-status reader.
 #
-# Freeze the set of Rust sources that open a plan document. Both read activation
-# markers, not `status:`: kill_criteria.rs extracts `kill_criteria:`, delivery_completion.rs
-# reads `completion:` frontmatter.
+# Ratchet every production Rust `"status"` literal, independent of file-reading
+# API, variable name, or source filename. A new plan reader therefore cannot
+# hide from discovery by calling `read`, `File::open`, or a helper instead of
+# `read_to_string(&plan_path)`. Counts also catch a new lookup added to an
+# existing source that already has unrelated status fields.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
+EXPECTED_RUST_STATUS_LITERALS="crates/fno-agents/build.rs:1
+crates/fno-agents/src/active_backlog.rs:2
+crates/fno-agents/src/bin/client.rs:27
+crates/fno-agents/src/claude_ask.rs:2
+crates/fno-agents/src/client_verbs.rs:17
+crates/fno-agents/src/codex_inject.rs:1
+crates/fno-agents/src/daemon.rs:12
+crates/fno-agents/src/finalize.rs:1
+crates/fno-agents/src/kill_criteria.rs:1
+crates/fno-agents/src/lib.rs:4
+crates/fno-agents/src/loop_megawalk.rs:4
+crates/fno-agents/src/loopcheck.rs:2
+crates/fno-agents/src/opencode_ask.rs:1
+crates/fno-agents/src/protocol.rs:3
+crates/fno-agents/src/spawn_gate.rs:2
+crates/fno-agents/src/state.rs:15
+crates/fno-agents/src/verify_evidence.rs:4
+crates/fno-agents/src/wait.rs:3
+crates/fno/build.rs:1
+crates/fno/src/agents_view.rs:51
+crates/fno/src/backlog_view.rs:59
+crates/fno/src/client.rs:1
+crates/fno/src/server.rs:2
+crates/fno/src/view_store.rs:1"
+actual_status_literals=""
+while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    count="$(grep -oF '"status"' "$source" 2>/dev/null | wc -l | tr -d ' ')"
+    if [ "$count" -gt 0 ]; then
+        actual_status_literals="${actual_status_literals}${source}:${count}
+"
+    fi
+done <<EOF
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | sort || true)
+EOF
+actual_status_literals="${actual_status_literals%$'\n'}"
+if [ "$actual_status_literals" != "$EXPECTED_RUST_STATUS_LITERALS" ]; then
+    violation "the production Rust status-literal inventory changed" \
+        "expected: $EXPECTED_RUST_STATUS_LITERALS" \
+        "actual:   ${actual_status_literals:-(none)}" \
+        "Do not classify plan frontmatter in Rust; route readiness through" \
+        "\`fno plan rung\`. Update this ratchet only for a reviewed, unrelated" \
+        "status field."
+else
+    note "OK: the production Rust status-literal inventory is unchanged"
+fi
+
+# Freeze the two known plan-document readers as a second, tighter diagnostic.
+# Both consume activation-specific markers, never `status:`.
 EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
 crates/fno-agents/src/kill_criteria.rs"
 actual=$(
