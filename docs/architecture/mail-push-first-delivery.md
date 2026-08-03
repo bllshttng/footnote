@@ -1,4 +1,4 @@
-# Mail push-first delivery (turn-boundary drain + undelivered escalation)
+# Mail push-first delivery (active-turn drain + undelivered escalation)
 
 The durable mail bus (`~/.fno/bus/messages.jsonl`) delivers on a pull model whose only drain point was `SessionStart`.
 A long-lived session never restarts, so mail addressed to its handle sat unread for the life of that session (a 13.5h run never hit another `SessionStart`; mail queued the whole time).
@@ -6,26 +6,32 @@ This makes delivery push instead of pull, and closes the matching sender-side ho
 
 ## Two changes, one node
 
-**Receive (push).** A new `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, runs `fno mail notify-self` every turn and injects a one-line nudge as `additionalContext` when there is unread inbound mail.
-`UserPromptSubmit` already fires every turn, so this is the retired interval-drain reborn at a boundary that already exists, with no daemon.
+**Receive (push).** The `UserPromptSubmit` hook, `hooks/inject-mail-notify.sh`, runs `fno mail notify-self` every turn and relays the complete framed durable messages as `additionalContext`.
+The payload includes each message id and `fno mail reply --to <id>` guidance, so the recipient sees the mail without discovering or running a drain command.
+`UserPromptSubmit` already fires every turn, so delivery uses an active boundary that already exists and adds no daemon or poll loop.
 
 **Send (honesty).** The same `notify-self` invocation also surfaces the session's *own* sent mail that no recipient has claimed past a TTL, both as a turn-boundary line and as `sent unclaimed: N` in `fno mail status`.
 Before this, `queued (durable)` was the last thing a sender ever heard, so silence read as delivered.
 
-## `fno mail notify-self` (hidden verb)
+## `fno mail notify-self` (hidden hook-output verb)
 
-Stat-only. It reuses `drain-self`'s identity path (`resolve_harness_identity` -> `canonical_handle` -> `scan_unread`) but **never advances the consume cursor** - the load-bearing invariant.
-A nudge is a notice, not a consume: `SessionStart`'s `drain-self` and the sender-side check must still see un-acted mail.
-There is no notify-cursor; the consume cursor is the sole delivery marker, and its non-advancement is exactly what keeps the nudge persistent (re-injecting each turn while unread) and self-clearing the instant the agent drains.
+The verb reuses `drain-self`'s identity path (`resolve_harness_identity` -> `canonical_handle` -> `scan_unread`) and the same forward-only consume cursor.
+It renders the complete `UserPromptSubmit` JSON envelope in the CLI, writes and flushes that envelope, and only then advances the cursor through the last rendered message.
+The shell hook relays the already-valid JSON directly, so no command substitution or second serializer can acknowledge mail before the final hook payload exists.
+There is no notify cursor: `SessionStart` and `UserPromptSubmit` race on the one canonical cursor, and whichever successfully drains first makes the other silent.
 
-- **Inbound:** unread envelopes addressed to my handle -> `N unread fno mail from <senders>: run \`fno mail drain-self\``. It points at `drain-self`, not `fno mail unread`: only `drain-self` self-resolves this session's handle and advances its consume cursor, so the nudge clears; `fno mail unread` defaults `--name` to the project and would read the wrong inbox and never clear. Senders are deterministic (first-seen), defanged, bounded (`X, Y, Z, +K more`).
+- **Inbound:** unread envelopes addressed to the canonical session handle -> complete bodies, ids, and reply guidance inside a hook-owned `<system-reminder>` frame, followed by acknowledgement after flush.
 - **Sent-unclaimed:** my sent mail still returned by `scan_unread(recipient)` (recipient's cursor has not passed it) AND strictly older than `config.inbox.unclaimed_ttl` (default 1800s) -> `N sent fno mail unclaimed (to <recipients>, >30m): recipient has not picked it up`. Computed live every call, so a just-consumed message stops being flagged immediately.
+
+Sent-unclaimed reporting remains stat-only and advances no recipient cursor.
 
 ## Failure posture
 
-Every path degrades to silence, never to a blocked turn: no harness identity -> no-op; `fno`/`jq` missing -> hook no-op; a recipient name `scan_unread` rejects (path-traversal guard) is skipped, never crashing the verb.
-The `</system-reminder>` delimiter is defanged in every interpolated field before embedding.
+Every path degrades to silence, never to a blocked turn: no harness identity -> no-op; `fno` missing -> hook no-op; a recipient name rejected by the cursor path guard is skipped instead of crashing the verb.
+The `</system-reminder>` delimiter is defanged across the complete untrusted mail render before embedding.
 The hook carries a portable 2s timeout and always exits 0.
+A rendering, serialization, write, flush, or process failure before acknowledgement leaves the cursor unchanged, so the next active-turn or SessionStart boundary can repeat the message instead of losing it.
+The achievable guarantee is therefore at-least-once display around process failure: a crash may repeat mail, but successful output-before-ack prevents permanent loss.
 
 ## Scope
 

@@ -1,38 +1,21 @@
 #!/usr/bin/env bash
-# hooks/inject-mail-notify.sh -- push-first mail delivery at the turn boundary (x-39a4).
+# hooks/inject-mail-notify.sh -- durable mail delivery at the turn boundary.
 #
-# UserPromptSubmit hook. The durable bus delivers on a pull model whose only
-# drain point is SessionStart, so mail sent to a long-lived session sits unread
-# for the life of that session (a 13.5h run never restarts). This hook makes
-# delivery push: every turn it runs `fno mail notify-self` (stat-only) and, when
-# there is unread inbound mail OR the session's own sent mail is unclaimed past
-# the TTL, injects a one-line nudge as UserPromptSubmit additionalContext.
-#
-# notify-self NEVER advances the consume cursor, so the nudge is persistent (it
-# re-injects each turn while unread) and clears the instant the agent drains.
-# Silent when there is no harness identity, no unread mail, or fno/jq is missing;
-# a 2s portable timeout bounds a hung binary; always exits 0, never blocks the
-# turn.
+# The hidden CLI verb owns rendering, UserPromptSubmit JSON serialization,
+# stdout flush, and only then cursor acknowledgement. This shell layer relays
+# that already-valid envelope directly so there is no second capture or write
+# boundary between visible delivery and acknowledgement. Silent when there is
+# no harness identity or mail; a portable two-second timeout bounds a hung
+# binary; failures never block the turn.
 
 set -uo pipefail
 
 command -v fno >/dev/null 2>&1 || exit 0
-command -v jq >/dev/null 2>&1 || exit 0
 
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
-OUTPUT=$(with_timeout 2 fno mail notify-self 2>/dev/null || true)
-[[ -z "$OUTPUT" ]] && exit 0
-
-# notify-self already defangs </system-reminder> in every interpolated field, so
-# OUTPUT is safe to embed. jq --arg keeps the JSON valid regardless.
-REMINDER="<system-reminder>
-${OUTPUT}
-</system-reminder>"
-
-jq -n --arg ctx "$REMINDER" \
-  '{"hookSpecificOutput":{"hookEventName":"UserPromptSubmit","additionalContext":$ctx}}'
+with_timeout 2 fno mail notify-self 2>/dev/null || true
 
 exit 0
