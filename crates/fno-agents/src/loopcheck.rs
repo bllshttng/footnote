@@ -5,9 +5,9 @@
 //! decision object. The manifest is NEVER mutated; the only write surface is
 //! append-only event logs.
 //!
-//! Module name starts with "loop" to match the LOC-ratchet glob
-//! `crates/fno-agents/src/loop*`.
+//! Module name starts with "loop" to match the LOC-ratchet glob `crates/fno-agents/src/loop*`.
 
+use crate::{completion_output::allow_output, delivery_completion::pr_passes};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -22,6 +22,7 @@ use std::process::{Command, Stdio};
 pub enum TerminationReason {
     DonePRGreen,
     DoneAdvisory,
+    DoneDelivery,
     /// A batch-lane member (batch-lane Wave 2/3): its commits live on a shared
     /// batch branch and ship via the batch PR, not its own, so there is no
     /// per-node PR to go green. Terminal, but NOT a ship reason - the batch's
@@ -49,16 +50,6 @@ pub enum TerminationReason {
     NoProgress,
     Interrupted,
     Aborted,
-}
-
-/// The JSON object written to stdout on every fire.
-#[derive(Debug, Serialize)]
-pub struct LoopCheckOutput {
-    pub decision: String, // "allow" | "block"
-    pub termination_reason: Option<TerminationReason>,
-    pub message: String,
-    pub fires: u64,
-    pub fingerprint: Option<String>,
 }
 
 // ── manifest parsing ──────────────────────────────────────────────────────────
@@ -3654,6 +3645,11 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
     }
 
+    let generic = crate::delivery_completion::evaluate_manifest(
+        &cwd,
+        manifest.plan_path.as_deref(),
+        &project_events,
+    );
     // ── Check gh binary availability ──────────────────────────────────────────
     // Probe by attempting to spawn; if the binary doesn't exist at all (NotFound
     // error kind), treat as absent. Exit-code failures from valid gh commands
@@ -3670,7 +3666,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         }
     };
 
-    if !gh_available {
+    if !gh_available
+        && matches!(
+            generic,
+            crate::delivery_completion::DeliveryCompletion::Inactive
+        )
+    {
         if !manifest.attended && !manifest.advisory {
             // Unattended + no advisory + no gh -> Interrupted
             emit(
@@ -3828,12 +3829,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
     };
 
     // Build a tentative fingerprint from this fire's gh reads.
-    let tentative_fp = make_fingerprint(
+    let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
         &head_sha,
         fp_pr_state.as_str(),
         &fp_ci.render(),
         &fp_review_ts,
-    );
+    ));
 
     // Read prior fires. We pass the tentative_fp for streak counting; if the gh
     // read failed we'll override the fingerprint with the carried-forward value below.
@@ -3848,7 +3849,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // If the pre-read gh call hard-failed, carry forward the prior fingerprint
     // (so the streak continues) rather than resetting to "none|none|none".
-    let fingerprint = if fp_read_failed {
+    let fingerprint = if fp_read_failed && !generic.is_active() {
         last_recorded_fp.unwrap_or(tentative_fp)
     } else {
         tentative_fp
@@ -3856,7 +3857,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // Recount consecutive streak with the (possibly carried-forward) fingerprint.
     // We already counted against the tentative_fp; if different, recount from the log.
-    let (consecutive_unchanged, streak_window) = if fp_read_failed {
+    let (consecutive_unchanged, streak_window) = if fp_read_failed && !generic.is_active() {
         // Re-read the streak against the carried-forward fingerprint.
         let (_, streak, _, window) = read_prior_fires(
             &project_events,
@@ -3892,13 +3893,6 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // done() fails simply blocks with the named reason.
     const MUTE_PROBE_N: u64 = 2;
 
-    // Operator review-finding gate input (x-f8d4). Resolve this session's node
-    // (graph_node_id in the frontmatter; the appended target_claim_key is the
-    // fallback) and scan events.jsonl for open findings. Node-scoped, NOT
-    // head-pinned: read here so both the promise arms and the mute-probe
-    // DonePRGreen path below see the same evidence. A malformed finding line
-    // never blocks (AC3-FR) but is surfaced as an audit notice so a truncated
-    // write can't vanish.
     let node_id = scan_manifest_field(&manifest_content, "graph_node_id").or_else(|| {
         scan_manifest_field(&manifest_content, "target_claim_key")
             .and_then(|k| k.strip_prefix("node:").map(|s| s.to_string()))
@@ -3918,8 +3912,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
     }
 
-    // Run done() on intent OR backstop OR mute-probe
-    if intent != Intent::None || backstop_tripped || consecutive_after >= MUTE_PROBE_N {
+    // Run done() on active generic delivery, intent, backstop, or mute-probe; malformed findings cannot block.
+    if generic.is_active()
+        || intent != Intent::None
+        || backstop_tripped
+        || consecutive_after >= MUTE_PROBE_N
+    {
         // Handle aborted first
         if let Intent::Aborted { ref reason } = intent {
             emit(
@@ -3961,7 +3959,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
         // Operator review-finding gate (x-f8d4, Locked Decision 3): an open
         // review_finding for this node HOLDS every success terminal-allow
-        // (DonePlanned / DoneAdvisory / DoneBatched / DonePRGreen) until an
+        // (DonePlanned / DoneAdvisory / DoneDelivery / DoneBatched / DonePRGreen) until an
         // explicit resolve - a promise cannot self-authorize past an operator's
         // open comment. Placed AFTER the Aborted arm and gated on
         // `!backstop_tripped` so the anti-wedge safety valves still win: an
@@ -3997,6 +3995,26 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 0,
                 allow_output("block", None, &reason, this_fire, Some(fingerprint)),
             );
+        }
+
+        if let Some(output) = crate::delivery_completion::gate_output(
+            &generic,
+            intent == Intent::Promise,
+            &project_events,
+            &global_events,
+            &session_id,
+            manifest.session_id.as_deref(),
+            node_id.as_deref(),
+            intent_source,
+            &fingerprint,
+            this_fire,
+            backstop_tripped,
+            consecutive_after,
+            streak_window,
+            fp_pr_state.as_str(),
+            &fp_ci.render(),
+        ) {
+            return (0, output);
         }
 
         // Plan-only unit: a plan-only thread reached the plan boundary. Checked
@@ -4230,8 +4248,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // done_probes: the FINAL DonePRGreen conjunct. Gated on
                 // every other conjunct already holding, so a plan with no probes
                 // spawns no subprocess and a red/unreviewed PR never pays for one.
-                let mut probe_block: Option<String> = None;
-                let mut probe_results = Value::Null;
+                let (mut probe_block, mut probe_results) = (None, Value::Null);
                 if pr_open && ci_ok && pr_info.reviewed && head_shipped {
                     match evaluate_done_probes(
                         manifest.plan_path.as_deref(),
@@ -4250,7 +4267,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     }
                 }
 
-                if pr_open && ci_ok && pr_info.reviewed && head_shipped && probe_block.is_none() {
+                let (reviewed, probes_passed) = (pr_info.reviewed, probe_block.is_none());
+                if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
                     // AC1-UI: name any rate-limited bot the gate proceeded
                     // without, so the terminal message and the emitted event
                     // agree on why a required bot is absent from the evidence.
@@ -5624,23 +5642,6 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
     }
 
     format!("PR #{} done() returned false (unknown reason)", pr.number)
-}
-
-fn allow_output(
-    decision: &str,
-    termination_reason: Option<TerminationReason>,
-    message: &str,
-    fires: u64,
-    fingerprint: Option<String>,
-) -> String {
-    let out = LoopCheckOutput {
-        decision: decision.to_string(),
-        termination_reason,
-        message: message.to_string(),
-        fires,
-        fingerprint,
-    };
-    serde_json::to_string(&out).unwrap_or_else(|_| r#"{"decision":"allow","termination_reason":null,"message":"serialization error","fires":0,"fingerprint":null}"#.to_string())
 }
 
 // ── public entry points ───────────────────────────────────────────────────────

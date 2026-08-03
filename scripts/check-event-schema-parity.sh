@@ -213,19 +213,20 @@ if [[ -n "$TEST_RUST_SCHEMA" ]]; then
     RUST_SCHEMA_JSON="$TEST_RUST_SCHEMA"
     RUST_AVAILABLE=true
 else
-    # Find fno-agents binary on PATH or in common build outputs
+    # Prefer the candidate checkout build. A globally installed fno-agents may
+    # legitimately lag the source under test and would turn parity into a
+    # comparison against a different revision.
     FNO_AGENTS_BIN=""
-    if command -v fno-agents &>/dev/null; then
+    for candidate in \
+        "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents" \
+        "$REPO_ROOT/crates/fno-agents/target/release/fno-agents"; do
+        if [[ -x "$candidate" ]]; then
+            FNO_AGENTS_BIN="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$FNO_AGENTS_BIN" ]] && command -v fno-agents &>/dev/null; then
         FNO_AGENTS_BIN="$(command -v fno-agents)"
-    else
-        for candidate in \
-            "$REPO_ROOT/crates/fno-agents/target/debug/fno-agents" \
-            "$REPO_ROOT/crates/fno-agents/target/release/fno-agents"; do
-            if [[ -x "$candidate" ]]; then
-                FNO_AGENTS_BIN="$candidate"
-                break
-            fi
-        done
     fi
 
     if [[ -z "$FNO_AGENTS_BIN" ]]; then

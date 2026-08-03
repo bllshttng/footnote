@@ -21,8 +21,8 @@
 # `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
 # finalize.rs shells out to `fno plan validate`/`stamp`, and loop_megawalk.rs
 # takes plan_path from `fno backlog next` JSON whose status Python already
-# derived. Only kill_criteria.rs opens a plan document at all, and it extracts
-# the `kill_criteria:` block, never `status:`.
+# derived. The registered Rust plan readers consume activation-specific keys,
+# never `status:`.
 #
 # So there is nothing on the far side to pin, and a parity harness would freeze
 # a contract with one participant. What can actually regress is someone ADDING
@@ -128,11 +128,108 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Rust must not grow a plan-status reader.
 #
-# Freeze the set of Rust sources that open a plan document. kill_criteria.rs is
-# the sole legitimate member: it extracts `kill_criteria:`, not `status:`.
+# Ratchet every production Rust `status` identifier, including string literals
+# and typed serde fields, independent of file-reading API, variable name, or
+# source filename. Counts also catch a new lookup added to an existing source
+# that already has unrelated status fields.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/kill_criteria.rs"
+EXPECTED_RUST_STATUS_IDENTIFIERS="crates/fno-agents/build.rs:2
+crates/fno-agents/src/active_backlog.rs:23
+crates/fno-agents/src/agents_config.rs:1
+crates/fno-agents/src/bin/client.rs:60
+crates/fno-agents/src/claims.rs:9
+crates/fno-agents/src/claude_adopt.rs:3
+crates/fno-agents/src/claude_ask.rs:9
+crates/fno-agents/src/client.rs:25
+crates/fno-agents/src/client_verbs.rs:58
+crates/fno-agents/src/codex_ask.rs:3
+crates/fno-agents/src/codex_inject.rs:1
+crates/fno-agents/src/daemon.rs:128
+crates/fno-agents/src/delivery_completion.rs:4
+crates/fno-agents/src/dispatch_posture.rs:3
+crates/fno-agents/src/drift.rs:4
+crates/fno-agents/src/finalize.rs:32
+crates/fno-agents/src/gc.rs:14
+crates/fno-agents/src/gemini_ask.rs:4
+crates/fno-agents/src/kill_criteria.rs:8
+crates/fno-agents/src/lib.rs:12
+crates/fno-agents/src/loop_dispatch.rs:6
+crates/fno-agents/src/loop_megawalk.rs:23
+crates/fno-agents/src/loopcheck.rs:31
+crates/fno-agents/src/manifest.rs:2
+crates/fno-agents/src/needs.rs:1
+crates/fno-agents/src/nudge.rs:1
+crates/fno-agents/src/opencode_ask.rs:1
+crates/fno-agents/src/paths.rs:3
+crates/fno-agents/src/protocol.rs:5
+crates/fno-agents/src/provider.rs:6
+crates/fno-agents/src/readiness.rs:13
+crates/fno-agents/src/scrape.rs:10
+crates/fno-agents/src/spawn_gate.rs:12
+crates/fno-agents/src/state.rs:32
+crates/fno-agents/src/stream_worker.rs:19
+crates/fno-agents/src/subprocess_ask.rs:6
+crates/fno-agents/src/verify_evidence.rs:9
+crates/fno-agents/src/wait.rs:4
+crates/fno/build.rs:2
+crates/fno/src/agents_view.rs:56
+crates/fno/src/backlog_view.rs:79
+crates/fno/src/bootstrap.rs:11
+crates/fno/src/client.rs:57
+crates/fno/src/clipboard.rs:2
+crates/fno/src/connections_view.rs:3
+crates/fno/src/digest_overlay.rs:1
+crates/fno/src/keys.rs:5
+crates/fno/src/link.rs:9
+crates/fno/src/needs_overlay.rs:1
+crates/fno/src/proto.rs:3
+crates/fno/src/pty.rs:1
+crates/fno/src/server.rs:20
+crates/fno/src/squad.rs:6
+crates/fno/src/view_store.rs:2
+crates/fno/src/web.rs:1"
+count_status_identifiers() {
+    awk '
+        {
+            line = $0
+            while (match(line, /(^|[^[:alnum:]_])status([^[:alnum:]_]|$)/)) {
+                count++
+                consumed = RSTART + RLENGTH - 1
+                if (consumed >= length(line)) break
+                line = substr(line, consumed)
+            }
+        }
+        END { print count + 0 }
+    ' "$1"
+}
+actual_status_identifiers=""
+while IFS= read -r source; do
+    [ -n "$source" ] || continue
+    count="$(count_status_identifiers "$source")"
+    if [ "$count" -gt 0 ]; then
+        actual_status_identifiers="${actual_status_identifiers}${source}:${count}
+"
+    fi
+done <<EOF
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | sort || true)
+EOF
+actual_status_identifiers="${actual_status_identifiers%$'\n'}"
+if [ "$actual_status_identifiers" != "$EXPECTED_RUST_STATUS_IDENTIFIERS" ]; then
+    violation "the production Rust status-identifier inventory changed" \
+        "expected: $EXPECTED_RUST_STATUS_IDENTIFIERS" \
+        "actual:   ${actual_status_identifiers:-(none)}" \
+        "Do not classify plan frontmatter in Rust; route readiness through" \
+        "\`fno plan rung\`. Update this ratchet only for a reviewed, unrelated" \
+        "status field."
+else
+    note "OK: the production Rust status-identifier inventory is unchanged"
+fi
+
+# Freeze the two known plan-document readers as a second, tighter diagnostic.
+# Both consume activation-specific markers, never `status:`.
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
+crates/fno-agents/src/kill_criteria.rs"
 actual=$(
     git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
         | xargs -0 grep -lE 'read_to_string\(&?plan' 2>/dev/null \
@@ -146,21 +243,41 @@ if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
         "\`fno plan rung\` (exit 0 = dispatchable). If the new reader genuinely needs" \
         "no status, add it to EXPECTED_RUST_PLAN_READERS with a one-line reason."
 else
-    note "OK: kill_criteria.rs is still the only Rust plan reader"
+    note "OK: the registered Rust plan-reader set is unchanged"
 fi
 
-# Narrowed to a FRONTMATTER key extraction (`"status" =>` in a match arm, or a
-# `status:` line prefix test). A bare `status` token is meaningless here -
-# kill_criteria.rs legitimately shells `git status --porcelain`.
-fm_status="$(
-    grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:' \
-        crates/fno-agents/src/kill_criteria.rs 2>/dev/null || true
-)"
+# Every registered reader rejects any `"status"` string literal: serde YAML
+# accepts direct lookup, indexing, parsed-key comparisons, and Value::from, so
+# enumerating access syntax would be a decorative guard. The sole subtraction
+# is kill_criteria.rs's exact existing `git status --porcelain` argv line.
+# Scan every registered reader so growing the allowlist cannot silently weaken
+# the guard.
+fm_status=""
+while IFS= read -r reader; do
+    [ -n "$reader" ] || continue
+    matches="$(
+        grep -nF '"status"' "$reader" 2>/dev/null || true
+    )"
+    if [ "$reader" = "crates/fno-agents/src/kill_criteria.rs" ]; then
+        matches="$(
+            printf '%s\n' "$matches" \
+                | grep -vE '^[0-9]+:[[:space:]]*\.args\(\["status",[[:space:]]*"--porcelain"\]\)[;]?[[:space:]]*$' \
+                || true
+        )"
+    fi
+    if [ -n "$matches" ]; then
+        fm_status="${fm_status}${reader}:
+${matches}
+"
+    fi
+done <<EOF
+$EXPECTED_RUST_PLAN_READERS
+EOF
 if [ -n "$fm_status" ]; then
-    violation "kill_criteria.rs now extracts frontmatter \`status\`; it must read \`kill_criteria:\` only" \
+    violation "a registered Rust plan reader extracts frontmatter \`status\`" \
         "$fm_status"
 else
-    note "OK: kill_criteria.rs extracts kill_criteria only, never frontmatter status"
+    note "OK: registered Rust plan readers never extract frontmatter status"
 fi
 
 # ---------------------------------------------------------------------------

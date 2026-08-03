@@ -46,6 +46,29 @@ def test_legacy_plan_frontmatter_remains_valid() -> None:
     assert plan.company_work is None
 
 
+def test_ac_d5_hp_generic_completion_requires_explicit_delivery_activation() -> None:
+    plan = PlanFrontmatter(
+        node="x-e9a3",
+        status="ready",
+        created="2026-08-02",
+        completion="delivery",
+        company_work=_refs(),
+    )
+
+    assert plan.completion == "delivery"
+
+
+def test_ac_d5_err_unknown_completion_mode_is_rejected() -> None:
+    with pytest.raises(ValidationError):
+        PlanFrontmatter(
+            node="x-e9a3",
+            status="ready",
+            created="2026-08-02",
+            completion="marketing",
+            company_work=_refs(),
+        )
+
+
 def test_plan_rejects_company_work_for_a_different_graph_node() -> None:
     with pytest.raises(ValidationError, match="must match plan node"):
         PlanFrontmatter(

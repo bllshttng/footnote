@@ -11,11 +11,11 @@
 //! - ALWAYS branch: ledger session-record fires on every terminal reason.
 //! - SHIP branch: stamp/graduate + handoff fire only on DonePRGreen/DoneAdvisory.
 //! - idempotency: a prior `session_finalized` event short-circuits a re-fire.
-//! - non-fatal: a failing sub-step emits `session_finalize_failed`, never
-//!   raises the exit code, and lets the remaining steps run.
-//! - archived/missing manifest (delegated path): no-op, exit 0.
+//! - legacy failures remain non-fatal; generic failures return nonzero to retry.
+//! - archived/missing manifest: legacy no-op, generic retry.
 
 use std::fs;
+use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use tempfile::TempDir;
@@ -32,6 +32,8 @@ struct Env {
     handoffs: PathBuf,
     postmortems: PathBuf,
     calls_log: PathBuf,
+    bin_dir: PathBuf,
+    gh_calls: PathBuf,
 }
 
 /// Build a hermetic env. `register_fails` makes the register-task stub exit 1.
@@ -53,6 +55,16 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
     fs::create_dir_all(&handoffs).unwrap();
 
     let calls_log = cwd.join("calls.log");
+    let bin_dir = root.join("bin");
+    let gh_calls = cwd.join("gh-calls.log");
+    fs::create_dir_all(&bin_dir).unwrap();
+    let gh = bin_dir.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\nprintf 'gh %s\\n' \"$*\" >> \"$GH_CALLS_LOG\"\nexit 1\n",
+    )
+    .unwrap();
+    fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
 
     // Manifest (frontmatter + body graph_node_id, like the real one).
     let state = cwd.join(".fno/target-state.md");
@@ -136,6 +148,8 @@ fn setup(session_id: &str, register_fails: bool) -> Env {
         handoffs,
         postmortems,
         calls_log,
+        bin_dir,
+        gh_calls,
     }
 }
 
@@ -162,9 +176,126 @@ fn run_finalize(env: &Env, reason: &str) -> std::process::Output {
         // pypath (PYTHONPATH entries prepend to sys.path) so the stubs win over
         // any site-packages/editable install of the real package.
         .env("PYTHONPATH", &env.pypath)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                env.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("GH_CALLS_LOG", &env.gh_calls)
         .current_dir(&env.cwd)
         .output()
         .expect("run finalize")
+}
+
+fn prepare_real_plan_stamp(env: &Env, expected_url_count: Option<u32>) {
+    fs::remove_file(env.pypath.join("fno/plan/_stamp.py")).unwrap();
+    fs::write(
+        env.pypath.join("fno/__init__.py"),
+        "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n",
+    )
+    .unwrap();
+    fs::write(
+        env.pypath.join("fno/plan/__init__.py"),
+        "from pkgutil import extend_path\n__path__ = extend_path(__path__, __name__)\n",
+    )
+    .unwrap();
+    let expected = expected_url_count
+        .map(|count| format!("expected_url_count: {count}\n"))
+        .unwrap_or_default();
+    fs::write(
+        env.cwd.join("plan.md"),
+        format!(
+            "---\nnode: ab-testnode\nstatus: ready\ncreated: 2026-08-02\n{expected}---\n# Plan\n"
+        ),
+    )
+    .unwrap();
+}
+
+fn run_finalize_real_stamp(env: &Env, reason: &str) -> std::process::Output {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let pythonpath = format!(
+        "{}:{}",
+        env.pypath.display(),
+        repo.join("cli/src").display()
+    );
+    Command::new(BIN)
+        .arg("finalize")
+        .arg("--state")
+        .arg(&env.state)
+        .arg("--cwd")
+        .arg(&env.cwd)
+        .arg("--reason")
+        .arg(reason)
+        .arg("--events")
+        .arg(&env.events)
+        .arg("--global-events")
+        .arg(&env.global_events)
+        .arg("--handoffs-dir")
+        .arg(&env.handoffs)
+        .arg("--postmortems-dir")
+        .arg(&env.postmortems)
+        .env("PYTHONPATH", pythonpath)
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                env.bin_dir.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("GH_CALLS_LOG", &env.gh_calls)
+        .current_dir(&env.cwd)
+        .output()
+        .expect("run finalize with real plan stamp")
+}
+
+fn write_delivery_verdict(env: &Env, session_id: &str, complete: bool) {
+    let requirements = if complete {
+        serde_json::json!([{
+            "deliverable_id": "output",
+            "evidence_id": "artifact-ready",
+            "subject_kind": "artifact",
+            "subject_id": "artifact-1",
+            "result": "passed",
+            "producers": ["adapter:test"],
+            "source_revisions": ["artifact-sha"],
+            "diagnostics": []
+        }])
+    } else {
+        serde_json::json!([])
+    };
+    fs::write(
+        &env.events,
+        serde_json::json!({
+            "ts": "2026-08-02T12:00:00Z",
+            "type": "delivery_verdict_evaluated",
+            "source": "target",
+            "data": {
+                "evaluator_version": "delivery-evaluator.v1",
+                "session_id": session_id,
+                "work_order_node_id": "ab-testnode",
+                "attempt_id": "attempt-1",
+                "aggregate": "passed",
+                "fact_revision": "sha256:abc",
+                "required_requirements": [{
+                    "deliverable_id": "output",
+                    "evidence_id": "artifact-ready"
+                }],
+                "requirements": requirements,
+                "diagnostics": []
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
 }
 
 fn calls(env: &Env) -> String {
@@ -338,6 +469,223 @@ fn finalize_advisory_ship_graduates() {
     );
 }
 
+#[test]
+fn generic_completion_finalize_consumes_selected_verdict_without_pr_paths() {
+    let env = setup("S-delivery", false);
+    fs::write(
+        &env.events,
+        serde_json::json!({
+            "ts": "2026-08-02T12:00:00Z",
+            "type": "delivery_verdict_evaluated",
+            "source": "target",
+            "data": {
+                "evaluator_version": "delivery-evaluator.v1",
+                "session_id": "S-delivery",
+                "work_order_node_id": "ab-testnode",
+                "attempt_id": "attempt-1",
+                "aggregate": "passed",
+                "fact_revision": "sha256:abc",
+                "required_requirements": [{
+                    "deliverable_id": "output",
+                    "evidence_id": "artifact-ready"
+                }],
+                "requirements": [{
+                    "deliverable_id": "output",
+                    "evidence_id": "artifact-ready",
+                    "subject_kind": "artifact",
+                    "subject_id": "artifact-1",
+                    "result": "passed",
+                    "producers": ["adapter:test"],
+                    "source_revisions": ["artifact-sha"],
+                    "diagnostics": []
+                }],
+                "diagnostics": []
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(out.status.success());
+    let c = calls(&env);
+    assert!(c.contains("register-task reason=DoneDelivery"));
+    assert!(c.contains("stamp-plan stamp"));
+    assert!(c.contains("stamp-plan graduate"));
+    assert!(!c.contains("verify-advise"));
+    let handoff = fs::read_to_string(&handoff_files(&env)[0]).unwrap();
+    assert!(handoff.contains("fno-delivery://ab-testnode/attempt-1/sha256:abc"));
+    assert!(handoff.contains("generic delivery receipt"));
+    assert!(fs::read_to_string(&env.gh_calls)
+        .unwrap_or_default()
+        .is_empty());
+    assert_eq!(count_event(&env.events, "termination", "S-delivery"), 1);
+    assert!(events_text(&env.events).contains("DoneDelivery"));
+}
+
+#[test]
+fn generic_completion_finalize_rejects_incomplete_selected_verdict() {
+    let env = setup("S-delivery-incomplete", false);
+    fs::write(
+        &env.events,
+        serde_json::json!({
+            "ts": "2026-08-02T12:00:00Z",
+            "type": "delivery_verdict_evaluated",
+            "source": "target",
+            "data": {
+                "evaluator_version": "delivery-evaluator.v1",
+                "session_id": "S-delivery-incomplete",
+                "work_order_node_id": "ab-testnode",
+                "attempt_id": "attempt-1",
+                "aggregate": "passed",
+                "fact_revision": "sha256:abc",
+                "required_requirements": [{
+                    "deliverable_id": "output",
+                    "evidence_id": "artifact-ready"
+                }],
+                "requirements": [],
+                "diagnostics": []
+            }
+        })
+        .to_string()
+            + "\n",
+    )
+    .unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-incomplete"),
+        0
+    );
+}
+
+#[test]
+fn generic_completion_finalize_does_not_revive_an_older_passing_verdict() {
+    let env = setup("S-delivery-newest", false);
+    write_delivery_verdict(&env, "S-delivery-newest", true);
+    let mut events = events_text(&env.events);
+    let mut newer: serde_json::Value =
+        serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    newer["ts"] = serde_json::json!("2026-08-02T12:01:00Z");
+    newer["data"]["requirements"] = serde_json::json!([]);
+    events.push_str(&newer.to_string());
+    events.push('\n');
+    fs::write(&env.events, events).unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-newest"),
+        0
+    );
+}
+
+#[test]
+fn generic_completion_finalize_rejects_a_newest_unbound_verdict() {
+    let env = setup("S-delivery-unbound", false);
+    write_delivery_verdict(&env, "S-delivery-unbound", true);
+    let mut events = events_text(&env.events);
+    let mut newer: serde_json::Value =
+        serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    newer["ts"] = serde_json::json!("2026-08-02T12:01:00Z");
+    newer["data"].as_object_mut().unwrap().remove("session_id");
+    events.push_str(&newer.to_string());
+    events.push('\n');
+    fs::write(&env.events, events).unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-unbound"),
+        0
+    );
+}
+
+#[test]
+fn generic_completion_finalize_real_stamp_reaches_done_with_bound_receipt() {
+    let env = setup("S-delivery-real", false);
+    prepare_real_plan_stamp(&env, None);
+    write_delivery_verdict(&env, "S-delivery-real", true);
+
+    let out = run_finalize_real_stamp(&env, "DoneDelivery");
+
+    assert!(
+        out.status.success(),
+        "stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan = fs::read_to_string(env.cwd.join("plan.md")).unwrap();
+    assert!(plan.contains("status: done"), "{plan}");
+    assert!(
+        plan.contains("fno-delivery://ab-testnode/attempt-1/sha256:abc"),
+        "{plan}"
+    );
+    assert!(plan.contains("S-delivery-real"), "{plan}");
+}
+
+#[test]
+fn generic_completion_finalize_real_stamp_respects_declared_url_count() {
+    let env = setup("S-delivery-count", false);
+    prepare_real_plan_stamp(&env, Some(2));
+    write_delivery_verdict(&env, "S-delivery-count", true);
+
+    let out = run_finalize_real_stamp(&env, "DoneDelivery");
+
+    assert!(out.status.success());
+    let plan = fs::read_to_string(env.cwd.join("plan.md")).unwrap();
+    assert!(plan.contains("status: in_review"), "{plan}");
+    assert!(plan.contains("expected_url_count: 2"), "{plan}");
+    assert!(!plan.contains("status: done"), "{plan}");
+}
+
+#[test]
+fn generic_completion_finalize_real_stamp_rejects_incomplete_receipt() {
+    let env = setup("S-delivery-real-bad", false);
+    prepare_real_plan_stamp(&env, None);
+    write_delivery_verdict(&env, "S-delivery-real-bad", false);
+
+    let out = run_finalize_real_stamp(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    let plan = fs::read_to_string(env.cwd.join("plan.md")).unwrap();
+    assert!(plan.contains("status: ready"), "{plan}");
+    assert!(!plan.contains("fno-delivery://"), "{plan}");
+}
+
+#[test]
+fn generic_completion_finalize_missing_selected_event_fails_closed() {
+    let env = setup("S-delivery-missing", false);
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert_eq!(
+        count_event(&env.events, "session_finalize_failed", "S-delivery-missing"),
+        1
+    );
+    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-missing"),
+        0
+    );
+}
+
 /// Idempotency: N stop-hook fires after a successful finalize produce exactly
 /// one ledger row, one stamp, one handoff, one session_finalized. (AC5-EDGE.)
 #[test]
@@ -417,6 +765,29 @@ fn finalize_missing_manifest_is_noop() {
         events_text(&env.events).is_empty(),
         "no events on missing manifest"
     );
+}
+
+#[test]
+fn generic_finalize_missing_or_unbound_manifest_requires_retry() {
+    let missing = setup("S-generic-gone", false);
+    fs::remove_file(&missing.state).unwrap();
+    assert!(!run_finalize(&missing, "DoneDelivery").status.success());
+
+    for session_line in ["", "session_id: ''\n"] {
+        let unbound = setup("S-generic-unbound", false);
+        fs::write(
+            &unbound.state,
+            format!(
+                "---\n{session_line}created_at: 2026-08-02T12:00:00Z\nattended: true\n---\ngraph_node_id: ab-testnode\n"
+            ),
+        )
+        .unwrap();
+        assert!(!run_finalize(&unbound, "DoneDelivery").status.success());
+        assert_eq!(
+            count_event(&unbound.events, "termination", "S-generic-unbound"),
+            0
+        );
+    }
 }
 
 /// Per-node rollup: three sessions on the same node each leave one ledger

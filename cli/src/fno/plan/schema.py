@@ -84,6 +84,7 @@ class PlanFrontmatter(BaseModel):
     # whose task acceptance references all resolve (x-f905). Absent on historical
     # plans, which keep permissive legacy reads.
     acceptance_contract: Literal["compiled-v1"] | None = None
+    completion: Literal["delivery"] | None = None
     shipped_at: datetime | None = None  # PR creation (implementation complete)
     done_at: datetime | None = None  # PR merged (first-write-only; x-f34f)
     urls: list[str] = []

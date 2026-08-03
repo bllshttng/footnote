@@ -139,7 +139,7 @@ Promote to a hardcoded check in both validators, with invalid corpus fixtures, i
 
 ## Consuming these facts
 
-`evidence_projection` maps an attempt onto the company-work `EvidenceRef` from [company-work contracts](company-work-contracts.md), so delivery consumes approval and effect facts without importing private approval models and without gaining authority to create or change them.
+`evidence_projection` maps an attempt onto the company-work `EvidenceRef` from [company-work contracts](company-work-contracts.md), so [generic delivery evidence](generic-delivery-evidence.md) consumes approval and effect facts without importing private approval models and without gaining authority to create or change them.
 `passed` there means the destination acknowledged one effect.
 It is not a delivery verdict.
 
@@ -164,4 +164,5 @@ Treating a request digest as a secret capability token would be a different desi
 ## Deliberately unresolved
 
 Adapter-specific remote idempotency and reconciliation are explicit conformance fields on `AdapterCapability` rather than inferred from a destination type.
-No live external adapter ships here; the first one arrives with the delivery node.
+No live external destination adapter ships here.
+The generic delivery adapter consumes the public projection and stable lifecycle events, while destination-specific execution and reconciliation remain separate edge capabilities.

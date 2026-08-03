@@ -406,7 +406,7 @@ There are no completion gates to set. The gate machinery (gate booleans in `targ
 
 ### Termination
 
-`fno-agents loop-check` resolves a session with one `TerminationReason`: `DonePRGreen` / `DoneAdvisory` (work confirmed done), `NoWork`, `Budget`, `NoProgress`, `Interrupted` (cancel sentinel), or `Aborted`. The pre-wedge `IN_PROGRESS` / `COMPLETE` / `BLOCKED` status strings no longer drive the decision.
+`fno-agents loop-check` resolves a session with one `TerminationReason`: `DonePRGreen`, `DoneAdvisory`, or explicitly activated `DoneDelivery` (work confirmed done), plus `NoWork`, `Budget`, `NoProgress`, `Interrupted` (cancel sentinel), or `Aborted`. The pre-wedge `IN_PROGRESS` / `COMPLETE` / `BLOCKED` status strings no longer drive the decision.
 
 **Forbidden statuses** (will break the loop):
 - `EXECUTION_COMPLETE`

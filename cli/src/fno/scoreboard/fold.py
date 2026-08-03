@@ -39,7 +39,9 @@ _WEDGE_REASONS = frozenset({"NoProgress", "Budget", "Aborted"})
 # stays (it delivers via the shared batch PR). This is intentionally looser than
 # finalize.SHIP_REASONS (which gates plan stamp/graduate on DonePRGreen|
 # DoneAdvisory only) - "delivered for telemetry" and "graduate the plan" differ.
-_SHIPPED_TERMINALS = frozenset({"DonePRGreen", "DoneAdvisory", "DoneBatched"})
+_SHIPPED_TERMINALS = frozenset(
+    {"DonePRGreen", "DoneAdvisory", "DoneDelivery", "DoneBatched"}
+)
 
 
 def _is_shipped_reason(termination_reason: str | None) -> bool:

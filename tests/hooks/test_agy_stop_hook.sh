@@ -16,6 +16,7 @@
 #   T6  loop-check garbage (present) -> stdout continue (transient retry) + event
 #   T7  Gemini-shaped transcript    -> synthesized claude line reaches loop-check
 #   T8  silence rule                -> stdout is exactly ONE JSON object, nothing else
+#   T12 DoneDelivery finalize fails -> stdout continue so the writer can retry
 
 set -uo pipefail
 
@@ -313,6 +314,26 @@ log "T11: jq missing + unrelated cwd -> sed-fallback locates active manifest"
         fail "T11: jq-missing+unrelated-cwd must bounded-continue via sed fallback, got $HOOK_STDOUT"
     fi
     rm -rf "$OTHER" 2>/dev/null || true
+    cleanup
+}
+
+# ── T12: failed generic finalize -> continue so the writer can retry ─────────
+log "T12: DoneDelivery finalize failure keeps the session alive"
+{
+    setup_env
+    FMARK="${TMP_DIR}/finalize_called"
+    STUB="${TMP_DIR}/fno-agents"
+    make_stub "$STUB" <<STUB
+#!/usr/bin/env bash
+if [[ "\$1" == "finalize" ]]; then touch "${FMARK}"; exit 1; fi
+echo '{"decision":"allow","termination_reason":"DoneDelivery","message":"delivery passed","fires":1,"fingerprint":"z"}'
+STUB
+    INPUT="{\"transcriptPath\":\"${TRANSCRIPT_FILE}\",\"fullyIdle\":true,\"conversationId\":\"c12\"}"
+    run_hook "$TMP_DIR" "$INPUT" "HOME=${HOME_DIR}" "FNO_AGENTS_BIN=${STUB}"
+    t12=true
+    [[ "$(stdout_decision)" == "continue" ]] || { fail "T12: expected continue, got $HOOK_STDOUT"; t12=false; }
+    [[ -f "$FMARK" ]] || { fail "T12: finalize not invoked"; t12=false; }
+    [[ "$t12" == true ]] && pass "T12: failed DoneDelivery finalize -> continue for retry"
     cleanup
 }
 

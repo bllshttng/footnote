@@ -558,7 +558,7 @@ with lines:
             and data.get("termination_reason")
             in {
                 "DonePRGreen",
-                "DoneAdvisory",
+                "DoneAdvisory", "DoneDelivery",
                 "DoneBatched",
                 "DoneAwaitingMerge",
                 "DonePlanned",

@@ -9,10 +9,12 @@
 //!   `graph_node_id` + `provider_id` + scalar `session_id` + `cost_usd` + a new
 //!   `termination_reason`, so a node's true cost and full session list roll up
 //!   by grouping ledger entries on `graph_node_id` (US7).
-//! - **Ship only** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
+//! - **Legacy ship** (`DonePRGreen` / `DoneAdvisory`): plan stamp + a mechanical
 //!   git-derived handoff artifact. A code ship (DonePRGreen) stamps `in_review`
 //!   only (done = merged, x-f34f; the flip happens at merge). An advisory ship
 //!   (DoneAdvisory) has no merge event, so it also graduates to `done` here.
+//! - **Generic delivery** (`DoneDelivery`): consume the selected strict verdict,
+//!   stamp or safely graduate with its receipt, and write a generic handoff.
 //! - **`DonePRGreen` only**, when the manifest approves it: arm GitHub's native
 //!   auto-merge. This is the one terminal that means "green and reviewed", and
 //!   arming it HERE rather than at PR creation is the whole point (x-1951) -
@@ -34,9 +36,10 @@
 //!
 //! ## Non-fatal + idempotent
 //!
-//! Every sub-step is independently non-fatal: a failure logs to stderr and is
-//! recorded in a `session_finalize_failed` event, but never changes the exit
-//! code (the promise is honored regardless - side-effects never block).
+//! Every sub-step records failures in a `session_finalize_failed` event.
+//! Legacy terminal side effects remain non-blocking, while `DoneDelivery`
+//! returns failure so the stop-hook can keep the session alive and retry its
+//! required receipt, stamp, and handoff writes.
 //! `session_finalized` is emitted ONLY when every attempted sub-step succeeded;
 //! a partial failure leaves it unemitted so a later stop-hook fire retries the
 //! remaining work (each shelled script is itself idempotent: ledger flock +
@@ -121,7 +124,7 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|DoneBatched|DoneAwaitingMerge|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 
@@ -474,9 +477,9 @@ fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
 
 // ── public entry ────────────────────────────────────────────────────────────
 
-/// `fno-agents finalize ...`. Returns a process exit code: 0 for the normal
-/// (always-non-fatal) path, 2 only for CLI misuse. Side-effect failures never
-/// raise the exit code - the promise is honored regardless.
+/// `fno-agents finalize ...`. Returns 0 for a completed write, 1 when generic
+/// delivery must retry, and 2 for CLI misuse. Legacy side-effect failures stay
+/// non-fatal.
 pub fn run_finalize(args: &[String]) -> i32 {
     if args
         .iter()
@@ -496,6 +499,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         eprintln!("finalize: --state, --cwd and --reason are required\n{HELP}");
         return 2;
     };
+    let delivery_ship = reason == "DoneDelivery";
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
@@ -505,9 +509,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
             .join(".fno/events.jsonl")
     });
 
-    // Read the manifest. A missing/unreadable manifest is the delegated-session
-    // path: handoff.sh archived it AND already wrote that session's ledger
-    // record before archival, so there is nothing to finalize here. Non-fatal.
+    // Missing manifests are the non-fatal delegated-session path for legacy
+    // reasons. Generic delivery must retry because its required writes cannot
+    // be proven without the session-bound manifest.
     let content = match fs::read_to_string(&state) {
         Ok(c) => c,
         Err(e) => {
@@ -515,16 +519,21 @@ pub fn run_finalize(args: &[String]) -> i32 {
                 "finalize: manifest {} unreadable ({e}); nothing to finalize (likely delegated/archived)",
                 state.display()
             );
-            return 0;
+            return i32::from(delivery_ship);
         }
     };
     let m = parse_manifest_fields(&content);
-    let Some(session_id) = m.session_id.clone() else {
+    let Some(session_id) = m
+        .session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
         eprintln!("finalize: manifest has no session_id; skipping (cannot dedup)");
-        return 0;
+        return i32::from(delivery_ship);
     };
 
-    let ship = SHIP_REASONS.contains(&reason.as_str());
+    let legacy_ship = SHIP_REASONS.contains(&reason.as_str());
+    let ship = legacy_ship || delivery_ship;
 
     // Idempotency, ship-aware (sigma-review HIGH): a prior COMPLETED ship means
     // the whole session is done. A prior non-ship finalize means only the ledger
@@ -598,14 +607,15 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // `graduate` verb and the cross-project safety net.
     let mut stamped = false;
     let mut handoff_path: Option<String> = None;
-    if ship {
+    let mut delivery_terminal_message: Option<String> = None;
+    if legacy_ship {
         let plan = m.plan_path.clone().unwrap_or_default();
         if !plan.is_empty() {
             let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
             // Graduate only for the merge-less advisory terminal; a cross-project
             // advisory still waits for a derivable count (never graduate early).
             let do_graduate = reason == "DoneAdvisory" && (!m.cross_project || expected.is_some());
-            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate) {
+            match stamp_and_graduate(&cwd, &plan, &session_id, expected, do_graduate, None) {
                 Ok(()) => stamped = true,
                 Err(step) => {
                     eprintln!("finalize: {step} failed");
@@ -672,6 +682,53 @@ pub fn run_finalize(args: &[String]) -> i32 {
         }
     }
 
+    if delivery_ship {
+        match crate::delivery_completion::selected_receipt(
+            &project_events,
+            m.graph_node_id.as_deref(),
+            &session_id,
+        ) {
+            Some(receipt) => {
+                delivery_terminal_message =
+                    Some(format!("generic delivery finalized via {}", receipt.uri));
+                let plan = m.plan_path.clone().unwrap_or_default();
+                if !plan.is_empty() {
+                    let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
+                    let do_graduate = !m.cross_project || expected.is_some();
+                    match stamp_and_graduate(
+                        &cwd,
+                        &plan,
+                        &session_id,
+                        expected,
+                        do_graduate,
+                        Some(&receipt.uri),
+                    ) {
+                        Ok(()) => stamped = true,
+                        Err(step) => failed.push(step),
+                    }
+                }
+                let dir = resolve_handoffs_dir(
+                    a.handoffs_dir.as_deref(),
+                    a.settings.as_deref(),
+                    &cwd,
+                    home.as_deref(),
+                );
+                match crate::delivery_completion::write_receipt_handoff(&dir, &session_id, &receipt)
+                {
+                    Ok(path) => handoff_path = Some(path),
+                    Err(error) => {
+                        eprintln!("finalize: generic handoff failed: {error}");
+                        failed.push("handoff".into());
+                    }
+                }
+            }
+            None => {
+                eprintln!("finalize: selected delivery verdict event missing");
+                failed.push("delivery_receipt".into());
+            }
+        }
+    }
+
     // ── STUCK ONLY: postmortem artifact (ab-1a92b677) ──────────────────────
     // A stuck terminal (NoProgress/Budget/Interrupted/Aborted) means the session
     // gave up, ran out of budget, or was cancelled mid-wedge without shipping.
@@ -733,7 +790,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // in the extended envelope. Best-effort; the pull leg (events.jsonl) is
     // authoritative and the push leg (task 1.4) rides it. gh is shelled for the
     // PR url only on a ship terminal.
-    let run_summary_pr = if ship { gh_pr_url(&cwd) } else { None };
+    let run_summary_pr = if legacy_ship { gh_pr_url(&cwd) } else { None };
     emit_run_summary(
         &project_events,
         &global_events,
@@ -749,7 +806,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // Runs in the always-run tail (first fire of every reason), so it stamps
     // even a non-ship/awaiting-merge terminal that left an open PR. Non-fatal;
     // deliberately not returned into `failed`.
-    stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+    if !delivery_ship {
+        stamp_node_pr(&cwd, m.graph_node_id.as_deref());
+    }
 
     // ── guarded do-provenance backstop (x-0469) ────────────────────────────
     // Same shape and same fatality as the stamp above: log-only, deliberately
@@ -800,6 +859,20 @@ pub fn run_finalize(args: &[String]) -> i32 {
     if let Some(blocked) = auto_merge_blocked_reason {
         data["auto_merge_blocked_reason"] = json!(blocked);
     }
+    if delivery_ship && failed.is_empty() {
+        let emitted = delivery_terminal_message.as_deref().is_some_and(|message| {
+            crate::delivery_completion::emit_terminal(
+                &project_events,
+                &global_events,
+                &session_id,
+                message,
+            )
+        });
+        if !emitted {
+            failed.push("delivery_terminal".into());
+        }
+    }
+    let delivery_retry = delivery_ship && !failed.is_empty();
     if failed.is_empty() {
         emit_to_both(&project_events, &global_events, "session_finalized", data);
     } else {
@@ -813,7 +886,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
             data,
         );
     }
-    0
+    if delivery_retry {
+        1
+    } else {
+        0
+    }
 }
 
 // ── ledger (always) ─────────────────────────────────────────────────────────
@@ -1038,8 +1115,9 @@ fn stamp_and_graduate(
     session_id: &str,
     expected_url_count: Option<u32>,
     do_graduate: bool,
+    url_override: Option<&str>,
 ) -> Result<(), String> {
-    let pr_url = gh_pr_url(cwd);
+    let pr_url = url_override.map(str::to_owned).or_else(|| gh_pr_url(cwd));
     let mut stamp = py_module(cwd);
     stamp
         .arg("-m")
@@ -2970,7 +3048,7 @@ mod tests {
         for stuck in ["NoProgress", "Budget", "Interrupted", "Aborted"] {
             assert!(POSTMORTEM_REASONS.contains(&stuck));
         }
-        for not_stuck in ["DonePRGreen", "DoneAdvisory", "NoWork"] {
+        for not_stuck in ["DonePRGreen", "DoneAdvisory", "DoneDelivery", "NoWork"] {
             assert!(!POSTMORTEM_REASONS.contains(&not_stuck));
         }
     }

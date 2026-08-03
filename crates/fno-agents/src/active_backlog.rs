@@ -414,7 +414,9 @@ const BOOT_GRACE_TICKS: u32 = 3;
 fn is_done_reason(r: &TerminationReason) -> bool {
     matches!(
         r,
-        TerminationReason::DonePRGreen | TerminationReason::DoneAdvisory
+        TerminationReason::DonePRGreen
+            | TerminationReason::DoneAdvisory
+            | TerminationReason::DoneDelivery
     )
 }
 
@@ -489,7 +491,7 @@ fn resolve_dispatch(
     node_id: &str,
     ev: Evidence,
 ) {
-    // Mirror MegawalkQueue::close EXACTLY: a DonePRGreen/DoneAdvisory close runs
+    // Mirror MegawalkQueue::close EXACTLY: a successful delivery close runs
     // `fno backlog done` (retry_etxtbsy for a transient busy binary) and Closes
     // only on success - a failed `done` Parks with the error, so the breaker
     // counts it as a failure just as the supervised path did (never a false
@@ -1131,11 +1133,12 @@ mod tests {
     }
 
     #[test]
-    fn is_done_reason_only_pr_green_and_advisory() {
+    fn is_done_reason_includes_generic_delivery() {
         // The two reasons MegawalkQueue::close treats as a `backlog done`;
         // DoneBatched/DoneAwaitingMerge are the map_outcome keep-set, not here.
         assert!(is_done_reason(&TerminationReason::DonePRGreen));
         assert!(is_done_reason(&TerminationReason::DoneAdvisory));
+        assert!(is_done_reason(&TerminationReason::DoneDelivery));
         assert!(!is_done_reason(&TerminationReason::DoneBatched));
         assert!(!is_done_reason(&TerminationReason::DoneAwaitingMerge));
         assert!(!is_done_reason(&TerminationReason::NoProgress));
