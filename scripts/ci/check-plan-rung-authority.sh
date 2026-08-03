@@ -151,17 +151,22 @@ else
     note "OK: the registered Rust plan-reader set is unchanged"
 fi
 
-# Narrowed to a FRONTMATTER key extraction (`"status" =>` in a match arm, a
-# `status:` line prefix test, or the serde YAML key-construction form used by
-# the delivery reader). A bare `status` token is meaningless here because
-# kill_criteria.rs legitimately shells `git status --porcelain`. Scan every
-# registered reader so growing the allowlist cannot silently weaken the guard.
+# Every registered reader except kill_criteria.rs rejects any `"status"` string
+# literal: serde YAML accepts direct string lookup, indexing, and Value::from,
+# so enumerating access syntax would be a decorative guard. kill_criteria.rs
+# legitimately shells `git status --porcelain`, so it retains the narrower
+# frontmatter-key patterns. Scan every registered reader so growing the
+# allowlist cannot silently weaken the guard.
 fm_status=""
 while IFS= read -r reader; do
     [ -n "$reader" ] || continue
+    if [ "$reader" = "crates/fno-agents/src/kill_criteria.rs" ]; then
+        status_pattern='"status"[[:space:]]*=>|starts_with\("status:|"\^?status:|Value::from[[:space:]]*\([[:space:]]*"status"'
+    else
+        status_pattern='"status"'
+    fi
     matches="$(
-        grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:|Value::from[[:space:]]*\([[:space:]]*"status"' \
-            "$reader" 2>/dev/null || true
+        grep -nE "$status_pattern" "$reader" 2>/dev/null || true
     )"
     if [ -n "$matches" ]; then
         fm_status="${fm_status}${reader}:
