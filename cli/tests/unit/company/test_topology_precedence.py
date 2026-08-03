@@ -125,7 +125,7 @@ def test_ac3_resolution_carries_only_shape_and_source() -> None:
     resolution = TopologyResolution.model_validate(
         {"shape": "direct", "source": "inference"}
     )
-    assert set(resolution.model_fields) == {"shape", "source"}
+    assert set(TopologyResolution.model_fields) == {"shape", "source"}
     with pytest.raises(ValidationError):
         TopologyResolution.model_validate(
             {"shape": "direct", "source": "inference", "work_order": "x-1"}
