@@ -118,6 +118,7 @@ def _resolve(
     definitions: tuple[RoleDefinitionSource, ...] | None = None,
     capabilities: tuple[CapabilityFact, ...] | None = None,
     context: tuple[ContextReference, ...] | None = None,
+    bounds: ContextBundleBounds | None = None,
 ):
     return resolve_role(
         role=role,
@@ -136,7 +137,7 @@ def _resolve(
         work_order=work_order,
         clock=NOW,
         snapshot_revision=REVISION,
-        bundle_bounds=ContextBundleBounds(max_references=2, max_bytes=512),
+        bundle_bounds=bounds or ContextBundleBounds(max_references=2, max_bytes=512),
     )
 
 
@@ -366,6 +367,49 @@ def test_smallest_bundle_selection_is_stable_under_catalog_reordering() -> None:
     )
 
 
+def test_context_candidate_search_is_bounded_before_cartesian_expansion() -> None:
+    manifest = _manifest(
+        context_selectors=(
+            ContextSelector(kind=ContextKind.BRIEF),
+            ContextSelector(kind=ContextKind.PLAN),
+        )
+    )
+    briefs = tuple(
+        _context(
+            f"brief-{index}",
+            byte_size=10,
+            digest=f"{index + 1:x}" * 64,
+            sensitivity=Sensitivity.INTERNAL,
+        )
+        for index in range(3)
+    )
+    plans = tuple(
+        reference.model_copy(
+            update={
+                "kind": ContextKind.PLAN,
+                "identifier": f"plan-{index}",
+                "content_digest": f"{index + 4:x}" * 64,
+            }
+        )
+        for index, reference in enumerate(briefs)
+    )
+
+    result = _resolve(
+        definitions=(_source(RoleLayer.BUILT_IN, "builtin/owner", manifest=manifest),),
+        context=briefs + plans,
+        bounds=ContextBundleBounds(
+            max_references=2,
+            max_bytes=512,
+            max_combinations=4,
+        ),
+    )
+
+    assert isinstance(result, RoleResolutionBlocked)
+    assert result.reason is RoleResolutionReason.OVER_BUDGET
+    assert result.reference == "context_combinations"
+    assert result.detail == "9 candidate combinations exceed limit 4"
+
+
 def test_manifests_are_frozen_extra_forbidden_and_non_granting() -> None:
     manifest = _manifest()
     with pytest.raises(ValidationError, match="frozen"):
@@ -399,6 +443,23 @@ def test_unreadable_stale_sensitive_and_mixed_revision_context_fail_closed() -> 
         assert isinstance(result, RoleResolutionBlocked)
         assert result.reason == reason
         assert result.source_id == context.provenance
+
+
+def test_mixed_context_failures_report_the_first_precise_stable_reason() -> None:
+    stale = _context(
+        fresh_until=NOW - timedelta(seconds=1),
+        digest="a" * 64,
+    )
+    over_sensitive = _context(
+        sensitivity=Sensitivity.RESTRICTED,
+        digest="b" * 64,
+    )
+
+    result = _resolve(context=(over_sensitive, stale))
+
+    assert isinstance(result, RoleResolutionBlocked)
+    assert result.reason is RoleResolutionReason.STALE_CONTEXT
+    assert result.source_id == stale.provenance
 
 
 def test_ac_r2_hp_all_layers_may_only_tighten_the_full_manifest() -> None:

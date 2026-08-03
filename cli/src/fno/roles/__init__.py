@@ -29,6 +29,7 @@ from fno.roles.registry import (
     DiscoveryInputError,
     RegistryError,
     RoleRegistry,
+    default_role_root,
     discover_role_definitions,
     ordered_definitions,
 )
@@ -61,6 +62,7 @@ __all__ = [
     "RoleResolutionReason",
     "RoutingHint",
     "Sensitivity",
+    "default_role_root",
     "discover_role_definitions",
     "ordered_definitions",
     "resolve_role",

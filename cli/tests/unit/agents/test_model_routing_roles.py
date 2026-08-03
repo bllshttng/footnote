@@ -58,8 +58,8 @@ OPENAI_PROVIDER = {
 def _write_business_role(
     root: Path,
     *,
-    provider: str,
-    model: str,
+    provider: str | None,
+    model: str | None,
     role_id: str = "publisher",
     function_id: str = "communications",
     layer: RoleLayer = RoleLayer.COMPANY,
@@ -81,7 +81,11 @@ def _write_business_role(
             review_policy=ReviewPolicy(required=True, minimum_reviewers=1),
             delivery_policy=DeliveryPolicy(required_evidence=("artifact",)),
             default_topology="direct",
-            routing_hint=RoutingHint(provider=provider, model=model),
+            routing_hint=(
+                RoutingHint(provider=provider, model=model)
+                if provider is not None or model is not None
+                else None
+            ),
         ),
     )
     path = root / layer.value / f"{role_id}.json"
@@ -328,7 +332,7 @@ def test_disabled_routing_resolved_business_role_remains_disabled(
 
 @pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
 @pytest.mark.parametrize("role", sorted(mr.PROTECTED_ROLES))
-def test_protected_business_names_short_circuit_before_lookup(
+def test_protected_business_names_validate_manifest_but_keep_primary_route(
     resolver: Callable[..., object], role: str
 ) -> None:
     called = False
@@ -347,7 +351,7 @@ def test_protected_business_names_short_circuit_before_lookup(
         )
         is None
     )
-    assert called is False
+    assert called is True
 
 
 def test_manifest_existence_guard_distinguishes_not_found_from_resolved() -> None:
@@ -421,6 +425,19 @@ def test_default_production_lookup_projects_manifest_through_codex_route(
     assert route is not None
     assert route.env == {"OPENAI_API_KEY": "openai-key"}
     assert "model='gpt-business'" in " ".join(route.config_args)
+
+
+@pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
+def test_business_manifest_without_optional_routing_hint_uses_primary_route(
+    resolver: Callable[..., object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "roles"
+    _write_business_role(root, provider=None, model=None)
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+
+    assert resolver("publisher", settings=_settings(), env={}) is None
 
 
 def test_default_lookup_uses_fixed_precedence_and_accepts_tightening_overlay(
@@ -588,8 +605,29 @@ def test_default_production_lookup_blocks_invalid_role_root_at_spawn_seam(
     assert "not a directory" in (caught.value.result.detail or "")
 
 
+def test_default_production_lookup_blocks_missing_explicit_role_root(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    root = tmp_path / "missing-roles"
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
+    monkeypatch.setattr(mr, "_routing_block", lambda settings: _settings().model_routing)
+
+    with pytest.raises(mr.BusinessRoleResolutionBlockedError) as caught:
+        mr.resolve_spawn_route("coordinate")
+
+    assert caught.value.result.reason is RoleResolutionReason.INVALID_MANIFEST
+    assert caught.value.result.source_id == str(root)
+    assert "does not exist" in (caught.value.result.detail or "")
+
+
+def test_business_role_refusals_share_route_composition_error_contract() -> None:
+    assert issubclass(mr.BusinessRoleResolutionBlockedError, mr.RouteCompositionError)
+    assert issubclass(mr.BusinessRoleRoutingProjectionError, mr.RouteCompositionError)
+
+
 @pytest.mark.parametrize("resolver", [mr.resolve_route, mr.resolve_codex_route])
-def test_default_lookup_keeps_protected_roles_short_circuited_before_discovery(
+def test_default_lookup_blocks_corrupt_sources_for_protected_roles(
     resolver: Callable[..., object],
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -598,7 +636,8 @@ def test_default_lookup_keeps_protected_roles_short_circuited_before_discovery(
     _write_corrupt_role(root)
     monkeypatch.setenv("FNO_ROLES_ROOT", str(root))
 
-    assert resolver("implement", settings=_settings(), env={}) is None
+    with pytest.raises(mr.BusinessRoleResolutionBlockedError):
+        resolver("implement", settings=_settings(), env={})
 
 
 def test_spawn_paths_share_the_guarded_routing_seams() -> None:

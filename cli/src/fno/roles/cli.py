@@ -149,14 +149,14 @@ def list_roles(
 def _show_row(
     record: DiscoveredRoleDefinition,
     *,
-    highest: DiscoveredRoleDefinition,
+    highest_valid: DiscoveredRoleDefinition | None,
 ) -> dict[str, Any]:
     return {
         "disposition": (
             "unchecked"
-            if record.role is None
+            if record.status.value != "valid" or record.definition is None
             else "contributing"
-            if record is highest
+            if record is highest_valid
             else "shadowed"
         ),
         "error": record.error,
@@ -182,7 +182,13 @@ def show_role(
 ) -> None:
     """Show ordered raw definitions, validity, and shadowing."""
     records = _matches(_discover(ctx), role)
-    rows = [_show_row(record, highest=records[-1]) for record in records] if records else []
+    valid_records = tuple(
+        record
+        for record in records
+        if record.status.value == "valid" and record.definition is not None
+    )
+    highest_valid = valid_records[-1] if valid_records else None
+    rows = [_show_row(record, highest_valid=highest_valid) for record in records]
     if _json_requested(ctx, json_output):
         _emit_json(rows)
         return
@@ -230,7 +236,7 @@ def _read_models(path: Path | None, adapter: TypeAdapter[Any]) -> tuple[Any, ...
     try:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return tuple(adapter.validate_python(raw))
-    except (OSError, json.JSONDecodeError, ValidationError) as exc:
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValidationError) as exc:
         raise typer.BadParameter(
             f"cannot validate {path}: {exc}",
             param_hint=str(path),

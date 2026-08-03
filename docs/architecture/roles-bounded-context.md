@@ -48,7 +48,7 @@ Resolution is deterministic over explicit definitions, capability facts, context
 | `RoleDefinitionSource` | Attributes a manifest or validation failure to one discovery layer, source, and snapshot revision. |
 | `CapabilityFact` | Reports independently supplied capability availability for an optional work-order scope; it does not grant the capability. |
 | `ContextReference` | Describes provenance, scope, digest, revision, freshness, sensitivity, size, and readability without copying source content. |
-| `ContextBundle` | Captures the smallest selected reference set within explicit count, byte, and sensitivity bounds. |
+| `ContextBundle` | Captures the smallest selected reference set within explicit count, byte, sensitivity, and candidate-combination bounds. |
 | `ResolvedRole` | Captures the complete source chain, effective manifest, bounded bundle, requirements, policies, routing projection, and stable digests. |
 | `RoleResolutionBlocked` | Returns one typed refusal with the responsible layer, source, reference, and detail. |
 | `ManifestRoutingResolution` | Carries only validated role identity, source digest, and provider/model projection into model routing. |
@@ -75,13 +75,15 @@ Naming a context reference does not grant access to its content; consumers must 
 `resolve_route` and `resolve_codex_route` perform conventional business-role discovery at their shared production seam.
 When no role-definition root exists, or a requested role is genuinely absent from a valid root, they preserve the existing routing-only provider, model, environment, notice, and fallback behavior.
 When a manifest resolves, only its optional provider/model projection enters routing.
+If that optional projection is absent, the worker stays on its primary model; a partial projection that cannot compose still refuses.
 Invalid, unreadable, mixed-revision, or authority-expanding manifests fail closed before a worker route is selected.
-Protected roles and explicit peer routes retain their existing independent behavior.
+Protected roles still validate discovery but remain on their primary model, and explicit peer routes retain their existing independent behavior.
 
 ## Inspection
 
 The hidden `fno roles ls`, `fno roles show`, and `fno roles resolve` commands inspect JSON definitions and emit stable text or JSON.
-By default, discovery reads layer directories beneath `FNO_ROLES_ROOT`, or `.fno/roles` when the environment variable is unset.
+By default, discovery reads layer directories beneath `FNO_ROLES_ROOT`, or the repository-root `.fno/roles` when the environment variable is unset.
+An unset conventional root means the feature is absent, while an explicitly configured missing root is an attributed configuration refusal.
 Inspection may also receive an explicit root or repeatable `--source layer=path` inputs.
 The commands do not spawn agents, acquire claims, mutate the graph, change definitions, or expand the curated command menu.
 

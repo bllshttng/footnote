@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import itertools
 import json
+import math
 from datetime import datetime
 from typing import Iterable, Sequence
 
@@ -299,19 +300,36 @@ def _context_failure(
             ),
         ),
     )
+
+    def blocked_for(
+        item: ContextReference,
+        reason: RoleResolutionReason,
+    ) -> RoleResolutionBlocked:
+        detail: str | None = None
+        if reason is RoleResolutionReason.UNREADABLE_CONTEXT:
+            detail = item.unavailable_reason
+        elif (
+            reason is RoleResolutionReason.STALE_CONTEXT
+            and selector.requires_freshness
+            and item.fresh_until is None
+        ):
+            detail = "freshness metadata required"
+        return _blocked(
+            role,
+            reason,
+            source=source,
+            source_id=item.provenance,
+            reference=f"{item.kind.value}:{item.identifier}",
+            detail=detail,
+        ).model_copy(update={"source_layer": source.layer, "source_id": item.provenance})
+
     for reason, predicate in checks:
         if all(predicate(item) for item in ordered):
-            item = ordered[0]
-            return _blocked(
-                role,
-                reason,
-                source=source,
-                source_id=item.provenance,
-                reference=f"{item.kind.value}:{item.identifier}",
-                detail=item.unavailable_reason
-                if reason is RoleResolutionReason.UNREADABLE_CONTEXT
-                else None,
-            ).model_copy(update={"source_layer": source.layer, "source_id": item.provenance})
+            return blocked_for(ordered[0], reason)
+    for item in ordered:
+        for reason, predicate in checks:
+            if predicate(item):
+                return blocked_for(item, reason)
     return None
 
 
@@ -389,6 +407,17 @@ def _select_bundle(
         candidate_sets.append(eligible)
 
     combinations: Iterable[tuple[ContextReference, ...]]
+    combination_count = math.prod(len(candidates) for candidates in candidate_sets)
+    if combination_count > bounds.max_combinations:
+        return _blocked(
+            role,
+            RoleResolutionReason.OVER_BUDGET,
+            source=source,
+            reference="context_combinations",
+            detail=(
+                f"{combination_count} candidate combinations exceed limit {bounds.max_combinations}"
+            ),
+        )
     combinations = itertools.product(*candidate_sets) if candidate_sets else ((),)
     valid: list[tuple[tuple[object, ...], tuple[ContextReference, ...]]] = []
     for combination in combinations:
@@ -470,7 +499,11 @@ def resolve_role(
             detail="work order role does not match requested role",
         )
     for record in unchecked_definitions:
-        if record.role is None and record.status is not DefinitionStatus.VALID:
+        if (
+            record.definition is None
+            and record.status is not DefinitionStatus.VALID
+            and (record.role is None or record.role == role)
+        ):
             return RoleResolutionBlocked(
                 role=role,
                 reason=RoleResolutionReason.INVALID_MANIFEST,

@@ -13,6 +13,7 @@ from typing import Any, Sequence
 from pydantic import Field, ValidationError
 
 from fno.company.contracts import RoleRef
+from fno.paths import resolve_repo_root
 from fno.roles.models import (
     DefinitionStatus,
     RoleDefinitionSource,
@@ -29,6 +30,18 @@ class RegistryError(ValueError):
 
 class DiscoveryInputError(ValueError):
     """An explicit discovery source has malformed syntax."""
+
+
+def default_role_root() -> Path:
+    """Resolve the conventional role root from project identity, not cwd."""
+    configured = os.environ.get("FNO_ROLES_ROOT")
+    if configured:
+        return Path(configured).expanduser()
+    try:
+        project_root = resolve_repo_root()
+    except RuntimeError:
+        project_root = Path.cwd()
+    return project_root / ".fno" / "roles"
 
 
 @dataclass(frozen=True)
@@ -277,11 +290,7 @@ def discover_role_definitions(
     source_specs: Sequence[str] = (),
 ) -> tuple[DiscoveredRoleDefinition, ...]:
     """Read sorted JSON definitions from the conventional layered role root."""
-    resolved_root = (
-        root
-        if root is not None
-        else Path(os.environ.get("FNO_ROLES_ROOT", Path.cwd() / ".fno" / "roles"))
-    ).expanduser()
+    resolved_root = (root if root is not None else default_role_root()).expanduser()
     candidates: list[tuple[RoleLayer, Path]] = []
     discovered_errors: list[DiscoveredRoleDefinition] = []
     for layer in RoleLayer:

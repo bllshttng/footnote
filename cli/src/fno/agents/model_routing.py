@@ -119,7 +119,7 @@ class RouteCompositionError(ValueError):
     """A secondary route cannot compose atomically with the active provider."""
 
 
-class BusinessRoleResolutionBlockedError(ValueError):
+class BusinessRoleResolutionBlockedError(RouteCompositionError):
     """A business role exists but its typed resolution failed closed."""
 
     def __init__(self, result: "RoleResolutionBlocked") -> None:
@@ -131,7 +131,7 @@ class BusinessRoleResolutionBlockedError(ValueError):
         )
 
 
-class BusinessRoleRoutingProjectionError(ValueError):
+class BusinessRoleRoutingProjectionError(RouteCompositionError):
     """A resolved business role lacks a deterministic provider/model route."""
 
 
@@ -506,8 +506,11 @@ def resolve_route(
     if not name:
         return None
 
-    # Hard quality guard FIRST: a protected role never routes, even if config
-    # tries to. Short-circuits before reading config.
+    business_role = _resolve_business_role(name, business_lookup)
+
+    # A protected role never routes, even if config or a business manifest
+    # asks it to. Discovery still runs first so a malformed manifest cannot
+    # masquerade as ordinary protected-role fallback.
     if name in PROTECTED_ROLES:
         return None
 
@@ -517,7 +520,6 @@ def resolve_route(
         env = os.environ
 
     block = _routing_block(settings)
-    business_role = _resolve_business_role(name, business_lookup)
     if not getattr(block, "enabled", True):
         return None
 
@@ -768,7 +770,11 @@ def resolve_codex_route(
     typed errors as the Claude lane.
     """
     name = _normalize(role)
-    if not name or name in PROTECTED_ROLES:
+    if not name:
+        return None
+
+    business_role = _resolve_business_role(name, business_lookup)
+    if name in PROTECTED_ROLES:
         return None
 
     if env is None:
@@ -777,7 +783,6 @@ def resolve_codex_route(
         env = os.environ
 
     block = _routing_block(settings)
-    business_role = _resolve_business_role(name, business_lookup)
     if not getattr(block, "enabled", True):
         return None
 
@@ -926,15 +931,24 @@ def _default_business_lookup(
     from fno.roles import (
         RoleResolutionBlocked,
         RoleResolutionReason,
+        default_role_root,
         discover_role_definitions,
         resolve_manifest_routing,
     )
 
     configured_root = os.environ.get("FNO_ROLES_ROOT")
-    root = Path(configured_root).expanduser() if configured_root else Path.cwd() / ".fno" / "roles"
+    root = Path(configured_root).expanduser() if configured_root else default_role_root()
     try:
         root_status = root.stat()
     except FileNotFoundError:
+        if configured_root:
+            return RoleResolutionBlocked(
+                role=RoleRef(id=role, function_id="unavailable"),
+                reason=RoleResolutionReason.INVALID_MANIFEST,
+                source_id=str(root),
+                reference=role,
+                detail="configured role root does not exist",
+            )
         return RoleResolutionBlocked(
             role=RoleRef(id=role, function_id="unavailable"),
             reason=RoleResolutionReason.NOT_FOUND,
@@ -970,6 +984,8 @@ def _business_role_target(
         return legacy_target
 
     projection = business_role.routing_projection
+    if projection is None:
+        return legacy_target
     provider = projection.provider if projection is not None else None
     model = projection.model if projection is not None else None
     if legacy_target is not None:

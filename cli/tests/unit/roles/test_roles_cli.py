@@ -141,14 +141,14 @@ def test_ac_r7_ui_ls_and_show_are_stable_and_keep_invalid_sources_visible(
     assert definitions[0]["layer"] == "project"
     assert definitions[0]["source"] == "project/broken.json"
     assert definitions[0]["status"] == "invalid"
-    assert definitions[0]["disposition"] == "contributing"
+    assert definitions[0]["disposition"] == "unchecked"
     assert definitions[0]["error"]
     assert definitions[0]["raw_definition"]["role"]["id"] == "broken"
     shown_text = _invoke("roles", "show", "broken")
     shown_text_again = _invoke("roles", "show", "broken")
     assert shown_text.exit_code == shown_text_again.exit_code == 0
     assert shown_text.output == shown_text_again.output
-    assert "status=invalid disposition=contributing" in shown_text.output
+    assert "status=invalid disposition=unchecked" in shown_text.output
     assert "error:" in shown_text.output
     assert _snapshot_tree(roles_root) == before_roles
 
@@ -324,6 +324,86 @@ def test_resolve_fails_closed_when_an_unchecked_source_has_no_role_identity(
     assert any(row["source"] == expected_source for row in shown_rows)
 
 
+def test_resolve_fails_closed_when_identified_invalid_overlay_has_no_revision(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    roles_root = tmp_path / "roles"
+    _write_source(
+        roles_root,
+        layer=RoleLayer.BUILT_IN,
+        name="owner",
+        role_id="owner",
+        function_id="marketing",
+    )
+    invalid = roles_root / RoleLayer.PROJECT.value / "owner.json"
+    invalid.parent.mkdir(parents=True)
+    invalid.write_text(
+        json.dumps(
+            {
+                "layer": "project",
+                "source_id": "project/owner.json",
+                "role": {"id": "owner", "function_id": "marketing"},
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(roles_root))
+    monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
+
+    resolved = _invoke(
+        "roles",
+        "resolve",
+        "owner",
+        "--work-order",
+        "x-a8c0",
+        "--attempt",
+        "attempt-1",
+        "-J",
+    )
+
+    assert resolved.exit_code == 1
+    blocked = _assert_pretty_sorted_json(resolved.output)
+    assert blocked["reason"] == "invalid_manifest"
+    assert blocked["source_layer"] == "project"
+    assert blocked["source_id"] == "project/owner.json"
+
+
+@pytest.mark.parametrize("option", ["--capabilities", "--context"])
+def test_resolve_rejects_invalid_utf8_auxiliary_inputs(
+    tmp_path: Path,
+    monkeypatch,
+    option: str,
+) -> None:
+    roles_root = tmp_path / "roles"
+    _write_source(
+        roles_root,
+        layer=RoleLayer.BUILT_IN,
+        name="owner",
+        role_id="owner",
+        function_id="marketing",
+    )
+    invalid = tmp_path / "invalid.json"
+    invalid.write_bytes(b"\xff\xfe")
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(roles_root))
+    monkeypatch.setenv("FNO_SKIP_MIGRATION", "1")
+
+    result = _invoke(
+        "roles",
+        "resolve",
+        "owner",
+        "--work-order",
+        "x-a8c0",
+        "--attempt",
+        "attempt-1",
+        option,
+        str(invalid),
+    )
+
+    assert result.exit_code == 2
+    assert "cannot validate" in result.output
+
+
 def test_resolve_fails_closed_when_a_layer_directory_cannot_be_enumerated(
     tmp_path: Path,
     monkeypatch,
@@ -378,3 +458,29 @@ def test_ac_r7_ui_roles_is_hidden_lazy_and_discoverable() -> None:
         "Inspect bounded business-role definitions and resolutions.",
         {"hidden": True},
     )
+
+
+def test_default_discovery_is_anchored_to_repository_root(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    project_root = tmp_path / "project"
+    roles_root = project_root / ".fno" / "roles"
+    _write_source(
+        roles_root,
+        layer=RoleLayer.BUILT_IN,
+        name="owner",
+        role_id="owner",
+        function_id="marketing",
+    )
+    nested = project_root / "cli" / "src"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    monkeypatch.delenv("FNO_ROLES_ROOT", raising=False)
+    monkeypatch.setattr("fno.roles.registry.resolve_repo_root", lambda: project_root)
+
+    listed = _invoke("roles", "ls", "-J")
+
+    assert listed.exit_code == 0
+    rows = _assert_pretty_sorted_json(listed.output)
+    assert rows[0]["role_id"] == "owner"

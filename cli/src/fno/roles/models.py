@@ -220,6 +220,7 @@ class ContextBundleBounds(_RoleModel):
     max_references: int = Field(ge=1)
     max_bytes: int = Field(ge=1)
     max_sensitivity: Sensitivity = Sensitivity.SENSITIVE
+    max_combinations: int = Field(default=4096, ge=1)
 
 
 class ResolvedSource(_RoleModel):
