@@ -4,16 +4,11 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 **footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
 
-## Precedence over generic coding skills
+## Precedence and output style
 
-A generic coding skill (ponytail, karpathy-guidelines, and anything similar installed globally) is advisory here. Where it disagrees with the working principles below, **this file wins.** The skills are installed per-machine and know nothing about this repo; these principles were written on purpose.
+Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. Two live cases: "shortest diff" loses to principle 4 (fix what you find, in this PR), and tool-branded comments (`// ponytail:`) are barred by the comment principle.
 
-Two conflicts are live today and both resolve the same way:
-
-- **"Shortest diff wins" loses to "fix what you find."** Ponytail optimises for the smallest change and fewest files. Principle 4 requires a pre-existing problem discovered mid-task to be fixed in the same PR while context is warm, as its own atomic commit. Fix it.
-- **No tool-branded comments.** A `// ponytail:` marker is a comment written for a tool rather than for the next reader, which is what the comment principle rules out. Explain the invariant or the why-not-the-obvious in plain terms, or write nothing.
-
-What the skills get right and this file already says: minimum code that solves the problem, reuse what the repo already has, no speculative abstractions. That overlap is not a conflict, and it is stated below in this repo's own terms.
+Lead responses with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Full ruleset and exceptions live in [docs/output-style.md](docs/output-style.md), kept out of the auto-loaded preamble.
 
 ## Working principles
 
@@ -26,23 +21,6 @@ What the skills get right and this file already says: minimum code that solves t
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
 8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
-
-## Output style
-
-The reader has ADHD. Shape every response so it can be acted on:
-
-1. Lead with the answer or next action: command, path, or snippet first.
-2. Number multi-step work; one bounded action per step.
-3. End with one next action doable in under two minutes.
-4. Finish the current issue before raising a new one.
-5. Restate progress each turn ("step 3 of 5 done").
-6. Give time estimates in concrete units, never "a bit".
-7. After a change, show what now works.
-8. Errors: state location, cause, and fix. No drama.
-9. Cap lists at 5 items.
-10. No preamble, no recaps, no closers.
-
-Exceptions: explain fully when asked to explain. Confirm before destructive actions. After three failed fixes, stop and name the doubtful assumption. If the request is ambiguous, ask one short question.
 
 ## Pitfalls corpus (capped)
 
@@ -220,8 +198,8 @@ ln -s /path/to/footnote ~/.claude/plugins/fno  # permanent
 
 ## Deep-dive docs
 
-Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md) · [active dispatcher](docs/architecture/active-backlog-dispatcher.md) · [merge-triggered auto-continue](docs/architecture/merge-triggered-auto-continue.md)
-Loop & target: [unified loop](docs/architecture/unified-loop.md) · [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md) · [self-handoff](docs/architecture/target-self-handoff.md) · [plan-mode integration](docs/architecture/target-plan-mode-integration.md) · [loc-ratchet](docs/architecture/loc-ratchet.md)
+Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md)
+Loop & target: [unified loop](docs/architecture/unified-loop.md) · [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md) · [loc-ratchet](docs/architecture/loc-ratchet.md)
 Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
-Coordination & providers: [coordination](docs/architecture/coordination.md) · [mail live-inject](docs/architecture/mail-live-inject.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md) · [role-based routing](docs/architecture/role-based-model-routing.md)
-Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [skill compat](docs/SKILL-COMPAT-MATRIX.md) · [path config](docs/path-config.md) · [installed-fno staleness](docs/architecture/installed-fno-staleness.md) · [memory system](docs/architecture/memory-system.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md)
