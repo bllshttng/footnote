@@ -1335,6 +1335,32 @@ def bearer_principal_verdict(
     return "match" if got == want else "mismatch"
 
 
+def principal_holder(
+    identity: Optional[str], *, exclude_id: str, root: Path | None = None
+) -> Optional[str]:
+    """Another shared-slot record already bound to ``identity``, or None.
+
+    ``duplicate_credential_holder`` compares TOKENS, which rotate, so the same
+    account registered again after a rotation slips past it and creates two
+    records for one quota pool - and reconciliation then matches both and
+    refuses forever as ``ambiguous-match``. Principals do not rotate, so this
+    catches what the digest cannot.
+    """
+    if identity is None:
+        return None
+    base = root or store_root()
+    try:
+        entries = sorted(entry for entry in base.iterdir() if entry.is_dir())
+    except OSError:
+        return None
+    for entry in entries:
+        if entry.name == exclude_id:
+            continue
+        if identity_key(record_principal(entry.name, root)) == identity:
+            return entry.name
+    return None
+
+
 def register_slot_snapshot(
     record: ProviderRecord, root: Path | None = None, *, lock_timeout: float = 10
 ) -> tuple[Path, Optional[dict], Optional[str]]:
@@ -1346,10 +1372,14 @@ def register_slot_snapshot(
     either because an ambient ``CLAUDE_CONFIG_DIR`` redirects the second read or
     because a concurrent switch replaces the slot between them.
 
-    ``ambiguous-slot`` writes nothing: with two accounts in the slot there is no
-    way to know which one the operator meant to register. Any other failure
-    still snapshots (registration must work offline) and leaves the record
-    unbound, which `doctor` reports.
+    ``ambiguous-slot`` and ``duplicate-principal:<id>`` write nothing: with two
+    accounts in the slot there is no way to know which one the operator meant,
+    and a principal another record already holds would create two records for
+    one quota pool. Any other failure still snapshots (registration must work
+    offline) and leaves the record unbound, which `doctor` reports.
+
+    The active stamp is written here too, inside the lock, because the captured
+    credential IS what the slot holds at that moment.
     """
     root = root or store_root()
     root.mkdir(parents=True, exist_ok=True)
@@ -1370,11 +1400,21 @@ def register_slot_snapshot(
         principal, failure = principal_of_blobs(blobs)
         if failure == "ambiguous-slot":
             return account_dir(record.id, root), None, failure
+        holder = principal_holder(
+            identity_key(principal), exclude_id=record.id, root=root
+        )
+        if holder is not None:
+            return account_dir(record.id, root), None, f"duplicate-principal:{holder}"
         adir = write_snapshot(record, blobs[0], root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
         else:
             _clear_record_principal(record.id, root)
+        # Stamp INSIDE the lock: the captured credential is what the slot holds
+        # right now, and releasing first would let a concurrent switch install
+        # and stamp another account before this stamp overwrote it - leaving the
+        # stamp naming this record while the slot holds the other one.
+        stamp_active_slot(record.harness, record.id, root)
         return adir, principal, failure
     finally:
         lock.release()
@@ -1493,7 +1533,10 @@ def _reconcile_locked(
             detail=f"no live {cli} login in the shared slot; sign in, then reconcile",
         )
     blob = blobs[0]
-    principal, failure = canonical_slot_principal(cli)
+    # Prove THE CAPTURE, not a second read: an A -> B -> A flip between the two
+    # would prove B, survive the later comparison against the captured A, and
+    # cache A's bearer under B's identity.
+    principal, failure = principal_of_blobs(blobs)
     if principal is None:
         if failure == "ambiguous-slot":
             return ReconcileResult(

@@ -2103,3 +2103,135 @@ class TestRegisterCapturesOneCredential:
                 managed.register_slot_snapshot(_rec("work-a"), tmp_path, lock_timeout=0.2)
         finally:
             held.release()
+
+
+class TestReconcileProvesItsOwnCapture:
+    def test_only_the_captured_bytes_are_ever_proven(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Re-reading the slot to prove it would let an A -> B -> A flip prove B,
+        survive the later comparison against the captured A, and cache A's
+        bearer under B's identity. The proof must see only the capture."""
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        managed._set_slot_taint("claude", tmp_path, True, [])
+        reads = {"n": 0}
+
+        def _blobs(cli):
+            reads["n"] += 1
+            # Anything after the capture sees a different credential.
+            return [_blob("B0")] if reads["n"] == 1 else [_blob("IMPOSTOR")]
+
+        proven: list[str] = []
+
+        def _principal(blob):
+            proven.append(blob)
+            return (
+                managed.principal_fingerprint(
+                    _profile("acct-b" if blob == _blob("B0") else "acct-impostor")
+                ),
+                None,
+            )
+
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _blobs)
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        # The impostor was never proven, and the genuine change was caught.
+        assert proven == [_blob("B0")]
+        assert result.outcome == "slot-changed"
+        assert managed.slot_tainted("claude", tmp_path)
+
+    def test_a_stable_slot_proves_and_commits(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        managed._set_slot_taint("claude", tmp_path, True, [])
+        proven: list[str] = []
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("B0")]
+        )
+
+        def _principal(blob):
+            proven.append(blob)
+            return managed.principal_fingerprint(_profile("acct-b")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-b"
+        assert proven == [_blob("B0")]  # proved once, over the capture
+
+
+class TestRegisterRejectsADuplicatePrincipal:
+    """`duplicate_credential_holder` compares TOKENS, which rotate. The same
+    account registered again after a rotation slips past it, creating two
+    records for one quota pool that reconciliation can then never tell apart."""
+
+    @staticmethod
+    def _arm(monkeypatch, uuid):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("ROTATED")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile(uuid)), None),
+        )
+
+    def test_a_rotated_token_for_a_known_principal_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        _bind("work-a", "acct-a", tmp_path)
+        self._arm(monkeypatch, "acct-a")
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a-again"), tmp_path
+        )
+
+        assert failure == "duplicate-principal:work-a" and principal is None
+        assert not (tmp_path / "work-a-again" / "blob").exists()
+
+    def test_a_new_principal_registers(self, tmp_path, monkeypatch):
+        _bind("work-a", "acct-a", tmp_path)
+        self._arm(monkeypatch, "acct-new")
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-b"), tmp_path
+        )
+
+        assert failure is None and principal["account_uuid"] == "acct-new"
+
+    def test_re_registering_the_same_id_is_not_a_duplicate(
+        self, tmp_path, monkeypatch
+    ):
+        _bind("work-a", "acct-a", tmp_path)
+        self._arm(monkeypatch, "acct-a")
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None and principal["account_uuid"] == "acct-a"
+
+    def test_the_active_stamp_is_written_inside_the_lock(
+        self, tmp_path, monkeypatch
+    ):
+        """Releasing first would let a concurrent switch install and stamp
+        another account before this stamp overwrote it."""
+        self._arm(monkeypatch, "acct-a")
+        stamped: list[str] = []
+        real_stamp = managed.stamp_active_slot
+
+        def _stamp(cli, record_id, root=None):
+            lock = managed._switch_lock_path(root)
+            assert lock.exists(), "stamped outside the switch lock"
+            stamped.append(record_id)
+            real_stamp(cli, record_id, root)
+
+        monkeypatch.setattr(managed, "stamp_active_slot", _stamp)
+        managed.register_slot_snapshot(_rec("work-a"), tmp_path)
+        assert stamped == ["work-a"]
+        assert managed.active_slot_id("claude", tmp_path) == "work-a"

@@ -309,6 +309,9 @@ A reconciliation against a store that does not exist yet returns `no-managed-sto
 A record's principal is bound only at `register`, which is the one moment the operator asserts that the signed-in account IS this record.
 `register` reads the slot once, under the same mutex a switch takes, and that single read serves the proof, the snapshot, and the binding.
 It refuses outright when the slot holds two different accounts, so it can never bind a stale credential under a new id; proving one read and snapshotting another is exactly how account A's identity would end up bound to account B's credential.
+It also refuses when the proven identity already belongs to another record.
+The existing duplicate check compares tokens, which rotate, so the same account registered again after a rotation would slip past it and leave two records sharing one quota pool that reconciliation could never tell apart.
+The active stamp is written inside the same lock, since the captured credential is what the slot holds at that moment.
 The identity compared is the account *and* the organization, because Claude Code usage is organization-scoped and one human can belong to two organizations; an identity missing either half is not comparable and fails closed.
 A switch deliberately does not bind, because it materializes the record's stored snapshot and a snapshot's provenance is the store rather than the operator: an earlier out-of-band login plus capture-before-overwrite can leave one account's credential filed under another's id, which is what the `duplicate-credential` finding reports.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.

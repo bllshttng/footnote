@@ -617,6 +617,18 @@ def register_provider(
     except managed.ManagedStoreError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(1)
+    if identity_failure and identity_failure.startswith("duplicate-principal:"):
+        holder_id = identity_failure.split(":", 1)[1]
+        typer.echo(
+            f"error: that account is already registered as '{holder_id}'.\n"
+            f"  a rotated token hides this from the credential check, but the "
+            f"proven identity is the same, so two ids would share one quota pool "
+            f"and reconciliation could never tell them apart.\n"
+            f"  sign into the {record.id} account first:  {record.harness} /logout && "
+            f"{record.harness} /login",
+            err=True,
+        )
+        raise typer.Exit(1)
     if identity_failure == "ambiguous-slot":
         typer.echo(
             f"error: the {record.harness} slot currently holds credentials for two "
@@ -643,14 +655,6 @@ def register_provider(
         typer.echo(f"error: failed to write config: {exc}", err=True)
         raise typer.Exit(1)
 
-    # The captured login IS what currently sits in this CLI's slot: stamp it
-    # active so the next switch captures-before-overwrite the right account. A
-    # stamp write failure is non-fatal (the record is saved) but must be loud,
-    # not a raw traceback - it degrades to no active-marker + no first capture.
-    try:
-        managed.stamp_active_slot(record.harness, record.id)
-    except OSError as exc:
-        typer.echo(f"warning: registered but could not stamp active slot: {exc}", err=True)
 
     # Registration is the one moment footnote KNOWS whose credential this is -
     # the operator just signed in as that account. Binding the principal here is
