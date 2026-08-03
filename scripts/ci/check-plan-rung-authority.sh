@@ -133,7 +133,8 @@ fi
 # reads `completion:` frontmatter.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs crates/fno-agents/src/kill_criteria.rs"
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs
+crates/fno-agents/src/kill_criteria.rs"
 actual=$(
     git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
         | xargs -0 grep -lE 'read_to_string\(&?plan' 2>/dev/null \
