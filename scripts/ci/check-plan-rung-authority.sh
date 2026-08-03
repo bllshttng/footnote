@@ -21,8 +21,8 @@
 # `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
 # finalize.rs shells out to `fno plan validate`/`stamp`, and loop_megawalk.rs
 # takes plan_path from `fno backlog next` JSON whose status Python already
-# derived. Only kill_criteria.rs opens a plan document at all, and it extracts
-# the `kill_criteria:` block, never `status:`.
+# derived. The registered Rust plan readers consume activation-specific keys,
+# never `status:`.
 #
 # So there is nothing on the far side to pin, and a parity harness would freeze
 # a contract with one participant. What can actually regress is someone ADDING
@@ -148,21 +148,33 @@ if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
         "\`fno plan rung\` (exit 0 = dispatchable). If the new reader genuinely needs" \
         "no status, add it to EXPECTED_RUST_PLAN_READERS with a one-line reason."
 else
-    note "OK: kill_criteria.rs is still the only Rust plan reader"
+    note "OK: the registered Rust plan-reader set is unchanged"
 fi
 
 # Narrowed to a FRONTMATTER key extraction (`"status" =>` in a match arm, or a
 # `status:` line prefix test). A bare `status` token is meaningless here -
-# kill_criteria.rs legitimately shells `git status --porcelain`.
-fm_status="$(
-    grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:' \
-        crates/fno-agents/src/kill_criteria.rs 2>/dev/null || true
-)"
+# kill_criteria.rs legitimately shells `git status --porcelain`. Scan every
+# registered reader so growing the allowlist cannot silently weaken the guard.
+fm_status=""
+while IFS= read -r reader; do
+    [ -n "$reader" ] || continue
+    matches="$(
+        grep -nE '"status"[[:space:]]*=>|starts_with\("status:|"\^?status:' \
+            "$reader" 2>/dev/null || true
+    )"
+    if [ -n "$matches" ]; then
+        fm_status="${fm_status}${reader}:
+${matches}
+"
+    fi
+done <<EOF
+$EXPECTED_RUST_PLAN_READERS
+EOF
 if [ -n "$fm_status" ]; then
-    violation "kill_criteria.rs now extracts frontmatter \`status\`; it must read \`kill_criteria:\` only" \
+    violation "a registered Rust plan reader extracts frontmatter \`status\`" \
         "$fm_status"
 else
-    note "OK: kill_criteria.rs extracts kill_criteria only, never frontmatter status"
+    note "OK: registered Rust plan readers never extract frontmatter status"
 fi
 
 # ---------------------------------------------------------------------------
