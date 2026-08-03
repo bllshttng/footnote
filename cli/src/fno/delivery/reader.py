@@ -8,6 +8,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ValidationError
 
@@ -411,19 +412,23 @@ def _approval_conflict_rejections(
     request_digest: str,
     *,
     fact_revision: str,
-    lifecycle: str = "decisions",
+    lifecycle: Literal["requests", "decisions"] = "decisions",
 ) -> tuple[DeliveryEvidenceRejection, ...]:
     required_ids = {
         evidence_id
         for deliverable in company_work.deliverables
         for evidence_id in deliverable.required_evidence_ids
     }
+    producer_event = (
+        "approval_requested" if lifecycle == "requests" else "approval_decided"
+    )
+    producer = f"event:approvals:{producer_event}"
     return tuple(
         DeliveryEvidenceRejection(
             evidence_id=evidence.id,
-            producer="event:approvals:approval_decided",
+            producer=producer,
             diagnostic=(
-                f"requirement {evidence.id} from event:approvals:approval_decided "
+                f"requirement {evidence.id} from {producer} "
                 f"rejected binding: conflicting immutable approval {lifecycle} for {request_digest}"
             ),
             fact_revision=fact_revision,

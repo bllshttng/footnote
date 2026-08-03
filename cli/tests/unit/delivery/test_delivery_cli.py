@@ -601,6 +601,7 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     assert "conflicting immutable approval requests" in " ".join(
         approval_row["diagnostics"]
     )
+    assert "event:approvals:approval_requested" in approval_row["producers"]
     effect_row = next(
         row
         for row in conflicting_request_payload["verdict"]["requirements"]
