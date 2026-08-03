@@ -229,6 +229,113 @@ fn generic_completion_ac_d4_compat_counterfactuals_match_pr_authority() {
 }
 
 #[test]
+fn generic_completion_ac_d4_compat_pr_adapter_matches_live_rust_authority() {
+    let repo = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap();
+    let script = r#"
+import datetime as dt
+import json
+from fno.delivery import LegacyPRSnapshot, adapt_legacy_pr
+
+now = dt.datetime.now(dt.timezone.utc)
+cases = [
+    {"name": "passed", "pr_open": True, "ci_ok": True, "ci_pending": False, "reviewed": True, "head_shipped": True, "probes_passed": True},
+    {"name": "closed", "pr_open": False, "ci_ok": True, "ci_pending": False, "reviewed": True, "head_shipped": True, "probes_passed": True},
+    {"name": "ci-red", "pr_open": True, "ci_ok": False, "ci_pending": False, "reviewed": True, "head_shipped": True, "probes_passed": True},
+    {"name": "ci-pending", "pr_open": True, "ci_ok": False, "ci_pending": True, "reviewed": True, "head_shipped": True, "probes_passed": True},
+    {"name": "unreviewed", "pr_open": True, "ci_ok": True, "ci_pending": False, "reviewed": False, "head_shipped": True, "probes_passed": True},
+    {"name": "wrong-head", "pr_open": True, "ci_ok": True, "ci_pending": False, "reviewed": True, "head_shipped": False, "probes_passed": True},
+    {"name": "probe-failed", "pr_open": True, "ci_ok": True, "ci_pending": False, "reviewed": True, "head_shipped": True, "probes_passed": False},
+]
+for case in cases:
+    snapshot = LegacyPRSnapshot(
+        work_order_node_id="x-live",
+        attempt_id="attempt-live",
+        current_head="head-live",
+        observed_at=now,
+        fresh_until=now + dt.timedelta(minutes=5),
+        source_revision="pr-live:head-live",
+        fact_revision="pr-live-snapshot",
+        **{key: value for key, value in case.items() if key != "name"},
+    )
+    shadow = adapt_legacy_pr(snapshot, evaluated_at=now)
+    print(json.dumps({
+        "input": case,
+        "legacy_passed": shadow.legacy_passed,
+        "reads": {row.evidence_id: row.result.value for row in shadow.verdict.requirements},
+    }))
+"#;
+    let output = Command::new("uv")
+        .args(["run", "--project"])
+        .arg(repo.join("cli"))
+        .args(["python", "-c", script])
+        .output()
+        .expect("run current-head Python PR adapter");
+    assert!(
+        output.status.success(),
+        "adapter stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let rows: Vec<Value> = String::from_utf8(output.stdout)
+        .unwrap()
+        .lines()
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect();
+    assert_eq!(rows.len(), 7);
+    for row in rows {
+        let input = &row["input"];
+        let pr_open = input["pr_open"].as_bool().unwrap();
+        let ci_ok = input["ci_ok"].as_bool().unwrap();
+        let ci_pending = input["ci_pending"].as_bool().unwrap();
+        let reviewed = input["reviewed"].as_bool().unwrap();
+        let head_shipped = input["head_shipped"].as_bool().unwrap();
+        let probes_passed = input["probes_passed"].as_bool().unwrap();
+        let authority = pr_passes(
+            pr_open,
+            ci_ok && !ci_pending,
+            reviewed,
+            head_shipped,
+            probes_passed,
+        );
+        assert_eq!(row["legacy_passed"], json!(authority), "{row}");
+        assert_eq!(
+            row["reads"]["legacy-pr-open"],
+            json!(if pr_open { "passed" } else { "failed" }),
+            "{row}"
+        );
+        assert_eq!(
+            row["reads"]["legacy-pr-ci"],
+            json!(if ci_pending {
+                "blocked"
+            } else if ci_ok {
+                "passed"
+            } else {
+                "failed"
+            }),
+            "{row}"
+        );
+        assert_eq!(
+            row["reads"]["legacy-pr-review"],
+            json!(if reviewed { "passed" } else { "blocked" }),
+            "{row}"
+        );
+        assert_eq!(
+            row["reads"]["legacy-pr-head"],
+            json!(if head_shipped { "passed" } else { "failed" }),
+            "{row}"
+        );
+        assert_eq!(
+            row["reads"]["legacy-pr-probes"],
+            json!(if probes_passed { "passed" } else { "failed" }),
+            "{row}"
+        );
+    }
+}
+
+#[test]
 fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() {
     let env = setup(&passed_response());
 

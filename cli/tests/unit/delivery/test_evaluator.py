@@ -463,6 +463,28 @@ def test_ac_d4_compat_research_adapter_consumes_actual_grade_result_current_read
 
     assert shadow.legacy_passed is (grade.green and artifact_read and sidecar_read)
     assert (shadow.verdict.aggregate is EvidenceResult.PASSED) is shadow.legacy_passed
+    reads = {row.evidence_id: row.result for row in shadow.verdict.requirements}
+    assert reads == {
+        "legacy-research-artifact-read": (
+            EvidenceResult.PASSED if artifact_read else EvidenceResult.FAILED
+        ),
+        "legacy-research-sidecar-read": (
+            EvidenceResult.PASSED if sidecar_read else EvidenceResult.FAILED
+        ),
+        "legacy-research-uncited-claims": (
+            EvidenceResult.PASSED
+            if grade.uncited_claims == 0
+            else EvidenceResult.FAILED
+        ),
+        "legacy-research-dead-urls": (
+            EvidenceResult.PASSED if grade.dead_urls == 0 else EvidenceResult.FAILED
+        ),
+        "legacy-research-section-coverage": (
+            EvidenceResult.PASSED
+            if not grade.sections_uncovered
+            else EvidenceResult.FAILED
+        ),
+    }
 
 
 @pytest.mark.parametrize(
