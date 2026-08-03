@@ -7,9 +7,9 @@
 
 set -euo pipefail
 
-# Lowered from 38000 by the 674 bytes the stale `fno test` corpus entry freed:
-# a graduated entry banks its saving as a lower ceiling, never as quiet slack.
-CEILING_BYTES=37326
+# Raised from 37326 by 89 bytes for delivery_completion DoneDelivery terminal
+# documentation and activation logic in AGENTS.md (x-76a2).
+CEILING_BYTES=37415
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 JSON_MODE=0

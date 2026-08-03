@@ -128,11 +128,12 @@ fi
 # ---------------------------------------------------------------------------
 # 2. Rust must not grow a plan-status reader.
 #
-# Freeze the set of Rust sources that open a plan document. kill_criteria.rs is
-# the sole legitimate member: it extracts `kill_criteria:`, not `status:`.
+# Freeze the set of Rust sources that open a plan document. Both read activation
+# markers, not `status:`: kill_criteria.rs extracts `kill_criteria:`, delivery_completion.rs
+# reads `completion:` frontmatter.
 # ---------------------------------------------------------------------------
 echo "--- Rust: no plan-status reader ---"
-EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/kill_criteria.rs"
+EXPECTED_RUST_PLAN_READERS="crates/fno-agents/src/delivery_completion.rs crates/fno-agents/src/kill_criteria.rs"
 actual=$(
     git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
         | xargs -0 grep -lE 'read_to_string\(&?plan' 2>/dev/null \
