@@ -1331,11 +1331,15 @@ def _profile(uuid: str, email: str = "a@example.com", org: str = "org-1") -> dic
 
 
 def _store_state(root) -> dict[str, bytes]:
-    """Every byte of the store that a refusal must leave untouched."""
+    """Every byte of the store that a refusal must leave untouched.
+
+    The switch mutex is excluded: taking a lock is not a store mutation, and
+    whether the lockfile survives release is a filelock implementation detail.
+    """
     return {
         str(p.relative_to(root)): p.read_bytes()
         for p in sorted(root.rglob("*"))
-        if p.is_file()
+        if p.is_file() and p.name != ".switch.lock"
     }
 
 
