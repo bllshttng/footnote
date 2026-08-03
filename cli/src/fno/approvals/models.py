@@ -248,9 +248,16 @@ class ApprovalDecision(_ApprovalModel):
 
 
 class AdapterCapability(_ApprovalModel):
-    """What an adapter actually proves. Both default False: absence is not proof.
+    """What an adapter DECLARES about itself. Both default False.
 
-    ``reconciliation`` says the adapter CAN read the destination, which is not the
+    This is a declaration, not a proof the store can verify: it is supplied by
+    whoever integrates the adapter, and a caller that lies here can defeat the
+    unknown-retry guard. That trust boundary is deliberate at this layer -- no
+    adapter ships in this package, and binding a capability to a verified adapter
+    identity belongs to whoever owns the adapter registry. Everything the store
+    CAN check, it checks.
+
+    ``reconciliation`` says the adapter can read the destination, which is not the
     same as having read it. Authorizing a retry on the capability alone would
     redispatch an effect that may already have landed, so the read itself must be
     supplied as a :class:`ReconciliationRead`.
@@ -268,9 +275,15 @@ class ReconciliationRead(_ApprovalModel):
     ``effect_present`` is the whole point: True means the destination already has
     the effect, so a retry would duplicate it and the attempt should be settled
     acknowledged instead. False is the only value that makes a retry safe.
+
+    ``idempotency_key`` binds the read to the exact attempt it clears. A read is
+    evidence about ONE effect, and an absence observed for a different effect is
+    not evidence about this one; the store refuses a read whose key does not
+    match, so passing the wrong one cannot quietly authorize a retry.
     """
 
     ref: NonEmptyStr
+    idempotency_key: NonEmptyStr
     effect_present: bool
 
 

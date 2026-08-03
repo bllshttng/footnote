@@ -90,7 +90,7 @@ Clock reads happen **inside** the write transaction. `BEGIN IMMEDIATE` can block
 
 | State | Reopens? |
 |---|---|
-| `failed` | Yes, no proof needed: an explicit rejection means the effect was not applied |
+| `failed` | Yes, no capability proof needed, because settling `failed` already required the destination's rejection reference |
 | `unknown` | Only against one of the two proofs below |
 | `prepared`, `executing` | No: still in flight, and a live dispatcher already holds it |
 | `acknowledged`, `blocked` | No: terminal |
@@ -103,6 +103,8 @@ For an `unknown` attempt, exactly two things count as proof:
 
 - `adapter.remote_idempotency` -- the destination itself enforces this key, so a duplicate request cannot become a duplicate effect.
 - A `ReconciliationRead` reporting `effect_present=False` -- somebody actually looked and the effect is absent.
+
+A read must also name the attempt it clears via `idempotency_key`: an absence observed for a different effect is not evidence about this one.
 
 The adapter's `reconciliation` flag alone is **not** proof. It says the adapter *can* read the destination, not that it *did*, and redispatching on capability would duplicate an effect whose response was merely lost.
 A read reporting `effect_present=True` refuses too: the effect already landed, so the honest move is to settle it acknowledged rather than send it again.
@@ -148,6 +150,16 @@ It is not a delivery verdict.
 `show` names every bound field, the decision and its transport, the expiration, each effect attempt and its state, and recovery instructions for an ambiguous one.
 `ls` and `show` read only.
 `decide` returns a stable refusal shape for digest mismatch, unauthorized principal, decline, expiration, replay, conflicting binding, denied class, unsafe retry, and terminal state, each carrying the authority consulted and any recovery step, and exits `ExitCode.ERROR`.
+
+## What the store does not verify
+
+`AdapterCapability` is a declaration by whoever integrates the adapter, not something the store can check.
+A caller that asserts `remote_idempotency=True` falsely defeats the unknown-retry guard.
+That boundary is deliberate here: no adapter ships in this package, and binding a capability to a verified adapter identity belongs to whoever owns the adapter registry.
+Everything the store *can* check, it checks, and the docstrings say "declares" rather than "proves" so the limit is not mistaken for a guarantee.
+
+`prepare` does not take an acting principal. The approval authorizes the effect and an executor carries it out; `principal_id` is who the request was raised for, and the *deciding* principal's authority is what gets revalidated at execution time.
+Treating a request digest as a secret capability token would be a different design than the one the acceptance criteria describe, where execution presents an exact match rather than an identity.
 
 ## Deliberately unresolved
 

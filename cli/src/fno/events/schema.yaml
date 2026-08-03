@@ -3099,7 +3099,7 @@ event_types:
     description: "One durable effect-attempt transition. `unknown` means the external outcome is ambiguous, never that it failed or succeeded."
     sources: [approvals, test]
     data:
-      required: [idempotency_key, state, previous_state, request_digest, work_order_id, attempt_id, effect_id]
+      required: [idempotency_key, state, request_digest, work_order_id, attempt_id, effect_id]
       properties:
         idempotency_key:
           type: string
@@ -3109,6 +3109,7 @@ event_types:
         previous_state:
           type: string
           enum: [prepared, executing, acknowledged, failed, blocked, unknown]
+          description: "The state left behind. ABSENT on the first event for an attempt, because creating one has no previous state; present on every later transition."
         request_digest:
           type: string
         work_order_id:

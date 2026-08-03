@@ -459,9 +459,23 @@ class EffectStore:
             row = conn.execute(
                 "SELECT * FROM attempts WHERE idempotency_key = ?", (idempotency_key,)
             ).fetchone()
-            result = PrepareResult(
-                attempt=_attempt_from_row(row), may_dispatch=True, dispatch_token=token
+            created = _attempt_from_row(row)
+            self._enqueue(
+                conn,
+                "effect_state_changed",
+                {
+                    "idempotency_key": idempotency_key,
+                    "state": EffectState.PREPARED.value,
+                    "request_digest": created.request_digest,
+                    "work_order_id": created.work_order_id,
+                    "attempt_id": created.attempt_id,
+                    "effect_id": created.effect_id,
+                },
             )
+            result = PrepareResult(
+                attempt=created, may_dispatch=True, dispatch_token=token
+            )
+        self._drain()
         return result
 
     def settle(
@@ -505,6 +519,17 @@ class EffectStore:
                     fields=["dispatch_token"],
                     recovery="Only the holder granted dispatch may settle an attempt; "
                     "a token superseded by a retry is no longer valid.",
+                )
+
+            if state is EffectState.FAILED and not (external_ref or row["external_ref"]):
+                _refuse(
+                    RefusalReason.UNSAFE_RETRY,
+                    f"settling {idempotency_key} failed requires the destination's rejection "
+                    f"reference; without one the outcome is not known to be a rejection",
+                    fields=["external_ref"],
+                    recovery="If the destination did not answer, settle unknown instead. "
+                    "A failed attempt is retried without a capability proof, so an "
+                    "ambiguous outcome recorded as failed would license a duplicate.",
                 )
 
             current = EffectState(row["state"])
@@ -632,6 +657,15 @@ class EffectStore:
                         f"adapter {adapter.adapter_id} cannot read {row['destination']}, "
                         f"so it cannot produce a reconciliation read for this effect",
                         fields=["reconciliation"],
+                        recovery=_UNKNOWN_RECOVERY,
+                    )
+                if reconciliation.idempotency_key != idempotency_key:
+                    _refuse(
+                        RefusalReason.UNSAFE_RETRY,
+                        f"reconciliation read {reconciliation.ref} is for "
+                        f"{reconciliation.idempotency_key}, not {idempotency_key}; a read "
+                        f"about another effect is not evidence about this one",
+                        fields=["idempotency_key"],
                         recovery=_UNKNOWN_RECOVERY,
                     )
                 if reconciliation.effect_present:
