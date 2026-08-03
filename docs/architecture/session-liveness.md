@@ -10,6 +10,19 @@ It reads claim liveness and loop-check recency to answer whether a session owns 
 
 Neither family substitutes for the other: a session can be alive without a current claim, and a claim can remain visible while its worker is not producing transcript activity.
 
+## Worktree-local activity advisory
+
+The SessionStart peer note uses a worktree-local observation cache, not a third truth family.
+The existing PostToolUse heartbeat touches `.fno/live/<session_id>` at most every 30 seconds before any target-manifest or claim-holder gate, so a hand-started session contributes activity even when it owns no target claim.
+The shared `hooks/helpers/worktree-live-peers.sh` reader emits a note only when another session's stamp is less than 120 seconds old; self-only and stale handoff stamps are silent.
+Claude reaches the reader through `hooks/worktree-peers-session-start.sh`, while Codex reaches the same helper through its existing `hooks/session-start.sh` wrapper because the two harness manifests do not share a SessionStart carrier.
+
+This cache answers only whether another session recently touched this worktree.
+It never establishes death, orphaning, work ownership, or completion, and it is not registered on `PreToolUse`, so it cannot refuse `Edit`, `Write`, or `Bash`.
+Missing, malformed, or unreadable stamp state fails open to silence; stale files are harmless because the reader judges only mtime and needs no retention sweep.
+
+Verify the writer and reader contracts with `bash tests/hooks/test_claim_heartbeat.sh` and `bash tests/hooks/test_worktree_live_peers.sh`.
+
 ## Read-side dispositions
 
 | Surface | Disposition |
