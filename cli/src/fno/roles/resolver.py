@@ -42,6 +42,118 @@ _SENSITIVITY_RANK = {
 }
 
 
+def _delegation_keys(manifest: RoleManifest) -> set[tuple[str, str]]:
+    return {(target.function_id, target.id) for target in manifest.delegation_targets}
+
+
+def _selector_field(selector: ContextSelector, field: str | None = None) -> str:
+    reference = f"context_selectors[{selector.reference}]"
+    return f"{reference}.{field}" if field is not None else reference
+
+
+def _context_overlay_violation(
+    previous: RoleManifest,
+    candidate: RoleManifest,
+) -> str | None:
+    options: list[tuple[int, ...]] = []
+    for selector in candidate.context_selectors:
+        same_kind = tuple(
+            index
+            for index, prior in enumerate(previous.context_selectors)
+            if prior.kind is selector.kind
+        )
+        if not same_kind:
+            return _selector_field(selector)
+        compatible_identifier = tuple(
+            index
+            for index in same_kind
+            if previous.context_selectors[index].identifier is None
+            or previous.context_selectors[index].identifier == selector.identifier
+        )
+        if not compatible_identifier:
+            return _selector_field(selector, "identifier")
+        compatible_sensitivity = tuple(
+            index
+            for index in compatible_identifier
+            if _SENSITIVITY_RANK[selector.max_sensitivity]
+            <= _SENSITIVITY_RANK[previous.context_selectors[index].max_sensitivity]
+        )
+        if not compatible_sensitivity:
+            return _selector_field(selector, "max_sensitivity")
+        options.append(compatible_sensitivity)
+
+    matched_prior: dict[int, int] = {}
+
+    def assign(candidate_index: int, seen: set[int]) -> bool:
+        for prior_index in options[candidate_index]:
+            if prior_index in seen:
+                continue
+            seen.add(prior_index)
+            occupant = matched_prior.get(prior_index)
+            if occupant is None or assign(occupant, seen):
+                matched_prior[prior_index] = candidate_index
+                return True
+        return False
+
+    for candidate_index, selector in enumerate(candidate.context_selectors):
+        if not assign(candidate_index, set()):
+            return _selector_field(selector)
+    return None
+
+
+def _overlay_violation(
+    previous: RoleManifest,
+    candidate: RoleManifest,
+) -> tuple[RoleResolutionReason, str] | None:
+    if candidate.role != previous.role:
+        return RoleResolutionReason.INVALID_OVERLAY, "role"
+    if candidate.function != previous.function:
+        return RoleResolutionReason.INVALID_OVERLAY, "function"
+    if _AUTHORITY_RANK[candidate.authority_ceiling] > _AUTHORITY_RANK[previous.authority_ceiling]:
+        return RoleResolutionReason.AUTHORITY_EXPANSION, "authority_ceiling"
+    if not set(candidate.deliverable_kinds).issubset(previous.deliverable_kinds):
+        return RoleResolutionReason.INVALID_OVERLAY, "deliverable_kinds"
+    if not _delegation_keys(candidate).issubset(_delegation_keys(previous)):
+        return RoleResolutionReason.INVALID_OVERLAY, "delegation_targets"
+    if not set(candidate.required_capabilities).issubset(previous.required_capabilities):
+        return RoleResolutionReason.INVALID_OVERLAY, "required_capabilities"
+    if previous.review_policy.required and not candidate.review_policy.required:
+        return RoleResolutionReason.INVALID_OVERLAY, "review_policy.required"
+    if candidate.review_policy.minimum_reviewers < previous.review_policy.minimum_reviewers:
+        return RoleResolutionReason.INVALID_OVERLAY, "review_policy.minimum_reviewers"
+    if not set(previous.review_policy.required_review_kinds).issubset(
+        candidate.review_policy.required_review_kinds
+    ):
+        return RoleResolutionReason.INVALID_OVERLAY, "review_policy.required_review_kinds"
+    if not set(previous.delivery_policy.required_evidence).issubset(
+        candidate.delivery_policy.required_evidence
+    ):
+        return RoleResolutionReason.INVALID_OVERLAY, "delivery_policy.required_evidence"
+    if (
+        previous.delivery_policy.require_all_deliverables
+        and not candidate.delivery_policy.require_all_deliverables
+    ):
+        return RoleResolutionReason.INVALID_OVERLAY, "delivery_policy.require_all_deliverables"
+    context_violation = _context_overlay_violation(previous, candidate)
+    if context_violation is not None:
+        return RoleResolutionReason.INVALID_OVERLAY, context_violation
+    if candidate.mission != previous.mission:
+        return RoleResolutionReason.INVALID_OVERLAY, "mission"
+    if candidate.default_topology != previous.default_topology:
+        return RoleResolutionReason.INVALID_OVERLAY, "default_topology"
+    if previous.routing_hint is not None:
+        for field in ("provider", "model"):
+            if (
+                getattr(previous.routing_hint, field) is not None
+                and (
+                    candidate.routing_hint is None
+                    or getattr(candidate.routing_hint, field) is None
+                )
+            ):
+                return RoleResolutionReason.INVALID_OVERLAY, f"routing_hint.{field}"
+    return None
+
+
 def _digest(domain: str, value: object) -> str:
     if hasattr(value, "model_dump"):
         value = value.model_dump(mode="json")
@@ -353,12 +465,14 @@ def resolve_role(
     for source in valid_sources[1:]:
         next_manifest = source.manifest
         assert next_manifest is not None
-        if _AUTHORITY_RANK[next_manifest.authority_ceiling] > _AUTHORITY_RANK[manifest.authority_ceiling]:
+        violation = _overlay_violation(manifest, next_manifest)
+        if violation is not None:
+            reason, reference = violation
             return _blocked(
                 role,
-                RoleResolutionReason.AUTHORITY_EXPANSION,
+                reason,
                 source=source,
-                reference="authority_ceiling",
+                reference=reference,
             )
         manifest = next_manifest
     highest_source = valid_sources[-1]

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
@@ -34,10 +35,10 @@ ROLE = RoleRef(id="arbitrary-owner", function_id="arbitrary-function")
 WORK_ORDER = WorkOrderRef(node_id="x-a8c0", attempt_id="attempt-1", role_id=ROLE.id)
 
 
-def _manifest(**overrides: object) -> RoleManifest:
+def _manifest(*, role: RoleRef = ROLE, **overrides: object) -> RoleManifest:
     values: dict[str, object] = {
-        "role": ROLE,
-        "function": FunctionRef(id=ROLE.function_id),
+        "role": role,
+        "function": FunctionRef(id=role.function_id),
         "mission": "Produce a bounded, reviewable artifact.",
         "deliverable_kinds": ("brief",),
         "delegation_targets": (),
@@ -63,6 +64,7 @@ def _source(
     layer: RoleLayer,
     source_id: str,
     *,
+    role: RoleRef = ROLE,
     manifest: RoleManifest | None = None,
     status: DefinitionStatus = DefinitionStatus.VALID,
     error: str | None = None,
@@ -72,10 +74,10 @@ def _source(
         layer=layer,
         source_id=source_id,
         snapshot_revision=revision,
-        role=ROLE,
+        role=role,
         manifest=manifest
         if manifest is not None
-        else (_manifest() if status == DefinitionStatus.VALID else None),
+        else (_manifest(role=role) if status == DefinitionStatus.VALID else None),
         status=status,
         error=error,
     )
@@ -84,6 +86,7 @@ def _source(
 def _context(
     identifier: str = "company-brief",
     *,
+    work_order: WorkOrderRef = WORK_ORDER,
     byte_size: int = 120,
     digest: str = "a" * 64,
     readable: bool = True,
@@ -95,7 +98,7 @@ def _context(
         kind=ContextKind.BRIEF,
         identifier=identifier,
         provenance=f"briefs/{identifier}.md",
-        work_order_scope=WORK_ORDER,
+        work_order_scope=work_order,
         content_digest=digest,
         content_revision="content-v1",
         snapshot_revision=revision,
@@ -109,13 +112,17 @@ def _context(
 
 def _resolve(
     *,
+    role: RoleRef = ROLE,
+    work_order: WorkOrderRef = WORK_ORDER,
     definitions: tuple[RoleDefinitionSource, ...] | None = None,
     capabilities: tuple[CapabilityFact, ...] | None = None,
     context: tuple[ContextReference, ...] | None = None,
 ):
     return resolve_role(
-        role=ROLE,
-        definitions=definitions or (_source(RoleLayer.BUILT_IN, "builtin/owner"),),
+        role=role,
+        definitions=definitions or (
+            _source(RoleLayer.BUILT_IN, "builtin/owner", role=role),
+        ),
         capability_facts=capabilities
         if capabilities is not None
         else (
@@ -126,8 +133,10 @@ def _resolve(
                 snapshot_revision=REVISION,
             ),
         ),
-        context_catalog=context if context is not None else (_context(),),
-        work_order=WORK_ORDER,
+        context_catalog=context
+        if context is not None
+        else (_context(work_order=work_order),),
+        work_order=work_order,
         clock=NOW,
         snapshot_revision=REVISION,
         bundle_bounds=ContextBundleBounds(max_references=2, max_bytes=512),
@@ -253,7 +262,11 @@ def test_manifests_are_frozen_extra_forbidden_and_non_granting() -> None:
     for forbidden in (
         {"credentials": ("secret",)},
         {"granted_capabilities": ("connector.write",)},
+        {"approval_receipts": ("receipt-1",)},
+        {"approval_receipt_ids": ("receipt-1",)},
         {"approval_id": "approval-1"},
+        {"effect": "send"},
+        {"effect_id": "effect-1"},
         {"effects": ("send",)},
         {"evidence_verdict": "passed"},
         {"graph_authority": "create"},
@@ -275,3 +288,368 @@ def test_unreadable_stale_sensitive_and_mixed_revision_context_fail_closed() -> 
         assert isinstance(result, RoleResolutionBlocked)
         assert result.reason == reason
         assert result.source_id == context.provenance
+
+
+def test_ac_r2_hp_all_layers_may_only_tighten_the_full_manifest() -> None:
+    editor = RoleRef(id="editor", function_id=ROLE.function_id)
+    analyst = RoleRef(id="analyst", function_id=ROLE.function_id)
+    base = _manifest(
+        deliverable_kinds=("brief", "post"),
+        delegation_targets=(editor, analyst),
+        required_capabilities=("connector.read", "draft.write"),
+        authority_ceiling=AuthorityCeiling.EXTERNAL,
+        context_selectors=(
+            ContextSelector(kind=ContextKind.BRIEF, max_sensitivity=Sensitivity.SENSITIVE),
+            ContextSelector(kind=ContextKind.PLAN, max_sensitivity=Sensitivity.INTERNAL),
+        ),
+        review_policy=ReviewPolicy(),
+        delivery_policy=DeliveryPolicy(
+            required_evidence=("artifact-exists",),
+            require_all_deliverables=False,
+        ),
+        routing_hint=RoutingHint(provider="codex"),
+    )
+    plugin = base.model_copy(update={"authority_ceiling": AuthorityCeiling.INTERNAL})
+    company = plugin.model_copy(
+        update={
+            "deliverable_kinds": ("brief",),
+            "delegation_targets": (editor,),
+            "required_capabilities": ("connector.read",),
+        }
+    )
+    project = company.model_copy(
+        update={
+            "context_selectors": (
+                ContextSelector(
+                    kind=ContextKind.BRIEF,
+                    identifier="company-brief",
+                    max_sensitivity=Sensitivity.INTERNAL,
+                ),
+            )
+        }
+    )
+    plan = project.model_copy(
+        update={
+            "review_policy": ReviewPolicy(
+                required=True,
+                minimum_reviewers=2,
+                required_review_kinds=("legal",),
+            ),
+            "delivery_policy": DeliveryPolicy(
+                required_evidence=("artifact-exists", "review-recorded"),
+                require_all_deliverables=True,
+            ),
+            "routing_hint": RoutingHint(provider="zai-openai", model="glm-4.6"),
+        }
+    )
+    definitions = tuple(
+        _source(layer, f"{layer.value}/owner", manifest=manifest)
+        for layer, manifest in zip(RoleLayer, (base, plugin, company, project, plan), strict=True)
+    )
+
+    result = _resolve(
+        definitions=definitions,
+        context=(_context(sensitivity=Sensitivity.INTERNAL),),
+    )
+
+    assert not isinstance(result, RoleResolutionBlocked)
+    assert result.manifest == plan
+    assert tuple(source.layer for source in result.source_chain) == tuple(RoleLayer)
+    assert result.required_capabilities == ("connector.read",)
+    assert result.authority_ceiling is AuthorityCeiling.INTERNAL
+
+
+@pytest.mark.parametrize(
+    ("base_overrides", "overlay_overrides", "reason", "reference"),
+    [
+        (
+            {"authority_ceiling": AuthorityCeiling.INTERNAL},
+            {"authority_ceiling": AuthorityCeiling.EXTERNAL},
+            RoleResolutionReason.AUTHORITY_EXPANSION,
+            "authority_ceiling",
+        ),
+        (
+            {"deliverable_kinds": ("brief",)},
+            {"deliverable_kinds": ("brief", "post")},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "deliverable_kinds",
+        ),
+        (
+            {"delegation_targets": ()},
+            {"delegation_targets": (RoleRef(id="editor", function_id=ROLE.function_id),)},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "delegation_targets",
+        ),
+        (
+            {"required_capabilities": ("connector.read",)},
+            {"required_capabilities": ("connector.read", "connector.write")},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "required_capabilities",
+        ),
+        (
+            {"review_policy": ReviewPolicy(required=True, minimum_reviewers=1)},
+            {"review_policy": ReviewPolicy()},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "review_policy.required",
+        ),
+        (
+            {"review_policy": ReviewPolicy(required=True, minimum_reviewers=2)},
+            {"review_policy": ReviewPolicy(required=True, minimum_reviewers=1)},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "review_policy.minimum_reviewers",
+        ),
+        (
+            {
+                "review_policy": ReviewPolicy(
+                    required=True,
+                    minimum_reviewers=1,
+                    required_review_kinds=("legal", "brand"),
+                )
+            },
+            {
+                "review_policy": ReviewPolicy(
+                    required=True,
+                    minimum_reviewers=1,
+                    required_review_kinds=("legal",),
+                )
+            },
+            RoleResolutionReason.INVALID_OVERLAY,
+            "review_policy.required_review_kinds",
+        ),
+        (
+            {"delivery_policy": DeliveryPolicy(required_evidence=("artifact", "review"))},
+            {"delivery_policy": DeliveryPolicy(required_evidence=("artifact",))},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "delivery_policy.required_evidence",
+        ),
+        (
+            {
+                "delivery_policy": DeliveryPolicy(
+                    required_evidence=("artifact",),
+                    require_all_deliverables=True,
+                )
+            },
+            {
+                "delivery_policy": DeliveryPolicy(
+                    required_evidence=("artifact",),
+                    require_all_deliverables=False,
+                )
+            },
+            RoleResolutionReason.INVALID_OVERLAY,
+            "delivery_policy.require_all_deliverables",
+        ),
+        (
+            {"context_selectors": ()},
+            {
+                "context_selectors": (
+                    ContextSelector(kind=ContextKind.BRIEF, identifier="company-brief"),
+                )
+            },
+            RoleResolutionReason.INVALID_OVERLAY,
+            "context_selectors[brief:company-brief]",
+        ),
+        (
+            {
+                "context_selectors": (
+                    ContextSelector(kind=ContextKind.BRIEF, identifier="company-brief"),
+                )
+            },
+            {"context_selectors": (ContextSelector(kind=ContextKind.BRIEF),)},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "context_selectors[brief:*].identifier",
+        ),
+        (
+            {
+                "context_selectors": (
+                    ContextSelector(
+                        kind=ContextKind.BRIEF,
+                        identifier="company-brief",
+                        max_sensitivity=Sensitivity.INTERNAL,
+                    ),
+                )
+            },
+            {
+                "context_selectors": (
+                    ContextSelector(
+                        kind=ContextKind.BRIEF,
+                        identifier="company-brief",
+                        max_sensitivity=Sensitivity.SENSITIVE,
+                    ),
+                )
+            },
+            RoleResolutionReason.INVALID_OVERLAY,
+            "context_selectors[brief:company-brief].max_sensitivity",
+        ),
+        (
+            {"mission": "Produce one bounded artifact."},
+            {"mission": "Own the whole company."},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "mission",
+        ),
+        (
+            {"default_topology": "direct"},
+            {"default_topology": "squad"},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "default_topology",
+        ),
+        (
+            {"routing_hint": RoutingHint(provider="codex", model="gpt-5")},
+            {"routing_hint": RoutingHint(model="gpt-5")},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "routing_hint.provider",
+        ),
+        (
+            {"routing_hint": RoutingHint(provider="codex", model="gpt-5")},
+            {"routing_hint": RoutingHint(provider="codex")},
+            RoleResolutionReason.INVALID_OVERLAY,
+            "routing_hint.model",
+        ),
+    ],
+)
+def test_ac_r2_sec_forbidden_overlay_changes_fail_closed_at_exact_source_and_field(
+    base_overrides: dict[str, object],
+    overlay_overrides: dict[str, object],
+    reason: RoleResolutionReason,
+    reference: str,
+) -> None:
+    definitions = (
+        _source(RoleLayer.BUILT_IN, "builtin/owner", manifest=_manifest(**base_overrides)),
+        _source(RoleLayer.PLAN, "plans/launch.md", manifest=_manifest(**overlay_overrides)),
+    )
+
+    result = _resolve(definitions=definitions)
+
+    assert result == RoleResolutionBlocked(
+        role=ROLE,
+        reason=reason,
+        source_layer=RoleLayer.PLAN,
+        source_id="plans/launch.md",
+        reference=reference,
+    )
+    assert not hasattr(result, "manifest_digest")
+    assert not hasattr(result, "source_chain")
+
+
+def test_identity_mismatch_is_not_a_representable_overlay() -> None:
+    with pytest.raises(ValidationError, match="role function_id must match function id"):
+        _manifest(function=FunctionRef(id="other-function"))
+    with pytest.raises(ValidationError, match="definition role must match manifest role"):
+        _source(
+            RoleLayer.PLAN,
+            "plans/launch.md",
+            manifest=_manifest(
+                role=RoleRef(id="other-role", function_id=ROLE.function_id)
+            ),
+        )
+
+
+def test_same_layer_ambiguity_blocks_with_exact_layer_and_source() -> None:
+    result = _resolve(
+        definitions=(
+            _source(RoleLayer.PLUGIN, "plugin-a/owner"),
+            _source(RoleLayer.PLUGIN, "plugin-b/owner"),
+        )
+    )
+
+    assert result == RoleResolutionBlocked(
+        role=ROLE,
+        reason=RoleResolutionReason.INVALID_OVERLAY,
+        source_layer=RoleLayer.PLUGIN,
+        source_id="plugin-a/owner",
+        reference=ROLE.id,
+        detail=(
+            "ambiguous plugin definitions for "
+            "arbitrary-function/arbitrary-owner: plugin-a/owner, plugin-b/owner"
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "function_id",
+    [
+        "marketing",
+        "communications",
+        "design",
+        "social",
+        "support",
+        "operations",
+        "sales",
+        "arbitrary-unknown-function",
+    ],
+)
+def test_ac_r6_inv_tightening_enforcement_is_function_agnostic(
+    function_id: str,
+) -> None:
+    role = RoleRef(id="owner", function_id=function_id)
+    work_order = WorkOrderRef(
+        node_id="x-a8c0",
+        attempt_id="attempt-1",
+        role_id=role.id,
+    )
+    base = _manifest(role=role, authority_ceiling=AuthorityCeiling.EXTERNAL)
+    tightened = _manifest(role=role, authority_ceiling=AuthorityCeiling.INTERNAL)
+    widened = _manifest(role=role, authority_ceiling=AuthorityCeiling.EXTERNAL)
+    accepted = _resolve(
+        role=role,
+        work_order=work_order,
+        definitions=(
+            _source(
+                RoleLayer.BUILT_IN,
+                f"builtin/{function_id}",
+                role=role,
+                manifest=base,
+            ),
+            _source(
+                RoleLayer.PROJECT,
+                f"project/{function_id}",
+                role=role,
+                manifest=tightened,
+            ),
+        ),
+        context=(_context(work_order=work_order),),
+    )
+    blocked = _resolve(
+        role=role,
+        work_order=work_order,
+        definitions=(
+            _source(
+                RoleLayer.BUILT_IN,
+                f"builtin/{function_id}",
+                role=role,
+                manifest=tightened,
+            ),
+            _source(
+                RoleLayer.PROJECT,
+                f"project/{function_id}",
+                role=role,
+                manifest=widened,
+            ),
+        ),
+        context=(_context(work_order=work_order),),
+    )
+
+    assert not isinstance(accepted, RoleResolutionBlocked)
+    assert accepted.authority_ceiling is AuthorityCeiling.INTERNAL
+    assert blocked == RoleResolutionBlocked(
+        role=role,
+        reason=RoleResolutionReason.AUTHORITY_EXPANSION,
+        source_layer=RoleLayer.PROJECT,
+        source_id=f"project/{function_id}",
+        reference="authority_ceiling",
+    )
+
+
+def test_core_role_resolution_has_no_function_name_semantics() -> None:
+    roles_source = Path(__file__).parents[3] / "src" / "fno" / "roles"
+    source = "\n".join(path.read_text() for path in roles_source.glob("*.py"))
+    assert "_AUTHORITY_RANK" in source  # positive control for the source scan
+    for function_name in (
+        "marketing",
+        "communications",
+        "design",
+        "social",
+        "support",
+        "operations",
+        "sales",
+    ):
+        assert function_name not in source.casefold()
