@@ -39,6 +39,11 @@ class AutonomousRoute:
     The destination fields are set together or not at all: a ``cutover`` that
     could not resolve BOTH a harness and an account overlay is never returned,
     because passing only one produces a wrong-billing or wrong-binary launch.
+
+    ``defer_fallback`` is what a ``cutover`` degrades to if the caller cannot
+    stage the destination after all: True when the window was binding enough to
+    hold work (EXHAUSTED), False when it was only the proactive LOW case, where
+    launching here is still better than waiting.
     """
 
     action: str
@@ -49,6 +54,7 @@ class AutonomousRoute:
     account_env: Optional[dict] = None
     retry_at: Optional[float] = None
     window: Optional[str] = None
+    defer_fallback: bool = False
 
 
 def _cutover_low_after_minutes(node_cwd: Optional[str]) -> int:
@@ -160,6 +166,7 @@ def select_autonomous_route(
                 account_env=account_env,
                 retry_at=sig.resets_at,
                 window=window,
+                defer_fallback=sig.defer,
             )
     if sig.defer:
         return AutonomousRoute(

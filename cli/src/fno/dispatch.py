@@ -17,6 +17,7 @@ its lifecycle (target_cli._maybe_reconcile_lane_slot) - identical to the daemon
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -208,6 +209,29 @@ def _healthy_alternate_exists() -> bool:
         return False
 
 
+def _cutover_command(harness: Optional[str], node_id: str) -> str:
+    """The destination harness's own target command, or "" if unresolvable.
+
+    This verb hosts a pane in THIS mux session, so the substrate is not the
+    destination's default; only the COMMAND needs the per-harness render
+    (codex takes `$fno:target`, never a raw slash verb). An empty return is the
+    caller's signal to stage nothing - a half-resolved destination must not
+    spawn."""
+    try:
+        from fno.agents.harness_map import resolve_dispatch
+
+        return str(
+            resolve_dispatch(
+                harness=harness,
+                substrate="pane",
+                node_id=node_id,
+                trigger="attended",
+            )["command"]
+        )
+    except Exception:  # noqa: BLE001 - an unresolvable harness never spawns
+        return ""
+
+
 def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Optional[float]) -> None:
     """Emit the single quota_deferred decision event. Non-fatal (AC1-UI)."""
     try:
@@ -270,28 +294,50 @@ def _dispatch_one(
     # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
     #     selection defers; an explicit --node dispatch always fires (LD#5).
     #     Fail-open: defer_dispatch off, p0, or UNKNOWN headroom -> proceed.
+    #     The route decision is the SAME one `backlog advance` reads (x-2716),
+    #     so identical node + config + quota fixtures resolve to the identical
+    #     destination tuple on both autonomous launchers.
+    cutover = None
+    cutover_command = ""
     if not explicit:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.agents.autonomous_route import select_autonomous_route
 
-        decision = evaluate_quota_defer(_resolve_provider_id() or "", priority=priority)
-        if decision is not None and _healthy_alternate_exists():
+        route = select_autonomous_route(
+            provider_id=_resolve_provider_id() or "",
+            priority=priority,
+            # An explicit --account is a human's billing choice: quota policy
+            # may still defer behind it, but must never reroute off it.
+            pinned=bool(account),
+            node_cwd=cwd,
+        )
+        if route.action == "cutover":
+            # Render the destination's own command HERE, before any claim or
+            # lane slot is taken: an unresolvable harness must fall back to the
+            # defer floor rather than reach the spawn with a claude command.
+            cutover_command = _cutover_command(route.harness, node_id)
+            if cutover_command:
+                cutover = route
+            elif not route.defer_fallback:
+                route = dataclasses.replace(route, action="stay")
+            else:
+                route = dataclasses.replace(route, action="defer")
+        if route.action == "defer" and not _healthy_alternate_exists():
             # Deferring is the floor, not the answer, once launch-time picking
             # can reroute: holding work because the ACTIVE account is exhausted
             # while another account has headroom is the stall this feature
             # exists to delete. The spawn seam does the actual picking; here we
-            # only decline to defer when it has somewhere to go.
-            decision = None
-        if decision is not None:
+            # only defer when neither a combo cutover nor the account picker
+            # has somewhere to go.
             _emit_quota_deferred(
-                node_id, decision.provider_id, decision.state.value, decision.retry_at
+                node_id, route.source_record, route.window or "", route.retry_at
             )
             return {
                 "outcome": "quota-deferred",
                 "node": node_id,
                 "slug": slug or "",
-                "provider": decision.provider_id,
-                "headroom": decision.state.value,
-                "retry_at": decision.retry_at,
+                "provider": route.source_record,
+                "headroom": route.window or "",
+                "retry_at": route.retry_at,
             }
 
     # 2. Boot-window dedup (mirrors advance()): a node already being worked
@@ -349,11 +395,21 @@ def _dispatch_one(
     provenance = resolve_provenance(node_id, slug)
     if account:
         provenance["FNO_ACCOUNT"] = account
+    # A cutover replaces all three parts of the launch together (harness,
+    # command, credential overlay); passing one without the others is the
+    # wrong-billing / wrong-binary launch the selector exists to prevent.
+    spawn_harness = "claude"
+    message = f"/target no-merge {node_id}"
+    if cutover is not None:
+        spawn_harness = cutover.harness or "claude"
+        message = cutover_command
+        account_env = cutover.account_env
+        provenance["FNO_ACCOUNT"] = cutover.record_id or ""
     try:
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),
-            message=f"/target no-merge {node_id}",
-            provider="claude",
+            message=message,
+            provider=spawn_harness,
             cwd=workdir,
             session=session,
             provenance=provenance,

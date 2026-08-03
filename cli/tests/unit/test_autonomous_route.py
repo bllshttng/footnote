@@ -7,6 +7,8 @@ LOW predicate, and the refusal to return a half-resolved destination.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 from fno.adapters.providers import runtime_state as rs
@@ -118,19 +120,6 @@ class TestExplicitIntentWins:
 class TestUnresolvableDestination:
     """AC5-FR: a destination missing either half is never launched."""
 
-    @pytest.mark.parametrize(
-        "broken",
-        [
-            "no-combo",  # resolve_dispatch_target has no active combo
-            "no-harness",  # the record carries no cli
-            "account-error",  # the account overlay cannot be staged
-        ],
-    )
-    def test_every_unresolvable_path_is_the_defer_floor(self, monkeypatch, broken) -> None:
-        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
-        _dest(monkeypatch, None)  # _select_destination degrades all three to None
-        assert _route().action == "defer", broken
-
     def test_selector_never_returns_a_partial_tuple(self, monkeypatch) -> None:
         _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
         _dest(monkeypatch, DEST)
@@ -152,3 +141,107 @@ class TestCutoverConfig:
         for bad in (-30, True, "60", 1.5, None):
             assert DispatchBlock(cutover_low_after_minutes=bad).cutover_low_after_minutes == 0
         assert DispatchBlock(cutover_low_after_minutes=60).cutover_low_after_minutes == 60
+
+
+# ---------------------------------------------------------------------------
+# _select_destination: the combo walk (moved from test_advance.py with the
+# function itself - a spawn stages a RECORD id, a harness, and an account env
+# together or not at all).
+# ---------------------------------------------------------------------------
+
+
+def test_select_destination_not_configured_defers(monkeypatch):
+    """_select_destination: on_exhaustion != failover -> None (no combo read)."""
+    from fno.config import SettingsModel
+
+    monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SettingsModel())
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: pytest.fail("defer must not read the active combo"),
+    )
+    assert ar._select_destination(None, "ccm") is None
+
+
+def test_select_destination_configured_picks_provider_and_cli(monkeypatch):
+    """_select_destination: failover + a combo with a healthy provider ->
+    (record_id, harness, account_env); the record's harness is used directly and its
+    dispatch_env becomes the spawn account env."""
+    from fno.adapters.providers.rotation import Combo
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(combo_name="combo1"),
+    )
+    combo = Combo(name="combo1", providers=("ccm", "ccr"))
+    monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
+    monkeypatch.setattr(
+        "fno.adapters.providers.rotation.next_healthy_provider",
+        lambda combo, exclude=(): "ccr",
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(harness="codex")}),
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.dispatch.dispatch_env",
+        lambda pid, repo_root=None: {"CODEX_HOME": "/acct/ccr"},
+    )
+    assert ar._select_destination(None, "ccm") == (
+        "ccr", "codex", {"CODEX_HOME": "/acct/ccr"},
+    )
+
+
+def test_select_destination_unstaged_account_defers(monkeypatch):
+    """_select_destination: dispatch_env raising (account not staged) ->
+    None (defer; never spawn onto a broken account)."""
+    from fno.adapters.providers.rotation import Combo
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(combo_name="combo1"),
+    )
+    combo = Combo(name="combo1", providers=("ccm", "ccr"))
+    monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
+    monkeypatch.setattr(
+        "fno.adapters.providers.rotation.next_healthy_provider",
+        lambda combo, exclude=(): "ccr",
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(by_id={"ccr": SimpleNamespace(harness="claude")}),
+    )
+
+    def boom(pid, repo_root=None):
+        raise RuntimeError("account not staged")
+
+    monkeypatch.setattr("fno.adapters.providers.dispatch.dispatch_env", boom)
+    assert ar._select_destination(None, "ccm") is None
+
+
+def test_select_destination_no_active_combo_defers(monkeypatch):
+    """_select_destination: failover configured but the active target is a
+    bare provider (no combo) -> None (nothing to walk)."""
+    from fno.config import SettingsModel
+    from fno.sigma_dispatch import DispatchTarget
+
+    monkeypatch.setattr(
+        "fno.config.load_settings",
+        lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
+    )
+    monkeypatch.setattr(
+        "fno.sigma_dispatch.resolve_dispatch_target",
+        lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
+    )
+    assert ar._select_destination(None, "ccm") is None
