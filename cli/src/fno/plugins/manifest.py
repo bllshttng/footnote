@@ -32,6 +32,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from fno.company.contracts import EvidenceResult, NonEmptyStr
 from fno.roles.models import ContextKind, RoleManifest, canonical_digest
+from packaging.version import InvalidVersion, Version
 
 __all__ = [
     "AdapterConformance",
@@ -63,10 +64,6 @@ class CompatibilityRange(_PackModel):
     def _endpoints_are_pep440(self) -> Self:
         # Both endpoints must be PEP 440 so range comparisons are meaningful; this
         # validator covers footnote_compat ranges and every dependency range.
-        try:
-            from packaging.version import InvalidVersion, Version
-        except ImportError:
-            return self
         for label, value in (("minimum", self.minimum), ("maximum", self.maximum)):
             if value is None:
                 continue
@@ -246,10 +243,6 @@ class PackManifest(_PackModel):
     def _version_is_pep440(self) -> Self:
         # The pack version must be PEP 440 so range comparisons are meaningful.
         # Range endpoints are validated on CompatibilityRange itself.
-        try:
-            from packaging.version import InvalidVersion, Version
-        except ImportError:
-            return self
         try:
             Version(self.version)
         except InvalidVersion as exc:

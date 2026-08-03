@@ -50,9 +50,28 @@ class RegistryCorrupt(Exception):
     """The registry file is present but unparseable; ownership cannot be trusted."""
 
 
+def _is_safe_component(value: str) -> bool:
+    # Same predicate activation/verification use: an id becomes a path segment.
+    return bool(
+        value
+        and "/" not in value
+        and "\\" not in value
+        and value not in (".", "..")
+        and "\x00" not in value
+    )
+
+
 def default_registry_path() -> Path:
     """The registry dotfile lives at the role root, outside the walked layers."""
     return default_role_root() / ".pack-registry.json"
+
+
+def _manifest_path_absolute(manifest_path: Path | str) -> str:
+    """Resolve a directory or file argument to an absolute plugin.yaml path."""
+    path = Path(manifest_path).expanduser()
+    if path.is_dir():
+        path = path / "plugin.yaml"
+    return str(path.resolve())
 
 
 class _RegistryModel(BaseModel):
@@ -138,6 +157,8 @@ class PackRegistry(_RegistryModel):
             raise ValueError(f"duplicate activation receipt for {receipt_ids[0]!r}")
         seen: dict[str, str] = {}
         for receipt in self.receipts:
+            if not _is_safe_component(receipt.pack_id):
+                raise ValueError(f"receipt pack_id {receipt.pack_id!r} is not a safe path component")
             expected_prefix = f"plugin/{receipt.pack_id}/"
             for path in receipt.written_paths:
                 # Reject non-normalized paths so an aliased entry like
@@ -148,13 +169,13 @@ class PackRegistry(_RegistryModel):
                     raise ValueError(f"non-normalized receipt path {path!r}")
                 # Bind each receipt path to its own pack namespace and a single
                 # role .json, so a corrupt receipt cannot claim (and later
-                # deactivate) another pack's role file.
+                # deactivate) another pack's role files.
                 if not path.startswith(expected_prefix) or not path.endswith(".json"):
                     raise ValueError(
                         f"receipt path {path!r} is not under {expected_prefix} or not a .json"
                     )
                 role_segment = path[len(expected_prefix):-len(".json")]
-                if not role_segment or "/" in role_segment:
+                if not _is_safe_component(role_segment):
                     raise ValueError(f"receipt path {path!r} has an unsafe role segment")
                 if path in seen:
                     raise ValueError(
@@ -225,7 +246,7 @@ class PackRegistryStore:
             pack_id=manifest.id,
             resolved_version=manifest.version,
             pack_digest=pack_digest(manifest),
-            manifest_path=str(manifest_path),
+            manifest_path=_manifest_path_absolute(manifest_path),
             declared_effects=manifest.permissions,
         )
         with self.lock:
@@ -256,7 +277,7 @@ class PackRegistryStore:
             pack_id=manifest.id,
             resolved_version=manifest.version,
             pack_digest=pack_digest(manifest),
-            manifest_path=str(manifest_path),
+            manifest_path=_manifest_path_absolute(manifest_path),
             declared_effects=manifest.permissions,
         )
         packs = tuple(p for p in registry.packs if p.pack_id != pack.pack_id)

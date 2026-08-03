@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 
@@ -63,6 +63,16 @@ def _json_requested(ctx: typer.Context, local: bool) -> bool:
     return json_mode(ctx)
 
 
+def _error(ctx: typer.Context, message: str, *, code: int = 1) -> NoReturn:
+    # Keep the advertised stable JSON interface intact on failure paths too: emit
+    # a versioned error envelope when --json was requested, plain text otherwise.
+    if json_mode(ctx):
+        _emit_json(_envelope({"error": message}))
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=code)
+
+
 @plugins_app.command("verify")
 def verify_command(
     ctx: typer.Context,
@@ -74,8 +84,7 @@ def verify_command(
     try:
         installed = store.installed_index()
     except RegistryCorrupt as exc:
-        typer.echo(f"registry corrupt; cannot verify dependencies: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        _error(ctx, f"registry corrupt; cannot verify dependencies: {exc}")
     report = verify_pack(path, installed=installed)
     if _json_requested(ctx, json_output):
         _emit_json(_envelope(report.as_dict()))
@@ -105,8 +114,7 @@ def activate_command(
     try:
         outcome = activate(path, registry_store=store, role_root=root)
     except ActivationRefusal as exc:
-        typer.echo(f"refused ({exc.reason.value}): {exc.detail}", err=True)
-        raise typer.Exit(code=1) from exc
+        _error(ctx, f"refused ({exc.reason.value}): {exc.detail}")
     receipt = outcome.receipt
     payload = {
         "pack_id": receipt.pack_id,
@@ -135,8 +143,7 @@ def deactivate_command(
     try:
         outcome = deactivate(pack_id, registry_store=store, role_root=root)
     except RegistryCorrupt as exc:
-        typer.echo(f"registry corrupt; cannot deactivate safely: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        _error(ctx, f"registry corrupt; cannot deactivate safely: {exc}")
     payload = {
         "pack_id": pack_id,
         "removed": list(outcome.removed),
@@ -164,8 +171,7 @@ def list_command(
     try:
         registry = store.load()
     except RegistryCorrupt as exc:
-        typer.echo(f"registry corrupt; cannot list packs: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        _error(ctx, f"registry corrupt; cannot list packs: {exc}")
     if _json_requested(ctx, json_output):
         packs = [
             {
@@ -202,16 +208,13 @@ def inspect_command(
     try:
         registry = store.load()
     except RegistryCorrupt as exc:
-        typer.echo(f"registry corrupt; cannot inspect: {exc}", err=True)
-        raise typer.Exit(code=1) from exc
+        _error(ctx, f"registry corrupt; cannot inspect: {exc}")
     pack = registry.pack_by_id(pack_id)
     if pack is None:
-        typer.echo(f"no installed pack {pack_id!r}", err=True)
-        raise typer.Exit(code=1)
+        _error(ctx, f"no installed pack {pack_id!r}")
     manifest, _ = load_manifest(Path(pack.manifest_path))
     if manifest is None:
-        typer.echo(f"manifest for {pack_id} no longer readable", err=True)
-        raise typer.Exit(code=1)
+        _error(ctx, f"manifest for {pack_id} no longer readable")
     declared_roles = [role.role.id for role in manifest.roles]
     digest_matches = pack_digest(manifest) == pack.pack_digest
     if _json_requested(ctx, json_output):
