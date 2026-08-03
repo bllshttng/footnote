@@ -159,7 +159,7 @@ init_git_repo() {
 
 setup_delivery_project() {
     local dir="$1" session_id="$2" harness_id="$3" transcript_kind="$4"
-    mkdir -p "$dir/.fno" "$dir/home/.fno" "$dir/handoffs" "$dir/stubs" "$dir/uv-tools"
+    mkdir -p "$dir/.fno" "$dir/home/.fno" "$dir/handoffs" "$dir/stubs" "$dir/hook-bin" "$dir/uv-tools"
     ln -s "${REPO_ROOT}/cli/.venv" "$dir/uv-tools/fno"
     init_git_repo "$dir"
     PROJECT_DIR="$dir" SESSION_ID="$session_id" HARNESS_ID="$harness_id" \
@@ -295,6 +295,7 @@ else:
 PY
     make_no_pr_gh "$dir/stubs/gh"
     make_git_stub "$dir/stubs/git" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    ln -s "$dir/stubs/gh" "$dir/hook-bin/gh"
 }
 
 assert_delivery_artifacts() {
@@ -315,6 +316,14 @@ with sqlite3.connect(root / ".fno/approvals.db") as conn:
     states = [row[0] for row in conn.execute("SELECT state FROM attempts")]
 assert states == ["acknowledged"], states
 PY
+}
+
+assert_real_pending_path() {
+    local dir="$1" top pending
+    top=$(git -C "$dir" rev-parse --show-toplevel) || return 1
+    pending=$(git -C "$dir" rev-parse --git-path fno-delivery-finalize-pending-probe) || return 1
+    [[ "$pending" == /* ]] || pending="$top/$pending"
+    [[ "$pending" == "$top/.git/fno-delivery-finalize-pending-probe" ]]
 }
 
 cleanup() { rm -rf "${TMP_DIR:-/nonexistent}" 2>/dev/null || true; }
@@ -629,7 +638,7 @@ log "Case D: generic delivery through production mux and Claude hook"
     HARNESS_ID="dddd-delivery-claude"
     setup_delivery_project "$TMP_DIR" "$SESSION_ID" "$HARNESS_ID" "claude"
 
-    COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/stubs:${PATH}"
+    COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/hook-bin:${PATH}"
     EVAL_JSON=$(
         cd "$TMP_DIR" || exit 1
         env HOME="$TMP_DIR/home" UV_TOOL_DIR="$TMP_DIR/uv-tools" \
@@ -637,6 +646,8 @@ log "Case D: generic delivery through production mux and Claude hook"
             "$MUX_BIN" delivery evaluate --json --plan-path plan.md --events .fno/events.jsonl
     )
     cd_ok=true
+    assert_real_pending_path "$TMP_DIR" \
+        || { fail "Case D: pending-finalization path is not in the real test git dir"; cd_ok=false; }
     if ! printf '%s' "$EVAL_JSON" | jq -e '.status == "evaluated" and .verdict.aggregate == "passed"' >/dev/null; then
         fail "Case D: production fno mux did not return a passed canonical verdict: $EVAL_JSON"
         cd_ok=false
@@ -672,7 +683,7 @@ log "Case E: generic delivery through production mux and agy hook"
     SESSION_ID="delivery-agy-e2e"
     HARNESS_ID="eeee-delivery-agy"
     setup_delivery_project "$TMP_DIR" "$SESSION_ID" "$HARNESS_ID" "agy"
-    COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/stubs:${PATH}"
+    COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/hook-bin:${PATH}"
     INPUT_JSON="{\"conversationId\":\"${HARNESS_ID}\",\"fullyIdle\":true,\"workspacePaths\":[\"${TMP_DIR}\"],\"transcriptPath\":\"${TMP_DIR}/${HARNESS_ID}.jsonl\"}"
     run_agy_hook "$TMP_DIR" "$INPUT_JSON" \
         "HOME=${TMP_DIR}/home" \
@@ -686,6 +697,8 @@ log "Case E: generic delivery through production mux and agy hook"
         "PATH=${COMMON_PATH}"
 
     ce_ok=true
+    assert_real_pending_path "$TMP_DIR" \
+        || { fail "Case E: pending-finalization path is not in the real test git dir"; ce_ok=false; }
     [[ "$HOOK_RC" -eq 0 ]] || { fail "Case E: agy hook rc=$HOOK_RC: $HOOK_STDERR"; ce_ok=false; }
     printf '%s' "$HOOK_STDOUT" | jq -e 'type == "object" and length == 0' >/dev/null \
         || { fail "Case E: agy hook did not emit the terminal allow object: $HOOK_STDOUT"; ce_ok=false; }
@@ -717,7 +730,7 @@ text = text.replace(
 )
 path.write_text(text)
 PY
-    COMMON_PATH="$(dirname "$MUX_BIN"):${TMP_DIR}/stubs:${PATH}"
+    COMMON_PATH="$(dirname "$MUX_BIN"):${PATH}"
     DECISION=$(
         cd "$TMP_DIR" || exit 1
         env HOME="$TMP_DIR/home" UV_TOOL_DIR="$TMP_DIR/uv-tools" \
