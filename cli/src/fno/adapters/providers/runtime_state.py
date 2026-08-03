@@ -1009,21 +1009,41 @@ class QuotaDeferDecision:
     retry_at: float | None
 
 
-def evaluate_quota_defer(
+@dataclasses.dataclass(frozen=True)
+class QuotaSignal:
+    """What one quota probe says about a provider for an autonomous launch.
+
+    ``defer`` and ``cutover`` are two verdicts read off the SAME probe because
+    their predicates point in OPPOSITE directions on the same LOW window: a
+    reset that is near is a reason to wait (defer), and a reset that is far is
+    a reason to leave this harness now (cutover), because waiting is the only
+    alternative. EXHAUSTED sets both - hold unless there is somewhere to go.
+
+    ``reason`` says why the verdicts are what they are, so a caller can report
+    "not probed" honestly instead of dressing it up as headroom.
+    """
+
+    provider_id: str
+    state: HeadroomState
+    resets_at: float | None
+    defer: bool
+    cutover: bool
+    reason: str
+
+
+def evaluate_quota_signal(
     provider_id: str,
     *,
     priority: str | None = None,
+    cutover_low_after_minutes: float = 0.0,
     now: float | None = None,
-) -> QuotaDeferDecision | None:
-    """Return a defer decision for an autonomous dispatch, or None to proceed.
+) -> QuotaSignal:
+    """Probe one provider's headroom and derive the defer/cutover verdicts.
 
-    Fail-open and opt-in (Locked Decisions 1/4/5/6):
-    - ``defer_dispatch`` off (the default) -> never defers.
-    - ``p0`` -> never defers.
-    - EXHAUSTED -> defer with the reset as ``retry_at``.
-    - LOW with a reset within ``defer_horizon_minutes`` -> defer.
-    - OK / UNKNOWN, or no provider, or LOW with a distant/absent reset ->
-      proceed (None). UNKNOWN never defers: absence of data is not trouble.
+    Fail-open and opt-in (Locked Decisions 1/4/5/6): no provider,
+    ``defer_dispatch`` off (the default), or ``p0`` short-circuits to a probe-
+    less UNKNOWN with both verdicts false, so a fresh install never defers and
+    never reroutes.
 
     This is the ONE probe site the dispatcher owns: it refreshes the snapshot
     (probe-on-stale) before consulting headroom, so the ~1-minute tick pays at
@@ -1033,14 +1053,18 @@ def evaluate_quota_defer(
     if now is None:
         now = time.time()
     if not provider_id:
-        return None
+        return QuotaSignal("", HeadroomState.UNKNOWN, None, False, False, "no-provider")
     from fno.adapters.providers.loader import load_quota_config
 
     quota = load_quota_config()
     if not quota.defer_dispatch:
-        return None
+        return QuotaSignal(
+            provider_id, HeadroomState.UNKNOWN, None, False, False, "defer-dispatch-off"
+        )
     if (priority or "").strip().lower() == "p0":
-        return None
+        return QuotaSignal(
+            provider_id, HeadroomState.UNKNOWN, None, False, False, "p0-exempt"
+        )
 
     # Probe-on-stale so the decision uses fresh data (the dispatcher tick is
     # not latency-sensitive, unlike combo rotation which reads cache only).
@@ -1051,13 +1075,39 @@ def evaluate_quota_defer(
         ttl_seconds=quota.probe_ttl_seconds,
         threshold_pct=quota.defer_threshold_pct,
     )
+    defer = cutover = False
     if h.state is HeadroomState.EXHAUSTED:
-        return QuotaDeferDecision(provider_id, h.state, h.resets_at)
-    if h.state is HeadroomState.LOW and h.resets_at is not None:
+        defer = cutover = True
+    elif h.state is HeadroomState.LOW and h.resets_at is not None:
         horizon = quota.defer_horizon_minutes * 60
         if horizon > 0 and h.resets_at <= now + horizon:
-            return QuotaDeferDecision(provider_id, h.state, h.resets_at)
-    return None
+            defer = True
+        after = cutover_low_after_minutes * 60
+        if after > 0 and h.resets_at > now + after:
+            cutover = True
+    return QuotaSignal(provider_id, h.state, h.resets_at, defer, cutover, "probed")
+
+
+def evaluate_quota_defer(
+    provider_id: str,
+    *,
+    priority: str | None = None,
+    now: float | None = None,
+) -> QuotaDeferDecision | None:
+    """Return a defer decision for an autonomous dispatch, or None to proceed.
+
+    - EXHAUSTED -> defer with the reset as ``retry_at``.
+    - LOW with a reset within ``defer_horizon_minutes`` -> defer.
+    - OK / UNKNOWN, or no provider, or LOW with a distant/absent reset ->
+      proceed (None). UNKNOWN never defers: absence of data is not trouble.
+
+    The defer half of :func:`evaluate_quota_signal`; a caller that also wants
+    the cutover verdict should read the signal directly rather than probe twice.
+    """
+    sig = evaluate_quota_signal(provider_id, priority=priority, now=now)
+    if not sig.defer:
+        return None
+    return QuotaDeferDecision(sig.provider_id, sig.state, sig.resets_at)
 
 
 # ---------------------------------------------------------------------------

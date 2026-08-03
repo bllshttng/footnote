@@ -1406,6 +1406,12 @@ class DispatchBlock(BaseModel):
     # to today (no combo read). An unknown value degrades to "defer" (a typo never
     # silently enables failover).
     on_exhaustion: str = "defer"
+    # Proactive LOW cutover, opt-in and OFF by default (0). Minutes: a LOW
+    # window resetting FARTHER out than this is a reason to leave the harness
+    # now, because waiting is the only alternative. Deliberately not
+    # defer_horizon_minutes - that predicate answers the opposite question
+    # (a near reset means wait), so reusing it would route backwards.
+    cutover_low_after_minutes: int = 0
 
     @field_validator("auto_merge", mode="before")
     @classmethod
@@ -1424,6 +1430,14 @@ class DispatchBlock(BaseModel):
         Same degrade-toward-safety stance as _coerce_auto_merge: a typo can never
         enable failover."""
         return v if v in ("defer", "failover") else "defer"
+
+    @field_validator("cutover_low_after_minutes", mode="before")
+    @classmethod
+    def _coerce_cutover_low(cls, v: object) -> object:
+        """Only a nonnegative TOML integer arms proactive LOW cutover; a bool,
+        a string, or a negative degrades to 0 (off). Same stance as the two
+        above: a config typo can never arm automatic rerouting."""
+        return v if isinstance(v, int) and not isinstance(v, bool) and v >= 0 else 0
 
 
 class AgentsBlock(BaseModel):
