@@ -2295,9 +2295,18 @@ def test_happy_spawn_discovers_the_session_claude_actually_minted(
     tmp_path: Path, monkeypatch
 ) -> None:
     projects = tmp_path / "projects"
-    _write_transcript(projects, tmp_path, "real-sid", time.time() + 60)
 
-    result, _ = _happy_spawn(monkeypatch, tmp_path, projects)
+    class TranscriptWritingRunner(FakeRunner):
+        """claude writes its transcript once the pane is running, not before."""
+
+        def __call__(self, argv, **kwargs):
+            if argv[1:4] == ["mux", "pane", "run"]:
+                _write_transcript(projects, tmp_path, "real-sid", time.time() + 60)
+            return super().__call__(argv, **kwargs)
+
+    result, _ = _happy_spawn(
+        monkeypatch, tmp_path, projects, runner=TranscriptWritingRunner()
+    )
 
     assert result.session_uuid == "real-sid"
     assert result.status == "live"
@@ -2319,6 +2328,46 @@ def test_claude_backfill_ignores_a_transcript_older_than_the_spawn(
             cwd, since_ms, projects_dir=projects, sleep=lambda _s: None
         )
         is None
+    )
+
+
+def test_happy_spawn_never_adopts_a_busy_siblings_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A live sibling appends to its transcript, so its mtime crosses the spawn
+    clock too. Identity, not recency, is what separates them - binding the row to
+    a healthy stranger would be worse than binding it to nothing."""
+    projects = tmp_path / "projects"
+    # Present before the spawn, and written DURING it (mtime in the future).
+    _write_transcript(projects, tmp_path, "sibling-sid", time.time() + 120)
+
+    result, _ = _happy_spawn(monkeypatch, tmp_path, projects)
+
+    assert result.session_uuid is None
+    assert result.status == "spawning"
+
+
+def test_claude_backfill_skips_an_excluded_pre_existing_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    projects = tmp_path / "projects"
+    cwd = tmp_path / "repo"
+    cwd.mkdir()
+    since_ms = int(time.time() * 1000)
+    _write_transcript(projects, cwd, "sibling-sid", time.time() + 120)
+    _write_transcript(projects, cwd, "mine-sid", time.time() + 120)
+
+    assert (
+        mux_spawn._backfill_claude_session_id(
+            cwd,
+            since_ms,
+            projects_dir=projects,
+            sleep=lambda _s: None,
+            exclude={"sibling-sid"},
+        )
+        == "mine-sid"
     )
 
 
