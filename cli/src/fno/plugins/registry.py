@@ -137,6 +137,7 @@ class PackRegistry(_RegistryModel):
             raise ValueError(f"duplicate activation receipt for {receipt_ids[0]!r}")
         seen: dict[str, str] = {}
         for receipt in self.receipts:
+            expected_prefix = f"plugin/{receipt.pack_id}/"
             for path in receipt.written_paths:
                 # Reject non-normalized paths so an aliased entry like
                 # plugin/a/../b/role.json cannot bypass the string uniqueness
@@ -144,6 +145,16 @@ class PackRegistry(_RegistryModel):
                 segments = path.split("/")
                 if path.startswith("/") or "." in segments or ".." in segments or "" in segments:
                     raise ValueError(f"non-normalized receipt path {path!r}")
+                # Bind each receipt path to its own pack namespace and a single
+                # role .json, so a corrupt receipt cannot claim (and later
+                # deactivate) another pack's role file.
+                if not path.startswith(expected_prefix) or not path.endswith(".json"):
+                    raise ValueError(
+                        f"receipt path {path!r} is not under {expected_prefix} or not a .json"
+                    )
+                role_segment = path[len(expected_prefix):-len(".json")]
+                if not role_segment or "/" in role_segment:
+                    raise ValueError(f"receipt path {path!r} has an unsafe role segment")
                 if path in seen:
                     raise ValueError(
                         f"path {path!r} owned by receipts {seen[path]!r} and {receipt.pack_id!r}"

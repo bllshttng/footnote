@@ -38,7 +38,7 @@ from fno.plugins.registry import (
     RegistryCorrupt,
     conformance_for,
 )
-from fno.plugins.verify import load_manifest, verify_manifest
+from fno.plugins.verify import load_manifest, resolve_manifest_path, verify_manifest
 from fno.roles.models import DefinitionStatus, RoleDefinitionSource, RoleLayer
 from fno.roles.registry import default_role_root
 
@@ -338,7 +338,9 @@ def activate(
                     activated_at=datetime.now(UTC),
                     conformance=conformance_for(manifest),
                 )
-                registry, _pack = store._install_locked(registry, manifest, target.resolve())
+                registry, _pack = store._install_locked(
+                    registry, manifest, resolve_manifest_path(target).resolve()
+                )
                 registry = store._record_activation_locked(registry, receipt)
                 store._save(registry)
             except BaseException:

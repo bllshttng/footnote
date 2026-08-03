@@ -74,6 +74,10 @@ class CompatibilityRange(_PackModel):
                 Version(value)
             except InvalidVersion as exc:
                 raise ValueError(f"{label} {value!r} is not a valid (PEP 440) version: {exc}") from exc
+        if self.maximum is not None and Version(self.maximum) < Version(self.minimum):
+            raise ValueError(
+                f"maximum {self.maximum!r} is lower than minimum {self.minimum!r}"
+            )
         return self
 
 

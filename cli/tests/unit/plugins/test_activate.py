@@ -139,25 +139,35 @@ def test_activation_is_idempotent_for_same_digest(tmp_path):
     assert first.receipt.pack_digest == second.receipt.pack_digest == pack_digest(_full_pack())
 
 
-def test_activation_refuses_when_a_different_pack_owns_the_path(tmp_path):
-    store, root = _store_and_root(tmp_path)
-    pack_a = _write_pack(tmp_path, _full_pack(), name="growth-studio")
-    # A foreign pack already owns the exact path growth-studio would write.
+def test_registry_rejects_a_cross_namespace_receipt_claim(tmp_path):
+    # A receipt may only own paths under its own plugin/<pack_id>/ namespace.
+    # A claim on another pack's path is corruption and is rejected at save time,
+    # so it can never be used to block or later delete that pack's role.
+    from pydantic import ValidationError
+
     from fno.plugins.registry import ActivationReceipt
 
-    foreign_digest = "f" * 64
-    store.record_activation(
-        ActivationReceipt(
-            pack_id="impostor",
-            pack_digest=foreign_digest,
-            resolved_version="9.9.9",
-            written_paths=("plugin/growth-studio/marketing.json",),
-            activated_at=datetime.now(UTC),
-        )
+    store, _root = _store_and_root(tmp_path)
+    impostor = ActivationReceipt(
+        pack_id="impostor",
+        pack_digest="f" * 64,
+        resolved_version="9.9.9",
+        written_paths=("plugin/growth-studio/marketing.json",),
+        activated_at=datetime.now(UTC),
     )
+    with pytest.raises((ValidationError, Exception)):
+        store.record_activation(impostor)
+
+
+def test_activation_refuses_an_unreceipted_existing_target(tmp_path):
+    # A file already at a planned target with no receipt owning it is occupied.
+    store, root = _store_and_root(tmp_path)
+    pack_dir = _write_pack(tmp_path, _full_pack())
+    (root / "plugin" / "growth-studio").mkdir(parents=True)
+    (root / "plugin" / "growth-studio" / "marketing.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ActivationRefusal) as info:
-        activate(pack_a, registry_store=store, role_root=root)
-    assert info.value.reason is ActivationRefusalReason.DIFFERENT_PACK_OWNS_PATH
+        activate(pack_dir, registry_store=store, role_root=root)
+    assert info.value.reason is ActivationRefusalReason.PATH_OCCUPIED
 
 
 # AC7-HP: deactivation removes only what the receipt recorded.
