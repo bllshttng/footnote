@@ -2058,6 +2058,24 @@ def dispatch_spawn(
     if account_env is None and provider == "claude":
         account_env = _pick_account_env(role=role, route_env=route_env)
 
+    launch_role = role
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
+        )
+
+        try:
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                notice=lambda note: print(note, file=sys.stderr),
+                account_overlay=bool(account_env),
+            )
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        launch_role = None
+
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
@@ -2073,7 +2091,7 @@ def dispatch_spawn(
         check_spawn_tier_remap(
             provider,
             model,
-            role=role,
+            role=launch_role,
             route_env=route_env,
             account_env=account_env,
         )
@@ -2109,19 +2127,6 @@ def dispatch_spawn(
             "--output-format supports only 'json' on claude headless spawns",
             exit_code=2,
         )
-
-    if provider == "claude" and (role is not None or route_env):
-        from fno.agents.model_routing import resolve_spawn_route
-
-        try:
-            route_env = resolve_spawn_route(
-                role,
-                route_env,
-                notice=lambda note: print(note, file=sys.stderr),
-                account_overlay=bool(account_env),
-            )
-        except RouteCompositionError as exc:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
 
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
@@ -2260,7 +2265,7 @@ def dispatch_spawn(
                         timeout=timeout,
                         yolo=yolo,
                         lock_handle=lock_handle,
-                        role=role,
+                        role=launch_role,
                         route_env=route_env,
                         model=model,
                         permission_mode=permission_mode,
@@ -2293,7 +2298,7 @@ def dispatch_spawn(
                             float(timeout) if timeout is not None else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
                         ),
                         lock_handle=lock_handle,
-                        role=role,
+                        role=launch_role,
                         effort=effort,
                         add_dir=add_dir,
                     )

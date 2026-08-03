@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from fno.roles import (
     DefinitionStatus,
     DeliveryPolicy,
     RegistryError,
+    ResolvedRole,
     ReviewPolicy,
     RoleDefinitionSource,
     RoleLayer,
@@ -29,6 +31,7 @@ from fno.roles import (
     Sensitivity,
     resolve_role,
 )
+from fno.roles.models import canonical_digest
 
 NOW = datetime(2026, 8, 2, 12, tzinfo=UTC)
 REVISION = "snapshot-7"
@@ -161,6 +164,61 @@ def test_ac_r1_hp_resolution_is_deterministic_and_records_fixed_layer_order() ->
     ]
     assert len(first.manifest_digest) == len(first.context_bundle.digest) == 64
     assert first.routing_projection == RoutingHint(provider="codex", model="gpt-5")
+
+
+def _change_bundle_snapshot(payload: dict) -> None:
+    bundle = payload["context_bundle"]
+    bundle["snapshot_revision"] = "other-snapshot"
+    for reference in bundle["references"]:
+        reference["snapshot_revision"] = "other-snapshot"
+    bundle["digest"] = canonical_digest(
+        "context-bundle",
+        {key: value for key, value in bundle.items() if key != "digest"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("mutation", "message"),
+    [
+        (
+            lambda payload: payload.update(
+                routing_projection={"provider": "other", "model": "other-model"}
+            ),
+            "routing_projection must match manifest",
+        ),
+        (
+            lambda payload: payload.update(source_chain=[]),
+            "at least 1 item",
+        ),
+        (
+            _change_bundle_snapshot,
+            "context bundle snapshot_revision must match resolved role",
+        ),
+        (
+            lambda payload: payload.update(authority_ceiling="external"),
+            "authority_ceiling must match manifest",
+        ),
+        (
+            lambda payload: payload.update(manifest_digest="0" * 64),
+            "manifest_digest must match manifest",
+        ),
+        (
+            lambda payload: payload["context_bundle"].update(digest="0" * 64),
+            "context bundle digest must match captured fields",
+        ),
+    ],
+)
+def test_resolved_role_rejects_contradictory_frozen_projection(
+    mutation,
+    message: str,
+) -> None:
+    resolved = _resolve()
+    assert isinstance(resolved, ResolvedRole)
+    payload = copy.deepcopy(resolved.model_dump(mode="json"))
+    mutation(payload)
+
+    with pytest.raises(ValidationError, match=message):
+        ResolvedRole.model_validate(payload)
 
 
 def test_fresh_context_requirement_rejects_missing_freshness_metadata() -> None:

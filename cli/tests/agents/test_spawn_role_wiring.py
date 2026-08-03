@@ -8,6 +8,7 @@ the ``role`` kwarg between the CLI flag and the claude create path.
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Dict
 
 import pytest
@@ -25,12 +26,12 @@ def _setup_tmp_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv(k, raising=False)
 
 
-def test_dispatch_spawn_threads_role_to_create_path(
+def test_dispatch_spawn_threads_captured_role_route_to_create_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _setup_tmp_home(tmp_path, monkeypatch)
 
-    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import dispatch as dispatch_mod, model_routing
     from fno.agents.dispatch import DispatchAskResult, dispatch_spawn
 
     captured: Dict[str, Any] = {}
@@ -40,6 +41,12 @@ def test_dispatch_spawn_threads_role_to_create_path(
         return DispatchAskResult(kind="create", short_id="abc12345")
 
     monkeypatch.setattr(dispatch_mod, "_claude_create_path", fake_create)
+    route = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        "ANTHROPIC_MODEL": "business-model",
+    }
+    monkeypatch.setattr(model_routing, "resolve_route", lambda *a, **k: route)
 
     result = dispatch_spawn(
         name="dreamer",
@@ -49,7 +56,8 @@ def test_dispatch_spawn_threads_role_to_create_path(
         role="consolidate",
     )
     assert result.kind == "created"
-    assert captured["role"] == "consolidate"
+    assert captured["role"] is None
+    assert captured["route_env"] == route
 
 
 def test_dispatch_spawn_defaults_role_to_none(
@@ -222,6 +230,76 @@ def test_tier_remap_preflight_normalizes_actual_conflict(
             )
 
     assert exc_info.value.exit_code == 2
+
+
+@pytest.mark.parametrize("substrate", ["worker", "pane"])
+def test_role_route_snapshot_is_resolved_once_before_tier_preflight_and_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    substrate: str,
+) -> None:
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("ANTHROPIC_DEFAULT_OPUS_MODEL", "glm-5.2")
+
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents import model_routing
+    from fno.agents.dispatch import DispatchAskResult, dispatch_spawn
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    route = {
+        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "secret",
+        "ANTHROPIC_MODEL": "business-model",
+    }
+    resolutions: list[str | None] = []
+
+    def stateful_resolution(role: str | None, **kwargs: Any) -> dict[str, str] | None:
+        resolutions.append(role)
+        return route if len(resolutions) == 1 else None
+
+    monkeypatch.setattr(model_routing, "resolve_route", stateful_resolution)
+    if substrate == "worker":
+        captured: dict[str, Any] = {}
+
+        def fake_create(**kwargs: Any) -> DispatchAskResult:
+            captured.update(kwargs)
+            return DispatchAskResult(kind="create", short_id="abc12345")
+
+        monkeypatch.setattr(dispatch_mod, "_claude_create_path", fake_create)
+        dispatch_spawn(
+            name="snapshot-worker",
+            message="work",
+            provider="claude",
+            cwd=tmp_path,
+            role="publisher",
+            model="opus",
+        )
+        assert captured["route_env"] == route
+        assert captured["role"] is None
+    else:
+        calls: list[list[str]] = []
+
+        def runner(argv: list[str], **kwargs: Any) -> Any:
+            calls.append(list(argv))
+            if argv[1:4] == ["mux", "pane", "run"]:
+                return SimpleNamespace(returncode=0, stdout="7\n", stderr="")
+            if argv[1:4] == ["mux", "pane", "ls"]:
+                return SimpleNamespace(returncode=0, stdout="[]", stderr="")
+            raise AssertionError(argv)
+
+        dispatch_spawn_pane(
+            name="snapshot-pane",
+            message="work",
+            provider="claude",
+            cwd=tmp_path,
+            role="publisher",
+            model="opus",
+            runner=runner,
+        )
+        launched = next(call for call in calls if call[1:4] == ["mux", "pane", "run"])
+        assert "ANTHROPIC_MODEL=business-model" in launched
+
+    assert resolutions == ["publisher"]
 
 
 @pytest.mark.parametrize("adapter", ["bg_create", "headless_create"])

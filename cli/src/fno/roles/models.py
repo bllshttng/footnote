@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from datetime import datetime
 from enum import Enum
 from typing import Annotated, Self
@@ -19,6 +21,19 @@ from fno.company.contracts import FunctionRef, RoleRef, WorkOrderRef
 
 NonEmptyStr = Annotated[str, StringConstraints(strip_whitespace=True, min_length=1)]
 Sha256Digest = Annotated[str, StringConstraints(pattern=r"^[0-9a-f]{64}$")]
+
+
+def canonical_digest(domain: str, value: object) -> str:
+    if hasattr(value, "model_dump"):
+        value = value.model_dump(mode="json")  # type: ignore[union-attr]
+    canonical = json.dumps(
+        value,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+    payload = f"fno/{domain}/v1\x00{canonical}".encode()
+    return hashlib.sha256(payload).hexdigest()
 
 
 class _RoleModel(BaseModel):
@@ -232,6 +247,16 @@ class ResolvedSource(_RoleModel):
     manifest_digest: Sha256Digest | None = None
     error: NonEmptyStr | None = None
 
+    @model_validator(mode="after")
+    def _resolved_source_is_valid(self) -> Self:
+        if self.status is not DefinitionStatus.VALID:
+            raise ValueError("resolved source must be valid")
+        if self.manifest_digest is None:
+            raise ValueError("resolved source requires a manifest_digest")
+        if self.error is not None:
+            raise ValueError("resolved source cannot carry an error")
+        return self
+
 
 class ContextBundle(_RoleModel):
     work_order: WorkOrderRef
@@ -240,12 +265,37 @@ class ContextBundle(_RoleModel):
     total_bytes: int = Field(ge=0)
     digest: Sha256Digest
 
+    @model_validator(mode="after")
+    def _bundle_is_coherent(self) -> Self:
+        if self.total_bytes != sum(reference.byte_size for reference in self.references):
+            raise ValueError("context bundle total_bytes must match references")
+        for reference in self.references:
+            if reference.snapshot_revision != self.snapshot_revision:
+                raise ValueError("context reference snapshot_revision must match bundle")
+            if (
+                reference.work_order_scope is not None
+                and reference.work_order_scope != self.work_order
+            ):
+                raise ValueError("context reference work_order_scope must match bundle")
+        digest_value = canonical_digest(
+            "context-bundle",
+            {
+                "work_order": self.work_order.model_dump(mode="json"),
+                "snapshot_revision": self.snapshot_revision,
+                "references": [item.model_dump(mode="json") for item in self.references],
+                "total_bytes": self.total_bytes,
+            },
+        )
+        if self.digest != digest_value:
+            raise ValueError("context bundle digest must match captured fields")
+        return self
+
 
 class ResolvedRole(_RoleModel):
     role: RoleRef
     work_order: WorkOrderRef
     snapshot_revision: NonEmptyStr
-    source_chain: tuple[ResolvedSource, ...]
+    source_chain: tuple[ResolvedSource, ...] = Field(min_length=1)
     manifest: RoleManifest
     manifest_digest: Sha256Digest
     context_bundle: ContextBundle
@@ -255,6 +305,45 @@ class ResolvedRole(_RoleModel):
     review_policy: ReviewPolicy
     delivery_policy: DeliveryPolicy
     routing_projection: RoutingHint | None = None
+
+    @model_validator(mode="after")
+    def _resolved_projection_is_coherent(self) -> Self:
+        if self.role != self.manifest.role:
+            raise ValueError("resolved role must match manifest role")
+        if self.work_order.role_id is not None and self.work_order.role_id != self.role.id:
+            raise ValueError("work_order role_id must match resolved role")
+        if self.context_bundle.work_order != self.work_order:
+            raise ValueError("context bundle work_order must match resolved role")
+        if self.context_bundle.snapshot_revision != self.snapshot_revision:
+            raise ValueError("context bundle snapshot_revision must match resolved role")
+        if self.manifest_digest != canonical_digest("role-manifest", self.manifest):
+            raise ValueError("manifest_digest must match manifest")
+        if any(source.snapshot_revision != self.snapshot_revision for source in self.source_chain):
+            raise ValueError("source snapshot_revision must match resolved role")
+        dispositions = tuple(source.disposition for source in self.source_chain)
+        if dispositions != ("shadowed",) * (len(self.source_chain) - 1) + ("contributing",):
+            raise ValueError("source_chain must end with its sole contributing source")
+        layers = tuple(source.layer for source in self.source_chain)
+        if len(set(layers)) != len(layers) or layers != tuple(
+            sorted(layers, key=tuple(RoleLayer).index)
+        ):
+            raise ValueError("source_chain must follow unique fixed layer order")
+        manifest_fields = (
+            (
+                "required_capabilities",
+                self.required_capabilities,
+                self.manifest.required_capabilities,
+            ),
+            ("authority_ceiling", self.authority_ceiling, self.manifest.authority_ceiling),
+            ("approval_floor", self.approval_floor, self.manifest.approval_floor),
+            ("review_policy", self.review_policy, self.manifest.review_policy),
+            ("delivery_policy", self.delivery_policy, self.manifest.delivery_policy),
+            ("routing_projection", self.routing_projection, self.manifest.routing_hint),
+        )
+        for field, actual, expected in manifest_fields:
+            if actual != expected:
+                raise ValueError(f"{field} must match manifest")
+        return self
 
 
 class ManifestRoutingResolution(_RoleModel):

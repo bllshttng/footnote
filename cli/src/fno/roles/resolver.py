@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
 import itertools
-import json
 import math
 from datetime import datetime
 from typing import Iterable, Sequence
@@ -29,6 +27,7 @@ from fno.roles.models import (
     RoleResolutionBlocked,
     RoleResolutionReason,
     Sensitivity,
+    canonical_digest as _digest,
 )
 from fno.roles.registry import DiscoveredRoleDefinition, RegistryError, RoleRegistry
 
@@ -166,19 +165,6 @@ def _overlay_violation(
             ):
                 return RoleResolutionReason.INVALID_OVERLAY, f"routing_hint.{field}"
     return None
-
-
-def _digest(domain: str, value: object) -> str:
-    if hasattr(value, "model_dump"):
-        value = value.model_dump(mode="json")
-    canonical = json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-    )
-    payload = f"fno/{domain}/v1\x00{canonical}".encode()
-    return hashlib.sha256(payload).hexdigest()
 
 
 def _blocked(
