@@ -1665,7 +1665,7 @@ def cmd_send(
         if to_project is None:
             from fno.agents import discover as discover_mod
             from fno.agents.dispatch import UNKNOWN_AGENT_EXIT_CODE
-            from fno.harness_identity import canonical_handle
+            from fno.harness_identity import canonical_handle, session_identity_key
 
             resolved, suggestions = discover_mod.resolve_or_suggest(
                 recipient, require_alive=False
@@ -1681,7 +1681,37 @@ def cmd_send(
                     file=sys.stderr,
                 )
                 raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
-            recipient = canonical_handle(resolved.session_id)
+            if resolved.identity_provisional:
+                print(
+                    f"cannot resolve agent heads-up uniquely: {recipient!r} has "
+                    "no canonical session identity",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+            try:
+                durable, ambiguous = discover_mod.resolve_reachable(
+                    resolved.session_id
+                )
+            except discover_mod.StoreReadError as exc:
+                print(
+                    f"cannot resolve agent heads-up uniquely: {recipient!r}; "
+                    f"unreadable stores: {', '.join(exc.failed)}",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE) from exc
+            if (
+                durable is None
+                or ambiguous
+                or session_identity_key(durable.session_id)
+                != session_identity_key(resolved.session_id)
+            ):
+                detail = f"; candidates: {', '.join(ambiguous)}" if ambiguous else ""
+                print(
+                    f"cannot resolve agent heads-up uniquely: {recipient!r}{detail}",
+                    file=sys.stderr,
+                )
+                raise typer.Exit(code=UNKNOWN_AGENT_EXIT_CODE)
+            recipient = canonical_handle(durable.session_id)
 
         # Sender identity: an explicit --from-name wins; otherwise resolve the
         # current project from settings (the project-note sender default, so a
