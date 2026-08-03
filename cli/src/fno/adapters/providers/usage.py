@@ -235,29 +235,29 @@ def _load_records() -> dict[str, ProviderRecord]:
         return {}
 
 
-def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
-    """Try ONCE to prove a tainted shared slot's identity. True if it repaired.
+def _shares_the_slot(record: ProviderRecord) -> bool:
+    """Only a managed record with no dir of its own rides the shared slot.
 
-    A taint used to be terminal: it made ``_is_active_slot_occupant`` False
-    forever, the probe degraded to None by design, and nothing announced it -
-    a five-day silent outage ended by deleting a marker file by hand. A fresh
-    probe now asks the reconciliation primitive whether the taint is a false
-    positive, and resumes ONLY if identity was proven.
-
-    Two boundaries keep the hook honest. A record with its own ``config_dir`` is
-    attributable without the slot, so it never reaches here. And a REFUSAL is
-    backed off briefly - a slot whose principal matches nothing must not re-hit
-    the profile endpoint on every probe - while never being cached as proof:
-    the backoff only delays the next attempt, it never satisfies one.
+    A ``config_dir`` record is attributable without the slot, so neither the
+    taint nor a drifted stamp can affect it and it never enters any repair.
     """
-    if record.auth != "managed" or _record_credential_dir(record) is not None:
+    return record.auth == "managed" and _record_credential_dir(record) is None
+
+
+def _reconcile_slot_once(record: ProviderRecord, now: float) -> bool:
+    """Try ONCE to prove the shared slot's identity and repair it. True if it did.
+
+    A REFUSAL is backed off briefly - a slot whose principal matches nothing
+    must not re-hit the profile endpoint on every probe - while never being
+    cached as proof: the backoff only delays the next attempt, it never
+    satisfies one.
+    """
+    if not _shares_the_slot(record):
         return False
     try:
         from fno.adapters.providers import managed
 
         root = managed.store_root()
-        if not managed.slot_tainted(record.harness, root):
-            return False  # not a taint refusal; there is nothing to repair
         if managed.reconcile_backoff_active(record.harness, root, now=now):
             return False
         # Note the attempt BEFORE making it, so a crash mid-reconcile still
@@ -267,6 +267,51 @@ def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
             record.harness, by_id=_load_records(), root=root
         ).ok
     except Exception:  # noqa: BLE001 - repair is best-effort; UNKNOWN is the fallback
+        return False
+
+
+def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
+    """Repair a TAINTED slot, the case that used to be terminal.
+
+    A taint made ``_is_active_slot_occupant`` False forever, the probe degraded
+    to None by design, and nothing announced it - a five-day silent outage ended
+    by deleting a marker file by hand. A fresh probe now asks whether the taint
+    is a false positive, and resumes ONLY if identity was proven.
+    """
+    if not _shares_the_slot(record):
+        return False
+    try:
+        from fno.adapters.providers import managed
+
+        if not managed.slot_tainted(record.harness, managed.store_root()):
+            return False  # not a taint refusal; there is nothing to repair
+    except Exception:  # noqa: BLE001 - an unreadable store is not repairable here
+        return False
+    return _reconcile_slot_once(record, now)
+
+
+def _stamp_is_provably_wrong(record: ProviderRecord, now: float) -> bool:
+    """The live slot provably belongs to someone OTHER than ``record``.
+
+    The taint watches the door footnote controls; `claude /login` uses the other
+    one and leaves a stamp that is wrong and untainted, so attribution proceeds
+    confidently and files the live account's usage under this record's name.
+    That is the misattribution the whole taint mechanism exists to prevent,
+    arriving through a door it does not watch.
+
+    Only a PROVEN mismatch counts. An unbound record or an unreachable endpoint
+    is no evidence, and stays on today's stamp-trusting behavior rather than
+    turning every store registered before principals existed into unknown.
+    """
+    if not _shares_the_slot(record):
+        return False
+    try:
+        from fno.adapters.providers import managed
+
+        return managed.slot_principal_matches(
+            record.harness, record.id, managed.store_root(), now=now
+        ) is False
+    except Exception:  # noqa: BLE001 - no evidence is not a mismatch
         return False
 
 
@@ -595,6 +640,16 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
         if not _reconcile_tainted_slot(record, now):
             return None
         if not _attributed_credential_dir(record)[0]:
+            return None
+    elif _stamp_is_provably_wrong(record, now):
+        # An out-of-band /login: the stamp is untainted and wrong, so nothing
+        # upstream hesitated. Repair once, then re-check - the slot usually
+        # belongs to a DIFFERENT record, which correctly leaves this one
+        # unknown and makes that one probeable on its own probe.
+        _reconcile_slot_once(record, now)
+        if not _attributed_credential_dir(record)[0] or _stamp_is_provably_wrong(
+            record, now
+        ):
             return None
     probe = _PROBES.get(record.harness)
     if probe is None:

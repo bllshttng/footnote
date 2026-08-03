@@ -856,3 +856,132 @@ class TestTaintSelfHeal:
         monkeypatch.setattr(
             usage_mod, "_load_records", lambda: ProvidersConfig(records=[rec]).by_id
         )
+
+
+class TestUntaintedStampDrift:
+    """The taint watches the door footnote controls. `claude /login` uses the
+    other one and leaves a stamp that is wrong AND untainted, so attribution
+    proceeds confidently and bills the wrong account - observed live."""
+
+    @staticmethod
+    def _record(record_id: str = "primary") -> ProviderRecord:
+        return ProviderRecord(
+            id=record_id, name=record_id, harness="claude", auth="managed"
+        )
+
+    @staticmethod
+    def _arm(monkeypatch, usage_mod, rec, *, matches, reconcile=None, root=None):
+        from pathlib import Path as _Path
+
+        from fno.adapters.providers import managed as managed_mod
+        from fno.adapters.providers.model import ProvidersConfig
+
+        monkeypatch.setattr(usage_mod, "_is_active_slot_occupant", lambda r: True)
+        monkeypatch.setattr(
+            managed_mod, "store_root", lambda: root or _Path("/nonexistent-store")
+        )
+        monkeypatch.setattr(managed_mod, "slot_tainted", lambda cli, r: False)
+        monkeypatch.setattr(
+            managed_mod, "slot_principal_matches",
+            lambda cli, record_id, r, **kw: matches,
+        )
+        if reconcile is not None:
+            monkeypatch.setattr(managed_mod, "reconcile_slot", reconcile)
+        monkeypatch.setattr(
+            usage_mod, "_load_records", lambda: ProvidersConfig(records=[rec]).by_id
+        )
+
+    def test_a_proven_wrong_stamp_stops_attribution(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The whole point: never report the live account's usage under the
+        stamped record's name."""
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        monkeypatch.setitem(
+            usage_mod._PROBES, "claude",
+            lambda r, now: pytest.fail("probed under a provably wrong stamp"),
+        )
+
+        def _no_repair(cli, *, by_id, root=None, lock_timeout=10):
+            from fno.adapters.providers.managed import ReconcileResult
+
+            return ReconcileResult("zero-match", detail="unregistered principal")
+
+        self._arm(monkeypatch, usage_mod, rec, matches=False, reconcile=_no_repair,
+                  root=tmp_path)
+        assert probe_usage(rec, now=1000.0) is None
+
+    def test_a_matching_principal_probes_normally(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: UsageSnapshot(
+            provider_id=r.id,
+            windows=(UsageWindow(label="5h", used_pct=7.0, resets_at=now + 60),),
+            probed_at=now, source="oauth-endpoint",
+        ))
+        self._arm(monkeypatch, usage_mod, rec, matches=True, root=tmp_path)
+        snap = probe_usage(rec, now=1000.0)
+        assert snap is not None and snap.windows[0].used_pct == 7.0
+
+    def test_no_evidence_keeps_todays_behavior(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """An unbound record or an unreachable endpoint is NOT a mismatch.
+        Reading it as one would turn every store registered before principals
+        existed into unknown - a wrong number replaced by no number."""
+        import fno.adapters.providers.usage as usage_mod
+
+        rec = self._record()
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: UsageSnapshot(
+            provider_id=r.id,
+            windows=(UsageWindow(label="5h", used_pct=3.0, resets_at=now + 60),),
+            probed_at=now, source="oauth-endpoint",
+        ))
+        self._arm(monkeypatch, usage_mod, rec, matches=None, root=tmp_path)
+        assert probe_usage(rec, now=1000.0) is not None
+
+    def test_a_config_dir_record_is_never_checked(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Boundaries: its own dir is attributable without the shared slot."""
+        import fno.adapters.providers.usage as usage_mod
+        from fno.adapters.providers import managed as managed_mod
+
+        own = tmp_path / "claude-alt"
+        own.mkdir()
+        rec = ProviderRecord(
+            id="alt", name="alt", harness="claude", auth="managed", config_dir=own
+        )
+        monkeypatch.setattr(
+            managed_mod, "slot_principal_matches",
+            lambda *a, **k: pytest.fail("a config_dir record consulted the slot"),
+        )
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: None)
+        assert probe_usage(rec, now=1000.0) is None
+
+
+class TestPrincipalEvidenceTTL:
+    def test_proven_evidence_is_reused_then_re_proven(self, tmp_path: Path) -> None:
+        """Successful evidence is cached briefly so an attribution check does
+        not pay a profile call on every probe."""
+        from fno.adapters.providers import managed
+
+        managed.note_slot_principal("claude", tmp_path, "acct-a", now=1000.0)
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, now=1000.0 + 60
+        ) == "acct-a"
+        assert managed.cached_slot_principal(
+            "claude", tmp_path, now=1000.0 + 100_000
+        ) is None
+
+    def test_an_unbound_record_is_no_evidence_not_a_mismatch(
+        self, tmp_path: Path
+    ) -> None:
+        from fno.adapters.providers import managed
+
+        assert managed.slot_principal_matches("claude", "never-bound", tmp_path) is None

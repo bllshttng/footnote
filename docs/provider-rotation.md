@@ -304,7 +304,16 @@ A reconciliation against a store that does not exist yet returns `no-managed-sto
 A record's principal is bound where footnote knows whose credential it holds: at `register`, and at the tail of a verified switch for a record not yet bound.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
 
-A tainted slot also self-heals: before a fresh usage probe refuses a tainted managed occupant, it runs the same primitive once, and resumes only if identity was proven.
+A fresh usage probe also checks the stamp it is about to trust.
+An out-of-band `/login` leaves a stamp that is wrong and *untainted*, so nothing upstream hesitates and the live account's usage gets filed under the stamped record's name.
+When the stamped record's live principal provably belongs to someone else, the probe repairs once and otherwise reports `unknown` rather than a confident wrong number.
+Proven principal evidence is cached briefly so this costs no call on the common path.
+
+Only a *proven* mismatch counts.
+A record with no bound principal, or an endpoint that cannot answer, is no evidence and keeps today's stamp-trusting behavior: turning "we could not ask" into `unknown` would break measurement for every store registered before principals existed, replacing a wrong number with no number.
+That also means a store predating this change measures exactly as it did until you re-register its accounts, which is what binds their principals.
+
+A tainted slot self-heals the same way: before a fresh usage probe refuses a tainted managed occupant, it runs the same primitive once, and resumes only if identity was proven.
 A refusal is backed off briefly so an unmatchable slot cannot re-hit the endpoint on every probe; only failures are cached, and only as backoff, never as proof.
 
 Two boundaries are worth knowing.

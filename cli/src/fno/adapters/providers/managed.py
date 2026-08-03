@@ -61,6 +61,9 @@ _PROFILE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
 # How long a REFUSED auto-reconcile is backed off. Only failures are cached, and
 # only as backoff, never as proof: a success clears both the taint and this file.
 _RECONCILE_BACKOFF_S = 300
+# How long PROVEN slot-principal evidence stays good. Bounds the cost of
+# checking a stamp against the live credential on every fresh probe.
+_PRINCIPAL_TTL_S = 900
 
 
 class ManagedStoreError(RuntimeError):
@@ -834,6 +837,13 @@ def taint_writers_still_live(cli: str, root: Path) -> list[str]:
     capture-before-overwrite would then file that credential under the record we
     just stamped.
     """
+    if not slot_tainted(cli, root):
+        # No taint means nothing recorded a writer, which is different from a
+        # marker that cannot say. Falling through to a live scan here would let
+        # any pinned session block the out-of-band-/login repair - the case the
+        # verb exists for, and the one where a live pin is routinely the very
+        # session running it.
+        return []
     recorded = tainting_pids(cli, root)
     if recorded is None:
         return [f"pid {session.pid}" for session in pinning_sessions_for(cli)]
@@ -1049,6 +1059,83 @@ def _clear_record_principal(record_id: str, root: Path | None = None) -> None:
         pass
 
 
+def _principal_cache_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".principal")
+
+
+def cached_slot_principal(
+    cli: str, root: Path, *, now: float | None = None, ttl: float = _PRINCIPAL_TTL_S
+) -> Optional[str]:
+    """The account uuid last PROVEN for this slot, while the evidence is fresh.
+
+    Successful evidence only: this is what keeps an attribution-sensitive probe
+    from paying a profile call every time. A failure is never cached here - it
+    would become an excuse to skip the next check, which is the opposite of what
+    an unproven identity should cause.
+    """
+    try:
+        data = json.loads(_principal_cache_path(cli, root).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    uuid, at = data.get("account_uuid"), data.get("at")
+    if not isinstance(uuid, str) or not isinstance(at, (int, float)):
+        return None
+    return uuid if (now if now is not None else time.time()) - at < ttl else None
+
+
+def note_slot_principal(
+    cli: str, root: Path, account_uuid: str, *, now: float | None = None
+) -> None:
+    try:
+        _atomic_write_private(
+            _principal_cache_path(cli, root),
+            json.dumps({
+                "account_uuid": account_uuid,
+                "at": now if now is not None else time.time(),
+            }),
+        )
+    except OSError:
+        pass
+
+
+def clear_slot_principal_cache(cli: str, root: Path) -> None:
+    _principal_cache_path(cli, root).unlink(missing_ok=True)
+
+
+def slot_principal_matches(
+    cli: str,
+    record_id: str,
+    root: Path,
+    *,
+    now: float | None = None,
+    ttl: float = _PRINCIPAL_TTL_S,
+) -> Optional[bool]:
+    """Is the live slot credential ``record_id``'s? None when unprovable.
+
+    The taint marker only watches the door footnote controls, so an out-of-band
+    `claude /login` leaves a stamp that is wrong AND untainted and attribution
+    proceeds confidently. This is the check that catches it.
+
+    None means NO EVIDENCE - the record has no bound principal, or the endpoint
+    could not answer - and must not be read as a mismatch. Turning "we could not
+    ask" into unknown usage would break measurement for every store registered
+    before principals existed, trading a wrong number for no number at all.
+    """
+    bound = record_principal(record_id, root)
+    if bound is None:
+        return None
+    cached = cached_slot_principal(cli, root, now=now, ttl=ttl)
+    if cached is not None:
+        return cached == bound["account_uuid"]
+    principal, _failure = slot_principal(read_canonical_slot_blob(cli))
+    if principal is None:
+        return None
+    note_slot_principal(cli, root, principal["account_uuid"], now=now)
+    return principal["account_uuid"] == bound["account_uuid"]
+
+
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:
     return _active_stamp_path(cli, root).with_suffix(".reconcile-attempt")
 
@@ -1225,8 +1312,23 @@ def _reconcile_locked(
     write_snapshot(by_id[matched], blob, root)
     write_record_principal(matched, principal, root)
     stamp_active_slot(cli, matched, root)
+    # Clearing the taint is what makes the stamp TRUSTED, so it gets the last
+    # look. An out-of-band writer that slipped in during the writes above leaves
+    # the taint set: the refreshed snapshot and stamp are then merely stale
+    # (self-correcting on the next pass) rather than stale-and-believed.
+    if read_canonical_slot_blob(cli) != blob:
+        note_slot_principal(cli, root, principal["account_uuid"])
+        return ReconcileResult(
+            "slot-changed",
+            detail=(
+                f"'{matched}' was proven and its snapshot refreshed, but the slot "
+                "changed again before the taint could be cleared; the taint stands "
+                "so nothing trusts the stamp - retry once the slot settles"
+            ),
+        )
     _set_slot_taint(cli, root, False)
     _clear_reconcile_backoff(cli, root)
+    note_slot_principal(cli, root, principal["account_uuid"])
     return ReconcileResult(
         "matched",
         record_id=matched,
@@ -1464,6 +1566,7 @@ def _switch_locked(
     # We just proved this blob is target's by materializing and verifying it, so
     # this is the cheapest moment to bind target's principal - the binding a
     # later reconciliation needs in order to recognize the account at all.
+    clear_slot_principal_cache(target.harness, root)
     capture_record_principal(target, target_blob, root)
     if emit_fn is not None:
         event: dict[str, object] = {
