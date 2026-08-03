@@ -111,6 +111,10 @@ def _stat_revision(stat: os.stat_result) -> str:
     return f"stat:{stat.st_dev}:{stat.st_ino}:{stat.st_size}:{stat.st_mtime_ns}"
 
 
+def _stat_identity(stat: os.stat_result) -> tuple[int, int, int, int]:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns
+
+
 def _read_coherent_bytes(path: Path, *, after_read=None) -> bytes:
     with path.open("rb") as stream:
         before = os.fstat(stream.fileno())
@@ -119,8 +123,9 @@ def _read_coherent_bytes(path: Path, *, after_read=None) -> bytes:
             after_read()
         after = os.fstat(stream.fileno())
     current = path.stat()
-    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns)
-    if identity(before) != identity(after) or identity(after) != identity(current):
+    if _stat_identity(before) != _stat_identity(after) or _stat_identity(
+        after
+    ) != _stat_identity(current):
         raise JournalRevisionConflict(
             _stat_revision(before),
             _stat_revision(after),
@@ -157,11 +162,13 @@ def _current_evidence_events(
     observed: dict[tuple[str, ...], tuple[str, list[dict[str, object]]]] = {}
     requests: dict[str, dict[str, object]] = {}
     approvals: dict[str, dict[str, object]] = {}
+    unkeyed_approvals: dict[str, dict[str, object]] = {}
     effects: dict[str, dict[str, object]] = {}
     for event in events:
         event_type = event.get("type")
         data = event.get("data")
         if event_type == "delivery_evidence_observed":
+            identity: tuple[str, ...]
             try:
                 parsed = DeliveryEvidenceObservedEvent.model_validate(event)
                 fact = parsed.data
@@ -176,18 +183,20 @@ def _current_evidence_events(
                 )
                 revision = fact.fact_revision
             except ValidationError:
-                evidence = data.get("evidence") if isinstance(data, dict) else None
-                evidence_id = evidence.get("id") if isinstance(evidence, dict) else None
+                raw_evidence = data.get("evidence") if isinstance(data, dict) else None
+                evidence_id = (
+                    raw_evidence.get("id") if isinstance(raw_evidence, dict) else None
+                )
                 producer = data.get("producer") if isinstance(data, dict) else None
                 if not isinstance(evidence_id, str):
                     raise ValueError("malformed delivery_evidence_observed event")
                 identity = ("rejected", evidence_id, str(producer))
                 revision = "rejected"
-            current = observed.get(identity)
-            if current is None or current[0] != revision:
+            selected = observed.get(identity)
+            if selected is None or selected[0] != revision:
                 observed[identity] = (revision, [event])
             else:
-                current[1].append(event)
+                selected[1].append(event)
             continue
         if not isinstance(data, dict):
             continue
@@ -195,10 +204,18 @@ def _current_evidence_events(
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
                 requests[digest] = event
+            else:
+                effect_id = data.get("effect_id")
+                if isinstance(effect_id, str) and effect_id:
+                    unkeyed_approvals[effect_id] = event
         elif event_type == "approval_decided":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
                 approvals[digest] = event
+            else:
+                effect_id = data.get("effect_id")
+                if isinstance(effect_id, str) and effect_id:
+                    unkeyed_approvals[effect_id] = event
         elif event_type == "effect_state_changed":
             key = data.get("idempotency_key")
             effect_id = data.get("effect_id")
@@ -206,19 +223,23 @@ def _current_evidence_events(
                 effects[f"key:{key}"] = event
             elif isinstance(effect_id, str) and effect_id:
                 effects[f"effect:{effect_id}"] = event
-    current: list[tuple[dict[str, object], dict[str, object] | None]] = [
+    selected_events: list[tuple[dict[str, object], dict[str, object] | None]] = [
         (event, None)
         for _, events_for_revision in observed.values()
         for event in events_for_revision
     ]
     for digest, request in requests.items():
-        current.append((approvals.get(digest, request), None))
+        selected_events.append((approvals.get(digest, request), None))
+    selected_events.extend(
+        (event, None) for digest, event in approvals.items() if digest not in requests
+    )
+    selected_events.extend((event, None) for event in unkeyed_approvals.values())
     for event in effects.values():
         data = event.get("data")
         digest = data.get("request_digest") if isinstance(data, dict) else None
-        request = requests.get(digest) if isinstance(digest, str) else None
-        current.append((event, request))
-    return tuple(current)
+        approval_request = requests.get(digest) if isinstance(digest, str) else None
+        selected_events.append((event, approval_request))
+    return tuple(selected_events)
 
 
 def _normalize_event(

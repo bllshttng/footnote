@@ -355,6 +355,62 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
     assert payload["verdict"]["aggregate"] == "passed"
     assert {row["result"] for row in payload["verdict"]["requirements"]} == {"passed"}
 
+    malformed_decision = {
+        "ts": "2026-08-02T12:04:00Z",
+        "type": "approval_decided",
+        "source": "approvals",
+        "data": {
+            "work_order_id": "x-delivery",
+            "attempt_id": "attempt-1",
+            "effect_id": "effect-1",
+            "decision": "declined",
+            "deciding_principal_id": "principal-1",
+        },
+    }
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [malformed_decision])
+    )
+
+    _, malformed_payload = _invoke(plan, events)
+
+    approval_row = next(
+        row
+        for row in malformed_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "approval-ready"
+    )
+    assert approval_row["result"] == "unknown"
+    assert "missing request_digest" in " ".join(approval_row["diagnostics"])
+
+    malformed_request = {
+        "ts": "2026-08-02T12:04:00Z",
+        "type": "approval_requested",
+        "source": "approvals",
+        "data": {
+            "work_order_id": "x-delivery",
+            "attempt_id": "attempt-1",
+            "effect_id": "effect-1",
+            "request_id": "request-2",
+            "principal_id": "principal-1",
+            "effect_class": "communication.external",
+            "destination": "email:customer@example.com",
+            "action_digest": "action-digest-2",
+            "expires_at": "2026-08-03T12:00:00Z",
+        },
+    }
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [malformed_request])
+    )
+
+    _, malformed_payload = _invoke(plan, events)
+
+    approval_row = next(
+        row
+        for row in malformed_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "approval-ready"
+    )
+    assert approval_row["result"] == "unknown"
+    assert "missing request_digest" in " ".join(approval_row["diagnostics"])
+
 
 def test_ac_d10_hp_refreshed_observed_snapshot_replaces_stale_history(tmp_path: Path) -> None:
     plan = _plan(tmp_path)

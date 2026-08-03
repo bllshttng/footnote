@@ -234,6 +234,12 @@ fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() 
 
     assert_eq!(output["decision"], "allow", "{output}");
     assert_eq!(output["termination_reason"], "DoneDelivery");
+    let message = output["message"].as_str().unwrap();
+    assert!(
+        message.contains("fno delivery evaluate --json"),
+        "{message}"
+    );
+    assert!(message.contains("sha256:abc"), "{message}");
     assert!(event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
     let events = fs::read_to_string(&env.events).unwrap();
     assert!(events.lines().any(|line| {
@@ -241,6 +247,16 @@ fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() 
         event["type"] == "loop_check"
             && event["data"]["decision"] == "allow"
             && event["data"]["fact_revision"] == "sha256:abc"
+    }));
+    assert!(events.lines().any(|line| {
+        let event: Value = serde_json::from_str(line).unwrap();
+        event["type"] == "termination"
+            && event["data"]["message"]
+                .as_str()
+                .is_some_and(|value| value.contains("fno delivery evaluate --json"))
+            && event["data"]["message"]
+                .as_str()
+                .is_some_and(|value| value.contains("sha256:abc"))
     }));
 }
 
@@ -306,6 +322,33 @@ fn generic_completion_malformed_explicit_plan_never_falls_through_to_advisory() 
 
     assert_eq!(output["decision"], "block");
     assert!(output["termination_reason"].is_null());
+}
+
+#[test]
+fn generic_completion_structurally_invalid_explicit_plan_never_falls_through_to_advisory() {
+    let invalid_declarations = [
+        "company_work: bogus\n",
+        "company_work:\n  work_order: bogus\n  deliverables: []\n",
+        "company_work:\n  work_order:\n    node_id: x-delivery\n  deliverables: []\n",
+        "company_work:\n  work_order:\n    node_id: x-delivery\n    attempt_id: attempt-1\n  deliverables: bogus\n",
+        "company_work:\n  work_order:\n    node_id: x-delivery\n    attempt_id: attempt-1\n  deliverables:\n    - id: output\n      required_evidence_ids: bogus\n",
+    ];
+    for declaration in invalid_declarations {
+        let env = setup(&passed_response());
+        fs::write(
+            env.cwd.join("plan.md"),
+            format!("---\ncompletion: delivery\n{declaration}---\n"),
+        )
+        .unwrap();
+
+        let output = run(&env);
+
+        assert_eq!(output["decision"], "block", "{declaration}: {output}");
+        assert!(
+            output["termination_reason"].is_null(),
+            "{declaration}: {output}"
+        );
+    }
 }
 
 #[test]

@@ -214,20 +214,25 @@ def adapt_delivery_event(
             or request_data["destination"] != binding.destination
         ):
             return ()
+        request_digest = _nonempty(data, "request_digest")
+        idempotency_key = _nonempty(data, "idempotency_key")
+        action_digest = _nonempty(request_data, "action_digest")
+        if request_digest is None or idempotency_key is None or action_digest is None:
+            return ()
         attempt = EffectAttempt(
             effect_id=binding.id,
             work_order_id=binding.work_order_id,
             attempt_id=binding.attempt_id,
-            request_digest=data["request_digest"],
-            idempotency_key=data["idempotency_key"],
-            action_digest=request_data["action_digest"],
+            request_digest=request_digest,
+            idempotency_key=idempotency_key,
+            action_digest=action_digest,
             destination=binding.destination,
             effect_class=binding.effect_class,
             adapter_id="event:approvals",
             adapter_version=EFFECT_EVENT_ADAPTER_VERSION,
             state=states[state],
-            external_ref=data.get("external_ref"),
-            reconciliation_ref=data.get("reconciliation_ref"),
+            external_ref=_nonempty(data, "external_ref"),
+            reconciliation_ref=_nonempty(data, "reconciliation_ref"),
         )
         projection = evidence_projection(attempt)
         if (
@@ -331,23 +336,31 @@ def _rejected_evidence_ids(
         evidence = data.get("evidence")
         evidence_id = evidence.get("id") if isinstance(evidence, Mapping) else None
         return (evidence_id,) if isinstance(evidence_id, str) and evidence_id in required_ids else ()
+    subject_ids: set[str]
+    kinds: tuple[EvidenceSubjectKind, ...]
     if event_type in {"approval_requested", "approval_decided"}:
         request_digest = _nonempty(data, "request_digest")
         kinds = (EvidenceSubjectKind.APPROVAL,)
-        subject_id = request_digest
+        binding = _producer_binding(company_work, data)
+        subject_ids = {
+            subject_id
+            for subject_id in (request_digest, binding.approval_id if binding else None)
+            if subject_id is not None
+        }
     elif event_type == "effect_state_changed":
-        subject_id = _nonempty(data, "effect_id")
+        effect_id = _nonempty(data, "effect_id")
+        subject_ids = {effect_id} if effect_id is not None else set()
         kinds = (EvidenceSubjectKind.EFFECT, EvidenceSubjectKind.ACKNOWLEDGMENT)
     else:
         return ()
-    if subject_id is None:
+    if not subject_ids:
         return ()
     return tuple(
         evidence.id
         for evidence in company_work.evidence
         if evidence.id in required_ids
         and evidence.subject_kind in kinds
-        and evidence.subject_id == subject_id
+        and evidence.subject_id in subject_ids
     )
 
 

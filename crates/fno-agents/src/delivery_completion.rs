@@ -7,6 +7,8 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+const EVALUATOR_COMMAND_ID: &str = "fno delivery evaluate --json";
+
 #[derive(Debug)]
 pub enum DeliveryCompletion {
     Inactive,
@@ -166,13 +168,15 @@ pub fn gate_output(
             Some(fingerprint.into()),
         ));
     }
+    let terminal_message =
+        format!("generic delivery passed via {EVALUATOR_COMMAND_ID} at {fact_revision}");
     crate::loopcheck::emit_to_both(
         project_events,
         global_events,
         "termination",
         serde_json::json!({
             "session_id": session_id, "reason": "DoneDelivery",
-            "message": format!("generic delivery passed at {fact_revision}")
+            "message": terminal_message
         }),
     );
     crate::loopcheck::emit_to_both(
@@ -188,7 +192,7 @@ pub fn gate_output(
     Some(crate::completion_output::allow_output(
         "allow",
         Some(crate::loopcheck::TerminationReason::DoneDelivery),
-        &format!("generic delivery passed at {fact_revision}"),
+        &terminal_message,
         fires,
         Some(fingerprint.into()),
     ))
@@ -338,36 +342,82 @@ fn activation(plan_path: &Path) -> Activation {
     {
         return Activation::Inactive;
     }
-    let Some(company) = mapping
-        .get(serde_yaml_ng::Value::from("company_work"))
-        .and_then(serde_yaml_ng::Value::as_mapping)
-    else {
+    let company_key = serde_yaml_ng::Value::from("company_work");
+    let Some(company_value) = mapping.get(&company_key) else {
         return Activation::Inactive;
     };
-    let work_order_valid = company
-        .get(serde_yaml_ng::Value::from("work_order"))
-        .and_then(serde_yaml_ng::Value::as_mapping)
-        .is_some_and(|work_order| {
-            ["node_id", "attempt_id"].iter().all(|key| {
-                work_order
-                    .get(serde_yaml_ng::Value::from(*key))
-                    .and_then(serde_yaml_ng::Value::as_str)
-                    .is_some_and(|value| !value.trim().is_empty())
-            })
-        });
-    let Some(deliverables) = company
-        .get(serde_yaml_ng::Value::from("deliverables"))
-        .and_then(serde_yaml_ng::Value::as_sequence)
-    else {
+    let Some(company) = company_value.as_mapping() else {
+        return Activation::Invalid("delivery plan company_work is not a mapping".into());
+    };
+    let work_order_key = serde_yaml_ng::Value::from("work_order");
+    let work_order_valid = match company.get(&work_order_key) {
+        None => false,
+        Some(value) => {
+            let Some(work_order) = value.as_mapping() else {
+                return Activation::Invalid(
+                    "delivery plan company_work.work_order is not a mapping".into(),
+                );
+            };
+            let node = work_order.get(serde_yaml_ng::Value::from("node_id"));
+            let attempt = work_order.get(serde_yaml_ng::Value::from("attempt_id"));
+            match (node, attempt) {
+                (None, _) | (_, None) => {
+                    return Activation::Invalid(
+                        "delivery plan work_order is missing node_id or attempt_id".into(),
+                    );
+                }
+                (Some(node), Some(attempt)) => {
+                    let Some(node) = node.as_str() else {
+                        return Activation::Invalid(
+                            "delivery plan work_order.node_id is not a string".into(),
+                        );
+                    };
+                    let Some(attempt) = attempt.as_str() else {
+                        return Activation::Invalid(
+                            "delivery plan work_order.attempt_id is not a string".into(),
+                        );
+                    };
+                    if node.trim().is_empty() || attempt.trim().is_empty() {
+                        return Activation::Invalid(
+                            "delivery plan work_order node_id or attempt_id is empty".into(),
+                        );
+                    }
+                    true
+                }
+            }
+        }
+    };
+    let deliverables_key = serde_yaml_ng::Value::from("deliverables");
+    let Some(deliverables_value) = company.get(&deliverables_key) else {
         return Activation::Inactive;
     };
-    let has_required = deliverables.iter().any(|deliverable| {
-        deliverable
-            .as_mapping()
-            .and_then(|item| item.get(serde_yaml_ng::Value::from("required_evidence_ids")))
-            .and_then(serde_yaml_ng::Value::as_sequence)
-            .is_some_and(|ids| !ids.is_empty())
-    });
+    let Some(deliverables) = deliverables_value.as_sequence() else {
+        return Activation::Invalid("delivery plan company_work.deliverables is not a list".into());
+    };
+    let mut has_required = false;
+    for deliverable in deliverables {
+        let Some(deliverable) = deliverable.as_mapping() else {
+            return Activation::Invalid("delivery plan deliverable is not a mapping".into());
+        };
+        let required_key = serde_yaml_ng::Value::from("required_evidence_ids");
+        let Some(required_value) = deliverable.get(&required_key) else {
+            continue;
+        };
+        let Some(required_ids) = required_value.as_sequence() else {
+            return Activation::Invalid("delivery plan required_evidence_ids is not a list".into());
+        };
+        for evidence_id in required_ids {
+            let Some(evidence_id) = evidence_id.as_str() else {
+                return Activation::Invalid(
+                    "delivery plan required evidence id is not a string".into(),
+                );
+            };
+            if evidence_id.trim().is_empty() {
+                return Activation::Invalid("delivery plan required evidence id is empty".into());
+            }
+            has_required = true;
+        }
+    }
     if work_order_valid && !deliverables.is_empty() && has_required {
         Activation::Active
     } else {
