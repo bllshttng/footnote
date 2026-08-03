@@ -278,36 +278,53 @@ def canonical_slot_blobs(cli: str) -> list[str]:
 
 
 def canonical_slot_principal(cli: str) -> tuple[Optional[dict], Optional[str]]:
-    """The one principal the shared slot presents, or a typed failure.
+    """The one principal the shared slot presents, or a typed failure."""
+    principal, _blob, failure = canonical_slot_identity(cli)
+    return principal, failure
 
-    ``ambiguous-slot`` when its credentials resolve to DIFFERENT accounts. That
-    is not a tie to break: whichever we stamped, some reader would get the other
-    one, so the honest answer is to refuse and let the operator settle it.
-    """
+
+def canonical_slot_identity(
+    cli: str,
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """``(principal, the blob it was proven from, failure)`` for the shared slot."""
     return principal_of_blobs(canonical_slot_blobs(cli))
 
 
-def principal_of_blobs(blobs: list[str]) -> tuple[Optional[dict], Optional[str]]:
-    """The one principal ``blobs`` agree on, or a typed failure.
+def principal_of_blobs(
+    blobs: list[str],
+) -> tuple[Optional[dict], Optional[str], Optional[str]]:
+    """``(principal, proven_blob, failure)`` for a captured set of credentials.
 
     Takes the bytes rather than re-reading the slot so a caller can prove, store
     and bind THE SAME credential: proving one read and snapshotting another is
     how account A's identity ends up bound to account B's blob.
+
+    Every candidate is resolved, and the one that PROVED is handed back. Both
+    matter. Stopping at the first failure would let an expired scoped item
+    sitting in front of a live unscoped login look like a plain offline
+    registration - and then get snapshotted and stamped as the account. And
+    ``ambiguous-slot`` when two resolve to different identities is not a tie to
+    break: whichever we stamped, some reader would get the other one.
     """
     if not blobs:
-        return None, "no-slot-credential"
-    seen: list[dict] = []
+        return None, None, "no-slot-credential"
+    resolved: list[tuple[dict, str]] = []
+    first_failure: Optional[str] = None
     for blob in blobs:
         principal, failure = slot_principal(blob)
         if principal is None:
-            return None, failure
-        seen.append(principal)
-    keys = {identity_key(p) for p in seen}
+            first_failure = first_failure or failure
+            continue
+        resolved.append((principal, blob))
+    if not resolved:
+        return None, None, first_failure or "profile-unavailable"
+    keys = {identity_key(principal) for principal, _blob in resolved}
     if None in keys:
-        return None, "malformed-profile"
+        return None, None, "malformed-profile"
     if len(keys) > 1:
-        return None, "ambiguous-slot"
-    return seen[0], None
+        return None, None, "ambiguous-slot"
+    principal, blob = resolved[0]
+    return principal, blob, None
 
 
 def _read_claude_blob(cfg: Path, *, shared: bool) -> Optional[str]:
@@ -1412,9 +1429,20 @@ def register_slot_snapshot(
                 f"no current {record.harness} login to snapshot for '{record.id}' "
                 "(sign in first, then register)"
             )
-        principal, failure = principal_of_blobs(blobs)
+        principal, proven_blob, failure = principal_of_blobs(blobs)
         if failure == "ambiguous-slot":
             return account_dir(record.id, root), None, failure
+        # A session recorded as tainting the slot can still overwrite it after
+        # the final read, so the provisional taint below must not simply
+        # discard it. Registration establishes a new truth; it cannot do that
+        # while something else can still change the slot underneath it.
+        blockers = taint_writers_still_live(record.harness, root)
+        if blockers:
+            return (
+                account_dir(record.id, root),
+                None,
+                f"slot-pinned:{', '.join(blockers)}",
+            )
         holder = principal_holder(
             identity_key(principal), exclude_id=record.id, root=root
         )
@@ -1453,7 +1481,7 @@ def register_slot_snapshot(
         # means "this stamp is not verified yet", which is what the marker is
         # for, and makes every abrupt exit fail safe.
         _set_slot_taint(record.harness, root, True, [])
-        adir = write_snapshot(record, blobs[0], root)
+        adir = write_snapshot(record, proven_blob or blobs[0], root)
         if principal is not None:
             write_record_principal(record.id, principal, root)
         else:
@@ -1595,11 +1623,11 @@ def _reconcile_locked(
             "no-slot-credential",
             detail=f"no live {cli} login in the shared slot; sign in, then reconcile",
         )
-    blob = blobs[0]
     # Prove THE CAPTURE, not a second read: an A -> B -> A flip between the two
     # would prove B, survive the later comparison against the captured A, and
     # cache A's bearer under B's identity.
-    principal, failure = principal_of_blobs(blobs)
+    principal, proven_blob, failure = principal_of_blobs(blobs)
+    blob = proven_blob or blobs[0]
     if principal is None:
         if failure == "ambiguous-slot":
             return ReconcileResult(

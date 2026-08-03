@@ -2529,3 +2529,109 @@ class TestProvisionalTaintSpansTheCommit:
 
         assert result.outcome == "slot-changed"
         assert managed.slot_tainted("claude", tmp_path)
+
+
+class TestEveryCandidateIsResolved:
+    """Stopping at the first failure lets an expired scoped item sitting in
+    front of a live unscoped login look like a plain offline registration - and
+    then get snapshotted and stamped as the account."""
+
+    def test_an_expired_first_candidate_does_not_hide_a_live_second(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("EXPIRED"), _blob("LIVE")],
+        )
+
+        def _principal(blob):
+            if blob == _blob("EXPIRED"):
+                return None, "profile-unavailable"
+            return managed.principal_fingerprint(_profile("acct-live")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None
+        assert principal["account_uuid"] == "acct-live"
+        # The credential STORED is the one that proved, not the expired residue.
+        assert (adir / "blob").read_text() == _blob("LIVE")
+
+    def test_all_candidates_unprovable_registers_unbound(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("A"), _blob("B")]
+        )
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+        assert principal is None and failure == "profile-unavailable"
+
+    def test_reconciliation_snapshots_the_blob_that_proved(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        managed._set_slot_taint("claude", tmp_path, True, [])
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("EXPIRED"), _blob("LIVE_B")],
+        )
+
+        def _principal(blob):
+            if blob == _blob("EXPIRED"):
+                return None, "profile-unavailable"
+            return managed.principal_fingerprint(_profile("acct-b")), None
+
+        monkeypatch.setattr(managed, "slot_principal", _principal)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-b"
+        assert (tmp_path / "work-b" / "blob").read_text() == _blob("LIVE_B")
+
+
+class TestRegisterRespectsALiveTaintWriter:
+    def test_a_live_writer_blocks_registration(self, tmp_path, monkeypatch):
+        """The provisional taint would otherwise discard the recorded writer,
+        and it can still overwrite the slot after the final read."""
+        import os
+
+        managed._set_slot_taint("claude", tmp_path, True, [os.getpid()])
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("LIVE")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure.startswith("slot-pinned:") and str(os.getpid()) in failure
+        assert principal is None
+        assert not (tmp_path / "work-a" / "blob").exists()
+        assert managed.tainting_pids("claude", tmp_path) == (os.getpid(),)
+
+    def test_a_dead_writer_does_not_block(self, tmp_path, monkeypatch):
+        managed._set_slot_taint("claude", tmp_path, True, [999_999])
+        monkeypatch.setattr(managed.psutil, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(managed, "_process_started_at", lambda pid: None)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("LIVE")]
+        )
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-a")), None),
+        )
+
+        _adir, principal, failure = managed.register_slot_snapshot(
+            _rec("work-a"), tmp_path
+        )
+
+        assert failure is None and principal["account_uuid"] == "acct-a"
+        assert not managed.slot_tainted("claude", tmp_path)

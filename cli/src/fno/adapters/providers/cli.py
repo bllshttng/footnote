@@ -667,6 +667,16 @@ def register_provider(
             err=True,
         )
         raise typer.Exit(1)
+    if identity_failure and identity_failure.startswith("slot-pinned:"):
+        who = identity_failure.split(":", 1)[1]
+        typer.echo(
+            f"error: {who} was pinning the {record.harness} slot when it was "
+            f"tainted and can still overwrite it, so registering '{record.id}' now "
+            f"could stamp a credential that is about to change.\n"
+            f"  stop it and re-run this command",
+            err=True,
+        )
+        raise typer.Exit(1)
     if identity_failure == "slot-changed":
         typer.echo(
             f"error: the {record.harness} slot changed while '{record.id}' was being "
