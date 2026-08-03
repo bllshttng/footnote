@@ -4,6 +4,12 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 **footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
 
+## Precedence and output style
+
+Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. Two live cases: "shortest diff" loses to principle 4 (fix what you find, in this PR), and tool-branded comments (`// ponytail:`) are barred by the comment principle.
+
+Lead responses with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Full ruleset and exceptions live in [docs/output-style.md](docs/output-style.md), kept out of the auto-loaded preamble.
+
 ## Working principles
 
 0. **Worktree-first.** Whenever possible, enter a dedicated feature worktree before editing, generating, or committing (`worktree.policy = "never"` projects work in place by design). Keep the canonical main checkout unclogged. Prune after merge.
@@ -192,8 +198,8 @@ ln -s /path/to/footnote ~/.claude/plugins/fno  # permanent
 
 ## Deep-dive docs
 
-Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md) · [active dispatcher](docs/architecture/active-backlog-dispatcher.md) · [merge-triggered auto-continue](docs/architecture/merge-triggered-auto-continue.md)
-Loop & target: [unified loop](docs/architecture/unified-loop.md) · [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md) · [self-handoff](docs/architecture/target-self-handoff.md) · [plan-mode integration](docs/architecture/target-plan-mode-integration.md) · [loc-ratchet](docs/architecture/loc-ratchet.md)
+Backlog: [usage](docs/backlog-usage.md) · [board ordering](docs/architecture/backlog-board-ordering.md) · [triage](docs/backlog-triage.md)
+Loop & target: [unified loop](docs/architecture/unified-loop.md) · [control-plane loop](docs/architecture/control-plane-loop.md) · [target reliability](docs/architecture/target-reliability-core.md) · [loc-ratchet](docs/architecture/loc-ratchet.md)
 Planning & ship: [lean blueprint](docs/architecture/lean-blueprint.md) · [plan completion stamp](docs/architecture/plan-completion-stamp.md) · [post-merge ritual](docs/architecture/auto-post-merge-ritual.md)
-Coordination & providers: [coordination](docs/architecture/coordination.md) · [mail live-inject](docs/architecture/mail-live-inject.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md) · [role-based routing](docs/architecture/role-based-model-routing.md)
-Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [skill compat](docs/SKILL-COMPAT-MATRIX.md) · [path config](docs/path-config.md) · [installed-fno staleness](docs/architecture/installed-fno-staleness.md) · [memory system](docs/architecture/memory-system.md)
+Coordination & providers: [coordination](docs/architecture/coordination.md) · [provider rotation](docs/provider-rotation.md) · [harness command matrix](docs/harness-command-matrix.md) · [cross-model review](docs/architecture/cross-model-review.md)
+Platform & ops: [harnesses](docs/HARNESSES.md) · [multi-CLI hooks](docs/architecture/multi-cli-hooks.md) · [path config](docs/path-config.md)

@@ -1297,6 +1297,41 @@ def _emit_human(
             "converge (or `fno doctor --codex-hooks` for detail)."
         )
 
+    # Plugin hook launch probe (x-d991): a hook command that cannot start fails
+    # open in Codex with zero signal; each row is one guard that was absent.
+    ph: dict[str, Any] = result.get("plugin_hooks") or {}
+    if ph.get("applicable"):
+        for merr in ph.get("manifest_errors") or []:
+            out(
+                f"fno doctor: hook manifest {merr.get('issue')}: {merr.get('path')} "
+                f"[{merr.get('manifest')}] - that harness loads no hooks (fail-open)."
+            )
+        for miss in ph.get("missing_scripts") or []:
+            out(
+                f"fno doctor: hook references MISSING script {miss.get('script')} "
+                f"[{miss.get('manifest')}/{miss.get('event')}] - the guard fails "
+                "open with no signal."
+            )
+        for failure in ph.get("failures") or []:
+            stderr = failure.get("stderr") or ""
+            tail = f" - {stderr[:160]}" if stderr else ""
+            out(
+                f"fno doctor: hook LAUNCH FAILED (rc={failure.get('rc')}): "
+                f"{failure.get('resolved')} [{failure.get('manifest')}/{failure.get('event')}]{tail}"
+            )
+    elif ph.get("reason"):
+        out(f"fno doctor: plugin hook probe skipped ({ph['reason']}).")
+
+    # Codex hook layer split (x-d991): a foreign hook in ~/.codex/hooks.json is
+    # not footnote's to remove, but the split itself is the diagnostic gap.
+    foreign = surf.get("codex_hooks_foreign_json") or []
+    if foreign:
+        out(
+            f"fno doctor: codex hooks: {len(foreign)} foreign hook(s) in "
+            "~/.codex/hooks.json (informational; run `fno doctor --codex-hooks` "
+            "for the per-command config.toml/hooks.json breakdown)."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -1684,10 +1719,369 @@ def _harness_surface_report() -> dict[str, Any]:
         codex = _codex_hooks_report()
         if codex.get("duplicate_layers") and codex.get("footnote_json_hooks"):
             report["codex_hooks_dual"] = True
+        # A foreign hook in ~/.codex/hooks.json is informational only - footnote
+        # owns config.toml and must not remove another tool's hook - but a layer
+        # split is exactly the unanswerable "which hook ran, from where?" this
+        # node exists to close, so surface it rather than stay silent (x-d991).
+        if codex.get("foreign_json_hooks"):
+            report["codex_hooks_foreign_json"] = codex["foreign_json_hooks"]
     except Exception:
         pass
 
     return report
+
+
+# ---------------------------------------------------------------------------
+# Plugin hook launch probe: the live fail-open detector (x-d991)
+# ---------------------------------------------------------------------------
+#
+# A hook whose command cannot resolve (PLUGIN_ROOT unset/empty, or a script
+# removed) fails OPEN in Codex: it exits 127/2, the session continues, and the
+# guard was absent with no signal. Verifying the hand-expanded absolute path
+# always passes, because that path cannot reproduce a placeholder-expansion
+# failure; only running the configured string through ``$SHELL -lc`` (the path
+# codex-rs/hooks/src/engine/command_runner.rs::default_shell_command takes) can.
+# This is that check.
+
+_HOOK_PROBE_TIMEOUT = 8.0
+
+# Probe launch is restricted to read-only gate events. SessionStart/Stop and the
+# other stateful events MUTATE ~/.fno when executed: inject-mail-drain advances
+# the real mail cursor, reconcile consumes notices, claim-heartbeat writes. A
+# probe that ran them would damage the live session, and a temp cwd does not
+# isolate that (the state lives under HOME/FNO_HOME, not cwd). PreToolUse gates
+# only read (graph.json, worktree location, git state) and exit, so launching
+# them is side-effect-free and is exactly the fail-open class this probe exists
+# to detect. Every event still gets an existence check; only the launch is gated.
+_PROBE_LAUNCH_EVENTS = ("PreToolUse",)
+
+# (name, repo-relative path, the plugin-root env var the manifest's commands
+# expand). Root is resolved PER manifest so a broken Codex PLUGIN_ROOT is not
+# masked by a healthy CLAUDE_PLUGIN_ROOT (or vice versa).
+_PROBE_MANIFESTS = (
+    ("hooks.json", "hooks/hooks.json", "CLAUDE_PLUGIN_ROOT"),
+    ("codex-hooks.json", "hooks/codex-hooks.json", "PLUGIN_ROOT"),
+)
+
+
+def _resolve_for_display(command: str, root_value: str) -> str:
+    """The command with plugin-root placeholders expanded, for failure reports.
+
+    The diagnostic difficulty this whole probe addresses is that the configured
+    string and the executed string differ; reporting the expanded form shows the
+    path the shell actually tried (empty when the root did not resolve)."""
+    expanded = root_value or ""
+    return command.replace("${PLUGIN_ROOT}", expanded).replace(
+        "${CLAUDE_PLUGIN_ROOT}", expanded
+    )
+
+
+def _referenced_hook_scripts(command: str, root: Path) -> list[Path]:
+    """Every ``${PLUGIN_ROOT}/...`` path token in a hook command, resolved under
+    ``root``. Used for the interpreter-agnostic missing-script check: a vanished
+    .py exits 2 under python3 (not 127), so the launch exit code alone cannot
+    prove a script is absent."""
+    expanded = command.replace("${PLUGIN_ROOT}", str(root)).replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(root)
+    )
+    return [
+        Path(tok.rstrip(';"'))
+        for tok in re.findall(rf"{re.escape(str(root))}\S+", expanded)
+    ]
+
+
+# Interpreters a hook command may invoke directly. A bare path (no interpreter)
+# is exec'd by the harness, so it needs the execute bit instead.
+_HOOK_INTERPRETERS = ("bash", "sh", "python3", "python", "node")
+
+
+def _command_launch_problems(command: str, root: Path) -> list[str]:
+    """Ways a command would fail to START, checked without executing it: a
+    missing interpreter, or a bare-invoked script that is not executable.
+
+    Stateful hooks are not launched (they mutate ~/.fno), so for their events
+    this static check is the only launchability coverage. A leading
+    ``env VAR=val`` prefix is skipped to reach the real first token."""
+    import shlex
+
+    expanded = command.replace("${PLUGIN_ROOT}", str(root)).replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(root)
+    )
+    try:
+        tokens = shlex.split(expanded)
+    except ValueError:
+        return []  # unparseable; the launch or existence check is the authority
+    i = 0
+    if tokens and tokens[0] == "env":
+        i = 1
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+    if i >= len(tokens):
+        return []
+    head = tokens[i]
+    if "/" not in head and head in _HOOK_INTERPRETERS:
+        if not shutil.which(head):
+            return [f"interpreter '{head}' not on PATH"]
+        return []
+    # Bare script path: the harness exec's it directly, so it must be executable.
+    script = Path(head)
+    if script.is_file() and not os.access(script, os.X_OK):
+        return [f"bare-invoked script not executable: {head}"]
+    return []
+
+
+def _manifest_event_commands(data: Any, *, source: str):
+    """Yield ``(event, command)`` for every hook in a parsed manifest, preserving
+    the event name. Bulletproof against structurally malformed-but-valid JSON
+    (the caller owns the hard malformed-manifest signal): every level is
+    type-checked, so no shape raises during iteration."""
+    if not isinstance(data, dict):
+        return
+    hooks = data.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for event, groups in hooks.items():
+        if event == "state" or not isinstance(groups, list):
+            continue
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            entries = group.get("hooks")
+            if not isinstance(entries, list):
+                continue
+            for hook in entries:
+                if not isinstance(hook, dict):
+                    continue
+                command = hook.get("command")
+                if isinstance(command, str) and command:
+                    yield event, command
+
+
+def _is_hook_launch_failure(result: dict[str, Any]) -> bool:
+    """A genuine launch failure: anything other than a clean exit 0.
+
+    Only read-only PreToolUse gates are launched, under a sandboxed env where
+    they have nothing to protect, so a benign probe payload must exit 0 (allow).
+    rc None (the launcher would not start, timed out, or could not create a temp
+    cwd) is a failure, not a silent green: a guard that does not run is exactly
+    the fail-open this probe exists to catch."""
+    return result.get("rc") != 0
+
+
+def _launch_plugin_hook(
+    command: str, *, root_value: str, shell: str, root_var: str
+) -> dict[str, Any]:
+    """Launch one read-only gate hook through the real harness launch path.
+
+    Reproduces Codex's ``default_shell_command`` (``$SHELL -lc <command>``),
+    setting ONLY ``root_var`` (the env var this manifest's commands expand), so a
+    manifest that uses the WRONG placeholder (e.g. a codex command referencing
+    ``${CLAUDE_PLUGIN_ROOT}``) fails here as it would in production, instead of
+    being masked by the other harness's var. Only called for read-only events
+    (see ``_PROBE_LAUNCH_EVENTS``); stateful hooks are never executed by the
+    probe.
+
+    Runs from a throwaway temp cwd with fno + claude-project state sandboxed to
+    it. Process-group-bounded so a hung hook cannot wedge the probe; never raises
+    (temp creation and launch errors return ``rc=None``, which the predicate
+    treats as a failure)."""
+    import tempfile
+
+    resolved = _resolve_for_display(command, root_value)
+    try:
+        workdir = tempfile.mkdtemp(prefix="fno-hook-probe.")
+    except OSError as exc:
+        return {"command": command, "resolved": resolved, "rc": None,
+                "stderr": f"temp creation failed: {exc}"[:300]}
+    payload = (
+        '{"session_id":"fno-doctor","cwd":'
+        + json.dumps(workdir)
+        + ',"tool_name":"Bash","tool_input":{"command":"git status --short"}}'
+    )
+    # Set ONLY this manifest's root var (matching the real harness); drop the
+    # others so a wrong-placeholder command is not masked. Sandbox fno +
+    # claude-project state to the temp cwd: a gate can mutate on the probe
+    # payload (git-protection.py deletes an expired approve_no_verify.flag it
+    # resolves under FNO_HOME), and without this the probe writes to the live
+    # ~/.fno. HOME stays real so interpreters/binaries resolve.
+    env = {
+        **os.environ,
+        "FNO_HOME": workdir,
+        "CLAUDE_PROJECT_DIR": workdir,
+    }
+    for v in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
+        env.pop(v, None)
+    env[root_var] = root_value
+    rc: Optional[int]
+    stderr = ""
+    try:
+        proc = subprocess.Popen(
+            [shell, "-lc", command],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=workdir,
+            env=env,
+            start_new_session=True,
+            text=True,
+        )
+    except OSError as exc:
+        shutil.rmtree(workdir, ignore_errors=True)
+        return {"command": command, "resolved": resolved, "rc": None,
+                "stderr": f"launch failed: {exc}"[:300]}
+    try:
+        _, err = proc.communicate(input=payload, timeout=_HOOK_PROBE_TIMEOUT)
+        rc = proc.returncode
+        stderr = (err or "").strip()
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        proc.communicate()
+        rc = None
+        stderr = "timed out"
+    finally:
+        shutil.rmtree(workdir, ignore_errors=True)
+    return {
+        "command": command,
+        "resolved": resolved,
+        "rc": rc,
+        "stderr": stderr[-300:],
+    }
+
+
+def _find_plugin_root_with_hooks() -> Optional[Path]:
+    """The plugin root that actually carries ``hooks/hooks.json``.
+
+    Prefers an explicit env root containing the manifests; else the resolved
+    source, walking up to the directory that carries ``hooks/`` - the resolved
+    source can be the Python project dir (e.g. ``cli/``) rather than the plugin
+    root, and reading manifests from ``cli/hooks/`` would silently iterate zero
+    commands (a false green)."""
+    for var in ("CLAUDE_PLUGIN_ROOT", "PLUGIN_ROOT"):
+        val = os.environ.get(var)
+        if val and (Path(val) / "hooks" / "hooks.json").is_file():
+            return Path(val)
+    src = _resolve_source(None)
+    if src is not None:
+        for parent in [src, *src.parents]:
+            if (parent / "hooks" / "hooks.json").is_file():
+                return parent
+    return None
+
+
+def _probe_root_value(root_var: str, manifest_root: Path) -> str:
+    """The plugin-root value to launch a manifest's commands with.
+
+    Honors an explicit env var (even EMPTY) for the manifest's OWN root var, so
+    ``PLUGIN_ROOT= fno doctor`` reproduces the live Codex fail-open rather than
+    silently falling back to a good root; a healthy CLAUDE_PLUGIN_ROOT cannot
+    mask a broken PLUGIN_ROOT because each manifest resolves independently. No
+    explicit env -> launch against the root the manifests were read from."""
+    if root_var in os.environ:
+        return os.environ[root_var]
+    return str(manifest_root)
+
+
+def _plugin_hooks_launch_report() -> dict[str, Any]:
+    """Check every plugin hook command: existence for all, plus a real
+    ``$SHELL -lc`` launch for the read-only gate events. Report any that cannot
+    start, any referenced script that is missing, and any manifest that is
+    absent or unparseable on the resolved install.
+
+    Advisory (loud on failure, never changes the staleness exit code): the hard
+    gate is the CI test, and this is the live-install detector, because the
+    failure is environmental and a CI runner cannot reproduce it. Stateful hooks
+    are NOT executed (they mutate ~/.fno); they get an existence check only."""
+    shell = os.environ.get("SHELL")
+    if not shell:
+        return {"applicable": False, "reason": "$SHELL unset"}
+
+    manifest_root = _find_plugin_root_with_hooks()
+    if manifest_root is None:
+        return {"applicable": False, "reason": "no plugin root with hooks/ resolved"}
+
+    launches: list[dict[str, Any]] = []
+    missing: list[dict[str, str]] = []
+    manifest_errors: list[dict[str, str]] = []
+    for name, rel, root_var in _PROBE_MANIFESTS:
+        path = manifest_root / rel
+        root_value = _probe_root_value(root_var, manifest_root)
+        # A missing or unparseable manifest means that harness loads NO hooks -
+        # a fail-open the CI validity test cannot see on a corrupted or partial
+        # live install. Surface it instead of reading as a healthy zero checks.
+        if not path.is_file():
+            manifest_errors.append(
+                {"manifest": name, "issue": "missing", "path": str(path)}
+            )
+            continue
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            manifest_errors.append(
+                {"manifest": name, "issue": f"unparseable: {exc}"[:200], "path": str(path)}
+            )
+            continue
+        # Valid JSON but structurally wrong (e.g. ``{"hooks": []}``) means that
+        # harness registers no real hooks either - same fail-open class as a
+        # missing manifest, not a healthy zero checks.
+        if not isinstance(data, dict) or not isinstance(data.get("hooks"), dict):
+            manifest_errors.append(
+                {"manifest": name,
+                 "issue": "malformed: top-level 'hooks' object missing or wrong type",
+                 "path": str(path)}
+            )
+            continue
+        # Nested malformation: an event whose groups are not an array (the silent
+        # skip in _manifest_event_commands would otherwise read as zero commands,
+        # a false green). Deeper shape errors are skipped without raising.
+        bad_events = [
+            ev for ev, grp in data["hooks"].items()
+            if ev != "state" and not isinstance(grp, list)
+        ]
+        if bad_events:
+            manifest_errors.append(
+                {"manifest": name,
+                 "issue": "malformed: event group(s) not arrays: "
+                          + ", ".join(bad_events[:3]),
+                 "path": str(path)}
+            )
+            continue
+        for event, command in _manifest_event_commands(data, source=name):
+            for script in _referenced_hook_scripts(command, manifest_root):
+                if not script.is_file():
+                    missing.append(
+                        {"manifest": name, "event": event, "script": str(script)}
+                    )
+            if event in _PROBE_LAUNCH_EVENTS:
+                result = _launch_plugin_hook(
+                    command, root_value=root_value, shell=shell, root_var=root_var
+                )
+                result["manifest"] = name
+                result["event"] = event
+                launches.append(result)
+            else:
+                # Stateful events are not executed (they mutate ~/.fno); check
+                # they can still START - missing interpreter, or a bare-invoked
+                # script without the execute bit - so a 126/127 fail-open there
+                # is not silently green.
+                for problem in _command_launch_problems(command, manifest_root):
+                    missing.append(
+                        {"manifest": name, "event": event, "script": problem}
+                    )
+
+    failures = [r for r in launches if _is_hook_launch_failure(r)]
+    return {
+        "applicable": True,
+        "shell": shell,
+        "manifest_root": str(manifest_root),
+        "launched": len(launches),
+        "failed": len(failures),
+        "failures": failures,
+        "missing_scripts": missing,
+        "manifest_errors": manifest_errors,
+    }
 
 
 def doctor_command(
@@ -1880,6 +2274,12 @@ def doctor_command(
     # Advisory per-harness surface freshness (x-3248): codex/opencode plugin
     # surfaces `fno update` does not cover. Never changes status/exit.
     result["harness_surface"] = _harness_surface_report()
+
+    # Advisory plugin hook launch probe (x-d991): a hook command that cannot
+    # resolve fails open in Codex with no signal. This launches every configured
+    # hook through the real ``$SHELL -lc`` path and reports any that cannot
+    # start. Loud on failure; never changes the staleness exit code.
+    result["plugin_hooks"] = _plugin_hooks_launch_report()
 
     # Agent health (x-1c7b): grooming freshness is advisory, but a nonzero-exit
     # LaunchAgent DOES change the exit code - an installed-but-dead agent is

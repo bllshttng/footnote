@@ -7,7 +7,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "${PLUGIN_ROOT}/hooks/graph-write-protect.sh",
+            "command": "bash ${PLUGIN_ROOT}/hooks/graph-write-protect.sh",
             "statusMessage": "checking fno state surfaces"
           }
         ]
