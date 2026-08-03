@@ -136,6 +136,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Executor resolution (locked-decision parser + surface inference)",
         {"hidden": True},
     ),
+    "roles": (
+        "fno.roles.cli:roles_app",
+        "Inspect bounded business-role definitions and resolutions.",
+        {"hidden": True},
+    ),
     "config": ("fno.config_cli:app", "Configuration management"),
     "notify": (
         "fno.notify:notify_app",

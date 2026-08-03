@@ -864,7 +864,13 @@ def _mesh_env_wrapper(
             # override it and send the routed pane back to Anthropic. `env -u`
             # on an unset var is a harmless no-op. `unset +=` (not `=`) so the
             # account/provenance unsets above are preserved.
-            unset += ["-u", "ANTHROPIC_API_KEY", "-u", "CLAUDE_CODE_OAUTH_TOKEN"]
+            if provider == "claude":
+                unset += [
+                    "-u",
+                    "ANTHROPIC_API_KEY",
+                    "-u",
+                    "CLAUDE_CODE_OAUTH_TOKEN",
+                ]
             pairs += [f"{k}={v}" for k, v in route.items()]
     return ["env", *unset, *pairs, *argv]
 
@@ -1128,19 +1134,39 @@ def dispatch_spawn_pane(
         picked = _pick_account_env(role=role, route_env=route_env)
         account_env = dict(picked) if picked is not None else None
 
+    launch_role = role
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
+        )
+
+        try:
+            route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        launch_role = None
+
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
     # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
     # that dies on its first turn. Fail closed before anything is created.
-    from fno.agents.model_routing import check_spawn_tier_remap, emit_env_scrub_warning
-
-    check_spawn_tier_remap(
-        provider,
-        model,
-        role=role,
-        route_env=route_env,
-        account_env=account_env,
+    from fno.agents.model_routing import (
+        RouteCompositionError,
+        check_spawn_tier_remap,
+        emit_env_scrub_warning,
     )
+
+    try:
+        check_spawn_tier_remap(
+            provider,
+            model,
+            role=launch_role,
+            route_env=route_env,
+            account_env=account_env,
+        )
+    except RouteCompositionError as exc:
+        raise DispatchAskError(str(exc), exit_code=2) from exc
     # Same seam, same reason as the tier-remap check above: a permission-pinned
     # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
     # approvals, so warn on every reachable path, not just the CLI seam.
@@ -1158,16 +1184,18 @@ def dispatch_spawn_pane(
             exit_code=2,
         )
 
-    if provider == "claude" and (role is not None or route_env):
-        from fno.agents.model_routing import (
-            RouteCompositionError,
-            resolve_spawn_route,
-        )
+    codex_route = None
+    if provider == "codex" and role is not None:
+        from fno.agents.model_routing import resolve_codex_route
 
         try:
-            route_env = resolve_spawn_route(role, route_env, account_overlay=bool(account_env))
+            codex_route = resolve_codex_route(role)
         except RouteCompositionError as exc:
             raise DispatchAskError(str(exc), exit_code=2) from exc
+        # An empty mapping marks the Codex lane as deliberately unrouted and
+        # prevents the generic env wrapper from resolving a Claude route.
+        route_env = dict(codex_route.env) if codex_route is not None else {}
+        launch_role = None
 
     effective_message: Optional[str] = None
     if message.strip().startswith(("/", "$fno:")):
@@ -1193,6 +1221,8 @@ def dispatch_spawn_pane(
         tools=tools,
         deny_tools=deny_tools,
     )
+    if codex_route is not None:
+        argv = [argv[0], *codex_route.config_args, *argv[1:]]
     if provider == "claude" and not claude_argv_is_interactive(argv):
         raise DispatchAskError(
             "refusing to pane-host claude with -p/--print (that bills the "
@@ -1222,7 +1252,7 @@ def dispatch_spawn_pane(
     from fno.agents.spawn_gate import qos_wrap
 
     wrapped = _mesh_env_wrapper(
-        name, provider, role, qos_wrap(argv), provenance, account_env, route_env
+        name, provider, launch_role, qos_wrap(argv), provenance, account_env, route_env
     )
 
     registry_path = paths.agents_registry_path()

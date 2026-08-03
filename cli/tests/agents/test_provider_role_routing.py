@@ -135,3 +135,30 @@ def test_cheap_role_without_key_falls_back_unrouted(
 
     env = captured["env"]
     assert "ANTHROPIC_BASE_URL" not in env
+
+
+def test_direct_provider_captures_role_resolution_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from fno.agents import model_routing
+    from fno.agents.providers import claude as claude_mod
+
+    captured: Dict[str, Any] = {}
+    resolutions: list[str | None] = []
+
+    def stateful(role: str | None, **kwargs: Any) -> dict[str, str] | None:
+        resolutions.append(role)
+        return None if len(resolutions) == 1 else {"ANTHROPIC_MODEL": "late-route"}
+
+    monkeypatch.setattr(model_routing, "resolve_route", stateful)
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake_run(captured))
+
+    claude_mod.bg_create(
+        name="captured-role",
+        message="work",
+        cwd=tmp_path,
+        role="publisher",
+    )
+
+    assert resolutions == ["publisher"]
+    assert "ANTHROPIC_MODEL" not in captured["env"]

@@ -240,6 +240,24 @@ def test_env_missing_key_fails_closed_no_stdout(monkeypatch: pytest.MonkeyPatch)
     assert "ZAI_API_KEY" in res.output
 
 
+def test_env_business_role_refusal_is_a_stable_command_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalid = tmp_path / "roles" / "project" / "broken.json"
+    invalid.parent.mkdir(parents=True)
+    invalid.write_text("{not-json", encoding="utf-8")
+    monkeypatch.setenv("FNO_ROLES_ROOT", str(tmp_path / "roles"))
+
+    result = runner.invoke(route_app, ["env", "publisher"])
+
+    assert result.exit_code == 1
+    assert "route env:" in result.output
+    assert "invalid_manifest" in result.output
+    assert "export " not in result.stdout
+    assert "unset " not in result.stdout
+
+
 def test_env_malformed_target(monkeypatch: pytest.MonkeyPatch) -> None:
     res = runner.invoke(route_app, ["env", "zai,"])
     assert res.exit_code == 2

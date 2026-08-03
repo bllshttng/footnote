@@ -42,7 +42,9 @@ Two non-negotiable invariants:
 
 - **Fail safe, not fail closed** (US4): if no key is configured for the role's
   provider, the role falls back to the primary Anthropic model with a one-line
-  notice and the spawn still succeeds. :func:`resolve_route` never raises.
+  notice and the spawn still succeeds. The legacy :func:`resolve_route` path
+  never raises; an opted-in business lookup fails closed on typed resolution
+  errors so they cannot be mistaken for legacy fallback.
 - **Hard quality guard**: ``implement`` / ``review-verdict`` are in
   ``PROTECTED_ROLES`` and short-circuit to ``None`` *before* any config is read.
   No settings edit can route the diff or verdict to a secondary provider.
@@ -57,6 +59,14 @@ from fno.env_file import read_var_from_env_file
 
 if TYPE_CHECKING:
     from fno.config import ModelRoutingBlock, SettingsModel
+    from fno.roles import (
+        ManifestRoutingResolution,
+        ResolvedRole,
+        RoleResolution,
+        RoleResolutionBlocked,
+    )
+
+BusinessRoleLookup = Callable[[str], "RoleResolution | ManifestRoutingResolution"]
 
 # Built-in default endpoint for the z.ai provider: the Anthropic-compatible
 # endpoint a claude worker needs (NOT the OpenAI /api/coding/paas/v4 path).
@@ -109,6 +119,22 @@ class RouteCompositionError(ValueError):
     """A secondary route cannot compose atomically with the active provider."""
 
 
+class BusinessRoleResolutionBlockedError(RouteCompositionError):
+    """A business role exists but its typed resolution failed closed."""
+
+    def __init__(self, result: "RoleResolutionBlocked") -> None:
+        self.result = result
+        detail = f": {result.detail}" if result.detail else ""
+        super().__init__(
+            f"business role {result.role.id!r} is blocked ({result.reason.value}){detail}; "
+            "no worker launched"
+        )
+
+
+class BusinessRoleRoutingProjectionError(RouteCompositionError):
+    """A resolved business role lacks a deterministic provider/model route."""
+
+
 def resolve_spawn_route(
     role: Optional[str],
     route_env: Optional[Mapping[str, str]] = None,
@@ -116,6 +142,7 @@ def resolve_spawn_route(
     intent: Optional[str] = None,
     notice: Optional[Callable[[str], None]] = None,
     account_overlay: bool = False,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve one spawn route and reject managed-OAuth half-composition.
 
@@ -135,7 +162,11 @@ def resolve_spawn_route(
     over Keychain OAuth, so the split-brain the guard exists to prevent cannot
     recur.
     """
-    route = dict(route_env) if route_env else resolve_route(role, notice=notice)
+    route = (
+        dict(route_env)
+        if route_env
+        else resolve_route(role, notice=notice, business_lookup=business_lookup)
+    )
     if route and os.environ.get("FNO_PROVIDER_AUTH", "").strip().lower() == "managed":
         # An account overlay relaxes the refusal only when the route is
         # self-sufficient (see docstring): without its own auth the route's
@@ -182,7 +213,7 @@ MODEL_ENV_KEYS = (
 )
 
 
-class TierRemapConflict(ValueError):
+class TierRemapConflict(RouteCompositionError):
     """A claude spawn names a tier alias the ambient environment redefines.
 
     ``claude --bg`` resolves the model tier alias against the CALLER's
@@ -403,9 +434,7 @@ def _parse_target(raw: str) -> Optional[tuple[str, str]]:
     return provider.lower(), model
 
 
-def _resolve_key(
-    provider: Mapping[str, Optional[str]], env: Mapping[str, str]
-) -> Optional[str]:
+def _resolve_key(provider: Mapping[str, Optional[str]], env: Mapping[str, str]) -> Optional[str]:
     """Resolve a provider's API key. Precedence: process env (named by
     ``api_key_env``) wins over the optional ``api_key_file``. Never raises."""
     key_name = provider.get("api_key_env") or ""
@@ -454,6 +483,7 @@ def resolve_route(
     settings: "Optional[SettingsModel]" = None,
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[dict[str, str]]:
     """Resolve per-spawn env overrides for ``role``.
 
@@ -462,7 +492,9 @@ def resolve_route(
 
     ``None`` is returned for: no role, a production/unrouted role, a disabled
     block, an unconfigured / non-Anthropic provider, or a missing key
-    (fail-safe). This function never raises.
+    (fail-safe). The legacy path never raises. An opted-in business lookup
+    raises a typed error when an existing business role is blocked or lacks a
+    complete composable routing projection.
 
     Args:
         role: the spawn's role; case/space-insensitive.
@@ -470,12 +502,16 @@ def resolve_route(
         env: environment mapping for key lookup; ``os.environ`` when None.
         notice: optional one-line-notice sink for fail-safe fallbacks.
     """
-    name = _normalize(role)
+    requested_role = (role or "").strip()
+    name = _normalize(requested_role)
     if not name:
         return None
 
-    # Hard quality guard FIRST: a protected role never routes, even if config
-    # tries to. Short-circuits before reading config.
+    business_role = _resolve_business_role(requested_role, business_lookup)
+
+    # A protected role never routes, even if config or a business manifest
+    # asks it to. Discovery still runs first so a malformed manifest cannot
+    # masquerade as ordinary protected-role fallback.
     if name in PROTECTED_ROLES:
         return None
 
@@ -488,7 +524,7 @@ def resolve_route(
     if not getattr(block, "enabled", True):
         return None
 
-    target = _role_target(name, block)
+    target = _business_role_target(name, block, business_role)
     if target is None:
         return None  # not a routed role -> primary model
     pname, model = target
@@ -525,8 +561,7 @@ def _route_for_target(
     if provider is None:
         _emit(
             notice,
-            f"model-routing: provider {pname!r} for {ctx} is not "
-            f"configured; {fallback}",
+            f"model-routing: provider {pname!r} for {ctx} is not configured; {fallback}",
         )
         return None
 
@@ -551,8 +586,7 @@ def _route_for_target(
     if not key:
         _emit(
             notice,
-            f"model-routing: no API key for provider {pname!r} ({ctx}); "
-            f"{fallback_key}",
+            f"model-routing: no API key for provider {pname!r} ({ctx}); {fallback_key}",
         )
         return None
 
@@ -608,9 +642,7 @@ def resolve_explicit_route(
 
         env = os.environ
     block = _routing_block(settings)
-    return _route_for_target(
-        pname, model.strip(), block, env, notice, ctx=f"peer {pname!r}"
-    )
+    return _route_for_target(pname, model.strip(), block, env, notice, ctx=f"peer {pname!r}")
 
 
 def materialize_route_settings(route_env: Mapping[str, str]) -> str:
@@ -725,6 +757,7 @@ def resolve_codex_route(
     settings: "Optional[SettingsModel]" = None,
     env: Optional[Mapping[str, str]] = None,
     notice: Optional[Callable[[str], object]] = None,
+    business_lookup: Optional[BusinessRoleLookup] = None,
 ) -> Optional[CodexRoute]:
     """Resolve codex-lane routing for ``role`` against an OpenAI-protocol
     provider, or ``None`` (use codex's default config, change nothing).
@@ -733,10 +766,17 @@ def resolve_codex_route(
     disabled block, an unrouted role, an unconfigured provider, a NON-openai
     provider (that belongs to the claude lane), a missing base_url/key, or a
     value that can't be safely embedded in TOML all return ``None`` (with a
-    one-line notice where a misconfiguration is worth surfacing). Never raises.
+    one-line notice where a misconfiguration is worth surfacing). The legacy
+    path never raises; an opted-in business lookup fails closed with the same
+    typed errors as the Claude lane.
     """
-    name = _normalize(role)
-    if not name or name in PROTECTED_ROLES:
+    requested_role = (role or "").strip()
+    name = _normalize(requested_role)
+    if not name:
+        return None
+
+    business_role = _resolve_business_role(requested_role, business_lookup)
+    if name in PROTECTED_ROLES:
         return None
 
     if env is None:
@@ -748,7 +788,7 @@ def resolve_codex_route(
     if not getattr(block, "enabled", True):
         return None
 
-    target = _role_target(name, block)
+    target = _business_role_target(name, block, business_role)
     if target is None:
         return None
     pname, model = target
@@ -841,9 +881,7 @@ def _routing_block(settings: "Optional[SettingsModel]") -> "ModelRoutingBlock":
 def _effective_roles(block: "ModelRoutingBlock") -> dict[str, str]:
     """Built-in routed roles (-> the default provider+model) overlaid with the
     config roles map (per-role override wins)."""
-    eff: dict[str, str] = {
-        r: f"zai,{DEFAULT_SECONDARY_MODEL}" for r in DEFAULT_ROUTED_ROLES
-    }
+    eff: dict[str, str] = {r: f"zai,{DEFAULT_SECONDARY_MODEL}" for r in DEFAULT_ROUTED_ROLES}
     for k, v in (getattr(block, "roles", None) or {}).items():
         eff[str(k).strip().lower()] = str(v)
     return eff
@@ -855,6 +893,119 @@ def _role_target(role: str, block: "ModelRoutingBlock") -> Optional[tuple[str, s
     if not raw:
         return None
     return _parse_target(str(raw))
+
+
+def _resolve_business_role(
+    role: str,
+    business_lookup: Optional[BusinessRoleLookup],
+) -> "Optional[ResolvedRole | ManifestRoutingResolution]":
+    """Validate the production business-role tri-state before routing policy."""
+    if business_lookup is None:
+        business_lookup = _default_business_lookup
+
+    from fno.roles import (
+        ManifestRoutingResolution,
+        ResolvedRole,
+        RoleResolutionBlocked,
+        RoleResolutionReason,
+    )
+
+    result = business_lookup(role)
+    if isinstance(result, RoleResolutionBlocked):
+        if result.reason is RoleResolutionReason.NOT_FOUND:
+            return None
+        raise BusinessRoleResolutionBlockedError(result)
+    if not isinstance(result, (ResolvedRole, ManifestRoutingResolution)):
+        raise BusinessRoleRoutingProjectionError(
+            f"business lookup for role {role!r} returned no typed resolution; no worker launched"
+        )
+    return result
+
+
+def _default_business_lookup(
+    role: str,
+) -> "ManifestRoutingResolution | RoleResolutionBlocked":
+    """Discover conventional manifests only when a role root actually exists."""
+    from pathlib import Path
+    import stat
+
+    from fno.company.contracts import RoleRef
+    from fno.roles import (
+        RoleResolutionBlocked,
+        RoleResolutionReason,
+        default_role_root,
+        discover_role_definitions,
+        resolve_manifest_routing,
+    )
+
+    configured_root = os.environ.get("FNO_ROLES_ROOT")
+    root = Path(configured_root).expanduser() if configured_root else default_role_root()
+    try:
+        root_status = root.stat()
+    except FileNotFoundError:
+        if configured_root:
+            return RoleResolutionBlocked(
+                role=RoleRef(id=role, function_id="unavailable"),
+                reason=RoleResolutionReason.INVALID_MANIFEST,
+                source_id=str(root),
+                reference=role,
+                detail="configured role root does not exist",
+            )
+        return RoleResolutionBlocked(
+            role=RoleRef(id=role, function_id="unavailable"),
+            reason=RoleResolutionReason.NOT_FOUND,
+            reference=role,
+        )
+    except OSError as exc:
+        return RoleResolutionBlocked(
+            role=RoleRef(id=role, function_id="unavailable"),
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_id=str(root),
+            reference=role,
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if not stat.S_ISDIR(root_status.st_mode):
+        return RoleResolutionBlocked(
+            role=RoleRef(id=role, function_id="unavailable"),
+            reason=RoleResolutionReason.INVALID_MANIFEST,
+            source_id=str(root),
+            reference=role,
+            detail="role root exists but is not a directory",
+        )
+    return resolve_manifest_routing(role, discover_role_definitions(root=root))
+
+
+def _business_role_target(
+    role: str,
+    block: "ModelRoutingBlock",
+    business_role: "Optional[ResolvedRole | ManifestRoutingResolution]",
+) -> Optional[tuple[str, str]]:
+    """Project only provider/model material into the legacy routing target."""
+    legacy_target = _role_target(role, block)
+    if business_role is None:
+        return legacy_target
+
+    projection = business_role.routing_projection
+    if projection is None:
+        return None
+    provider = projection.provider if projection is not None else None
+    model = projection.model if projection is not None else None
+    if legacy_target is not None:
+        provider = provider or legacy_target[0]
+        model = model or legacy_target[1]
+
+    missing = [
+        field for field, value in (("provider", provider), ("model", model)) if value is None
+    ]
+    if missing:
+        fields = " and ".join(missing)
+        raise BusinessRoleRoutingProjectionError(
+            f"resolved business role {role!r} has an incomplete routing projection: "
+            f"missing {fields}; no configured legacy target can complete it; "
+            "no worker launched"
+        )
+    assert provider is not None and model is not None
+    return provider, model
 
 
 def _provider_to_dict(provider: object) -> dict[str, Optional[str]]:
@@ -870,9 +1021,7 @@ def _provider_to_dict(provider: object) -> dict[str, Optional[str]]:
     return {}
 
 
-def _resolve_provider(
-    pname: str, block: "ModelRoutingBlock"
-) -> Optional[dict[str, Optional[str]]]:
+def _resolve_provider(pname: str, block: "ModelRoutingBlock") -> Optional[dict[str, Optional[str]]]:
     """Merge built-in providers with config.providers (config wins per field)
     and return the named provider's record, or None if unknown."""
     providers: dict[str, dict[str, Optional[str]]] = {
@@ -932,12 +1081,15 @@ def build_route_table(
         env = os.environ
     block = _routing_block(settings)
     eff = _effective_roles(block)
-    config_roles = {
-        str(k).strip().lower() for k in (getattr(block, "roles", None) or {})
-    }
+    config_roles = {str(k).strip().lower() for k in (getattr(block, "roles", None) or {})}
 
     names: list[str] = []
-    for r in (*DEFAULT_ROUTED_ROLES, *KNOWN_LANE_ROLES, *sorted(config_roles), *sorted(PROTECTED_ROLES)):
+    for r in (
+        *DEFAULT_ROUTED_ROLES,
+        *KNOWN_LANE_ROLES,
+        *sorted(config_roles),
+        *sorted(PROTECTED_ROLES),
+    ):
         if r not in names:
             names.append(r)
 
@@ -957,8 +1109,10 @@ def build_route_table(
                 }
             )
             continue
-        source = "config" if role in config_roles else (
-            "built-in" if role in DEFAULT_ROUTED_ROLES else "known lane"
+        source = (
+            "config"
+            if role in config_roles
+            else ("built-in" if role in DEFAULT_ROUTED_ROLES else "known lane")
         )
         raw = eff.get(role)
         if not raw:

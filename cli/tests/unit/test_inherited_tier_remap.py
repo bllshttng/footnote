@@ -24,6 +24,7 @@ from fno.agents.model_routing import (
     env_scrub_warning,
 )
 from fno.agents.rust_runtime import (
+    _refuse_inherited_tier_remap,
     _scrub_account_auth_at_seam,
     _warn_env_scrub_spawn,
     env_scrub_spawn_warning,
@@ -76,6 +77,26 @@ def test_a_role_exempts_only_once_it_resolves_to_a_real_route(monkeypatch):
         lambda *a, **k: {"ANTHROPIC_MODEL": "glm-5.2"},
     )
     assert inherited_tier_remap(args, ZAI_ENV) is None
+
+
+def test_cli_tier_preflight_normalizes_business_role_refusal(monkeypatch, capsys):
+    from fno.agents.model_routing import BusinessRoleRoutingProjectionError
+
+    for key, value in ZAI_ENV.items():
+        monkeypatch.setenv(key, value)
+
+    def blocked(*args, **kwargs):
+        raise BusinessRoleRoutingProjectionError("invalid business role at CLI seam")
+
+    monkeypatch.setattr("fno.agents.model_routing.resolve_route", blocked)
+
+    with pytest.raises(SystemExit) as exc_info:
+        _refuse_inherited_tier_remap(
+            [*BASE, "--role", "publisher", "--model", "opus"]
+        )
+
+    assert exc_info.value.code == 2
+    assert "invalid business role at CLI seam" in capsys.readouterr().err
 
 
 def test_in_process_spawn_apis_enforce_the_same_invariant():

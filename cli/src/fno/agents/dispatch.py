@@ -881,6 +881,7 @@ def _codex_create_path(
     - registry write failure post-create  -> 12 (with cleanup hint)
     """
     from fno.agents.providers import codex as codex_mod
+    from fno.agents.model_routing import RouteCompositionError
 
     output_path = _codex_output_path(name)
 
@@ -897,6 +898,15 @@ def _codex_create_path(
             reasoning_effort=effort,
             add_dir=add_dir,
         )
+    except RouteCompositionError as exc:
+        events.emit(
+            "agent_ask_failed",
+            stage="codex-route",
+            name=name,
+            provider="codex",
+            role=role,
+        )
+        raise DispatchAskError(str(exc), exit_code=2) from exc
     except codex_mod.NoSessionIdError as exc:
         events.emit(
             "agent_ask_failed",
@@ -2048,20 +2058,45 @@ def dispatch_spawn(
     if account_env is None and provider == "claude":
         account_env = _pick_account_env(role=role, route_env=route_env)
 
+    launch_role = role
+    if provider == "claude" and (role is not None or route_env):
+        from fno.agents.model_routing import (
+            RouteCompositionError,
+            resolve_spawn_route,
+        )
+
+        try:
+            route_env = resolve_spawn_route(
+                role,
+                route_env,
+                notice=lambda note: print(note, file=sys.stderr),
+                account_overlay=bool(account_env),
+            )
+        except RouteCompositionError as exc:
+            raise DispatchAskError(str(exc), exit_code=2) from exc
+        launch_role = None
+
     # 1. Name validation. spawn allows empty message (default "").
     # x: the tier-remap invariant must hold on every reachable spawn path, not
     # just the CLI seam -- an in-process caller passing model="opus" under a
     # foreign ANTHROPIC_DEFAULT_OPUS_MODEL would otherwise still launch a worker
     # that dies on its first turn. Fail closed before anything is created.
-    from fno.agents.model_routing import check_spawn_tier_remap, emit_env_scrub_warning
-
-    check_spawn_tier_remap(
-        provider,
-        model,
-        role=role,
-        route_env=route_env,
-        account_env=account_env,
+    from fno.agents.model_routing import (
+        RouteCompositionError,
+        check_spawn_tier_remap,
+        emit_env_scrub_warning,
     )
+
+    try:
+        check_spawn_tier_remap(
+            provider,
+            model,
+            role=launch_role,
+            route_env=route_env,
+            account_env=account_env,
+        )
+    except RouteCompositionError as exc:
+        raise DispatchAskError(str(exc), exit_code=2) from exc
     # Same seam, same reason as the tier-remap check above: a permission-pinned
     # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
     # approvals, so warn on every reachable path, not just the CLI seam.
@@ -2092,22 +2127,6 @@ def dispatch_spawn(
             "--output-format supports only 'json' on claude headless spawns",
             exit_code=2,
         )
-
-    if provider == "claude" and (role is not None or route_env):
-        from fno.agents.model_routing import (
-            RouteCompositionError,
-            resolve_spawn_route,
-        )
-
-        try:
-            route_env = resolve_spawn_route(
-                role,
-                route_env,
-                notice=lambda note: print(note, file=sys.stderr),
-                account_overlay=bool(account_env),
-            )
-        except RouteCompositionError as exc:
-            raise DispatchAskError(str(exc), exit_code=2) from exc
 
     # 3a. claude + --once -> refused immediately (before acquiring the lock,
     # since there is no state to protect).
@@ -2246,7 +2265,7 @@ def dispatch_spawn(
                         timeout=timeout,
                         yolo=yolo,
                         lock_handle=lock_handle,
-                        role=role,
+                        role=launch_role,
                         route_env=route_env,
                         model=model,
                         permission_mode=permission_mode,
@@ -2279,7 +2298,7 @@ def dispatch_spawn(
                             float(timeout) if timeout is not None else _DEFAULT_FOLLOWUP_TIMEOUT_SEC
                         ),
                         lock_handle=lock_handle,
-                        role=role,
+                        role=launch_role,
                         effort=effort,
                         add_dir=add_dir,
                     )

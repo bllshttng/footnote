@@ -516,16 +516,9 @@ def bg_create(
     # (fail-safe). Clear any parent Anthropic credential (a stale API key OR a
     # subscription OAuth token) so the routed auth token is the one that wins;
     # otherwise a lingering credential sends the routed worker back to Anthropic.
-    # An explicit --route (route_env, already resolved + fail-closed at the CLI
-    # boundary) WINS over the role lane: named intent beats auto-routing. Only
-    # when absent do we resolve the role's fail-safe route.
-    route: Optional[dict[str, str]]
-    if route_env:
-        route = dict(route_env)
-    else:
-        from fno.agents.model_routing import resolve_route
-
-        route = resolve_route(role, notice=lambda m: print(m, file=sys.stderr))
+    # The role or explicit route was resolved once above. Reusing that captured
+    # value keeps mutable manifest discovery from changing within one launch.
+    route: Optional[dict[str, str]] = dict(route_env) if route_env else None
     # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
     # account's own login. SCRUB inherited auth vars first, else an ambient
     # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN would override the account's
