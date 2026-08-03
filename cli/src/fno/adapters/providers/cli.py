@@ -488,6 +488,13 @@ def add_provider(
 # register (managed credential store, US1)
 # ---------------------------------------------------------------------------
 
+# The only capture failures that still register the account, unbound: the
+# identity could not be PROVEN, but nothing about it is contradictory. Every
+# other typed failure wrote nothing, so it must refuse rather than report a
+# registration that did not happen.
+_REGISTERS_UNBOUND = frozenset({None, "profile-unavailable", "malformed-profile"})
+
+
 def _register_config_dir_account(
     provider_id: str,
     harness_name: str,
@@ -649,6 +656,24 @@ def register_provider(
             f"error: the {record.harness} slot currently holds credentials for two "
             f"different accounts, so registering '{record.id}' could bind the wrong "
             f"one.\n  sign out and back in as {record.id}, then re-run this command",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if identity_failure == "slot-changed":
+        typer.echo(
+            f"error: the {record.harness} slot changed while '{record.id}' was being "
+            f"registered (an out-of-band /login), so nothing was written.\n"
+            f"  re-run this command once the slot settles",
+            err=True,
+        )
+        raise typer.Exit(1)
+    if identity_failure not in _REGISTERS_UNBOUND:
+        # A typed failure with no handler above wrote nothing, so reporting
+        # success would be a lie. Refuse generically rather than let a future
+        # failure value fall through as a registration that never happened.
+        typer.echo(
+            f"error: registering '{record.id}' failed ({identity_failure}); "
+            "nothing was written",
             err=True,
         )
         raise typer.Exit(1)

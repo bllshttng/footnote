@@ -1714,3 +1714,48 @@ class TestReconcileSlot:
             managed.write_record_principal(rid, {"account_uuid": f"acct-{rid}"}, root)
         result = _invoke(["doctor"], cwd=store, home=store)
         assert "unbound-principal" not in result.output
+
+    @pytest.mark.parametrize(
+        "failure,needle",
+        [
+            ("slot-changed", "changed while"),
+            ("some-future-failure", "some-future-failure"),
+        ],
+    )
+    def test_a_capture_that_wrote_nothing_never_reports_success(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch, failure: str, needle: str
+    ) -> None:
+        """A typed failure with no handler wrote nothing, so printing
+        'Registered' would be a lie - including for a failure added later."""
+        from pathlib import Path as _P
+
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "register_slot_snapshot",
+            lambda record, *a, **kw: (_P("/x"), None, failure),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert needle in result.output
+        assert "Registered managed account" not in result.output
+
+    def test_an_unprovable_identity_still_registers(
+        self, store: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Registration must work offline; the record is simply unbound."""
+        from pathlib import Path as _P
+
+        from fno.adapters.providers import managed
+
+        monkeypatch.setattr(
+            managed, "register_slot_snapshot",
+            lambda record, *a, **kw: (_P("/x"), None, "profile-unavailable"),
+        )
+
+        result = _invoke(["register", "readyrule"], cwd=store, home=store)
+
+        assert result.exit_code == 0, result.output
+        assert "Registered managed account" in result.output
