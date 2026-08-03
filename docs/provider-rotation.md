@@ -294,6 +294,11 @@ It is deliberately **not** a `clear-taint` verb, and it will not act on anything
 An unreachable profile endpoint, a malformed response, a principal matching no registered account, or one matching two of them each leave the stamp, the snapshots, and the taint byte-identical, and exit non-zero naming which of those happened.
 Clearing a taint without proof would file one account's usage under another's name, which is worse than staying `unknown`.
 
+It also refuses with `slot-pinned` while a session that was pinning when the taint was written is still alive.
+Proving the principal proves it now, and that session was launched under the outgoing account, so its next token refresh can overwrite the slot with that account's credential.
+The taint marker records those pids for exactly this check: a session started after the switch already read the new credential and never blocks a repair, which matters because on the shared slot the pinning session is usually the account being proven.
+Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pinned to another account exports it and reconciliation would otherwise prove the pinned account and stamp it onto the canonical slot.
+
 A record's principal is bound where footnote knows whose credential it holds: at `register`, and at the tail of a verified switch for a record not yet bound.
 An account that has never been registered since this landed has no bound principal, so reconciliation reports `zero-match` and names the live account; sign that account in and re-run `fno config accounts register <id>` to bind it.
 

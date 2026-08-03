@@ -1562,7 +1562,8 @@ class TestReconcileSlot:
         result = _invoke(["register", "readyrule"], cwd=store, home=store)
         assert result.exit_code == 0, result.output
         root = store / ".fno" / "providers"
-        assert managed.record_principal("readyrule", root)["account_uuid"] == "acct-1"
+        bound = managed.record_principal("readyrule", root)
+        assert bound is not None and bound["account_uuid"] == "acct-1"
         assert "acct-1" not in result.output
 
     def test_doctor_names_an_out_of_band_login_as_drift(

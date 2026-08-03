@@ -215,6 +215,39 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
     # claude
     default_cfg = _claude_slot_config_dir()
     cfg = config_dir or default_cfg
+    return _read_claude_blob(cfg, shared=cfg == default_cfg)
+
+
+def read_canonical_slot_blob(cli: str) -> Optional[str]:
+    """The SHARED slot credential, ignoring any ambient ``CLAUDE_CONFIG_DIR``.
+
+    ``_read_slot_blob`` honors that variable, which is right for an operator
+    verb writing the slot and wrong for an identity read: a worker pinned to
+    another account exports it, and reconciliation would then prove the pinned
+    account's principal and stamp it onto the canonical slot - or refuse a
+    repair having never looked at the credential it was repairing. usage.py's
+    ``_canonical_claude_slot_dir`` exists for exactly this reason.
+    """
+    if cli != "claude":
+        return _read_slot_blob(cli)
+    canonical = Path.home() / ".claude"
+    if _claude_slot_config_dir() == canonical:
+        # No ambient override, so the ordinary read already IS the canonical
+        # one. Routing through it keeps a single slot-read seam - the direct
+        # path below would otherwise bypass every caller's patch point and
+        # reach the real Keychain.
+        return _read_slot_blob(cli)
+    return _read_claude_blob(canonical, shared=True)
+
+
+def _read_claude_blob(cfg: Path, *, shared: bool) -> Optional[str]:
+    """Read claude's credential for ``cfg``; ``shared`` allows the unscoped item.
+
+    ``shared`` is a parameter rather than a ``cfg == default`` test inside so a
+    canonical read stays canonical under an ambient override: the unscoped
+    Keychain item belongs to the shared slot, and whether we may read it is a
+    property of which slot we asked for, not of the environment.
+    """
     if sys.platform == "darwin":
         acct = _claude_keychain_account()
         # The unscoped Keychain item belongs to the default ~/.claude account
@@ -224,7 +257,7 @@ def _read_slot_blob(cli: str, config_dir: Path | None = None) -> Optional[str]:
         # only in its scoped item, so falling through would return the default
         # account's credential under the alternate dir (a misattribution).
         services = [_claude_scoped_service(cfg)]
-        if cfg == default_cfg:
+        if shared:
             services.append(_CLAUDE_KEYCHAIN_SERVICE)
         for service in services:
             out = _run_security(["find-generic-password", "-s", service, "-a", acct, "-w"])
@@ -750,12 +783,69 @@ def slot_tainted(cli: str, root: Path) -> bool:
     return _slot_taint_path(cli, root).exists()
 
 
-def _set_slot_taint(cli: str, root: Path, tainted: bool) -> None:
+def _set_slot_taint(
+    cli: str, root: Path, tainted: bool, pids: tuple[int, ...] | list[int] = ()
+) -> None:
+    """Write or clear the taint marker, recording WHICH sessions caused it.
+
+    The pids are what make the taint clearable later. Those processes were
+    launched under the OUTGOING account, so each is a live candidate to
+    overwrite the slot with that account's refreshed credential; a session
+    started afterwards already read the new credential and is harmless. Without
+    the list, a repair could only ask "is anything pinned right now?", which on
+    the shared slot is almost always yes - including the very session doing the
+    repair.
+    """
     path = _slot_taint_path(cli, root)
     if tainted:
-        _atomic_write_private(path, "1")
+        _atomic_write_private(path, json.dumps({"pids": list(pids)}))
     else:
         path.unlink(missing_ok=True)
+
+
+def tainting_pids(cli: str, root: Path) -> Optional[tuple[int, ...]]:
+    """Pids recorded in the taint marker, or None when it records none.
+
+    None means "this marker cannot say", which is a legacy marker written before
+    pids were recorded - the caller falls back to a conservative live scan. An
+    empty tuple is a real answer: nothing was pinning.
+    """
+    try:
+        raw = _slot_taint_path(cli, root).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    pids = data.get("pids") if isinstance(data, dict) else None
+    if not isinstance(pids, list):
+        return None
+    return tuple(p for p in pids if isinstance(p, int))
+
+
+def taint_writers_still_live(cli: str, root: Path) -> list[str]:
+    """Sessions that could still rewrite the slot with a DIFFERENT credential.
+
+    Proving the live principal proves it NOW. A session that was pinning when
+    the taint was written holds the previous account's token and can flush a
+    refresh of it into the slot at any moment, so clearing the taint while one
+    is alive restores exactly the condition the taint records - and the next
+    capture-before-overwrite would then file that credential under the record we
+    just stamped.
+    """
+    recorded = tainting_pids(cli, root)
+    if recorded is None:
+        return [f"pid {session.pid}" for session in pinning_sessions_for(cli)]
+    alive: list[str] = []
+    for pid in recorded:
+        try:
+            still_here = psutil.pid_exists(pid)
+        except Exception:  # noqa: BLE001 - unreadable means assume it is still there
+            still_here = True
+        if still_here:
+            alive.append(f"pid {pid}")
+    return alive
 
 
 # ---------------------------------------------------------------------------
@@ -931,7 +1021,7 @@ def slot_identity_drift(cli: str, root: Path | None = None) -> Optional[dict]:
     bound = record_principal(stamped, root)
     if bound is None:
         return None
-    principal, _failure = slot_principal(_read_slot_blob(cli))
+    principal, _failure = slot_principal(read_canonical_slot_blob(cli))
     if principal is None or principal["account_uuid"] == bound["account_uuid"]:
         return None
     return {
@@ -1020,7 +1110,7 @@ def reconcile_slot(
 def _reconcile_locked(
     cli: str, *, by_id: dict[str, ProviderRecord], root: Path
 ) -> ReconcileResult:
-    blob = _read_slot_blob(cli)
+    blob = read_canonical_slot_blob(cli)
     if blob is None or not blob.strip():
         return ReconcileResult(
             "no-slot-credential",
@@ -1069,6 +1159,21 @@ def _reconcile_locked(
         )
 
     matched = matches[0]
+    # Identity is proven as of NOW, which is only good enough if nothing can
+    # still change it. A session that was pinning when the taint was written
+    # holds the previous account's token, so clearing on its watch would trust
+    # a stamp the next refresh can invalidate.
+    blockers = taint_writers_still_live(cli, root)
+    if blockers:
+        return ReconcileResult(
+            "slot-pinned",
+            detail=(
+                f"the live slot proves '{matched}', but {', '.join(blockers)} was "
+                "pinning the slot when it was tainted and can still write the "
+                "previous account's refreshed credential; stop it and retry"
+            ),
+        )
+
     # Snapshot first, stamp second, clear taint last: a crash at any point
     # leaves the taint set, which is the safe direction to fail.
     write_snapshot(by_id[matched], blob, root)
@@ -1309,7 +1414,7 @@ def _switch_locked(
     # self-correcting on the next successful switch; journaling is not worth it
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.harness, target.id, root)
-    _set_slot_taint(target.harness, root, bool(pinned_by))
+    _set_slot_taint(target.harness, root, bool(pinned_by), pinned_by)
     # We just proved this blob is target's by materializing and verifying it, so
     # this is the cheapest moment to bind target's principal - the binding a
     # later reconciliation needs in order to recognize the account at all.

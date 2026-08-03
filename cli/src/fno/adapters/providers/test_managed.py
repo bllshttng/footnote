@@ -1344,9 +1344,9 @@ def _store_state(root) -> dict[str, bytes]:
 
 
 def _bind(record_id: str, uuid: str, root, email: str = "a@example.com") -> None:
-    managed.write_record_principal(
-        record_id, managed.principal_fingerprint(_profile(uuid, email)), root
-    )
+    fingerprint = managed.principal_fingerprint(_profile(uuid, email))
+    assert fingerprint is not None
+    managed.write_record_principal(record_id, fingerprint, root)
 
 
 class TestPrincipalFingerprint:
@@ -1575,3 +1575,127 @@ class TestReconcileConcurrency:
         # The stamp and the slot describe the SAME account: never A's snapshot
         # under B's stamp.
         assert managed.read_blob(stamped, tmp_path) == fake_slot["claude"]
+
+
+class TestReconcileRespectsLiveTaintWriters:
+    """Proving the principal proves it NOW. A session that was pinning when the
+    taint was written holds the PREVIOUS account's token and can flush a refresh
+    of it into the slot afterwards, so clearing on its watch would trust a stamp
+    the next refresh invalidates."""
+
+    @staticmethod
+    def _arm(fake_slot, tmp_path, monkeypatch, pids):
+        by_id = _register_two(fake_slot, tmp_path)
+        _bind("work-b", "acct-b", tmp_path)
+        fake_slot["claude"] = _blob("B_ROTATED")
+        managed._set_slot_taint("claude", tmp_path, True, pids)
+        monkeypatch.setattr(
+            managed, "slot_principal",
+            lambda blob: (managed.principal_fingerprint(_profile("acct-b")), None),
+        )
+        return by_id
+
+    def test_a_live_taint_writer_blocks_the_repair(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        import os
+
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [os.getpid()])
+        before = _store_state(tmp_path)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "slot-pinned"
+        assert str(os.getpid()) in result.detail
+        assert _store_state(tmp_path) == before
+        assert managed.slot_tainted("claude", tmp_path)
+
+    def test_a_dead_taint_writer_no_longer_blocks(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """The common repair: the rotated-out session already exited."""
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [999_999])
+        monkeypatch.setattr(managed.psutil, "pid_exists", lambda pid: False)
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "matched" and result.record_id == "work-b"
+        assert not managed.slot_tainted("claude", tmp_path)
+
+    def test_an_unrelated_live_session_does_not_block(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A session started AFTER the switch read the new credential, so it is
+        not a risk - and on the shared slot it is usually the account being
+        proven, including the very session running the repair."""
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [999_999])
+        monkeypatch.setattr(managed.psutil, "pid_exists", lambda pid: False)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+        assert managed.reconcile_slot("claude", by_id=by_id, root=tmp_path).ok
+
+    def test_a_legacy_marker_falls_back_to_a_live_scan(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """A marker written before pids were recorded cannot say who was live,
+        so the conservative scan is the only honest answer."""
+        by_id = self._arm(fake_slot, tmp_path, monkeypatch, [])
+        managed._atomic_write_private(managed._slot_taint_path("claude", tmp_path), "1")
+        assert managed.tainting_pids("claude", tmp_path) is None
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(4242, "claude")],
+        )
+
+        result = managed.reconcile_slot("claude", by_id=by_id, root=tmp_path)
+
+        assert result.outcome == "slot-pinned" and "4242" in result.detail
+
+    def test_switch_records_the_pins_it_proceeded_under(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "pinning_sessions",
+            lambda config_dir=None: [managed.PinningSession(77, "claude")],
+        )
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert managed.tainting_pids("claude", tmp_path) == (77,)
+
+
+class TestCanonicalSlotRead:
+    def test_an_ambient_config_dir_never_redirects_the_identity_read(
+        self, tmp_path, monkeypatch
+    ):
+        """A worker pinned to another account exports CLAUDE_CONFIG_DIR. Reading
+        that dir would prove the PINNED account's identity and stamp it onto the
+        canonical slot, which is the misattribution this whole node exists to
+        kill - arriving through the repair meant to prevent it."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(tmp_path / "claude-alt"))
+        asked: list[tuple] = []
+
+        def _record(cfg, *, shared):
+            asked.append((cfg, shared))
+            return _blob("CANONICAL")
+
+        monkeypatch.setattr(managed, "_read_claude_blob", _record)
+
+        assert managed.read_canonical_slot_blob("claude") == _blob("CANONICAL")
+        assert asked == [(tmp_path / ".claude", True)]
+
+    def test_without_an_override_it_routes_through_the_one_slot_seam(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Keeping the single seam is what stops a second read path from
+        silently reaching the real Keychain in tests."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+        monkeypatch.setattr(
+            managed, "_read_claude_blob",
+            lambda cfg, *, shared: pytest.fail("bypassed the patched slot seam"),
+        )
+        fake_slot["claude"] = _blob("VIA_SEAM")
+        assert managed.read_canonical_slot_blob("claude") == _blob("VIA_SEAM")
