@@ -3829,12 +3829,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
     };
 
     // Build a tentative fingerprint from this fire's gh reads.
-    let tentative_fp = make_fingerprint(
+    let tentative_fp = generic.delivery_fingerprint(make_fingerprint(
         &head_sha,
         fp_pr_state.as_str(),
         &fp_ci.render(),
         &fp_review_ts,
-    );
+    ));
 
     // Read prior fires. We pass the tentative_fp for streak counting; if the gh
     // read failed we'll override the fingerprint with the carried-forward value below.
@@ -3849,7 +3849,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // If the pre-read gh call hard-failed, carry forward the prior fingerprint
     // (so the streak continues) rather than resetting to "none|none|none".
-    let fingerprint = if fp_read_failed {
+    let fingerprint = if fp_read_failed && !generic.is_active() {
         last_recorded_fp.unwrap_or(tentative_fp)
     } else {
         tentative_fp
@@ -3857,7 +3857,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
     // Recount consecutive streak with the (possibly carried-forward) fingerprint.
     // We already counted against the tentative_fp; if different, recount from the log.
-    let (consecutive_unchanged, streak_window) = if fp_read_failed {
+    let (consecutive_unchanged, streak_window) = if fp_read_failed && !generic.is_active() {
         // Re-read the streak against the carried-forward fingerprint.
         let (_, streak, _, window) = read_prior_fires(
             &project_events,
@@ -3912,15 +3912,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
         );
     }
 
-    // Operator review-finding gate input (x-f8d4). Resolve this session's node
-    // (graph_node_id in the frontmatter; the appended target_claim_key is the
-    // fallback) and scan events.jsonl for open findings. Node-scoped, NOT
-    // head-pinned: read here so both the promise arms and the mute-probe
-    // DonePRGreen path below see the same evidence. A malformed finding line
-    // never blocks (AC3-FR) but is surfaced as an audit notice so a truncated
-    // write can't vanish.
-    // Run done() on intent OR backstop OR mute-probe
-    if intent != Intent::None || backstop_tripped || consecutive_after >= MUTE_PROBE_N {
+    // Run done() on active generic delivery, intent, backstop, or mute-probe; malformed findings cannot block.
+    if generic.is_active()
+        || intent != Intent::None
+        || backstop_tripped
+        || consecutive_after >= MUTE_PROBE_N
+    {
         // Handle aborted first
         if let Intent::Aborted { ref reason } = intent {
             emit(
@@ -4006,9 +4003,16 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &project_events,
             &global_events,
             &session_id,
-            &intent_source,
+            manifest.session_id.as_deref(),
+            node_id.as_deref(),
+            intent_source,
             &fingerprint,
             this_fire,
+            backstop_tripped,
+            consecutive_after,
+            streak_window,
+            fp_pr_state.as_str(),
+            &fp_ci.render(),
         ) {
             return (0, output);
         }

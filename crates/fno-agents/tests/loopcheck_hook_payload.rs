@@ -337,3 +337,275 @@ fn shim_honors_block_when_old_binary_ignores_large_payload() {
         String::from_utf8_lossy(&output.stderr)
     );
 }
+
+fn delivery_finalize_retry_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path().join("repo");
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(&cwd)
+        .status()
+        .unwrap();
+    fs::write(
+        cwd.join(".fno/target-state.md"),
+        "---\nsession_id: sess-delivery-retry\nclaude_session_id: null\n---\n",
+    )
+    .unwrap();
+    let transcript = cwd.join("transcript.jsonl");
+    fs::write(&transcript, "").unwrap();
+    let mock = make_script(
+        tmp.path(),
+        "mock-fno-agents",
+        r#"
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "loop-check" ]; then
+  count=0; [ -f .fno/loop-count ] && count=$(cat .fno/loop-count)
+  echo $((count + 1)) > .fno/loop-count
+  rm -f .fno/target-state.md
+  echo '{"decision":"allow","termination_reason":"DoneDelivery","message":"done"}'
+  exit 0
+fi
+if [ "$1" = "finalize" ]; then
+  count=0; [ -f .fno/finalize-count ] && count=$(cat .fno/finalize-count)
+  count=$((count + 1)); echo "$count" > .fno/finalize-count
+  [ "$count" -eq 1 ] && exit 1
+  touch .fno/finalize-complete
+  exit 0
+fi
+exit 2
+"#,
+    );
+    (tmp, cwd, transcript, mock)
+}
+
+#[test]
+fn claude_hook_retries_delivery_finalize_after_manifest_disappears() {
+    let (_tmp, cwd, transcript, mock) = delivery_finalize_retry_fixture();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/target-stop-hook.sh");
+    let payload = serde_json::json!({"transcript_path": transcript}).to_string();
+    let fire = || {
+        let mut child = Command::new("bash")
+            .arg(&shim)
+            .current_dir(&cwd)
+            .env("FNO_AGENTS_BIN", &mock)
+            .stdin(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        child.wait().unwrap().code()
+    };
+
+    assert_eq!(fire(), Some(2));
+    assert_eq!(fire(), Some(0));
+    assert!(cwd.join(".fno/finalize-complete").exists());
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "2"
+    );
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/loop-count"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+}
+
+#[test]
+fn agy_hook_retries_delivery_finalize_after_manifest_disappears() {
+    let (_tmp, cwd, transcript, mock) = delivery_finalize_retry_fixture();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let payload = serde_json::json!({
+        "conversationId": "sess-delivery-retry",
+        "transcriptPath": transcript,
+        "workspacePaths": [cwd],
+        "fullyIdle": true
+    })
+    .to_string();
+    let fire = || {
+        let mut child = Command::new("bash")
+            .arg(&shim)
+            .current_dir(&cwd)
+            .env("FNO_AGENTS_BIN", &mock)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        child
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(payload.as_bytes())
+            .unwrap();
+        String::from_utf8(child.wait_with_output().unwrap().stdout).unwrap()
+    };
+
+    assert!(fire().contains("generic delivery finalization failed"));
+    assert_eq!(fire().trim(), "{}");
+    assert!(cwd.join(".fno/finalize-complete").exists());
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/finalize-count"))
+            .unwrap()
+            .trim(),
+        "2"
+    );
+    assert_eq!(
+        fs::read_to_string(cwd.join(".fno/loop-count"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+}
+
+#[test]
+fn snapshot_failure_does_not_gate_a_legacy_terminal() {
+    let (_tmp, cwd, transcript, _mock) = delivery_finalize_retry_fixture();
+    let mock = make_script(
+        cwd.parent().unwrap(),
+        "legacy-fno-agents",
+        r#"
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "loop-check" ]; then
+  echo '{"decision":"allow","termination_reason":"DoneAdvisory","message":"legacy done"}'
+  exit 0
+fi
+if [ "$1" = "finalize" ]; then touch .fno/legacy-finalized; exit 0; fi
+exit 2
+"#,
+    );
+    make_script(cwd.parent().unwrap(), "cp", "exit 1");
+    let path = format!(
+        "{}:{}",
+        cwd.parent().unwrap().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/target-stop-hook.sh");
+    let payload = serde_json::json!({"transcript_path": transcript}).to_string();
+    let mut child = Command::new("bash")
+        .arg(&shim)
+        .current_dir(&cwd)
+        .env("FNO_AGENTS_BIN", &mock)
+        .env("PATH", path)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let status = child.wait().unwrap();
+
+    assert_eq!(status.code(), Some(0));
+    assert!(cwd.join(".fno/legacy-finalized").exists());
+}
+
+fn stale_pending_with_live_session_fixture() -> (TempDir, PathBuf, PathBuf, PathBuf) {
+    let (tmp, cwd, transcript, _mock) = delivery_finalize_retry_fixture();
+    fs::write(
+        cwd.join(".fno/target-state.md"),
+        "---\nsession_id: session-live\nclaude_session_id: null\n---\n",
+    )
+    .unwrap();
+    let pending = Command::new("git")
+        .args([
+            "rev-parse",
+            "--git-path",
+            "fno-delivery-finalize-pending-session-old.md",
+        ])
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    let pending = PathBuf::from(String::from_utf8(pending.stdout).unwrap().trim());
+    let pending = if pending.is_absolute() {
+        pending
+    } else {
+        cwd.join(pending)
+    };
+    fs::write(
+        &pending,
+        "---\nsession_id: session-old\nclaude_session_id: null\n---\n",
+    )
+    .unwrap();
+    let mock = make_script(
+        tmp.path(),
+        "collision-fno-agents",
+        r#"
+if [ "$1" = "--version" ]; then exit 0; fi
+if [ "$1" = "loop-check" ]; then
+  touch .fno/live-loopchecked
+  echo '{"decision":"block","termination_reason":null,"message":"live session incomplete"}'
+  exit 0
+fi
+if [ "$1" = "finalize" ]; then touch .fno/stale-finalized; exit 0; fi
+exit 2
+"#,
+    );
+    (tmp, cwd, transcript, mock)
+}
+
+#[test]
+fn claude_stale_pending_cannot_bypass_a_live_session() {
+    let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/target-stop-hook.sh");
+    let payload = serde_json::json!({"transcript_path": transcript}).to_string();
+    let mut child = Command::new("bash")
+        .arg(&shim)
+        .current_dir(&cwd)
+        .env("FNO_AGENTS_BIN", &mock)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+
+    assert_eq!(child.wait().unwrap().code(), Some(2));
+    assert!(cwd.join(".fno/live-loopchecked").exists());
+    assert!(!cwd.join(".fno/stale-finalized").exists());
+}
+
+#[test]
+fn agy_stale_pending_cannot_bypass_a_live_session() {
+    let (_tmp, cwd, transcript, mock) = stale_pending_with_live_session_fixture();
+    let shim = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../hooks/agy-target-stop-hook.sh");
+    let payload = serde_json::json!({
+        "conversationId": "session-live",
+        "transcriptPath": transcript,
+        "workspacePaths": [cwd],
+        "fullyIdle": true
+    })
+    .to_string();
+    let mut child = Command::new("bash")
+        .arg(&shim)
+        .current_dir(&cwd)
+        .env("FNO_AGENTS_BIN", &mock)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+
+    assert!(String::from_utf8(output.stdout)
+        .unwrap()
+        .contains("live session incomplete"));
+    assert!(cwd.join(".fno/live-loopchecked").exists());
+    assert!(!cwd.join(".fno/stale-finalized").exists());
+}

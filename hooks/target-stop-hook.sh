@@ -40,13 +40,30 @@ HOOK_INPUT=$(cat)
 # No state file -> no target session here -> nothing to gate. This is the ONLY
 # safe silent allow, and it gates every error path below: with a state file
 # present, a checker that cannot do its job must block-and-signal, never allow.
-STATE_FILE=".fno/target-state.md"
+LIVE_STATE_FILE=".fno/target-state.md"
+STATE_FILE="$LIVE_STATE_FILE"
+REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+DELIVERY_PENDING_PREFIX=$(git -C "$REPO_ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
+    || printf '%s' "${REPO_ROOT}/.fno/.delivery-finalize-pending-")
+if [[ -f "$LIVE_STATE_FILE" ]]; then
+    LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
+        | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+    DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${LIVE_SESSION_ID:-session}.md"
+    [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
+else
+    DELIVERY_PENDING_STATE=""
+    for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
+        if [[ -f "$pending" ]]; then DELIVERY_PENDING_STATE="$pending"; break; fi
+    done
+    [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
+fi
+DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
+trap 'rm -f "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 if [[ ! -f "$STATE_FILE" ]]; then
     exit 0
 fi
 
 # Active target session confirmed from here down.
-REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 SESSION_ID=$(grep '^session_id:' "$STATE_FILE" 2>/dev/null \
     | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
 
@@ -151,27 +168,33 @@ fi
 # and the captured exit code is the binary's own. (Trailing newline added by
 # <<< is harmless: serde_json tolerates trailing whitespace.)
 mkdir -p "${REPO_ROOT}/.fno" 2>/dev/null || true
+CANDIDATE_READY=0
+if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
+    CANDIDATE_READY=1
+fi
 LOOP_CHECK_LOG="${REPO_ROOT}/.fno/loop-check.stderr.log"
 DECISION_JSON=""
 verb_rc=0
-DECISION_JSON=$("$BIN" loop-check \
-    --state "$STATE_FILE" \
-    --transcript "$TRANSCRIPT_PATH" \
-    --cwd "$PWD" \
-    --hook-input-stdin \
-    2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
+if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
+    DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
+else
+    DECISION_JSON=$("$BIN" loop-check \
+        --state "$STATE_FILE" \
+        --transcript "$TRANSCRIPT_PATH" \
+        --cwd "$PWD" \
+        --hook-input-stdin \
+        2>>"$LOOP_CHECK_LOG" <<<"$HOOK_INPUT") || verb_rc=$?
 
-if [[ $verb_rc -ne 0 ]]; then
-    echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc for an active session" >&2
-    # Surface the verb's own stderr (the 2>> redirect above hides it from the
-    # operator otherwise) - last lines name the actual cause.
-    tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
-    unavailable_block_or_allow
-fi
-
-if ! echo "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
-    echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
-    unavailable_block_or_allow
+    if [[ $verb_rc -ne 0 ]]; then
+        echo "target stop-hook: WARNING: fno-agents loop-check exited $verb_rc for an active session" >&2
+        tail -n 5 "$LOOP_CHECK_LOG" >&2 2>/dev/null || true
+        unavailable_block_or_allow
+    fi
+    if ! echo "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
+        echo "target stop-hook: WARNING: fno-agents loop-check returned unexpected output (not JSON) for an active session" >&2
+        unavailable_block_or_allow
+    fi
 fi
 
 # ── 8. Clean decision reached: self-heal the unavailable counter ──────────────
@@ -189,30 +212,31 @@ if [[ "$DECISION" == "block" ]]; then
 fi
 
 # ── 10. Terminal-allow: invoke the finalize WRITER (step 6, ab-f8e5f214) ───────
-# loop-check is the read-only DECISION; on a TERMINAL allow (a non-null
-# termination_reason) the shim runs the separate `finalize` WRITER to re-home
-# the ledger record + (ship-only) plan stamp/graduate + handoff artifact. This
-# fires at the session-terminal boundary in EVERY mode (attended, autonomous,
-# megawalk worker), so the records appear even when the agent compacted before
-# the (now-removed) pre-promise side-effect bash.
+# On a terminal allow, the shim runs the separate `finalize` writer for the
+# ledger record and ship-only stamp, graduation, and handoff in every mode.
 #
-# Strictly non-blocking: finalize is idempotent and best-effort. Any failure
-# (old binary without the verb, missing python3, a sub-step error) is logged
-# and ignored - side-effects NEVER change the completion decision. Run
-# synchronously (NOT backgrounded): a backgrounded child would be SIGHUP'd when
-# the session process exits, which defeats the survive-compaction goal.
+# Legacy finalize remains idempotent and best-effort. Generic delivery is the
+# exception: its receipt, stamp, and handoff are part of the terminal contract,
+# so a non-zero writer exit keeps the session alive for an idempotent retry.
+# Run synchronously (NOT backgrounded): a backgrounded child would be SIGHUP'd
+# when the session process exits, defeating the survive-compaction goal.
 TERMINATION_REASON=$(echo "$DECISION_JSON" | jq -r '.termination_reason // empty')
 if [[ -n "$TERMINATION_REASON" ]]; then
-    # Capture finalize's combined output: append the full trace to the log, and
-    # ALSO surface it to the operator's stderr when finalize reports a sub-step
-    # failure. finalize exits 0 even on a non-fatal sub-step failure (side-effects
-    # never block), so the `|| ...` arm alone would miss those - the structured
-    # session_finalize_failed EVENT is the canonical record, but an attended
-    # operator should still see the failure without grepping events.jsonl.
+    FINALIZE_STATE="$STATE_FILE"
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+            && { [[ $CANDIDATE_READY -ne 1 ]] \
+                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
+            echo "target stop-hook: generic delivery state could not be preserved; will retry" >&2
+            exit 2
+        fi
+        FINALIZE_STATE="$DELIVERY_PENDING_STATE"
+    fi
+    # Log the full trace and surface failures to the attended operator.
     FINALIZE_OUT=""
     FINALIZE_RC=0
     FINALIZE_OUT="$("$BIN" finalize \
-        --state "$STATE_FILE" \
+        --state "$FINALIZE_STATE" \
         --transcript "$TRANSCRIPT_PATH" \
         --cwd "$PWD" \
         --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
@@ -221,6 +245,16 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     fi
     if [[ $FINALIZE_RC -ne 0 ]] || printf '%s' "$FINALIZE_OUT" | grep -qi 'failed'; then
         echo "target stop-hook: finalize note (non-blocking): $(printf '%s' "$FINALIZE_OUT" | tail -n 3)" >&2
+    fi
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then
+        echo "target stop-hook: generic delivery finalization failed; will retry" >&2
+        exit 2
+    fi
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
+        if ! rm -f "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+            echo "target stop-hook: generic delivery retry state cleanup failed; will retry" >&2
+            exit 2
+        fi
     fi
 fi
 

@@ -11,9 +11,8 @@
 //! - ALWAYS branch: ledger session-record fires on every terminal reason.
 //! - SHIP branch: stamp/graduate + handoff fire only on DonePRGreen/DoneAdvisory.
 //! - idempotency: a prior `session_finalized` event short-circuits a re-fire.
-//! - non-fatal: a failing sub-step emits `session_finalize_failed`, never
-//!   raises the exit code, and lets the remaining steps run.
-//! - archived/missing manifest (delegated path): no-op, exit 0.
+//! - legacy failures remain non-fatal; generic failures return nonzero to retry.
+//! - archived/missing manifest: legacy no-op, generic retry.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -522,6 +521,8 @@ fn generic_completion_finalize_consumes_selected_verdict_without_pr_paths() {
     assert!(fs::read_to_string(&env.gh_calls)
         .unwrap_or_default()
         .is_empty());
+    assert_eq!(count_event(&env.events, "termination", "S-delivery"), 1);
+    assert!(events_text(&env.events).contains("DoneDelivery"));
 }
 
 #[test]
@@ -555,10 +556,63 @@ fn generic_completion_finalize_rejects_incomplete_selected_verdict() {
 
     let out = run_finalize(&env, "DoneDelivery");
 
-    assert!(out.status.success());
+    assert!(!out.status.success());
     assert!(!calls(&env).contains("stamp-plan"));
     assert!(handoff_files(&env).is_empty());
     assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-incomplete"),
+        0
+    );
+}
+
+#[test]
+fn generic_completion_finalize_does_not_revive_an_older_passing_verdict() {
+    let env = setup("S-delivery-newest", false);
+    write_delivery_verdict(&env, "S-delivery-newest", true);
+    let mut events = events_text(&env.events);
+    let mut newer: serde_json::Value =
+        serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    newer["ts"] = serde_json::json!("2026-08-02T12:01:00Z");
+    newer["data"]["requirements"] = serde_json::json!([]);
+    events.push_str(&newer.to_string());
+    events.push('\n');
+    fs::write(&env.events, events).unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-newest"),
+        0
+    );
+}
+
+#[test]
+fn generic_completion_finalize_rejects_a_newest_unbound_verdict() {
+    let env = setup("S-delivery-unbound", false);
+    write_delivery_verdict(&env, "S-delivery-unbound", true);
+    let mut events = events_text(&env.events);
+    let mut newer: serde_json::Value =
+        serde_json::from_str(events.lines().next().unwrap()).unwrap();
+    newer["ts"] = serde_json::json!("2026-08-02T12:01:00Z");
+    newer["data"].as_object_mut().unwrap().remove("session_id");
+    events.push_str(&newer.to_string());
+    events.push('\n');
+    fs::write(&env.events, events).unwrap();
+
+    let out = run_finalize(&env, "DoneDelivery");
+
+    assert!(!out.status.success());
+    assert!(!calls(&env).contains("stamp-plan"));
+    assert!(handoff_files(&env).is_empty());
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-unbound"),
+        0
+    );
 }
 
 #[test]
@@ -606,7 +660,7 @@ fn generic_completion_finalize_real_stamp_rejects_incomplete_receipt() {
 
     let out = run_finalize_real_stamp(&env, "DoneDelivery");
 
-    assert!(out.status.success());
+    assert!(!out.status.success());
     let plan = fs::read_to_string(env.cwd.join("plan.md")).unwrap();
     assert!(plan.contains("status: ready"), "{plan}");
     assert!(!plan.contains("fno-delivery://"), "{plan}");
@@ -618,7 +672,7 @@ fn generic_completion_finalize_missing_selected_event_fails_closed() {
 
     let out = run_finalize(&env, "DoneDelivery");
 
-    assert!(out.status.success());
+    assert!(!out.status.success());
     assert!(!calls(&env).contains("stamp-plan"));
     assert!(handoff_files(&env).is_empty());
     assert_eq!(
@@ -626,6 +680,10 @@ fn generic_completion_finalize_missing_selected_event_fails_closed() {
         1
     );
     assert!(events_text(&env.events).contains("delivery_receipt"));
+    assert_eq!(
+        count_event(&env.events, "termination", "S-delivery-missing"),
+        0
+    );
 }
 
 /// Idempotency: N stop-hook fires after a successful finalize produce exactly
@@ -707,6 +765,29 @@ fn finalize_missing_manifest_is_noop() {
         events_text(&env.events).is_empty(),
         "no events on missing manifest"
     );
+}
+
+#[test]
+fn generic_finalize_missing_or_unbound_manifest_requires_retry() {
+    let missing = setup("S-generic-gone", false);
+    fs::remove_file(&missing.state).unwrap();
+    assert!(!run_finalize(&missing, "DoneDelivery").status.success());
+
+    for session_line in ["", "session_id: ''\n"] {
+        let unbound = setup("S-generic-unbound", false);
+        fs::write(
+            &unbound.state,
+            format!(
+                "---\n{session_line}created_at: 2026-08-02T12:00:00Z\nattended: true\n---\ngraph_node_id: ab-testnode\n"
+            ),
+        )
+        .unwrap();
+        assert!(!run_finalize(&unbound, "DoneDelivery").status.success());
+        assert_eq!(
+            count_event(&unbound.events, "termination", "S-generic-unbound"),
+            0
+        );
+    }
 }
 
 /// Per-node rollup: three sessions on the same node each leave one ledger

@@ -127,6 +127,7 @@ class DeliveryEvaluateResponse(_DeliveryModel):
     version: Literal["delivery-evaluate-response.v1"] = DELIVERY_EVALUATE_RESPONSE_VERSION
     status: Literal["inactive", "evaluated", "undeterminable"]
     fact_revision: NonEmptyStr | None = None
+    evidence_revision: NonEmptyStr | None = None
     verdict: DeliveryVerdict | None = None
     diagnostics: tuple[NonEmptyStr, ...] = ()
 

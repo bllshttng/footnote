@@ -93,18 +93,23 @@ fno delivery evaluate --json --plan-path path/to/plan.md --events .fno/events.js
 ```
 
 The response version is `delivery-evaluate-response.v1`, with status `inactive`, `evaluated`, or `undeterminable`.
+It carries both the full coherent-journal `fact_revision` and a stable `evidence_revision` derived from the current normalized verdict for this work order and attempt, so loop audit writes, unrelated work, duplicate events, and historical replays do not masquerade as delivery progress.
 Rust accepts a pass only from a strict, complete evaluated response whose fact revision matches the verdict and whose non-observation requirement rows all pass with producer and source-revision evidence.
 Unknown versions, extra fields, malformed JSON, partial verdicts, and passed observation rows remain nonterminal.
 
 ## Terminal and Finalization
 
 Loop-check honors cancellation, budget, abort, and open operator findings before accepting `DoneDelivery`.
-It must durably append the session-bound `delivery_verdict_evaluated` event before returning the terminal.
-Finalize consumes that selected event without evaluating again.
+It requires nonempty session and graph-node bindings, requires the verdict's work-order node to match the target manifest's graph node, and must durably append the session-bound `delivery_verdict_evaluated` event before returning the terminal decision.
+Non-passing generic evaluations and passed evaluations without a promise record loop fires and terminate as `NoProgress` at the normal backstop instead of falling through to a legacy authority.
+The generic fingerprint combines normal code/world state with `evidence_revision`, so real producer progress resets that backstop while loop-check audit events do not.
+Finalize consumes only the newest target verdict for that session without evaluating again; a newer malformed, incomplete, non-passing, or unbound verdict cannot revive an older pass.
 
 Finalize stamps and graduates the plan when safe, writes a deterministic `fno-delivery://` receipt and generic handoff, and records the normal ledger and run summary.
 It does not query GitHub, stamp a PR number, arm auto-merge, assume a merge, or invoke the research evaluator.
 Cross-project plans retain the expected-URL-count graduation guard.
+A generic finalization failure keeps the stop hook alive for an idempotent retry, while legacy terminal side effects remain best-effort and non-blocking.
+The authoritative `DoneDelivery` termination event is appended only after those required generic writes succeed, preventing an active dispatcher from closing the node during a retry.
 
 ## Compatibility
 
@@ -126,5 +131,6 @@ The repository has no root `Cargo.toml`, so root-level `cargo test -p fno-agents
 - `inactive` means the plan did not explicitly opt in.
 - `undeterminable` means the plan or journal could not be read coherently or validated; fix the named diagnostic and rerun.
 - A non-passing verdict names every failed, blocked, or unknown slot; repair the producer-owned fact rather than editing the derived verdict.
-- A missing selected-verdict event leaves finalize partial and the plan ungraduated; rerun loop-check after the event log is writable.
+- A missing or invalid newest selected-verdict event leaves finalize partial and the stop hook retries after the event log is repaired.
+- A missing, unreadable, or session-unbound manifest makes `DoneDelivery` finalize return nonzero for the same retry path; legacy delegated-session behavior stays non-fatal.
 - A journal change during evaluation is expected concurrency behavior; rerun after the producer write settles.

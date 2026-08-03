@@ -86,6 +86,7 @@ fn run(env: &GenericEnv) -> Value {
         .arg("--git-bin")
         .arg(env.cwd.join("missing-git"))
         .env("FNO_LOOPCHECK_FNO_BIN", &env.evaluator)
+        .env("FNO_LOOPCHECK_MIN_FIRE_GAP_SECS", "0")
         .output()
         .unwrap();
     assert!(
@@ -101,6 +102,7 @@ fn passed_response() -> String {
         "version": "delivery-evaluate-response.v1",
         "status": "evaluated",
         "fact_revision": "sha256:abc",
+        "evidence_revision": "sha256:evidence-1",
         "verdict": {
             "evaluator_version": "delivery-evaluator.v1",
             "session_id": null,
@@ -248,16 +250,108 @@ fn generic_completion_ac_d7_hp_passed_canonical_verdict_terminates_without_gh() 
             && event["data"]["decision"] == "allow"
             && event["data"]["fact_revision"] == "sha256:abc"
     }));
-    assert!(events.lines().any(|line| {
+    assert!(!events.lines().any(|line| {
         let event: Value = serde_json::from_str(line).unwrap();
-        event["type"] == "termination"
-            && event["data"]["message"]
-                .as_str()
-                .is_some_and(|value| value.contains("fno delivery evaluate --json"))
-            && event["data"]["message"]
-                .as_str()
-                .is_some_and(|value| value.contains("sha256:abc"))
+        event["type"] == "termination" && event["data"]["reason"] == "DoneDelivery"
     }));
+}
+
+#[test]
+fn generic_completion_missing_manifest_session_never_terminates() {
+    let env = setup(&passed_response());
+    fs::write(
+        &env.state,
+        "---\ncreated_at: 2026-08-02T12:00:00Z\nattended: true\nplan_path: plan.md\n---\ngraph_node_id: x-delivery\n",
+    )
+    .unwrap();
+
+    let mut output = Value::Null;
+    for _ in 0..6 {
+        output = run(&env);
+    }
+
+    assert_eq!(output["decision"], "allow", "{output}");
+    assert_eq!(output["termination_reason"], "NoProgress", "{output}");
+    assert!(!event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
+    let events = fs::read_to_string(&env.events).unwrap();
+    assert!(!events.contains("DoneDelivery"));
+}
+
+#[test]
+fn generic_completion_rejects_a_verdict_for_a_different_manifest_node() {
+    let mut response: Value = serde_json::from_str(&passed_response()).unwrap();
+    response["verdict"]["work_order_node_id"] = json!("x-other");
+    let env = setup(&response.to_string());
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block", "{output}");
+    assert!(output["termination_reason"].is_null(), "{output}");
+    assert!(!event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
+}
+
+#[test]
+fn generic_completion_nonpassing_reaches_the_no_progress_backstop() {
+    let env = setup("{not-json");
+
+    let mut output = Value::Null;
+    for _ in 0..6 {
+        output = run(&env);
+    }
+
+    assert_eq!(output["decision"], "allow", "{output}");
+    assert_eq!(output["termination_reason"], "NoProgress", "{output}");
+    assert!(!event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
+}
+
+#[test]
+fn generic_completion_passed_without_promise_reaches_the_no_progress_backstop() {
+    let env = setup(&passed_response());
+    fs::write(
+        &env.transcript,
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"still working\"}}\n",
+    )
+    .unwrap();
+
+    let mut output = Value::Null;
+    for _ in 0..6 {
+        output = run(&env);
+    }
+
+    assert_eq!(output["decision"], "allow", "{output}");
+    assert_eq!(output["termination_reason"], "NoProgress", "{output}");
+    assert!(!event_types(&env.events).contains(&"delivery_verdict_evaluated".to_string()));
+}
+
+#[test]
+fn generic_completion_evidence_progress_resets_the_no_progress_streak() {
+    let env = setup(&passed_response());
+    fs::write(
+        &env.transcript,
+        "{\"message\":{\"role\":\"assistant\",\"content\":\"still working\"}}\n",
+    )
+    .unwrap();
+    for _ in 0..4 {
+        assert_eq!(run(&env)["decision"], "block");
+    }
+    let mut progressed: Value = serde_json::from_str(&passed_response()).unwrap();
+    progressed["evidence_revision"] = json!("sha256:evidence-2");
+    fs::write(
+        &env.evaluator,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' '{}'\n",
+            progressed.to_string().replace('\'', "'\\''")
+        ),
+    )
+    .unwrap();
+
+    let output = run(&env);
+
+    assert_eq!(output["decision"], "block", "{output}");
+    assert!(output["termination_reason"].is_null(), "{output}");
+    let output = run(&env);
+    assert_eq!(output["decision"], "block", "{output}");
+    assert!(output["termination_reason"].is_null(), "{output}");
 }
 
 #[test]

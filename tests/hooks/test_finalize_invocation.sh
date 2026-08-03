@@ -7,7 +7,7 @@
 # its first arg: `loop-check` prints a configured decision JSON; `finalize`
 # records its invocation (and --reason) to a marker file and exits with a
 # configured code. We then assert whether finalize was called and with what
-# reason, and that a finalize failure never changes the shim's exit code.
+# reason, and that only a failed generic delivery finalize keeps the loop alive.
 #
 # Tests:
 #   T1  terminal-allow (DonePRGreen) -> finalize called with --reason DonePRGreen, shim exit 0
@@ -15,6 +15,7 @@
 #   T3  allow + null reason          -> finalize NOT called (not terminal), shim exit 0
 #   T4  finalize fails (exit 1)      -> shim still exits 0 (side-effects never block)
 #   T5  finalize gets --state/--cwd/--transcript forwarded
+#   T6  DoneDelivery finalize fails -> shim exits 2 so the writer can retry
 
 set -uo pipefail
 
@@ -138,6 +139,18 @@ log "T5: finalize receives forwarded args"
     grep -q -- "--cwd" "$MARKER" 2>/dev/null || { fail "T5: --cwd not forwarded: $args"; ok=false; }
     grep -q -- "--transcript" "$MARKER" 2>/dev/null || { fail "T5: --transcript not forwarded: $args"; ok=false; }
     $ok && pass "T5: finalize receives --state/--cwd/--transcript"
+    cleanup
+}
+
+# ── T6: failed generic finalize blocks stop so the writer can retry ───────────
+log "T6: DoneDelivery finalize failure keeps the session alive"
+{
+    setup '{"decision":"allow","termination_reason":"DoneDelivery","message":"delivery passed","fires":1,"fingerprint":"f"}' 1
+    run_hook
+    ok=true
+    [[ "$HOOK_RC" -eq 2 ]] || { fail "T6: expected exit 2, got $HOOK_RC"; ok=false; }
+    [[ -f "$MARKER" ]] || { fail "T6: finalize was not invoked"; ok=false; }
+    $ok && pass "T6: failed DoneDelivery finalize -> shim exit 2 for retry"
     cleanup
 }
 

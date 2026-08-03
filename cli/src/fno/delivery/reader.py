@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -15,8 +16,10 @@ from fno.delivery.contracts import (
     DeliveryEvaluateResponse,
     DeliveryEvidenceObservedEvent,
     DeliveryEvidenceRejection,
+    DeliveryVerdict,
 )
 from fno.delivery.evaluator import evaluate_delivery
+from fno.company.contracts import CompanyWorkRefs
 from fno.plan._doc import load_plan
 from fno.plan.schema import PlanFrontmatter
 
@@ -79,9 +82,10 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
     fact_revision = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     evaluated_at = datetime.now(timezone.utc)
     try:
+        current_events = _current_evidence_events(events, company_work)
         facts = tuple(
             item
-            for event, request_event in _current_evidence_events(events)
+            for event, request_event in current_events
             for item in _normalize_event(
                 company_work,
                 event,
@@ -93,9 +97,11 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
     except ValueError as exc:
         return _undeterminable(str(exc))
     verdict = evaluate_delivery(company_work, facts, evaluated_at=evaluated_at)
+    evidence_revision = _delivery_evidence_revision(verdict)
     return DeliveryEvaluateResponse(
         status="evaluated",
         fact_revision=fact_revision,
+        evidence_revision=evidence_revision,
         verdict=verdict,
         diagnostics=verdict.diagnostics,
     )
@@ -155,89 +161,179 @@ def _parse_events(raw: bytes) -> tuple[dict[str, object], ...]:
     return tuple(events)
 
 
+def _delivery_evidence_revision(
+    verdict: DeliveryVerdict,
+) -> str:
+    canonical = json.dumps(
+        verdict.model_dump(mode="json", exclude={"fact_revision", "session_id"}),
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
+
+
+def _event_time(event: dict[str, object]) -> str:
+    value = event.get("ts")
+    return value if isinstance(value, str) else ""
+
+
+def _event_datetime(event: dict[str, object]) -> datetime | None:
+    value = _event_time(event)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo is not None else None
+
+
+@dataclass(frozen=True)
+class _LatestEvent:
+    event: dict[str, object]
+    timestamp: datetime | None
+    latest_valid_timestamp: datetime | None
+
+
+def _select_latest(
+    selected: dict[str, _LatestEvent], key: str, event: dict[str, object]
+) -> None:
+    current = selected.get(key)
+    timestamp = _event_datetime(event)
+    if current is None:
+        selected[key] = _LatestEvent(event, timestamp, timestamp)
+    elif timestamp is None:
+        selected[key] = _LatestEvent(event, None, current.latest_valid_timestamp)
+    elif current.timestamp is None:
+        if (
+            current.latest_valid_timestamp is None
+            or timestamp > current.latest_valid_timestamp
+        ):
+            selected[key] = _LatestEvent(event, timestamp, timestamp)
+    elif timestamp >= current.timestamp:
+        selected[key] = _LatestEvent(event, timestamp, timestamp)
+
+
 def _current_evidence_events(
     events: tuple[dict[str, object], ...],
+    company_work: CompanyWorkRefs,
 ) -> tuple[tuple[dict[str, object], dict[str, object] | None], ...]:
     """Select current producer state without reconstructing its authority."""
-    observed: dict[tuple[str, ...], tuple[str, list[dict[str, object]]]] = {}
-    requests: dict[str, dict[str, object]] = {}
-    approvals: dict[str, dict[str, object]] = {}
-    unkeyed_approvals: dict[str, dict[str, object]] = {}
-    effects: dict[str, dict[str, object]] = {}
+    observed: dict[
+        tuple[str, ...],
+        tuple[datetime | None, datetime | None, list[dict[str, object]]],
+    ] = {}
+    requests: dict[str, _LatestEvent] = {}
+    approvals: dict[str, _LatestEvent] = {}
+    unkeyed_approvals: dict[str, _LatestEvent] = {}
+    effects: dict[str, _LatestEvent] = {}
     for event in events:
         event_type = event.get("type")
         data = event.get("data")
         if event_type == "delivery_evidence_observed":
-            identity: tuple[str, ...]
+            raw_evidence = data.get("evidence") if isinstance(data, dict) else None
+            evidence_id = (
+                raw_evidence.get("id") if isinstance(raw_evidence, dict) else None
+            )
+            producer = data.get("producer") if isinstance(data, dict) else None
+            if not isinstance(raw_evidence, dict) or not isinstance(evidence_id, str):
+                raise ValueError("malformed delivery_evidence_observed event")
+            identity = tuple(
+                str(value)
+                for value in (
+                    raw_evidence.get("work_order_id"),
+                    raw_evidence.get("attempt_id"),
+                    evidence_id,
+                    raw_evidence.get("subject_kind"),
+                    raw_evidence.get("subject_id"),
+                    producer,
+                )
+            )
+            observed_at: datetime | None
             try:
                 parsed = DeliveryEvidenceObservedEvent.model_validate(event)
                 fact = parsed.data
-                evidence = fact.evidence
-                identity = (
-                    evidence.work_order_id,
-                    evidence.attempt_id,
-                    evidence.id,
-                    evidence.subject_kind.value,
-                    evidence.subject_id,
-                    fact.producer,
-                )
-                revision = fact.fact_revision
+                observed_at = fact.observed_at
             except ValidationError:
-                raw_evidence = data.get("evidence") if isinstance(data, dict) else None
-                evidence_id = (
-                    raw_evidence.get("id") if isinstance(raw_evidence, dict) else None
-                )
-                producer = data.get("producer") if isinstance(data, dict) else None
-                if not isinstance(evidence_id, str):
-                    raise ValueError("malformed delivery_evidence_observed event")
-                identity = ("rejected", evidence_id, str(producer))
-                revision = "rejected"
-            selected = observed.get(identity)
-            if selected is None or selected[0] != revision:
-                observed[identity] = (revision, [event])
-            else:
-                selected[1].append(event)
+                observed_at = _event_datetime(event)
+            current_observation = observed.get(identity)
+            if current_observation is None:
+                observed[identity] = (observed_at, observed_at, [event])
+            elif observed_at is None:
+                observed[identity] = (None, current_observation[1], [event])
+            elif current_observation[0] is None:
+                if (
+                    current_observation[1] is None
+                    or observed_at > current_observation[1]
+                ):
+                    observed[identity] = (observed_at, observed_at, [event])
+            elif observed_at > current_observation[0]:
+                observed[identity] = (observed_at, observed_at, [event])
+            elif observed_at == current_observation[0]:
+                current_observation[2].append(event)
             continue
         if not isinstance(data, dict):
+            if event_type in {
+                "approval_requested",
+                "approval_decided",
+                "effect_state_changed",
+            }:
+                raise ValueError(f"malformed {event_type} event: data is not an object")
             continue
         if event_type == "approval_requested":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
-                requests[digest] = event
+                _select_latest(requests, digest, event)
             else:
                 effect_id = data.get("effect_id")
                 if isinstance(effect_id, str) and effect_id:
-                    unkeyed_approvals[effect_id] = event
+                    _select_latest(unkeyed_approvals, effect_id, event)
         elif event_type == "approval_decided":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
-                approvals[digest] = event
+                _select_latest(approvals, digest, event)
             else:
                 effect_id = data.get("effect_id")
                 if isinstance(effect_id, str) and effect_id:
-                    unkeyed_approvals[effect_id] = event
+                    _select_latest(unkeyed_approvals, effect_id, event)
         elif event_type == "effect_state_changed":
             key = data.get("idempotency_key")
             effect_id = data.get("effect_id")
             if isinstance(key, str) and key:
-                effects[f"key:{key}"] = event
+                _select_latest(effects, f"key:{key}", event)
             elif isinstance(effect_id, str) and effect_id:
-                effects[f"effect:{effect_id}"] = event
-    selected_events: list[tuple[dict[str, object], dict[str, object] | None]] = [
-        (event, None)
-        for _, events_for_revision in observed.values()
-        for event in events_for_revision
-    ]
-    for digest, request in requests.items():
-        selected_events.append((approvals.get(digest, request), None))
+                _select_latest(effects, f"effect:{effect_id}", event)
+    work_order = company_work.work_order
+    assert work_order is not None
+    selected_events: list[tuple[dict[str, object], dict[str, object] | None]] = []
+    for _, _, events_for_revision in observed.values():
+        for event in events_for_revision:
+            data = event.get("data")
+            evidence = data.get("evidence") if isinstance(data, dict) else None
+            explicit_other_work = (
+                isinstance(evidence, dict)
+                and isinstance(evidence.get("work_order_id"), str)
+                and evidence["work_order_id"] != work_order.node_id
+            )
+            if explicit_other_work:
+                continue
+            selected_events.append((event, None))
+    for digest, current_request in requests.items():
+        selected_events.append((approvals.get(digest, current_request).event, None))
     selected_events.extend(
-        (event, None) for digest, event in approvals.items() if digest not in requests
+        (current.event, None)
+        for digest, current in approvals.items()
+        if digest not in requests
     )
-    selected_events.extend((event, None) for event in unkeyed_approvals.values())
-    for event in effects.values():
+    selected_events.extend(
+        (current.event, None) for current in unkeyed_approvals.values()
+    )
+    for current in effects.values():
+        event = current.event
         data = event.get("data")
         digest = data.get("request_digest") if isinstance(data, dict) else None
-        approval_request = requests.get(digest) if isinstance(digest, str) else None
+        matching_request = requests.get(digest) if isinstance(digest, str) else None
+        approval_request = (
+            matching_request.event if matching_request is not None else None
+        )
         selected_events.append((event, approval_request))
     return tuple(selected_events)
 
@@ -277,8 +373,14 @@ def _normalize_event(
     return reject_delivery_event(company_work, event, fact_revision=fact_revision)
 
 
-def _undeterminable(diagnostic: str) -> DeliveryEvaluateResponse:
-    return DeliveryEvaluateResponse(status="undeterminable", diagnostics=(diagnostic,))
+def _undeterminable(
+    diagnostic: str, *, evidence_revision: str | None = None
+) -> DeliveryEvaluateResponse:
+    return DeliveryEvaluateResponse(
+        status="undeterminable",
+        evidence_revision=evidence_revision,
+        diagnostics=(diagnostic,),
+    )
 
 
 def _inactive_declaration() -> DeliveryEvaluateResponse:

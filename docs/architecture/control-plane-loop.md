@@ -251,20 +251,20 @@ Legacy manifests (those with a `status:` key written by the pre-wedge init) are 
 
 ## The finalize writer (step 6)
 
-`loop-check` remains a decision verb for legacy paths. The generic-delivery branch performs one durability write before allowing `DoneDelivery`: it appends the strict session-bound selected verdict that finalize must consume. `fno-agents finalize` is the separate writer the shim runs after any terminal-allow decision (a non-null `termination_reason`):
+`loop-check` remains a decision verb for legacy paths. The generic-delivery branch performs one durability write before returning the `DoneDelivery` decision: it appends the strict session-bound selected verdict that finalize must consume. `fno-agents finalize` is the separate writer the shim runs after any terminal-allow decision (a non-null `termination_reason`):
 
 ```
 decision = fno-agents loop-check ...        # pure read-only, unchanged
 if decision.allow AND decision.is_terminal:
-    fno-agents finalize --reason <termination_reason>   # writer, non-fatal
+    fno-agents finalize --reason <termination_reason>   # writer
 ```
 
 It splits into two trigger classes:
 
 - **Always** (any terminal reason): one ledger session-record, via `session-cost.py` + `register-task.py`, carrying `graph_node_id` + `provider_id` + scalar `session_id` + `cost_usd` + a new `termination_reason` field. Every provider session that touched a node leaves exactly one row, so a node's true cost and full session list roll up by grouping ledger entries on `graph_node_id`.
 - **Legacy ship** (`DonePRGreen` / `DoneAdvisory`): plan stamp + graduate (`stamp-plan.py`) and a git-derived handoff artifact.
-- **Generic delivery** (`DoneDelivery`): consume the already selected verdict, stamp or safely graduate the plan with its deterministic `fno-delivery://` receipt, and write a generic handoff without PR or research assumptions.
+- **Generic delivery** (`DoneDelivery`): consume the already selected verdict, stamp or safely graduate the plan with its deterministic `fno-delivery://` receipt, write a generic handoff without PR or research assumptions, then durably append the authoritative termination event.
 
-It is idempotent (a `session_finalized` event keyed by `session_id` short-circuits re-fires) and strictly non-fatal (a sub-step failure emits `session_finalize_failed` naming the step, runs the remaining steps, and never changes the completion decision). Nothing it writes is read by a future `loop-check` decision as a gate: the budget axis filters ledger cost by `session_id`, so a terminal write can only push the same terminating session toward termination, never away. A delegating self-handoff session writes its own ledger record (`termination_reason: delegated`, ledger-only) inside `handoff.sh` before manifest archival, because the shim's finalize cannot read the archived manifest. New event kinds: `session_finalized`, `session_finalize_failed`.
+It is idempotent: a `session_finalized` event keyed by `session_id` short-circuits re-fires, and a sub-step failure emits `session_finalize_failed` naming the step while running the remaining steps. Legacy terminal failures remain non-blocking. A `DoneDelivery` failure returns nonzero so the Claude and agy stop-hook adapters keep the session alive and retry the required receipt, stamp, handoff, and terminal-event writes. The authoritative `DoneDelivery` termination is absent until those writes succeed, so the active dispatcher cannot close the node mid-retry. Nothing it writes is read by a future `loop-check` decision as a gate: the budget axis filters ledger cost by `session_id`, so a terminal write can only push the same terminating session toward termination, never away. A delegating self-handoff session writes its own ledger record (`termination_reason: delegated`, ledger-only) inside `handoff.sh` before manifest archival, because the shim's finalize cannot read the archived manifest. New event kinds: `session_finalized`, `session_finalize_failed`.
 
 The control-plane collapse is complete: a legacy code unit's completion authority is exactly three external reads (PR + CI + reviews) plus a budget ceiling, while an explicitly activated generic unit uses its complete current delivery-evidence verdict. Nothing an agent writes as an unvalidated status flag is a precondition of `<promise>`.

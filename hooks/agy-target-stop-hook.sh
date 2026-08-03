@@ -72,7 +72,23 @@ if [[ -n "$WORKSPACE_ROOT" && -d "$WORKSPACE_ROOT" ]]; then
 else
     ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 fi
-STATE_FILE="$ROOT/.fno/target-state.md"
+LIVE_STATE_FILE="$ROOT/.fno/target-state.md"
+STATE_FILE="$LIVE_STATE_FILE"
+DELIVERY_PENDING_PREFIX=$(git -C "$ROOT" rev-parse --git-path fno-delivery-finalize-pending- 2>/dev/null \
+    || printf '%s' "$ROOT/.fno/.delivery-finalize-pending-")
+if [[ -f "$LIVE_STATE_FILE" ]]; then
+    LIVE_SESSION_ID=$(grep '^session_id:' "$LIVE_STATE_FILE" 2>/dev/null \
+        | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+    DELIVERY_PENDING_STATE="${DELIVERY_PENDING_PREFIX}${LIVE_SESSION_ID:-session}.md"
+    [[ -f "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
+else
+    DELIVERY_PENDING_STATE=""
+    for pending in "${DELIVERY_PENDING_PREFIX}"*.md; do
+        if [[ -f "$pending" ]]; then DELIVERY_PENDING_STATE="$pending"; break; fi
+    done
+    [[ -n "$DELIVERY_PENDING_STATE" ]] && STATE_FILE="$DELIVERY_PENDING_STATE"
+fi
+DELIVERY_CANDIDATE="${DELIVERY_PENDING_STATE}.candidate.$$"
 
 # conversationId (agy's session discriminator, jq-only) -- read where jq exists;
 # the counter helper falls back to the state-file session_id when it is empty.
@@ -191,7 +207,7 @@ else
     : > "$SYNTH"
 fi
 # Clean up the synth file on every exit path (loop-check has read it by then).
-trap 'rm -f "$SYNTH" 2>/dev/null || true' EXIT
+trap 'rm -f "$SYNTH" "$DELIVERY_CANDIDATE" 2>/dev/null || true' EXIT
 
 # ── 5. Resolve the fno-agents binary (most-local wins; same order as the shim) ─
 REPO_ROOT=$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")
@@ -218,25 +234,30 @@ if [[ -z "$BIN" ]]; then
     unavailable_continue_or_allow
 fi
 
+CANDIDATE_READY=0
+if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+    && cp "$STATE_FILE" "$DELIVERY_CANDIDATE" 2>/dev/null; then
+    CANDIDATE_READY=1
+fi
+
 # ── 7. Invoke loop-check (transcript scan only; agy stdin has no last message) ─
 DECISION_JSON=""
 verb_rc=0
-DECISION_JSON=$("$BIN" loop-check \
-    --state "$STATE_FILE" \
-    --transcript "$SYNTH" \
-    --cwd "$ROOT" \
-    2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
+if [[ "$STATE_FILE" == "$DELIVERY_PENDING_STATE" ]]; then
+    DECISION_JSON='{"decision":"allow","termination_reason":"DoneDelivery","message":"retrying generic delivery finalization"}'
+else
+    DECISION_JSON=$("$BIN" loop-check \
+        --state "$STATE_FILE" \
+        --transcript "$SYNTH" \
+        --cwd "$ROOT" \
+        2>>"$ROOT/.fno/agy-loop-check.stderr.log") || verb_rc=$?
 
-# ── 8. Transient failure of a present binary -> bounded-continue (retry next) ──
-# When loop-check can't return a verdict, do NOT fabricate a termination -- keep
-# working and let the next firing retry. Routed through the SAME bounded counter
-# as the missing-checker paths so a PERMANENTLY-broken checker gives up loudly
-# instead of wedging the session into a forever-continue.
-if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
-    emit_event "loop_check_gh_error"
-    echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / non-JSON)" >&2
-    tail -n 5 "$ROOT/.fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
-    unavailable_continue_or_allow
+    if [[ $verb_rc -ne 0 ]] || ! printf '%s' "$DECISION_JSON" | jq -e . >/dev/null 2>&1; then
+        emit_event "loop_check_gh_error"
+        echo "agy stop-hook: WARNING: loop-check unavailable (rc=$verb_rc / non-JSON)" >&2
+        tail -n 5 "$ROOT/.fno/agy-loop-check.stderr.log" >&2 2>/dev/null || true
+        unavailable_continue_or_allow
+    fi
 fi
 
 # ── 8a. Clean decision reached: self-heal the unavailable counter ─────────────
@@ -256,18 +277,33 @@ if [[ "$DECISION" == "block" ]]; then
 fi
 
 # ── 10. Terminal allow -> run the finalize WRITER (ledger + ship stamp), then stop
-# Mirrors the claude shim: loop-check is the read-only decision; finalize is the
-# idempotent, best-effort side-effect writer. Any failure is logged and ignored --
-# side-effects never change the completion decision. Run synchronously (a
-# backgrounded child would be SIGHUP'd when agy exits).
+# Mirrors the Claude shim. Legacy failures remain best-effort; a failed generic
+# delivery writer keeps the session alive so required writes can retry.
 if [[ -n "$TERMINATION_REASON" ]]; then
-    FINALIZE_OUT=""
+    FINALIZE_STATE="$STATE_FILE"
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
+        if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \
+            && { [[ $CANDIDATE_READY -ne 1 ]] \
+                || ! mv "$DELIVERY_CANDIDATE" "$DELIVERY_PENDING_STATE"; }; then
+            emit '{"decision":"continue","reason":"generic delivery state could not be preserved; will retry"}'
+        fi
+        FINALIZE_STATE="$DELIVERY_PENDING_STATE"
+    fi
+    FINALIZE_OUT="" FINALIZE_RC=0
     FINALIZE_OUT="$("$BIN" finalize \
-        --state "$STATE_FILE" \
+        --state "$FINALIZE_STATE" \
         --transcript "$SYNTH" \
         --cwd "$ROOT" \
-        --reason "$TERMINATION_REASON" 2>&1)" || true
+        --reason "$TERMINATION_REASON" 2>&1)" || FINALIZE_RC=$?
     [[ -n "$FINALIZE_OUT" ]] && printf '%s\n' "$FINALIZE_OUT" >> "$ROOT/.fno/finalize.stderr.log" 2>/dev/null || true
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" && $FINALIZE_RC -ne 0 ]]; then
+        emit '{"decision":"continue","reason":"generic delivery finalization failed; will retry"}'
+    fi
+    if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
+        if ! rm -f "$DELIVERY_PENDING_STATE" 2>/dev/null; then
+            emit '{"decision":"continue","reason":"generic delivery retry state cleanup failed; will retry"}'
+        fi
+    fi
 fi
 
 # Allow the stop. loop-check already emitted its own `termination` event on a

@@ -14,9 +14,38 @@ pub enum DeliveryCompletion {
     Inactive,
     Passed {
         fact_revision: String,
+        evidence_revision: String,
+        work_order_node_id: String,
         verdict: Value,
     },
-    Nonpassing(String),
+    Nonpassing {
+        reason: String,
+        evidence_revision: Option<String>,
+    },
+}
+
+impl DeliveryCompletion {
+    pub fn is_active(&self) -> bool {
+        !matches!(self, Self::Inactive)
+    }
+
+    pub fn delivery_fingerprint(&self, legacy: String) -> String {
+        let revision = match self {
+            Self::Inactive => return legacy,
+            Self::Passed {
+                evidence_revision, ..
+            }
+            | Self::Nonpassing {
+                evidence_revision: Some(evidence_revision),
+                ..
+            } => evidence_revision.as_str(),
+            Self::Nonpassing { .. } => "unavailable",
+        };
+        let (head, tail) = legacy
+            .split_once('|')
+            .unwrap_or((&legacy, "none|none|none"));
+        format!("{head}@delivery:{revision}|{tail}")
+    }
 }
 
 #[derive(Debug)]
@@ -38,6 +67,8 @@ struct Response {
     version: String,
     status: String,
     fact_revision: Value,
+    #[serde(default)]
+    evidence_revision: Option<String>,
     verdict: Value,
     diagnostics: Vec<String>,
 }
@@ -80,7 +111,7 @@ struct Requirement {
 pub fn evaluate(fno_bin: &str, cwd: &Path, plan_path: &Path, events: &Path) -> DeliveryCompletion {
     match activation(plan_path) {
         Activation::Inactive => return DeliveryCompletion::Inactive,
-        Activation::Invalid(reason) => return DeliveryCompletion::Nonpassing(reason),
+        Activation::Invalid(reason) => return nonpassing(reason, None),
         Activation::Active => {}
     }
     let output = match Command::new(fno_bin)
@@ -93,16 +124,17 @@ pub fn evaluate(fno_bin: &str, cwd: &Path, plan_path: &Path, events: &Path) -> D
     {
         Ok(output) if output.status.success() => output,
         Ok(output) => {
-            return DeliveryCompletion::Nonpassing(format!(
-                "delivery evaluator exited {:?}: {}",
-                output.status.code(),
-                String::from_utf8_lossy(&output.stderr).trim()
-            ))
+            return nonpassing(
+                format!(
+                    "delivery evaluator exited {:?}: {}",
+                    output.status.code(),
+                    String::from_utf8_lossy(&output.stderr).trim()
+                ),
+                None,
+            )
         }
         Err(error) => {
-            return DeliveryCompletion::Nonpassing(format!(
-                "delivery evaluator could not start: {error}"
-            ))
+            return nonpassing(format!("delivery evaluator could not start: {error}"), None)
         }
     };
     parse_response(&output.stdout)
@@ -129,34 +161,100 @@ pub fn gate_output(
     project_events: &Path,
     global_events: &Path,
     session_id: &str,
+    manifest_session_id: Option<&str>,
+    expected_node: Option<&str>,
     intent_source: &str,
     fingerprint: &str,
     fires: u64,
+    backstop_tripped: bool,
+    consecutive_unchanged: u64,
+    streak_window_secs: i64,
+    pr_state: &str,
+    ci: &str,
 ) -> Option<String> {
     let DeliveryCompletion::Passed {
         fact_revision,
+        evidence_revision: _,
+        work_order_node_id,
         verdict,
     } = completion
     else {
         return match completion {
             DeliveryCompletion::Inactive => None,
-            DeliveryCompletion::Nonpassing(reason) => Some(crate::completion_output::allow_output(
-                "block",
-                None,
-                &format!("generic delivery undeterminable: {reason}"),
+            DeliveryCompletion::Nonpassing { reason, .. } => Some(nonpassing_output(
+                project_events,
+                global_events,
+                session_id,
+                intent_source,
+                fingerprint,
                 fires,
-                Some(fingerprint.into()),
+                backstop_tripped,
+                promise,
+                consecutive_unchanged,
+                streak_window_secs,
+                pr_state,
+                ci,
+                &format!("generic delivery undeterminable: {reason}"),
             )),
             DeliveryCompletion::Passed { .. } => unreachable!(),
         };
     };
-    if !promise {
-        return Some(crate::completion_output::allow_output(
-            "block",
-            None,
-            "generic delivery requires a promise",
+    if manifest_session_id.is_none_or(|value| value.trim().is_empty()) {
+        return Some(nonpassing_output(
+            project_events,
+            global_events,
+            session_id,
+            intent_source,
+            fingerprint,
             fires,
-            Some(fingerprint.into()),
+            backstop_tripped,
+            promise,
+            consecutive_unchanged,
+            streak_window_secs,
+            pr_state,
+            ci,
+            "generic delivery session has no session id binding",
+        ));
+    }
+    let binding_error = match expected_node {
+        Some(expected) if expected == work_order_node_id => None,
+        Some(expected) => Some(format!(
+            "generic delivery verdict node {work_order_node_id} does not match session node {expected}"
+        )),
+        None => Some("generic delivery session has no graph node binding".into()),
+    };
+    if let Some(reason) = binding_error {
+        return Some(nonpassing_output(
+            project_events,
+            global_events,
+            session_id,
+            intent_source,
+            fingerprint,
+            fires,
+            backstop_tripped,
+            promise,
+            consecutive_unchanged,
+            streak_window_secs,
+            pr_state,
+            ci,
+            &reason,
+        ));
+    }
+    if !promise {
+        return Some(nonpassing_output(
+            project_events,
+            global_events,
+            session_id,
+            intent_source,
+            fingerprint,
+            fires,
+            backstop_tripped,
+            promise,
+            consecutive_unchanged,
+            streak_window_secs,
+            pr_state,
+            ci,
+            "generic delivery requires a promise",
         ));
     }
     if !emit_verdict(project_events, global_events, session_id, verdict) {
@@ -173,20 +271,15 @@ pub fn gate_output(
     crate::loopcheck::emit_to_both(
         project_events,
         global_events,
-        "termination",
-        serde_json::json!({
-            "session_id": session_id, "reason": "DoneDelivery",
-            "message": terminal_message
-        }),
-    );
-    crate::loopcheck::emit_to_both(
-        project_events,
-        global_events,
         "loop_check",
         serde_json::json!({
             "session_id": session_id, "decision": "allow", "intent": "promise",
             "intent_source": intent_source, "fingerprint": fingerprint,
-            "fires": fires, "fact_revision": fact_revision
+            "fires": fires, "fact_revision": fact_revision,
+            "consecutive_unchanged": consecutive_unchanged,
+            "streak_window_secs": streak_window_secs,
+            "pr_state": pr_state, "ci": ci, "reviewed": false,
+            "review_skipped": true, "fp_read_failed": false
         }),
     );
     Some(crate::completion_output::allow_output(
@@ -196,6 +289,85 @@ pub fn gate_output(
         fires,
         Some(fingerprint.into()),
     ))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn nonpassing_output(
+    project_events: &Path,
+    global_events: &Path,
+    session_id: &str,
+    intent_source: &str,
+    fingerprint: &str,
+    fires: u64,
+    backstop_tripped: bool,
+    promise: bool,
+    consecutive_unchanged: u64,
+    streak_window_secs: i64,
+    pr_state: &str,
+    ci: &str,
+    reason: &str,
+) -> String {
+    if !backstop_tripped {
+        crate::loopcheck::emit_to_both(
+            project_events,
+            global_events,
+            "loop_check",
+            serde_json::json!({
+                "session_id": session_id,
+                "decision": "block",
+                "intent": if promise { "promise" } else { "none" },
+                "intent_source": intent_source,
+                "fingerprint": fingerprint,
+                "fires": fires,
+                "consecutive_unchanged": consecutive_unchanged,
+                "streak_window_secs": streak_window_secs,
+                "pr_state": pr_state, "ci": ci, "reviewed": false,
+                "review_skipped": true, "fp_read_failed": false
+            }),
+        );
+        return crate::completion_output::allow_output(
+            "block",
+            None,
+            reason,
+            fires,
+            Some(fingerprint.into()),
+        );
+    }
+    let message = format!("generic delivery made no progress: {reason}");
+    crate::loopcheck::emit_to_both(
+        project_events,
+        global_events,
+        "termination",
+        serde_json::json!({
+            "session_id": session_id,
+            "reason": "NoProgress",
+            "message": message
+        }),
+    );
+    crate::loopcheck::emit_to_both(
+        project_events,
+        global_events,
+        "loop_check",
+        serde_json::json!({
+            "session_id": session_id,
+            "decision": "allow",
+            "intent": "backstop",
+            "intent_source": intent_source,
+            "fingerprint": fingerprint,
+            "fires": fires,
+            "consecutive_unchanged": consecutive_unchanged,
+            "streak_window_secs": streak_window_secs,
+            "pr_state": pr_state, "ci": ci, "reviewed": false,
+            "review_skipped": true, "fp_read_failed": false
+        }),
+    );
+    crate::completion_output::allow_output(
+        "allow",
+        Some(crate::loopcheck::TerminationReason::NoProgress),
+        &message,
+        fires,
+        Some(fingerprint.into()),
+    )
 }
 
 pub fn emit_verdict(
@@ -214,6 +386,33 @@ pub fn emit_verdict(
         "type": "delivery_verdict_evaluated",
         "source": "target",
         "data": data,
+    });
+    let Ok(mut line) = serde_json::to_vec(&envelope) else {
+        return false;
+    };
+    line.push(b'\n');
+    let durable = append(project_events, &line);
+    if project_events != global_events {
+        let _ = append(global_events, &line);
+    }
+    durable
+}
+
+pub fn emit_terminal(
+    project_events: &Path,
+    global_events: &Path,
+    session_id: &str,
+    message: &str,
+) -> bool {
+    let envelope = serde_json::json!({
+        "ts": chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+        "type": "termination",
+        "source": "hook",
+        "data": {
+            "session_id": session_id,
+            "reason": "DoneDelivery",
+            "message": message
+        },
     });
     let Ok(mut line) = serde_json::to_vec(&envelope) else {
         return false;
@@ -261,16 +460,21 @@ pub fn selected_receipt(
     session_id: &str,
 ) -> Option<DeliveryReceipt> {
     let content = std::fs::read_to_string(events).ok()?;
-    content.lines().rev().find_map(|line| {
-        let event: Value = serde_json::from_str(line).ok()?;
-        if event.get("type")?.as_str()? != "delivery_verdict_evaluated"
-            || event.get("source")?.as_str()? != "target"
+    for line in content.lines().rev() {
+        let event: Value = match serde_json::from_str(line) {
+            Ok(event) => event,
+            Err(_) => continue,
+        };
+        if event.get("type").and_then(Value::as_str) != Some("delivery_verdict_evaluated")
+            || event.get("source").and_then(Value::as_str) != Some("target")
         {
-            return None;
+            continue;
         }
         let data = event.get("data")?;
-        if data.get("session_id")?.as_str()? != session_id {
-            return None;
+        match data.get("session_id").and_then(Value::as_str) {
+            Some(other) if other != session_id => continue,
+            Some(_) => {}
+            None => return None,
         }
         let revision = data.get("fact_revision")?.as_str()?;
         let verdict = strict_passed_verdict(data, revision)?;
@@ -279,13 +483,14 @@ pub fn selected_receipt(
             return None;
         }
         let attempt = verdict.attempt_id.as_str();
-        Some(DeliveryReceipt {
+        return Some(DeliveryReceipt {
             node: node.into(),
             attempt: attempt.into(),
             fact_revision: revision.into(),
             uri: format!("fno-delivery://{node}/{attempt}/{revision}"),
-        })
-    })
+        });
+    }
+    None
 }
 
 pub fn write_receipt_handoff(
@@ -429,40 +634,58 @@ fn parse_response(raw: &[u8]) -> DeliveryCompletion {
     let response: Response = match serde_json::from_slice(raw) {
         Ok(response) => response,
         Err(error) => {
-            return DeliveryCompletion::Nonpassing(format!(
-                "malformed delivery evaluator response: {error}"
-            ))
+            return nonpassing(
+                format!("malformed delivery evaluator response: {error}"),
+                None,
+            )
         }
     };
     if response.version != "delivery-evaluate-response.v1" {
-        return DeliveryCompletion::Nonpassing(
-            "unknown delivery evaluator response version".into(),
-        );
+        return nonpassing("unknown delivery evaluator response version".into(), None);
     }
     match response.status.as_str() {
         "inactive" if response.fact_revision.is_null() && response.verdict.is_null() => {
             DeliveryCompletion::Inactive
         }
         "undeterminable" if response.fact_revision.is_null() && response.verdict.is_null() => {
-            DeliveryCompletion::Nonpassing(response.diagnostics.join("; "))
+            nonpassing(response.diagnostics.join("; "), response.evidence_revision)
         }
         "evaluated" => parse_evaluated(response),
-        _ => DeliveryCompletion::Nonpassing("invalid delivery evaluator response state".into()),
+        _ => nonpassing(
+            "invalid delivery evaluator response state".into(),
+            response.evidence_revision,
+        ),
     }
 }
 
 fn parse_evaluated(response: Response) -> DeliveryCompletion {
     let Some(fact_revision) = response.fact_revision.as_str() else {
-        return DeliveryCompletion::Nonpassing("evaluated response has no fact revision".into());
-    };
-    if strict_passed_verdict(&response.verdict, fact_revision).is_none() {
-        return DeliveryCompletion::Nonpassing(
-            "delivery verdict is nonpassing or incomplete".into(),
+        return nonpassing(
+            "evaluated response has no fact revision".into(),
+            response.evidence_revision,
         );
-    }
+    };
+    let Some(evidence_revision) = response.evidence_revision.clone() else {
+        return nonpassing("evaluated response has no evidence revision".into(), None);
+    };
+    let Some(verdict) = strict_passed_verdict(&response.verdict, fact_revision) else {
+        return nonpassing(
+            "delivery verdict is nonpassing or incomplete".into(),
+            Some(evidence_revision),
+        );
+    };
     DeliveryCompletion::Passed {
         fact_revision: fact_revision.to_string(),
+        evidence_revision,
+        work_order_node_id: verdict.work_order_node_id,
         verdict: response.verdict,
+    }
+}
+
+fn nonpassing(reason: String, evidence_revision: Option<String>) -> DeliveryCompletion {
+    DeliveryCompletion::Nonpassing {
+        reason,
+        evidence_revision,
     }
 }
 

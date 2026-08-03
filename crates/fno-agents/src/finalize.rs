@@ -36,9 +36,10 @@
 //!
 //! ## Non-fatal + idempotent
 //!
-//! Every sub-step is independently non-fatal: a failure logs to stderr and is
-//! recorded in a `session_finalize_failed` event, but never changes the exit
-//! code (the promise is honored regardless - side-effects never block).
+//! Every sub-step records failures in a `session_finalize_failed` event.
+//! Legacy terminal side effects remain non-blocking, while `DoneDelivery`
+//! returns failure so the stop-hook can keep the session alive and retry its
+//! required receipt, stamp, and handoff writes.
 //! `session_finalized` is emitted ONLY when every attempted sub-step succeeded;
 //! a partial failure leaves it unemitted so a later stop-hook fire retries the
 //! remaining work (each shelled script is itself idempotent: ledger flock +
@@ -476,9 +477,9 @@ fn push_run_summary_to_parent(run: &str, node: Option<&str>, reason: &str) {
 
 // ── public entry ────────────────────────────────────────────────────────────
 
-/// `fno-agents finalize ...`. Returns a process exit code: 0 for the normal
-/// (always-non-fatal) path, 2 only for CLI misuse. Side-effect failures never
-/// raise the exit code - the promise is honored regardless.
+/// `fno-agents finalize ...`. Returns 0 for a completed write, 1 when generic
+/// delivery must retry, and 2 for CLI misuse. Legacy side-effect failures stay
+/// non-fatal.
 pub fn run_finalize(args: &[String]) -> i32 {
     if args
         .iter()
@@ -498,6 +499,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
         eprintln!("finalize: --state, --cwd and --reason are required\n{HELP}");
         return 2;
     };
+    let delivery_ship = reason == "DoneDelivery";
 
     let home = std::env::var_os("HOME").map(PathBuf::from);
     let project_events = a.events.unwrap_or_else(|| cwd.join(".fno/events.jsonl"));
@@ -507,9 +509,9 @@ pub fn run_finalize(args: &[String]) -> i32 {
             .join(".fno/events.jsonl")
     });
 
-    // Read the manifest. A missing/unreadable manifest is the delegated-session
-    // path: handoff.sh archived it AND already wrote that session's ledger
-    // record before archival, so there is nothing to finalize here. Non-fatal.
+    // Missing manifests are the non-fatal delegated-session path for legacy
+    // reasons. Generic delivery must retry because its required writes cannot
+    // be proven without the session-bound manifest.
     let content = match fs::read_to_string(&state) {
         Ok(c) => c,
         Err(e) => {
@@ -517,17 +519,20 @@ pub fn run_finalize(args: &[String]) -> i32 {
                 "finalize: manifest {} unreadable ({e}); nothing to finalize (likely delegated/archived)",
                 state.display()
             );
-            return 0;
+            return i32::from(delivery_ship);
         }
     };
     let m = parse_manifest_fields(&content);
-    let Some(session_id) = m.session_id.clone() else {
+    let Some(session_id) = m
+        .session_id
+        .clone()
+        .filter(|value| !value.trim().is_empty())
+    else {
         eprintln!("finalize: manifest has no session_id; skipping (cannot dedup)");
-        return 0;
+        return i32::from(delivery_ship);
     };
 
     let legacy_ship = SHIP_REASONS.contains(&reason.as_str());
-    let delivery_ship = reason == "DoneDelivery";
     let ship = legacy_ship || delivery_ship;
 
     // Idempotency, ship-aware (sigma-review HIGH): a prior COMPLETED ship means
@@ -602,6 +607,7 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // `graduate` verb and the cross-project safety net.
     let mut stamped = false;
     let mut handoff_path: Option<String> = None;
+    let mut delivery_terminal_message: Option<String> = None;
     if legacy_ship {
         let plan = m.plan_path.clone().unwrap_or_default();
         if !plan.is_empty() {
@@ -683,6 +689,8 @@ pub fn run_finalize(args: &[String]) -> i32 {
             &session_id,
         ) {
             Some(receipt) => {
+                delivery_terminal_message =
+                    Some(format!("generic delivery finalized via {}", receipt.uri));
                 let plan = m.plan_path.clone().unwrap_or_default();
                 if !plan.is_empty() {
                     let expected = derive_expected_url_count(&cwd, &plan, m.cross_project);
@@ -851,6 +859,20 @@ pub fn run_finalize(args: &[String]) -> i32 {
     if let Some(blocked) = auto_merge_blocked_reason {
         data["auto_merge_blocked_reason"] = json!(blocked);
     }
+    if delivery_ship && failed.is_empty() {
+        let emitted = delivery_terminal_message.as_deref().is_some_and(|message| {
+            crate::delivery_completion::emit_terminal(
+                &project_events,
+                &global_events,
+                &session_id,
+                message,
+            )
+        });
+        if !emitted {
+            failed.push("delivery_terminal".into());
+        }
+    }
+    let delivery_retry = delivery_ship && !failed.is_empty();
     if failed.is_empty() {
         emit_to_both(&project_events, &global_events, "session_finalized", data);
     } else {
@@ -864,7 +886,11 @@ pub fn run_finalize(args: &[String]) -> i32 {
             data,
         );
     }
-    0
+    if delivery_retry {
+        1
+    } else {
+        0
+    }
 }
 
 // ── ledger (always) ─────────────────────────────────────────────────────────
