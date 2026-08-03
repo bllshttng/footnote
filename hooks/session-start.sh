@@ -227,23 +227,15 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
-# The Codex wrapper is its sole SessionStart carrier; Claude registers a small
-# dedicated carrier in hooks.json. Both render this one read-only predicate.
+# Codex calls the shared predicate here; Claude registers a dedicated carrier.
 peer_helper="${SCRIPT_DIR}/helpers/worktree-live-peers.sh"
 peer_note=""
 if [[ -f "$peer_helper" ]]; then
-    if [[ -n "$CONTEXT_HOOK_INPUT" && -f "$CONTEXT_HOOK_INPUT" ]]; then
-        peer_note="$(bash "$peer_helper" <"$CONTEXT_HOOK_INPUT" 2>/dev/null || true)"
-    else
-        peer_note="$(bash "$peer_helper" </dev/null 2>/dev/null || true)"
-    fi
+    peer_note="$(bash "$peer_helper" <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)"
 fi
 if [[ -n "$peer_note" ]]; then
-    if [[ -n "$hygiene_content" ]]; then
-        hygiene_content="${hygiene_content}"$'\n'"${peer_note}"
-    else
-        hygiene_content="## Worktree hygiene"$'\n'"${peer_note}"
-    fi
+    [[ -n "$hygiene_content" ]] || hygiene_content="## Worktree hygiene"
+    hygiene_content="${hygiene_content}"$'\n'"${peer_note}"
 fi
 
 # 5. first-run setup nudge — points a brand-new user (no fno config yet) at the
