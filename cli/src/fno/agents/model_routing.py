@@ -655,14 +655,25 @@ def materialize_route_settings(route_env: Mapping[str, str]) -> str:
     survives that fork where an env overlay cannot. Content-addressed and
     ``0600`` (it carries ``ANTHROPIC_AUTH_TOKEN``): identical routes reuse one
     file rather than accumulating per spawn.
+
+    Every ``SCRUB_AUTH_VARS`` entry is written as an empty string FIRST, with
+    the route on top. Without that floor a routed worker keeps whatever auth the
+    invoking shell exported - and the env scrub that would have dropped it is
+    itself discarded at the daemon fork - so a session pointed at another
+    endpoint could still authenticate with an inherited ``ANTHROPIC_API_KEY``.
+    A composed ``--route`` + ``--account`` spawn writes ONLY this file (the
+    route wins the settings file by design), which is where that gap lived.
     """
     import hashlib
     import json
     import os
 
     from fno import paths
+    from fno.agents.account_env import SCRUB_AUTH_VARS
 
-    payload = json.dumps({"env": dict(route_env)}, sort_keys=True)
+    env: dict[str, str] = {var: "" for var in SCRUB_AUTH_VARS}
+    env.update(route_env)
+    payload = json.dumps({"env": env}, sort_keys=True)
     digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:16]
     # Route through fno.paths (config-driven ~/.fno) rather than a bare
     # Path.home() -- the check-no-hardcoded-paths gate forbids the literal, and

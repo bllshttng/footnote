@@ -386,12 +386,20 @@ def test_materialize_route_settings_is_0600_and_content_addressed(
     monkeypatch.setenv("HOME", str(tmp_path))
     from fno.agents.model_routing import materialize_route_settings
 
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+
     env = {"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"}
     p1 = materialize_route_settings(env)
     p2 = materialize_route_settings(dict(env))  # same content -> same file
     assert p1 == p2
     assert oct(os.stat(p1).st_mode & 0o777) == "0o600"
-    assert json.load(open(p1))["env"] == env
+    blob = json.load(open(p1))["env"]
+    assert {k: blob[k] for k in env} == env
+    # Every inheritable auth var the route did not set is written empty (unset),
+    # so an ambient key from the invoking shell cannot outrank the route.
+    for var in SCRUB_AUTH_VARS:
+        if var not in env:
+            assert blob[var] == "", var
     # codex P2 (finding 8): published atomically via a temp + os.replace, so a
     # racing reader never sees a partial file and no .tmp sidecar is left behind.
     leftovers = list(Path(p1).parent.glob(".*.tmp"))
@@ -423,6 +431,43 @@ def test_bg_create_routed_spawn_passes_settings_flag(
     argv = seen["argv"]
     assert "--settings" in argv
     assert argv[argv.index("--settings") + 1].endswith(".json")
+
+
+def test_composed_route_and_account_spawn_scrubs_inherited_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A --route + --account spawn writes ONLY the route settings file (route-wins
+    atomicity), so that file has to carry the auth scrub itself: the env scrub is
+    discarded at the daemon fork, and without the floor the worker could still
+    authenticate with an inherited key while its endpoint points elsewhere."""
+    import json
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "stale-primary-key")
+    from fno.agents.providers import claude as claude_mod
+
+    seen: Dict[str, Any] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        from subprocess import CompletedProcess
+
+        return CompletedProcess(argv, 0, stdout="backgrounded \xb7 abcd1234 \xb7 ok\n", stderr="")
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    claude_mod.bg_create(
+        name="w",
+        message="hi",
+        cwd=tmp_path,
+        account_env={"CLAUDE_CONFIG_DIR": str(tmp_path / "acct")},
+        route_env={"ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic", "ANTHROPIC_AUTH_TOKEN": "t"},
+    )
+    argv = seen["argv"]
+    blob = json.load(open(argv[argv.index("--settings") + 1]))["env"]
+    assert blob["ANTHROPIC_API_KEY"] == ""
+    assert blob["CLAUDE_CODE_OAUTH_TOKEN"] == ""
+    assert blob["ANTHROPIC_BASE_URL"] == "https://api.z.ai/api/anthropic"
 
 
 def test_headless_create_routed_spawn_passes_settings_flag(
