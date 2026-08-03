@@ -227,11 +227,14 @@ if [[ -f "$hygiene_helper" ]]; then
     fi
 fi
 
-# Codex calls the shared predicate here; Claude registers a dedicated carrier.
-peer_helper="${SCRIPT_DIR}/helpers/worktree-live-peers.sh"
+# Codex calls the shared carrier (body-only); Claude registers it directly in
+# hooks.json. One observation path: the carrier evaluates the predicate, renders
+# the advisory, and best-effort records + folds recurrence. Neither harness
+# reimplements the peer predicate or the event payload.
+peer_carrier="${SCRIPT_DIR}/worktree-peers-session-start.sh"
 peer_note=""
-if [[ -f "$peer_helper" ]]; then
-    peer_note="$(bash "$peer_helper" <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)"
+if [[ -f "$peer_carrier" ]]; then
+    peer_note="$(bash "$peer_carrier" --body-only <"${CONTEXT_HOOK_INPUT:-/dev/null}" 2>/dev/null || true)"
 fi
 if [[ -n "$peer_note" ]]; then
     [[ -n "$hygiene_content" ]] || hygiene_content="## Worktree hygiene"
