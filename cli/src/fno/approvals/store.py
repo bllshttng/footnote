@@ -81,7 +81,8 @@ CREATE TABLE IF NOT EXISTS attempts (
     external_ref       TEXT,
     reconciliation_ref TEXT,
     dispatch_claimed   INTEGER NOT NULL DEFAULT 0,
-    dispatch_token     TEXT
+    dispatch_token     TEXT,
+    remote_idempotency INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS outbox (
@@ -428,9 +429,10 @@ class EffectStore:
                     return PrepareResult(attempt=attempt, may_dispatch=False)
                 token = _new_token()
                 claimed = conn.execute(
-                    "UPDATE attempts SET dispatch_claimed = 1, dispatch_token = ?"
+                    "UPDATE attempts SET dispatch_claimed = 1, dispatch_token = ?,"
+                    " remote_idempotency = ?"
                     " WHERE idempotency_key = ? AND dispatch_claimed = 0",
-                    (token, idempotency_key),
+                    (token, 1 if adapter.remote_idempotency else 0, idempotency_key),
                 ).rowcount
                 if claimed != 1:
                     return PrepareResult(attempt=attempt, may_dispatch=False)
@@ -439,8 +441,8 @@ class EffectStore:
             conn.execute(
                 "INSERT INTO attempts (idempotency_key, effect_id, work_order_id, attempt_id,"
                 " request_digest, action_digest, destination, effect_class, adapter_id,"
-                " adapter_version, state, dispatch_claimed, dispatch_token)"
-                " VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?)",
+                " adapter_version, state, dispatch_claimed, dispatch_token,"
+                " remote_idempotency) VALUES (?,?,?,?,?,?,?,?,?,?,?,1,?,?)",
                 (
                     idempotency_key,
                     request["effect_id"],
@@ -454,6 +456,7 @@ class EffectStore:
                     adapter.adapter_version,
                     EffectState.PREPARED.value,
                     token,
+                    1 if adapter.remote_idempotency else 0,
                 ),
             )
             row = conn.execute(
@@ -521,10 +524,10 @@ class EffectStore:
                     "a token superseded by a retry is no longer valid.",
                 )
 
-            if state is EffectState.FAILED and not (external_ref or row["external_ref"]):
+            if state is EffectState.FAILED and not external_ref:
                 _refuse(
                     RefusalReason.UNSAFE_RETRY,
-                    f"settling {idempotency_key} failed requires the destination's rejection "
+                    f"settling {idempotency_key} failed requires this dispatch's own rejection "
                     f"reference; without one the outcome is not known to be a rejection",
                     fields=["external_ref"],
                     recovery="If the destination did not answer, settle unknown instead. "
@@ -595,8 +598,11 @@ class EffectStore:
         An ``unknown`` attempt needs one of two proofs, because nobody knows
         whether it happened:
 
-        * ``adapter.remote_idempotency`` -- the destination itself enforces this
-          key, so a duplicate request cannot become a duplicate effect.
+        * remote idempotency covering the AMBIGUOUS DISPATCH ITSELF -- both the
+          attempt's stored flag and the retry adapter. A retry adapter that newly
+          declares the capability says nothing about the send already in flight:
+          the destination never deduped that one, so resending under a key it
+          never saw duplicates the effect.
         * a ``reconciliation`` read reporting ``effect_present=False`` -- somebody
           actually looked and the effect is absent. The adapter's
           ``reconciliation`` flag alone is NOT enough: it says the adapter can
@@ -641,13 +647,18 @@ class EffectStore:
             # not outlive its approval's expiration or its principal's authority.
             self._authorized_request(conn, row["request_digest"], now)
 
-            if current is EffectState.UNKNOWN and not adapter.remote_idempotency:
+            # The stored flag is what the ambiguous dispatch actually ran under.
+            # A retry adapter that newly declares remote idempotency says nothing
+            # about the send already in flight: the destination did not dedupe it,
+            # so resending under a key it never saw duplicates the effect.
+            covered = bool(row["remote_idempotency"]) and adapter.remote_idempotency
+            if current is EffectState.UNKNOWN and not covered:
                 if reconciliation is None:
                     _refuse(
                         RefusalReason.UNSAFE_RETRY,
-                        f"adapter {adapter.adapter_id} does not enforce this idempotency key "
-                        f"remotely, so an unknown effect may only be retried with a "
-                        f"reconciliation read proving it is absent",
+                        f"the ambiguous dispatch for {idempotency_key} did not run under remote "
+                        f"idempotency, so it may only be retried with a reconciliation "
+                        f"read proving the effect is absent",
                         fields=["remote_idempotency", "reconciliation"],
                         recovery=_UNKNOWN_RECOVERY,
                     )
@@ -683,7 +694,8 @@ class EffectStore:
             token = _new_token()
             claimed = conn.execute(
                 "UPDATE attempts SET state = ?, dispatch_claimed = 1, dispatch_token = ?,"
-                " adapter_id = ?, adapter_version = ?,"
+                " adapter_id = ?, adapter_version = ?, remote_idempotency = ?,"
+                " external_ref = NULL,"
                 " reconciliation_ref = COALESCE(?, reconciliation_ref)"
                 " WHERE idempotency_key = ? AND state = ?",
                 (
@@ -691,6 +703,7 @@ class EffectStore:
                     token,
                     adapter.adapter_id,
                     adapter.adapter_version,
+                    1 if adapter.remote_idempotency else 0,
                     reconciliation.ref if reconciliation else None,
                     idempotency_key,
                     current.value,

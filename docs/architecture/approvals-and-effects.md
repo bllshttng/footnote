@@ -90,7 +90,7 @@ Clock reads happen **inside** the write transaction. `BEGIN IMMEDIATE` can block
 
 | State | Reopens? |
 |---|---|
-| `failed` | Yes, no capability proof needed, because settling `failed` already required the destination's rejection reference |
+| `failed` | Yes, no capability proof needed, because settling `failed` already required *this dispatch's own* rejection reference. Reopening clears it, so the next failure must prove itself again |
 | `unknown` | Only against one of the two proofs below |
 | `prepared`, `executing` | No: still in flight, and a live dispatcher already holds it |
 | `acknowledged`, `blocked` | No: terminal |
@@ -101,7 +101,7 @@ The transition is a conditional `UPDATE ... WHERE state = ?` on the state that w
 
 For an `unknown` attempt, exactly two things count as proof:
 
-- `adapter.remote_idempotency` -- the destination itself enforces this key, so a duplicate request cannot become a duplicate effect.
+- Remote idempotency covering the **ambiguous dispatch itself**: both the attempt's stored flag and the retry adapter. A retry adapter that newly declares the capability says nothing about the send already in flight, because the destination never deduped that one, so resending under a key it never saw would duplicate the effect.
 - A `ReconciliationRead` reporting `effect_present=False` -- somebody actually looked and the effect is absent.
 
 A read must also name the attempt it clears via `idempotency_key`: an absence observed for a different effect is not evidence about this one.

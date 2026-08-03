@@ -323,15 +323,59 @@ def test_ac4_err_unknown_retry_is_refused_without_a_proven_capability(
 def test_ac4_err_remote_idempotency_alone_makes_an_unknown_retry_safe(
     store: EffectStore,
 ) -> None:
+    """Only when the ambiguous dispatch itself ran under remote idempotency."""
     digest = _approve(store, _request())
     tok = store.prepare(
-        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+        request_digest=digest, idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER
     ).dispatch_token
     store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
 
     reopened = store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
     assert reopened.attempt.state is EffectState.EXECUTING
     assert reopened.attempt.idempotency_key == "key-1"
+
+
+def test_ac4_err_a_newly_declared_capability_cannot_cover_an_earlier_dispatch(
+    store: EffectStore,
+) -> None:
+    """The destination never deduped the send already in flight, so resending
+    under a key it never saw duplicates the effect."""
+    digest = _approve(store, _request())
+    tok = store.prepare(
+        request_digest=digest, idempotency_key="key-1", adapter=ADAPTER
+    ).dispatch_token
+    store.settle(dispatch_token=tok, idempotency_key="key-1", state=EffectState.UNKNOWN)
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.authorize_retry(idempotency_key="key-1", adapter=IDEMPOTENT_ADAPTER)
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert store.get_attempt("key-1").state is EffectState.UNKNOWN
+
+
+def test_a_stale_rejection_reference_does_not_satisfy_a_later_failure(
+    store: EffectStore,
+) -> None:
+    """Otherwise an ambiguous retried dispatch could be labelled failed on the
+    strength of the PREVIOUS dispatch's rejection, and retried again unproven."""
+    digest = _approve(store, _request())
+    first = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(
+        dispatch_token=first.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.FAILED,
+        external_ref="rejected-1",
+    )
+    second = store.authorize_retry(idempotency_key="key-1", adapter=ADAPTER)
+    assert second.attempt.external_ref is None
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.settle(
+            dispatch_token=second.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.FAILED,
+        )
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert store.get_attempt("key-1").state is EffectState.EXECUTING
 
 
 def test_ac4_err_a_reconciliation_read_proving_absence_makes_a_retry_safe(
@@ -1174,3 +1218,28 @@ def test_creating_an_attempt_emits_its_own_event(store: EffectStore, tmp_path: P
     assert changes[0]["data"]["state"] == "prepared"
     assert changes[0]["data"]["idempotency_key"] == "key-1"
     assert "previous_state" not in changes[0]["data"]
+
+
+def test_a_reference_from_an_earlier_state_does_not_prove_a_rejection(
+    store: EffectStore,
+) -> None:
+    """A reference recorded alongside an ambiguous outcome is not the
+    destination saying no, so it must not satisfy a later failed settlement."""
+    digest = _approve(store, _request())
+    granted = store.prepare(request_digest=digest, idempotency_key="key-1", adapter=ADAPTER)
+    store.settle(
+        dispatch_token=granted.dispatch_token,
+        idempotency_key="key-1",
+        state=EffectState.UNKNOWN,
+        external_ref="partial-send-1",
+    )
+    assert store.get_attempt("key-1").external_ref == "partial-send-1"
+
+    with pytest.raises(RefusedError) as excinfo:
+        store.settle(
+            dispatch_token=granted.dispatch_token,
+            idempotency_key="key-1",
+            state=EffectState.FAILED,
+        )
+    assert excinfo.value.refusal.reason is RefusalReason.UNSAFE_RETRY
+    assert store.get_attempt("key-1").state is EffectState.UNKNOWN
