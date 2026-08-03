@@ -130,7 +130,7 @@ def _print_human(record: dict[str, Any]) -> None:
 @approvals_app.command("ls")
 def list_requests(
     pending: bool = typer.Option(False, "--pending", help="Only requests with no decision."),
-    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
     db: Optional[Path] = typer.Option(None, "--db", hidden=True, help="Override the store path."),
 ) -> None:
     """List approval requests. Reads only; never executes an effect."""
@@ -154,7 +154,7 @@ def list_requests(
 @approvals_app.command("show")
 def show_request(
     request_digest: str = typer.Argument(..., help="Full request digest."),
-    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
     db: Optional[Path] = typer.Option(None, "--db", hidden=True, help="Override the store path."),
 ) -> None:
     """Show every bound field of one request. Reads only; never executes an effect."""
@@ -180,7 +180,7 @@ def decide_request(
     transport: Optional[str] = typer.Option(
         None, "--transport", help="Where the decision arrived from. Informational only."
     ),
-    as_json: bool = typer.Option(False, "--json", help="Machine-readable output."),
+    as_json: bool = typer.Option(False, "--json", "-J", help="Machine-readable output."),
     db: Optional[Path] = typer.Option(None, "--db", hidden=True, help="Override the store path."),
 ) -> None:
     """Decide one exact request.
