@@ -28,10 +28,20 @@ The pane still had a real pid, a real pane id, and a painted first frame, which 
 ## What fno does now
 
 1. **It does not pin.** `dispatch_spawn_pane` resolves the monitor before building the argv and skips minting a `session_uuid` on the happy route. `happy_pane_argv` refuses outright if an argv still carries `--session-id`, so an in-process caller that builds its own argv cannot reintroduce the lie.
-2. **It discovers.** `_backfill_claude_session_id` finds the transcript that appeared for this cwd after the pane started - the same shape as the existing codex and opencode backfills. It is stability-gated: an id is accepted only once the same single id repeats on the next probe, so a same-cwd sibling spawning at the same moment yields nothing rather than being mis-claimed.
-3. **It reports the miss.** No transcript means no claude session started, so the row lands as `spawning`, not `live`, and an `agent_session_id_uncaptured` event is emitted. A pane created but not addressable is a state worth naming; calling it live is the failure this page exists to prevent.
+2. **It does not guess.** The row lands id-less and `spawning`, and an `agent_session_id_uncaptured` event is emitted. A pane created but not yet addressable is a state worth naming; calling it live is the failure this page exists to prevent.
+3. **The worker names itself.** Its SessionStart hook restamps the row via `restamp_harness_session_id`, keyed on `FNO_AGENT_SELF` - the one identity on the row a harness cannot re-mint. That restamp promotes a `spawning` row to `live`, because a worker that has proven its own identity is addressable.
 
 The default (unmonitored) claude route is unchanged: fno pins `--session-id` there and claude honours it.
+
+### Why the spawn does not read the transcript store
+
+Finding the transcript that appeared for this cwd after the pane started is the obvious move, and it was tried. It is unsound.
+
+Two happy panes starting in one cwd snapshot the same baseline. If pane A's transcript is the only new one for as long as the probe runs, and pane B writes its registry row first, B records A's session id. Peek, mail, truth, and resume for B then all target A, which is very much alive and doing something else.
+
+Recency cannot separate them either: a claude transcript is appended to for the life of its session, so a sibling that merely *writes* during the probe looks newer than the spawn.
+
+Binding a row to a healthy stranger is strictly worse than leaving it unbound. The worker naming itself is proof; anything the spawn can observe from outside is inference.
 
 ## Two namespaces, not one
 

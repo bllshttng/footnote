@@ -553,6 +553,65 @@ def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
     assert "session_restamp_failed" in [e["kind"] for e in _events(tmp_path)]
 
 
+def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A happy-hosted claude pane cannot be given an id at spawn (happy discards
+    the pinned one), so its row parks at `spawning` and the restamp is the ONLY
+    path to an id. Leaving it `spawning` after the worker has proven its own
+    identity is the same lie as calling it `live` before, just inverted.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="target-x-ee43-happy",
+            harness="claude",
+            harness_session_id=None,
+            cwd="/proj",
+            log_path="",
+            status="spawning",
+            mux={"session": "main", "pane_id": 11},
+        )
+    ])
+    entry = restamp_harness_session_id(
+        name="target-x-ee43-happy", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert rows[0].harness_session_id == REMINT
+    assert rows[0].status == "live", "a worker that named itself is addressable"
+    assert rows[0].short_id == "", "still a mux row: exactly one live ref"
+
+
+def test_restamp_does_not_disturb_a_non_spawning_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only `spawning` is promoted. Every other status is owned by something
+    that knows more about the worker's lifecycle than a SessionStart hook does."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="target-x-ee43-idle",
+            harness="claude",
+            harness_session_id=BIRTH,
+            cwd="/proj",
+            log_path="",
+            status="idle",
+            mux={"session": "main", "pane_id": 12},
+        )
+    ])
+    restamp_harness_session_id(
+        name="target-x-ee43-idle", harness="claude", session_id=REMINT
+    )
+
+    assert load_registry()[0].status == "idle"
+
+
 def test_restamp_corrects_a_mux_hosted_row(tmp_path: Path, monkeypatch) -> None:
     """The reported row was PANE-hosted, and a mux row is the one shape where
     filling short_id is illegal: `_validate_single_live_ref` enforces mux XOR

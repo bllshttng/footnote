@@ -2237,14 +2237,11 @@ def _zai_route(monkeypatch):
     return route
 
 
-def _happy_spawn(monkeypatch, tmp_path, projects_dir: Path, **kwargs):
-    """A happy-monitored claude pane spawn with the transcript store redirected."""
+def _happy_spawn(monkeypatch, tmp_path, **kwargs):
+    """A happy-monitored claude pane spawn."""
     import fno.agents.mux_spawn as mux_spawn
-    from fno.agents.discover import PROJECTS_DIR_ENV
 
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
-    monkeypatch.setattr(mux_spawn, "_CLAUDE_BACKFILL_DELAY_S", 0.0)
-    monkeypatch.setenv(PROJECTS_DIR_ENV, str(projects_dir))
     return _spawn(
         monkeypatch,
         tmp_path,
@@ -2255,19 +2252,9 @@ def _happy_spawn(monkeypatch, tmp_path, projects_dir: Path, **kwargs):
     )
 
 
-def _write_transcript(projects_dir: Path, cwd: Path, sid: str, mtime: float) -> None:
-    from fno.agents.discover import _candidate_dir_names
-
-    pdir = projects_dir / _candidate_dir_names(str(cwd))[0]
-    pdir.mkdir(parents=True, exist_ok=True)
-    path = pdir / f"{sid}.jsonl"
-    path.write_text("{}\n")
-    os.utime(path, (mtime, mtime))
-
-
 def test_happy_spawn_never_pins_a_session_id(tmp_path: Path, monkeypatch) -> None:
     """happy discards --session-id, so fno must not mint one and report it (x-ee43)."""
-    result, runner = _happy_spawn(monkeypatch, tmp_path, tmp_path / "projects")
+    result, runner = _happy_spawn(monkeypatch, tmp_path)
 
     run_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "run"])
     provider_argv = run_call[run_call.index("--") + 1 :]
@@ -2276,120 +2263,45 @@ def test_happy_spawn_never_pins_a_session_id(tmp_path: Path, monkeypatch) -> Non
     assert result.session_uuid is None
 
 
-def test_happy_spawn_without_a_transcript_is_not_reported_live(
+def test_happy_spawn_is_not_reported_live_without_a_proven_session(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """No transcript means no claude session started; the row must not read live.
+    """The spawn cannot know a happy pane's session id, so it must not claim one.
 
-    This is the x-ee43 corpse: a real pid, a real pane, and status "live" for ~55
-    minutes with no session behind it.
+    This is the x-ee43 corpse: a real pid, a real pane, and status "live" for
+    ~55 minutes with no session behind it. The row waits for the worker to name
+    itself via the SessionStart restamp instead of guessing.
     """
-    result, _ = _happy_spawn(monkeypatch, tmp_path, tmp_path / "projects")
+    result, _ = _happy_spawn(monkeypatch, tmp_path)
 
     assert result.session_uuid is None
     assert result.status == "spawning"
     assert result.short_id == ""
 
 
-def test_happy_spawn_discovers_the_session_claude_actually_minted(
+def test_happy_spawn_never_guesses_from_the_transcript_store(
     tmp_path: Path, monkeypatch
 ) -> None:
-    projects = tmp_path / "projects"
+    """A transcript appearing in the cwd during the spawn proves nothing.
 
-    class TranscriptWritingRunner(FakeRunner):
-        """claude writes its transcript once the pane is running, not before."""
-
-        def __call__(self, argv, **kwargs):
-            if argv[1:4] == ["mux", "pane", "run"]:
-                _write_transcript(projects, tmp_path, "real-sid", time.time() + 60)
-            return super().__call__(argv, **kwargs)
-
-    result, _ = _happy_spawn(
-        monkeypatch, tmp_path, projects, runner=TranscriptWritingRunner()
-    )
-
-    assert result.session_uuid == "real-sid"
-    assert result.status == "live"
-
-
-def test_claude_backfill_ignores_a_transcript_older_than_the_spawn(
-    tmp_path: Path, monkeypatch
-) -> None:
+    Two panes starting in one cwd see the same store; whichever writes its row
+    first could claim the other's session. Binding the row to a healthy stranger
+    is worse than leaving it unbound, so the spawn reads no transcripts at all.
+    """
     import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.discover import PROJECTS_DIR_ENV, _candidate_dir_names
 
     projects = tmp_path / "projects"
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    since_ms = int(time.time() * 1000)
-    _write_transcript(projects, cwd, "stale-sid", (since_ms / 1000.0) - 30)
+    pdir = projects / _candidate_dir_names(str(tmp_path))[0]
+    pdir.mkdir(parents=True)
+    (pdir / "someone-elses-sid.jsonl").write_text("{}\n")
+    monkeypatch.setenv(PROJECTS_DIR_ENV, str(projects))
 
-    assert (
-        mux_spawn._backfill_claude_session_id(
-            cwd, since_ms, projects_dir=projects, sleep=lambda _s: None
-        )
-        is None
-    )
-
-
-def test_happy_spawn_never_adopts_a_busy_siblings_session(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """A live sibling appends to its transcript, so its mtime crosses the spawn
-    clock too. Identity, not recency, is what separates them - binding the row to
-    a healthy stranger would be worse than binding it to nothing."""
-    projects = tmp_path / "projects"
-    # Present before the spawn, and written DURING it (mtime in the future).
-    _write_transcript(projects, tmp_path, "sibling-sid", time.time() + 120)
-
-    result, _ = _happy_spawn(monkeypatch, tmp_path, projects)
+    result, _ = _happy_spawn(monkeypatch, tmp_path)
 
     assert result.session_uuid is None
     assert result.status == "spawning"
-
-
-def test_claude_backfill_skips_an_excluded_pre_existing_session(
-    tmp_path: Path, monkeypatch
-) -> None:
-    import fno.agents.mux_spawn as mux_spawn
-
-    projects = tmp_path / "projects"
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    since_ms = int(time.time() * 1000)
-    _write_transcript(projects, cwd, "sibling-sid", time.time() + 120)
-    _write_transcript(projects, cwd, "mine-sid", time.time() + 120)
-
-    assert (
-        mux_spawn._backfill_claude_session_id(
-            cwd,
-            since_ms,
-            projects_dir=projects,
-            sleep=lambda _s: None,
-            exclude={"sibling-sid"},
-        )
-        == "mine-sid"
-    )
-
-
-def test_claude_backfill_refuses_an_ambiguous_same_cwd_pair(
-    tmp_path: Path, monkeypatch
-) -> None:
-    """Two sessions starting in one cwd cannot be told apart; guess nothing."""
-    import fno.agents.mux_spawn as mux_spawn
-
-    projects = tmp_path / "projects"
-    cwd = tmp_path / "repo"
-    cwd.mkdir()
-    since_ms = int(time.time() * 1000)
-    _write_transcript(projects, cwd, "sid-a", time.time() + 60)
-    _write_transcript(projects, cwd, "sid-b", time.time() + 60)
-
-    assert (
-        mux_spawn._backfill_claude_session_id(
-            cwd, since_ms, projects_dir=projects, sleep=lambda _s: None
-        )
-        is None
-    )
+    assert not hasattr(mux_spawn, "_backfill_claude_session_id")
 
 
 def test_happy_routed_panes_config_read_failure_refuses(monkeypatch) -> None:

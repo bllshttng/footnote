@@ -34,7 +34,7 @@ import time
 import uuid as _uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Collection, Mapping, Optional
+from typing import Callable, Mapping, Optional
 
 from fno import paths
 from fno.agents.dispatch import (
@@ -667,114 +667,6 @@ def _backfill_codex_session_id(
         if attempt:
             naptime(_CODEX_BACKFILL_DELAY_S)
         ids = codex_session_ids_started_in(cwd, since_ms, sessions_dir=sessions_dir)
-        if len(ids) > 1:
-            return None  # ambiguous; retrying cannot narrow it
-        if len(ids) == 1 and ids[0] == prev:
-            return ids[0]
-        prev = ids[0] if ids else None
-    return None
-
-
-# A happy-hosted claude writes its transcript once the child claude actually
-# starts, which is one extra process hop behind a codex rollout. Wider window,
-# same shape. Paid only on the happy route.
-#
-# ponytail: fixed window, not an adaptive wait. It fails in one direction - a
-# healthy worker whose SessionStart hooks run long enough to push the transcript
-# past ~6s is reported `spawning` rather than `live`, costing addressability but
-# never the spawn. Widen ATTEMPTS if that shows up in practice; the cost is spawn
-# latency on a genuinely dead pane, which is the case that already lost an hour.
-_CLAUDE_BACKFILL_ATTEMPTS = 8
-_CLAUDE_BACKFILL_DELAY_S = 0.75
-
-
-def _claude_session_ids_started_in(
-    cwd: Path,
-    since_ms: int,
-    *,
-    projects_dir: Optional[Path] = None,
-    exclude: Collection[str] = (),
-) -> list[str]:
-    """Claude session ids whose transcript for ``cwd`` was touched after ``since_ms``.
-
-    Mirrors ``discover.codex_session_ids_started_in`` over claude's projects
-    store. The cwd->subdir encoding is lossy, so both candidate spellings are
-    scanned (``_candidate_dir_names``) exactly as the discovery path does.
-
-    ``exclude`` is the pre-launch snapshot and is the load-bearing filter, not
-    the mtime. A claude transcript is appended to for the life of its session, so
-    a sibling that merely WRITES during the probe has an mtime after ``since_ms``
-    too - "newer than the spawn" cannot tell a new session from a busy old one.
-    Only an id that was absent before the pane ran can belong to the new pane.
-    The mtime bound is kept as a cheap second condition; it is not sufficient
-    alone. Passing ``since_ms=0`` with no ``exclude`` yields the full id set,
-    which is how the snapshot itself is taken.
-    """
-    from fno.agents.discover import _candidate_dir_names, default_projects_dir
-
-    root = projects_dir or default_projects_dir()
-    cutoff = since_ms / 1000.0
-    found: set[str] = set()
-    for name in _candidate_dir_names(str(cwd)):
-        try:
-            entries = list(os.scandir(root / name))
-        except OSError:
-            continue
-        for e in entries:
-            if ".sync-conflict-" in e.name or not e.name.endswith(".jsonl"):
-                continue
-            sid = e.name[: -len(".jsonl")]
-            if sid in exclude:
-                continue
-            try:
-                if not e.is_file() or e.stat().st_mtime < cutoff:
-                    continue
-            except OSError:
-                continue
-            found.add(sid)
-    return sorted(found)
-
-
-def _backfill_claude_session_id(
-    cwd: Path,
-    since_ms: int,
-    *,
-    projects_dir: Optional[Path] = None,
-    sleep: Optional[Callable] = None,
-    exclude: Collection[str] = (),
-) -> Optional[str]:
-    """Discover a happy-hosted claude pane's session id after the spawn.
-
-    On the happy route fno cannot pin ``--session-id`` (happy extracts it and
-    never re-adds it under its hook server), so the id is discovered the same way
-    the codex and opencode rows discover theirs: the transcript that appeared for
-    this cwd after the pane started.
-
-    ``exclude`` is the set of transcript ids present before the pane ran; only an
-    id absent from it can be this pane's. Without it a merely BUSY sibling in the
-    same cwd would qualify (its transcript is appended to continuously, so its
-    mtime crosses ``since_ms``), and the row would be bound to the wrong worker -
-    strictly worse than binding it to nothing, since peek, mail, truth, and
-    resume would then all target a healthy stranger.
-
-    Stability-gated like the codex no-pid path: an id is accepted only once the
-    same single id repeats on the next probe, so a same-cwd sibling spawning
-    concurrently yields ``None`` rather than being mis-claimed.
-
-    ``None`` is also the DEAD-SPAWN signal, and that is the point. A happy pane
-    that never starts a claude session writes no transcript at all, so the miss
-    that costs addressability is the same read that stops the receipt calling it
-    live (x-ee43: a spawn returned status "live" with a real pid and pane while
-    no session existed for ~55 minutes).
-    """
-    naptime = sleep or time.sleep
-    prev: Optional[str] = None
-    for attempt in range(_CLAUDE_BACKFILL_ATTEMPTS):
-        if attempt:
-            naptime(_CLAUDE_BACKFILL_DELAY_S)
-        ids = _claude_session_ids_started_in(
-            cwd, since_ms, projects_dir=projects_dir, exclude=exclude
-        )
         if len(ids) > 1:
             return None  # ambiguous; retrying cannot narrow it
         if len(ids) == 1 and ids[0] == prev:
@@ -1432,15 +1324,6 @@ def dispatch_spawn_pane(
         # become the sole backfill candidate, stamping this row with the
         # sibling's id. Sampling here keeps the bound as tight as the pane run.
         spawn_started_ms = int(time.time() * 1000)
-        # Snapshot the transcript ids already present for this cwd, on the same
-        # tight clock and for the same reason. mtime alone cannot identify the
-        # new session: a sibling that merely writes during the probe also looks
-        # "newer than the spawn". Sampled here so a session that starts during
-        # the lock-wait above is still outside the snapshot and stays a
-        # candidate, while every pre-existing one is excluded by identity.
-        claude_pre_sids: frozenset[str] = frozenset()
-        if provider == "claude" and not pin_session:
-            claude_pre_sids = frozenset(_claude_session_ids_started_in(cwd, 0))
         run_args = [
             "mux",
             "pane",
@@ -1575,22 +1458,27 @@ def dispatch_spawn_pane(
                     reason="no unique codex rollout for this cwd after spawn",
                 )
         elif provider == "claude" and not pin_session:
-            # happy owns the id on this route (see the hoisted resolve_monitor),
-            # so discover it rather than minting one. A miss means no claude
-            # session ever started - the row must not read live for it.
-            session_uuid = _backfill_claude_session_id(
-                cwd, spawn_started_ms, exclude=claude_pre_sids
-            )
-            if session_uuid is None:
-                from fno.agents import events as _events
+            # happy owns the id on this route, so the spawn CANNOT know it and
+            # deliberately does not try. Guessing from the transcript store was
+            # the obvious move and it is unsound: two panes starting in one cwd
+            # snapshot the same baseline, and whichever writes its row first can
+            # claim the other's session - binding the row to a healthy stranger,
+            # which is worse than binding it to nothing.
+            #
+            # The worker names itself instead. Its SessionStart hook restamps
+            # this row (keyed on FNO_AGENT_SELF, the one identity a harness
+            # cannot re-mint) with the id it is actually using, which is proof
+            # rather than inference. Until that lands the row stays id-less and
+            # `spawning` - created, not yet addressable.
+            from fno.agents import events as _events
 
-                _events.emit(
-                    "agent_session_id_uncaptured",
-                    name=name,
-                    harness=provider,
-                    cwd=str(cwd),
-                    reason="no claude transcript for this cwd after a happy spawn",
-                )
+            _events.emit(
+                "agent_session_id_uncaptured",
+                name=name,
+                harness=provider,
+                cwd=str(cwd),
+                reason="happy owns the claude session id; awaiting SessionStart restamp",
+            )
 
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
         # captured above), or "human" for a direct human spawn with no session

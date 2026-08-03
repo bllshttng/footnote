@@ -1137,6 +1137,17 @@ def restamp_harness_session_id(
                 return entries  # already current: no write, no event
             stale = entry.harness_session_id or ""
             entry.harness_session_id = session_id
+            # A row parked at `spawning` was waiting for exactly this: an id it
+            # could not learn at spawn time. The worker has now named itself, so
+            # it is addressable and the transition is complete. Without this the
+            # row is stuck at `spawning` for its whole life on any route where
+            # the restamp is the ONLY path to an id (a happy-hosted claude pane
+            # cannot pin one, since happy discards it), and a permanently
+            # `spawning` row is the same lie as a permanently `live` one, just
+            # in the other direction. Only `spawning` is promoted: every other
+            # status is owned by something that knows more than this hook does.
+            if entry.status == "spawning":
+                entry.status = "live"
             # claude addresses by the 8-hex jobId in short_id, which is the
             # session uuid's leading segment (HARNESS_SESSION_ID_FIELDS maps
             # claude -> short_id). Re-derive it only when the stored short was
