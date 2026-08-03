@@ -930,6 +930,18 @@ def slot_principal(blob: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
     bearer = _token_from_blob(blob)
     if not bearer:
         return None, "profile-unavailable"
+    return principal_of_bearer(bearer)
+
+
+def principal_of_bearer(bearer: str) -> tuple[Optional[dict], Optional[str]]:
+    """``(principal, failure)`` for one exact OAuth bearer.
+
+    Taking the bearer rather than a slot location is what lets a caller prove
+    the identity of the CREDENTIAL IT WILL ACTUALLY USE. Proving one credential
+    and then measuring another is the same misattribution by a longer route:
+    the scoped and unscoped Keychain items can hold different accounts, and a
+    stale scoped item is exactly why the usage probe tries several bearers.
+    """
     req = urllib.request.Request(
         _PROFILE_URL,
         headers={
@@ -1066,7 +1078,7 @@ def _principal_cache_path(cli: str, root: Path) -> Path:
 def cached_slot_principal(
     cli: str,
     root: Path,
-    blob: Optional[str],
+    credential: Optional[str],
     *,
     now: float | None = None,
     ttl: float = _PRINCIPAL_TTL_S,
@@ -1082,7 +1094,7 @@ def cached_slot_principal(
     an excuse to skip the next check, the opposite of what an unproven identity
     should cause.
     """
-    digest = credential_digest(blob)
+    digest = credential_digest(credential)
     if digest is None:
         return None
     try:
@@ -1101,11 +1113,11 @@ def note_slot_principal(
     cli: str,
     root: Path,
     account_uuid: str,
-    blob: Optional[str],
+    credential: Optional[str],
     *,
     now: float | None = None,
 ) -> None:
-    digest = credential_digest(blob)
+    digest = credential_digest(credential)
     if digest is None:
         return
     try:
@@ -1125,46 +1137,40 @@ def clear_slot_principal_cache(cli: str, root: Path) -> None:
     _principal_cache_path(cli, root).unlink(missing_ok=True)
 
 
-def slot_principal_verdict(
+def bearer_principal_verdict(
     cli: str,
     record_id: str,
     root: Path,
+    bearer: str,
     *,
     now: float | None = None,
     ttl: float = _PRINCIPAL_TTL_S,
 ) -> str:
-    """Does the live slot credential belong to ``record_id``?
-
-    ``match`` | ``mismatch`` | ``unprovable`` | ``unsupported``.
+    """Does ``bearer`` belong to ``record_id``? ``match``/``mismatch``/``unprovable``.
 
     The taint marker only watches the door footnote controls, so an out-of-band
-    `claude /login` leaves a stamp that is wrong AND untainted, and attribution
-    proceeds confidently. This is the check that catches it.
+    `claude /login` leaves a stamp that is wrong AND untainted and attribution
+    proceeds confidently. This is the check that catches it - and it takes the
+    exact bearer so the credential proven is the credential measured.
 
     ``unprovable`` (no bound principal, or the endpoint could not answer) is NOT
     a pass. Shared-slot attribution without fresh proof is exactly the confident
-    wrong number this module exists to stop, and the cost of refusing is small:
-    the usage endpoint that would consume the attribution lives on the same host
-    as the profile endpoint, so an outage that hides identity has already taken
-    the measurement with it.
-
-    ``unsupported`` is different in kind - a harness with no principal endpoint
-    can never prove identity, so refusing there would permanently silence codex
-    measurement to no benefit. Those keep the stamp-trusting behavior.
+    wrong number this module exists to stop, and refusing costs little: the
+    usage endpoint that would consume the attribution shares a host with the
+    profile endpoint, so an outage hiding identity has already taken the
+    measurement with it. `doctor` reports an unbound principal so the resulting
+    unknown always carries a reason and a fix.
     """
-    if cli != "claude":
-        return "unsupported"
     bound = record_principal(record_id, root)
     if bound is None:
         return "unprovable"
-    blob = read_canonical_slot_blob(cli)
-    cached = cached_slot_principal(cli, root, blob, now=now, ttl=ttl)
+    cached = cached_slot_principal(cli, root, bearer, now=now, ttl=ttl)
     if cached is not None:
         return "match" if cached == bound["account_uuid"] else "mismatch"
-    principal, _failure = slot_principal(blob)
+    principal, _failure = principal_of_bearer(bearer)
     if principal is None:
         return "unprovable"
-    note_slot_principal(cli, root, principal["account_uuid"], blob, now=now)
+    note_slot_principal(cli, root, principal["account_uuid"], bearer, now=now)
     return "match" if principal["account_uuid"] == bound["account_uuid"] else "mismatch"
 
 
@@ -1365,7 +1371,11 @@ def _reconcile_locked(
         )
     _set_slot_taint(cli, root, False)
     _clear_reconcile_backoff(cli, root)
-    note_slot_principal(cli, root, principal["account_uuid"], blob)
+    # Key the evidence on the BEARER inside the blob, not the blob, so the usage
+    # probe's per-bearer lookup finds this entry instead of re-proving it.
+    from fno.adapters.providers.usage import _token_from_blob
+
+    note_slot_principal(cli, root, principal["account_uuid"], _token_from_blob(blob))
     return ReconcileResult(
         "matched",
         record_id=matched,

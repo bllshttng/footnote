@@ -290,33 +290,28 @@ def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
     return _reconcile_slot_once(record, now)
 
 
-def _stamp_is_trustworthy(record: ProviderRecord, now: float) -> bool:
-    """May ``record``'s stamp be trusted for attribution right now?
+def _bearer_verdict(record: ProviderRecord, bearer: str, now: float) -> str:
+    """May ``bearer``'s usage be filed under ``record``? Checked per credential.
 
-    The taint watches the door footnote controls; `claude /login` uses the other
-    one and leaves a stamp that is wrong and untainted, so attribution proceeds
-    confidently and files the live account's usage under this record's name.
-    That is the misattribution the taint mechanism exists to prevent, arriving
-    through a door it does not watch.
+    Deliberately keyed to the bearer rather than to "the slot": the scoped and
+    unscoped Keychain items can hold different accounts, which is why the probe
+    tries several bearers in the first place. A check that proved one credential
+    while the request used another would reintroduce the misattribution it was
+    added to prevent.
 
-    Shared-slot attribution therefore needs FRESH proof, and an unprovable
-    identity is refused rather than assumed: a wrong number is worse than no
-    number, and refusing costs little because the usage endpoint that would
-    consume the attribution shares a host with the profile endpoint. A harness
-    with no principal endpoint at all is a different case - it can never prove
-    identity, so refusing would silence it permanently for no gain.
+    A record with its own dir is attributable by construction and skips this
+    entirely.
     """
     if not _shares_the_slot(record):
-        return True  # its own dir is attributable without the shared slot
+        return "unsupported"
     try:
         from fno.adapters.providers import managed
 
-        verdict = managed.slot_principal_verdict(
-            record.harness, record.id, managed.store_root(), now=now
+        return managed.bearer_principal_verdict(
+            record.harness, record.id, managed.store_root(), bearer, now=now
         )
-    except Exception:  # noqa: BLE001 - an unreadable store cannot vouch for a stamp
-        return False
-    return verdict in ("match", "unsupported")
+    except Exception:  # noqa: BLE001 - an unreadable store cannot vouch for a bearer
+        return "unprovable"
 
 
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
@@ -472,7 +467,14 @@ def _probe_claude(record: ProviderRecord, now: float) -> UsageSnapshot | None:
     probe would silently fail. A 401/403 skips to the next token; any other
     network error aborts (fail-open None).
     """
+    unattributable = False
     for bearer in _claude_bearer_candidates(record):
+        # Prove BEFORE the usage request, so another account's usage is never
+        # fetched at all - not fetched and then discarded.
+        verdict = _bearer_verdict(record, bearer, now)
+        if verdict not in ("match", "unsupported"):
+            unattributable = True
+            continue
         req = urllib.request.Request(
             _CLAUDE_USAGE_URL,
             headers={
@@ -500,6 +502,12 @@ def _probe_claude(record: ProviderRecord, now: float) -> UsageSnapshot | None:
             probed_at=now,
             source="oauth-endpoint",
         )
+    if unattributable:
+        # Every candidate credential either belongs to someone else or could not
+        # be proven. An out-of-band /login is the usual cause, so try the repair
+        # once; the slot commonly turns out to belong to a DIFFERENT record,
+        # which correctly leaves this one unknown.
+        _reconcile_slot_once(record, now)
     return None
 
 
@@ -644,16 +652,6 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
         if not _reconcile_tainted_slot(record, now):
             return None
         if not _attributed_credential_dir(record)[0]:
-            return None
-    elif not _stamp_is_trustworthy(record, now):
-        # An out-of-band /login, or an identity we simply cannot prove. Repair
-        # once, then re-check - a repaired slot usually belongs to a DIFFERENT
-        # record, which correctly leaves this one unknown and makes that one
-        # probeable on its own probe.
-        _reconcile_slot_once(record, now)
-        if not _attributed_credential_dir(record)[0] or not _stamp_is_trustworthy(
-            record, now
-        ):
             return None
     probe = _PROBES.get(record.harness)
     if probe is None:

@@ -319,6 +319,10 @@ A harness with no principal endpoint is a different case and keeps the stamp-tru
 Codex can never prove a slot principal, so refusing there would silence its measurement permanently for no gain.
 Records with their own `config_dir` are exempt too, since they are attributable without the shared slot at all.
 
+The check runs per credential, immediately before that credential is spent on a usage request.
+The probe tries several bearers because a stale scoped Keychain item can 401 while the unscoped one is live, so a check anchored to "the slot" could prove one credential while the request used another - the same misattribution by a longer route.
+A bearer that fails the check is skipped rather than measured, so another account's usage is never fetched at all.
+
 Proven evidence is cached against a digest of the credential it was proven about, not just against time.
 Time alone would let an out-of-band `/login` inside the TTL reuse evidence about the credential it replaced, making the check built to catch that login the thing that hides it.
 
