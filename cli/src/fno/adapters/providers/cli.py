@@ -929,6 +929,22 @@ def _doctor_findings() -> list[dict]:
                     "detail": f"stored credential expired {stamp}",
                 })
 
+        if (
+            record.auth == "managed"
+            and record.harness == "claude"
+            and record.config_dir is None
+            and managed.record_principal(record.id) is None
+        ):
+            findings.append({
+                "record": record.id,
+                "problem": "unbound-principal",
+                "detail": (
+                    "no proven identity is bound, so shared-slot usage cannot be "
+                    "attributed to it and reads unknown; sign this account in and "
+                    f"run `fno config accounts register {record.id}` to bind it"
+                ),
+            })
+
         if record.config_dir is not None:
             from fno.agents.account_env import _login_present
 

@@ -290,29 +290,33 @@ def _reconcile_tainted_slot(record: ProviderRecord, now: float) -> bool:
     return _reconcile_slot_once(record, now)
 
 
-def _stamp_is_provably_wrong(record: ProviderRecord, now: float) -> bool:
-    """The live slot provably belongs to someone OTHER than ``record``.
+def _stamp_is_trustworthy(record: ProviderRecord, now: float) -> bool:
+    """May ``record``'s stamp be trusted for attribution right now?
 
     The taint watches the door footnote controls; `claude /login` uses the other
     one and leaves a stamp that is wrong and untainted, so attribution proceeds
     confidently and files the live account's usage under this record's name.
-    That is the misattribution the whole taint mechanism exists to prevent,
-    arriving through a door it does not watch.
+    That is the misattribution the taint mechanism exists to prevent, arriving
+    through a door it does not watch.
 
-    Only a PROVEN mismatch counts. An unbound record or an unreachable endpoint
-    is no evidence, and stays on today's stamp-trusting behavior rather than
-    turning every store registered before principals existed into unknown.
+    Shared-slot attribution therefore needs FRESH proof, and an unprovable
+    identity is refused rather than assumed: a wrong number is worse than no
+    number, and refusing costs little because the usage endpoint that would
+    consume the attribution shares a host with the profile endpoint. A harness
+    with no principal endpoint at all is a different case - it can never prove
+    identity, so refusing would silence it permanently for no gain.
     """
     if not _shares_the_slot(record):
-        return False
+        return True  # its own dir is attributable without the shared slot
     try:
         from fno.adapters.providers import managed
 
-        return managed.slot_principal_matches(
+        verdict = managed.slot_principal_verdict(
             record.harness, record.id, managed.store_root(), now=now
-        ) is False
-    except Exception:  # noqa: BLE001 - no evidence is not a mismatch
+        )
+    except Exception:  # noqa: BLE001 - an unreadable store cannot vouch for a stamp
         return False
+    return verdict in ("match", "unsupported")
 
 
 def _claude_bearer_candidates(record: ProviderRecord) -> list[str]:
@@ -641,13 +645,13 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
             return None
         if not _attributed_credential_dir(record)[0]:
             return None
-    elif _stamp_is_provably_wrong(record, now):
-        # An out-of-band /login: the stamp is untainted and wrong, so nothing
-        # upstream hesitated. Repair once, then re-check - the slot usually
-        # belongs to a DIFFERENT record, which correctly leaves this one
-        # unknown and makes that one probeable on its own probe.
+    elif not _stamp_is_trustworthy(record, now):
+        # An out-of-band /login, or an identity we simply cannot prove. Repair
+        # once, then re-check - a repaired slot usually belongs to a DIFFERENT
+        # record, which correctly leaves this one unknown and makes that one
+        # probeable on its own probe.
         _reconcile_slot_once(record, now)
-        if not _attributed_credential_dir(record)[0] or _stamp_is_provably_wrong(
+        if not _attributed_credential_dir(record)[0] or not _stamp_is_trustworthy(
             record, now
         ):
             return None

@@ -1064,20 +1064,32 @@ def _principal_cache_path(cli: str, root: Path) -> Path:
 
 
 def cached_slot_principal(
-    cli: str, root: Path, *, now: float | None = None, ttl: float = _PRINCIPAL_TTL_S
+    cli: str,
+    root: Path,
+    blob: Optional[str],
+    *,
+    now: float | None = None,
+    ttl: float = _PRINCIPAL_TTL_S,
 ) -> Optional[str]:
-    """The account uuid last PROVEN for this slot, while the evidence is fresh.
+    """The account uuid last PROVEN for exactly ``blob``, while still fresh.
 
-    Successful evidence only: this is what keeps an attribution-sensitive probe
-    from paying a profile call every time. A failure is never cached here - it
-    would become an excuse to skip the next check, which is the opposite of what
-    an unproven identity should cause.
+    Keyed on a digest of the credential, not just the harness. Time alone is the
+    wrong key: an out-of-band `/login` inside the TTL would otherwise reuse
+    evidence about the credential it replaced, and the check built to catch that
+    login would be the thing that hides it.
+
+    Successful evidence only. A failure is never cached here - it would become
+    an excuse to skip the next check, the opposite of what an unproven identity
+    should cause.
     """
+    digest = credential_digest(blob)
+    if digest is None:
+        return None
     try:
         data = json.loads(_principal_cache_path(cli, root).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    if not isinstance(data, dict):
+    if not isinstance(data, dict) or data.get("credential") != digest:
         return None
     uuid, at = data.get("account_uuid"), data.get("at")
     if not isinstance(uuid, str) or not isinstance(at, (int, float)):
@@ -1086,13 +1098,22 @@ def cached_slot_principal(
 
 
 def note_slot_principal(
-    cli: str, root: Path, account_uuid: str, *, now: float | None = None
+    cli: str,
+    root: Path,
+    account_uuid: str,
+    blob: Optional[str],
+    *,
+    now: float | None = None,
 ) -> None:
+    digest = credential_digest(blob)
+    if digest is None:
+        return
     try:
         _atomic_write_private(
             _principal_cache_path(cli, root),
             json.dumps({
                 "account_uuid": account_uuid,
+                "credential": digest,
                 "at": now if now is not None else time.time(),
             }),
         )
@@ -1104,36 +1125,47 @@ def clear_slot_principal_cache(cli: str, root: Path) -> None:
     _principal_cache_path(cli, root).unlink(missing_ok=True)
 
 
-def slot_principal_matches(
+def slot_principal_verdict(
     cli: str,
     record_id: str,
     root: Path,
     *,
     now: float | None = None,
     ttl: float = _PRINCIPAL_TTL_S,
-) -> Optional[bool]:
-    """Is the live slot credential ``record_id``'s? None when unprovable.
+) -> str:
+    """Does the live slot credential belong to ``record_id``?
+
+    ``match`` | ``mismatch`` | ``unprovable`` | ``unsupported``.
 
     The taint marker only watches the door footnote controls, so an out-of-band
-    `claude /login` leaves a stamp that is wrong AND untainted and attribution
+    `claude /login` leaves a stamp that is wrong AND untainted, and attribution
     proceeds confidently. This is the check that catches it.
 
-    None means NO EVIDENCE - the record has no bound principal, or the endpoint
-    could not answer - and must not be read as a mismatch. Turning "we could not
-    ask" into unknown usage would break measurement for every store registered
-    before principals existed, trading a wrong number for no number at all.
+    ``unprovable`` (no bound principal, or the endpoint could not answer) is NOT
+    a pass. Shared-slot attribution without fresh proof is exactly the confident
+    wrong number this module exists to stop, and the cost of refusing is small:
+    the usage endpoint that would consume the attribution lives on the same host
+    as the profile endpoint, so an outage that hides identity has already taken
+    the measurement with it.
+
+    ``unsupported`` is different in kind - a harness with no principal endpoint
+    can never prove identity, so refusing there would permanently silence codex
+    measurement to no benefit. Those keep the stamp-trusting behavior.
     """
+    if cli != "claude":
+        return "unsupported"
     bound = record_principal(record_id, root)
     if bound is None:
-        return None
-    cached = cached_slot_principal(cli, root, now=now, ttl=ttl)
+        return "unprovable"
+    blob = read_canonical_slot_blob(cli)
+    cached = cached_slot_principal(cli, root, blob, now=now, ttl=ttl)
     if cached is not None:
-        return cached == bound["account_uuid"]
-    principal, _failure = slot_principal(read_canonical_slot_blob(cli))
+        return "match" if cached == bound["account_uuid"] else "mismatch"
+    principal, _failure = slot_principal(blob)
     if principal is None:
-        return None
-    note_slot_principal(cli, root, principal["account_uuid"], now=now)
-    return principal["account_uuid"] == bound["account_uuid"]
+        return "unprovable"
+    note_slot_principal(cli, root, principal["account_uuid"], blob, now=now)
+    return "match" if principal["account_uuid"] == bound["account_uuid"] else "mismatch"
 
 
 def _reconcile_backoff_path(cli: str, root: Path) -> Path:
@@ -1317,18 +1349,23 @@ def _reconcile_locked(
     # the taint set: the refreshed snapshot and stamp are then merely stale
     # (self-correcting on the next pass) rather than stale-and-believed.
     if read_canonical_slot_blob(cli) != blob:
-        note_slot_principal(cli, root, principal["account_uuid"])
+        # SET the taint rather than merely leaving it: this path is also reached
+        # from an untainted drift repair, where "the taint stands" would be a
+        # lie and the stamp we just wrote would be trusted over a slot we know
+        # has moved. No recorded pids, so a retry proceeds once it settles.
+        clear_slot_principal_cache(cli, root)
+        _set_slot_taint(cli, root, True, [])
         return ReconcileResult(
             "slot-changed",
             detail=(
                 f"'{matched}' was proven and its snapshot refreshed, but the slot "
-                "changed again before the taint could be cleared; the taint stands "
-                "so nothing trusts the stamp - retry once the slot settles"
+                "changed again before the stamp could be trusted; the slot is "
+                "marked tainted so nothing reads it - retry once it settles"
             ),
         )
     _set_slot_taint(cli, root, False)
     _clear_reconcile_backoff(cli, root)
-    note_slot_principal(cli, root, principal["account_uuid"])
+    note_slot_principal(cli, root, principal["account_uuid"], blob)
     return ReconcileResult(
         "matched",
         record_id=matched,

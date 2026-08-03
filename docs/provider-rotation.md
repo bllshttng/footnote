@@ -271,6 +271,8 @@ One read-only verb reporting the store's real condition, exiting non-zero when a
 - a stored credential past its expiry
 - a `config_dir` that is missing or holds no login
 - a tainted slot
+- a shared-slot account with no proven identity bound (why its usage reads `unknown`)
+- a stamp the live slot credential contradicts (an out-of-band `/login`)
 
 `register` refuses a duplicate credential up front, but that guard is register-time only.
 `doctor` is the surface that reports stores predating it, and the verb that confirms a `--config-dir` conversion took.
@@ -309,9 +311,16 @@ An out-of-band `/login` leaves a stamp that is wrong and *untainted*, so nothing
 When the stamped record's live principal provably belongs to someone else, the probe repairs once and otherwise reports `unknown` rather than a confident wrong number.
 Proven principal evidence is cached briefly so this costs no call on the common path.
 
-Only a *proven* mismatch counts.
-A record with no bound principal, or an endpoint that cannot answer, is no evidence and keeps today's stamp-trusting behavior: turning "we could not ask" into `unknown` would break measurement for every store registered before principals existed, replacing a wrong number with no number.
-That also means a store predating this change measures exactly as it did until you re-register its accounts, which is what binds their principals.
+Shared-slot attribution needs *fresh proof*, so an identity that cannot be proven is refused rather than assumed.
+Refusing costs little: the usage endpoint that would consume the attribution shares a host with the profile endpoint, so an outage that hides identity has already taken the measurement with it.
+A store registered before principals existed therefore reads `unknown` until you re-register its accounts, which is what binds them; `doctor` reports `unbound-principal` and names the command, so the `unknown` is never silent.
+
+A harness with no principal endpoint is a different case and keeps the stamp-trusting behavior.
+Codex can never prove a slot principal, so refusing there would silence its measurement permanently for no gain.
+Records with their own `config_dir` are exempt too, since they are attributable without the shared slot at all.
+
+Proven evidence is cached against a digest of the credential it was proven about, not just against time.
+Time alone would let an out-of-band `/login` inside the TTL reuse evidence about the credential it replaced, making the check built to catch that login the thing that hides it.
 
 A tainted slot self-heals the same way: before a fresh usage probe refuses a tainted managed occupant, it runs the same primitive once, and resumes only if identity was proven.
 A refusal is backed off briefly so an unmatchable slot cannot re-hit the endpoint on every probe; only failures are cached, and only as backoff, never as proof.

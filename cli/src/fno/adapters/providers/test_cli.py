@@ -1231,6 +1231,8 @@ class TestDoctor:
         monkeypatch.setenv("PWD", str(tmp_path))
         monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
         root = tmp_path / ".fno" / "providers"
+        from fno.adapters.providers import managed
+
         for rid, tok in (("readyrule", "tok-a"), ("makers", "tok-b")):
             (root / rid).mkdir(parents=True)
             (root / rid / "blob").write_text(
@@ -1238,6 +1240,9 @@ class TestDoctor:
                     "claudeAiOauth": {"accessToken": tok, "expiresAt": 4102444800000}
                 })
             )
+            # A shared-slot account with no proven identity is no longer
+            # healthy: its usage cannot be attributed, so doctor says so.
+            managed.write_record_principal(rid, {"account_uuid": f"acct-{rid}"}, root)
         result = _invoke(["doctor"], cwd=tmp_path, home=tmp_path)
         assert result.exit_code == 0, result.output
         assert "no problems found" in result.output
@@ -1617,3 +1622,25 @@ class TestReconcileSlot:
         )
         result = _invoke(["doctor"], cwd=store, home=store)
         assert "slot-identity-drift" not in result.output
+
+    def test_doctor_names_an_unbound_principal_as_the_reason_for_unknown(
+        self, store: Path
+    ) -> None:
+        """Fail-closed attribution must not be silent - the silence is the
+        original disease. doctor is where 'unknown' gets a reason and a fix."""
+        result = _invoke(["doctor"], cwd=store, home=store)
+
+        assert result.exit_code != 0, result.output
+        assert "unbound-principal" in result.output
+        assert "fno config accounts register readyrule" in result.output
+
+    def test_a_bound_record_is_not_reported_unbound(
+        self, store: Path
+    ) -> None:
+        from fno.adapters.providers import managed
+
+        root = store / ".fno" / "providers"
+        for rid in ("readyrule", "makers"):
+            managed.write_record_principal(rid, {"account_uuid": f"acct-{rid}"}, root)
+        result = _invoke(["doctor"], cwd=store, home=store)
+        assert "unbound-principal" not in result.output
