@@ -598,10 +598,9 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
         for row in conflicting_request_payload["verdict"]["requirements"]
         if row["evidence_id"] == "approval-ready"
     )
-    assert "conflicting immutable approval requests" in " ".join(
-        approval_row["diagnostics"]
-    )
-    assert "event:approvals:approval_requested" in approval_row["producers"]
+    request_diagnostics = " ".join(approval_row["diagnostics"])
+    assert "conflicting immutable approval requests" in request_diagnostics
+    assert "event:approvals:approval_requested" in request_diagnostics
     effect_row = next(
         row
         for row in conflicting_request_payload["verdict"]["requirements"]
