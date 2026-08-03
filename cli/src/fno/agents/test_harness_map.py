@@ -96,11 +96,11 @@ def test_config_substrate_typo_fails_loud():
 
 
 def test_pane_guard_fails_closed_on_unknown_trigger():
-    """The autonomous-pane guard fails CLOSED: any non-'attended' trigger
-    (typo, 'auto', or None) still blocks a stalling pane - and never crashes."""
-    for t in ("autonamous", None):
-        with pytest.raises(DispatchResolveError, match="pane"):
-            _resolve(harness="claude", substrate="pane", trigger=t)
+    """A typo is refused, while an omitted trigger keeps autonomous semantics."""
+    with pytest.raises(DispatchResolveError, match="unknown dispatch trigger"):
+        _resolve(harness="claude", substrate="pane", trigger="autonamous")
+    with pytest.raises(DispatchResolveError, match="pane"):
+        _resolve(harness="claude", substrate="pane", trigger=None)
 
 
 def test_config_overlay_precedence():

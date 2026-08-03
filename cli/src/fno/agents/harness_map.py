@@ -312,6 +312,11 @@ def resolve_dispatch(
     unsubstituted command. ``dispatch_cfg`` overrides the config read (for tests)."""
     cfg = dict(dispatch_cfg) if dispatch_cfg is not None else _load_dispatch_cfg(settings)
     decision: list[str] = []
+    chosen_trigger = (trigger or "autonomous").strip().lower() or "autonomous"
+    if chosen_trigger not in ("autonomous", "attended"):
+        raise DispatchResolveError(
+            f"unknown dispatch trigger {trigger!r}; valid: autonomous, attended"
+        )
 
     # 1. harness. An explicit flag is distinguished by ``is not None`` (present
     # vs omitted), NOT truthiness: an empty explicit ``--harness ""`` (e.g. a
@@ -369,7 +374,7 @@ def resolve_dispatch(
     # closed until an unattended journey proves the pane can complete by itself.
     if (
         chosen_substrate == "pane"
-        and (trigger or "").strip().lower() != "attended"
+        and chosen_trigger != "attended"
         and not caps.get("autonomous_pane", False)
     ):
         raise DispatchResolveError(

@@ -143,6 +143,16 @@ def test_missing_autonomous_pane_capability_fails_closed(monkeypatch):
         )
 
 
+def test_malformed_trigger_fails_closed_on_capability_enabled_pane():
+    with pytest.raises(DispatchResolveError, match="unknown dispatch trigger"):
+        resolve_dispatch(
+            harness="codex",
+            substrate="pane",
+            node_id="x-abcd",
+            trigger="autonamous",
+        )
+
+
 def test_pane_capability_does_not_enable_codex_bg():
     with pytest.raises(DispatchResolveError, match="bg is claude-only"):
         resolve_dispatch(
