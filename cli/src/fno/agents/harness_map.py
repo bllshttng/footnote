@@ -98,7 +98,7 @@ _HARNESS_CAPS: dict[str, dict] = {
         "resume": "native-session",  # session store + --resume <uuid>
         "bg": True,  # claude --bg
         "autonomous_pane": False,
-        "route_on_pane": False,
+        "route_on_pane": True,
         "stop_hook": "native",
         # Native slash-command invocation of the target skill (verified).
         "command_surface": _SLASH,
