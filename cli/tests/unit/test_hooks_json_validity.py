@@ -310,17 +310,17 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
     )
 
     failures: list[str] = []
-    samples: dict[str, str] = {}  # manifest name -> one PreToolUse command
-    for name, rel, _root_var in _PROBE_MANIFESTS:
+    samples: dict[str, tuple[str, str]] = {}  # manifest name -> (command, root_var)
+    for name, rel, root_var in _PROBE_MANIFESTS:
         data = json.loads((REPO_ROOT / rel).read_text(encoding="utf-8"))
         for event, command in _manifest_event_commands(data, source=name):
             for script in _referenced_hook_scripts(command, REPO_ROOT):
                 if not script.is_file():
                     failures.append(f"{name}/{event}: missing script {script}")
             if event in _PROBE_LAUNCH_EVENTS:
-                samples.setdefault(name, command)
+                samples.setdefault(name, (command, root_var))
                 result = _launch_plugin_hook(
-                    command, root_value=str(REPO_ROOT), shell=shell
+                    command, root_value=str(REPO_ROOT), shell=shell, root_var=root_var
                 )
                 if _is_hook_launch_failure(result):
                     failures.append(
@@ -340,10 +340,27 @@ def test_every_manifest_hook_is_wired_and_pretooluse_launches() -> None:
     assert set(samples) == expected, (
         f"every manifest must carry a PreToolUse gate to probe; got {sorted(samples)}"
     )
-    for name, command in samples.items():
-        empty_root = _launch_plugin_hook(command, root_value="", shell=shell)
+    for name, (command, root_var) in samples.items():
+        empty_root = _launch_plugin_hook(
+            command, root_value="", shell=shell, root_var=root_var
+        )
         assert _is_hook_launch_failure(empty_root), (
             f"{name}: empty plugin root must fail the launch (the fail-open), "
             f"got rc={empty_root['rc']}"
         )
+
+    # Placeholder fidelity: a command using the OTHER harness's root variable
+    # must fail when only this manifest's var is set, because the real harness
+    # does not set the other var. Pins that the probe is not masking a
+    # wrong-placeholder manifest into a false green.
+    wrong = _launch_plugin_hook(
+        "bash ${CLAUDE_PLUGIN_ROOT}/hooks/graph-write-protect.sh",
+        root_value=str(REPO_ROOT),
+        shell=shell,
+        root_var="PLUGIN_ROOT",
+    )
+    assert _is_hook_launch_failure(wrong), (
+        "a command using ${CLAUDE_PLUGIN_ROOT} must fail when only PLUGIN_ROOT "
+        f"is set (real Codex sets no CLAUDE_PLUGIN_ROOT); got rc={wrong['rc']}"
+    )
 

@@ -1790,6 +1790,46 @@ def _referenced_hook_scripts(command: str, root: Path) -> list[Path]:
     ]
 
 
+# Interpreters a hook command may invoke directly. A bare path (no interpreter)
+# is exec'd by the harness, so it needs the execute bit instead.
+_HOOK_INTERPRETERS = ("bash", "sh", "python3", "python", "node")
+
+
+def _command_launch_problems(command: str, root: Path) -> list[str]:
+    """Ways a command would fail to START, checked without executing it: a
+    missing interpreter, or a bare-invoked script that is not executable.
+
+    Stateful hooks are not launched (they mutate ~/.fno), so for their events
+    this static check is the only launchability coverage. A leading
+    ``env VAR=val`` prefix is skipped to reach the real first token."""
+    import shlex
+
+    expanded = command.replace("${PLUGIN_ROOT}", str(root)).replace(
+        "${CLAUDE_PLUGIN_ROOT}", str(root)
+    )
+    try:
+        tokens = shlex.split(expanded)
+    except ValueError:
+        return []  # unparseable; the launch or existence check is the authority
+    i = 0
+    if tokens and tokens[0] == "env":
+        i = 1
+        while i < len(tokens) and "=" in tokens[i] and not tokens[i].startswith("-"):
+            i += 1
+    if i >= len(tokens):
+        return []
+    head = tokens[i]
+    if "/" not in head and head in _HOOK_INTERPRETERS:
+        if not shutil.which(head):
+            return [f"interpreter '{head}' not on PATH"]
+        return []
+    # Bare script path: the harness exec's it directly, so it must be executable.
+    script = Path(head)
+    if script.is_file() and not os.access(script, os.X_OK):
+        return [f"bare-invoked script not executable: {head}"]
+    return []
+
+
 def _manifest_event_commands(data: Any, *, source: str):
     """Yield ``(event, command)`` for every hook in a parsed manifest, preserving
     the event name. Bulletproof against structurally malformed-but-valid JSON
@@ -1829,19 +1869,22 @@ def _is_hook_launch_failure(result: dict[str, Any]) -> bool:
 
 
 def _launch_plugin_hook(
-    command: str, *, root_value: str, shell: str
+    command: str, *, root_value: str, shell: str, root_var: str
 ) -> dict[str, Any]:
     """Launch one read-only gate hook through the real harness launch path.
 
-    Reproduces Codex's ``default_shell_command`` (``$SHELL -lc <command>``) with
-    the four plugin-root env vars a live session supplies, so a command that only
-    fails when PLUGIN_ROOT does not resolve is reproduced here instead of hidden
-    by a hand-expanded path. Only called for read-only events (see
-    ``_PROBE_LAUNCH_EVENTS``); stateful hooks are never executed by the probe.
+    Reproduces Codex's ``default_shell_command`` (``$SHELL -lc <command>``),
+    setting ONLY ``root_var`` (the env var this manifest's commands expand), so a
+    manifest that uses the WRONG placeholder (e.g. a codex command referencing
+    ``${CLAUDE_PLUGIN_ROOT}``) fails here as it would in production, instead of
+    being masked by the other harness's var. Only called for read-only events
+    (see ``_PROBE_LAUNCH_EVENTS``); stateful hooks are never executed by the
+    probe.
 
-    Runs from a throwaway temp cwd. Process-group-bounded so a hung hook cannot
-    wedge the probe; never raises (temp creation and launch errors return
-    ``rc=None``, which the predicate treats as a failure)."""
+    Runs from a throwaway temp cwd with fno + claude-project state sandboxed to
+    it. Process-group-bounded so a hung hook cannot wedge the probe; never raises
+    (temp creation and launch errors return ``rc=None``, which the predicate
+    treats as a failure)."""
     import tempfile
 
     resolved = _resolve_for_display(command, root_value)
@@ -1855,20 +1898,20 @@ def _launch_plugin_hook(
         + json.dumps(workdir)
         + ',"tool_name":"Bash","tool_input":{"command":"git status --short"}}'
     )
+    # Set ONLY this manifest's root var (matching the real harness); drop the
+    # others so a wrong-placeholder command is not masked. Sandbox fno +
+    # claude-project state to the temp cwd: a gate can mutate on the probe
+    # payload (git-protection.py deletes an expired approve_no_verify.flag it
+    # resolves under FNO_HOME), and without this the probe writes to the live
+    # ~/.fno. HOME stays real so interpreters/binaries resolve.
     env = {
         **os.environ,
-        "PLUGIN_ROOT": root_value,
-        "CLAUDE_PLUGIN_ROOT": root_value,
-        "PLUGIN_DATA": root_value,
-        "CLAUDE_PLUGIN_DATA": root_value,
-        # Sandbox fno + claude-project state to the temp cwd: a gate can mutate
-        # on the probe payload (git-protection.py deletes an expired
-        # approve_no_verify.flag it resolves under FNO_HOME), and without this
-        # the probe would write to the live ~/.fno. HOME stays real so
-        # interpreters and binaries still resolve.
         "FNO_HOME": workdir,
         "CLAUDE_PROJECT_DIR": workdir,
     }
+    for v in ("PLUGIN_ROOT", "CLAUDE_PLUGIN_ROOT", "PLUGIN_DATA", "CLAUDE_PLUGIN_DATA"):
+        env.pop(v, None)
+    env[root_var] = root_value
     rc: Optional[int]
     stderr = ""
     try:
@@ -2013,11 +2056,20 @@ def _plugin_hooks_launch_report() -> dict[str, Any]:
                     )
             if event in _PROBE_LAUNCH_EVENTS:
                 result = _launch_plugin_hook(
-                    command, root_value=root_value, shell=shell
+                    command, root_value=root_value, shell=shell, root_var=root_var
                 )
                 result["manifest"] = name
                 result["event"] = event
                 launches.append(result)
+            else:
+                # Stateful events are not executed (they mutate ~/.fno); check
+                # they can still START - missing interpreter, or a bare-invoked
+                # script without the execute bit - so a 126/127 fail-open there
+                # is not silently green.
+                for problem in _command_launch_problems(command, manifest_root):
+                    missing.append(
+                        {"manifest": name, "event": event, "script": problem}
+                    )
 
     failures = [r for r in launches if _is_hook_launch_failure(r)]
     return {
