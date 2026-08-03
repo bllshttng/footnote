@@ -19,7 +19,7 @@ from fno.delivery.contracts import (
     DeliveryVerdict,
 )
 from fno.delivery.evaluator import evaluate_delivery
-from fno.company.contracts import CompanyWorkRefs
+from fno.company.contracts import CompanyWorkRefs, EvidenceSubjectKind
 from fno.plan._doc import load_plan
 from fno.plan.schema import PlanFrontmatter
 
@@ -82,7 +82,9 @@ def evaluate_plan_delivery(plan_path: Path, events_path: Path) -> DeliveryEvalua
     fact_revision = f"sha256:{hashlib.sha256(raw).hexdigest()}"
     evaluated_at = datetime.now(timezone.utc)
     try:
-        current_events = _current_evidence_events(events, company_work)
+        current_events = _current_evidence_events(
+            events, company_work, fact_revision=fact_revision
+        )
         facts = tuple(
             item
             for event, request_event in current_events
@@ -215,13 +217,18 @@ def _select_latest(
 def _current_evidence_events(
     events: tuple[dict[str, object], ...],
     company_work: CompanyWorkRefs,
-) -> tuple[tuple[dict[str, object], dict[str, object] | None], ...]:
+    *,
+    fact_revision: str,
+) -> tuple[
+    tuple[dict[str, object] | DeliveryEvidenceRejection, dict[str, object] | None],
+    ...,
+]:
     """Select current producer state without reconstructing its authority."""
     observed: dict[
         tuple[str, ...],
         tuple[datetime | None, datetime | None, list[dict[str, object]]],
     ] = {}
-    requests: dict[str, _LatestEvent] = {}
+    requests: dict[str, dict[str, _LatestEvent]] = {}
     approvals: dict[str, dict[str, _LatestEvent]] = {}
     unkeyed_approvals: dict[str, _LatestEvent] = {}
     effects: dict[str, _LatestEvent] = {}
@@ -307,7 +314,11 @@ def _current_evidence_events(
         if event_type == "approval_requested":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
-                _select_latest(requests, digest, event)
+                _select_latest(
+                    requests.setdefault(digest, {}),
+                    _immutable_payload_key(data),
+                    event,
+                )
             else:
                 effect_id = data.get("effect_id")
                 if isinstance(effect_id, str) and effect_id:
@@ -315,10 +326,7 @@ def _current_evidence_events(
         elif event_type == "approval_decided":
             digest = data.get("request_digest")
             if isinstance(digest, str) and digest:
-                decision = data.get("decision")
-                decision_key = (
-                    decision if isinstance(decision, str) and decision else "<malformed>"
-                )
+                decision_key = _immutable_payload_key(data)
                 _select_latest(approvals.setdefault(digest, {}), decision_key, event)
             else:
                 effect_id = data.get("effect_id")
@@ -331,7 +339,9 @@ def _current_evidence_events(
                 _select_latest(effects, f"key:{key}", event)
             elif isinstance(effect_id, str) and effect_id:
                 _select_latest(effects, f"effect:{effect_id}", event)
-    selected_events: list[tuple[dict[str, object], dict[str, object] | None]] = []
+    selected_events: list[
+        tuple[dict[str, object] | DeliveryEvidenceRejection, dict[str, object] | None]
+    ] = []
     for _, _, events_for_revision in observed.values():
         for event in events_for_revision:
             data = event.get("data")
@@ -344,20 +354,41 @@ def _current_evidence_events(
             if explicit_other_work:
                 continue
             selected_events.append((event, None))
-    for digest, current_request in requests.items():
+    for digest, current_requests in requests.items():
         decisions = approvals.get(digest)
         if decisions:
             selected_events.extend(
                 (decisions[key].event, None) for key in sorted(decisions)
             )
         else:
-            selected_events.append((current_request.event, None))
+            selected_events.extend(
+                (current_requests[key].event, None) for key in sorted(current_requests)
+            )
     selected_events.extend(
         (decisions[key].event, None)
         for digest, decisions in approvals.items()
         if digest not in requests
         for key in sorted(decisions)
     )
+    for digest, decisions in approvals.items():
+        if len(decisions) > 1:
+            selected_events.extend(
+                (rejection, None)
+                for rejection in _approval_conflict_rejections(
+                    company_work, digest, fact_revision=fact_revision
+                )
+            )
+    for digest, current_requests in requests.items():
+        if len(current_requests) > 1:
+            selected_events.extend(
+                (rejection, None)
+                for rejection in _approval_conflict_rejections(
+                    company_work,
+                    digest,
+                    fact_revision=fact_revision,
+                    lifecycle="requests",
+                )
+            )
     selected_events.extend(
         (current.event, None) for current in unkeyed_approvals.values()
     )
@@ -365,22 +396,63 @@ def _current_evidence_events(
         event = current.event
         data = event.get("data")
         digest = data.get("request_digest") if isinstance(data, dict) else None
-        matching_request = requests.get(digest) if isinstance(digest, str) else None
+        matching_requests = requests.get(digest) if isinstance(digest, str) else None
         approval_request = (
-            matching_request.event if matching_request is not None else None
+            next(iter(matching_requests.values())).event
+            if matching_requests is not None and len(matching_requests) == 1
+            else None
         )
         selected_events.append((event, approval_request))
     return tuple(selected_events)
 
 
+def _approval_conflict_rejections(
+    company_work: CompanyWorkRefs,
+    request_digest: str,
+    *,
+    fact_revision: str,
+    lifecycle: str = "decisions",
+) -> tuple[DeliveryEvidenceRejection, ...]:
+    required_ids = {
+        evidence_id
+        for deliverable in company_work.deliverables
+        for evidence_id in deliverable.required_evidence_ids
+    }
+    return tuple(
+        DeliveryEvidenceRejection(
+            evidence_id=evidence.id,
+            producer="event:approvals:approval_decided",
+            diagnostic=(
+                f"requirement {evidence.id} from event:approvals:approval_decided "
+                f"rejected binding: conflicting immutable approval {lifecycle} for {request_digest}"
+            ),
+            fact_revision=fact_revision,
+        )
+        for evidence in company_work.evidence
+        if evidence.id in required_ids
+        and evidence.subject_kind is EvidenceSubjectKind.APPROVAL
+        and evidence.subject_id == request_digest
+    )
+
+
+def _immutable_payload_key(data: dict[str, object]) -> str:
+    return json.dumps(
+        {key: value for key, value in data.items() if key != "event_id"},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+
+
 def _normalize_event(
     company_work,
-    event: dict[str, object],
+    event: dict[str, object] | DeliveryEvidenceRejection,
     *,
     request_event: dict[str, object] | None,
     evaluated_at: datetime,
     fact_revision: str,
 ):
+    if isinstance(event, DeliveryEvidenceRejection):
+        return (event,)
     if event.get("type") == "delivery_evidence_observed":
         try:
             parsed = DeliveryEvidenceObservedEvent.model_validate(event)

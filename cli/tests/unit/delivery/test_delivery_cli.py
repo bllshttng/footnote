@@ -553,7 +553,61 @@ def test_ac_d7_hp_latest_approval_and_effect_state_are_projected(tmp_path: Path)
         if row["evidence_id"] == "approval-ready"
     )
     assert approval_row["result"] == "unknown"
-    assert "conflicting duplicate facts" in " ".join(approval_row["diagnostics"])
+    assert "conflicting immutable approval decisions" in " ".join(
+        approval_row["diagnostics"]
+    )
+
+    duplicate_approval = json.loads(json.dumps(rows[1]))
+    duplicate_approval["ts"] = "2026-08-02T12:07:00Z"
+    duplicate_approval["data"].update(
+        {
+            "deciding_principal_id": "principal-2",
+            "event_id": "event-decision-other-principal",
+        }
+    )
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [duplicate_approval])
+    )
+    _, duplicate_approval_payload = _invoke(plan, events)
+    assert duplicate_approval_payload["verdict"]["aggregate"] == "unknown"
+    approval_row = next(
+        row
+        for row in duplicate_approval_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "approval-ready"
+    )
+    assert approval_row["result"] == "unknown"
+    assert "conflicting immutable approval decisions" in " ".join(
+        approval_row["diagnostics"]
+    )
+
+    conflicting_request = json.loads(json.dumps(rows[0]))
+    conflicting_request["ts"] = "2026-08-02T12:08:00Z"
+    conflicting_request["data"].update(
+        {
+            "destination": "email:other@example.com",
+            "event_id": "event-request-conflicting",
+        }
+    )
+    events.write_text(
+        "".join(json.dumps(row) + "\n" for row in rows + [conflicting_request])
+    )
+    _, conflicting_request_payload = _invoke(plan, events)
+    assert conflicting_request_payload["verdict"]["aggregate"] == "unknown"
+    approval_row = next(
+        row
+        for row in conflicting_request_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "approval-ready"
+    )
+    assert "conflicting immutable approval requests" in " ".join(
+        approval_row["diagnostics"]
+    )
+    effect_row = next(
+        row
+        for row in conflicting_request_payload["verdict"]["requirements"]
+        if row["evidence_id"] == "effect-ready"
+    )
+    assert effect_row["result"] == "unknown"
+    assert "rejected binding" in " ".join(effect_row["diagnostics"])
 
     events.write_text(
         "".join(json.dumps(row) + "\n" for row in rows + [rows[-1]])
