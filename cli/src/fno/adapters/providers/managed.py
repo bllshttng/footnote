@@ -30,6 +30,9 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +48,19 @@ _CLAUDE_KEYCHAIN_SERVICE = "Claude Code-credentials"
 _SECURITY_TIMEOUT_S = 5  # ponytail: same 5s ceiling usage.py uses for `security`
 _CODEX_LOGIN_TIMEOUT_S = 5
 _CODEX_AUTH_ENV_VARS = ("CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY")
+
+# The claude OAuth profile endpoint. Verified live 2026-08-03: it answers the
+# one question the store cannot answer about itself - WHO the credential now in
+# the slot belongs to - as non-secret identity (`account.uuid`, `organization`,
+# `email`), with no token echoed back. It is what makes an out-of-band
+# `claude /login` observable at all: that path writes the Keychain directly and
+# tells footnote nothing, so the stamp is the state known to drift.
+_PROFILE_URL = "https://api.anthropic.com/api/oauth/profile"
+_PROFILE_TIMEOUT_S = 10  # same budget usage.py gives the sibling usage endpoint
+_PROFILE_USER_AGENT = "claude-code/2.1.0"  # a custom UA risks being rejected
+# How long a REFUSED auto-reconcile is backed off. Only failures are cached, and
+# only as backoff, never as proof: a success clears both the taint and this file.
+_RECONCILE_BACKOFF_S = 300
 
 
 class ManagedStoreError(RuntimeError):
@@ -551,6 +567,20 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
             f"no current {record.harness} login to snapshot for '{record.id}' "
             "(sign in first, then register)"
         )
+    return write_snapshot(record, blob, root)
+
+
+def write_snapshot(record: ProviderRecord, blob: str, root: Path | None = None) -> Path:
+    """Store ``blob`` as ``record``'s snapshot (dir 700, blob 600).
+
+    Split out of :func:`snapshot_current` so reconciliation can store the exact
+    blob whose principal it just proved, rather than re-reading the slot and
+    trusting that nothing moved in between.
+
+    Any previously proven ``principal`` survives the rewrite: it identifies the
+    ACCOUNT, not the credential, so a capture-before-overwrite that dropped it
+    would silently disarm the reconciliation that depends on it.
+    """
     try:
         adir = account_dir(record.id, root)
         adir.mkdir(parents=True, exist_ok=True)
@@ -562,6 +592,10 @@ def snapshot_current(record: ProviderRecord, root: Path | None = None) -> Path:
             "captured_at": _utc_now_iso(),
             "kind": "keychain" if (record.harness == "claude" and sys.platform == "darwin") else "file",
         }
+        prior = read_meta(record.id, root) or {}
+        for key in ("principal", "principal_at"):
+            if key in prior:
+                meta[key] = prior[key]
         _atomic_write_private(_meta_path(record.id, root), json.dumps(meta, indent=2))
     except OSError as exc:
         raise ManagedStoreError(f"failed to write snapshot for '{record.id}': {exc}") from exc
@@ -722,6 +756,302 @@ def _set_slot_taint(cli: str, root: Path, tainted: bool) -> None:
         _atomic_write_private(path, "1")
     else:
         path.unlink(missing_ok=True)
+
+
+# ---------------------------------------------------------------------------
+# Principal reconciliation: the live credential is the truth, the store is cache
+#
+# Everything above assumes footnote performs every slot transition. `claude
+# /login` breaks that assumption - it writes the Keychain directly and tells us
+# nothing - and the taint marker written under live pins has no clearer, so a
+# false taint made every quota read UNKNOWN with no way back. Both are the same
+# gap: the store has no way to ask who is actually in the slot. Asking the
+# credential itself is the answer, and it must be an ANSWER, never a guess:
+# taint clears only when the live principal binds to exactly one record.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ReconcileResult:
+    """Why reconciliation did or did not repair the slot.
+
+    ``outcome`` is the typed reason a caller branches on and a receipt prints;
+    every value other than ``matched`` means NOTHING was written.
+    """
+
+    outcome: str
+    record_id: Optional[str] = None
+    detail: str = ""
+
+    @property
+    def ok(self) -> bool:
+        return self.outcome == "matched"
+
+
+def principal_fingerprint(profile: object) -> Optional[dict]:
+    """The smallest stable non-secret identity in a ``/api/oauth/profile`` body.
+
+    ``account.uuid`` is the whole discriminator: it names the human, so it
+    survives every token refresh, and it differs across configured accounts.
+    ``organization_uuid`` and ``email`` ride along only to make a refusal
+    readable - a match is decided on ``account_uuid`` alone. Returns None when
+    the payload carries no stable uuid, which the caller reports as
+    ``malformed-profile`` rather than treating an unknown shape as a match.
+    """
+    if not isinstance(profile, dict):
+        return None
+    account = profile.get("account")
+    if not isinstance(account, dict):
+        return None
+    uuid = account.get("uuid")
+    if not isinstance(uuid, str) or not uuid:
+        return None
+    out: dict = {"account_uuid": uuid}
+    org = profile.get("organization")
+    if isinstance(org, dict) and isinstance(org.get("uuid"), str) and org["uuid"]:
+        out["organization_uuid"] = org["uuid"]
+    email = account.get("email")
+    if isinstance(email, str) and email:
+        out["email"] = email
+    return out
+
+
+def slot_principal(blob: Optional[str]) -> tuple[Optional[dict], Optional[str]]:
+    """``(principal, failure)`` for the credential inside ``blob``.
+
+    Exactly one side is ever set. ``failure`` is ``profile-unavailable`` (no
+    bearer, network error, timeout, 401) or ``malformed-profile`` (a 200 whose
+    body carries no stable principal). An unavailable endpoint proves NOTHING -
+    not that the slot changed and not that it did not - so it can never clear a
+    taint. The bearer is used and dropped: never returned, logged, or stored.
+    """
+    from fno.adapters.providers.usage import _token_from_blob
+
+    bearer = _token_from_blob(blob)
+    if not bearer:
+        return None, "profile-unavailable"
+    req = urllib.request.Request(
+        _PROFILE_URL,
+        headers={
+            "Authorization": f"Bearer {bearer}",
+            "anthropic-beta": "oauth-2025-04-20",
+            "User-Agent": _PROFILE_USER_AGENT,
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=_PROFILE_TIMEOUT_S) as resp:
+            body = resp.read()
+    except (urllib.error.URLError, OSError, TimeoutError, ValueError):
+        return None, "profile-unavailable"
+    try:
+        payload = json.loads(body)
+    except (ValueError, TypeError):
+        return None, "malformed-profile"
+    fingerprint = principal_fingerprint(payload)
+    if fingerprint is None:
+        return None, "malformed-profile"
+    return fingerprint, None
+
+
+def record_principal(record_id: str, root: Path | None = None) -> Optional[dict]:
+    """``record_id``'s proven principal, or None when it has never been bound."""
+    meta = read_meta(record_id, root) or {}
+    principal = meta.get("principal")
+    if isinstance(principal, dict) and principal.get("account_uuid"):
+        return principal
+    return None
+
+
+def write_record_principal(record_id: str, principal: dict, root: Path | None = None) -> None:
+    """Bind ``principal`` to ``record_id`` in its private metadata (600).
+
+    Private store metadata, never a receipt and never the graph: it is identity
+    for matching, and the less of it that travels the better.
+    """
+    meta = read_meta(record_id, root) or {}
+    meta["principal"] = principal
+    meta["principal_at"] = _utc_now_iso()
+    _atomic_write_private(_meta_path(record_id, root), json.dumps(meta, indent=2))
+
+
+def capture_record_principal(
+    record: ProviderRecord,
+    blob: Optional[str] = None,
+    root: Path | None = None,
+    *,
+    force: bool = False,
+) -> Optional[dict]:
+    """Best-effort: prove and store ``record``'s principal from its credential.
+
+    Called where footnote KNOWS which account a blob belongs to (register, and
+    the tail of a verified switch), so the binding is established while the
+    answer is certain. Never raises and never blocks its caller: a record with
+    no bound principal is simply unmatchable later, and reconciliation refuses
+    loudly instead of guessing.
+
+    ``force`` re-binds an already-bound record. Register sets it (re-registering
+    an id is how an operator rebinds it to a different account); switch does
+    not, so a routine switch of an already-bound record costs no network call.
+    """
+    if record.harness != "claude":
+        return None
+    if not force and record_principal(record.id, root) is not None:
+        return None
+    material = blob if blob is not None else read_blob(record.id, root)
+    principal, _failure = slot_principal(material)
+    if principal is None:
+        return None
+    try:
+        write_record_principal(record.id, principal, root)
+    except OSError:
+        return None
+    return principal
+
+
+def _reconcile_backoff_path(cli: str, root: Path) -> Path:
+    return _active_stamp_path(cli, root).with_suffix(".reconcile-attempt")
+
+
+def reconcile_backoff_active(
+    cli: str, root: Path, *, now: float | None = None, window: float = _RECONCILE_BACKOFF_S
+) -> bool:
+    """True when a refused auto-reconcile is still inside its backoff window.
+
+    Bounds the cost of a slot whose principal matches nothing: without it every
+    usage probe would re-hit the profile endpoint. Only the EXPLICIT
+    ``reconcile-slot`` verb ignores this, so an operator repairing the store is
+    never told to wait.
+    """
+    try:
+        stamp = float(_reconcile_backoff_path(cli, root).read_text(encoding="utf-8").strip())
+    except (OSError, ValueError):
+        return False
+    return (now if now is not None else time.time()) - stamp < window
+
+
+def note_reconcile_attempt(cli: str, root: Path, *, now: float | None = None) -> None:
+    try:
+        _atomic_write_private(
+            _reconcile_backoff_path(cli, root), str(now if now is not None else time.time())
+        )
+    except OSError:
+        pass
+
+
+def _clear_reconcile_backoff(cli: str, root: Path) -> None:
+    _reconcile_backoff_path(cli, root).unlink(missing_ok=True)
+
+
+def reconcile_slot(
+    cli: str,
+    *,
+    by_id: dict[str, ProviderRecord],
+    root: Path | None = None,
+    lock_timeout: float = 10,
+) -> ReconcileResult:
+    """Prove who is in ``cli``'s shared slot and repair the store to match.
+
+    Takes the SAME mutex as :func:`switch`, and reads the slot INSIDE it, so a
+    concurrent footnote switch can never make this observation stale between
+    the read and the write it justifies.
+
+    On a unique match: refresh that record's snapshot from the live blob, stamp
+    it active, clear the taint. On anything else - endpoint down, malformed
+    body, no matching record, two matching records - write nothing at all and
+    return the typed reason. That asymmetry is the point: a wrong clear files
+    one account's usage under another's name, which is worse than staying
+    UNKNOWN.
+    """
+    if cli != "claude":
+        return ReconcileResult(
+            "unsupported-harness",
+            detail=(
+                f"'{cli}' has no principal endpoint to prove slot identity with; "
+                "only claude slots can be reconciled"
+            ),
+        )
+    root = root or store_root()
+    root.mkdir(parents=True, exist_ok=True)
+    lock = filelock.FileLock(str(_switch_lock_path(root)), timeout=lock_timeout)
+    try:
+        lock.acquire()
+    except filelock.Timeout:
+        return ReconcileResult(
+            "lock-timeout", detail="another slot transition is in progress; try again"
+        )
+    try:
+        return _reconcile_locked(cli, by_id=by_id, root=root)
+    finally:
+        lock.release()
+
+
+def _reconcile_locked(
+    cli: str, *, by_id: dict[str, ProviderRecord], root: Path
+) -> ReconcileResult:
+    blob = _read_slot_blob(cli)
+    if blob is None or not blob.strip():
+        return ReconcileResult(
+            "no-slot-credential",
+            detail=f"no live {cli} login in the shared slot; sign in, then reconcile",
+        )
+    principal, failure = slot_principal(blob)
+    if principal is None:
+        return ReconcileResult(
+            failure or "profile-unavailable",
+            detail=(
+                "could not prove who the live slot credential belongs to; "
+                "taint, stamp and snapshots are unchanged"
+            ),
+        )
+
+    # A record with its OWN config_dir is attributable without the shared slot
+    # (usage.py accepts its dir before taint is ever consulted), so it is not a
+    # candidate for the slot's identity and must not be able to claim it.
+    matches = [
+        record_id
+        for record_id, record in sorted(by_id.items())
+        if record.harness == cli
+        and record.auth == "managed"
+        and record.config_dir is None
+        and (record_principal(record_id, root) or {}).get("account_uuid")
+        == principal["account_uuid"]
+    ]
+    who = principal.get("email") or principal["account_uuid"]
+    if not matches:
+        return ReconcileResult(
+            "zero-match",
+            detail=(
+                f"the live slot holds {who}, which matches no registered account's "
+                "proven identity; sign that account in and run "
+                "`fno config accounts register <id>` to bind it"
+            ),
+        )
+    if len(matches) > 1:
+        return ReconcileResult(
+            "ambiguous-match",
+            detail=(
+                f"the live slot holds {who}, which matches {len(matches)} records "
+                f"({', '.join(matches)}); one of them was registered while the other "
+                "was signed in"
+            ),
+        )
+
+    matched = matches[0]
+    # Snapshot first, stamp second, clear taint last: a crash at any point
+    # leaves the taint set, which is the safe direction to fail.
+    write_snapshot(by_id[matched], blob, root)
+    write_record_principal(matched, principal, root)
+    stamp_active_slot(cli, matched, root)
+    _set_slot_taint(cli, root, False)
+    _clear_reconcile_backoff(cli, root)
+    return ReconcileResult(
+        "matched",
+        record_id=matched,
+        detail=(
+            f"the live {cli} slot belongs to '{matched}' (proven by live profile); "
+            "snapshot refreshed, stamped active, taint cleared"
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -948,6 +1278,10 @@ def _switch_locked(
     # for a manual v1 (US3's daemon path can revisit if a postmortem shows it).
     stamp_active_slot(target.harness, target.id, root)
     _set_slot_taint(target.harness, root, bool(pinned_by))
+    # We just proved this blob is target's by materializing and verifying it, so
+    # this is the cheapest moment to bind target's principal - the binding a
+    # later reconciliation needs in order to recognize the account at all.
+    capture_record_principal(target, target_blob, root)
     if emit_fn is not None:
         event: dict[str, object] = {
             "provider": target.id,
