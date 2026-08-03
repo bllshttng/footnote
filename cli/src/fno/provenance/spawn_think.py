@@ -712,6 +712,7 @@ def _spawn_think_worker(
     model: Optional[str] = None,
     provider: Optional[str] = None,
     permission_mode: Optional[str] = None,
+    node: Optional[dict] = None,
 ) -> str:
     """Dispatch a fire-and-forget ``/think`` worker carrying the seed.
 
@@ -730,8 +731,20 @@ def _spawn_think_worker(
 
     from fno.agents.harness_map import resolve_dispatch
 
+    dispatch_settings = getattr(settings_obj, "dispatch", None)
+    shared_substrate = (
+        getattr(dispatch_settings, "substrate", "") or ""
+    ).strip()
+    think_spawn_settings = getattr(settings_obj, "think_spawn", None)
+    legacy_substrate = (
+        getattr(think_spawn_settings, "substrate", None)
+        if not shared_substrate
+        else None
+    )
+
     resolved = resolve_dispatch(
         harness=(provider or "").strip() or None,
+        substrate=legacy_substrate,
         node_id=node_id,
         verb="/think",
         trigger="autonomous",
@@ -740,6 +753,12 @@ def _spawn_think_worker(
     resolved_harness = resolved["harness"]
     substrate = resolved["substrate"]
     native_think = resolved["command"]
+    resolved_model = (model or "").strip() or None
+    if resolved_model is None and node is not None:
+        resolved_model = _route_resolve.node_model(
+            node,
+            provider=resolved_harness,
+        )
     portable_think = f"/think {node_id}"
     rendered_prompt = (
         native_think + prompt[len(portable_think) :]
@@ -762,8 +781,8 @@ def _spawn_think_worker(
         cmd += ["--fresh"]
     # x-571f: a pinned node's /think worker also runs on the pin (US1 honors it
     # on the claude/bg arm). Empty/None = provider default, unchanged.
-    if model:
-        cmd += ["--model", model]
+    if resolved_model:
+        cmd += ["--model", resolved_model]
     # x-dfa4: an explicit permission_mode wins; else the autonomous-dispatcher
     # config default (config.agents.spawn_permission_mode). Both empty = unchanged.
     mode = (permission_mode or "").strip()
@@ -1346,8 +1365,9 @@ def maybe_spawn_think(
             node_slug,
             reason,
             invocation_suffix,
-            model=_route_resolve.node_model(node, provider=node.get("provider")),
+            model=node.get("model"),
             provider=node.get("provider"),
+            node=node,
         )
     except SpawnAlreadyRunning:
         _safe_release(dispatch_key, holder)

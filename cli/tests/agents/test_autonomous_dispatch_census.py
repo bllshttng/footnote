@@ -77,7 +77,7 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     assert "capabilities(provider).get(\"route_on_pane\", False)" in attended_spawn
 
 
-def test_context_think_has_no_private_substrate_setting() -> None:
+def test_context_think_legacy_substrate_is_compatibility_only() -> None:
     config = _read_with_positive_control(
         "cli/src/fno/config/__init__.py",
         "class ThinkSpawnBlock",
@@ -97,6 +97,7 @@ def test_context_think_has_no_private_substrate_setting() -> None:
         re.DOTALL,
     )
     assert block is not None
-    assert "substrate: str" not in block.group(1)
-    assert '"think_spawn.substrate"' not in registry
-    assert "`think_spawn.substrate`" not in guide
+    assert "substrate: Optional[str] = None" in block.group(1)
+    assert '"think_spawn.substrate"' in registry
+    assert "deprecated compatibility fallback" in registry.lower()
+    assert "deprecated compatibility fallback" in guide.lower()

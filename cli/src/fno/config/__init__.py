@@ -1746,6 +1746,10 @@ class ThinkSpawnBlock(BaseModel):
     # inline-fill blows the context budget. Inherits max_per_run and daily_cap;
     # it adds no ceiling of its own.
     on_decompose_wave0: bool = False
+    # Deprecated read-time compatibility alias. New configuration belongs at
+    # config.dispatch.substrate; this value is consulted only when that shared
+    # setting is absent so upgrades preserve an operator's prior launch shape.
+    substrate: Optional[str] = None
     # B (x-5d51): how an attended session handles a born node. ``offer`` (default,
     # byte-for-byte x-6a10) prints a copy-pasteable handoff line; ``spawn`` opts
     # into a real bg /think dispatch. Fail-safe to ``offer`` so a garbage value
@@ -1821,6 +1825,22 @@ class ThinkSpawnBlock(BaseModel):
         if isinstance(v, str) and v.strip().lower() == "spawn":
             return "spawn"
         return "offer"
+
+    @field_validator("substrate", mode="before")
+    @classmethod
+    def _coerce_legacy_substrate(cls, v: object) -> Optional[str]:
+        """Preserve previously accepted values without restoring authority.
+
+        An absent key remains ``None`` so ``config.dispatch`` and its harness
+        default decide. A present malformed legacy value keeps the historical
+        fail-safe to Claude ``bg`` behavior.
+        """
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if isinstance(v, str) and v.strip().lower() in {"pane", "bg", "headless"}:
+            return v.strip().lower()
+        return "bg"
+
 
 def _coerce_affirmative(v: object, default: bool) -> bool:
     """Map a settings value to a bool with the bash get_config truth table.

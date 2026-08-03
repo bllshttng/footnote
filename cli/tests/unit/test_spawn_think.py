@@ -111,9 +111,9 @@ def patch_spawn(monkeypatch: pytest.MonkeyPatch):
     stamp_calls: list[tuple] = []
 
     def fake_spawn(node_id, prompt, node_cwd, node_slug, reason="birth",
-                   invocation_suffix=None, model=None, provider=None):
+                   invocation_suffix=None, model=None, provider=None, node=None):
         spawn_calls.append(
-            (node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model, provider)
+            (node_id, prompt, node_cwd, node_slug, reason, invocation_suffix, model, provider, node)
         )
         return "deadbeef"
 
@@ -1370,6 +1370,27 @@ def test_AC10_HP_configured_dispatch_substrate_reaches_every_spawn(monkeypatch, 
     cap = _capture_spawn_cmd(monkeypatch)
     st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
     assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "headless"
+
+
+def test_legacy_think_spawn_substrate_remains_a_compatibility_fallback(
+    monkeypatch, tmp_path
+):
+    _write_config(tmp_path, "[think_spawn]\nsubstrate = \"headless\"\n")
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "headless"
+
+
+def test_shared_dispatch_substrate_overrides_legacy_compatibility_key(
+    monkeypatch, tmp_path
+):
+    _write_config(
+        tmp_path,
+        '[think_spawn]\nsubstrate = "headless"\n\n[dispatch]\nsubstrate = "bg"\n',
+    )
+    cap = _capture_spawn_cmd(monkeypatch)
+    st._spawn_think_worker("x-1", "prompt", str(tmp_path), "slug")
+    assert cap["cmd"][cap["cmd"].index("--substrate") + 1] == "bg"
 
 
 def test_a_garbage_dispatch_substrate_fails_loud(monkeypatch, tmp_path):

@@ -385,6 +385,42 @@ def test_think_worker_codex_uses_shared_dispatch_default(monkeypatch):
     assert cmd[-1] == "$fno:think x-test\n\nfull context"
 
 
+def test_think_worker_scopes_tier_to_resolved_dispatch_harness(monkeypatch):
+    from fno.provenance import spawn_think
+
+    captured = _capture_spawn(monkeypatch, spawn_think)
+    settings = SimpleNamespace(
+        agents=SimpleNamespace(spawn_permission_mode=""),
+        dispatch=SimpleNamespace(
+            harness="codex",
+            substrate="",
+            command="",
+            auto_merge=False,
+            allowed_verbs=["/target", "/think"],
+        ),
+    )
+    monkeypatch.setattr(spawn_think, "_settings_for", lambda root: settings)
+    model_scopes: list[str] = []
+    monkeypatch.setattr(
+        spawn_think._route_resolve,
+        "node_model",
+        lambda node, provider: model_scopes.append(provider) or "codex-tier-model",
+    )
+
+    spawn_think._spawn_think_worker(
+        "x-test",
+        "/think x-test\n\nfull context",
+        None,
+        "slug",
+        model="",
+        node={"model_tier": "high"},
+    )
+
+    cmd = captured["cmd"]
+    assert model_scopes == ["codex"]
+    assert cmd[cmd.index("--model") + 1] == "codex-tier-model"
+
+
 def test_think_worker_explicit_pane_uses_shared_capability_gate(monkeypatch):
     from fno.provenance import spawn_think
 

@@ -271,6 +271,11 @@ FIELD_META: dict[str, Meta] = {
         "inherits max_per_run and daily_cap). Worth it only when the epic is large enough "
         "that inline-filling every child blows one session's context budget.",
     ),
+    "think_spawn.substrate": Meta(
+        "advanced",
+        "Deprecated compatibility fallback for existing configs; used only when "
+        "dispatch.substrate is unset. Configure new routing under config.dispatch.",
+    ),
     # --- config.active_backlog.* ---
     "active_backlog.enabled": Meta(
         "advanced",
