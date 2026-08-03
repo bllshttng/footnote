@@ -4,6 +4,17 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 **footnote** is a Claude Code plugin: an autonomous delivery pipeline that takes a feature from idea to shipped PR (think -> plan -> do -> review -> ship). First time here? `fno setup wizard` (terminal) or `/fno:setup` (in-session). Defaults work without config.
 
+## Precedence over generic coding skills
+
+A generic coding skill (ponytail, karpathy-guidelines, and anything similar installed globally) is advisory here. Where it disagrees with the working principles below, **this file wins.** The skills are installed per-machine and know nothing about this repo; these principles were written on purpose.
+
+Two conflicts are live today and both resolve the same way:
+
+- **"Shortest diff wins" loses to "fix what you find."** Ponytail optimises for the smallest change and fewest files. Principle 4 requires a pre-existing problem discovered mid-task to be fixed in the same PR while context is warm, as its own atomic commit. Fix it.
+- **No tool-branded comments.** A `// ponytail:` marker is a comment written for a tool rather than for the next reader, which is what the comment principle rules out. Explain the invariant or the why-not-the-obvious in plain terms, or write nothing.
+
+What the skills get right and this file already says: minimum code that solves the problem, reuse what the repo already has, no speculative abstractions. That overlap is not a conflict, and it is stated below in this repo's own terms.
+
 ## Working principles
 
 0. **Worktree-first.** Whenever possible, enter a dedicated feature worktree before editing, generating, or committing (`worktree.policy = "never"` projects work in place by design). Keep the canonical main checkout unclogged. Prune after merge.
@@ -15,6 +26,23 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 6. **Comments earn their place.** Match the surrounding file's comment density and idiom; add one only for a non-obvious invariant, race, or why-not-the-obvious. Never ticket/PR/node IDs (`scripts/ci/check-no-internal-refs.sh` fails on them).
 7. **Reproduce before you fix.** Reproduce a bug end-to-end on the real user path before editing; the repro is also the proof the fix landed. When a UI is in the loop, exercise it and be picky (see #4).
 8. **Quality outweighs cost.** Weight quality, simplicity, robustness, and maintainability over effort-now. Never overrides #2.
+
+## Output style
+
+The reader has ADHD. Shape every response so it can be acted on:
+
+1. Lead with the answer or next action: command, path, or snippet first.
+2. Number multi-step work; one bounded action per step.
+3. End with one next action doable in under two minutes.
+4. Finish the current issue before raising a new one.
+5. Restate progress each turn ("step 3 of 5 done").
+6. Give time estimates in concrete units, never "a bit".
+7. After a change, show what now works.
+8. Errors: state location, cause, and fix. No drama.
+9. Cap lists at 5 items.
+10. No preamble, no recaps, no closers.
+
+Exceptions: explain fully when asked to explain. Confirm before destructive actions. After three failed fixes, stop and name the doubtful assumption. If the request is ambiguous, ask one short question.
 
 ## Pitfalls corpus (capped)
 
