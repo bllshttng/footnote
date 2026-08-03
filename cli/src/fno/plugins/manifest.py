@@ -1,0 +1,226 @@
+"""Frozen, non-granting declarations for a function-pack manifest.
+
+A pack describes business capability as versioned data. It reuses the merged
+identity contracts verbatim rather than defining parallel types, because the
+roles it ships are projected into the ``RoleLayer.PLUGIN`` directory the role
+registry already walks and the resolver already digests. A divergent role or
+function identity type would compute a different manifest digest and break the
+identity and overlay checks ``resolve_role`` performs.
+
+Two declaration families are named as declarations, never as facts:
+
+* ``permissions`` is the pack's MAXIMUM EXPECTED EFFECT ceiling, read for review
+  and reported by the verifier. Activation grants none of it.
+* adapter ``conformance`` mirrors :class:`fno.approvals.models.AdapterCapability`
+  field-for-field. ``approvals-and-effects.md`` states the approval store cannot
+  verify these, so the registry records which pack digest declared which
+  conformance, making a false declaration attributable after the fact. The
+  docstrings say "declares", not "proves".
+
+The manifest model is pure data. It does not validate a packaged role's
+``default_topology`` vocabulary, because ``RoleManifest`` carries that field as a
+bare ``NonEmptyStr`` and the closed four-literal vocabulary lives in
+``fno.company.topology``. The verifier checks it there; re-pinning the literals
+here would be a second copy of the vocabulary and a scope violation.
+"""
+
+from __future__ import annotations
+
+from typing import Self
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+from fno.company.contracts import EvidenceResult, NonEmptyStr
+from fno.roles.models import ContextKind, RoleManifest, canonical_digest
+
+__all__ = [
+    "AdapterConformance",
+    "AdapterDeclaration",
+    "AssetDeclaration",
+    "CompatibilityRange",
+    "EffectDeclaration",
+    "EvaluatorDeclaration",
+    "PackDependency",
+    "PackManifest",
+    "ScenarioDeclaration",
+    "SkillDeclaration",
+    "WorkflowDeclaration",
+    "pack_digest",
+]
+
+
+class _PackModel(BaseModel):
+    model_config = ConfigDict(frozen=True, extra="forbid")
+
+
+class CompatibilityRange(_PackModel):
+    """Declared Footnote version range a pack is compatible with."""
+
+    minimum: NonEmptyStr
+    maximum: NonEmptyStr | None = None
+
+
+class PackDependency(_PackModel):
+    """Another pack this one declares a dependency on."""
+
+    pack_id: NonEmptyStr
+    version_range: CompatibilityRange
+
+
+class SkillDeclaration(_PackModel):
+    """A skill contribution, bundled at build time (no runtime Skill() call)."""
+
+    id: NonEmptyStr
+    source: NonEmptyStr
+
+
+class WorkflowDeclaration(_PackModel):
+    """A packaged workflow template."""
+
+    id: NonEmptyStr
+    source: NonEmptyStr
+
+
+class AdapterConformance(_PackModel):
+    """Adapter self-declaration, mirroring AdapterCapability field-for-field.
+
+    Declares, never proves: ``approvals-and-effects.md`` assigns verifying a
+    capability against a real adapter identity to whoever owns the adapter
+    registry. This node is that owner, so the registry records which pack digest
+    declared these flags; it cannot prevent a false declaration before the fact.
+    """
+
+    adapter_id: NonEmptyStr
+    adapter_version: NonEmptyStr
+    remote_idempotency: bool = False
+    reconciliation: bool = False
+
+
+class AdapterDeclaration(_PackModel):
+    """An external destination adapter the pack declares it may reach."""
+
+    id: NonEmptyStr
+    destination: NonEmptyStr
+    conformance: AdapterConformance
+
+
+class EvaluatorDeclaration(_PackModel):
+    """A delivery evaluator the pack ships as a declaration.
+
+    Packs ship evaluator declarations and never compute an aggregate verdict;
+    ``fno.delivery`` evaluates.
+    """
+
+    id: NonEmptyStr
+    command: NonEmptyStr
+    required: bool = True
+
+
+class AssetDeclaration(_PackModel):
+    """A packaged asset, referenced as a ContextKind.ARTIFACT context reference.
+
+    The merged ContextKind enum is untouched: a packaged asset is an artifact,
+    not a new context kind.
+    """
+
+    id: NonEmptyStr
+    source: NonEmptyStr
+    kind: ContextKind = ContextKind.ARTIFACT
+
+
+class EffectDeclaration(_PackModel):
+    """One maximum-expected effect in the pack's review ceiling.
+
+    Reuses the effect-class and destination vocabulary that
+    :func:`fno.approvals.models.classify_effect` and the approval authority
+    consult at decision time. A pack cannot know the work order and attempt a
+    concrete :class:`fno.company.contracts.EffectRef` is bound to, so the ceiling
+    carries only the vocabulary the review and authority surfaces read. It
+    declares an expected effect; it grants nothing, and activation never acts on
+    it.
+    """
+
+    effect_class: NonEmptyStr
+    destination: NonEmptyStr
+
+
+class ScenarioDeclaration(_PackModel):
+    """A benchmark scenario supplying declared-test evidence.
+
+    ``command`` is the runnable check and ``recorded_result`` is the last result
+    captured from running it. The verifier reports whether the command is
+    present and executable and reflects the recorded result honestly.
+    """
+
+    id: NonEmptyStr
+    command: NonEmptyStr
+    recorded_result: EvidenceResult
+
+
+class PackManifest(_PackModel):
+    """One versioned function-pack: identity plus component declarations.
+
+    ``roles`` carries full :class:`RoleManifest` objects, reused unchanged; they
+    are what activation projects into the plugin role layer. A pack declaring
+    zero roles is legal (assets and evaluators only); a pack declaring zero
+    components at all is refused as empty.
+    """
+
+    id: NonEmptyStr
+    version: NonEmptyStr
+    footnote_compat: CompatibilityRange
+    roles: tuple[RoleManifest, ...] = ()
+    skills: tuple[SkillDeclaration, ...] = ()
+    workflows: tuple[WorkflowDeclaration, ...] = ()
+    adapters: tuple[AdapterDeclaration, ...] = ()
+    evaluators: tuple[EvaluatorDeclaration, ...] = ()
+    assets: tuple[AssetDeclaration, ...] = ()
+    permissions: tuple[EffectDeclaration, ...] = ()
+    scenarios: tuple[ScenarioDeclaration, ...] = ()
+    depends_on: tuple[PackDependency, ...] = ()
+
+    @model_validator(mode="after")
+    def _declarations_are_unique(self) -> Self:
+        def identity(field: str, item: object) -> object:
+            if field == "roles":
+                return item.role.id  # type: ignore[union-attr]
+            if field == "permissions":
+                return (item.effect_class, item.destination)  # type: ignore[union-attr]
+            return item.id  # type: ignore[union-attr]
+
+        for field in (
+            "roles",
+            "skills",
+            "workflows",
+            "adapters",
+            "evaluators",
+            "assets",
+            "permissions",
+            "scenarios",
+        ):
+            items = getattr(self, field)
+            keys = [identity(field, item) for item in items]
+            if len(set(keys)) != len(keys):
+                raise ValueError(f"duplicate {field} declaration {keys[0]!r}")
+        return self
+
+    @model_validator(mode="after")
+    def _pack_is_not_empty(self) -> Self:
+        component_counts = (
+            self.roles,
+            self.skills,
+            self.workflows,
+            self.adapters,
+            self.evaluators,
+            self.assets,
+            self.permissions,
+            self.scenarios,
+        )
+        if not any(component_counts):
+            raise ValueError("a pack must declare at least one component")
+        return self
+
+
+def pack_digest(manifest: PackManifest) -> str:
+    """Stable sha256 over the canonical pack-manifest serialization."""
+    return canonical_digest("pack-manifest", manifest.model_dump(mode="json"))
