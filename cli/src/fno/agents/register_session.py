@@ -21,11 +21,35 @@ reserved for the session preamble).
 from __future__ import annotations
 
 import argparse
+import os
 import sys
+import time
 from typing import Optional, Sequence
 
 from fno.agents import events
 from fno.agents.registry import register_existing_session, restamp_harness_session_id
+
+#: How long a spawned worker waits for its own row to appear before giving up.
+#: Covers the spawner's post-`mux pane run` tail (child-pid lookup, the <=1s
+#: readiness probe, the registry lock) with room to spare. A miss costs
+#: addressability, never the session: the hook exits 0 regardless.
+_RESTAMP_ROW_WAIT_S = 10.0
+_RESTAMP_ROW_POLL_S = 0.25
+
+
+def _row_exists(name: str, harness: str) -> bool:
+    """True when this worker's row is already in the registry.
+
+    Fails to ``True`` (do not wait) on any read error: a registry we cannot read
+    is not evidence that the row is missing, and sleeping on that guess would
+    delay session start for a reason we cannot even state.
+    """
+    from fno.agents.registry import load_registry
+
+    try:
+        return any(e.name == name and e.harness == harness for e in load_registry())
+    except Exception:  # noqa: BLE001 -- unreadable registry is not "row absent"
+        return True
 
 
 def _restamp(agent_self: str, harness: str, session_id: str) -> int:
@@ -38,11 +62,54 @@ def _restamp(agent_self: str, harness: str, session_id: str) -> int:
     re-mintable id, so routing a re-minted worker through it appends a SECOND
     row for one worker instead of fixing the first -- which is why this returns
     rather than falling through.
+
+    RETRIES on a missing row, briefly. The spawner creates the row AFTER
+    ``mux pane run`` returns (it needs the pane id, and a half-created row is
+    worse than a late one), so a worker whose harness boots fast enough can run
+    this hook before its own row exists. `restamp_harness_session_id` cannot
+    distinguish "no such row" from "not yet" and returns None either way, so
+    without a wait the handoff silently loses the race. That is unrecoverable on
+    any route where this restamp is the ONLY path to an id - a happy-hosted
+    claude pane cannot be given one at spawn, because happy discards it - and the
+    worker would stay id-less and `spawning` for its whole life while being
+    perfectly healthy. The wait is bounded and still fail-soft: exhausting it
+    returns 0 exactly as a genuine no-row miss always did.
     """
+    # Only the pane substrate writes its row after the child starts, and it says
+    # so by name. Every other spawn either has its row already or never gets one -
+    # a headless one-shot sets FNO_AGENT_SELF and deliberately has no row, so
+    # waiting on that signal alone would delay every one-shot's first prompt by
+    # the full deadline for a row that is never coming.
+    #
+    # Comparing to THIS worker's name, not just testing presence: a pane worker
+    # passes its whole environment to any one-shot it launches, so the marker is
+    # inherited by children that are not the pane. It names the pane, the child
+    # overwrites FNO_AGENT_SELF with its own name, and the mismatch cancels the
+    # wait without any spawn path having to remember to clear it.
+    deadline = time.monotonic() + (
+        _RESTAMP_ROW_WAIT_S
+        if os.environ.get("FNO_AGENT_ROW_PENDING") == agent_self
+        else 0.0
+    )
     try:
-        entry = restamp_harness_session_id(
-            name=agent_self, harness=harness, session_id=session_id
-        )
+        while True:
+            # Observe the row BEFORE restamping, not after. None from the restamp
+            # is ambiguous - no such row YET, or a row that already matches - and
+            # only the first is worth waiting on. Reading existence AFTERWARDS
+            # answers the wrong instant: the spawner can append the row in between,
+            # and we would then break on "a row exists" having never restamped
+            # THAT row, stranding the worker id-less for life. Checked first, a
+            # True can only mean the row predates this restamp, so a None beside
+            # it really is "already current".
+            existed = _row_exists(agent_self, harness)
+            entry = restamp_harness_session_id(
+                name=agent_self, harness=harness, session_id=session_id
+            )
+            if entry is not None or existed:
+                break
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(_RESTAMP_ROW_POLL_S)
     except Exception as exc:  # fail-open: never block session start (AC7-ERR)
         events.emit(
             "session_restamp_failed",

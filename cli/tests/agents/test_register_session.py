@@ -553,6 +553,159 @@ def test_main_agent_self_is_failopen(tmp_path: Path, monkeypatch) -> None:
     assert "session_restamp_failed" in [e["kind"] for e in _events(tmp_path)]
 
 
+def test_restamp_waits_for_a_row_the_spawner_has_not_written_yet(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The spawner appends the row after `mux pane run` returns, so a fast worker
+    can run this hook first. Losing that race is unrecoverable on any route where
+    the restamp is the only path to an id, so the hook waits for its own row.
+
+    The row appearing between the existence check and the restamp must still be
+    restamped: checking existence first is what makes that safe.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    calls = {"n": 0}
+
+    def _late_row(name: str, harness: str) -> bool:
+        # Absent on the first look; the spawner writes it just before the second.
+        calls["n"] += 1
+        if calls["n"] == 2:
+            _spawned_row()
+        return calls["n"] > 2
+
+    monkeypatch.setattr(rs, "_row_exists", _late_row)
+    monkeypatch.setattr(rs, "_RESTAMP_ROW_POLL_S", 0.0)
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "target-x-f0c2")
+
+    assert rs._restamp("target-x-f0c2", "claude", REMINT) == 0
+
+    from fno.agents.registry import load_registry
+
+    rows = load_registry()
+    assert len(rows) == 1
+    assert rows[0].harness_session_id == REMINT, "the late row must still be restamped"
+
+
+def test_restamp_ignores_a_pending_marker_inherited_from_its_parent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A pane worker passes its whole environment to any one-shot it launches, so
+    the marker is inherited by children that are not the pane. It names the pane
+    and the child overwrites FNO_AGENT_SELF, so the mismatch cancels the wait
+    without any spawn path having to remember to clear it."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    monkeypatch.setenv("FNO_AGENT_ROW_PENDING", "the-parent-pane")
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("an inherited marker must not re-enable the wait")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
+
+    assert rs._restamp("the-nested-one-shot", "claude", REMINT) == 0
+
+
+def test_restamp_never_waits_for_a_row_a_headless_one_shot_will_not_get(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A rowless headless one-shot sets FNO_AGENT_SELF too. Keying the wait on
+    that alone made every one-shot sit out the whole deadline before its first
+    prompt, waiting for a row that is never coming."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    monkeypatch.delenv("FNO_AGENT_ROW_PENDING", raising=False)
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("a rowless substrate must not wait")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+    monkeypatch.setattr(rs, "_row_exists", lambda *_a: False)
+
+    assert rs._restamp("worker-headless", "claude", REMINT) == 0
+
+
+def test_restamp_does_not_poll_when_the_row_is_already_current(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The ordinary pinned path writes an already-correct row. Waiting out the
+    deadline there would add the whole wait to every spawned session start."""
+    use_tmpdir(monkeypatch, tmp_path)
+    import fno.agents.register_session as rs
+
+    _spawned_row()
+
+    def _no_sleep(_s: float) -> None:
+        raise AssertionError("must not sleep when the row already exists")
+
+    monkeypatch.setattr(rs.time, "sleep", _no_sleep)
+
+    assert rs._restamp("target-x-f0c2", "claude", BIRTH) == 0
+
+
+def test_restamp_promotes_a_spawning_row_once_the_worker_names_itself(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A happy-hosted claude pane cannot be given an id at spawn (happy discards
+    the pinned one), so its row parks at `spawning` and the restamp is the ONLY
+    path to an id. Leaving it `spawning` after the worker has proven its own
+    identity is the same lie as calling it `live` before, just inverted.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="worker-happy-pane",
+            harness="claude",
+            harness_session_id=None,
+            cwd="/proj",
+            log_path="",
+            status="spawning",
+            mux={"session": "main", "pane_id": 11},
+        )
+    ])
+    entry = restamp_harness_session_id(
+        name="worker-happy-pane", harness="claude", session_id=REMINT
+    )
+
+    assert entry is not None
+    rows = load_registry()
+    assert rows[0].harness_session_id == REMINT
+    assert rows[0].status == "live", "a worker that named itself is addressable"
+    assert rows[0].short_id == "", "still a mux row: exactly one live ref"
+
+
+def test_restamp_does_not_disturb_a_non_spawning_status(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only `spawning` is promoted. Every other status is owned by something
+    that knows more about the worker's lifecycle than a SessionStart hook does."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.registry import AgentEntry, load_registry, restamp_harness_session_id, write_registry
+
+    write_registry([
+        AgentEntry(
+            name="worker-idle-pane",
+            harness="claude",
+            harness_session_id=BIRTH,
+            cwd="/proj",
+            log_path="",
+            status="idle",
+            mux={"session": "main", "pane_id": 12},
+        )
+    ])
+    restamp_harness_session_id(
+        name="worker-idle-pane", harness="claude", session_id=REMINT
+    )
+
+    assert load_registry()[0].status == "idle"
+
+
 def test_restamp_corrects_a_mux_hosted_row(tmp_path: Path, monkeypatch) -> None:
     """The reported row was PANE-hosted, and a mux row is the one shape where
     filling short_id is illegal: `_validate_single_live_ref` enforces mux XOR

@@ -1191,6 +1191,190 @@ def test_reconcile_backfills_late_codex_pane_identity_without_index(
     ]
 
 
+def test_reconcile_orphans_a_dead_idless_claude_pane(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A happy-hosted claude pane has no session id until its worker restamps.
+
+    Before this arm existed the row fell to `missing-claude-short-id` (a mux row's
+    short_id is deliberately empty) and was never orphaned, so a dead pane held
+    its name against every future spawn of that name.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: False)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: False)
+
+    dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "orphaned"
+
+
+def test_reconcile_orphans_a_dead_claude_pane_that_already_restamped(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pane is the oracle for a pane row's whole life, not just before it has
+    an id. Gating the arm on a missing id covered the row only until its worker
+    restamped, and a pane that died after that was reachable by no arm at all."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="live",
+            harness_session_id="019fb024-2327-75f3-8b80-06e9d5ade05f",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: False)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: False)
+
+    dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "orphaned"
+
+
+def test_reconcile_correlates_the_pane_child_even_with_an_incarnation_token(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """`pid_start_time` proves the stored pid's incarnation is alive, never which
+    pane it now belongs to. After a mux restart recycles (session, pane_id) the
+    original child can still be running while the pane is someone else's, and pane
+    liveness and pid liveness are then both true about different processes."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="live",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: True)
+    # The pane now hosts a different child than the one this row recorded.
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_a: 9999)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "live", "preserved, never asserted"
+    assert any(e["reason"] == "claude-pane-pid-unconfirmed" for e in result.errors)
+
+
+def test_reconcile_never_trusts_an_uncorrelated_claude_pane_pid(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A legacy row carries no incarnation token, so `_pid_alive` degrades to bare
+    existence. A mux restart can hand the same (session, pane_id) to a different
+    child while the recorded pid is recycled and alive; trusting that keeps the
+    row live and points name-based delivery at a stranger."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="live",
+            pid=4242,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    # The pane's real child is someone else; the recorded pid is a recycled one
+    # that happens to still exist.
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_a: 9999)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: True)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "live", "status is preserved, not asserted"
+    assert any(e["reason"] == "claude-pane-pid-unconfirmed" for e in result.errors)
+
+
+def test_reconcile_keeps_a_live_claude_pane_with_no_pid_pending(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Missing pid evidence is inconclusive, never dead. `orphaned` is terminal
+    and a later restamp only promotes `spawning`, so orphaning a live pane on an
+    absent pid would strand a healthy worker permanently."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(mux_spawn, "_lookup_child_pid", lambda *_a: None)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "spawning"
+    assert any(e["reason"] == "claude-pane-pid-pending" for e in result.errors)
+
+
+def test_reconcile_keeps_a_live_idless_claude_pane_waiting(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Still alive and still owed its restamp: waiting is correct, not an error."""
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_registry(
+        dict(
+            name="worker-happy",
+            provider="claude",
+            status="spawning",
+            pid=4242,
+            pid_start_time=123,
+            mux={"session": "main", "pane_id": 7},
+        ),
+    )
+
+    from fno.agents import dispatch, mux_spawn, spawn_gate
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda *_args: True)
+    monkeypatch.setattr(spawn_gate, "_pid_alive", lambda pid, started: pid == 4242)
+
+    result = dispatch.reconcile_agents()
+
+    assert load_registry()[0].status == "spawning"
+    assert not any(e["reason"] == "missing-claude-short-id" for e in result.errors)
+
+
 def test_reconcile_keeps_live_unresolved_codex_pane_pending(
     tmp_path: Path, monkeypatch
 ) -> None:

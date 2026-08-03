@@ -1971,16 +1971,25 @@ def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
-    argv = mux_spawn.happy_pane_argv(
-        ["claude", "--session-id", "u1", "--model", "glm-5.2", "go"], _ROUTE
-    )
+    argv = mux_spawn.happy_pane_argv(["claude", "--model", "glm-5.2", "go"], _ROUTE)
 
     assert argv[0] == "happy"
     assert "--settings" not in argv
     pairs = [argv[i + 1] for i, token in enumerate(argv) if token == "--claude-env"]
     assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in pairs
     assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
-    assert argv[-5:] == ["--session-id", "u1", "--model", "glm-5.2", "go"]
+    assert argv[-3:] == ["--model", "glm-5.2", "go"]
+
+
+def test_happy_pane_argv_refuses_a_pinned_session_id(monkeypatch) -> None:
+    """happy strips --session-id and never re-adds it under its hook server, so a
+    pinned uuid would make the receipt name a session that never exists."""
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    with pytest.raises(DispatchAskError, match="--session-id"):
+        mux_spawn.happy_pane_argv(["claude", "--session-id", "u1", "go"], _ROUTE)
 
 
 def test_happy_pane_argv_refuses_when_happy_is_absent(monkeypatch) -> None:
@@ -2217,6 +2226,82 @@ def test_explicit_happy_monitor_refuses_conflicting_account_credential(
 
     assert exc.value.exit_code == 2
     assert runner.calls == []
+
+
+def _zai_route(monkeypatch):
+    from fno.agents.model_routing import resolve_explicit_route
+
+    monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
+    route = resolve_explicit_route("zai", "glm-5.2[1m]")
+    assert route is not None
+    return route
+
+
+def _happy_spawn(monkeypatch, tmp_path, **kwargs):
+    """A happy-monitored claude pane spawn."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    return _spawn(
+        monkeypatch,
+        tmp_path,
+        monitor="happy",
+        route_provider="zai",
+        route_env=_zai_route(monkeypatch),
+        **kwargs,
+    )
+
+
+def test_happy_spawn_never_pins_a_session_id(tmp_path: Path, monkeypatch) -> None:
+    """happy discards --session-id, so fno must not mint one and report it."""
+    result, runner = _happy_spawn(monkeypatch, tmp_path)
+
+    run_call = next(c for c in runner.calls if c[1:4] == ["mux", "pane", "run"])
+    provider_argv = run_call[run_call.index("--") + 1 :]
+    assert "--session-id" not in provider_argv
+    assert "happy" in provider_argv
+    assert result.session_uuid is None
+
+
+def test_happy_spawn_is_not_reported_live_without_a_proven_session(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The spawn cannot know a happy pane's session id, so it must not claim one.
+
+    This is the reported corpse: a real pid, a real pane, and status "live" for
+    ~55 minutes with no session behind it. The row waits for the worker to name
+    itself via the SessionStart restamp instead of guessing.
+    """
+    result, _ = _happy_spawn(monkeypatch, tmp_path)
+
+    assert result.session_uuid is None
+    assert result.status == "spawning"
+    assert result.short_id == ""
+
+
+def test_happy_spawn_never_guesses_from_the_transcript_store(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A transcript appearing in the cwd during the spawn proves nothing.
+
+    Two panes starting in one cwd see the same store; whichever writes its row
+    first could claim the other's session. Binding the row to a healthy stranger
+    is worse than leaving it unbound, so the spawn reads no transcripts at all.
+    """
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.discover import PROJECTS_DIR_ENV, _candidate_dir_names
+
+    projects = tmp_path / "projects"
+    pdir = projects / _candidate_dir_names(str(tmp_path))[0]
+    pdir.mkdir(parents=True)
+    (pdir / "someone-elses-sid.jsonl").write_text("{}\n")
+    monkeypatch.setenv(PROJECTS_DIR_ENV, str(projects))
+
+    result, _ = _happy_spawn(monkeypatch, tmp_path)
+
+    assert result.session_uuid is None
+    assert result.status == "spawning"
+    assert not hasattr(mux_spawn, "_backfill_claude_session_id")
 
 
 def test_happy_routed_panes_config_read_failure_refuses(monkeypatch) -> None:

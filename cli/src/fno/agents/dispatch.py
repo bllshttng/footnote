@@ -3633,7 +3633,128 @@ def reconcile_agents(
                 new_status = "live" if reachable else "orphaned"
 
         elif entry.harness == "claude":
-            if not claude_path_present:
+            # EVERY claude PANE row reconciles from the pane, with or without a
+            # session id. A mux row's short_id is deliberately empty (one live ref
+            # per row), so the `claude logs` probe below - which is keyed on
+            # short_id - can never reach one; without this arm a pane row falls to
+            # `missing-claude-short-id`, which only reports and never changes
+            # status, so a dead pane holds its name against every future spawn of
+            # that name, forever.
+            #
+            # Gating this on `not harness_session_id` was the earlier shape and it
+            # was the AGENTS.md path-uniqueness trap in miniature: it covered the
+            # pane only until its worker restamped, and a pane that then died was
+            # unreachable by any arm. The pane is the reachability oracle for a
+            # pane-hosted row for its whole life, not just before it has an id.
+            #
+            # Deliberately ahead of the claude-on-PATH guard: this probes the mux
+            # and the pid, never the claude CLI, so a host where claude was
+            # removed can still retire a provably dead pane.
+            if entry.mux:
+                if entry.status in _TERMINAL_AGENT_STATUSES:
+                    continue
+
+                from fno.agents.mux_spawn import _lookup_child_pid, _mux_pane_alive
+                from fno.agents.spawn_gate import _pid_alive, _process_start_time
+
+                pane_state = _mux_pane_alive(entry.mux)
+                if pane_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "mux-pane-liveness-unavailable",
+                        }
+                    )
+                    continue
+                probe_pid = entry.pid
+                probe_start = entry.pid_start_time
+                # `_mux_pane_alive` proves the PANE is up, never that the recorded
+                # pid is still its child. Without an incarnation token `_pid_alive`
+                # degrades to bare existence, so re-derive the pane's real child
+                # before trusting a live answer. Unlike the codex arm this never
+                # stamps an identity from the pid, so an unconfirmed pid only ever
+                # keeps the row waiting - it can never bind a stranger.
+                # ALWAYS re-derive the pane's current child, even when the row
+                # carries an incarnation token. That token proves only that the
+                # stored pid's incarnation is alive; it says nothing about which
+                # pane that process now belongs to. A mux restart can hand
+                # `(session, pane_id)` to a different child while the original is
+                # still running, and then `_mux_pane_alive` and `_pid_alive` are
+                # both true about DIFFERENT processes - which preserves the row as
+                # live and points delivery at the stranger's pane.
+                confirmed = False
+                if pane_state is not False:
+                    live_pid = _lookup_child_pid(
+                        str(entry.mux["session"]),
+                        int(entry.mux["pane_id"]),
+                        subprocess.run,
+                    )
+                    if live_pid is not None and probe_pid in (None, live_pid):
+                        probe_pid = live_pid
+                        # Keep a stored incarnation token: it is stronger than a
+                        # fresh read, which cannot see a pid recycled since.
+                        if probe_start is None:
+                            probe_start = _process_start_time(probe_pid)
+                        confirmed = True
+                # A live pane with no usable pid is INCONCLUSIVE, never dead.
+                # `_lookup_child_pid` is best-effort, so folding its miss into
+                # `False` would orphan a healthy worker on absent evidence - and
+                # `orphaned` is terminal here while a later restamp only promotes
+                # `spawning`, so that mistake is permanent. Stay pending, exactly
+                # as the codex arm does with `codex-pane-pid-pending`.
+                if pane_state is True and probe_pid is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-pane-pid-pending",
+                        }
+                    )
+                    continue
+                # An uncorrelated pid may not be this pane's at all. A legacy row
+                # carries no incarnation token, so `_pid_alive` degrades to bare
+                # existence there; a mux restart can hand `(session, pane_id)` to
+                # a different child while the recorded pid has been RECYCLED and
+                # is alive. Trusting that keeps the row `live` and points
+                # name-based delivery at a stranger. Only a DEAD pane is decided
+                # without correlation, since nothing can be bound to it.
+                if pane_state is True and not confirmed:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-pane-pid-unconfirmed",
+                        }
+                    )
+                    continue
+                pid_state = (
+                    _pid_alive(probe_pid, probe_start)
+                    if pane_state is True and probe_pid is not None
+                    else False
+                )
+                if pid_state is None:
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": None,
+                            "reason": "claude-process-incarnation-unavailable",
+                        }
+                    )
+                    continue
+                if pid_state is True:
+                    # The pane is up. Leave the status alone: a row still owed
+                    # its restamp is correctly `spawning`, and one that already
+                    # got it was promoted to `live` by the restamp itself. Either
+                    # way this pass has nothing to correct.
+                    continue
+                new_status = "orphaned"
+
+            elif not claude_path_present:
                 # Mirror the codex-index-missing pattern: when claude is
                 # not installed we cannot probe reachability, so we route
                 # the entry to `errors` with status untouched. Anything
@@ -3648,7 +3769,7 @@ def reconcile_agents(
                     }
                 )
                 continue
-            if not entry.short_id:
+            elif not entry.short_id:
                 events.emit(
                     "agent_inconsistent",
                     name=entry.name,
@@ -3663,69 +3784,69 @@ def reconcile_agents(
                     }
                 )
                 continue
+            else:
+                from fno.agents.providers import claude as claude_mod
 
-            from fno.agents.providers import claude as claude_mod
-
-            # Phase 5: MCP-backed claude agents probe via the sidecar
-            # instead of `claude logs`. Same tri-state contract:
-            # True/False/raise. Socket-only agents (mcp_channel_id is
-            # None) keep the legacy claude_logs_reachable path.
-            # NOTE: probe_label is assigned BEFORE the probe call so a
-            # ReachabilityProbeError from the probe still has the
-            # label in scope for the error route.
-            probe_label = (
-                "claude-mcp-probe-failed" if entry.mcp_channel_id else "claude-probe-failed"
-            )
-            try:
-                if entry.mcp_channel_id:
-                    reachable = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
-                else:
-                    reachable = claude_mod.claude_logs_reachable(
-                        entry.short_id, timeout=claude_logs_timeout
-                    )
-            except ReachabilityProbeError as exc:
-                # Catch the lifted base class (US4-gemini Wave 1.1) so
-                # both the claude-side timeout/OSError probe error and the
-                # Phase 5 ``mcp_channel_disconnected`` probe error are routed
-                # identically. Probe inconclusive -> preserve status,
-                # route to errors with a per-provider reason
-                # discriminator. Mirrors the codex-side
-                # codex-session-index-unreadable treatment so transient
-                # CLI slowness or sidecar I/O hiccups don't mass-orphan
-                # healthy agents (Codex P1 round-5 on PR #315).
-                events.emit(
-                    "agent_inconsistent",
-                    name=entry.name,
-                    provider="claude",
-                    reason=exc.reason,
+                # Phase 5: MCP-backed claude agents probe via the sidecar
+                # instead of `claude logs`. Same tri-state contract:
+                # True/False/raise. Socket-only agents (mcp_channel_id is
+                # None) keep the legacy claude_logs_reachable path.
+                # NOTE: probe_label is assigned BEFORE the probe call so a
+                # ReachabilityProbeError from the probe still has the
+                # label in scope for the error route.
+                probe_label = (
+                    "claude-mcp-probe-failed" if entry.mcp_channel_id else "claude-probe-failed"
                 )
-                errors.append(
-                    {
-                        "name": entry.name,
-                        "provider": "claude",
-                        "id": entry.short_id,
-                        "reason": f"{probe_label}: {exc.reason}",
-                    }
-                )
-                continue
-            new_status = "live" if reachable else "orphaned"
-
-            # US4 heal (x-ec59): a live claude row whose canonical id never landed
-            # (the uuid resolution raced at spawn) is unroutable-but-live. Resolve
-            # it from claude's own store -- the same jsonl the liveness probe just
-            # read -- and fold the write into reconcile's single batched cycle. A
-            # miss leaves it null (the durable queue stays the floor); never fatal.
-            if reachable and not entry.harness_session_id and entry.short_id:
                 try:
-                    healed = claude_mod.resolve_session_uuid(entry.short_id)
-                except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
-                    healed = None
-                if healed:
-                    # Queue only. The `backfilled` claim is made AFTER the write,
-                    # against the names the write actually stamped: the under-lock
-                    # guard can refuse this row (same-name rm + re-register), and
-                    # claiming success here reported a heal that never landed.
-                    pending_backfill[entry.name] = (entry.short_id, healed)
+                    if entry.mcp_channel_id:
+                        reachable = claude_mod.mcp_channel_reachable(entry.mcp_channel_id, timeout=0.25)
+                    else:
+                        reachable = claude_mod.claude_logs_reachable(
+                            entry.short_id, timeout=claude_logs_timeout
+                        )
+                except ReachabilityProbeError as exc:
+                    # Catch the lifted base class (US4-gemini Wave 1.1) so
+                    # both the claude-side timeout/OSError probe error and the
+                    # Phase 5 ``mcp_channel_disconnected`` probe error are routed
+                    # identically. Probe inconclusive -> preserve status,
+                    # route to errors with a per-provider reason
+                    # discriminator. Mirrors the codex-side
+                    # codex-session-index-unreadable treatment so transient
+                    # CLI slowness or sidecar I/O hiccups don't mass-orphan
+                    # healthy agents (Codex P1 round-5 on PR #315).
+                    events.emit(
+                        "agent_inconsistent",
+                        name=entry.name,
+                        provider="claude",
+                        reason=exc.reason,
+                    )
+                    errors.append(
+                        {
+                            "name": entry.name,
+                            "provider": "claude",
+                            "id": entry.short_id,
+                            "reason": f"{probe_label}: {exc.reason}",
+                        }
+                    )
+                    continue
+                new_status = "live" if reachable else "orphaned"
+
+                # US4 heal (x-ec59): a live claude row whose canonical id never landed
+                # (the uuid resolution raced at spawn) is unroutable-but-live. Resolve
+                # it from claude's own store -- the same jsonl the liveness probe just
+                # read -- and fold the write into reconcile's single batched cycle. A
+                # miss leaves it null (the durable queue stays the floor); never fatal.
+                if reachable and not entry.harness_session_id and entry.short_id:
+                    try:
+                        healed = claude_mod.resolve_session_uuid(entry.short_id)
+                    except Exception:  # noqa: BLE001 — a resolver error is a tolerated miss
+                        healed = None
+                    if healed:
+                        # Queue only. The `backfilled` claim is made AFTER the write,
+                        # against the names the write actually stamped: the under-lock
+                        # guard can refuse this row (same-name rm + re-register), and
+                        # claiming success here reported a heal that never landed.
+                        pending_backfill[entry.name] = (entry.short_id, healed)
 
         else:
             errors.append(

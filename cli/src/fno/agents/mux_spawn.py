@@ -245,7 +245,9 @@ def happy_pane_argv(
     """Carry a routed claude pane through happy without losing its endpoint.
 
     happy reserves ``--settings`` for its hook server and discards a caller's
-    file, so routed values must use its ``--claude-env`` interface instead.
+    file, so routed values must use its ``--claude-env`` interface instead. It
+    consumes ``--session-id`` the same way: the session id belongs to happy on
+    this route and is discovered after the spawn, never pinned before it.
     """
     if any(arg == "--settings" or arg.startswith("--settings=") for arg in argv):
         raise DispatchAskError(
@@ -254,6 +256,15 @@ def happy_pane_argv(
             "discards the caller's file, so the route would be silently ignored "
             "and the worker would launch on the default account. Carry the route "
             "as --claude-env KEY=VALUE instead.",
+            exit_code=2,
+        )
+    if any(arg == "--session-id" or arg.startswith("--session-id=") for arg in argv):
+        raise DispatchAskError(
+            "refusing to launch a claude pane through happy with --session-id: "
+            "happy extracts that flag out of the argv and never re-adds it under "
+            "its hook server, so claude mints a different id and the spawn receipt "
+            "would name a session that never exists (unpeekable worker, id-less "
+            "registry row). Let happy own the id; fno discovers it afterwards.",
             exit_code=2,
         )
     if shutil.which("happy") is None:
@@ -823,7 +834,25 @@ def _mesh_env_wrapper(
     ``FNO_NODE``/``FNO_SLUG``/``FNO_PLAN``) for a node-driven spawn; empty values
     are dropped so an ad-hoc pane exports nothing new (the starship module hides
     absent vars via ``when``)."""
-    pairs = [f"FNO_AGENT_SELF={name}", f"FNO_AGENT_PROVIDER={provider}"]
+    # FNO_AGENT_ROW_PENDING marks the one substrate whose row is written AFTER
+    # the child starts (the pane id does not exist until `mux pane run` returns),
+    # so only here may a worker's SessionStart hook wait for its own row. Headless
+    # one-shots set FNO_AGENT_SELF too and deliberately never get a row, so
+    # keying the wait on FNO_AGENT_SELF alone would make every one-shot sit out
+    # the full deadline before its first prompt.
+    #
+    # It carries the NAME, not a bare flag, and the hook waits only when the two
+    # agree. A pane worker that itself launches a headless one-shot passes this
+    # whole environment down; every spawn path overwrites FNO_AGENT_SELF but none
+    # of them clears an inherited marker, so a bare `=1` would silently re-enable
+    # the wait for a nested child that will never have a row. Scoping it to the
+    # identity makes the stale value self-invalidating instead of requiring every
+    # present and future spawn path to remember to unset it.
+    pairs = [
+        f"FNO_AGENT_SELF={name}",
+        f"FNO_AGENT_PROVIDER={provider}",
+        f"FNO_AGENT_ROW_PENDING={name}",
+    ]
     unset: list[str] = []
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
@@ -1206,7 +1235,25 @@ def dispatch_spawn_pane(
         effective_message = message
 
     session = resolve_mux_session(session)
-    session_uuid = str(_uuid.uuid4()) if provider == "claude" else None
+    # Resolve the monitor BEFORE the argv build. happy OWNS the claude session
+    # id: claudeLocal() extracts `--session-id` out of the caller's argv and only
+    # re-adds it on its `!hookSettingsPath` branch, which a normal `happy` launch
+    # never takes (the start path assigns hookSettingsPath unconditionally). A
+    # pinned uuid is therefore discarded, claude mints its own, and the receipt
+    # names a session that never exists - which is what makes a happy pane
+    # unpeekable and its registry row id-less whether it is healthy or a corpse.
+    # Every resolve_monitor input is available here, so the hoist leaves the
+    # unmonitored route byte-identical.
+    resolved_monitor = resolve_monitor(
+        monitor,
+        harness=provider,
+        route_provider=route_provider,
+        route_env=route_env,
+        account_env=account_env,
+        model=model,
+    )
+    pin_session = provider == "claude" and resolved_monitor != "happy"
+    session_uuid = str(_uuid.uuid4()) if pin_session else None
     argv = build_pane_argv(
         provider,
         message,
@@ -1230,16 +1277,6 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
-    # Keep the one existing launcher seam. The explicit selector is deliberately
-    # narrower (claude + zai + pane); omitting it preserves the config default.
-    resolved_monitor = resolve_monitor(
-        monitor,
-        harness=provider,
-        route_provider=route_provider,
-        route_env=route_env,
-        account_env=account_env,
-        model=model,
-    )
     # Keep the outer env wrapper: it scrubs inherited Anthropic credentials,
     # while --claude-env reasserts the complete route in happy's claude child.
     if resolved_monitor == "happy":
@@ -1438,6 +1475,28 @@ def dispatch_spawn_pane(
                     cwd=str(cwd),
                     reason="no unique codex rollout for this cwd after spawn",
                 )
+        elif provider == "claude" and not pin_session:
+            # happy owns the id on this route, so the spawn CANNOT know it and
+            # deliberately does not try. Guessing from the transcript store was
+            # the obvious move and it is unsound: two panes starting in one cwd
+            # snapshot the same baseline, and whichever writes its row first can
+            # claim the other's session - binding the row to a healthy stranger,
+            # which is worse than binding it to nothing.
+            #
+            # The worker names itself instead. Its SessionStart hook restamps
+            # this row (keyed on FNO_AGENT_SELF, the one identity a harness
+            # cannot re-mint) with the id it is actually using, which is proof
+            # rather than inference. Until that lands the row stays id-less and
+            # `spawning` - created, not yet addressable.
+            from fno.agents import events as _events
+
+            _events.emit(
+                "agent_session_id_uncaptured",
+                name=name,
+                harness=provider,
+                cwd=str(cwd),
+                reason="happy owns the claude session id; awaiting SessionStart restamp",
+            )
 
         # Crown stamp (US9): the grantor is the spawning session (the parent edge
         # captured above), or "human" for a direct human spawn with no session
@@ -1460,9 +1519,15 @@ def dispatch_spawn_pane(
                 r.harness_session_id == session_uuid for r in rows
             )
             stored_session_uuid = None if claimed else session_uuid
+            # A pane with no identified session is created but not addressable.
+            # Keep that transition explicit instead of calling it live - for the
+            # happy-hosted claude route as much as for codex, where an id-less
+            # row reporting "live" is exactly the corpse that passes every
+            # liveness check the tooling offers.
             row_status = (
                 "spawning"
-                if provider == "codex" and stored_session_uuid is None
+                if stored_session_uuid is None
+                and (provider == "codex" or (provider == "claude" and not pin_session))
                 else "live"
             )
             rows.append(
