@@ -267,6 +267,8 @@ allowed_verbs = ["/target", "/think"]
 auto_merge = false
 # On provider exhaustion during autonomous dispatch: 'defer' (default; a fresh install is unchanged) waits for headroom; 'failover' rotates to the next non-exhausted provider in the active combo. A full-combo exhaustion falls back to defer; any unknown value degrades to 'defer'.
 on_exhaustion = "defer"
+# Minutes after which a LOW (not yet exhausted) quota window whose reset is FARTHER out than this arms a cross-harness cutover instead of a wait. Default 0 = off (a fresh install is unchanged). The predicate is inverted from the defer horizon on purpose: for deferring a distant reset means wait, for cutover it means leave now. Needs dispatch.on_exhaustion='failover' and a healthy candidate in the active combo; any non-integer or negative value degrades to 0.
+cutover_low_after_minutes = 0
 
 [auto_continue]
 # Auto-dispatch the next ready node after a PR merges.
