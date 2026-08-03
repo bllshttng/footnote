@@ -12,11 +12,16 @@ projection is role definitions only. A pack that declares an external-publicatio
 effect still cannot dispatch one, because the approval authority is unchanged and
 capabilities arrive as independent work-order-scoped facts.
 
-Writes are atomic (temp file plus ``os.replace``) so a concurrent discovery never
-observes a partial JSON file. Activation refuses on any failed or blocked
-verification condition, refuses to overwrite a path a different pack owns, is
-idempotent for the same digest, and deactivates by removing only the paths its
-own receipt recorded.
+Pack and role ids become path segments, so they are validated as single path
+components and every resolved target is confirmed to stay under the plugin root:
+a manifest id of ``../x`` cannot escape the role layer. Ownership preflight,
+atomic per-file writes (temp plus ``os.replace``), stale-path reconciliation on
+upgrade, and the receipt recording run under one registry lock so two concurrent
+activations serialize and a partial activation never leaves unreceipted files.
+Activation refuses on any failed or blocked verification condition, refuses to
+overwrite a path a different pack owns, is idempotent for the same digest, and
+deactivates by removing only the paths its own receipt recorded after they are
+confirmed gone.
 """
 
 from __future__ import annotations
@@ -32,6 +37,7 @@ from fno.plugins.manifest import PackManifest, pack_digest
 from fno.plugins.registry import (
     ActivationReceipt,
     PackRegistryStore,
+    RegistryCorrupt,
     conformance_for,
 )
 from fno.plugins.verify import load_manifest, verify_pack
@@ -50,8 +56,10 @@ __all__ = [
 
 class ActivationRefusalReason(str, Enum):
     VERIFICATION_FAILED = "verification_failed"
+    INVALID_IDENTITY = "invalid_identity"
     DIFFERENT_PACK_OWNS_PATH = "different_pack_owns_path"
     UNWRITABLE_LAYER = "unwritable_layer"
+    REGISTRY_CORRUPT = "registry_corrupt"
 
 
 class ActivationRefusal(Exception):
@@ -69,6 +77,27 @@ def _revision_for(manifest: PackManifest) -> str:
 
 def _target_source_id(manifest: PackManifest, role_id: str) -> str:
     return f"plugin/{manifest.id}/{role_id}.json"
+
+
+def _validate_path_component(value: str, kind: str) -> None:
+    """Reject an id that is not a single safe path component.
+
+    Pack and role ids become path segments under ``<root>/plugin/<pack>/<role>.json``.
+    A value with a separator, a traversal literal, or a NUL could escape the
+    plugin root or cross into another pack's namespace, so it is refused before
+    any filesystem touch.
+    """
+    if (
+        not value
+        or "/" in value
+        or "\\" in value
+        or value in (".", "..")
+        or "\x00" in value
+    ):
+        raise ActivationRefusal(
+            ActivationRefusalReason.INVALID_IDENTITY,
+            f"invalid {kind} {value!r}: must be a single path component",
+        )
 
 
 def _atomic_write_json(path: Path, payload: str) -> None:
@@ -119,8 +148,9 @@ def activate(
     """Verify then project a pack's roles into the plugin role layer.
 
     Grants nothing: writes role definitions only. Raises
-    :class:`ActivationRefusal` on a failed/blocked verification condition or when
-    a different pack owns a target path.
+    :class:`ActivationRefusal` on a failed/blocked verification condition, an
+    unsafe id, a path a different pack owns, an unwritable layer, or a corrupt
+    registry.
     """
     target = Path(path).expanduser()
     store = registry_store or PackRegistryStore()
@@ -132,11 +162,18 @@ def activate(
         raise ActivationRefusal(ActivationRefusalReason.VERIFICATION_FAILED, detail)
     digest = pack_digest(manifest)
 
-    existing = store.load().receipt_for(manifest.id)
-    if existing is not None and existing.pack_digest == digest:
-        return ActivationOutcome(receipt=existing, already_active=True)
+    _validate_path_component(manifest.id, "pack id")
+    for role_manifest in manifest.roles:
+        _validate_path_component(role_manifest.role.id, "role id")
 
-    report = verify_pack(target, installed=store.installed_index())
+    # UNKNOWN conditions are allowed: an unknown is honest non-evaluation (a pack
+    # with no benchmark scenarios), not a defect. Dependencies are always checked
+    # here because the installed index is supplied, so the only unknown source is
+    # declared-test. The plan gates activation on *failed* conditions.
+    try:
+        report = verify_pack(target, installed=store.installed_index())
+    except RegistryCorrupt as exc:
+        raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
     failing = [
         condition
         for condition in report.conditions
@@ -149,35 +186,71 @@ def activate(
         )
 
     revision = _revision_for(manifest)
-    written: list[str] = []
+    plugin_root = (root / "plugin").resolve()
+    # Resolve every target and prove it stays under the plugin root before any
+    # write: a containment failure refuses up front rather than mid-activation.
+    planned: list[tuple[str, Path, RoleDefinitionSource]] = []
     for index in range(len(manifest.roles)):
         source_id, definition = _definition_document(manifest, index, revision=revision)
-        owner = store.owner_of_path(source_id)
-        if owner is not None and owner[0] != manifest.id:
-            raise ActivationRefusal(
-                ActivationRefusalReason.DIFFERENT_PACK_OWNS_PATH,
-                f"{source_id} is owned by pack {owner[0]}",
-            )
-        target_path = root / source_id
+        resolved = (root / source_id).resolve()
         try:
-            _atomic_write_json(target_path, definition.model_dump_json())
-        except OSError as exc:
+            resolved.relative_to(plugin_root)
+        except ValueError as exc:
             raise ActivationRefusal(
-                ActivationRefusalReason.UNWRITABLE_LAYER,
-                f"cannot write {target_path}: {exc}",
+                ActivationRefusalReason.INVALID_IDENTITY,
+                f"{source_id} resolves outside the plugin role root",
             ) from exc
-        written.append(source_id)
+        planned.append((source_id, resolved, definition))
 
-    receipt = ActivationReceipt(
-        pack_id=manifest.id,
-        pack_digest=digest,
-        resolved_version=manifest.version,
-        written_paths=tuple(written),
-        activated_at=datetime.now(UTC),
-        conformance=conformance_for(manifest),
-    )
-    store.install(manifest, target)
-    store.record_activation(receipt)
+    try:
+        with store.lock:
+            registry = store.load()  # raises RegistryCorrupt
+            for source_id, _resolved, _definition in planned:
+                owner = registry.owner_of_path(source_id)
+                if owner is not None and owner[0] != manifest.id:
+                    raise ActivationRefusal(
+                        ActivationRefusalReason.DIFFERENT_PACK_OWNS_PATH,
+                        f"{source_id} is owned by pack {owner[0]}",
+                    )
+            existing = registry.receipt_for(manifest.id)
+            if existing is not None and existing.pack_digest == digest:
+                return ActivationOutcome(receipt=existing, already_active=True)
+
+            written: list[str] = []
+            for source_id, resolved, definition in planned:
+                try:
+                    _atomic_write_json(resolved, definition.model_dump_json())
+                except OSError as exc:
+                    raise ActivationRefusal(
+                        ActivationRefusalReason.UNWRITABLE_LAYER,
+                        f"cannot write {resolved}: {exc}",
+                    ) from exc
+                written.append(source_id)
+
+            # An upgrade whose new manifest drops roles must not leave the old
+            # roles' files orphaned and undeactivatable: remove prior receipt
+            # paths that the new set no longer carries.
+            new_set = set(written)
+            for prior in (existing.written_paths if existing is not None else ()):
+                if prior in new_set:
+                    continue
+                prior_path = (root / prior)
+                if prior_path.is_file():
+                    prior_path.unlink()
+
+            receipt = ActivationReceipt(
+                pack_id=manifest.id,
+                pack_digest=digest,
+                resolved_version=manifest.version,
+                written_paths=tuple(written),
+                activated_at=datetime.now(UTC),
+                conformance=conformance_for(manifest),
+            )
+            registry, _pack = store._install_locked(registry, manifest, target)
+            registry = store._record_activation_locked(registry, receipt)
+            store._save(registry)
+    except RegistryCorrupt as exc:
+        raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
     return ActivationOutcome(receipt=receipt, already_active=False)
 
 
@@ -195,20 +268,36 @@ def deactivate(
 ) -> DeactivationOutcome:
     """Remove only the definition paths this pack's receipt recorded.
 
-    A hand-written definition in the same plugin layer is never touched.
+    Each path is removed only if its current owner is still this pack, and the
+    receipt is retained until the removals succeed so a failed unlink keeps retry
+    evidence. A hand-written definition in the same plugin layer is never touched.
     """
     store = registry_store or PackRegistryStore()
     root = Path(role_root) if role_root is not None else default_role_root()
-    receipt = store.remove_activation(pack_id)
+    try:
+        receipt = store.peek_receipt(pack_id)
+    except RegistryCorrupt:
+        return DeactivationOutcome(removed=(), left_alone=())
     if receipt is None:
         return DeactivationOutcome(removed=(), left_alone=())
+
     removed: list[str] = []
+    left_alone: list[str] = []
+    try:
+        registry = store.load()
+    except RegistryCorrupt:
+        # Refuse to guess at ownership when the registry is corrupt.
+        return DeactivationOutcome(removed=(), left_alone=receipt.written_paths)
     for source_id in receipt.written_paths:
+        owner = registry.owner_of_path(source_id)
         path = root / source_id
+        if owner is not None and owner[0] != pack_id:
+            # Another pack reclaimed this path mid-flight; leave it alone.
+            left_alone.append(source_id)
+            continue
         if path.is_file():
             path.unlink()
-            removed.append(source_id)
-    # Report any receipted path that survives (e.g. a different pack reclaimed it
-    # mid-flight) so the operator sees deactivation was not total there.
-    left_alone = tuple(path for path in receipt.written_paths if path not in removed)
-    return DeactivationOutcome(removed=tuple(removed), left_alone=left_alone)
+        removed.append(source_id)
+
+    store.remove_activation(pack_id)
+    return DeactivationOutcome(removed=tuple(removed), left_alone=tuple(left_alone))

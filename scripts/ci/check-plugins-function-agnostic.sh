@@ -20,8 +20,8 @@ root="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
 target="$root/cli/src/fno/plugins"
 
 if [[ ! -d "$target" ]]; then
-  echo "check-plugins-function-agnostic: $target not found; nothing to scan" >&2
-  exit 0
+  echo "check-plugins-function-agnostic: $target not found; the package must exist to be scanned (fail closed)" >&2
+  exit 1
 fi
 
 python3 - "$target" <<'PY'

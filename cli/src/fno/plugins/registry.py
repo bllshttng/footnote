@@ -40,9 +40,14 @@ __all__ = [
     "InstalledPack",
     "PackRegistry",
     "PackRegistryStore",
+    "RegistryCorrupt",
     "conformance_for",
     "default_registry_path",
 ]
+
+
+class RegistryCorrupt(Exception):
+    """The registry file is present but unparseable; ownership cannot be trusted."""
 
 
 def default_registry_path() -> Path:
@@ -128,27 +133,44 @@ class PackRegistryStore:
         self.lock = FileLock(str(self.path) + ".lock")
 
     def load(self) -> PackRegistry:
+        """Load the registry, raising :class:`RegistryCorrupt` if it is present but unparseable.
+
+        A missing file is a fresh install and returns an empty registry. A file
+        that exists but is corrupt must NOT read as empty: doing so would discard
+        every ownership and receipt record, letting activation overwrite existing
+        definitions. Fail closed so the corruption is surfaced and fixed.
+        """
         try:
             raw = json.loads(self.path.read_text(encoding="utf-8"))
         except FileNotFoundError:
             return PackRegistry()
-        except (json.JSONDecodeError, ValidationError):
-            # A corrupt registry is rebuilt empty rather than acted on as garbage.
-            return PackRegistry()
+        except json.JSONDecodeError as exc:
+            raise RegistryCorrupt(f"registry at {self.path} is not valid JSON: {exc}") from exc
         try:
             return PackRegistry.model_validate(raw)
-        except ValidationError:
+        except ValidationError as exc:
+            raise RegistryCorrupt(f"registry at {self.path} failed schema validation: {exc}") from exc
+
+    def load_or_empty(self) -> PackRegistry:
+        """Read-only display load: an empty registry on corruption, never a raise."""
+        try:
+            return self.load()
+        except RegistryCorrupt:
             return PackRegistry()
 
     def installed_index(self) -> dict[str, str]:
         """pack_id -> resolved_version, for the verifier's dependency family."""
-        return {pack.pack_id: pack.resolved_version for pack in self.load().packs}
+        return {pack.pack_id: pack.resolved_version for pack in self.load_or_empty().packs}
 
     def owner_digest_of_path(self, written_path: str) -> str | None:
         return self.load().owner_digest_of_path(written_path)
 
     def owner_of_path(self, written_path: str) -> tuple[str, str] | None:
         return self.load().owner_of_path(written_path)
+
+    def peek_receipt(self, pack_id: str) -> ActivationReceipt | None:
+        """Read a receipt without removing it (for ordered deactivation)."""
+        return self.load().receipt_for(pack_id)
 
     def install(self, manifest: PackManifest, manifest_path: Path) -> InstalledPack:
         """Record (or refresh) a pack as installed and return its record."""
@@ -167,9 +189,7 @@ class PackRegistryStore:
 
     def record_activation(self, receipt: ActivationReceipt) -> None:
         with self.lock:
-            registry = self.load()
-            receipts = tuple(r for r in registry.receipts if r.pack_id != receipt.pack_id)
-            self._save(registry.model_copy(update={"receipts": (*receipts, receipt)}))
+            self._save(self._record_activation_locked(self.load(), receipt))
 
     def remove_activation(self, pack_id: str) -> ActivationReceipt | None:
         with self.lock:
@@ -180,6 +200,25 @@ class PackRegistryStore:
             receipts = tuple(r for r in registry.receipts if r.pack_id != pack_id)
             self._save(registry.model_copy(update={"receipts": receipts}))
             return receipt
+
+    # -- lock-held internals (caller already holds self.lock) --------------
+
+    @staticmethod
+    def _install_locked(registry: PackRegistry, manifest: PackManifest, manifest_path: Path) -> tuple[PackRegistry, InstalledPack]:
+        pack = InstalledPack(
+            pack_id=manifest.id,
+            resolved_version=manifest.version,
+            pack_digest=pack_digest(manifest),
+            manifest_path=str(manifest_path),
+            declared_effects=manifest.permissions,
+        )
+        packs = tuple(p for p in registry.packs if p.pack_id != pack.pack_id)
+        return registry.model_copy(update={"packs": (*packs, pack)}), pack
+
+    @staticmethod
+    def _record_activation_locked(registry: PackRegistry, receipt: ActivationReceipt) -> PackRegistry:
+        receipts = tuple(r for r in registry.receipts if r.pack_id != receipt.pack_id)
+        return registry.model_copy(update={"receipts": (*receipts, receipt)})
 
     def _save(self, registry: PackRegistry) -> None:
         payload = json.dumps(registry.model_dump(mode="json"), sort_keys=True, indent=2)

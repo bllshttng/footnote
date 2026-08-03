@@ -115,3 +115,16 @@ def test_two_packs_can_each_own_their_own_paths_concurrently(tmp_path):
     store.record_activation(_receipt(pack_id="pack-b", digest="b" * 64, paths=("plugin/pack-b/b.json",)))
     registry = store.load()
     assert {r.pack_id for r in registry.receipts} == {"pack-a", "pack-b"}
+
+
+def test_corrupt_registry_load_raises_instead_of_resetting_to_empty(tmp_path):
+    from fno.plugins.registry import RegistryCorrupt
+
+    store = PackRegistryStore(tmp_path / "registry.json")
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{ not valid json", encoding="utf-8")
+    with pytest.raises(RegistryCorrupt):
+        store.load()
+    # read-only display load degrades gracefully
+    assert store.load_or_empty().packs == ()
+    assert store.installed_index() == {}

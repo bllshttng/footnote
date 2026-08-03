@@ -170,3 +170,47 @@ def test_resolve_synthetic_catches_unresolvable_role(tmp_path):
     resolve_conditions = [c for c in report.conditions if c.name.startswith("resolve:")]
     assert resolve_conditions
     assert all(c.result is EvidenceResult.PASSED for c in resolve_conditions)
+
+
+def test_scenario_with_missing_script_blocks_even_when_runner_is_present(tmp_path):
+    # bash is on PATH, but the script it names does not exist => blocked, not passed.
+    pack = _full_pack().model_copy(
+        update={
+            "scenarios": (
+                _full_pack().scenarios[0].model_copy(update={"command": "bash no-such-script.sh"}),
+            )
+        }
+    )
+    pack_dir = _write_pack(tmp_path, pack)
+    report = verify_pack(pack_dir, installed={})
+    scenario = next(c for c in report.conditions if c.name.startswith("scenario:"))
+    assert scenario.checked is True
+    assert scenario.result is EvidenceResult.BLOCKED
+
+
+def test_scenario_with_present_script_passes(tmp_path):
+    pack_dir = tmp_path / "growth-studio"
+    pack_dir.mkdir()
+    (pack_dir / "scripts").mkdir()
+    (pack_dir / "scripts" / "run.sh").write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    pack = _full_pack().model_copy(
+        update={"scenarios": (_full_pack().scenarios[0].model_copy(update={"command": "bash scripts/run.sh"}),)}
+    )
+    (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(pack.model_dump(mode="json")), encoding="utf-8")
+    report = verify_pack(pack_dir, installed={})
+    scenario = next(c for c in report.conditions if c.name.startswith("scenario:"))
+    assert scenario.checked is True
+    assert scenario.result is EvidenceResult.PASSED
+
+
+def test_dependency_version_out_of_range_fails(tmp_path):
+    pack_dict = _full_pack().model_dump(mode="json")
+    pack_dict["depends_on"] = [{"pack_id": "core-brand", "version_range": {"minimum": "1.0.0"}}]
+    pack_dir = tmp_path / "growth-studio"
+    pack_dir.mkdir()
+    (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(pack_dict), encoding="utf-8")
+    report = verify_pack(pack_dir, installed={"core-brand": "0.5.0"})
+    dep = next(c for c in report.conditions if c.name == "dependency:core-brand")
+    assert dep.checked is True
+    assert dep.result is EvidenceResult.FAILED
+    assert "outside" in (dep.detail or "")

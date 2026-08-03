@@ -248,6 +248,25 @@ def _schema_conditions(manifest: PackManifest) -> list[Condition]:
     ]
 
 
+def _version_tuple(value: str) -> tuple[int, ...]:
+    parsed: list[int] = []
+    for chunk in value.split("."):
+        try:
+            parsed.append(int(chunk))
+        except ValueError:
+            parsed.append(0)
+    return tuple(parsed) or (0,)
+
+
+def _in_range(resolved: str, minimum: str, maximum: str | None) -> bool:
+    rv = _version_tuple(resolved)
+    if rv < _version_tuple(minimum):
+        return False
+    if maximum is not None and rv > _version_tuple(maximum):
+        return False
+    return True
+
+
 def _dependency_conditions(
     manifest: PackManifest,
     installed: Mapping[str, str] | None,
@@ -280,15 +299,29 @@ def _dependency_conditions(
                 )
             )
             continue
-        conditions.append(
-            Condition(
-                ConditionFamily.DEPENDENCY,
-                f"dependency:{dependency.pack_id}",
-                checked=True,
-                result=EvidenceResult.PASSED,
-                detail=f"{dependency.pack_id} resolved to {resolved}",
+        if not _in_range(resolved, dependency.version_range.minimum, dependency.version_range.maximum):
+            conditions.append(
+                Condition(
+                    ConditionFamily.DEPENDENCY,
+                    f"dependency:{dependency.pack_id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=(
+                        f"{dependency.pack_id} resolved to {resolved}, outside "
+                        f"{dependency.version_range.minimum}..{dependency.version_range.maximum or 'open'}"
+                    ),
+                )
             )
-        )
+        else:
+            conditions.append(
+                Condition(
+                    ConditionFamily.DEPENDENCY,
+                    f"dependency:{dependency.pack_id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"{dependency.pack_id} resolved to {resolved}",
+                )
+            )
     if not manifest.depends_on:
         conditions.append(
             Condition(
@@ -458,15 +491,52 @@ def _resolution_conditions(manifest: PackManifest) -> list[Condition]:
     return conditions
 
 
+def _footnote_version() -> str | None:
+    try:
+        from importlib.metadata import version
+
+        return version("fno")
+    except Exception:
+        return None
+
+
 def _compatibility_conditions(manifest: PackManifest) -> list[Condition]:
-    conditions: list[Condition] = [
-        Condition(
-            ConditionFamily.COMPATIBILITY,
-            "footnote-compat-range",
-            checked=True,
-            result=EvidenceResult.PASSED,
-            detail=f"minimum={manifest.footnote_compat.minimum} maximum={manifest.footnote_compat.maximum or 'open'}",
-        ),
+    conditions: list[Condition] = []
+    running = _footnote_version()
+    if running is None:
+        conditions.append(
+            Condition(
+                ConditionFamily.COMPATIBILITY,
+                "footnote-compat-range",
+                checked=False,
+                result=EvidenceResult.UNKNOWN,
+                detail="running footnote version unavailable; range not evaluated",
+            )
+        )
+    elif _in_range(running, manifest.footnote_compat.minimum, manifest.footnote_compat.maximum):
+        conditions.append(
+            Condition(
+                ConditionFamily.COMPATIBILITY,
+                "footnote-compat-range",
+                checked=True,
+                result=EvidenceResult.PASSED,
+                detail=f"running footnote {running} within declared range",
+            )
+        )
+    else:
+        conditions.append(
+            Condition(
+                ConditionFamily.COMPATIBILITY,
+                "footnote-compat-range",
+                checked=True,
+                result=EvidenceResult.FAILED,
+                detail=(
+                    f"running footnote {running} outside "
+                    f"{manifest.footnote_compat.minimum}..{manifest.footnote_compat.maximum or 'open'}"
+                ),
+            )
+        )
+    conditions.append(
         Condition(
             ConditionFamily.COMPATIBILITY,
             "role-manifest-schema",
@@ -474,19 +544,49 @@ def _compatibility_conditions(manifest: PackManifest) -> list[Condition]:
             result=EvidenceResult.PASSED,
             detail=f"{len(manifest.roles)} role(s) parsed as RoleManifest",
         ),
-    ]
+    )
     conditions.extend(_topology_conditions(manifest))
     conditions.extend(_resolution_conditions(manifest))
     return conditions
 
 
+_INTERPRETERS = frozenset({"bash", "sh", "zsh", "python", "python3", "ruby", "node", "perl"})
+_SCRIPT_SUFFIXES = frozenset((".sh", ".py", ".rb", ".js", ".pl"))
+
+
+def _token_resolves(token: str, base: Path) -> bool:
+    if "/" in token or "\\" in token:
+        return (base / token).is_file()
+    return shutil.which(token) is not None
+
+
+def _command_is_runnable(command: str, base: Path) -> bool:
+    """Static runnability check that never executes the command.
+
+    Verification is pure (it never spawns), so this confirms the command is
+    structurally runnable: the runner resolves on PATH or as a repo-relative path,
+    and when an interpreter names a script file, that script exists relative to
+    the pack. Without the script check, ``bash missing.sh`` would read as runnable
+    because ``bash`` is on PATH while the script it runs is absent.
+    """
+    parts = command.split()
+    if not parts:
+        return False
+    runner = parts[0]
+    if not _token_resolves(runner, base):
+        return False
+    if runner in _INTERPRETERS:
+        script = next((p for p in parts[1:] if not p.startswith("-")), None)
+        if script is not None and ("/" in script or script.endswith(tuple(_SCRIPT_SUFFIXES))):
+            if not (base / script).is_file():
+                return False
+    return True
+
+
 def _declared_test_conditions(manifest: PackManifest, base: Path) -> list[Condition]:
     conditions: list[Condition] = []
     for scenario in manifest.scenarios:
-        token = scenario.command.split()[0] if scenario.command.split() else ""
-        located = shutil.which(token) or str(base / token) if token else ""
-        runnable = bool(located) and Path(located).exists()
-        if runnable:
+        if _command_is_runnable(scenario.command, base):
             conditions.append(
                 Condition(
                     ConditionFamily.DECLARED_TEST,
@@ -497,6 +597,7 @@ def _declared_test_conditions(manifest: PackManifest, base: Path) -> list[Condit
                 )
             )
         else:
+            token = scenario.command.split()[0] if scenario.command.split() else ""
             conditions.append(
                 Condition(
                     ConditionFamily.DECLARED_TEST,

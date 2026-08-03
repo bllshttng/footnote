@@ -196,3 +196,37 @@ def test_deactivation_removes_only_receipted_paths_and_leaves_hand_written(tmp_p
     assert hand_written.exists()
     discovered = discover_role_definitions(root=root)
     assert any(r.role is not None and r.role.id == "curator" for r in discovered)
+
+
+def test_activation_refuses_path_traversal_pack_id(tmp_path):
+    store, root = _store_and_root(tmp_path)
+    pack = _full_pack().model_copy(update={"id": "../escape"})
+    pack_dir = tmp_path / "p"
+    pack_dir.mkdir()
+    (pack_dir / "plugin.yaml").write_text(yaml.safe_dump(pack.model_dump(mode="json")), encoding="utf-8")
+    with pytest.raises(ActivationRefusal) as info:
+        activate(pack_dir, registry_store=store, role_root=root)
+    assert info.value.reason is ActivationRefusalReason.INVALID_IDENTITY
+
+
+def test_activation_refuses_on_corrupt_registry(tmp_path):
+    store, root = _store_and_root(tmp_path)
+    store.path.parent.mkdir(parents=True, exist_ok=True)
+    store.path.write_text("{ not valid json", encoding="utf-8")
+    pack_dir = _write_pack(tmp_path, _full_pack())
+    with pytest.raises(ActivationRefusal) as info:
+        activate(pack_dir, registry_store=store, role_root=root)
+    assert info.value.reason is ActivationRefusalReason.REGISTRY_CORRUPT
+
+
+def test_upgrade_removes_stale_role_files(tmp_path):
+    store, root = _store_and_root(tmp_path)
+    base_role = _full_pack().roles[0]
+    second_role = base_role.model_copy(update={"role": RoleRef(id="second", function_id="growth-studio")})
+    v1 = _full_pack().model_copy(update={"version": "0.1.0", "roles": (base_role, second_role)})
+    v2 = _full_pack().model_copy(update={"version": "0.2.0", "roles": (base_role,)})
+    activate(_write_pack(tmp_path, v1, name="gs-v1"), registry_store=store, role_root=root)
+    assert (root / "plugin" / "growth-studio" / "second.json").exists()
+    activate(_write_pack(tmp_path, v2, name="gs-v2"), registry_store=store, role_root=root)
+    assert (root / "plugin" / "growth-studio" / "marketing.json").exists()
+    assert not (root / "plugin" / "growth-studio" / "second.json").exists()
