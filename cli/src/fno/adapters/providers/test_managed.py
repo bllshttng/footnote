@@ -339,10 +339,10 @@ class TestSwitchGuards:
         by_id = _register_two(fake_slot, tmp_path)
         before = fake_slot["claude"]  # B0, still in the slot
 
-        def _boom(record, root=None):
+        def _boom(cli):
             raise managed.KeychainError("security find-generic-password timed out")
 
-        monkeypatch.setattr(managed, "snapshot_current", _boom)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", _boom)
         with pytest.raises(managed.KeychainError):
             managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
         assert fake_slot["claude"] == before  # slot never overwritten
@@ -2661,3 +2661,43 @@ class TestRegisterRespectsALiveTaintWriter:
 
         assert failure == "duplicate-credential:work-a" and principal is None
         assert not (tmp_path / "work-b" / "blob").exists()
+
+
+class TestCaptureBeforeOverwriteAgreesWithIdentity:
+    """Reconciliation may store the PROVEN (unscoped) credential while a
+    scoped-first capture would write the other one straight back over it - the
+    two reads must not disagree about which credential belongs to a record."""
+
+    def test_capture_reads_the_same_candidates_identity_does(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs", lambda cli: [_blob("B_ROTATED")]
+        )
+
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+        assert (tmp_path / "work-b" / "blob").read_text() == _blob("B_ROTATED")
+
+    def test_two_credentials_in_the_slot_capture_nothing(
+        self, fake_slot, tmp_path, monkeypatch
+    ):
+        """Guessing would file another account's credential under this record -
+        silent, where a lost rotated token is recoverable with a login."""
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(
+            managed, "canonical_slot_blobs",
+            lambda cli: [_blob("SCOPED_OTHER"), _blob("UNSCOPED_B")],
+        )
+
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+
+        # work-b keeps its earlier snapshot rather than gaining a stranger's.
+        assert (tmp_path / "work-b" / "blob").read_text() == _blob("B0")
+
+    def test_an_empty_slot_captures_nothing(self, fake_slot, tmp_path, monkeypatch):
+        by_id = _register_two(fake_slot, tmp_path)
+        monkeypatch.setattr(managed, "canonical_slot_blobs", lambda cli: [])
+        managed.switch(by_id["work-a"], by_id=by_id, root=tmp_path)
+        assert (tmp_path / "work-b" / "blob").read_text() == _blob("B0")

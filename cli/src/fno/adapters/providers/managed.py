@@ -1802,6 +1802,31 @@ def _clear_unverified_codex_stamp(root: Path) -> str:
     return "active stamp cleared because the slot occupant is unverified"
 
 
+def _capture_outgoing(outgoing: ProviderRecord, root: Path) -> bool:
+    """Re-snapshot the outgoing account's current slot credential. True if done.
+
+    Reads the SAME canonical candidates the identity path resolves, because
+    those two must not disagree about which credential belongs to a record:
+    reconciliation may have stored the proven (unscoped) blob while a
+    scoped-first read here would capture the other one straight back over it.
+
+    More than one distinct credential in the slot means we cannot say which is
+    this record's, so it captures nothing and the older snapshot stands. That
+    loses a rotated refresh token at worst - recoverable with a login - where
+    guessing would file another account's credential under this record, which
+    is silent and is not. It is the same "skip capture rather than poison it"
+    stance the taint check above already takes.
+
+    A read failure still propagates: overwriting the slot without capturing a
+    live credential we could not read would lose the outgoing token for real.
+    """
+    blobs = canonical_slot_blobs(outgoing.harness)  # KeychainError propagates
+    if len(blobs) != 1:
+        return False
+    write_snapshot(outgoing, blobs[0], root)
+    return True
+
+
 def switch(
     target: ProviderRecord,
     *,
@@ -1885,17 +1910,7 @@ def _switch_locked(
     # stamped account's snapshot with them.
     rollback_blob: Optional[str] = _read_slot_blob(target.harness)
     if outgoing_id and outgoing_id in by_id and not slot_tainted(target.harness, root):
-        try:
-            snapshot_current(by_id[outgoing_id], root)
-        except KeychainError:
-            # A real read failure over a live credential must NOT be swallowed:
-            # proceeding would overwrite the slot and lose the outgoing account's
-            # rotated refresh token. Abort with the receipt; slot still untouched.
-            raise
-        except ManagedStoreError:
-            # No readable outgoing login (fresh slot / already cleared): nothing
-            # to capture, so nothing to lose. Proceed.
-            pass
+        _capture_outgoing(by_id[outgoing_id], root)
 
     _write_slot_blob(target.harness, target_blob)
 

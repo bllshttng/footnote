@@ -304,6 +304,7 @@ Reading the slot also ignores any ambient `CLAUDE_CONFIG_DIR`, since a worker pi
 On macOS the shared slot has two Keychain items, scoped and unscoped, and a stale one can sit beside a live one holding a different account.
 Reconciliation resolves both and refuses with `ambiguous-slot` when they name different accounts: that is not a tie to break, because whichever was stamped, some reader would get the other one.
 Every candidate is resolved rather than stopping at the first, and the credential stored is the one that actually proved: an expired scoped item sitting in front of a live login would otherwise look like a plain offline registration and then be snapshotted and stamped as the account.
+Capture-before-overwrite reads the same candidates, so the two cannot disagree about which credential belongs to a record; with more than one distinct credential present it captures nothing, since a lost rotated token is recoverable with a login while another account's credential filed under this record is silent.
 The pin check runs before the profile call rather than after it, and the slot is re-read and compared before anything is written, so a writer that replaces the credential during that call and then exits refuses with `slot-changed` instead of getting its credential stamped under the proven account's name.
 A reconciliation against a store that does not exist yet returns `no-managed-store` without creating it: `matched` is the only outcome allowed to touch disk, and that includes the directory.
 
