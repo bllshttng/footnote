@@ -991,6 +991,62 @@ def check_contained() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("resume-bind", hidden=True)
+def resume_bind_cmd(
+    json_out: bool = typer.Option(
+        False, "--json", "-J", help="Emit one JSON result line for the harness adapter."
+    ),
+    heartbeat: bool = typer.Option(
+        False,
+        "--heartbeat",
+        help="Heartbeat mode: refresh the lease, or rebind if the prior pid is dead.",
+    ),
+    harness: Optional[str] = typer.Option(
+        None, "--harness", help="Override ambient harness (transport/testing)."
+    ),
+    harness_session_id: Optional[str] = typer.Option(
+        None, "--harness-session-id", help="Override ambient session id (transport/testing)."
+    ),
+) -> None:
+    """Native target resume: rebind the node claim to the resumed durable pid (x-2ccd).
+
+    Reads the immutable manifest in the cwd, proves the ambient harness identity
+    matches it, and atomically rebinds the node claim's dead prior PID to this
+    durable process. Fail-closed: a foreign, live-concurrent, off-host, or
+    mismatched owner refuses with a named reason and changes nothing. A plain
+    session with no manifest is a silent no-op. The SessionStart/heartbeat
+    adapters call this and parse the ``--json`` line; policy lives in the
+    primitive, not the shell.
+    """
+    from fno.target.resume_bind import resume_bind
+
+    result = resume_bind(
+        Path.cwd(),
+        heartbeat=heartbeat,
+        harness=harness,
+        harness_session_id=harness_session_id,
+    )
+    if json_out:
+        typer.echo(json.dumps(result))
+        return
+    res = result.get("result")
+    if res == "noop":
+        return  # silent: a plain session with no target manifest
+    if res in ("rebound", "idempotent"):
+        typer.echo(
+            f"target resume: {res} {result.get('node')} "
+            f"run={result.get('fno_id')} pid={result.get('pid')}"
+        )
+        return
+    typer.echo(
+        f"target resume: refused ({result.get('node', '?')}): {result.get('reason')}",
+        err=True,
+    )
+    if result.get("advice"):
+        typer.echo(f"  {result['advice']}", err=True)
+    raise typer.Exit(code=1)
+
+
 @target_app.command("status")
 def status(
     node: Optional[str] = typer.Argument(

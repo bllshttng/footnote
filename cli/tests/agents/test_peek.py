@@ -94,6 +94,125 @@ def test_peek_resolve_miss_exits_13_with_suggestions(tmp_path):
     assert "worker-a" in err.getvalue()
 
 
+# --------------------------------------------------------------------------
+# peek_mux — pane-substrate workers, the default substrate (x-680d)
+# --------------------------------------------------------------------------
+
+
+def test_peek_mux_pane_worker_read_when_live_resolver_misses(tmp_path):
+    """A pane worker resolves via the registry mux ref and is read, even though
+    the live-session resolver returns None (its content is a PTY, not a transcript)."""
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x-5f43",
+        lines=5,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["board-survey", "gate-b1c3"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("mux-sess", 33, "worker-x-5f43"),
+        mux_reader=lambda sess, pane, n: (0, "thinking...\nacting now\n"),
+    )
+    assert rc == 0
+    text = out.getvalue()
+    assert "mux pane=33" in text
+    assert "acting now" in text
+    # The misdirecting "did you mean" suggestions must NOT appear for a peer
+    # peek can in fact observe.
+    assert "did you mean" not in err.getvalue()
+
+
+def test_peek_mux_pane_refusal_names_working_surface(tmp_path):
+    """When the mux cannot answer, the refusal names `fno mux pane read <id>`
+    instead of listing unrelated peers (the 2026-08-04 false-liveness incident
+    where an empty resolver result was read as proof three live workers were wedged)."""
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "boardsort-b63a",
+        lines=5,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["board-survey", "gate-b1c3", "footnote-56"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("mux-sess", 25, "boardsort-b63a"),
+        mux_reader=lambda sess, pane, n: (1, ""),
+    )
+    assert rc == 1
+    msg = err.getvalue()
+    assert "fno mux pane read 25" in msg
+    assert "boardsort-b63a" in msg
+    # Unrelated peers must not be listed as "did you mean" for a pane worker.
+    assert "board-survey" not in msg
+
+
+def test_peek_mux_pane_no_row_falls_through_to_not_found(tmp_path):
+    """A handle with no mux row still gets the normal peer-not-found path."""
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "ghost",
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, ["someone-else"]),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: None,
+        mux_reader=lambda sess, pane, n: (0, "irrelevant"),
+    )
+    assert rc == 13
+    assert "peer not found: ghost" in err.getvalue()
+    assert "someone-else" in err.getvalue()
+
+
+def test_peek_mux_pane_json_shape(tmp_path):
+    """--json on a pane worker emits a parseable row carrying the pane identity."""
+    out, err = io.StringIO(), io.StringIO()
+    rc = peek(
+        "worker-x-5f43",
+        lines=3,
+        json_out=True,
+        stdout=out,
+        stderr=err,
+        resolve=lambda h: (None, []),
+        projects_root=tmp_path,
+        mux_lookup=lambda h: ("mux-sess", 33, "worker-x-5f43"),
+        mux_reader=lambda sess, pane, n: (0, "hello pane\n"),
+    )
+    assert rc == 0
+    row = json.loads(out.getvalue().strip())
+    assert row["pane_id"] == 33
+    assert row["mux_session"] == "mux-sess"
+    assert "hello pane" in row["text"]
+
+
+def test_lookup_mux_pane_finds_registry_row(tmp_path):
+    """_lookup_mux_pane resolves a registry mux row directly, no live session needed."""
+    from fno.agents.peek import _lookup_mux_pane
+    from fno.agents.registry import AgentEntry, write_registry
+
+    # A pane worker carries the mux ref and NO transport short_id (the mux ref
+    # is its identity) - the one-live-ref invariant mux XOR worker XOR bg.
+    entry = AgentEntry(
+        name="worker-x-5f43",
+        harness="claude",
+        cwd=str(tmp_path),
+        log_path="",
+        mux={"session": "mux-sess", "pane_id": 33},
+    )
+    registry_path = tmp_path / ".fno" / "agents" / "registry.json"
+    write_registry([entry], path=registry_path)
+
+    assert _lookup_mux_pane("worker-x-5f43", registry_path=registry_path) == (
+        "mux-sess",
+        33,
+        "worker-x-5f43",
+    )
+    # An unknown handle and a non-mux row both resolve to None.
+    assert _lookup_mux_pane("nope", registry_path=registry_path) is None
+
+    plain = AgentEntry(name="daemon-worker", harness="claude", cwd=str(tmp_path), log_path="", short_id="cafe1234")
+    write_registry([plain], path=registry_path)
+    assert _lookup_mux_pane("daemon-worker", registry_path=registry_path) is None
+
+
 def test_peek_requested_name_reads_repaired_codex_thread(tmp_path):
     """The requested name reads the rollout, GIVEN an already-repaired row.
 

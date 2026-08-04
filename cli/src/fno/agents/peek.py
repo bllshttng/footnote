@@ -3,7 +3,9 @@
 Reply is agent-native (``mail send`` resolves ``<handle>`` across every live
 source). Observe was tribal knowledge (``agents logs`` is registry-only; a live
 codex thread or unrostered ``claude --bg`` session had no single observe verb).
-``peek`` closes the asymmetry: same union resolver, read instead of write.
+``peek`` closes the asymmetry: the same union resolver as send for
+transcript-backed peers, plus a mux-pane arm for pane-substrate workers (the
+default substrate), whose content is a PTY rather than a transcript (x-680d).
 
 Two data paths, tried in order (design x-05da):
 
@@ -636,6 +638,123 @@ def _default_resolve(handle: str):
     return resolve_or_suggest(handle)
 
 
+def _lookup_mux_pane(
+    handle: str, *, registry_path: Optional[Path] = None
+) -> Optional[tuple[str, int, str]]:
+    """Resolve a handle to a mux-pane registry row, or None.
+
+    The live-session resolver (``resolve_or_suggest``) misses pane-substrate
+    workers by design: their content is a PTY, not a transcript, and their
+    ``session_id`` stays null until reconcile backfills it. A pane worker is
+    still a fully-registered row, so the registry resolves it directly. This
+    closes the asymmetry that made the default substrate unobservable through
+    the documented observe verb (x-680d).
+
+    Returns ``(mux_session, pane_id, name)`` for a row carrying a ``mux`` ref,
+    else None. A read/parse failure or a non-mux row is None, never raised.
+    """
+    from fno.agents.registry import AgentResolutionError, load_registry, resolve_agent_in
+
+    try:
+        entries = load_registry(registry_path)
+    except Exception:  # noqa: BLE001 - torn/version-drifted registry contributes no row
+        return None
+    try:
+        resolved = resolve_agent_in(entries, handle)
+    except AgentResolutionError:
+        return None
+    entry = getattr(resolved, "entry", None)
+    mux = getattr(entry, "mux", None) if entry is not None else None
+    if not isinstance(mux, dict):
+        return None
+    session = mux.get("session")
+    pane_id = mux.get("pane_id")
+    if session is None or pane_id is None:
+        return None
+    try:
+        return str(session), int(pane_id), getattr(entry, "name", None) or handle
+    except (TypeError, ValueError):
+        return None
+
+
+def _read_mux_pane(
+    session: str, pane_id: int, n: int, *, runner: Optional[Callable] = None
+) -> tuple[int, str]:
+    """Read a mux pane's scrollback via ``fno mux pane read``.
+
+    Returns ``(returncode, stdout)``. The runner is injectable so tests never
+    shell out. Mirrors the read path the spawn readiness gate already uses.
+    """
+    import subprocess
+
+    from fno.agents.mux_spawn import DispatchAskError, _run_mux
+
+    run = runner or subprocess.run
+    try:
+        proc = _run_mux(
+            [
+                "mux", "pane", "read", "--session", str(session),
+                str(pane_id), "--lines", str(n),
+            ],
+            run,
+        )
+    except DispatchAskError as exc:
+        return getattr(exc, "exit_code", 1) or 1, str(exc)
+    return proc.returncode, proc.stdout or ""
+
+
+def _try_mux_pane(
+    handle: str,
+    n: int,
+    out,
+    err,
+    *,
+    json_out: bool,
+    mux_lookup: Optional[Callable[[str], Optional[tuple]]],
+    mux_reader: Optional[Callable[[str, int, int], tuple[int, str]]],
+) -> Optional[int]:
+    """Observe a pane-substrate worker, or None when the handle is not one.
+
+    Called when the live-session resolver misses. If the registry holds a
+    ``mux`` row for ``handle``, read the pane scrollback and render it; on any
+    read failure emit a refusal that names the working surface (``fno mux pane
+    read <id>``) rather than listing unrelated peers - the misdirecting refusal
+    that manufactured false-liveness verdicts on 2026-08-04 (x-680d).
+
+    Returns an exit code when it handled the handle (read or named refusal),
+    None to let the caller fall through to ``peer not found``.
+    """
+    if mux_lookup is None:
+        mux_lookup = _lookup_mux_pane
+    pane = mux_lookup(handle)
+    if pane is None:
+        return None
+    session, pane_id, name = pane
+    reader = mux_reader or _read_mux_pane
+    rc, text = reader(session, pane_id, n)
+    if rc != 0 or not text.strip():
+        err.write(
+            f"{handle} is a pane worker (mux pane {pane_id}, session {session}); "
+            f"the mux did not answer. Read it directly: fno mux pane read {pane_id}\n"
+        )
+        return EXIT_UNSUPPORTED
+    if json_out:
+        out.write(
+            json.dumps(
+                {"pane": handle, "mux_session": session, "pane_id": pane_id,
+                 "text": text.rstrip()}
+            )
+            + "\n"
+        )
+    else:
+        out.write(
+            f"peer {handle}: mux pane={pane_id} session={session}\n{text}"
+            if text.endswith("\n")
+            else f"peer {handle}: mux pane={pane_id} session={session}\n{text}\n"
+        )
+    return EXIT_OK
+
+
 def peek(
     handle: str,
     *,
@@ -650,6 +769,8 @@ def peek(
     opencode_storage_dir: Optional[Path] = None,
     events_path: Optional[Path] = None,
     is_live: Optional[Callable[[], bool]] = None,
+    mux_lookup: Optional[Callable[[str], Optional[tuple]]] = None,
+    mux_reader: Optional[Callable[[str, int, int], tuple[int, str]]] = None,
 ) -> int:
     """Observe a peer by handle. Returns the process exit code.
 
@@ -664,6 +785,15 @@ def peek(
 
     session, suggestions = resolver(handle)
     if session is None:
+        # The default substrate (a mux pane) is invisible to the live-session
+        # resolver: its content is a PTY, not a transcript. Try the registry's
+        # mux ref before declaring the peer missing (x-680d).
+        mux_rc = _try_mux_pane(
+            handle, lines, out, err,
+            json_out=json_out, mux_lookup=mux_lookup, mux_reader=mux_reader,
+        )
+        if mux_rc is not None:
+            return mux_rc
         err.write(f"peer not found: {handle}\n")
         if suggestions:
             err.write(f"did you mean: {', '.join(suggestions)}\n")
