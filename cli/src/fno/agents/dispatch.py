@@ -2251,9 +2251,25 @@ def dispatch_spawn(
             # produced nothing - the silent default-account fallback this exists
             # to prevent. A role that DID resolve leaves route_env truthy, so it
             # still wins over the recorded route.
-            if revive and not route_env:
-                assert existing is not None  # revive implies a matching row
-                restored_route = restore_route_for_relaunch(existing)
+            # The source row is resolved by the TRANSCRIPT being resumed, not by
+            # this spawn's name. A revive reuses the old name, but nothing stops
+            # `spawn other-name --resume <uuid>` from relaunching the same
+            # transcript under a fresh row - and that row is the one carrying the
+            # route. Keying on `existing` alone would leave every renamed relaunch
+            # silently unrouted, a guard on one of the two ways in.
+            source_row = existing if revive else None
+            if resume_session_id and source_row is None:
+                source_row = next(
+                    (
+                        e
+                        for e in entries
+                        if getattr(e, "harness_session_id", None) == resume_session_id
+                        and getattr(e, "route_settings_path", None)
+                    ),
+                    None,
+                )
+            if resume_session_id and source_row is not None and not route_env:
+                restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
                     # An explicit --account names a DIFFERENT destination than
                     # the recorded route, and the two do not compose: the route
@@ -2264,8 +2280,8 @@ def dispatch_spawn(
                     # whichever half is easier to drop.
                     if account_was_explicit:
                         raise DispatchAskError(
-                            f"agent {name!r} was launched on the route recorded at "
-                            f"{existing.route_settings_path}, and --account names a "
+                            f"agent {source_row.name!r} was launched on the route recorded "
+                            f"at {source_row.route_settings_path}, and --account names a "
                             f"different destination; the two do not compose (the route "
                             f"overrides the account's endpoint and auth). Drop --account "
                             f"to revive on the recorded route, or pass an explicit "

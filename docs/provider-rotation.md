@@ -431,15 +431,26 @@ is load-bearing:
 
 | Command | Starts a new process? | Route handling |
 |---|---|---|
-| `fno agents spawn --resume <uuid> --substrate bg` | yes | restore the recorded route, or refuse (exit 2) |
-| `fno agents resume` on claude (`claude attach`) | no | nothing to do |
+| `fno agents spawn --resume <uuid>` | yes | restore the recorded route, or refuse (exit 2) |
+| `fno agents resume`, dead-row arm (`claude --resume`) | yes | re-apply via `--settings`, or refuse (exit 13) |
+| `fno agents resume`, live arm (`claude attach`) | no | nothing to do |
 | `fno agents attach` | no | nothing to do |
 
-`claude attach` opens a session that is still running ("The session keeps running
-either way", `claude attach --help`), so the route lives in that process and no
-attach can lose it.
-`fno agents resume` on a claude row IS `claude attach`, so it is not a relaunch
-either.
+`fno agents resume` is two arms, and only one of them relaunches.
+It probes liveness first: a reachable supervisor gets `claude attach <short_id>`,
+which opens a session that is still running ("The session keeps running either
+way", `claude attach --help`), so the route lives in that process and no attach
+can lose it.
+An exited one gets `claude --resume <uuid>`, which starts a new process and is
+therefore a genuine relaunch that must carry the route.
+That arm lives in Rust (`client_verbs.rs`), not in `resume_cli.py`, because
+`resume` is in `RUST_CLIENT_VERBS` and auto-routes to the daemon binary - reading
+only the Python path is how you conclude, wrongly, that resume can never lose a
+route.
+
+The spawn restore resolves its source row by the transcript being resumed, not by
+the spawn's name: `spawn other-name --resume <uuid>` relaunches the same
+transcript under a fresh row, and the route lives on the old one.
 
 ### Why this is claude-only
 

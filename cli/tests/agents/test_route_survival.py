@@ -334,3 +334,28 @@ def test_a_route_file_holding_only_the_scrub_floor_refuses(tmp_path, monkeypatch
     with pytest.raises(DispatchAskError) as exc:
         restore_route_for_relaunch(load_registry()[0])
     assert exc.value.exit_code == 2
+
+
+def test_a_renamed_relaunch_of_the_same_transcript_still_restores(
+    tmp_path, monkeypatch
+) -> None:
+    """The source row is the transcript's, not this spawn's name.
+
+    `spawn other-name --resume <uuid>` relaunches the same transcript under a
+    fresh row. Keying the restore on a same-name revive would leave every
+    renamed relaunch silently unrouted - a guard on one of the two ways in.
+    """
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    Path(path).unlink()  # make the restore refuse, so it is observable
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="a-different-name",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert path in str(exc.value)
+    assert "router" in str(exc.value), "the refusal names the row that owns the route"

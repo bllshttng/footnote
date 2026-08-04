@@ -1349,11 +1349,35 @@ where
             None,
         ))
     } else if dead && is_uuid_shaped(uuid) {
+        // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
+        // is the one door on this verb that can lose a route. A row that records
+        // one gets it re-applied through `--settings`, the same mechanism the
+        // original spawn used; a recorded file that is gone refuses rather than
+        // relaunching on the default Anthropic account, which works, bills the
+        // wrong vendor, and reports nothing.
+        let route_settings = entry
+            .get("route_settings_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        let mut argv: Vec<String> = vec!["claude".into()];
+        if let Some(path) = route_settings {
+            if !Path::new(path).is_file() {
+                eprintln!(
+                    "fno agents resume: {name} was launched on the route recorded at \
+                     {path}, and that file is gone; refusing to relaunch it on the \
+                     default account. Re-spawn with an explicit --route/-P to choose one."
+                );
+                return Err(13);
+            }
+            eprintln!("fno agents resume: restoring recorded route from {path}");
+            argv.push("--settings".into());
+            argv.push(path.into());
+        }
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        Ok((
-            vec!["claude".into(), "--resume".into(), uuid.into()],
-            Some(uuid.to_string()),
-        ))
+        argv.push("--resume".into());
+        argv.push(uuid.into());
+        Ok((argv, Some(uuid.to_string())))
     } else if dead {
         eprintln!(
             "fno agents resume: {} has no claude session recorded; nothing to resume.",
