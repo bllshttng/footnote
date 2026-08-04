@@ -208,7 +208,14 @@ def cmd_resolve(
     else:
         for key in ("harness", "substrate", "command", "command_surface"):
             typer.echo(f"{key}={out[key]}")
-        for key in ("route_action", "route_reason", "route_account", "route_retry_at"):
+        for key in (
+            "route_action",
+            "route_reason",
+            "route_account",
+            "route_source",
+            "route_window",
+            "route_retry_at",
+        ):
             if key in out:
                 typer.echo(f"{key}={out[key]}")
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
@@ -236,6 +243,11 @@ def _autonomous_route_for(
     Best-effort by design - any failure resolves to None (proceed as configured),
     matching the fail-open stance of every other quota read.
     """
+    # A named node we could not resolve has no known repository, and routing it
+    # from the CALLER's would pick a combo and an account out of the wrong
+    # project's registry. Proceed as configured instead of routing on a guess.
+    if node and rec is None:
+        return None
     try:
         from fno.agents.autonomous_route import (
             launch_is_pinned,

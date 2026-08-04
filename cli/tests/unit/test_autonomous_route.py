@@ -448,3 +448,28 @@ class TestCutoverMergePosture:
         import fno.dispatch as dm
 
         assert dm._cutover_command("no-such-harness", "ab-1111aaaa") == ""
+
+
+class TestUnresolvableNodeIsNotRouted:
+    def test_a_named_node_that_does_not_resolve_returns_no_route(self, monkeypatch) -> None:
+        """No known repository means no route: selecting from the CALLER's
+        registry would pick a combo and an account out of the wrong project."""
+        import fno.dispatch as dm
+
+        monkeypatch.setattr(dm, "_lookup_node", lambda ref: None)
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route",
+            lambda **k: pytest.fail("routed a node with no resolved repository"),
+        )
+        assert dm._autonomous_route_for(None, None, "ab-nosuch") is None
+
+    def test_a_node_less_resolve_still_routes(self, monkeypatch) -> None:
+        # The bare autonomous resolve (no --node) legitimately routes from the
+        # caller's own repository; only a NAMED-but-unresolved node abstains.
+        import fno.dispatch as dm
+
+        sentinel = object()
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route", lambda **k: sentinel
+        )
+        assert dm._autonomous_route_for(None, None, None) is sentinel
