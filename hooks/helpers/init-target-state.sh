@@ -823,21 +823,37 @@ EOF
     # Ambiguous/unprovable -> empty harness -> default claude, NEVER precedence.
     PROVIDER="${_OWNED_HARNESS:-claude}"
   else
-    PROVIDER="$(detect_provider)"
-    _OWNED_HARNESS=""
+    # Fail-open (stale fno, no verb). A real harness sets its OWN session marker,
+    # overwriting any inherited value, so a SINGLE-family marker is this
+    # process's own and stamps; only a MULTI-family disagreement degrades (one
+    # marker is foreign and precedence must not launder it).
+    _failopen_families=0
+    { [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]] || [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
+    { [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]] || [[ "${CLAUDECODE_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
+    [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "${HERMES_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    if [[ "$_failopen_families" -ge 2 ]]; then
+      _OWNED_HARNESS=""     # ambiguous -> manifest/claim "unknown", session null
+    else
+      _OWNED_HARNESS="$(detect_provider)"   # single/none -> own family (claude default)
+    fi
+    PROVIDER="${_OWNED_HARNESS:-claude}"
     _OWNED_SID=""
     _OWNED_DISP="legacy"
     _OWNED_COLLISION=""
+    unset _failopen_families
   fi
 
-  # Feature-detect claim --harness: a deployed fno predating the option rejects
-  # it and fails claim acquisition, so pass it only when the installed CLI lists
-  # it. Pin the OWNED harness, or "unknown" when none was proven - never let the
-  # claim writer fall back to ambient precedence (which would launder an
-  # inherited marker). ${...:-unknown} is always nonempty, so no bare --harness.
-  _CLAIM_HARNESS_FLAG=""
-  if command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
+  # --harness ships in the same release as the owned-identity verb, so pass it
+  # only when the verb actually answered (_OWNED_OUT non-empty): a stale/mock fno
+  # that fail-opened lacks it and would reject the flag (and the claim falls to
+  # ambient). Pin the OWNED harness or "unknown" - never ambient precedence.
+  # ${...:-unknown} is always nonempty, so no bare --harness.
+  if [[ -n "$_OWNED_OUT" ]]; then
     _CLAIM_HARNESS_FLAG="--harness ${_OWNED_HARNESS:-unknown}"
+  else
+    _CLAIM_HARNESS_FLAG=""
   fi
 
   # The manifest `harness` field drives hook loading (doctor) and routing, so it
@@ -872,30 +888,22 @@ EOF
   # harness = PROVIDER. Model is best-effort (empty when the harness hides it);
   # effort has no self-env today. Reused by the manifest write and the US6 stamp.
   # The proven harness session id. When the owned-identity verb ran, trust its
-  # answer (empty when it could not prove one - the manifest then records null,
-  # which is honest where a stranger's id is the bug). Only the stale-fno fail-
-  # open path falls back below, and even there it must NOT reproduce the leak:
-  # when two harness families disagree, raw precedence would launder an inherited
-  # CODEX_THREAD_ID into the identity, so leave it unset and default provider to
-  # claude rather than stamping the precedence winner.
+  # answer (empty when it could not prove one - the manifest records null, honest
+  # where a stranger's id is the bug). The fail-open path stamps a SINGLE-family
+  # marker (a real harness sets its own, so it is own); a MULTI-family
+  # disagreement left _OWNED_HARNESS empty above, so the id stays null rather
+  # than precedence-launder an inherited marker.
   _HARNESS_SESSION="$_OWNED_SID"
-  if [[ -z "$_OWNED_OUT" ]]; then
-    # Fail-open (stale fno, no verb): no proof is available, so NEVER stamp a
-    # session id from an ambient marker - that is the load-bearing identity this
-    # run refuses to launder. Leave it null. The manifest harness FIELD is
-    # metadata only; detect_provider already supplied it, and when two families
-    # disagree default to claude so an inherited marker's harness does not win.
-    # The whitespace glob matches detect_provider's blank-is-unset rule (a
-    # whitespace-only marker must not count as set).
-    _HARNESS_SESSION=""
-    _failopen_families=0
-    { [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]] || [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
-    { [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]] || [[ "${CLAUDECODE_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
-    [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
-    [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
-    [[ "${HERMES_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
-    [[ "$_failopen_families" -ge 2 ]] && PROVIDER="claude"
-    unset _failopen_families
+  if [[ -z "$_OWNED_OUT" && -n "$_OWNED_HARNESS" ]]; then
+    if [[ -n "$_codex_thread_compact" ]]; then
+      _HARNESS_SESSION="$_codex_thread_raw"
+    elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+      _HARNESS_SESSION="$claude_transcript_id"
+    elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
+      _HARNESS_SESSION="$GEMINI_SESSION_ID"
+    elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
+      _HARNESS_SESSION="$OPENCODE_SESSION_ID"
+    fi
   fi
   _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
   _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"
