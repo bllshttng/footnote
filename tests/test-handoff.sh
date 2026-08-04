@@ -634,8 +634,9 @@ arm_probe() {
   fi
 }
 
-# A transcript line the probe understands: usage sums to used_tokens, and the
-# window is 200000 unless the model name carries [1m].
+# A transcript line the probe understands: usage sums to used_tokens. The window
+# comes from the model family - claude-sonnet-4-6 is a 1M-context model, so the
+# token counts below are percentages of 1,000,000, not of 200,000.
 probe_line() {  # probe_line <input_tokens>
   printf '{"type":"assistant","message":{"model":"claude-sonnet-4-6","usage":{"input_tokens":%s,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}' "$1"
 }
@@ -646,7 +647,7 @@ probe_line() {  # probe_line <input_tokens>
 echo ""
 echo "=== Scenario 7: no-pressure park ==="
 SBX="$(make_sandbox s7)"
-arm_probe "$SBX" "$(probe_line 60000)"   # 60000/200000 = 30%
+arm_probe "$SBX" "$(probe_line 300000)"  # 300000/1000000 = 30%
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_TEST_HOME="$SBX" run_handoff "$SBX" "wave"
@@ -667,7 +668,7 @@ check_log_absent "no-pressure: no claim acquire" "$CALL_LOG" "claim acquire"
 echo ""
 echo "=== Scenario 7b: pressure -> delegate ==="
 SBX="$(make_sandbox s7b)"
-arm_probe "$SBX" "$(probe_line 140000)"  # 140000/200000 = 70%
+arm_probe "$SBX" "$(probe_line 700000)"  # 700000/1000000 = 70%
 
 CALL_LOG="$SBX/call-log"
 HANDOFF_TEST_HOME="$SBX" HANDOFF_VERIFY_TIMEOUT=10 HANDOFF_VERIFY_INTERVAL=1 \
