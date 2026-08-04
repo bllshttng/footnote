@@ -453,3 +453,189 @@ def test_triage_apply_exits_nonzero_on_drops(tmp_graph, tmp_path):
     entries = _read_entries(tmp_graph)
     node = next(e for e in entries if e["id"] == node_id)
     assert node.get("status") == "deferred"
+
+
+# ---------------------------------------------------------------------------
+# Batch (variadic) defer / undefer
+# ---------------------------------------------------------------------------
+
+
+def _seed_idea(label: str) -> str:
+    """File a bare idea node and return its id."""
+    r = _invoke("--json", "backlog", "add", label)
+    assert r.exit_code == 0, r.output
+    return json.loads(r.stdout)["id"]
+
+
+def test_batch_defer_marks_all_ids(tmp_graph, tmp_path):
+    """AC1-HP: defer of N ids sets deferred state on all and names each on stdout."""
+    ids = [_seed_with_plan(tmp_path, f"Batch {n}") for n in ("A", "B", "C")]
+
+    r = _invoke("backlog", "defer", *ids, "--reason", "stale")
+    assert r.exit_code == 0, r.output
+
+    entries = _read_entries(tmp_graph)
+    by_id = {e["id"]: e for e in entries}
+    for nid in ids:
+        node = by_id[nid]
+        assert node.get("deferred_at"), f"{nid} missing deferred_at"
+        assert node.get("deferred_reason") == "stale"
+        assert node.get("status") == "deferred", f"{nid} status={node.get('status')!r}"
+        assert nid in r.output, f"stdout should name {nid}"
+
+
+def test_batch_defer_comma_separated_expansion(tmp_graph, tmp_path):
+    """Comma- and space-separated bundles expand through _expand_id_args."""
+    a = _seed_with_plan(tmp_path, "Comma A")
+    b = _seed_with_plan(tmp_path, "Comma B")
+    c = _seed_with_plan(tmp_path, "Comma C")
+
+    # 'a,b' plus standalone c -> three distinct ids deferred.
+    r = _invoke("backlog", "defer", f"{a},{b}", c, "--reason", "stale")
+    assert r.exit_code == 0, r.output
+
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    for nid in (a, b, c):
+        assert by_id[nid].get("status") == "deferred", f"{nid} not deferred"
+
+
+def test_batch_defer_dedups_repeated_ids(tmp_graph, tmp_path):
+    """AC6-EDGE: 'x-a,x-a x-a' defers once and stdout carries one ack line."""
+    a = _seed_with_plan(tmp_path, "Dedup A")
+
+    r = _invoke("backlog", "defer", f"{a},{a}", a, "--reason", "stale")
+    assert r.exit_code == 0, r.output
+
+    assert r.output.count(f"Deferred {a}") == 1, (
+        f"repeated id should be acked once; output:\n{r.output}"
+    )
+    node = next(e for e in _read_entries(tmp_graph) if e["id"] == a)
+    assert node.get("status") == "deferred"
+
+
+def test_batch_defer_enters_lock_once(tmp_graph, tmp_path, monkeypatch):
+    """AC3-CON: a batch of N>1 ids enters locked_mutate_graph exactly once."""
+    import fno.graph.store as gs
+
+    ids = [_seed_with_plan(tmp_path, f"Lock {n}") for n in range(3)]
+    calls: list[int] = []
+    orig = gs.locked_mutate_graph
+
+    def spy(*args, **kwargs):
+        calls.append(1)
+        return orig(*args, **kwargs)
+
+    monkeypatch.setattr(gs, "locked_mutate_graph", spy)
+
+    r = _invoke("backlog", "defer", *ids, "--reason", "stale")
+    assert r.exit_code == 0, r.output
+    assert len(calls) == 1, f"batch must enter locked_mutate_graph once, got {len(calls)}"
+    # Delegation still mutated every node.
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    assert all(by_id[nid].get("status") == "deferred" for nid in ids)
+
+
+def test_batch_defer_unknown_id_aborts_all(tmp_graph, tmp_path):
+    """AC4-ERR: one unknown id aborts the whole batch before any write."""
+    a = _seed_with_plan(tmp_path, "Known A")
+    b = _seed_with_plan(tmp_path, "Known B")
+    unknown = "ab-deadbeef"
+
+    r = runner.invoke(
+        app,
+        ["backlog", "defer", a, unknown, b, "--reason", "stale"],
+        catch_exceptions=True,
+    )
+    assert r.exit_code == 1, f"unknown id should exit 1; got {r.exit_code}"
+    combined = (r.stdout or "") + (r.stderr or "")
+    assert unknown in combined, "stderr should name the unknown id"
+
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    for nid in (a, b):
+        assert not by_id[nid].get("deferred_at"), f"{nid} must not be deferred on abort"
+
+
+def test_batch_defer_requires_at_least_one_id(tmp_graph, tmp_path):
+    """AC5-ERR: defer whose args expand to no ids exits 1 with the required-id message."""
+    # A bare comma expands to zero ids via _expand_id_args, reaching the guard.
+    r = runner.invoke(
+        app, ["backlog", "defer", ",", "--reason", "x"], catch_exceptions=True
+    )
+    assert r.exit_code == 1, f"empty-id defer should exit 1; got {r.exit_code}"
+    combined = (r.stdout or "") + (r.stderr or "")
+    assert "at least one task_id" in combined.lower(), (
+        f"expected required-id message; got: {combined}"
+    )
+
+
+def test_batch_defer_mixed_done_and_idea(tmp_graph, tmp_path):
+    """AC7-EDGE: a done node and an idea node both flip to deferred in one batch.
+
+    Proves completed_at is cleared per node inside the loop; the done > deferred
+    precedence would otherwise pin the done node to done.
+    """
+    done_node = _seed_with_plan(tmp_path, "Batch Done")
+    _invoke("backlog", "done", done_node, "--skip-stamp")
+    idea_node = _seed_idea("Batch Idea")
+
+    r = _invoke("backlog", "defer", done_node, idea_node, "--reason", "park")
+    assert r.exit_code == 0, r.output
+
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    for nid in (done_node, idea_node):
+        node = by_id[nid]
+        assert node.get("completed_at") in (None, ""), (
+            f"{nid} completed_at must be cleared; got {node.get('completed_at')!r}"
+        )
+        assert node.get("deferred_at")
+        assert node.get("status") == "deferred", f"{nid} status={node.get('status')!r}"
+
+
+def test_batch_undefer_clears_all_and_emits_per_node(tmp_graph, tmp_path, monkeypatch):
+    """AC2-HP: undefer of N deferred nodes clears all and emits N events."""
+    import fno.agents.events as ev
+
+    ids = [_seed_with_plan(tmp_path, f"Undefer {n}") for n in range(3)]
+    _invoke("backlog", "defer", *ids, "--reason", "stale")
+
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        ev, "emit", lambda *a, **k: emitted.append(k.get("unit_id")) or None
+    )
+
+    r = _invoke("backlog", "undefer", *ids)
+    assert r.exit_code == 0, r.output
+
+    by_id = {e["id"]: e for e in _read_entries(tmp_graph)}
+    for nid in ids:
+        node = by_id[nid]
+        assert not node.get("deferred_at"), f"{nid} deferred_at should be cleared"
+        assert not node.get("deferred_reason")
+    # One streak-reset event per actually-deferred node.
+    assert sorted(e for e in emitted if e) == sorted(ids), (
+        f"expected one event per deferred node; got {emitted}"
+    )
+
+
+def test_batch_undefer_warns_for_non_deferred(tmp_graph, tmp_path, monkeypatch):
+    """undefer of a batch where some ids were not deferred warns and emits only for those that were."""
+    import fno.agents.events as ev
+
+    deferred = _seed_with_plan(tmp_path, "Was Deferred")
+    fresh = _seed_with_plan(tmp_path, "Was Fresh")
+    _invoke("backlog", "defer", deferred, "--reason", "stale")
+
+    emitted: list[str] = []
+    monkeypatch.setattr(
+        ev, "emit", lambda *a, **k: emitted.append(k.get("unit_id")) or None
+    )
+
+    r = _invoke("backlog", "undefer", deferred, fresh)
+    assert r.exit_code == 0, r.output
+    combined = (r.stdout or "") + (r.stderr or "")
+    assert fresh in combined and "not deferred" in combined.lower(), (
+        f"expected non-deferred warning for {fresh}; got: {combined}"
+    )
+    assert deferred in emitted and fresh not in emitted, (
+        f"event should fire only for deferred nodes; got {emitted}"
+    )

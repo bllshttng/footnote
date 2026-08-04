@@ -5447,24 +5447,36 @@ def cmd_remove(
 
 @cli.command(
     "defer",
-    epilog="Paired verb: `fno backlog undefer <id>` reverses this (hidden; run its own --help).",
+    epilog="Paired verb: `fno backlog undefer <id>...` reverses this (hidden; run its own --help).",
 )
 def cmd_defer(
-    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    task_ids: List[str] = typer.Argument(
+        ...,
+        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+    ),
     reason: str = typer.Option(
         ...,
         "--reason", "-R",
-        help="Why this node is being deferred (free text, surfaced in triage).",
+        help="Why these nodes are being deferred (applies to all). Free text, surfaced in triage.",
     ),
 ) -> None:
-    """Mark a backlog node as deferred. Sets ``deferred_at`` + ``deferred_reason``."""
+    """Mark one or more backlog nodes as deferred. Sets ``deferred_at`` + ``deferred_reason``.
+
+    Atomic across the batch: if any ID is unknown, none are deferred.
+    Same reason applies to every ID in the batch.
+    """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+    ids = _expand_id_args(task_ids)
+    if not ids:
+        typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
+    for tid in ids:
+        if not has_node_id_prefix(tid):
+            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            raise typer.Exit(code=1)
 
     # Strip and validate the reason at the CLI boundary so direct invocation
     # cannot land an empty-reason deferral. The triage validator already
@@ -5475,44 +5487,52 @@ def cmd_defer(
         typer.echo("Error: --reason cannot be blank", err=True)
         raise typer.Exit(code=1)
 
-    _freed_box: list[list] = [[]]
+    # (id, freed-children) collected per node so each release is echoed, the
+    # same way the single-id path reported its one freed set.
+    freed_by_id: list[tuple[str, list[str]]] = []
+
     def mutator(entries):
-        node = _find_node(entries, task_id)
-        if not node:
-            typer.echo(f"Error: feature {task_id} not found", err=True)
-            raise typer.Exit(code=1)
-        dependents = _find_dependents(entries, task_id)
-        if dependents:
+        # Resolve every id and abort naming ALL missing ones before mutating,
+        # mirroring cmd_queue's all-or-nothing batch atomicity.
+        missing = [tid for tid in ids if _find_node(entries, tid) is None]
+        if missing:
             typer.echo(
-                f"WARN: Deferring {task_id} blocks: {', '.join(dependents)}",
+                f"Error: feature(s) not found: {', '.join(missing)}",
                 err=True,
             )
-        node["locked_by"] = None
-        node["claimed_at"] = None
-        # Clear completed_at so the cascade can flip to deferred. Without
-        # this, deferring an already-done node is a silent no-op because
-        # the precedence ladder is `done > deferred` - completed_at would
-        # keep status pinned to done. Symmetric with cmd_done, which
-        # clears deferred_at on the reverse transition.
-        node["completed_at"] = None
-        node["deferred_at"] = datetime.now(timezone.utc).isoformat()
-        node["deferred_reason"] = cleaned_reason
-        # Release anything shipping inside it (x-e957), completing the set with
-        # cmd_remove and cmd_supersede. A deferred unit is not going to merge,
-        # so `_strandable_contained_ids` (keyed on completed_at) can never heal
-        # its children, while selection_guards and `target init` keep refusing
-        # them - unbuildable, uncloseable, invisible to every sweep. Un-contained
-        # rather than closed: deferring the unit is not a claim its children
-        # shipped. Undefer does not re-contain them, deliberately: re-adoption is
-        # decompose's job and inferring it here would re-hide work the operator
-        # may have since re-scoped.
-        _freed_box[0] = _release_contained_children(entries, node.get("id"))
+            raise typer.Exit(code=1)
+        now = datetime.now(timezone.utc).isoformat()
+        for tid in ids:
+            node = _find_node(entries, tid)
+            dependents = _find_dependents(entries, tid)
+            if dependents:
+                typer.echo(
+                    f"WARN: Deferring {tid} blocks: {', '.join(dependents)}",
+                    err=True,
+                )
+            node["locked_by"] = None
+            node["claimed_at"] = None
+            # Clear completed_at PER NODE, inside the loop. The precedence
+            # ladder is `done > deferred`, so hoisting this clear out of the
+            # loop (or skipping it for the batch) makes deferring a done node
+            # a silent no-op: completed_at would keep status pinned to done.
+            # Symmetric with cmd_done, which clears deferred_at on the reverse
+            # transition.
+            node["completed_at"] = None
+            node["deferred_at"] = now
+            node["deferred_reason"] = cleaned_reason
+            # Release anything shipping inside it (x-e957). _release_contained_children
+            # owns the full rationale; the per-node call is what surfaces each
+            # freed set on a batch drain.
+            freed = _release_contained_children(entries, node.get("id"))
+            freed_by_id.append((tid, freed))
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
-    typer.echo(f'Deferred {task_id}: "{cleaned_reason}"')
-    _echo_freed(_freed_box[0], task_id)
-    _project_plans_from_graph([task_id])
+    for tid, freed in freed_by_id:
+        typer.echo(f'Deferred {tid}: "{cleaned_reason}"')
+        _echo_freed(freed, tid)
+    _project_plans_from_graph(ids)
 
 
 # -- queue / unqueue / queued --
@@ -6106,53 +6126,73 @@ def cmd_queued(
 
 @cli.command("undefer", hidden=True)
 def cmd_undefer(
-    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+    task_ids: List[str] = typer.Argument(
+        ...,
+        help="Feature IDs (ab-XXXXXXXX). Multiple via space and/or comma: 'ab-X,ab-Y ab-Z'.",
+    ),
 ) -> None:
-    """Clear deferred state on a backlog node. Idempotent."""
+    """Clear deferred state on one or more backlog nodes. Idempotent.
+
+    Atomic across the batch: if any ID is unknown, none are cleared.
+    Reports each ID's prior state; warns (non-fatally) for IDs that were
+    not actually deferred. Each node that WAS deferred gets its own
+    streak-reset event.
+    """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph
     from fno.graph._intake import _find_node
 
-    if not has_node_id_prefix(task_id):
-        typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'", err=True)
+    ids = _expand_id_args(task_ids)
+    if not ids:
+        typer.echo("Error: at least one task_id is required", err=True)
         raise typer.Exit(code=1)
+    for tid in ids:
+        if not has_node_id_prefix(tid):
+            typer.echo(f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{tid}'", err=True)
+            raise typer.Exit(code=1)
 
-    was_deferred_holder: list[bool] = [False]
+    was_deferred: list[tuple[str, bool]] = []
 
     def mutator(entries):
-        node = _find_node(entries, task_id)
-        if not node:
-            typer.echo(f"Error: feature {task_id} not found", err=True)
+        missing = [tid for tid in ids if _find_node(entries, tid) is None]
+        if missing:
+            typer.echo(
+                f"Error: feature(s) not found: {', '.join(missing)}",
+                err=True,
+            )
             raise typer.Exit(code=1)
-        was_deferred_holder[0] = bool(node.get("deferred_at"))
-        node["deferred_at"] = None
-        node["deferred_reason"] = None
+        for tid in ids:
+            node = _find_node(entries, tid)
+            was_deferred.append((tid, bool(node.get("deferred_at"))))
+            node["deferred_at"] = None
+            node["deferred_reason"] = None
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    if was_deferred_holder[0]:
-        # Mark a streak-reset boundary so the failed-node cascade (#34) gives a
-        # human-recovered node a clean slate: it needs N FRESH consecutive
-        # failures before auto-defer re-triggers (AC5-FR). The reader keys on
-        # data.unit_id; the flat agents envelope it writes is accepted too.
-        # Best-effort - a failed emit only means the node keeps its pre-undefer
-        # streak, never a crash in undefer.
-        try:
-            from fno.agents.events import emit as _emit_event
-            from fno.graph.failure import events_path as _events_path
+    for tid, did in was_deferred:
+        if did:
+            # Mark a streak-reset boundary so the failed-node cascade (#34) gives a
+            # human-recovered node a clean slate: it needs N FRESH consecutive
+            # failures before auto-defer re-triggers (AC5-FR). The reader keys on
+            # data.unit_id; the flat agents envelope it writes is accepted too.
+            # Best-effort - a failed emit only means the node keeps its pre-undefer
+            # streak, never a crash in undefer. Per node: the boundary is keyed on
+            # data.unit_id, so N nodes that were actually deferred emit N events.
+            try:
+                from fno.agents.events import emit as _emit_event
+                from fno.graph.failure import events_path as _events_path
 
-            # Write to the SAME log the streak reader consumes (the walker's
-            # $HOME/.fno mirror), not agents.events' state_dir default, so
-            # reader and emitter agree even under a customized config.state_dir.
-            _emit_event("node_undeferred", path=_events_path(), unit_id=task_id)
-        except Exception:
-            pass
-
-    if not was_deferred_holder[0]:
-        typer.echo(f"warning: {task_id} was not deferred", err=True)
-    typer.echo(f"Undeferred {task_id}")
-    _project_plans_from_graph([task_id])
+                # Write to the SAME log the streak reader consumes (the walker's
+                # $HOME/.fno mirror), not agents.events' state_dir default, so
+                # reader and emitter agree even under a customized config.state_dir.
+                _emit_event("node_undeferred", path=_events_path(), unit_id=tid)
+            except Exception:
+                pass
+        else:
+            typer.echo(f"warning: {tid} was not deferred", err=True)
+        typer.echo(f"Undeferred {tid}")
+    _project_plans_from_graph(ids)
 
 
 # -- done --
