@@ -168,14 +168,23 @@ def _select_destination(
         return None
 
 
-def _healthy_alternate_exists() -> bool:
+def _healthy_alternate_exists(node_cwd: Optional[str] = None) -> bool:
     """True when launch-time account picking is armed AND has a live account.
 
     Best-effort and conservative: anything unreadable, or picking disarmed,
     returns False so the defer stands. Only a positive answer - an account the
     spawn seam could actually launch on - suppresses it.
+
+    ``pick_account`` is scoped to the PROCESS cwd, so for a node in another
+    project it would answer from the dispatcher's registry rather than the
+    node's. Rather than suppress a defer on evidence from the wrong repository,
+    a cross-project node answers False and the defer stands.
     """
     try:
+        from pathlib import Path as _Path
+
+        if node_cwd and _Path(node_cwd).resolve() != _Path.cwd().resolve():
+            return False
         from fno.adapters.providers.cli import pick_account
 
         return pick_account(if_armed=True).account is not None
@@ -232,7 +241,7 @@ def select_autonomous_route(
         # not in one caller because the two launchers must reach the same
         # verdict; when only `fno dispatch` had it, identical fixtures deferred
         # on one path and launched on the other.
-        if not pinned and _healthy_alternate_exists():
+        if not pinned and _healthy_alternate_exists(node_cwd):
             return AutonomousRoute(
                 "stay", "alternate-account-available",
                 source_record=sig.provider_id, window=window,

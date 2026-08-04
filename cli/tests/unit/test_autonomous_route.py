@@ -353,3 +353,37 @@ class TestAutonomousResolveRung:
             CliRunner().invoke(dm.dispatch_app, ["resolve", "--node", "ab-1111aaaa", "-J"]).stdout
         )
         assert "route_action" not in out
+
+
+class TestAlternateAccountScope:
+    """The defer escape must not be answered from the wrong repository."""
+
+    def test_cross_project_node_leaves_the_defer_standing(self, monkeypatch, tmp_path) -> None:
+        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
+        _dest(monkeypatch, None)
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.pick_account",
+            lambda **k: pytest.fail("read the dispatcher's accounts for a foreign node"),
+        )
+        assert _route(node_cwd=str(tmp_path)).action == "defer"
+
+    def test_same_project_node_consults_the_picker(self, monkeypatch, tmp_path) -> None:
+        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
+        _dest(monkeypatch, None)
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.pick_account",
+            lambda **k: SimpleNamespace(account="ccr"),
+        )
+        r = _route(node_cwd=str(tmp_path))
+        assert r.action == "stay"
+        assert r.reason == "alternate-account-available"
+
+    def test_a_pinned_launch_never_takes_the_escape(self, monkeypatch) -> None:
+        # Picking is a reroute, and a pin forbids reroutes - not defers.
+        _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)
+        monkeypatch.setattr(
+            "fno.adapters.providers.cli.pick_account",
+            lambda **k: pytest.fail("rerouted a pinned launch to another account"),
+        )
+        assert _route(pinned=True).action == "defer"

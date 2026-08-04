@@ -1273,10 +1273,13 @@ def cmd_spawn(
             # handed to a claude spawn authenticates nothing and launches the
             # wrong binary - the exact miss this carrier exists to prevent, so it
             # is checked here rather than assumed from the caller's bookkeeping.
-            if harness and rec_harness and rec_harness != harness:
+            # Compare against the RESOLVED harness, not the raw --harness option:
+            # omitting the flag leaves it None, and trusting that would stage a
+            # codex account onto the resolved claude default unchecked.
+            if rec_harness and rec_harness != provider:
                 raise ValueError(
                     f"record is a {rec_harness} account but the spawn resolves "
-                    f"{harness}"
+                    f"{provider}"
                 )
             account_env = {
                 **(account_env or {}),

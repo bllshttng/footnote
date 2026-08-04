@@ -331,8 +331,16 @@ for id in "${NODES[@]}"; do
   DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
   DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
   cutover_args=(); route_account=""
-  route_json="$(fno dispatch resolve --autonomous --node "$id" -J 2>/dev/null)"
+  route_json="$(fno dispatch resolve --autonomous --node "$id" -J 2>/dev/null)"; route_rc=$?
   route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
+  # Fail OPEN but never SILENT. A stale `fno` without --autonomous, or any
+  # unreadable verdict, leaves quota routing off for this node - the pre-quota
+  # behaviour, so the node still dispatches rather than wedging the fleet, but
+  # the degrade is announced. Silence here would be indistinguishable from
+  # "quota said proceed", which is how a routing seam quietly stops existing.
+  if [[ "$route_rc" -ne 0 || -z "$route_action" ]]; then
+    echo "note: $id quota routing unavailable (dispatch resolve --autonomous rc=$route_rc); dispatching on the configured harness '$DISPATCH_PROVIDER_BASE'" >&2
+  fi
   if [[ "$route_action" == "defer" ]]; then
     # The node stays ready and nothing is claimed; the next run after the reset
     # dispatches it. Same outcome the Python launchers report as quota-deferred.
