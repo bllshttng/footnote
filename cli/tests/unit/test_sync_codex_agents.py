@@ -43,7 +43,21 @@ def test_codex_agents_are_generated_and_parse() -> None:
     assert res.returncode == 0, res.stderr
 
     files = sorted((REPO_ROOT / ".codex" / "agents").glob("*.toml"))
-    assert len(files) == len(list((REPO_ROOT / "agents").glob("*.md")))
+    names = {path.stem for path in files}
+
+    def _has_pack(path: Path) -> bool:
+        text = path.read_text(encoding="utf-8")
+        block = text.split("---\n", 1)[1].split("\n---", 1)[0] if text.startswith("---\n") else ""
+        return any(line.strip().startswith("pack:") for line in block.splitlines())
+
+    agent_mds = sorted((REPO_ROOT / "agents").glob("*.md"))
+    non_pack = [path for path in agent_mds if not _has_pack(path)]
+    # Every non-pack agent is registered on codex; pack-contributed agents are a
+    # Claude-plugin-skill surface (their bounded-tool allowlist is enforced by
+    # the Claude harness, not expressible in codex's coarse sandbox), so they
+    # are deliberately NOT registered on the codex harness.
+    assert names == {path.stem for path in non_pack}
+    assert "growth-marketer" not in names
     for path in files:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
         assert data["name"] == path.stem

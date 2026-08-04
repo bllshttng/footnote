@@ -44,16 +44,6 @@ def _artifact_sensitivity(spec: object) -> Sensitivity:
     return Sensitivity(str(raw))
 
 
-def _sentinel_digest(resolved: Path) -> str:
-    # A real sha256 that is provably NOT the file's content: it hashes a
-    # sentinel naming the resolved path. ContextReference.content_digest is a
-    # mandatory sha256 field (the frozen resolver sorts candidates on it), so
-    # an unreadable entry still needs a value; the matching readable=False
-    # flag is what keeps it honest, and the resolver routes it to
-    # UNREADABLE_CONTEXT without ever trusting it as the file's bytes.
-    return hashlib.sha256(f"fno/context/unavailable/{resolved}".encode()).hexdigest()
-
-
 def catalog_revision(artifacts: Mapping[str, object]) -> str:
     """A stable revision for a configured artifact map.
 
@@ -94,14 +84,14 @@ def build_artifact_catalog(
             data = resolved.read_bytes()
         except OSError as exc:
             # Absent, permission-denied, or a directory: never fabricate the
-            # file's bytes. Flag unreadable with a reason naming the path.
+            # file's bytes or a digest. Flag unreadable with a reason naming
+            # the path, and carry no content_digest/content_revision - an
+            # honest observation of an unreadable file claims no content.
             references.append(
                 ContextReference(
                     kind=ContextKind.ARTIFACT,
                     identifier=identifier,
                     provenance=str(resolved),
-                    content_digest=_sentinel_digest(resolved),
-                    content_revision=_sentinel_digest(resolved),
                     snapshot_revision=snapshot_revision,
                     sensitivity=sensitivity,
                     byte_size=0,

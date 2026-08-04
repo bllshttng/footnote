@@ -7,6 +7,10 @@
       "claim": "The skill refuses with the exact fno plugins activate line when growth-studio is inactive."
     },
     {
+      "id": "resolution-gate",
+      "claim": "The orchestrator resolves each role for the work order before dispatch, so capability and context gates are enforced at launch time."
+    },
+    {
       "id": "one-draft-round",
       "claim": "Exactly one draft round runs; the four subagents are dispatched once."
     },

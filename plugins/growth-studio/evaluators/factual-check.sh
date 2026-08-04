@@ -65,4 +65,24 @@ for claim in "${claims[@]}"; do
   done
 done
 
+# Citations may appear in the body too, not only under Claims. Every bracket
+# citation in the WHOLE draft must resolve to a product-truth heading, except
+# markdown links [text](url) (a `(` immediately follows). This stops an
+# unsupported assertion anywhere from passing just because it sits outside the
+# Claims section.
+all_cites=()
+while IFS= read -r tok; do [ -n "$tok" ] && all_cites+=("$tok"); done < <(
+  # Strip markdown links first ([text](url) -> ""), then collect [Heading] tokens.
+  sed -E 's/\[[^]]*\]\([^)]*\)//g' "$draft" \
+    | grep -oE '\[[^]]+\]' | sed -E 's/^\[//; s/\]$//'
+)
+if [ "${#all_cites[@]}" -gt 0 ]; then
+  for cite in "${all_cites[@]}"; do
+    if ! grep -qxF -- "$cite" "$headings_file"; then
+      echo "factual-check: citation does not resolve to a product-truth heading: [$cite]" >&2
+      fail=1
+    fi
+  done
+fi
+
 exit $fail

@@ -46,9 +46,40 @@ Resolve the two artifacts the roles read, in this order:
   founder to configure it (resolution would block with MISSING_CONTEXT).
 - `brand-voice`: the pack-supplied `plugins/growth-studio/assets/brand-voice.md`.
 
-## 3. One draft round
+## 3. Resolution gate
 
-Dispatch all four role subagents concurrently via the Task tool:
+Before dispatching any subagent, resolve each role for this work order so the
+capability and context gates are enforced at launch time, not bypassed.
+Build the context catalog once and mint a work-order-scoped capability fact for
+every capability the role declares:
+
+```bash
+fno roles context --json --snapshot "$REV" > .fno/campaigns/<slug>/catalog.json
+```
+
+For each role, write a capability-facts JSON whose entries cover that role's
+`required_capabilities` (marketing: `growth.draft`, `growth.research`;
+communications: `growth.draft`, `growth.statement`; design: `growth.render`,
+`growth.accessibility`; social: `growth.draft`, `growth.schedule`), each
+`available: true` and `work_order_scope` set to this campaign's work order, then
+resolve:
+
+```bash
+fno roles resolve <role> --work-order <slug> --attempt <attempt> \
+  --capabilities .fno/campaigns/<slug>/<role>-capabilities.json \
+  --context .fno/campaigns/<slug>/catalog.json --json
+```
+
+A role that returns `RoleResolutionBlocked` (`MISSING_CAPABILITY`,
+`MISSING_CONTEXT`, or `UNREADABLE_CONTEXT`) is recorded as blocked and NOT
+dispatched; the campaign continues with the roles that resolved. This is the
+only place the gates can be enforced at launch: bundling made the subagents
+present, activation permitted the roles, and this step proves the work order is
+authorized and the context is configured before any draft is written.
+
+## 4. One draft round
+
+Dispatch the roles that resolved, concurrently via the Task tool:
 
 - `@fno:growth-marketer` producing `campaign-plan.md`
 - `@fno:growth-comms` producing `press-draft.md`
@@ -63,7 +94,7 @@ A subagent that returns `FAILED` or `BLOCKED` is recorded as such beside its
 draft and the campaign continues to a partial bundle; it does not abort the
 other three.
 
-## 4. One evaluation round
+## 5. One evaluation round
 
 Run the three evaluator scripts over each returned draft, from the pack
 directory so the pack-relative paths resolve:
@@ -77,7 +108,7 @@ Write each verdict as a JSON evidence file beside its draft, for example
 `{"evaluator": ..., "passed": true|false, "detail": "..."}`.
 Accessibility review runs only against the design role's rendered mock.
 
-## 5. At most one revision round
+## 6. At most one revision round
 
 Re-dispatch only the subagents whose draft failed an evaluator, with the
 verdict attached to the brief.
@@ -87,7 +118,7 @@ approvable set; it is never retried.
 This is the bounded answer to an unbounded review loop: two constants, no
 convergence.
 
-## 6. Founder approval gate
+## 7. Founder approval gate
 
 Print the bundle inventory, the per-draft evidence status, and one sentence
 naming exactly what approval would authorize and what it would not.

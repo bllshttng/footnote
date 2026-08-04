@@ -29,6 +29,9 @@ check() {
 check activation-gate \
   "refuses with the exact activate line when inactive" \
   "grep -qF 'fno plugins activate plugins/growth-studio/plugin.yaml' '$skill'"
+check resolution-gate \
+  "resolves each role (capability/context gates) before dispatch" \
+  "grep -qiE 'resolve each role|fno roles resolve' '$skill'"
 check one-draft-round \
   "exactly one draft round runs" \
   "grep -qiE 'one draft round' '$skill'"

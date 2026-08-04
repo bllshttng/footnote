@@ -28,9 +28,6 @@ from fno.roles.context import build_artifact_catalog, catalog_revision
 
 NOW = datetime(2026, 8, 4, 12, tzinfo=UTC)
 REVISION = "snapshot-edf5"
-SENTINEL = lambda path: hashlib.sha256(  # noqa: E731
-    f"fno/context/unavailable/{path}".encode()
-).hexdigest()
 
 
 # --------------------------------------------------------------------------- #
@@ -78,10 +75,10 @@ def test_absent_file_is_unreadable_with_reason_and_no_fabricated_digest(
     assert ref.unavailable_reason is not None
     assert str(missing) in ref.unavailable_reason
     assert ref.byte_size == 0
-    # The digest is the path sentinel, provably NOT the file's content (the
-    # file was never read): it must equal the documented sentinel formula and
-    # cannot equal a content digest because there are no bytes to hash.
-    assert ref.content_digest == SENTINEL(Path(str(missing)).expanduser())
+    # No fabricated digest: an unreadable file carries no content_digest and no
+    # content_revision at all, because it claims no content.
+    assert ref.content_digest is None
+    assert ref.content_revision is None
 
 
 def test_directory_is_unreadable(tmp_path: Path) -> None:

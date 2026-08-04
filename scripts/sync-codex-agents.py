@@ -219,6 +219,16 @@ def generated_toml(source: Path) -> str:
 def generated_files() -> dict[Path, str]:
     files: dict[Path, str] = {}
     for source in sorted(AGENTS_DIR.glob("*.md")):
+        text = source.read_text(encoding="utf-8")
+        # Pack-contributed agents (a `pack:` key in the raw frontmatter; this
+        # parser whitelists known keys and would otherwise swallow it) are a
+        # Claude-plugin-skill surface: their bounded-tool allowlist is enforced
+        # by the Claude harness's verify gate, which codex's coarse sandbox
+        # (read-only / workspace-write) cannot express. They are not registered
+        # on the codex harness, where the boundary could not hold mechanically.
+        block = text.split("---\n", 1)[1].split("\n---", 1)[0] if text.startswith("---\n") else ""
+        if any(line.strip().startswith("pack:") for line in block.splitlines()):
+            continue
         out = OUT_DIR / f"{source.stem}.toml"
         files[out] = generated_toml(source)
     return files

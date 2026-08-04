@@ -371,3 +371,30 @@ def test_factual_check_fails_an_uncited_claim(tmp_path):
         encoding="utf-8",
     )
     assert _run_evaluator("factual-check.sh", draft, truth) != 0
+
+
+def test_factual_check_fails_an_unresolving_body_citation(tmp_path):
+    truth = _PACK / "assets" / "product-truth.md"
+    draft = tmp_path / "draft.md"
+    draft.write_text(
+        "# Plan\n\nA body claim cites a heading that does not exist [Made up heading].\n\n"
+        "## Claims\n\n- A real claim [Delivery pipeline].\n",
+        encoding="utf-8",
+    )
+    assert _run_evaluator("factual-check.sh", draft, truth) != 0
+
+
+def test_accessibility_check_requires_image_and_ratio(tmp_path):
+    good = tmp_path / "good.md"
+    good.write_text(
+        "# Mock\n\n![Hero: a graph splitting into four lanes](hero.png)\n\n"
+        "Contrast ratio 4.5:1 meets AA.\n",
+        encoding="utf-8",
+    )
+    no_image = tmp_path / "no_image.md"
+    no_image.write_text("# Mock\n\nContrast ratio 7:1, but no rendered image.\n", encoding="utf-8")
+    no_ratio = tmp_path / "no_ratio.md"
+    no_ratio.write_text("# Mock\n\n![Hero](hero.png)\n\nContrast is fine.\n", encoding="utf-8")
+    assert _run_evaluator("accessibility-check.sh", good) == 0
+    assert _run_evaluator("accessibility-check.sh", no_image) != 0
+    assert _run_evaluator("accessibility-check.sh", no_ratio) != 0

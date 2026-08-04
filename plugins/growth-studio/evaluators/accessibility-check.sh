@@ -18,11 +18,17 @@ if grep -nE '!\[[[:space:]]*\]\(' "$draft" >/dev/null; then
   fail=1
 fi
 
-# 2. A rendered mock must carry a contrast note. Requiring the word 'contrast'
-#    (case-insensitive) keeps this a structural presence check, not a ratio
-#    judgment.
-if ! grep -qi 'contrast' "$draft"; then
-  echo "accessibility-check: draft has no contrast note" >&2
+# 2. A rendered mock must include at least one image with NON-EMPTY alt text.
+#    A draft with no rendered asset is not an accessible mock.
+if ! grep -qE '!\[[^]]+\]\(' "$draft"; then
+  echo "accessibility-check: no rendered image with alt text" >&2
+  fail=1
+fi
+
+# 3. Structured contrast evidence: a ratio like 4.5:1 (not just the word
+#    "contrast"). Keeps this a structural check, not a ratio judgment.
+if ! grep -qE '[0-9]+(\.[0-9]+)?:[0-9]+|[0-9]+(\.[0-9]+)?/1\b' "$draft"; then
+  echo "accessibility-check: no contrast ratio (expected e.g. 4.5:1)" >&2
   fail=1
 fi
 

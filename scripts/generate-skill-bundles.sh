@@ -87,6 +87,40 @@ if ! "${PY[@]}" "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
   exit 1
 fi
 
+# Verify each pack before bundling any of its rows. Bundling makes a packaged
+# agent callable at session start; an agent that fails agent-tools-bounded (or
+# any other verify condition) must never be bundled, because activation - which
+# verifies - runs later and only gates the role layer, not the bundled agent's
+# harness-level invocation. Fail closed: a pack that fails, or cannot be
+# verified, is not bundled. Returns 0 pass, 1 fail, 2 unverifiable.
+_verify_pack() {
+  local manifest="$1"
+  # Prefer the IN-TREE fno-py: it reflects the current source (the installed
+  # `fno` can be stale and reject a manifest field this branch added).
+  if command -v uv >/dev/null 2>&1; then
+    uv run --project "$SOURCE_ROOT/cli" fno-py plugins verify "$manifest" >/dev/null 2>&1 || return 1
+  elif command -v fno >/dev/null 2>&1; then
+    fno plugins verify "$manifest" >/dev/null 2>&1 || return 1
+  else
+    return 2
+  fi
+}
+declare _VERIFIED_PACKS=""
+while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
+  [[ "$TYPE" == pack-* ]] || continue
+  case " $_VERIFIED_PACKS " in *" $SKILL "*) continue ;; esac
+  _VERIFIED_PACKS="$_VERIFIED_PACKS $SKILL"
+  manifest="$SOURCE_ROOT/plugins/$SKILL/plugin.yaml"
+  [[ -f "$manifest" ]] || { echo "ERROR: pack manifest not found: $manifest" >&2; exit 1; }
+  _verify_pack "$manifest"
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "ERROR: cannot verify pack $SKILL (no fno or uv available); refusing to bundle unverified" >&2; exit 1
+  elif [ "$rc" -ne 0 ]; then
+    echo "ERROR: pack $SKILL fails verification; refusing to bundle (run: fno plugins verify $manifest)" >&2; exit 1
+  fi
+done < "$ROWS_FILE"
+
 # pack-marker check: a bundled pack destination carries a `pack:` key whose
 # value equals the DECLARING pack id. The collision guard uses this so the
 # generator never clobbers a hand-authored file, a different pack's output, or

@@ -218,8 +218,8 @@ class ContextReference(_RoleModel):
     identifier: NonEmptyStr
     provenance: NonEmptyStr
     work_order_scope: WorkOrderRef | None = None
-    content_digest: Sha256Digest
-    content_revision: NonEmptyStr
+    content_digest: Sha256Digest | None = None
+    content_revision: NonEmptyStr | None = None
     snapshot_revision: NonEmptyStr
     fresh_until: datetime | None = None
     sensitivity: Sensitivity
@@ -240,6 +240,14 @@ class ContextReference(_RoleModel):
             raise ValueError("readable context cannot have an unavailable_reason")
         if not self.readable and self.unavailable_reason is None:
             raise ValueError("unreadable context requires an unavailable_reason")
+        # A digest/revision is a claim to have read the content. An unreadable
+        # reference must carry neither (no fabricated digest); a readable one
+        # must carry both. This is the honest-observation contract: digest
+        # presence is validated only for content that was actually read.
+        if self.readable and (self.content_digest is None or self.content_revision is None):
+            raise ValueError("readable context requires content_digest and content_revision")
+        if not self.readable and (self.content_digest is not None or self.content_revision is not None):
+            raise ValueError("unreadable context cannot carry a content_digest or content_revision")
         return self
 
 
