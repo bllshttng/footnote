@@ -1536,11 +1536,13 @@ def dispatch_spawn_pane(
         # route's key: half a restore, reported as a whole one. Codex route
         # survival needs an artifact this design does not model, so it stays
         # unrecorded and codex relaunch behavior is unchanged.
+        # Materialized inside the reap guard below, NOT here: it does mkdir +
+        # open + replace under the state dir, the pane is already running by this
+        # point, and an OSError escaping uncaught would leave a live pane with no
+        # registry row - the exact orphan `_reap_spawned_pane` exists to prevent.
         from fno.agents.model_routing import route_settings_path_for
 
-        route_settings_path = (
-            route_settings_path_for(route_env) if provider == "claude" else None
-        )
+        route_settings_path: Optional[str] = None
 
         stored_session_uuid: Optional[str] = None
         row_status: AgentStatus = "live"
@@ -1591,6 +1593,8 @@ def dispatch_spawn_pane(
             return rows
 
         try:
+            if provider == "claude":
+                route_settings_path = route_settings_path_for(route_env)
             update_registry(_append, path=registry_path)
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)

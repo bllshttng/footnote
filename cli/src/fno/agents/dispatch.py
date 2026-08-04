@@ -1872,8 +1872,12 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
     behavior change wearing the word "resume".
 
     Raises:
-        DispatchAskError: exit 15, when the row names a route file that is gone
-            or unreadable. Refusing beats relaunching unrouted.
+        DispatchAskError: exit 2, when the row names a route file that is gone
+            or unreadable. Refusing beats relaunching unrouted. Exit 2 is the
+            code every other route-composition refusal already uses
+            (``RouteCompositionError``); notably NOT 15, which the ask/followup
+            lane documents as "reply timeout, the message WAS delivered" - the
+            opposite claim, since this refusal starts nothing at all.
     """
     path = getattr(entry, "route_settings_path", None)
     if not path:
@@ -1887,7 +1891,7 @@ def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str
             f"agent {entry.name!r} was launched on the route recorded at {path}, "
             f"and it cannot be restored ({exc}). Refusing to relaunch it on the "
             f"default account; re-spawn with an explicit --route/-P to choose one.",
-            exit_code=15,
+            exit_code=2,
         ) from exc
 
 
@@ -2100,6 +2104,10 @@ def dispatch_spawn(
     # pane path calls the same helper itself. Two seams, one implementation -
     # putting it in cli.py instead would miss every in-process caller that
     # bypasses argument parsing.
+    # Whether the CALLER named an account, captured before the pick can fill it
+    # in. The revive restore below needs the distinction: dropping an advisory
+    # pick is free, dropping an operator's explicit --account is not (x-ae2d).
+    account_was_explicit = account_env is not None
     if account_env is None and provider == "claude":
         account_env = _pick_account_env(role=role, route_env=route_env)
 
@@ -2232,22 +2240,28 @@ def dispatch_spawn(
                 assert existing is not None  # revive implies a matching row
                 restored_route = restore_route_for_relaunch(existing)
                 if restored_route:
-                    route_env = restored_route
-                    # The route wins endpoint+auth+model as one unit (x-2af5).
-                    # The advisory account pick above fires only for a route-less
-                    # spawn, so letting it ride along here would split the two
-                    # axes and bill the picked account for the route's endpoint.
-                    account_env = None
-                    # Same guard on this path as on a flag-supplied route: a
-                    # --model pin under the restored tier map must fail closed
-                    # here too, or the revive relaunches a worker that dies on
-                    # its first turn behind a live receipt.
-                    try:
-                        check_spawn_tier_remap(
-                            provider, model, role=None, route_env=route_env, account_env=None
+                    # An explicit --account names a DIFFERENT destination than
+                    # the recorded route, and the two do not compose: the route
+                    # overrides the account's endpoint and auth, so the pair
+                    # bills one vendor for another's traffic. `fno agents spawn`
+                    # already refuses --account with --route for that reason;
+                    # refuse the same pair here rather than silently dropping
+                    # whichever half is easier to drop.
+                    if account_was_explicit:
+                        raise DispatchAskError(
+                            f"agent {name!r} was launched on the route recorded at "
+                            f"{existing.route_settings_path}, and --account names a "
+                            f"different destination; the two do not compose (the route "
+                            f"overrides the account's endpoint and auth). Drop --account "
+                            f"to revive on the recorded route, or pass an explicit "
+                            f"--route/-P to move it deliberately.",
+                            exit_code=2,
                         )
-                    except RouteCompositionError as exc:
-                        raise DispatchAskError(str(exc), exit_code=2) from exc
+                    # The route wins endpoint+auth+model as one unit (x-2af5), so
+                    # the advisory pick made above (route-less spawns only) must
+                    # not ride along and split the two axes.
+                    account_env = None
+                    route_env = restored_route
 
             # 4a2. Build the dispatch context so the create helpers' emits
             # (agent_ask_started/agent_ask_done) carry the same request_id /

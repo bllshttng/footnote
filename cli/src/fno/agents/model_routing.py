@@ -755,7 +755,17 @@ def route_settings_path_for(
 
 
 def read_route_settings(path: str) -> dict[str, str]:
-    """Read a recorded route-settings file back into its env mapping.
+    """Read a recorded route-settings file back into the route it expressed.
+
+    Returns the route's OWN keys only. The stored file is the auth-scrub floor
+    (every ``SCRUB_AUTH_VARS`` entry as an empty string) with the route written
+    on top, and an empty value means "unset" only to claude reading a settings
+    FILE. Handing the floor back to a spawn would put it in the child's process
+    environment instead, where the original launch had those vars simply absent
+    - a revived worker carrying ``ANTHROPIC_API_KEY=""`` and every unset tier
+    var is not running the env it ran under. The floor is re-applied by
+    :func:`materialize_route_settings` when the relaunch writes its own settings
+    file, so dropping it here loses nothing and keeps the replay faithful.
 
     Raises :class:`RouteRestoreError` when the file is gone, unreadable, or
     malformed. Every caller is a relaunch, and a relaunch that cannot restore
@@ -775,7 +785,7 @@ def read_route_settings(path: str) -> dict[str, str]:
         raise RouteRestoreError(f"route settings file {path} is malformed: {exc}") from exc
     if not isinstance(env, dict):
         raise RouteRestoreError(f"route settings file {path} has no env mapping")
-    return {str(k): str(v) for k, v in env.items()}
+    return {str(k): str(v) for k, v in env.items() if str(v) != ""}
 
 
 

@@ -431,7 +431,7 @@ is load-bearing:
 
 | Command | Starts a new process? | Route handling |
 |---|---|---|
-| `fno agents spawn --resume <uuid> --substrate bg` | yes | restore the recorded route, or refuse (exit 15) |
+| `fno agents spawn --resume <uuid> --substrate bg` | yes | restore the recorded route, or refuse (exit 2) |
 | `fno agents resume` on claude (`claude attach`) | no | nothing to do |
 | `fno agents attach` | no | nothing to do |
 
@@ -454,6 +454,22 @@ whole one, which is worse than no restore at all.
 So a non-claude row records nothing and its relaunch behavior is unchanged.
 Codex route survival needs an artifact that also carries the config args; that is
 not built here.
+
+### Two things the restore deliberately does not replay
+
+The recorded file is the auth-scrub floor (every `SCRUB_AUTH_VARS` entry as an
+empty string) with the route written on top.
+An empty value means "unset" only to claude reading a settings *file*; a process
+environment has no such rule.
+So the restore returns the route's own keys and drops the floor, and the relaunch
+re-applies the floor when it writes its own settings file.
+Replaying it instead would hand the revived worker an `ANTHROPIC_API_KEY=""` that
+the original launch never carried.
+
+An explicit `--account` on a revive is refused rather than merged or dropped.
+The route overrides the account's endpoint and auth, so the pair bills one vendor
+for another's traffic; `fno agents spawn` already refuses `--account` with
+`--route` for the same reason.
 
 The recorded path answers "what was this worker launched with, so it can be
 launched that way again". It never answers "what is this worker running now" -

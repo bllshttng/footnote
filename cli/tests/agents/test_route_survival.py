@@ -193,10 +193,11 @@ def test_ac2_hp_revive_restores_the_recorded_route(tmp_path, monkeypatch) -> Non
 
     _routed_claude_row(tmp_path, monkeypatch)
     got = restore_route_for_relaunch(load_registry()[0])
-    assert got is not None
-    # The recorded file is the auth-scrub floor plus the route, so assert the
-    # route survived rather than equality with it.
-    assert {k: got[k] for k in ROUTE_ENV} == ROUTE_ENV
+    # Exactly the route's own keys. The stored file also carries the auth-scrub
+    # floor as empty strings, which means "unset" only to claude reading a
+    # settings FILE - replaying it as process env would hand the revived worker
+    # an ANTHROPIC_API_KEY="" the original launch never had.
+    assert got == ROUTE_ENV
 
 
 def test_ac3_err_revive_refuses_when_the_route_file_is_gone(tmp_path, monkeypatch) -> None:
@@ -209,7 +210,7 @@ def test_ac3_err_revive_refuses_when_the_route_file_is_gone(tmp_path, monkeypatc
     with pytest.raises(DispatchAskError) as exc:
         restore_route_for_relaunch(load_registry()[0])
     assert path in str(exc.value)
-    assert exc.value.exit_code == 15
+    assert exc.value.exit_code == 2
 
 
 def test_ac3_err_revive_refuses_on_a_malformed_route_file(tmp_path, monkeypatch) -> None:
@@ -220,7 +221,7 @@ def test_ac3_err_revive_refuses_on_a_malformed_route_file(tmp_path, monkeypatch)
     Path(path).write_text("{not json", encoding="utf-8")
     with pytest.raises(DispatchAskError) as exc:
         restore_route_for_relaunch(load_registry()[0])
-    assert exc.value.exit_code == 15
+    assert exc.value.exit_code == 2
 
 
 def test_ac5_hp_a_never_routed_row_restores_nothing(tmp_path, monkeypatch) -> None:
@@ -246,3 +247,49 @@ def test_ac4_err_a_codex_pane_records_no_route_so_it_cannot_half_restore(
 
     _spawn_pane(monkeypatch, tmp_path, provider="codex", route_env=dict(ROUTE_ENV))
     assert load_registry()[0].route_settings_path is None
+
+
+def test_restore_never_replays_the_auth_scrub_floor(tmp_path, monkeypatch) -> None:
+    """The scrub floor is a settings-file convention, not process env.
+
+    `materialize_route_settings` writes every SCRUB_AUTH_VARS entry as "" and
+    the route on top. claude reads an empty settings value as unset; a process
+    environment has no such rule, so replaying the floor would give the revived
+    worker a present-but-blank credential the original launch never carried.
+    """
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+    from fno.agents.dispatch import restore_route_for_relaunch
+    from fno.agents.registry import load_registry
+
+    _routed_claude_row(tmp_path, monkeypatch)
+    got = restore_route_for_relaunch(load_registry()[0])
+    assert all(v != "" for v in got.values())
+    blank = [v for v in SCRUB_AUTH_VARS if v not in ROUTE_ENV]
+    assert blank, "fixture assumes the floor is wider than the route"
+    assert not (set(blank) & set(got)), "an unset scrub var must not reach the spawn env"
+
+
+def test_an_explicit_account_on_a_revive_refuses_rather_than_losing_a_half(
+    tmp_path, monkeypatch
+) -> None:
+    """A recorded route and an explicit --account name different destinations.
+
+    They do not compose - the route overrides the account's endpoint and auth -
+    and `fno agents spawn` already refuses the pair. Dropping either half here
+    would bill one vendor for another's traffic with no output saying so.
+    """
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+            account_env={"CLAUDE_CONFIG_DIR": "/cfg"},
+        )
+    assert exc.value.exit_code == 2
+    assert "--account" in str(exc.value)
+    assert path in str(exc.value)
