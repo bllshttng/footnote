@@ -158,11 +158,22 @@ class ProviderRuntimeState:
     schema_version: int = SCHEMA_VERSION
 
 
-def _resolve_state_path() -> Path:
-    """Return the active runtime-state path, honoring env override."""
+def _resolve_state_path(repo_root: Path | None = None) -> Path:
+    """Return the active runtime-state path, honoring env override.
+
+    The path is project-local by design, so it resolves against ``repo_root``
+    when the caller knows which repository the operation concerns. Cross-project
+    dispatch needs that: the record set and the cached snapshot for a node must
+    come from the SAME repository, or a same-id record in the dispatcher's own
+    project would answer for the node's. The env override still wins (it is how
+    tests pin a state file) and an omitted root keeps the process cwd, which is
+    correct for every operation that concerns the caller's own repo.
+    """
     override = os.environ.get("FNO_RUNTIME_STATE_PATH")
     if override:
         return Path(override)
+    if repo_root is not None:
+        return Path(repo_root) / RUNTIME_STATE_PATH
     return Path(RUNTIME_STATE_PATH)
 
 
@@ -758,6 +769,7 @@ def read_usage(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageSnapshot | None:
     """Lock-free read of the cached usage snapshot for ``provider_id``.
 
@@ -768,7 +780,7 @@ def read_usage(
     """
     if now is None:
         now = time.time()
-    state_path = _resolve_state_path()
+    state_path = _resolve_state_path(repo_root)
     raw = _read_disk_payload(state_path)
     if raw is None:
         return None
@@ -781,7 +793,11 @@ def read_usage(
     return snap
 
 
-def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> bool:
+def write_usage_snapshot(
+    snapshot: UsageSnapshot,
+    now: float | None = None,
+    repo_root: Path | None = None,
+) -> bool:
     """Persist ``snapshot`` under ``usage[provider_id]``; True if it landed.
 
     Serializes on the same ``.update.lock`` as health/cursor writes. On lock
@@ -795,7 +811,7 @@ def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> b
     """
     if now is None:
         now = time.time()
-    state_path = _resolve_state_path()
+    state_path = _resolve_state_path(repo_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path(state_path)
     try:
@@ -876,7 +892,9 @@ def refresh_usage_detailed(
     """
     if now is None:
         now = time.time()
-    cached = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+    cached = read_usage(
+        provider_id, ttl_seconds=ttl_seconds, now=now, repo_root=repo_root
+    )
     if cached is not None:
         return UsageRefresh(cached, None if cached.windows else "no-windows")
     # Local import: loader pulls in rotation/model; keep the module-load graph
@@ -894,7 +912,7 @@ def refresh_usage_detailed(
     if snapshot is None:
         return UsageRefresh(None, reason)
     # Persist, then report the SNAPSHOT regardless of how the write went.
-    persisted = write_usage_snapshot(snapshot, now=now)
+    persisted = write_usage_snapshot(snapshot, now=now, repo_root=repo_root)
     return UsageRefresh(
         snapshot, None if snapshot.windows else "no-windows", persisted
     )
@@ -953,6 +971,7 @@ def headroom(
     now: float | None = None,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     threshold_pct: float = 90.0,
+    repo_root: Path | None = None,
 ) -> Headroom:
     """Compute the headroom verdict for ``provider_id`` from cached usage.
 
@@ -972,7 +991,7 @@ def headroom(
     if now is None:
         now = time.time()
     try:
-        raw = _read_disk_payload(_resolve_state_path())
+        raw = _read_disk_payload(_resolve_state_path(repo_root))
     except Exception:  # noqa: BLE001 - a corrupt state read never breaks dispatch
         raw = None
     health = _parse_state_payload(raw).get(provider_id) if raw else None
@@ -1094,6 +1113,7 @@ def evaluate_quota_signal(
         now=now,
         ttl_seconds=quota.probe_ttl_seconds,
         threshold_pct=quota.defer_threshold_pct,
+        repo_root=repo_root,
     )
     if h.state is HeadroomState.UNKNOWN and fresh is not None and fresh.windows:
         # The probe SAW the provider, but the read-back did not: a persist that

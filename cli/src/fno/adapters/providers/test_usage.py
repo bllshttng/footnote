@@ -520,7 +520,7 @@ class TestRefreshObservation:
         from fno.adapters.providers import runtime_state as rs
 
         snap = _snap("p1", UsageWindow("5h", 12.0, 9000.0))
-        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None: False)
+        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None, **k: False)
         monkeypatch.setattr(
             "fno.adapters.providers.loader.load_providers",
             lambda *a, **k: type(
@@ -1394,3 +1394,37 @@ def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, m
     assert sig.state is HeadroomState.EXHAUSTED
     assert sig.defer and sig.cutover
     assert sig.resets_at == 9e18
+
+
+def test_usage_cache_does_not_bleed_between_repositories(monkeypatch, tmp_path) -> None:
+    """A record id is only unique WITHIN a repository.
+
+    The runtime-state file is project-local, so a cross-project route decision
+    must read and write the node's repo. Sharing one cache keyed by id alone
+    would let the dispatcher's own project answer for the node's.
+    """
+    from fno.adapters.providers.runtime_state import read_usage, write_usage_snapshot
+
+    # No env override: exercise the repo_root branch, not the test pin.
+    monkeypatch.delenv("FNO_RUNTIME_STATE_PATH", raising=False)
+    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
+    for r in (repo_a, repo_b):
+        (r / ".fno").mkdir(parents=True)
+
+    # Same record id, different observations, one per repository.
+    assert write_usage_snapshot(
+        _snap("shared-id", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
+        now=1000.0,
+        repo_root=repo_a,
+    )
+    assert write_usage_snapshot(
+        _snap("shared-id", UsageWindow("5h", 1.0, 9e18), probed_at=1000.0),
+        now=1000.0,
+        repo_root=repo_b,
+    )
+
+    a = read_usage("shared-id", now=1000.0, repo_root=repo_a)
+    b = read_usage("shared-id", now=1000.0, repo_root=repo_b)
+    assert a is not None and b is not None
+    assert a.windows[0].used_pct == 100.0
+    assert b.windows[0].used_pct == 1.0
