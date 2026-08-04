@@ -82,6 +82,43 @@ def _write_claude_transcript(
     return path
 
 
+def _write_claude_transcript_with_model(
+    projects_root: Path, cwd: str, sid: str, model: str, turns: int = 3
+) -> Path:
+    """A transcript whose assistant messages carry ``model``, as claude writes it."""
+    slug = cwd.replace("/", "-").replace(".", "-")
+    d = projects_root / slug
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"{sid}.jsonl"
+    lines = []
+    for i in range(turns):
+        lines.append(json.dumps({"type": "user", "message": {
+            "role": "user", "content": [{"type": "text", "text": f"go {i}"}]}}))
+        lines.append(json.dumps({"type": "assistant", "message": {
+            "role": "assistant", "model": model,
+            "content": [{"type": "text", "text": f"working on it {i}"}]}}))
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
+def _write_codex_rollout(
+    sessions_dir: Path, cwd: str, sid: str, model: str
+) -> Path:
+    """A codex rollout: session_meta for identity, turn_context for the model."""
+    d = sessions_dir / "2026" / "08" / "04"
+    d.mkdir(parents=True, exist_ok=True)
+    path = d / f"rollout-2026-08-04T10-00-00-{sid}.jsonl"
+    lines = [
+        json.dumps({"type": "session_meta", "payload": {"id": sid, "cwd": cwd}}),
+        json.dumps({"type": "turn_context", "payload": {"model": model}}),
+        json.dumps({"type": "response_item", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "output_text", "text": "on it"}]}}),
+    ]
+    path.write_text("\n".join(lines) + "\n")
+    return path
+
+
 def _resolver(session):
     def r(_handle):
         return session, []
@@ -281,3 +318,180 @@ def test_resolver_crash_is_distinct_from_a_routine_miss(tmp_path):
     assert result["state"] == "unknown"
     assert result["reason"] == "resolver-error"
     assert result["reason"] != "not-found"
+
+
+# ---------------------------------------------------------------------------
+# observed_model: the route a worker is ACTUALLY on, read from its transcript
+#
+# The whole point is that this is DERIVED, never recorded. A route stamped at
+# spawn reports intent, so it would have printed the intended model in exactly
+# the scenario that motivated this reading (an operator who suspects a silent
+# fallback). Every test below feeds a transcript, never a spawn argument.
+# ---------------------------------------------------------------------------
+
+def test_observed_model_from_claude_transcript(tmp_path):
+    """AC1-HP: a worker routed to zai whose transcript records glm-5.2."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-0000-0000-0000-000000000001"
+    _write_claude_transcript_with_model(tmp_path, cwd, sid, "glm-5.2", turns=3)
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+
+    assert result["observed_model"] == {
+        "kind": "observed",
+        "model": "glm-5.2",
+        "samples": 3,
+    }
+
+
+def test_observed_model_no_transcript_still_renders(tmp_path):
+    """AC3-ERR: no transcript file -> no-transcript, the row still resolves."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-0000-0000-0000-000000000002"
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+
+    assert result["observed_model"] == {"kind": "no-transcript"}
+    # A missing transcript is not a fault: truth still answers, no exception.
+    assert result["state"] == "unknown"
+
+
+def test_observed_model_no_model_yet_is_separable_from_no_transcript(tmp_path):
+    """AC4-ERR: a transcript that exists but carries no answered turn.
+
+    This is the diagnostic the whole four-variant shape exists for: a worker
+    that came up and never processed a turn must not read like one that was
+    spawned two seconds ago.
+    """
+    from fno.agents.session_truth import observed_model, resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-0000-0000-0000-000000000003"
+    # User turns only: the session exists, nothing has answered.
+    path = _write_claude_transcript(tmp_path, cwd, sid, [("user", "start the work")])
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+
+    assert result["observed_model"] == {"kind": "no-model-yet"}
+    assert observed_model("claude", path) != {"kind": "no-transcript"}
+
+
+def test_observed_model_torn_final_line_is_unreadable_then_succeeds(tmp_path):
+    """AC5-CON: read while the writer is mid-line; no lock, correct next read."""
+    from fno.agents.session_truth import observed_model
+
+    path = tmp_path / "live.jsonl"
+    complete = json.dumps({"type": "assistant", "message": {"model": "glm-5.2"}})
+    # The writer got half of the next record out.
+    path.write_text(complete + "\n" + '{"type":"assist')
+
+    torn = observed_model("claude", path)
+    assert torn["kind"] == "unreadable"
+    assert "torn" in torn["reason"]
+
+    # The writer finishes the line; the very next read succeeds.
+    path.write_text(complete + "\n" + complete + "\n")
+    assert observed_model("claude", path) == {
+        "kind": "observed",
+        "model": "glm-5.2",
+        "samples": 2,
+    }
+
+
+def test_observed_model_unreadable_reason_when_path_is_not_a_file(tmp_path):
+    """A path that exists but cannot be read is unreadable, never no-transcript:
+    invisibility and absence must stay distinguishable."""
+    from fno.agents.session_truth import observed_model
+
+    d = tmp_path / "a-directory.jsonl"
+    d.mkdir()
+    result = observed_model("claude", d)
+    assert result["kind"] == "unreadable"
+    assert result["reason"]
+
+
+def test_observed_model_from_codex_rollout(tmp_path):
+    """AC6-HP: codex records the model on turn_context; same resolver, same key."""
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "019fcde6-b8c0-7000-8000-000000000004"
+    _write_codex_rollout(tmp_path, cwd, sid, "gpt-5.6-sol")
+
+    session = SimpleNamespace(agent="codex", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1",
+        resolve=_resolver(session),
+        codex_sessions_dir=tmp_path,
+    )
+
+    assert result["observed_model"] == {
+        "kind": "observed",
+        "model": "gpt-5.6-sol",
+        "samples": 1,
+    }
+
+
+def test_observed_model_reports_a_silent_fallback_verbatim(tmp_path):
+    """AC7-ERR: a worker INTENDED for zai that is answering as claude-*.
+
+    Reported verbatim, which is what makes intent and outcome visibly disagree.
+    A recorded-at-spawn field would have printed `glm-5.2` here with full
+    confidence -- that is the defect this reading exists to avoid.
+    """
+    from fno.agents.session_truth import resolve_session_truth
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-0000-0000-0000-000000000005"
+    _write_claude_transcript_with_model(tmp_path, cwd, sid, "claude-opus-5", turns=2)
+
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+    result = resolve_session_truth(
+        "w1", resolve=_resolver(session), projects_root=tmp_path
+    )
+
+    assert result["observed_model"]["model"] == "claude-opus-5"
+
+
+def test_observed_model_reads_a_bounded_tail_not_the_whole_file(tmp_path):
+    """A multi-MB transcript costs the same fixed read as a fresh one, and the
+    window boundary never yields a torn-line verdict of its own."""
+    from fno.agents.session_truth import _MODEL_TAIL_BYTES, observed_model
+
+    path = tmp_path / "big.jsonl"
+    filler = json.dumps({"type": "user", "message": {"role": "user",
+                                                     "content": "x" * 500}})
+    recent = json.dumps({"type": "assistant", "message": {"model": "glm-5.2"}})
+    with path.open("w") as fh:
+        for _ in range(_MODEL_TAIL_BYTES // len(filler) + 50):
+            fh.write(filler + "\n")
+        fh.write(recent + "\n")
+
+    assert path.stat().st_size > _MODEL_TAIL_BYTES
+    assert observed_model("claude", path) == {
+        "kind": "observed",
+        "model": "glm-5.2",
+        "samples": 1,
+    }
+
+
+def test_observed_model_unsupported_harness_has_no_transcript(tmp_path):
+    """opencode keeps a shared store, not a per-session file: no file, no claim."""
+    from fno.agents.session_truth import observed_model
+
+    assert observed_model("opencode", tmp_path / "anything") == {
+        "kind": "no-transcript"
+    }
