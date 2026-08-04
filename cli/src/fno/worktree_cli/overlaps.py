@@ -90,7 +90,10 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
         return events, coverage
     try:
         text = journal.read_text(encoding="utf-8")
-    except OSError as exc:
+    except (OSError, UnicodeError) as exc:
+        # UnicodeDecodeError (invalid UTF-8) is a ValueError, not an OSError,
+        # so it must be caught here too or it escapes as a crash instead of the
+        # promised structured `unknown` result.
         coverage["state"] = "unknown"
         coverage["unreadable"] = True
         coverage["error"] = f"{type(exc).__name__}: {exc}"

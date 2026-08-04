@@ -157,6 +157,16 @@ def test_unreadable_journal_is_unknown_and_exits_nonzero(tmp_path: Path, monkeyp
     assert code == 1
 
 
+def test_invalid_utf8_journal_is_unknown(tmp_path: Path) -> None:
+    """Invalid UTF-8 in the journal is a decode failure, not a crash: report unknown."""
+    journal = tmp_path / "events.jsonl"
+    journal.write_bytes(b'{"type":"worktree_overlap_observed"}\n\xff\xfe not utf-8\n')
+    report, code = overlaps_report(journal=journal, now=NOW)
+    assert report["state"] == "unknown"
+    assert code == 1
+
+
+
 # -- AC6-ERR: recording failure is loud and non-blocking --------------------
 #
 # The carrier owns exit-zero; overlap_record must never raise. It reports

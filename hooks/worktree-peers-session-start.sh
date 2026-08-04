@@ -50,28 +50,32 @@ if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
   if command -v with_timeout >/dev/null 2>&1; then
     raw="$(printf '%s' "$obs" | with_timeout 30 fno worktree overlap-record --stdin --since 28 2>/dev/null)"; raw_rc=$?
   else
-    raw="$(printf '%s' "$obs" | fno worktree overlap-record --stdin --since 28 2>/dev/null || true)"
-  fi
-  if (( raw_rc == 124 )); then
-    # The wall-clock bound fired: treat as unrecorded, never block SessionStart.
+    # No wall-clock bound available: never make an unbounded call that could
+    # block SessionStart. Surface unrecorded; the advisory still prints.
     record_status="unrecorded"
-  else
-    recorded="$(printf '%s' "$raw" | jq -r 'if (.recorded|type)=="boolean" then .recorded else empty end' 2>/dev/null || true)"
-    if [[ "$recorded" == "true" ]]; then
-      fold_state="$(printf '%s' "$raw" | jq -r '.fold.state // empty' 2>/dev/null || true)"
-      if [[ "$fold_state" != "complete" && "$fold_state" != "no_data" ]]; then
-        # Recorded, but the recurrence fold could not be trusted.
-        record_status="count-unavailable"
-      else
-        met="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold_met // false' 2>/dev/null || true)"
-        if [[ "$met" == "true" ]]; then
-          distinct="$(printf '%s' "$raw" | jq -r '.fold.distinct_observations // 0' 2>/dev/null || echo 0)"
-          thresh="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold // 3' 2>/dev/null || echo 3)"
-          lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
-        fi
-      fi
-    else
+  fi
+  if [[ -z "$record_status" ]]; then
+    if (( raw_rc == 124 )); then
+      # The bound fired: treat as unrecorded, never block SessionStart.
       record_status="unrecorded"
+    else
+      recorded="$(printf '%s' "$raw" | jq -r 'if (.recorded|type)=="boolean" then .recorded else empty end' 2>/dev/null || true)"
+      if [[ "$recorded" == "true" ]]; then
+        fold_state="$(printf '%s' "$raw" | jq -r '.fold.state // empty' 2>/dev/null || true)"
+        if [[ "$fold_state" != "complete" && "$fold_state" != "no_data" ]]; then
+          # Recorded, but the recurrence fold could not be trusted.
+          record_status="count-unavailable"
+        else
+          met="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold_met // false' 2>/dev/null || true)"
+          if [[ "$met" == "true" ]]; then
+            distinct="$(printf '%s' "$raw" | jq -r '.fold.distinct_observations // 0' 2>/dev/null || echo 0)"
+            thresh="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold // 3' 2>/dev/null || echo 3)"
+            lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
+          fi
+        fi
+      else
+        record_status="unrecorded"
+      fi
     fi
   fi
 else
