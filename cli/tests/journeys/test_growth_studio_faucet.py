@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
+import pytest
 import yaml
 
 from fno.approvals.models import classify_effect
@@ -47,14 +49,40 @@ def _frontmatter_tools(path: Path) -> list[str]:
 # agnostic gate still passes.
 
 
+def _base_ref() -> str | None:
+    """A ref pointing at the default-branch tip, or None if none is resolvable.
+
+    CI PR checkouts do not always carry origin/main; try the common names and
+    the GitHub Actions base-ref env, in order.
+    """
+    candidates = ["origin/main", "main", "master", "origin/HEAD", "upstream/main"]
+    base = os.environ.get("GITHUB_BASE_REF")
+    if base:
+        candidates.append(f"origin/{base}")
+    for ref in candidates:
+        if (
+            subprocess.run(
+                ["git", "rev-parse", "--verify", "-q", ref],
+                cwd=REPO_ROOT,
+                capture_output=True,
+            ).returncode
+            == 0
+        ):
+            return ref
+    return None
+
+
 def test_resolver_core_byte_identical_to_main() -> None:
+    base = _base_ref()
+    if base is None:
+        pytest.skip("no default-branch ref available to compare the resolver core against")
     result = subprocess.run(
-        ["git", "diff", "--exit-code", "origin/main", "--",
+        ["git", "diff", "--exit-code", base, "--",
          "cli/src/fno/roles/registry.py", "cli/src/fno/roles/resolver.py"],
         cwd=REPO_ROOT,
         capture_output=True,
     )
-    assert result.returncode == 0, "resolver core differs from main:\n" + result.stdout.decode()
+    assert result.returncode == 0, f"resolver core differs from {base}:\n" + result.stdout.decode()
 
 
 def test_plugins_function_agnostic_gate_passes() -> None:

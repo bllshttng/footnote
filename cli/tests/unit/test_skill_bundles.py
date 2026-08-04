@@ -67,7 +67,7 @@ def test_manifest_parser_emits_5col_tsv():
         assert len(parts) == 5, (
             f"expected <type>\\t<skill>\\t<source>\\t<dest>\\t<meta>, got {row!r}"
         )
-        assert parts[0] in {"file", "reference", "agent"}, f"unknown type: {parts[0]}"
+        assert parts[0] in {"file", "reference", "agent", "pack-skill", "pack-agent"}, f"unknown type: {parts[0]}"
 
 
 def test_generator_produces_byte_identical_file_bundles():
