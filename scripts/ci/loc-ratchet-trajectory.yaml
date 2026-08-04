@@ -28,6 +28,11 @@ baseline:
   note: "pre-step-1 main; the collapse must end below this number"
 
 entries:
+  - date: 2026-08-04
+    pr: null
+    branch: feature/x-edf5
+    delta: 34
+    reason: 'growth-studio faucet bundling seam (x-edf5): the +34 in-glob delta is scripts/lib/parse-bundle-manifest.py gaining a pack scan that globs plugins/*/plugin.yaml and emits pack-skill and pack-agent rows with root-relative destinations, so a pack''s skills and agents bundle from the one place they are declared (plugin.yaml) rather than being re-declared in skill-bundles.yaml. The scan is the load-bearing addition: it is what lets the freshness gate audit pack rows, and putting it in the generator alone would produce files no gate compares. The matching destination branching lives in generate-skill-bundles.sh and check-skill-bundles-fresh.sh, both off-manifest .sh files outside scripts/lib/. No new gate, terminal, loop, or merge authority; a build-time copy plus a freshness comparison.'
   - date: 2026-08-03
     pr: 724
     branch: feature/x-cd4d
