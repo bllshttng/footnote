@@ -467,13 +467,21 @@ def _parse_claude_windows(payload: Any) -> tuple[UsageWindow, ...]:
     return tuple(out)
 
 
-def _probe_claude(record: ProviderRecord, now: float) -> UsageSnapshot | None:
+def _probe_claude(
+    record: ProviderRecord, now: float
+) -> tuple[UsageSnapshot | None, str | None]:
     """Probe the claude ``/api/oauth/usage`` endpoint (verified x-6bcf).
 
     Tries every candidate bearer token until one returns 200: a stale scoped
     Keychain item 401s while the live unscoped item succeeds, so a single-token
     probe would silently fail. A 401/403 skips to the next token; any other
     network error aborts (fail-open None).
+
+    Reports ``unattributed`` rather than ``probe-failed`` when every candidate
+    bearer was REJECTED, because no usage request was ever issued: the fault is
+    a stale or unprovable account binding, not the endpoint. Calling that a
+    probe failure sends an operator to debug a network path that was never
+    used - a confident wrong reason, which is worse than a bare unknown.
     """
     unattributable = False
     for bearer in _claude_bearer_candidates(record):
@@ -497,26 +505,27 @@ def _probe_claude(record: ProviderRecord, now: float) -> UsageSnapshot | None:
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 continue  # stale/invalid token - try the next candidate
-            return None
+            return None, "probe-failed"
         except (urllib.error.URLError, OSError, TimeoutError):
-            return None
+            return None, "probe-failed"
         try:
             payload = json.loads(body)
         except (json.JSONDecodeError, ValueError):
-            return None
+            return None, "probe-failed"
         return UsageSnapshot(
             provider_id=record.id,
             windows=_parse_claude_windows(payload),
             probed_at=now,
             source="oauth-endpoint",
-        )
+        ), None
     if unattributable:
         # Every candidate credential either belongs to someone else or could not
         # be proven. An out-of-band /login is the usual cause, so try the repair
         # once; the slot commonly turns out to belong to a DIFFERENT record,
         # which correctly leaves this one unknown.
         _reconcile_slot_once(record, now)
-    return None
+        return None, "unattributed"
+    return None, "probe-failed"
 
 
 def _codex_home() -> Path:
@@ -599,15 +608,17 @@ def _parse_codex_rate_limits(payload: Any) -> tuple[UsageWindow, ...]:
     return tuple(out)
 
 
-def _probe_codex(record: ProviderRecord, now: float) -> UsageSnapshot | None:
+def _probe_codex(
+    record: ProviderRecord, now: float
+) -> tuple[UsageSnapshot | None, str | None]:
     """Probe the most recent codex session's rate_limits event. [VERIFY-AT-IMPL]."""
     session = _latest_codex_session(record)
     if session is None:
-        return None
+        return None, "probe-failed"
     try:
         lines = session.read_text(encoding="utf-8").splitlines()
     except OSError:
-        return None
+        return None, "probe-failed"
     # Scan newest-first for the last event carrying rate_limits.
     for line in reversed(lines):
         line = line.strip()
@@ -624,23 +635,89 @@ def _probe_codex(record: ProviderRecord, now: float) -> UsageSnapshot | None:
                 windows=windows,
                 probed_at=now,
                 source="session-events",
-            )
-    return None
+            ), None
+    return None, "probe-failed"
 
 
-_PROBES: dict[str, Callable[[ProviderRecord, float], "UsageSnapshot | None"]] = {
+# Each probe returns ``(snapshot, unknown_reason)``: the reason is decided where
+# the failure happens, because only the probe knows whether it ever issued a
+# request. Deriving it afterwards from a bare None is what mislabels a rejected
+# credential as an endpoint failure.
+_PROBES: dict[
+    str, Callable[[ProviderRecord, float], "tuple[UsageSnapshot | None, str | None]"]
+] = {
     "claude": _probe_claude,
     "codex": _probe_codex,
 }
 
 
+def probe_usage_detail(
+    record: ProviderRecord, now: float | None = None
+) -> tuple[UsageSnapshot | None, str | None]:
+    """``(snapshot, unknown_reason)`` - the probe plus WHY it came back unknown.
+
+    The single implementation; :func:`probe_usage` is the compatibility wrapper
+    over it, so there is exactly one probe path to stub, guard, or reason about.
+
+    A bare ``None`` is one value with four causes, and telling them apart is the
+    difference between "repair attribution" and "the endpoint moved". A five-day
+    quota outage looked exactly like a cold cache because both printed
+    ``unknown``. The reason is a stable, non-secret slug - never a token, a
+    bearer, or a remote response body:
+
+    - ``harness-unsupported``- no probe registered for ``record.harness``
+    - ``auth-unsupported``   - an api_key record; the probes read OAuth bearers
+    - ``unattributed``       - no credential provably belongs to this record.
+      Covers both the pre-probe refusal AND a probe that rejected every
+      candidate bearer, since in neither case was a usage request issued.
+    - ``probe-failed``       - the probe issued a request and could not read usage
+    - ``probe-error``        - the probe raised (contained here, AC1-FR)
+
+    Order is part of the contract: CAPABILITY is classified before attribution.
+    A gemini record has no probe and an api_key record has no bearer to read, so
+    neither has an attribution problem to repair - telling an operator to fix
+    account binding there sends them after a fault that does not exist.
+
+    ``reason`` is None exactly when ``snapshot`` is not None.
+    """
+    if now is None:
+        now = time.time()
+    probe = _PROBES.get(record.harness)
+    if probe is None:
+        return None, "harness-unsupported"
+    if record.auth == "api_key":
+        # Record-scoped by construction (the key rides `env`), so attribution is
+        # not the missing piece: every probe reads an OAuth bearer, and this
+        # record has none. v1 leaves api_key usage unknown.
+        return None, "auth-unsupported"
+    if not _attributed_credential_dir(record)[0]:
+        # A tainted slot may be a FALSE taint (the five-day outage). Ask once
+        # whether identity can be proven, then re-read attribution - a proven
+        # slot may well belong to a different record than this one, in which
+        # case this record correctly stays unknown and that one becomes
+        # probeable on its own probe.
+        if not _reconcile_tainted_slot(record, now):
+            return None, "unattributed"
+        if not _attributed_credential_dir(record)[0]:
+            return None, "unattributed"
+    try:
+        snapshot, reason = probe(record, now)
+    except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)
+        logger.debug("usage probe crashed for %r: %s", record.id, exc)
+        return None, "probe-error"
+    if snapshot is None:
+        return None, reason or "probe-failed"
+    return snapshot, None
+
+
 def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapshot | None:
     """Return a fresh usage snapshot for ``record``, or None if unknown.
 
-    Dispatches by ``record.harness``. NEVER raises: any exception inside a per-CLI
-    probe is contained here (AC1-FR), logged once at debug, and mapped to None
-    so a dispatch decision proceeds fail-open. api_key records and CLIs without
-    a probe (gemini, glm, openclaw, hermes) return None in v1.
+    Compatibility wrapper over :func:`probe_usage_detail` for callers that only
+    need the snapshot. Dispatches by ``record.harness``. NEVER raises: any
+    exception inside a per-CLI probe is contained (AC1-FR), logged once at debug,
+    and mapped to None so a dispatch decision proceeds fail-open. api_key records
+    and CLIs without a probe (gemini, glm, openclaw, hermes) return None in v1.
 
     The gate is attribution, not auth strategy: a record is probeable when a
     credential provably its own is resolvable (see
@@ -649,23 +726,4 @@ def probe_usage(record: ProviderRecord, now: float | None = None) -> UsageSnapsh
     ``fno config accounts usage`` printed ``unknown`` at exit 0 while the endpoint,
     the bearer discovery, and the parser all worked.
     """
-    if now is None:
-        now = time.time()
-    if not _attributed_credential_dir(record)[0]:
-        # A tainted slot may be a FALSE taint (the five-day outage). Ask once
-        # whether identity can be proven, then re-read attribution - a proven
-        # slot may well belong to a different record than this one, in which
-        # case this record correctly stays unknown and that one becomes
-        # probeable on its own probe.
-        if not _reconcile_tainted_slot(record, now):
-            return None
-        if not _attributed_credential_dir(record)[0]:
-            return None
-    probe = _PROBES.get(record.harness)
-    if probe is None:
-        return None
-    try:
-        return probe(record, now)
-    except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)
-        logger.debug("usage probe crashed for %r: %s", record.id, exc)
-        return None
+    return probe_usage_detail(record, now)[0]
