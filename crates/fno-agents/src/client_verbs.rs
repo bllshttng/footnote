@@ -3825,10 +3825,7 @@ mod tests {
             graph_node_id: x-0358\n";
         let m = parse_manifest_identity(content);
         assert_eq!(m.harness, "claude");
-        assert_eq!(
-            m.harness_session_id,
-            "c7dc6218-493a-4299-916a-330ec0b0b055"
-        );
+        assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
         assert_eq!(m.owner_cwd, "/Users/x/code/wt");
         assert_eq!(m.fno_id, "20260804T202518Z-cl99002-4e0236");
         // codex_thread_id: null stays empty, never "null".
@@ -3880,7 +3877,10 @@ mod tests {
 
     #[test]
     fn derived_short_id_uses_final_eight() {
-        assert_eq!(derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"), "c0b0b055");
+        assert_eq!(
+            derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"),
+            "c0b0b055"
+        );
         assert_eq!(derived_short_id("abc12345"), "abc12345");
         assert_eq!(derived_short_id("short"), "short");
     }
@@ -3901,10 +3901,7 @@ mod tests {
         assert_eq!(e.project_root, "/Users/x/wt");
         // codex carries no claude uuid; claude_session_uuid stays None.
         assert_eq!(e.claude_session_uuid, None);
-        assert_eq!(
-            e.fno_id.as_deref(),
-            Some("20260804T202518Z-cl99002-4e0236")
-        );
+        assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
         assert!(!e.short_id.is_empty());
         assert_eq!(e.name, format!("target-{}", e.short_id));
         assert_eq!(e.status, crate::AgentStatus::Idle);
@@ -3966,7 +3963,10 @@ mod tests {
             exited_at: None,
             worktree_clean: None,
         };
-        assert_eq!(crate::gc::gc_action(&row, 1000, 60), crate::gc::GcAction::Keep);
+        assert_eq!(
+            crate::gc::gc_action(&row, 1000, 60),
+            crate::gc::GcAction::Keep
+        );
     }
 
     #[test]
@@ -3984,7 +3984,8 @@ mod tests {
             ..Default::default()
         };
         upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t")).unwrap();
-        let (row, fno_id, source) = synthesize_and_adopt("thread-seed-1234", &home).expect("seeded row resolves");
+        let (row, fno_id, source) =
+            synthesize_and_adopt("thread-seed-1234", &home).expect("seeded row resolves");
         assert_eq!(source, AdoptSource::Registry);
         assert_eq!(
             row.get("harness_session_id").and_then(Value::as_str),
@@ -4009,7 +4010,9 @@ mod tests {
             matches!(res, Err(AdoptError::NoEvidence) | Err(AdoptError::Io(_))),
             "miss must refuse, not mint; got {res:?}"
         );
-        assert!(read_registry_entries(&home.registry_json()).unwrap().is_empty());
+        assert!(read_registry_entries(&home.registry_json())
+            .unwrap()
+            .is_empty());
         std::env::remove_var(crate::paths::HOME_ENV);
     }
 
