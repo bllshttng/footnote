@@ -333,20 +333,20 @@ def test_owned_lone_foreign_marker_is_not_stamped_when_prover_contradicts():
     assert owned.harness is None
 
 
-def test_owned_two_same_family_proven_collapse_to_one(monkeypatch):
-    """Two markers of the proven harness (CODEX_THREAD_ID + CODEX_SESSION_ID,
-    both codex) plus a foreign claude marker collapse to the one proven family
-    rather than reading as two-proven-ambiguous. Precedence-first within the
-    family wins (the thread id)."""
+def test_owned_distinct_ids_in_one_proven_family_degrade():
+    """Two markers of the proven harness with DISTINCT ids (CODEX_THREAD_ID +
+    CODEX_SESSION_ID, both codex, different values) cannot be told apart: proof
+    is harness-level, not id-level. The resolver degrades rather than pick by
+    precedence, which could stamp an inherited same-family stranger id."""
     env = {
         "CODEX_THREAD_ID": "thread",
         "CODEX_SESSION_ID": "session",
         "CLAUDE_CODE_SESSION_ID": "claude-mine",
     }
     owned = resolve_owned_identity(env, prove=lambda harness, sid: harness == "codex")
-    assert owned.disposition == "proven"
-    assert owned.harness == "codex"
-    assert owned.session_id == "thread"  # precedence-first within the proven family
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
 
 
 def test_owned_prover_cant_tell_falls_through_to_collision(tmp_path):

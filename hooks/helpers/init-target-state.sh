@@ -856,8 +856,17 @@ EOF
   # claude rather than stamping the precedence winner.
   _HARNESS_SESSION="$_OWNED_SID"
   if [[ -z "$_OWNED_OUT" ]]; then
-    if [[ -n "$_codex_thread_compact" ]] \
-       && [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+    # Fail-open (stale fno, no verb). Do NOT reproduce the leak: when two or
+    # more harness FAMILIES are present, raw precedence would launder an
+    # inherited marker into the identity, so leave it unset and default provider
+    # to claude rather than stamping the precedence winner. A single family
+    # keeps today's precedence behavior.
+    _failopen_families=0
+    { [[ -n "$_codex_thread_compact" ]] || [[ -n "${CODEX_SESSION_ID:-}" ]]; } && _failopen_families=$((_failopen_families+1))
+    [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]] && _failopen_families=$((_failopen_families+1))
+    [[ -n "${GEMINI_SESSION_ID:-}" ]] && _failopen_families=$((_failopen_families+1))
+    [[ -n "${OPENCODE_SESSION_ID:-}" ]] && _failopen_families=$((_failopen_families+1))
+    if [[ "$_failopen_families" -ge 2 ]]; then
       PROVIDER="claude"
       _HARNESS_SESSION=""
     elif [[ -n "$_codex_thread_compact" ]]; then
@@ -869,6 +878,7 @@ EOF
     elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
       _HARNESS_SESSION="$OPENCODE_SESSION_ID"
     fi
+    unset _failopen_families
   fi
   _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
   _HARNESS_EFFORT="${TARGET_HARNESS_EFFORT:-}"

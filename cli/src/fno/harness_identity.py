@@ -315,16 +315,22 @@ def resolve_owned_identity(
         survivors.append((marker, harness, value))
 
     rejected_t = tuple(rejected)
-    proven_families = {harness for _, harness, _ in proven}
-    if len(proven_families) == 1:
-        # A uniquely proven family wins. Multiple markers of that family
-        # (CODEX_THREAD_ID + CODEX_SESSION_ID, both proven) collapse to one,
-        # precedence-first.
-        _marker, harness, value = proven[0]
-        return OwnedHarnessIdentity(
-            value, harness, present, "single" if len(distinct) == 1 else "proven", rejected_t
-        )
-    if len(proven_families) > 1:
+    proven_by_family: dict[str, set[str]] = {}
+    for _marker, harness, value in proven:
+        proven_by_family.setdefault(harness, set()).add(value)
+    if len(proven_by_family) == 1:
+        family, ids = next(iter(proven_by_family.items()))
+        if len(ids) == 1:
+            # A uniquely proven family with one id wins (precedence-first).
+            _marker, harness, value = next(p for p in proven if p[1] == family)
+            return OwnedHarnessIdentity(
+                value, harness, present, "single" if len(distinct) == 1 else "proven", rejected_t
+            )
+        # One proven family but multiple DISTINCT ids: proof is harness-level,
+        # not id-level, so it cannot say which id this process owns. Picking by
+        # precedence could stamp an inherited same-family stranger id; degrade.
+        return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
+    if len(proven_by_family) > 1:
         return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
 
     survivor_families = {harness for _, harness, _ in survivors}
