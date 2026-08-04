@@ -343,7 +343,7 @@ class TestDeferDoesNotStallWhenPickingCanReroute:
     """
 
     def test_a_healthy_alternate_suppresses_the_defer(self, armed: Path) -> None:
-        from fno.dispatch import _healthy_alternate_exists
+        from fno.agents.autonomous_route import _healthy_alternate_exists
 
         assert _healthy_alternate_exists() is True
 
@@ -359,7 +359,7 @@ class TestDeferDoesNotStallWhenPickingCanReroute:
         monkeypatch.setenv("FNO_RUNTIME_STATE_PATH", str(tmp_path / "rs.json"))
         from fno.adapters.providers.runtime_state import write_usage_snapshot
         from fno.adapters.providers.usage import UsageSnapshot, UsageWindow
-        from fno.dispatch import _healthy_alternate_exists
+        from fno.agents.autonomous_route import _healthy_alternate_exists
 
         now = _time.time()
         for rid in ("readyrule", "makers"):
@@ -378,6 +378,6 @@ class TestDeferDoesNotStallWhenPickingCanReroute:
         monkeypatch.setenv("HOME", str(tmp_path))
         monkeypatch.setenv("PWD", str(tmp_path))
         monkeypatch.setenv("FNO_STATE_DIR", str(tmp_path / ".fno"))
-        from fno.dispatch import _healthy_alternate_exists
+        from fno.agents.autonomous_route import _healthy_alternate_exists
 
         assert _healthy_alternate_exists() is False
