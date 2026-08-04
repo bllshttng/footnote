@@ -2189,7 +2189,7 @@ event_types:
     consumers: [operator]
 
   - name: dispatch_failover
-    description: "Emitted by an autonomous launcher (`fno backlog advance` or `fno dispatch`) when config.dispatch.on_exhaustion='failover' and the shared route selector chose a cutover instead of a defer: the node launched on the next healthy record in the active combo, which may be on another harness (claude->codex). Emitted only AFTER the spawn succeeds - a routing decision is not a completed cutover. From `backlog advance` it is paired with the following advance_dispatched (the receipt of the switch, not a competing decision); `fno dispatch` reports its launch in the verdict it returns and emits this receipt alone. A whole-combo exhaustion, an unresolvable destination, or an explicit pin falls back to a quota-deferred skip instead."
+    description: "Emitted by an autonomous launcher (`fno backlog advance`, `fno dispatch`, or the shell dispatcher `dispatch-node.sh`) when config.dispatch.on_exhaustion='failover' and the shared route selector chose a cutover instead of a defer: the node launched on the next healthy record in the active combo, which may be on another harness (claude->codex). Emitted only AFTER the spawn succeeds - a routing decision is not a completed cutover. From `backlog advance` it is paired with the following advance_dispatched (the receipt of the switch, not a competing decision); `fno dispatch` and the shell dispatcher report their launch in their own verdict line and emit this receipt alone. A whole-combo exhaustion, an unresolvable destination, or an explicit pin falls back to a quota-deferred skip instead."
     sources: [backlog]
     data:
       required: [node_id, from, to]

@@ -906,6 +906,21 @@ for id in "${NODES[@]}"; do
   # Launched. Leave the reservation to expire by TTL (the worker now owns
   # node:<id>, which guards later dispatches).
   echo "launched $id name=$agent_name session=$sid cwd=${launch_cwd} hint=\"fno agents logs $agent_name\" route=${route_val}"
+  # The cutover receipt, on the same contract the Python launchers honour:
+  # AFTER launch proof, never on the decision alone. Without it a shell cutover
+  # is invisible to `fno event` and an operator cannot see that quota moved the
+  # work to another harness. Best-effort: telemetry never fails a dispatch.
+  if [[ -n "$route_account" ]]; then
+    fno event emit -t dispatch_failover -s backlog -d "$(jq -nc \
+      --arg node_id "$id" \
+      --arg from "$(printf '%s' "$route_json" | jq -r '.route_source // ""')" \
+      --arg to "$route_account" \
+      --arg harness_to "$DISPATCH_PROVIDER" \
+      --arg window "$(printf '%s' "$route_json" | jq -r '.route_window // ""')" \
+      --arg reason "$(printf '%s' "$route_json" | jq -r '.route_reason // ""')" \
+      '{node_id:$node_id,from:$from,to:$to,harness_to:$harness_to,window:$window,reason:$reason}' \
+      2>/dev/null)" >/dev/null 2>&1 || true
+  fi
   n_launched=$((n_launched + 1))
 done
 

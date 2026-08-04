@@ -1276,10 +1276,13 @@ def cmd_spawn(
             # Compare against the RESOLVED harness, not the raw --harness option:
             # omitting the flag leaves it None, and trusting that would stage a
             # codex account onto the resolved claude default unchecked.
-            if rec_harness and rec_harness != provider:
+            # Require a harness AND exact equality. Treating an empty harness as
+            # "no objection" would wave through the one record we can say least
+            # about, which is the opposite of what a fail-closed guard is for.
+            if rec_harness != provider:
                 raise ValueError(
-                    f"record is a {rec_harness} account but the spawn resolves "
-                    f"{provider}"
+                    f"record is a {rec_harness or '<no harness>'} account but "
+                    f"the spawn resolves {provider}"
                 )
             account_env = {
                 **(account_env or {}),

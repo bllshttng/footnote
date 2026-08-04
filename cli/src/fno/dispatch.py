@@ -297,17 +297,18 @@ def _cutover_command(harness: Optional[str], node_id: str) -> str:
     destination's default; only the COMMAND needs the per-harness render
     (codex takes `$fno:target`, never a raw slash verb). An empty return is the
     caller's signal to stage nothing - a half-resolved destination must not
-    spawn."""
-    try:
-        from fno.agents.harness_map import resolve_dispatch
+    spawn.
 
-        return str(
-            resolve_dispatch(
-                harness=harness,
-                substrate="pane",
-                node_id=node_id,
-                trigger="attended",
-            )["command"]
+    This verb's normal path always spawns `/target no-merge`, so the cutover
+    renders the SAME posture on the destination. Going through the full resolver
+    would read `config.dispatch.auto_merge` and could hand a rerouted worker the
+    merge authority the non-cutover launch never gets: quota exhaustion must not
+    change who may merge."""
+    try:
+        from fno.agents.harness_map import dispatch_command
+
+        return dispatch_command(harness or "", allow_merge=False).replace(
+            "{id}", node_id
         )
     except Exception:  # noqa: BLE001 - an unresolvable harness never spawns
         return ""
