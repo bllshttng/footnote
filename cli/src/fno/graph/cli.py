@@ -54,7 +54,7 @@ cli.add_typer(_batch_cli, name="batch", hidden=True)
 # never pick up the same node. The implementation is homed in graph/statuses.py
 # (so the board renderers can share it without a cli<->render cycle); re-exported
 # under the original module-global name that existing tests monkeypatch.
-from fno.graph.statuses import live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
+from fno.graph.statuses import _LEGACY_DEFER_PREFIX, live_claimed_node_ids as _live_claimed_node_ids  # noqa: E402
 
 
 def _require_live_claimed_node_ids(operation: str) -> set[str]:
@@ -1582,19 +1582,31 @@ def cmd_decompose(
             # Fields, not the derived `status` string: recompute_statuses
             # re-persists status after every locked mutation, so it is a
             # snapshot rather than truth (selection_guards' dead-ancestor guard
-            # documents the same reasoning). completed_at first, reproducing the
-            # cascade's done > superseded > deferred precedence, so a unit that
-            # was superseded and later closed does not trip a false refusal -
-            # a done owner is healable by the merge cascade. Both death fields
-            # are read even though every writer sets deferred_at today, so a
-            # future supersede path that forgets it cannot slip through.
+            # documents the same reasoning). The legacy `completed_at:
+            # "deferred:<ts>"` workaround (pre-feature deferral overloaded
+            # completed_at) is folded into the effective deferred_at here:
+            # recompute_statuses migrates it to deferred_at only AFTER this
+            # mutator returns, so reading completed_at raw would treat a
+            # deferred owner as done, skip this guard, and stamp exactly the
+            # permanently-contained state it exists to prevent. A genuinely-done
+            # owner (a real completed_at timestamp, not the legacy marker) is
+            # exempt because the merge cascade can heal it, reproducing the
+            # done > superseded > deferred precedence so a unit that was
+            # superseded and later closed does not trip a false refusal. Both
+            # death fields are read even though every writer sets deferred_at
+            # today, so a future supersede path that forgets it cannot slip
+            # through.
             #
             # Gated on a non-empty adopt list: a dead group child with nothing
             # to adopt still updates its title, waves, and blocked_by as it does
             # today. Refusing there would deadlock an epic doc whose group was
             # deferred for unrelated reasons.
-            if grp["adopt"] and not node.get("completed_at") and (
-                node.get("deferred_at") or node.get("superseded_by")
+            _completed = node.get("completed_at")
+            _legacy_defer = isinstance(_completed, str) and _completed.startswith(
+                _LEGACY_DEFER_PREFIX
+            )
+            if grp["adopt"] and not (bool(_completed) and not _legacy_defer) and (
+                node.get("deferred_at") or node.get("superseded_by") or _legacy_defer
             ):
                 _superseder = node.get("superseded_by")
                 # The remedy branches on the cause: `fno backlog undefer` clears
@@ -1604,9 +1616,10 @@ def cmd_decompose(
                 if _superseder:
                     _how = f"was superseded by {_superseder}"
                     _remedy = (
-                        "Point the adopt list at the superseding node, or give "
-                        "the group a new slug so it mints a live delivery unit "
-                        "(`fno backlog undefer` does not clear superseded_by)"
+                        f"Run `fno backlog unsupersede {node['id']}` to revive it "
+                        "(clears superseded_by; `undefer` does not), or point the "
+                        "adopt list at the superseding node, or give the group a "
+                        "new slug so it mints a live delivery unit"
                     )
                 else:
                     _how = "is deferred"

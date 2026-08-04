@@ -2906,6 +2906,25 @@ def _deferred_unit(g, read_entries):
     return unit
 
 
+def _legacy_deferred_unit(g, read_entries):
+    """Seed one adoptable child, mint group child `one`, then park it with the
+    pre-feature workaround: ``completed_at: "deferred:<ts>"`` and no deferred_at.
+
+    ``recompute_statuses`` migrates this marker to ``deferred_at``, but only
+    AFTER a mutator returns, so the decompose mutator sees it raw - exactly the
+    shape that bypassed the guard before the legacy-prefix fix.
+    """
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _decompose(BARE_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    entries = json.loads(g.read_text())["entries"]
+    parked = next(e for e in entries if e["id"] == unit)
+    parked["completed_at"] = "deferred:2026-07-01T00:00:00+00:00"
+    parked.pop("deferred_at", None)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    return unit
+
+
 def test_adopt_under_a_deferred_group_child_is_refused(graph_env):
     """AC1: the stamp would be unreachable by every repair path that exists.
 
@@ -2924,6 +2943,27 @@ def test_adopt_under_a_deferred_group_child_is_refused(graph_env):
     assert unit in result.output
     assert "deferred" in result.output
     assert "undefer" in result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+
+
+def test_adopt_under_a_legacy_deferred_group_child_is_refused(graph_env):
+    """The pre-feature ``completed_at: "deferred:<ts>"`` workaround must not
+    bypass the guard.
+
+    ``recompute_statuses`` migrates the marker to ``deferred_at`` only after the
+    mutator returns, so reading ``completed_at`` raw would treat a deferred owner
+    as done, skip the guard, and stamp the permanently-contained state it exists
+    to prevent. The marker is folded into the effective deferred_at for the
+    deadness check, so the guard fires identically to the deferred_at case.
+    """
+    g, read_entries = graph_env
+    unit = _legacy_deferred_unit(g, read_entries)
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 2, result.output
+    assert unit in result.output
+    assert "deferred" in result.output
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None
 
@@ -2991,9 +3031,11 @@ def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
     assert result.exit_code == 2, result.output
     assert "ab-new00001" in result.output
     assert "superseded" in result.output
-    # Named only to disclaim it. What AC4 forbids is OFFERING it as the remedy.
+    # The remedy offers `unsupersede` (the verb that clears superseded_by), not
+    # `undefer` (which clears only deferred_at, so the next run refuses again).
+    assert f"unsupersede {unit}" in result.output
     assert f"undefer {unit}" not in result.output
-    assert "does not clear superseded_by" in result.output
+    assert "clears superseded_by" in result.output
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None
 
