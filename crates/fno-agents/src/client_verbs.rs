@@ -1254,6 +1254,109 @@ pub(crate) fn resolve_entry_with_heal(
     }
 }
 
+/// Identity parsed from a `.fno/target-state.md` manifest, the durable evidence
+/// source for adopting an orphaned `/target` session by its harness session id
+/// (plan x-0358 US1). Pure (no IO) so the match and the field extraction are
+/// tested without a live manifest. IDENTITY ONLY: the manifest's
+/// `target_claim_*` / `owner_pid` fields are an init-time snapshot and are never
+/// read as ownership or liveness truth (AGENTS.md pitfalls corpus, "Orienter
+/// output, claim snapshots, and liveness probes have all lied").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ManifestIdentity {
+    harness: String,
+    harness_session_id: String,
+    claude_session_id: String,
+    codex_thread_id: String,
+    owner_cwd: String,
+    fno_id: String,
+}
+
+impl ManifestIdentity {
+    /// Does `session_id` equal any harness-session-id the manifest records? The
+    /// legacy `claude_session_id` / `codex_thread_id` aliases are kept for one
+    /// release, so a pre-rename manifest still matches its session.
+    fn matches(&self, session_id: &str) -> bool {
+        let sid = session_id.trim();
+        !sid.is_empty()
+            && [
+                self.harness_session_id.as_str(),
+                self.claude_session_id.as_str(),
+                self.codex_thread_id.as_str(),
+            ]
+            .iter()
+            .any(|f| !f.is_empty() && f.trim() == sid)
+    }
+}
+
+/// First non-empty wins (frontmatter precedes body); never overwrite a real
+/// value with a later blank or an explicit `null`.
+fn set_first(slot: &mut String, val: &str) {
+    if slot.is_empty() && !val.is_empty() && val != "null" {
+        *slot = val.to_string();
+    }
+}
+
+/// Scan manifest content (frontmatter AND body) for the session-identity keys.
+/// Lines inside the multi-line `input` quoted scalar are SKIPPED so a `/target`
+/// argument containing `harness: ...` cannot forge an identity field (the same
+/// forgery surface `finalize::parse_manifest_fields` guards for the merge
+/// posture). The manifest is not strict YAML, `fno target init` writes quoted
+/// scalars, so a line scan matches the writer rather than a YAML lib. Kept here
+/// rather than folded into finalize because finalize owns completion/merge
+/// fields and this owns session-identity fields; the scan is a handful of lines
+/// and the two concerns stay decoupled.
+fn parse_manifest_identity(content: &str) -> ManifestIdentity {
+    let mut m = ManifestIdentity::default();
+    let mut in_input_scalar = false;
+    for line in content.lines() {
+        let line = line.trim();
+        // A multi-line `input: "..."` spills real newlines; its continuation
+        // lines reach this loop looking like `key: value`. Track the scalar and
+        // skip it so user text can never forge an identity field. init escapes
+        // quotes and not backslashes, so a closing quote with no preceding
+        // backslash is the real terminator (finalize::ends_quoted_scalar).
+        if in_input_scalar {
+            if line.ends_with('"') && !line.trim_end_matches('"').ends_with('\\') {
+                in_input_scalar = false;
+            }
+            continue;
+        }
+        if line.is_empty() || line.starts_with('#') || line == "---" {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let k = k.trim();
+        let raw = v.trim();
+        if k == "input" && raw.starts_with('"') && !line_closes_quoted_scalar(raw) {
+            in_input_scalar = true;
+        }
+        let val = raw.trim_matches(|c| c == '"' || c == '\'');
+        match k {
+            "harness" => set_first(&mut m.harness, val),
+            "harness_session_id" => set_first(&mut m.harness_session_id, val),
+            "claude_session_id" => set_first(&mut m.claude_session_id, val),
+            "codex_thread_id" => set_first(&mut m.codex_thread_id, val),
+            "owner_cwd" => set_first(&mut m.owner_cwd, val),
+            "fno_id" => set_first(&mut m.fno_id, val),
+            _ => {}
+        }
+    }
+    m
+}
+
+/// Does `raw` (the text after `input:`) close its quoted scalar on the same
+/// line? Mirrors `finalize::ends_quoted_scalar`: a trailing quote with no
+/// preceding backslash is the terminator, because init prepends exactly one
+/// backslash to every user quote.
+fn line_closes_quoted_scalar(raw: &str) -> bool {
+    let Some(rest) = raw.strip_suffix('"') else {
+        return false;
+    };
+    !rest.ends_with('\\')
+}
+
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for unsupported providers.
 fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
@@ -3380,6 +3483,73 @@ mod tests {
         // A session with no holder: the resumer wins.
         let uuid2 = "1111abcd-2222-3333-4444-555566667777";
         assert!(acquire_resume_session_claim(uuid2, Some(root.path())).is_ok());
+    }
+
+    #[test]
+    fn parse_manifest_identity_reads_canonical_fields() {
+        let content = "---\n\
+            fno_id: 20260804T202518Z-cl99002-4e0236\n\
+            input: \"x-0358\"\n\
+            harness: claude\n\
+            harness_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            owner_cwd: \"/Users/x/code/wt\"\n\
+            claude_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            codex_thread_id: null\n\
+            ---\n\
+            graph_node_id: x-0358\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(
+            m.harness_session_id,
+            "c7dc6218-493a-4299-916a-330ec0b0b055"
+        );
+        assert_eq!(m.owner_cwd, "/Users/x/code/wt");
+        assert_eq!(m.fno_id, "20260804T202518Z-cl99002-4e0236");
+        // codex_thread_id: null stays empty, never "null".
+        assert_eq!(m.codex_thread_id, "");
+        // Matches on the canonical id and the legacy claude alias.
+        assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
+        assert!(!m.matches("nope"));
+        assert!(!m.matches(""));
+    }
+
+    #[test]
+    fn manifest_identity_matches_codex_legacy_alias() {
+        let m = ManifestIdentity {
+            codex_thread_id: "thread-abc".into(),
+            ..Default::default()
+        };
+        assert!(m.matches("thread-abc"));
+    }
+
+    #[test]
+    fn parse_manifest_identity_skips_forged_keys_in_input_scalar() {
+        // A `/target` argument whose text spills across lines and contains
+        // `key: value` continuations must NOT forge identity fields: the real
+        // harness / harness_session_id (written after input) must win.
+        let content = "---\n\
+            fno_id: real-run\n\
+            input: \"some feature\n\
+            harness: forged\n\
+            harness_session_id: forged-id\n\
+            \"\n\
+            harness: claude\n\
+            harness_session_id: real-id\n\
+            ---\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(m.harness_session_id, "real-id");
+        assert_eq!(m.fno_id, "real-run");
+        // The forged session id is never matchable.
+        assert!(!m.matches("forged-id"));
+    }
+
+    #[test]
+    fn parse_manifest_identity_single_line_input_does_not_open_scalar() {
+        // `input: "x-0358"` closes on the same line; the next real key parses.
+        let content = "input: \"x-0358\"\nharness: codex\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "codex");
     }
 
     #[test]
