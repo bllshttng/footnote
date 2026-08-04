@@ -3,7 +3,7 @@ name = "fno"
 # Keep in lockstep with crates/fno-agents and cli (Python). These ship as
 # separate binaries but share one release number; born-at-0.3.0 was a scaffold
 # typo, not a real version line. Protocol compat is PROTO_VERSION, not this.
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 # The mux pulls in tokio + alacritty_terminal + portable-pty, so this crate no
 # longer targets the old pure-std 1.74 floor. 1.89 matches fno-agents (the
