@@ -850,10 +850,17 @@ EOF
   # The proven harness session id. When the owned-identity verb ran, trust its
   # answer (empty when it could not prove one - the manifest then records null,
   # which is honest where a stranger's id is the bug). Only the stale-fno fail-
-  # open path falls back to the raw precedence marker chain below.
+  # open path falls back below, and even there it must NOT reproduce the leak:
+  # when two harness families disagree, raw precedence would launder an inherited
+  # CODEX_THREAD_ID into the identity, so leave it unset and default provider to
+  # claude rather than stamping the precedence winner.
   _HARNESS_SESSION="$_OWNED_SID"
   if [[ -z "$_OWNED_OUT" ]]; then
-    if [[ -n "$_codex_thread_compact" ]]; then
+    if [[ -n "$_codex_thread_compact" ]] \
+       && [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
+      PROVIDER="claude"
+      _HARNESS_SESSION=""
+    elif [[ -n "$_codex_thread_compact" ]]; then
       _HARNESS_SESSION="$_codex_thread_raw"
     elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
       _HARNESS_SESSION="$claude_transcript_id"
