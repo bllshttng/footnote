@@ -147,3 +147,6 @@ scenarios:
   - id: launch-smoke
     command: bash scenarios/launch-smoke.sh
     recorded_result: passed
+  - id: launch-evals
+    command: bash scenarios/launch-evals.sh
+    recorded_result: passed

@@ -1,0 +1,30 @@
+{
+  "prompt": "Run /fno:growth-launch to draft a campaign for the function-pack launch.",
+  "expected_output": "A campaign bundle with four role-attributed drafts, each carrying a factual and a brand verdict file, held at a founder approval gate with terminal state approved-draft-bundle and no external effect dispatched.",
+  "assertions": [
+    {
+      "id": "activation-gate",
+      "claim": "The skill refuses with the exact fno plugins activate line when growth-studio is inactive."
+    },
+    {
+      "id": "one-draft-round",
+      "claim": "Exactly one draft round runs; the four subagents are dispatched once."
+    },
+    {
+      "id": "one-revision-round",
+      "claim": "At most one revision round runs; a second failure is reported, not retried."
+    },
+    {
+      "id": "evidence-verdicts",
+      "claim": "Every returned draft carries a factual and a brand verdict file beside it."
+    },
+    {
+      "id": "terminal-state",
+      "claim": "The terminal state is approved-draft-bundle."
+    },
+    {
+      "id": "no-dispatch",
+      "claim": "No effect is dispatched; no packaged agent holds a publish-capable tool."
+    }
+  ]
+}
