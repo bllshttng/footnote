@@ -120,7 +120,8 @@ def fold_overlap_events(events: list[dict], *, since_days: int, now: datetime) -
     cutoff = now - timedelta(days=since_days)
     by_id: dict[str, dict] = {}
     for e in events:
-        data = e.get("data") if isinstance(e.get("data"), dict) else {}
+        raw_data = e.get("data")
+        data = raw_data if isinstance(raw_data, dict) else {}
         oid = data.get("observation_id")
         if not isinstance(oid, str) or not oid:
             continue
@@ -201,10 +202,14 @@ def overlap_record(
         return 0
 
     try:
-        obj = json.loads(raw) if raw.strip() else None
+        parsed = json.loads(raw) if raw.strip() else None
     except json.JSONDecodeError:
-        obj = None
-    peers = obj.get("peer_session_ids") if isinstance(obj, dict) else None
+        parsed = None
+    if not isinstance(parsed, dict):
+        result["record_reason"] = "invalid-input"
+        return result, _emit()
+    obj: dict = parsed
+    peers = obj.get("peer_session_ids")
     if not isinstance(peers, list) or not peers:
         result["record_reason"] = "invalid-input"
         return result, _emit()
@@ -269,7 +274,7 @@ def overlaps_report(
     try:
         events, coverage = _read_overlap_events(journal)
     except OverlapReadError as exc:
-        report = {"state": "unknown", "coverage": exc.coverage, "distinct_observations": None}
+        report: dict[str, Any] = {"state": "unknown", "coverage": exc.coverage, "distinct_observations": None}
         return report, 1
     now = now or datetime.now(timezone.utc)
     folded = fold_overlap_events(events, since_days=since_days, now=now)
