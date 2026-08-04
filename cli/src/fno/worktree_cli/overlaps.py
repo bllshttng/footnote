@@ -19,7 +19,7 @@ from typing import Any
 
 import typer
 
-from fno.events import ValidationError, append_event, worktree_overlap_observed
+from fno.events import ValidationError, append_event, validate, worktree_overlap_observed
 
 # Three distinct observations in a rolling 28-day window warrant a Stage 3
 # design review. Intentionally low: its only effect is recommending a pass,
@@ -105,6 +105,15 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
             coverage["malformed_lines"] += 1
             continue
         if isinstance(e, dict) and e.get("type") == "worktree_overlap_observed":
+            # A JSON-valid-but-schema-invalid overlap line would count toward
+            # recurrence while coverage reported complete. Schema-validate it
+            # and treat a rejection as a malformed line (partial coverage) so
+            # broken evidence never reads as a clean zero or a false trend.
+            try:
+                validate(e)
+            except ValidationError:
+                coverage["malformed_lines"] += 1
+                continue
             events.append(e)
     coverage["state"] = "partial" if coverage["malformed_lines"] else "complete"
     return events, coverage

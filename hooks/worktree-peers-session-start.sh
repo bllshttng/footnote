@@ -20,6 +20,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BODY_ONLY=0
 [[ "${1:-}" == "--body-only" ]] && BODY_ONLY=1
 
+# Bound shelling out so a hung CLI or a slow fold over a huge journal can never
+# block SessionStart. The helper ships beside this hook; if absent (should not
+# happen in a real install), calls fall back to unbounded best-effort.
+WT_HELPER="$SCRIPT_DIR/../scripts/lib/with-timeout.sh"
+if [[ -f "$WT_HELPER" ]]; then
+  # shellcheck source=/dev/null
+  source "$WT_HELPER"
+fi
+
 # Evaluate the predicate once in machine mode. Empty output means no fresh peer
 # (self-only, stale, missing identity, missing/malformed dir) -> stay silent.
 obs="$(bash "$SCRIPT_DIR/helpers/worktree-live-peers.sh" --machine 2>/dev/null || true)"
@@ -28,29 +37,42 @@ obs="$(bash "$SCRIPT_DIR/helpers/worktree-live-peers.sh" --machine 2>/dev/null |
 lines=('- Another session is working in this worktree. [fno-overlap-observed]')
 
 # Best-effort record + recurrence fold. A missing/old fno, a rejected payload,
-# lock contention, or an unreadable journal never changes the advisory and never
-# makes this hook exit nonzero. jq is a SessionStart dependency (the platform
-# wrappers already require it); if it is somehow absent we cannot confirm the
-# recording and surface unrecorded rather than guessing.
+# lock contention, an unreadable journal, OR a hung CLI never changes the
+# advisory and never makes this hook exit nonzero. The fno call is wall-clock
+# bounded (with_timeout, 30s) so a slow fold cannot block SessionStart; a timeout
+# surfaces as unrecorded. jq is a SessionStart dependency (the platform wrappers
+# already require it); if it is somehow absent we cannot confirm the recording
+# and surface unrecorded rather than guessing.
 record_status=""
 if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-  raw="$(printf '%s' "$obs" | fno worktree overlap-record --stdin --since 28 2>/dev/null || true)"
-  recorded="$(printf '%s' "$raw" | jq -r 'if (.recorded|type)=="boolean" then .recorded else empty end' 2>/dev/null || true)"
-  if [[ "$recorded" == "true" ]]; then
-    fold_state="$(printf '%s' "$raw" | jq -r '.fold.state // empty' 2>/dev/null || true)"
-    if [[ "$fold_state" != "complete" && "$fold_state" != "no_data" ]]; then
-      # Recorded, but the recurrence fold could not be trusted.
-      record_status="count-unavailable"
-    else
-      met="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold_met // false' 2>/dev/null || true)"
-      if [[ "$met" == "true" ]]; then
-        distinct="$(printf '%s' "$raw" | jq -r '.fold.distinct_observations // 0' 2>/dev/null || echo 0)"
-        thresh="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold // 3' 2>/dev/null || echo 3)"
-        lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
-      fi
-    fi
+  raw=""
+  raw_rc=0
+  if command -v with_timeout >/dev/null 2>&1; then
+    raw="$(printf '%s' "$obs" | with_timeout 30 fno worktree overlap-record --stdin --since 28 2>/dev/null)"; raw_rc=$?
   else
+    raw="$(printf '%s' "$obs" | fno worktree overlap-record --stdin --since 28 2>/dev/null || true)"
+  fi
+  if (( raw_rc == 124 )); then
+    # The wall-clock bound fired: treat as unrecorded, never block SessionStart.
     record_status="unrecorded"
+  else
+    recorded="$(printf '%s' "$raw" | jq -r 'if (.recorded|type)=="boolean" then .recorded else empty end' 2>/dev/null || true)"
+    if [[ "$recorded" == "true" ]]; then
+      fold_state="$(printf '%s' "$raw" | jq -r '.fold.state // empty' 2>/dev/null || true)"
+      if [[ "$fold_state" != "complete" && "$fold_state" != "no_data" ]]; then
+        # Recorded, but the recurrence fold could not be trusted.
+        record_status="count-unavailable"
+      else
+        met="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold_met // false' 2>/dev/null || true)"
+        if [[ "$met" == "true" ]]; then
+          distinct="$(printf '%s' "$raw" | jq -r '.fold.distinct_observations // 0' 2>/dev/null || echo 0)"
+          thresh="$(printf '%s' "$raw" | jq -r '.fold.recurrence_threshold // 3' 2>/dev/null || echo 3)"
+          lines+=("- recurrence reached ${distinct}/${thresh} in 28 days; run \`fno worktree overlaps --since 28\`. A Stage 3 worktree-write-lock design node is now warranted (not filed automatically).")
+        fi
+      fi
+    else
+      record_status="unrecorded"
+    fi
   fi
 else
   record_status="unrecorded"

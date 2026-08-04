@@ -308,6 +308,23 @@ def test_validate_accepts_builder_event_with_matching_digest() -> None:
     assert validate(event) is None
 
 
+def test_schema_invalid_overlap_line_is_partial_not_counted(tmp_path: Path) -> None:
+    """A JSON-valid overlap line that fails schema validation reads as a malformed
+    line (partial coverage) and is NOT counted toward recurrence."""
+    journal = tmp_path / "events.jsonl"
+    valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
+    # Same fields, but a 64-hex id that is NOT this tuple's digest -> rejected.
+    bad = json.loads(json.dumps(valid))
+    bad["data"]["observation_id"] = "f" * 64
+    journal.write_text(json.dumps(valid) + "\n" + json.dumps(bad) + "\n", encoding="utf-8")
+    report, code = overlaps_report(journal=journal, now=NOW)
+    assert report["state"] == "partial"
+    assert code == 1
+    assert report["coverage"]["malformed_lines"] == 1
+    assert report["distinct_observations"] == 1
+
+
+
 
 
 # -- carrier contract: the real Typer command accepts the carrier's invocation --
