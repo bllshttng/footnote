@@ -1814,7 +1814,16 @@ def advance(
         # the raw `.active` pointer) is what `fno dispatch` probes: with managed
         # rotation past the pointer the two launchers would otherwise probe
         # different records and disagree about the route.
-        provider_id = provider or node.get("provider") or effective_active() or ""
+        provider_id = (
+            provider
+            or node.get("provider")
+            # Scoped to the NODE's repository, like every other read in the
+            # route decision: resolving the active record from the dispatcher's
+            # own checkout would evaluate one project's quota for another
+            # project's launch.
+            or effective_active(repo_root=Path(node_cwd) if node_cwd else None)
+            or ""
+        )
         route = select_autonomous_route(
             provider_id=provider_id,
             priority=node.get("priority"),

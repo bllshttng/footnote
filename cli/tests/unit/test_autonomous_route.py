@@ -339,6 +339,41 @@ class TestAutonomousResolveRung:
         assert out["route_source"] == "ccm"
         assert out["route_retry_at"] == 9e18
 
+    def test_unrenderable_destination_falls_back_to_defer_not_the_walled_harness(
+        self, monkeypatch
+    ) -> None:
+        """A cutover that cannot render is not a cutover, but the quota verdict
+        behind it stands: falling back to the original harness would launch on
+        the very account the selector ruled out."""
+        route = ar.AutonomousRoute(
+            "cutover",
+            "exhausted-cutover",
+            source_record="ccm",
+            record_id="ghost",
+            harness="no-such-harness",
+            account_env={"X": "1"},
+            window="exhausted",
+            defer_fallback=True,
+        )
+        out = json.loads(self._resolve(monkeypatch, route).stdout)
+        assert out["route_action"] == "defer"
+        assert out["route_reason"].endswith("destination-unrenderable")
+        assert out["route_account"] == ""
+
+    def test_unrenderable_destination_on_a_nonbinding_low_stays(self, monkeypatch) -> None:
+        route = ar.AutonomousRoute(
+            "cutover",
+            "low-cutover",
+            source_record="ccm",
+            record_id="ghost",
+            harness="no-such-harness",
+            account_env={"X": "1"},
+            window="low",
+            defer_fallback=False,
+        )
+        out = json.loads(self._resolve(monkeypatch, route).stdout)
+        assert out["route_action"] == "stay"
+
     def test_bare_resolve_stays_pure(self, monkeypatch) -> None:
         import fno.dispatch as dm
         from typer.testing import CliRunner

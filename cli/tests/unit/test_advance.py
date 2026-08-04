@@ -1722,7 +1722,7 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
 
     captured: dict = {}
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda: "ccm")
+    monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "ccm")
     monkeypatch.setattr(dispatch_mod, "_next_node", lambda project: DISPATCH_NODE)
     from fno.agents import autonomous_route as ar
 

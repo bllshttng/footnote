@@ -149,15 +149,16 @@ def cmd_resolve(
         brief, brief_source = resolve_dispatch_brief(rec)
 
     route = _autonomous_route_for(rec, harness, node) if autonomous else None
+    base_harness = harness
     if route is not None and route.action == "cutover":
         # The destination owns the harness AND the command surface (codex takes
         # `$fno:target`, never a raw slash verb), so resolve the tuple FOR it
         # rather than resolving here and patching the harness afterwards.
         harness = route.harness
 
-    try:
-        out = resolve_dispatch(
-            harness=harness,
+    def _resolve(target_harness: Optional[str]) -> dict:
+        return resolve_dispatch(
+            harness=target_harness,
             substrate=substrate,
             node_id=node,
             command=command,
@@ -165,16 +166,37 @@ def cmd_resolve(
             brief=brief,
             trigger=trigger,
         )
+
+    try:
+        out = _resolve(harness)
     except DispatchResolveError as exc:
-        typer.echo(f"dispatch resolve: {exc}", err=True)
-        raise typer.Exit(code=2)
+        # A cutover whose destination cannot render is not a cutover - but the
+        # quota verdict behind it still stands, so falling back to the ORIGINAL
+        # harness would launch on the very account the selector ruled out. Carry
+        # the route's own fallback instead: defer when the window was binding,
+        # stay when it was only the proactive LOW case.
+        if route is not None and route.action == "cutover":
+            route = dataclasses.replace(
+                route,
+                action="defer" if route.defer_fallback else "stay",
+                reason=f"{route.reason}-destination-unrenderable",
+                record_id=None,
+                harness=None,
+                account_env=None,
+            )
+            try:
+                out = _resolve(base_harness)
+            except DispatchResolveError as exc2:
+                typer.echo(f"dispatch resolve: {exc2}", err=True)
+                raise typer.Exit(code=2)
+        else:
+            typer.echo(f"dispatch resolve: {exc}", err=True)
+            raise typer.Exit(code=2)
 
     out["brief_source"] = brief_source
     if autonomous:
-        # A cutover whose destination command cannot render is not a cutover: the
-        # resolve above would have exited 2, so reaching here means the whole
-        # destination tuple is good. Report the record id only; the credentials
-        # ride `fno agents spawn --dispatch-account`, never argv.
+        # Report the record id only; the credentials ride `fno agents spawn
+        # --dispatch-account`, never argv.
         out["route_action"] = route.action if route else "unknown-proceed"
         out["route_reason"] = route.reason if route else "route-unavailable"
         out["route_account"] = (route.record_id or "") if route else ""
@@ -222,7 +244,7 @@ def _autonomous_route_for(
 
         cwd = (rec or {}).get("_resolved_cwd") or (rec or {}).get("cwd")
         return select_autonomous_route(
-            provider_id=_resolve_provider_id() or "",
+            provider_id=_resolve_provider_id(cwd) or "",
             priority=(rec or {}).get("priority"),
             pinned=bool((harness or "").strip())
             or launch_is_pinned(rec, node_cwd=cwd),
@@ -247,19 +269,23 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
     return None
 
 
-def _resolve_provider_id() -> Optional[str]:
+def _resolve_provider_id(node_cwd: Optional[str] = None) -> Optional[str]:
     """The provider record a default dispatch would run on (the active one).
 
     Routes through the SAME resolver `fno config accounts list` displays, so a managed
     routing-active pointer the slot has moved past no longer evaluates one
     account's headroom for a worker that spawns on another's credential.
 
+    Scoped to the NODE's repository when one is known: a cross-project dispatch
+    that read the active record from the dispatcher's own checkout would judge
+    one project's quota for another project's launch.
+
     Best-effort: an unconfigured / unreadable providers block yields None, which
     reads as UNKNOWN headroom and proceeds (fail-open)."""
     try:
         from fno.adapters.providers.loader import effective_active
 
-        return effective_active()
+        return effective_active(repo_root=Path(node_cwd) if node_cwd else None)
     except Exception:  # noqa: BLE001 - a config read must never block a dispatch
         return None
 
@@ -385,7 +411,7 @@ def _dispatch_one(
         )
 
         route = select_autonomous_route(
-            provider_id=_resolve_provider_id() or "",
+            provider_id=_resolve_provider_id(cwd) or "",
             priority=priority,
             # The same pin rule `backlog advance` applies, so the two launchers
             # cannot disagree about whether a launch is rerouteable. An explicit

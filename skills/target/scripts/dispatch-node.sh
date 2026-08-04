@@ -331,7 +331,13 @@ for id in "${NODES[@]}"; do
   DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
   DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
   cutover_args=(); route_account=""
-  route_json="$(fno dispatch resolve --autonomous --node "$id" -J 2>/dev/null)"; route_rc=$?
+  # An explicit --route is a human's model-and-billing choice, and precedence
+  # puts every explicit pin above quota policy. Passing the configured harness
+  # makes the resolver treat this launch as pinned: it may still DEFER, but it
+  # is never rerouted onto another harness, which would discard the route.
+  route_pin_args=()
+  [[ -n "$ROUTE" ]] && route_pin_args=(--harness "$DISPATCH_PROVIDER_BASE")
+  route_json="$(fno dispatch resolve --autonomous --node "$id" "${route_pin_args[@]+"${route_pin_args[@]}"}" -J 2>/dev/null)"; route_rc=$?
   route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
   # Fail OPEN but never SILENT. A stale `fno` without --autonomous, or any
   # unreadable verdict, leaves quota routing off for this node - the pre-quota
