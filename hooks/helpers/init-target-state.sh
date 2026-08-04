@@ -832,11 +832,12 @@ EOF
 
   # Feature-detect claim --harness: a deployed fno predating the option rejects
   # it and fails claim acquisition, so pass it only when the installed CLI lists
-  # it. Otherwise omit (the claim falls to ambient - degraded, but the node is
-  # still claimed rather than left unclaimed on a stale install).
+  # it. Pin the OWNED harness, or "unknown" when none was proven - never let the
+  # claim writer fall back to ambient precedence (which would launder an
+  # inherited marker). ${...:-unknown} is always nonempty, so no bare --harness.
   _CLAIM_HARNESS_FLAG=""
-  if [[ -n "$_OWNED_HARNESS" ]] && command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
-    _CLAIM_HARNESS_FLAG="--harness $_OWNED_HARNESS"
+  if command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
+    _CLAIM_HARNESS_FLAG="--harness ${_OWNED_HARNESS:-unknown}"
   fi
 
   # The manifest `harness` field drives hook loading (doctor) and routing, so it

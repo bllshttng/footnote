@@ -878,6 +878,16 @@ def resolve_owned_identity_cmd() -> None:
 
     true_harness = resolve_session_harness()
 
+    # The hook's claude session id may arrive as TARGET_TRANSCRIPT_ID (a footnote
+    # hook input) when CLAUDE_CODE_SESSION_ID is not in the env; honor it as the
+    # claude marker so a claude hook that exposes its id only through hook input
+    # can still prove and stamp its identity.
+    env = dict(os.environ)
+    if not (env.get("CLAUDE_CODE_SESSION_ID") or "").strip() and (
+        env.get("TARGET_TRANSCRIPT_ID") or ""
+    ).strip():
+        env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
+
     def _prove(harness: str, _sid: str) -> Optional[bool]:
         # Three states: True (this process mints this harness), False (the
         # process tree resolves to a DIFFERENT harness, so this marker is
@@ -889,7 +899,7 @@ def resolve_owned_identity_cmd() -> None:
         return harness == true_harness
 
     owned = resolve_owned_identity(
-        os.environ,
+        env,
         prove=_prove,
         collide=lambda _harness, sid: row_owning_session_id(sid),
     )
