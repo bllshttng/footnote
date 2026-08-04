@@ -200,6 +200,54 @@ def test_maintain_cli_judgment_legs_propose_only(tmp_graph):
     assert all(n.get("deferred_at") is None for n in after)
 
 
+# --- AC8-UI / AC9-UI: bounded stale-idea receipt ----------------------------
+
+
+def test_maintain_stale_receipt_is_bounded(tmp_graph):
+    """AC8-UI: >10 stale ideas print a summary, the 10 oldest, an explicit cap, and one drain command."""
+    now = datetime.now(timezone.utc)
+    nodes = [
+        _node(
+            f"ab-s{i:02d}",
+            title=f"Stale idea {i}",
+            created_at=(now - timedelta(days=60 + i)).isoformat(),  # 60..71d
+        )
+        for i in range(12)
+    ]
+    _seed(tmp_graph, nodes)
+
+    result = _invoke([])
+    assert result.exit_code == 0, result.output
+    out = result.output
+
+    # Summary line with count and age range.
+    assert "stale ideas: 12" in out
+    assert "age 60-71d" in out
+    # Explicit no-silent-cap line.
+    assert "showing 10 of 12" in out
+    # The 10 OLDEST appear; the 2 youngest do not.
+    for i in range(2, 12):
+        assert f"ab-s{i:02d}" in out, f"oldest candidate ab-s{i:02d} should be listed"
+    assert "ab-s00" not in out, "youngest candidate must be capped out"
+    assert "ab-s01" not in out, "second-youngest candidate must be capped out"
+    # One drain command with --no-validity and the variadic defer.
+    assert "--no-validity" in out
+    assert "xargs fno backlog defer -R" in out
+    assert "jq -r '.stale_ideas[].node_id'" in out
+
+
+def test_maintain_stale_receipt_zero_prints_zero_line(tmp_graph):
+    """AC9-UI: zero stale ideas still prints a zero line and emits no drain command."""
+    now = datetime.now(timezone.utc)
+    # A fresh idea under the staleness threshold is NOT stale.
+    _seed(tmp_graph, [_node("ab-fresh01", title="Fresh", created_at=now.isoformat())])
+
+    result = _invoke([])
+    assert result.exit_code == 0, result.output
+    assert "stale ideas: 0" in result.output
+    assert "xargs fno backlog defer" not in result.output
+
+
 def test_maintain_wip_count_includes_live_epic_promoted_children(
     tmp_graph, monkeypatch
 ):

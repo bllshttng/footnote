@@ -8754,11 +8754,30 @@ def cmd_maintain(
             f"  rollup candidate {nid} -> {epic_id} ({score:.2f}): "
             f"fno backlog update {nid} --parent {epic_id}"
         )
-    for s in stale:
+    # Bounded stale-idea receipt: the per-candidate echo scaled to one line per
+    # stale idea (hundreds on a mature graph), swamping the one-screen report.
+    # Summary + 10 oldest + one drain command instead. The drain lands the whole
+    # batch in one locked write via the variadic `defer` (one read/backup/write/
+    # render regardless of id count); --no-validity skips the analyzer call that
+    # made an earlier `maintain -J` hang past 120s.
+    if stale:
+        ages = sorted(s.age_days for s in stale)
+        oldest = sorted(stale, key=lambda s: s.age_days, reverse=True)[:10]
         typer.echo(
-            f"  stale idea {s.node_id} ({s.age_days}d): "
-            f"fno backlog defer {s.node_id} --reason 'stale >{staleness_days}d, drained by maintain'"
+            f"  stale ideas: {len(stale)} (age {ages[0]}-{ages[-1]}d) - "
+            f"drain in one locked write:"
         )
+        for s in oldest:
+            typer.echo(f"    {s.node_id} ({s.age_days}d)")
+        if len(stale) > 10:
+            typer.echo(f"    (showing 10 of {len(stale)} oldest)")
+        typer.echo(
+            f"    fno backlog maintain --no-validity -J "
+            f"| jq -r '.stale_ideas[].node_id' "
+            f"| xargs fno backlog defer -R 'stale >{staleness_days}d, drained by maintain'"
+        )
+    else:
+        typer.echo("  stale ideas: 0")
     if overflow:
         count, cap = overflow
         typer.echo(
