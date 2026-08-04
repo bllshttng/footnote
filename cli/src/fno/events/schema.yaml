@@ -37,7 +37,7 @@ envelope:
       # daemon.rs). Per-agent worker sources (worker:<id>, stream-worker:<id>) are
       # pattern sources, validated by both the Python and bash validators via the
       # `patterns` list below (previously only the parity-script layer checked them).
-      enum: [target, megawalk, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
+      enum: [target, megatron, fno-loop, hook, subagent, migration, test, backlog, daemon, observer, skill_diff, active-backlog, approvals]
       patterns:
         - '^(worker|stream-worker):.+$'
       description: "Producer identity; consumers route on this. A fixed-string source from the enum, or a per-agent worker matching one of `patterns`."
@@ -64,7 +64,7 @@ event_types:
 
   - name: phase_transition
     description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
-    sources: [target, megawalk, fno-loop, hook]
+    sources: [target, fno-loop, hook]
     data:
       required: [gate_bearing, phase, nonce, session_id]
       properties:
@@ -83,7 +83,7 @@ event_types:
         session_id:
           type: string
           description: "target or megawalk session id."
-    consumers: [hooks/target-stop-hook.sh, hooks/megawalk-stop-hook.sh]
+    consumers: [hooks/target-stop-hook.sh]
 
   - name: child_promise
     description: "A target child session emitted <promise> at COMPLETE. Megawalk verifies before advancing."
@@ -413,7 +413,7 @@ event_types:
 
   - name: subagent_spawn
     description: "Existing trust-boundary event; retained verbatim for back-compat."
-    sources: [hook, target, megawalk]
+    sources: [hook, target]
     data:
       required: [agent_name, provider_id, cli]
       properties:
@@ -424,7 +424,7 @@ event_types:
 
   - name: subagent_complete
     description: "Existing trust-boundary event; retained verbatim."
-    sources: [hook, target, megawalk]
+    sources: [hook, target]
     data:
       required: [agent_name]
       properties:
@@ -737,7 +737,7 @@ event_types:
 
   - name: claim_acquired
     description: "A work-claim was acquired on a key. First write to .fno/claims/<key>.lock."
-    sources: [fno-loop, target, megawalk, megatron, hook]
+    sources: [fno-loop, target, megatron, hook]
     data:
       required: [key, holder, pid, host, acquired_at]
       properties:
@@ -766,7 +766,7 @@ event_types:
 
   - name: claim_released
     description: "A claim was released by its owner. Lock file unlinked."
-    sources: [fno-loop, target, megawalk, megatron, hook]
+    sources: [fno-loop, target, megatron, hook]
     data:
       required: [key, holder, pid, host, acquired_at, duration_held_ms]
       properties:
@@ -789,7 +789,7 @@ event_types:
 
   - name: claim_refreshed
     description: "A TTL claim's expires_at was extended by its owner."
-    sources: [fno-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, expires_at]
       properties:
@@ -812,7 +812,7 @@ event_types:
 
   - name: claim_stale_reclaimed
     description: "A stale claim was recovered by a new holder. Old file archived to .expired/."
-    sources: [fno-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, previous_holder, previous_pid]
       properties:
@@ -858,7 +858,7 @@ event_types:
 
   - name: claim_idempotent_reacquired
     description: "Same holder re-acquired a key it already owns (resume/restart path)."
-    sources: [fno-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megatron]
     data:
       required: [key, holder, pid, host, acquired_at, previous_acquired_at]
       properties:
@@ -881,7 +881,7 @@ event_types:
 
   - name: claim_clock_skew_rejected
     description: "A refresh was rejected because computed expires_at landed in the past."
-    sources: [fno-loop, target, megawalk, megatron]
+    sources: [fno-loop, target, megatron]
     data:
       required: [key, now_ms, expires_at, reason]
       properties:
@@ -897,7 +897,7 @@ event_types:
 
   - name: session_satisfied
     description: "Signals that a target session's work is complete; alternative to <promise> tag emission. The stop hook scans for these and may auto-release the Stop hook when a fresh event matches the current session and the three-factor gates are still satisfied. Data.source is the constrained subsystem that produced the signal (check_pr, pr_merge, ci_watcher, fno_gate_manual, delegated); envelope source is the producer identity."
-    sources: [target, megawalk, fno-loop, hook]
+    sources: [target, fno-loop, hook]
     data:
       required: [source, reason, session_id, gate_state_hash]
       properties:
@@ -1785,7 +1785,7 @@ event_types:
         message:
           type: string
           description: "Human-readable termination message."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: mail_escalation
     description: "Send-time human escalation for mail that needs a human now: a --kind question (unconditional, Locked Decision 7) or a live-miss to an operator-attended recipient (declared at registration). Surfaces in the needs-me mux overlay so a human at the mux sees the nudge even when the OS notification was missed, debounced, or unavailable. Emitted from the shared escalation helper under the same per-(sender,recipient) debounce as the notifier; one event per non-debounced escalation."
@@ -1913,7 +1913,7 @@ event_types:
         title:
           type: string
           description: "Optional human-readable title of the unit."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: node_failed
     description: "Synthesized when a dispatched session exits without a TerminationReason event: either immediately by the per-unit watchdog, or when dead-row GC reaps a convention-named target/reconcile worker that never terminated (x-5c08). Group-2 walk and dispatcher policy count both toward the same consecutive-failure streak."
@@ -1939,7 +1939,7 @@ event_types:
         reason:
           type: string
           description: "Machine-readable reconstruction reason when the failure came from a later lifecycle seam."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: walk_paused
     description: "Emitted by the unified loop runtime (run_loop) when walk policy requests a pause before loop_terminated(NoProgress). Carries the policy name and detail so operators can diagnose why the walk stopped early. Always followed by loop_terminated{reason: NoProgress} in the same walk. The legacy walker_paused kind (megawalk.py) maps to this."
@@ -1960,7 +1960,7 @@ event_types:
         units_closed:
           type: integer
           description: "Number of units that reached the close step before the pause."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: node_closed
     description: "Emitted by the unified loop runtime after EVERY queue.close() call, including resume-guard closes (no dispatch occurred), normal termination closes, and per-unit cap parks. Provides per-unit close visibility in the event stream so TUI and progress-line consumers see close outcomes without polling queue state. The legacy node_complete and node_parked kinds (megawalk.py) map to this."
@@ -1987,7 +1987,7 @@ event_types:
         iterations_used:
           type: integer
           description: "Walk iteration count at close time."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: loop_terminated
     description: "The loop runtime's walk-level terminal event. Distinct from `termination` (a session's terminal event emitted by loop-check)."
@@ -2012,7 +2012,7 @@ event_types:
         session_id:
           type: string
           description: "Optional session correlation key (populated when termination is triggered mid-unit)."
-    consumers: [operator, megawalk]
+    consumers: [operator]
 
   - name: delegated
     description: "Emitted by handoff.sh when a target session successfully delegates its remaining pipeline to a fresh successor session. Records the full lineage chain: node, from/to session pair, boundary type, and generation number. The terminal-session resolution rule (sec 2.5) follows these events to judge promise/completion for megawalk pre-advance verification."
@@ -2041,7 +2041,7 @@ event_types:
         harness:
           type: string
           description: "Owning harness of the delegating (parent) lineage (codex/claude/gemini). Namespaces the successor name (tgt-<node>-<harness>-gN) and scopes the generation count per (node, harness) so two harnesses cannot collide on one registry name (x-3e70). Absent on pre-change events."
-    consumers: [hooks/megawalk-stop-hook.sh, operator]
+    consumers: [operator]
 
   - name: handoff_failed
     description: "Emitted by handoff.sh when the ordered succession protocol fails after any state mutation. Signals that the parent session has re-acquired its node claim and restored its target-state.md so it can continue in-session. The reason field indicates the failure stage."
