@@ -263,7 +263,11 @@ def _emit_pack_rows(repo_root: Path) -> int:
             print(f"ERROR: pack manifest {pack_yaml}: {exc}", file=sys.stderr)
             return 1
         if not isinstance(data, dict):
-            continue
+            print(
+                f"ERROR: pack manifest {pack_yaml} is not a mapping (got {type(data).__name__})",
+                file=sys.stderr,
+            )
+            return 1
         for skill in data.get("skills") or []:
             if not isinstance(skill, dict):
                 continue

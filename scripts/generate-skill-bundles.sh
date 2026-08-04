@@ -87,10 +87,11 @@ if ! "${PY[@]}" "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
   exit 1
 fi
 
-# pack-marker check: a bundled pack destination carries a `pack:` key in its
-# frontmatter. Used by the collision guard so the generator never clobbers a
-# hand-authored (non-pack) file or skill. Returns 0 when the marker is present.
-_pack_marker_present() {
+# pack-marker check: a bundled pack destination carries a `pack:` key whose
+# value equals the DECLARING pack id. The collision guard uses this so the
+# generator never clobbers a hand-authored file, a different pack's output, or
+# a mismatched-ownership destination. Returns 0 when the marker value matches.
+_pack_marker_value() {
   local target="$1"
   local file=""
   if [[ -f "$target" ]]; then
@@ -98,9 +99,16 @@ _pack_marker_present() {
   elif [[ -d "$target" && -f "$target/SKILL.md" ]]; then
     file="$target/SKILL.md"
   else
-    return 1
+    return 0  # no file to read -> empty value
   fi
-  awk 'NR==1 && /^---[[:space:]]*$/ {f=1; next} f && /^---[[:space:]]*$/ {exit} f && /^pack:/ {found=1; exit} END {exit !found}' "$file"
+  awk 'NR==1 && /^---[[:space:]]*$/ {f=1; next} f && /^---[[:space:]]*$/ {exit} f && /^pack:/ {sub(/^pack:[[:space:]]*/,""); gsub(/["'\'']/,""); print; exit}' "$file"
+}
+
+_pack_marker_matches() {
+  local target="$1" declaring="$2"
+  local marker
+  marker="$(_pack_marker_value "$target")"
+  [[ "$marker" == "$declaring" ]]
 }
 
 # Iterate manifest entries: <type>\t<skill>\t<source>\t<dest>\t<meta_json>
@@ -129,11 +137,13 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
     [[ -f "$SRC_PATH" ]] || { echo "ERROR: source not found: $SOURCE" >&2; exit 1; }
   fi
 
-  # Collision guard: refuse to overwrite an existing destination that is not
-  # already a bundled pack output (no `pack:` marker). A pack skill named
-  # `target` must never clobber the plugin's own driver skill.
-  if [[ "$TYPE" == pack-* && -e "$DST_PATH" ]] && ! _pack_marker_present "$DST_PATH"; then
-    echo "ERROR: refusing to overwrite $DST_PATH: existing path lacks a 'pack:' marker (not a bundled pack output)" >&2
+  # Collision guard: refuse to overwrite an existing destination unless its
+  # `pack:` marker matches the declaring pack id. A hand-authored file (no
+  # marker), a different pack's output, or a mismatched-ownership destination
+  # all refuse - so a pack skill named `target` can never clobber the plugin's
+  # own driver skill, and one pack can never overwrite another's bundle.
+  if [[ "$TYPE" == pack-* && -e "$DST_PATH" ]] && ! _pack_marker_matches "$DST_PATH" "$SKILL"; then
+    echo "ERROR: refusing to overwrite $DST_PATH: existing path's 'pack:' marker does not match declaring pack '$SKILL'" >&2
     exit 1
   fi
 

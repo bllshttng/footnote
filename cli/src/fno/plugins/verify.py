@@ -669,15 +669,28 @@ def _agent_binding_conditions(manifest: PackManifest, base: Path) -> list[Condit
                 )
             )
             continue
-        raw_tools = frontmatter.get("tools")
+        if "tools" not in frontmatter:
+            # An omitted tools field inherits the harness default tool set
+            # (shell, web, the lot), so it is unbounded, not vacuously bounded.
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-tools-bounded:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail="no tools frontmatter; the agent would inherit the harness default tool set",
+                )
+            )
+            continue
+        raw_tools = frontmatter["tools"]
         if not raw_tools:
             conditions.append(
                 Condition(
                     ConditionFamily.SCHEMA,
                     f"agent-tools-bounded:{agent.id}",
                     checked=True,
-                    result=EvidenceResult.PASSED,
-                    detail="no tools declared; vacuously bounded",
+                    result=EvidenceResult.FAILED,
+                    detail="empty tools list; the agent would inherit the harness default tool set",
                 )
             )
             continue

@@ -293,6 +293,24 @@ def test_agent_unbounded_tools_fail(tmp_path):
         assert offender in detail
 
 
+def test_agent_with_no_tools_frontmatter_fails(tmp_path):
+    # An omitted tools field inherits the harness default tool set, so it is
+    # unbounded, not vacuously bounded.
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=_AGENT_ROLE)
+    pack_dir = _pack_with_agent(tmp_path, agent)
+    target = pack_dir / "agents" / "growth-marketer.md"
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(
+        "---\nname: growth-marketer\npack: growth-studio\nrole: marketing\n---\n\nbody\n",
+        encoding="utf-8",
+    )
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    cond = by_name["agent-tools-bounded:growth-marketer"]
+    assert cond.result is EvidenceResult.FAILED
+    assert "inherit the harness default" in (cond.detail or "")
+
+
 # AC7-ERR: a declared evaluator whose command does not resolve blocks verify.
 
 
