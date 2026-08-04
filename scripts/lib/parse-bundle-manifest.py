@@ -279,6 +279,15 @@ def _emit_pack_rows(repo_root: Path) -> int:
                 file=sys.stderr,
             )
             return 1
+        # The plugin directory name and the manifest id must agree, or the
+        # build-time bundle identity and the runtime activation identity diverge.
+        manifest_id = data.get("id")
+        if manifest_id != pack_id:
+            print(
+                f"ERROR: pack directory {pack_id!r} does not match manifest id {manifest_id!r}",
+                file=sys.stderr,
+            )
+            return 1
         for skill in data.get("skills") or []:
             if not isinstance(skill, dict):
                 continue

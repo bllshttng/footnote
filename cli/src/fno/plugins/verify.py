@@ -669,6 +669,37 @@ def _agent_binding_conditions(manifest: PackManifest, base: Path) -> list[Condit
                 )
             )
             continue
+        # The copied frontmatter's identity fields must match the declaration
+        # and the pack, so a different bounded agent cannot pass role binding and
+        # be bundled verbatim under another agent's id.
+        fm_name = str(frontmatter.get("name"))
+        fm_pack = str(frontmatter.get("pack"))
+        fm_role = frontmatter.get("role")
+        role_ok = agent.role is None or str(fm_role) == agent.role.id
+        if fm_name == agent.id and fm_pack == manifest.id and role_ok:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-frontmatter-identity:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"frontmatter name/pack/role match the declaration",
+                )
+            )
+        else:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-frontmatter-identity:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=(
+                        f"frontmatter identity mismatch: name={fm_name!r} pack={fm_pack!r} "
+                        f"role={fm_role!r} vs declaration id={agent.id!r} pack={manifest.id!r} "
+                        f"role={agent.role.id if agent.role else None!r}"
+                    ),
+                )
+            )
         if "tools" not in frontmatter:
             # An omitted tools field inherits the harness default tool set
             # (shell, web, the lot), so it is unbounded, not vacuously bounded.

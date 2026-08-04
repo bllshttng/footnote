@@ -249,6 +249,7 @@ def inspect_command(
                 {
                     "pack_id": manifest.id,
                     "version": manifest.version,
+                    "manifest_path": pack.manifest_path,
                     "installed_digest": pack.pack_digest,
                     "digest_matches_install": digest_matches,
                     "declared_roles": declared_roles,

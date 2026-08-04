@@ -34,7 +34,9 @@ present unconditionally at session start, activation is what makes it permitted.
 ## 2. Objective intake
 
 Take the free-text objective and a campaign slug from the invocation.
-Create `.fno/campaigns/<slug>/`.
+Reject the slug if it is empty or contains a path separator, a traversal
+component (`..`), or a NUL: it becomes a filesystem path under
+`.fno/campaigns/`. Create `.fno/campaigns/<slug>/`.
 If that directory already exists, refuse and name it rather than interleaving
 into a prior campaign.
 
@@ -43,7 +45,7 @@ pack is the in-tree dogfood copy or an installed pack in another project:
 
 ```bash
 PACK_ROOT="$(dirname "$(fno plugins inspect growth-studio --json \
-  | python3 -c 'import json,sys;print(json.load(sys.stdin)["source_path"])')")"
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["manifest_path"])')")"
 ```
 
 The roles read two artifacts, both resolved through the project's context
@@ -74,19 +76,23 @@ MIXED_REVISION):
 
 ```bash
 REV="$(fno roles show marketing --json \
-  | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[-1]["snapshot_revision"])')"
+  | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[-1]["raw_definition"]["snapshot_revision"])')"
 fno roles context --json --snapshot "$REV" > .fno/campaigns/<slug>/catalog.json
 ```
 
 For each role, write a capability-facts JSON covering that role's
 `required_capabilities` (marketing: `growth.draft`, `growth.research`;
 communications: `growth.draft`, `growth.statement`; design: `growth.render`,
-`growth.accessibility`; social: `growth.draft`, `growth.schedule`). Each fact
-carries every required field, scoped to this work order:
+`growth.accessibility`; social: `growth.draft`, `growth.schedule`). The grant
+is the founder's: running `/fno:growth-launch` authorizes this campaign's work
+order, and each fact RECORDS that authorization (`source_id` names the founder's
+launch, `available: true`); it does not assert a capability from the manifest.
+If the work order is not authorized, refuse before dispatch. Each fact carries
+every required field, scoped to this work order:
 
 ```json
 [{"capability": "growth.draft", "available": true,
-  "source_id": "growth-launch/<slug>", "snapshot_revision": "<REV>",
+  "source_id": "founder-launch/<slug>", "snapshot_revision": "<REV>",
   "work_order_scope": {"node_id": "<slug>", "attempt_id": "<attempt>", "role_id": "<role>"}}]
 ```
 
@@ -115,8 +121,9 @@ Dispatch the roles that resolved, concurrently via the Task tool:
   contrast note)
 - `@fno:growth-social` producing `social-post.md` and `social-calendar.md`
 
-Hand each subagent the objective, the campaign directory, and the two asset
-paths.
+Hand each subagent only the asset paths its role resolved: design gets
+brand-voice only; marketing, communications, and social get product-truth and
+brand-voice.
 One round.
 A subagent that returns `FAILED` or `BLOCKED` is recorded as such beside its
 draft and the campaign continues to a partial bundle; it does not abort the
@@ -150,10 +157,11 @@ convergence.
 
 Print the bundle inventory, the per-draft evidence status, and one sentence
 naming exactly what approval would authorize and what it would not.
-The terminal state is `approved-draft-bundle`.
-Do not dispatch any effect.
-The skill holds no tool that could: the subagents cannot publish, and this
-orchestrator only composes their drafts and the evaluator verdicts.
+The run ends in an `approval-requested` state; it records no approval and
+dispatches no effect. The founder's explicit approval is recorded out of band
+and only then does the bundle become `approved-draft-bundle`.
+The skill holds no tool that could dispatch: the subagents cannot publish, and
+this orchestrator only composes their drafts and the evaluator verdicts.
 
 ## Exit states
 
@@ -165,4 +173,5 @@ orchestrator only composes their drafts and the evaluator verdicts.
   failing verdict and excluded from the approvable set. Exit zero; the founder
   decides.
 - Success: the bundle inventory, per-draft evidence, and the approval prompt.
-  Terminal state `approved-draft-bundle`.
+  Terminal state `approval-requested` (becomes `approved-draft-bundle` only on
+  the founder's out-of-band approval).
