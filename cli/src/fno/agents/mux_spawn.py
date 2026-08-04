@@ -248,6 +248,20 @@ def happy_pane_argv(
     file, so routed values must use its ``--claude-env`` interface instead. It
     consumes ``--session-id`` the same way: the session id belongs to happy on
     this route and is discovered after the spawn, never pinned before it.
+
+    These refusals are on the ONLY reachable happy path, so the usual "a guard
+    on one of N paths is decorative" audit does not apply here and does not need
+    re-running: this function has exactly one production caller (the
+    ``resolved_monitor == "happy"`` branch below), there is no happy launcher in
+    the Rust crates or the shell dispatchers, and the ``--monitor happy`` flag
+    itself already requires pane + claude + zai and refuses a separate
+    ``--model``. Re-verify with an anchored sweep (``grep -rn happy_pane_argv``
+    over explicit trees, not an ``rg`` glob exclude) if that branch ever grows a
+    sibling.
+
+    The carry below is lossless by construction -- it iterates the route, so it
+    cannot drop a key -- and the test suite holds it to set equality against a
+    full seven-key route, not just the endpoint pair.
     """
     if any(arg == "--settings" or arg.startswith("--settings=") for arg in argv):
         raise DispatchAskError(
