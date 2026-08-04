@@ -79,11 +79,15 @@ def _harness_name_of(proc: psutil.Process) -> Optional[str]:
     """
     for cand, is_cmdline in _candidate_strings(proc):
         low = cand.lower()
+        # Claude matches by substring on name/exe ONLY (its versioned binary
+        # embeds the name in the exe path and the basename alone may not carry
+        # it), never on a cmdline entry - a dedicated test pins that a wrapper
+        # path on the command line does not prove claude.
         if not is_cmdline and "claude" in low:
             return "claude"
-        # Match the executable/script BASENAME only, never an intermediate path
-        # segment: an ancestor running /tmp/codex/wrapper.sh must not prove
-        # codex. The stem drops one extension (gemini.js -> gemini).
+        # Other harnesses match the executable/script BASENAME token (stem drops
+        # one extension, gemini.js -> gemini); intermediate path segments never
+        # count, so /tmp/codex/wrapper.sh does not prove codex.
         basename = low.rsplit("/", 1)[-1]
         if basename in _SEGMENT_TOKENS:
             return basename
