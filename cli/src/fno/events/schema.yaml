@@ -1108,6 +1108,36 @@ event_types:
           description: "Count of completed filed-node lines swept to inbox-archive.md this pass."
     consumers: [audit]
 
+  - name: worktree_overlap_observed
+    description: "A SessionStart carrier observed at least one other session with a fresh worktree-local liveness stamp. Advisory-only: it proves concurrent recent activity, not simultaneous writes, ownership, or harm. Written to the machine-global journal so it survives worktree cleanup; consumed by `fno worktree overlaps` for recurrence reporting. Harness identity may ride as optional diagnostic metadata but never shapes the predicate, the observation id, or the recurrence threshold."
+    sources: [hook]
+    data:
+      required: [observation_id, repository_key, worktree_key, observer_session_id, peer_session_ids, live_window_seconds]
+      properties:
+        observation_id:
+          type: string
+          description: "Deterministic sha256 digest of repository_key, worktree_key, observer_session_id, and the sorted peer_session_ids. The dedup and recurrence key."
+        repository_key:
+          type: string
+          description: "Normalized absolute common Git directory; a local machine identity for the repository, not current ownership truth."
+        worktree_key:
+          type: string
+          description: "Normalized absolute worktree Git administrative directory."
+        observer_session_id:
+          type: string
+          description: "The session receiving the advisory."
+        peer_session_ids:
+          type: array
+          items: { type: string }
+          description: "Sorted non-empty fresh peer identities observed in the fixed liveness window."
+        live_window_seconds:
+          type: integer
+          description: "The reader window that classified the peers as fresh (120)."
+        harness:
+          type: string
+          description: "Optional diagnostic: the observer harness (claude|codex). Never participates in the predicate, observation id, or recurrence threshold."
+    consumers: [fno worktree overlaps]
+
 # ---------------------------------------------------------------------------
 # W7 additive: Rust fno-agents supervisor event kinds.
 # These are emitted by the Rust daemon/workers to events.jsonl with kind

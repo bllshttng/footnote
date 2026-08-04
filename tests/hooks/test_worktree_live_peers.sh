@@ -40,6 +40,24 @@ run_carrier() {
 
 reset_live() { rm -rf "$LIVE_DIR"; mkdir -p "$LIVE_DIR"; }
 
+# A fno shim on PATH makes carrier recording deterministic and fast (the real
+# fno may be absent, old, or slow) and keeps the global journal unpolluted. Each
+# shim emulates `fno worktree overlap-record --stdin` and echoes one fixed
+# result line, ignoring its stdin.
+FNO_SHIM_DIR="$TMP_DIR/fno-shim"
+make_fno_shim() {
+  mkdir -p "$FNO_SHIM_DIR"
+  cat >"$FNO_SHIM_DIR/fno" <<EOF
+#!/usr/bin/env bash
+cat >/dev/null 2>&1 || true
+printf '%s\n' '$1'
+exit 0
+EOF
+  chmod +x "$FNO_SHIM_DIR/fno"
+}
+# Default: recording failed (lock contention / old CLI) -> unrecorded marker.
+make_fno_shim '{"recorded":false,"record_reason":"lock-timeout"}'
+
 # The production defaults are a coupled contract: the writer must refresh
 # before the reader can classify an active session as stale.
 writer_throttle="$(sed -n 's/^LIVE_THROTTLE=\([0-9][0-9]*\)$/\1/p' "$HEARTBEAT")"
@@ -190,16 +208,91 @@ else
   fail "unreadable directory: rc=$rc out=[$out]"
 fi
 
-# Claude's direct carrier adds the same hygiene section around the shared note.
+# Claude's direct carrier renders the advisory; with recording failing it adds
+# the visible unrecorded marker and still exits zero.
 reset_live
 touch "$LIVE_DIR/peer-session"
-out="$(run_carrier self-session 2>/dev/null)"; rc=$?
+out="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
+      bash "$CARRIER" 2>/dev/null)"; rc=$?
 if [[ "$rc" -eq 0 && "$out" == *"## Worktree hygiene"* \
-      && "$out" == *"Another session is working in this worktree."* ]]; then
-  pass "Claude carrier renders the shared advisory"
+      && "$out" == *"Another session is working in this worktree."* \
+      && "$out" == *"[fno-overlap-unrecorded]"* ]]; then
+  pass "Claude carrier renders advisory + unrecorded marker, exits zero"
 else
   fail "Claude carrier: rc=$rc out=[$out]"
 fi
+
+# AC1-HP (structured): --machine mode emits one JSON observation with the fresh
+# peer, the worktree/repo Git identity, and the 120s window.
+reset_live
+touch "$LIVE_DIR/peer-session"
+mout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | CODEX_THREAD_ID= bash "$HELPER" --machine 2>/dev/null)"; mrc=$?
+if [[ "$mrc" -eq 0 \
+      && "$(printf '%s' "$mout" | jq -r '.peer_session_ids[0] // empty' 2>/dev/null)" == "peer-session" \
+      && "$(printf '%s' "$mout" | jq -r '.live_window_seconds // empty' 2>/dev/null)" == "120" \
+      && -n "$(printf '%s' "$mout" | jq -r '.worktree_git_dir // empty' 2>/dev/null)" \
+      && -n "$(printf '%s' "$mout" | jq -r '.repository_common_dir // empty' 2>/dev/null)" ]]; then
+  pass "machine mode emits a structured peer observation"
+else
+  fail "machine mode observation: rc=$mrc out=[$mout]"
+fi
+
+# AC3-EDGE: machine mode is silent without a fresh peer (no evidence manufactured).
+reset_live
+touch "$LIVE_DIR/self-session"
+mout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | CODEX_THREAD_ID= bash "$HELPER" --machine 2>/dev/null)"; mrc=$?
+if [[ "$mrc" -eq 0 && -z "$mout" ]]; then
+  pass "machine mode is silent without a fresh peer"
+else
+  fail "machine mode silence: rc=$mrc out=[$mout]"
+fi
+
+# Carrier --body-only omits the section header (the Codex wrapper owns it).
+reset_live
+touch "$LIVE_DIR/peer-session"
+bout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
+      bash "$CARRIER" --body-only 2>/dev/null)"; brc=$?
+if [[ "$brc" -eq 0 && "$bout" != *"## Worktree hygiene"* \
+      && "$bout" == *"fno-overlap-observed"* ]]; then
+  pass "body-only carrier omits the header"
+else
+  fail "body-only carrier: rc=$brc out=[$bout]"
+fi
+
+# AC5-UI: a recorded observation that crosses recurrence surfaces the notice.
+make_fno_shim '{"recorded":true,"observation_id":"x","fold":{"state":"complete","distinct_observations":3,"recurrence_threshold":3,"recurrence_threshold_met":true}}'
+reset_live
+touch "$LIVE_DIR/peer-session"
+tout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
+      bash "$CARRIER" 2>/dev/null)"; trc=$?
+if [[ "$trc" -eq 0 && "$tout" == *"recurrence reached 3/3"* \
+      && "$tout" == *"fno worktree overlaps --since 28"* \
+      && "$tout" != *"[fno-overlap-unrecorded]"* ]]; then
+  pass "recurrence crossing surfaces the threshold notice"
+else
+  fail "recurrence notice: rc=$trc out=[$tout]"
+fi
+
+# AC6-ERR: append succeeded but the fold degraded -> count-unavailable, not unrecorded.
+make_fno_shim '{"recorded":true,"observation_id":"x","fold":{"state":"partial"}}'
+reset_live
+touch "$LIVE_DIR/peer-session"
+cout="$(printf '{"cwd":"%s","session_id":"self-session"}' "$PROJECT" \
+  | FNO_HOME="$TMP_DIR/fno-home" PATH="$FNO_SHIM_DIR:$PATH" \
+      bash "$CARRIER" 2>/dev/null)"; crc=$?
+if [[ "$crc" -eq 0 && "$cout" == *"[fno-overlap-count-unavailable]"* \
+      && "$cout" != *"[fno-overlap-unrecorded]"* ]]; then
+  pass "degraded fold surfaces count-unavailable, not unrecorded"
+else
+  fail "count-unavailable: rc=$crc out=[$cout]"
+fi
+# Restore the default unrecorded shim for any later carrier checks.
+make_fno_shim '{"recorded":false,"record_reason":"lock-timeout"}'
 
 # Codex's existing wrapper calls the same helper from its hygiene block.
 WRAPPER_HOME="$TMP_DIR/home"

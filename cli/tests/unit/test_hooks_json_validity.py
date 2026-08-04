@@ -174,8 +174,13 @@ def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
 
 
 def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> None:
-    """Both harness manifests must reach the same read-only peer predicate."""
+    """Both harness manifests reach ONE carrier, which owns the predicate.
+
+    Claude registers the carrier directly; the Codex wrapper delegates to the
+    same carrier (--body-only) rather than reimplementing the helper invocation,
+    so there is exactly one observation path for both harnesses."""
     helper = "helpers/worktree-live-peers.sh"
+    carrier = "worktree-peers-session-start.sh"
     claude_commands = [
         hook["command"]
         for registration in json.loads(HOOKS_JSON.read_text(encoding="utf-8"))[
@@ -183,7 +188,7 @@ def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> N
         ]["SessionStart"]
         for hook in registration.get("hooks", [])
     ]
-    assert sum("worktree-peers-session-start.sh" in c for c in claude_commands) == 1
+    assert sum(carrier in c for c in claude_commands) == 1
 
     codex_commands = [
         hook["command"]
@@ -193,8 +198,13 @@ def test_worktree_peer_notice_is_carried_by_claude_and_codex_sessionstart() -> N
         for hook in registration.get("hooks", [])
     ]
     assert sum("hooks/session-start.sh" in c for c in codex_commands) == 1
-    for carrier in ("worktree-peers-session-start.sh", "session-start.sh"):
-        assert helper in (REPO_ROOT / "hooks" / carrier).read_text(encoding="utf-8")
+    # The carrier owns the predicate; the Codex wrapper delegates to the carrier
+    # and must not call the helper itself (one observation path, not two).
+    carrier_src = (REPO_ROOT / "hooks" / carrier).read_text(encoding="utf-8")
+    wrapper_src = (REPO_ROOT / "hooks" / "session-start.sh").read_text(encoding="utf-8")
+    assert helper in carrier_src
+    assert carrier in wrapper_src
+    assert helper not in wrapper_src
 
 
 def test_worktree_activity_writer_is_carried_by_both_posttooluse_manifests() -> None:

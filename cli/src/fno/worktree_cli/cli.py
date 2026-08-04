@@ -329,3 +329,59 @@ def policy(
     if pol.policy != "never":
         typer.echo(f"base={pol.base}")
     raise typer.Exit(0)
+
+
+# --- overlap telemetry (x-cd4d) -------------------------------------------
+
+
+@app.command("overlap-record", hidden=True)
+def overlap_record_cmd(
+    since: int = typer.Option(
+        28,
+        "--since",
+        help="Fold window (days) for the recurrence count returned after recording.",
+    ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read one observation from stdin (the only input mode; the carrier contract).",
+    ),
+) -> None:
+    """Record one worktree overlap observation read from stdin (carrier-facing).
+
+    Reads the machine-mode JSON from the SessionStart peer helper, appends one
+    typed event to the machine-global journal under a 250 ms lock bound, and
+    folds the recurrence window. Always exits 0: recording and fold status ride
+    on the emitted JSON line; the carrier renders advisories and keeps exit-zero.
+    ``--stdin`` is the carrier's invocation contract; the verb reads stdin
+    unconditionally (it is the only input mode).
+    """
+    from fno.worktree_cli.overlaps import overlap_record
+
+    del stdin  # accepted for the carrier contract; stdin is the only input mode
+    _result, code = overlap_record(since)
+    raise typer.Exit(code=code)
+
+
+@app.command("overlaps")
+def overlaps_cmd(
+    since: int = typer.Option(28, "--since", help="Rolling window in days (default 28)."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
+) -> None:
+    """Report deduplicated worktree overlap observations (read-only).
+
+    Deduplicates by observation id over the machine-global event journal so
+    repeated deliveries of one observation never inflate recurrence. Exits 0 for
+    a clean or empty journal; exits nonzero when evidence is unreadable or
+    partial so incomplete coverage is never mistaken for zero.
+    """
+    import json as _json
+
+    from fno.worktree_cli.overlaps import overlaps_report, render_overlaps_text
+
+    report, code = overlaps_report(since, json_out=json_out)
+    if json_out:
+        typer.echo(_json.dumps(report, separators=(",", ":"), default=str))
+    else:
+        typer.echo(render_overlaps_text(report))
+    raise typer.Exit(code=code)
