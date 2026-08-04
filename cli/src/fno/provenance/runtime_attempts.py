@@ -123,7 +123,8 @@ def runtime_attempts(
 
     claim_state_fn = claim_state_fn or _default_claim_state
     claim = claim_state_fn(node_id)
-    claim_state = str(claim.get("state") or "").lower() or None
+    claim_holder = claim.get("holder") if isinstance(claim, dict) else None
+    live_claim_state = str(claim.get("state") or "").lower() or None
     node_terminal = str(node.get("status") or "").lower() in {"done", "superseded"}
     pr_number = node.get("pr_number")
 
@@ -136,7 +137,27 @@ def runtime_attempts(
         fno_id = ident["fno_id"]
         commits = _commits_ahead(wt, _branch_from_manifest(raw))
         has_work = bool(commits) or bool(pr_number)
-        attempt_state = _classify(claim_state, has_work, node_terminal)
+        # The node claim is global and singular, so it can name at most ONE
+        # attempt's owner. Only the manifest whose target_claim_holder matches
+        # the live claim holder may inherit the claim's state; every other
+        # manifest on disk is a HISTORICAL attempt (a prior run, or a sibling
+        # worktree whose session lost the node) and must classify from its own
+        # work evidence, never from a claim a different session now holds.
+        # Without this gate a newer live attempt would relabel an old
+        # interrupted attempt as "live" (the mislabeling this module exists to
+        # prevent).
+        is_current_owner = bool(claim_holder) and claim_holder == ident.get(
+            "target_claim_holder"
+        )
+        if is_current_owner:
+            row_claim_state = live_claim_state
+            row_claim_holder = claim_holder
+            row_claim_pid = claim.get("pid")
+        else:
+            row_claim_state = None
+            row_claim_holder = ident.get("target_claim_holder")
+            row_claim_pid = None
+        attempt_state = _classify(row_claim_state, has_work, node_terminal)
         # Dedup: keep the row with the most affirmative evidence / freshest state.
         prev = rows.get(fno_id)
         if prev is not None and _rank(prev["attempt_state"]) >= _rank(attempt_state):
@@ -147,9 +168,9 @@ def runtime_attempts(
             "harness_session_id": ident["harness_session_id"],
             "node": node_id,
             "worktree": str(wt),
-            "claim_state": claim_state,
-            "claim_holder": claim.get("holder"),
-            "claim_pid": claim.get("pid"),
+            "claim_state": row_claim_state,
+            "claim_holder": row_claim_holder,
+            "claim_pid": row_claim_pid,
             "commits_ahead": commits,
             "pr_number": pr_number,
             "attempt_state": attempt_state,

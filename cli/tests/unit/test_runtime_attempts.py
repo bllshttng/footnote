@@ -102,6 +102,35 @@ def test_runtime_dedup_on_fno_id_keeps_most_affirmative(tmp_path, monkeypatch):
     assert rows[0]["attempt_state"] == "live"
 
 
+def test_runtime_historical_attempt_not_relabelled_live(tmp_path, monkeypatch):
+    """A historical attempt (different holder) must not inherit a newer attempt's
+    live claim. The node claim is singular and global; only the manifest whose
+    target_claim_holder matches the live holder may read 'live'. The older
+    attempt classifies from its own work evidence (interrupted), never 'live'."""
+    wt_a, wt_b = tmp_path / "a", tmp_path / "b"
+    wt_a.mkdir(); wt_b.mkdir()
+    manifest_a = _manifest_for(sid="sid-a", fno_id="run-a")
+    manifest_b = _manifest_for(sid="sid-b", fno_id="run-b")
+
+    def _read(wt):
+        return manifest_b if str(wt).endswith("b") else manifest_a
+
+    monkeypatch.setattr(ra, "read_target_manifest", _read)
+    monkeypatch.setattr(ra, "_commits_ahead", lambda wt, br: 4)  # both have work
+    rows = runtime_attempts(
+        NODE, {"cwd": str(tmp_path), "status": "ready"},
+        worktree_roots=[wt_a, wt_b],
+        claim_state_fn=lambda nid: _claim("live", holder="target-session:sid-b", pid=999),
+    )
+    by_run = {r["fno_id"]: r for r in rows}
+    assert len(rows) == 2
+    assert by_run["run-b"]["attempt_state"] == "live"
+    assert by_run["run-b"]["claim_state"] == "live"
+    # run-a is a historical attempt: work + non-terminal -> interrupted, NOT live.
+    assert by_run["run-a"]["attempt_state"] == "interrupted"
+    assert by_run["run-a"]["claim_state"] is None
+
+
 def test_runtime_skips_non_matching_manifests(tmp_path, monkeypatch):
     """A manifest for a DIFFERENT node is not projected onto this node."""
     other = _manifest_for(node="x-other")
