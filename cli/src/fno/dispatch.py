@@ -139,7 +139,10 @@ def cmd_resolve(
     # dispatcher (dispatch-node.sh) included - carries the same context, not only
     # advance.py's daemon paths. An explicit --brief still wins (it IS rung 1).
     brief_source = "explicit" if brief else "none"
-    rec = _lookup_node(node) if node else None
+    # An explicit --brief is rung 1 and the node is never consulted for it, so
+    # the lookup stays demand-driven: only a brief that must be synthesized, or
+    # the autonomous route (which reads the node's priority and cwd), pays it.
+    rec = _lookup_node(node) if node and (brief is None or autonomous) else None
     if brief is None and rec:
         from fno.provenance.autobrief import resolve_dispatch_brief
 
