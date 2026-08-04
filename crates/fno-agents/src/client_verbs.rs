@@ -387,7 +387,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1349,11 +1349,55 @@ where
             None,
         ))
     } else if dead && is_uuid_shaped(uuid) {
+        // x-ae2d: this arm RELAUNCHES (the live arm above only attaches), so it
+        // is the one door on this verb that can lose a route. A row that records
+        // one gets it re-applied through `--settings`, the same mechanism the
+        // original spawn used; a recorded file that is gone refuses rather than
+        // relaunching on the default Anthropic account, which works, bills the
+        // wrong vendor, and reports nothing.
+        let route_settings = entry
+            .get("route_settings_path")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|p| !p.is_empty());
+        let mut argv: Vec<String> = vec!["claude".into()];
+        if let Some(path) = route_settings {
+            // Present is not enough. The file is the auth-scrub floor with the
+            // route written on top, and claude reads an empty settings value as
+            // UNSET - so a floor-only or malformed file hands claude a settings
+            // file that selects nothing and the worker comes back on the default
+            // account in silence. That is the same outcome as a missing file, so
+            // it takes the same refusal. Python's `read_route_settings` applies
+            // the identical rule; a check here that only tested existence would
+            // make these two doors disagree while the docs call them equivalent.
+            let usable = fs::read_to_string(path).ok().and_then(|raw| {
+                serde_json::from_str::<Value>(&raw).ok().map(|v| {
+                    v.get("env").and_then(Value::as_object).is_some_and(|env| {
+                        env.values()
+                            .any(|x| x.as_str().is_some_and(|s| !s.is_empty()))
+                    })
+                })
+            });
+            if usable != Some(true) {
+                let why = match usable {
+                    None => "cannot be read as a route settings file",
+                    _ => "records no route",
+                };
+                eprintln!(
+                    "fno agents resume: {name} was launched on the route recorded at \
+                     {path}, and it {why}; refusing to relaunch it on the default \
+                     account. Re-spawn with an explicit --route/-P to choose one."
+                );
+                return Err(13);
+            }
+            eprintln!("fno agents resume: restoring recorded route from {path}");
+            argv.push("--settings".into());
+            argv.push(path.into());
+        }
         eprintln!("fno agents resume: {name} has exited - resuming in your terminal");
-        Ok((
-            vec!["claude".into(), "--resume".into(), uuid.into()],
-            Some(uuid.to_string()),
-        ))
+        argv.push("--resume".into());
+        argv.push(uuid.into());
+        Ok((argv, Some(uuid.to_string())))
     } else if dead {
         eprintln!(
             "fno agents resume: {} has no claude session recorded; nothing to resume.",
@@ -3223,6 +3267,74 @@ mod tests {
     }
 
     #[test]
+    fn claude_resume_dead_arm_restores_a_recorded_route_or_refuses() {
+        // x-ae2d: the dead arm RELAUNCHES, so it is the one door on this verb
+        // that can lose a route. Untested, the branch is a guard on paper: the
+        // Python spawn door has its own tests and neither covers this one.
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let route = home.path().join("route-settings-abc123.json");
+        fs::write(&route, r#"{"env":{"ANTHROPIC_BASE_URL":"https://z"}}"#).unwrap();
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "route_settings_path": route.to_str().unwrap(),
+        });
+
+        // Recorded + present -> `--settings <path>` ahead of `--resume`, the
+        // same mechanism (and the same flag order) the original spawn used.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())).unwrap(),
+            (
+                vec![
+                    "claude".to_string(),
+                    "--settings".into(),
+                    route.to_str().unwrap().into(),
+                    "--resume".into(),
+                    uuid.into(),
+                ],
+                Some(uuid.to_string()),
+            )
+        );
+
+        // Recorded but FLOOR-ONLY -> refuse too. claude reads an empty settings
+        // value as unset, so this file selects nothing and the worker would come
+        // back on the default account in silence - the same outcome as a missing
+        // file, and the same rule Python's read_route_settings applies.
+        fs::write(&route, r#"{"env":{"ANTHROPIC_API_KEY":""}}"#).unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
+        );
+
+        // Recorded but unparseable -> refuse, never a partial re-apply.
+        fs::write(&route, "{not json").unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
+        );
+
+        // Recorded but gone -> refuse. Relaunching would work, bill the default
+        // Anthropic account, and report nothing.
+        fs::remove_file(&route).unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
+        );
+
+        // The live arm never relaunches, so a recorded route changes nothing
+        // there - it must stay a bare `claude attach`.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("working".into())).unwrap(),
+            (
+                vec!["claude".into(), "attach".into(), "7c5dcf5d".into()],
+                None
+            )
+        );
+    }
+
+    #[test]
     fn claude_resume_socket_miss_requires_family1_death() {
         let home = cv_tmpdir();
         let ch = ClaudeHome::at(home.path());
@@ -3524,10 +3636,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v12 is the future-drift case a pre-bump reader would have on v11.
+        // v13 is the future-drift case a pre-bump reader would have on v12.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":12,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":13,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as

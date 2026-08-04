@@ -1326,6 +1326,15 @@ def _claude_create_path(
                 time.sleep(_PIN_LOOKUP_BACKOFF_S)
         return False
 
+    # x-ae2d: materialize the route file BEFORE the supervisor exists. It does
+    # mkdir + open + replace under the state dir, and doing it at row-write time
+    # would put that I/O after the launch, where an OSError escapes uncaught and
+    # strands a live supervisor with no registry row. Content-addressed, so this
+    # is the same path bg_create resolves for itself moments later.
+    from fno.agents.model_routing import route_settings_path_for
+
+    route_settings_path = route_settings_path_for(route_env)
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -1415,6 +1424,13 @@ def _claude_create_path(
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        # x-ae2d: the route this launch got, so a relaunch can come back on it.
+        # ROUTE only, never an account overlay: the account settings file omits
+        # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
+        # that config), so recording it would promise a restore that silently
+        # leaves the account behind. Resolved before the launch (above) so its
+        # I/O cannot strand a live supervisor.
+        route_settings_path=route_settings_path,
     )
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
@@ -1846,6 +1862,45 @@ def _is_revival(
     return True
 
 
+def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str]]:
+    """The route a relaunch of ``entry`` must come back on, or ``None`` (x-ae2d).
+
+    The claude relaunch door: a ``--resume`` revive starts a NEW supervisor, and
+    its route comes only from the flags on THAT invocation, so a revive issued
+    without ``-P``/``--route`` silently moves the work onto the default Anthropic
+    account. Silent is the whole problem - the worker runs fine, bills the wrong
+    vendor, and reports nothing.
+
+    A faithful replay, not a re-resolution: the recorded file is read back and
+    handed to the spawn as an explicit route, which ``resolve_spawn_route`` passes
+    through unchanged. Re-resolving against today's config would relaunch the
+    worker onto a route that may differ from the one it ran under, which is a
+    behavior change wearing the word "resume".
+
+    Raises:
+        DispatchAskError: exit 2, when the row names a route file that is gone
+            or unreadable. Refusing beats relaunching unrouted. Exit 2 is the
+            code every other route-composition refusal already uses
+            (``RouteCompositionError``); notably NOT 15, which the ask/followup
+            lane documents as "reply timeout, the message WAS delivered" - the
+            opposite claim, since this refusal starts nothing at all.
+    """
+    path = getattr(entry, "route_settings_path", None)
+    if not path:
+        return None
+    from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+    try:
+        return read_route_settings(path)
+    except RouteRestoreError as exc:
+        raise DispatchAskError(
+            f"agent {entry.name!r} was launched on the route recorded at {path}, "
+            f"and it cannot be restored ({exc}). Refusing to relaunch it on the "
+            f"default account; re-spawn with an explicit --route/-P to choose one.",
+            exit_code=2,
+        ) from exc
+
+
 def _picked_headroom_note(account_id: str) -> str:
     """The picked account's worst window, for the receipt. Never raises."""
     try:
@@ -2055,7 +2110,12 @@ def dispatch_spawn(
     # pane path calls the same helper itself. Two seams, one implementation -
     # putting it in cli.py instead would miss every in-process caller that
     # bypasses argument parsing.
-    if account_env is None and provider == "claude":
+    # A --resume spawn is never picked for, the same seam rule `_pick_account_at_seam`
+    # applies to the CLI argv: the transcript being resumed lives under the config
+    # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
+    # where that uuid does not exist. It also keeps the revive restore below
+    # honest - any --account reaching it is one the operator actually typed.
+    if account_env is None and provider == "claude" and not resume_session_id:
         account_env = _pick_account_env(role=role, route_env=route_env)
 
     launch_role = role
@@ -2179,6 +2239,76 @@ def dispatch_spawn(
                     f"use 'fno agents rm {name}' first or pick another name",
                     exit_code=2,
                 )
+
+            # x-ae2d: a revive relaunches the supervisor, so it must come back on
+            # the route the row was born with unless this invocation resolved one
+            # of its own. Raises (exit 2) when the recorded route is unrestorable.
+            #
+            # Keyed on the RESOLVED route, never on whether --role was mentioned.
+            # `resolve_route` is fail-SAFE: a protected role, a disabled block, an
+            # unconfigured provider, or a missing key all return None and leave
+            # route_env unset. Skipping the restore because a role was NAMED would
+            # therefore relaunch unrouted in exactly the case where the role
+            # produced nothing - the silent default-account fallback this exists
+            # to prevent. A role that DID resolve leaves route_env truthy, so it
+            # still wins over the recorded route.
+            # The source row is resolved by the TRANSCRIPT being resumed, not by
+            # this spawn's name. A revive reuses the old name, but nothing stops
+            # `spawn other-name --resume <uuid>` from relaunching the same
+            # transcript under a fresh row - and that row is the one carrying the
+            # route. Keying on `existing` alone would leave every renamed relaunch
+            # silently unrouted, a guard on one of the two ways in.
+            source_row = existing if revive else None
+            if resume_session_id and source_row is None:
+                source_row = next(
+                    (
+                        e
+                        for e in entries
+                        if getattr(e, "harness_session_id", None) == resume_session_id
+                        and getattr(e, "route_settings_path", None)
+                    ),
+                    None,
+                )
+            if resume_session_id and source_row is not None and not route_env:
+                restored_route = restore_route_for_relaunch(source_row)
+                if restored_route:
+                    # An explicit --account COMPOSES with the restored route, the
+                    # same way it composes with a flag-supplied one (x-5ed4): the
+                    # route wins endpoint+auth+model as one unit through the
+                    # settings file, and the account's CLAUDE_CONFIG_DIR rides the
+                    # spawn env to select the per-account daemon. Nothing here
+                    # refuses the pair - `fno agents spawn` does not either, and
+                    # the picker that would otherwise inject an advisory
+                    # --account already skips a --resume spawn on both seams, so
+                    # an account reaching this point is one the operator typed.
+                    #
+                    # Through resolve_spawn_route, not assigned past it: that is
+                    # THE composition decision, and it is where managed OAuth
+                    # refuses a foreign endpoint layered over the default Claude
+                    # credential slot. A restored route that skipped it would be
+                    # the one route in the system exempt from the check - a guard
+                    # every other route pays and this one does not.
+                    from fno.agents.model_routing import resolve_spawn_route
+
+                    try:
+                        route_env = resolve_spawn_route(
+                            None,
+                            restored_route,
+                            intent=f"route recorded for {source_row.name!r}",
+                            notice=lambda note: print(note, file=sys.stderr),
+                            account_overlay=bool(account_env),
+                        )
+                    except RouteCompositionError as exc:
+                        raise DispatchAskError(str(exc), exit_code=2) from exc
+                    # Say so. The Rust `resume` door prints its restore, and a
+                    # relaunch that silently changes destination is the failure
+                    # shape this whole path exists to remove - a receipt that
+                    # omits the restore is the same silence pointed the other way.
+                    print(
+                        f"route: restored from {source_row.route_settings_path} "
+                        f"(recorded when {source_row.name!r} launched)",
+                        file=sys.stderr,
+                    )
 
             # 4a2. Build the dispatch context so the create helpers' emits
             # (agent_ask_started/agent_ask_done) carry the same request_id /

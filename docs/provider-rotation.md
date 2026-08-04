@@ -409,6 +409,117 @@ is created by `staging.stage(record)` and verified by `staging.verify_staged(rec
 
 ---
 
+## Route survival across a relaunch
+
+A routed claude spawn writes its endpoint, auth token, and tier maps to a
+content-addressed `0600` file under `~/.fno/route-settings/<sha16>.json`, and the
+worker's registry row records that file's PATH in `route_settings_path` (schema
+v12).
+The row stores the path only: the file carries a live `ANTHROPIC_AUTH_TOKEN` and
+the registry has no `0600` guarantee.
+
+Relaunching a worker means starting a new harness process for it, and the route
+comes only from the flags on that new invocation, so without the recorded path a
+relaunch comes back on the default Anthropic account.
+That failure is expensive precisely because it is not visible: the worker runs,
+bills the wrong vendor, and reports nothing.
+So the relaunch door reads the recorded path and either re-applies the route or
+refuses non-zero naming the file it could not restore.
+
+Which commands are relaunch doors is narrower than it looks, and the distinction
+is load-bearing:
+
+| Command | Starts a new process? | Route handling |
+|---|---|---|
+| `fno agents spawn --resume <uuid>` | yes | restore the recorded route, or refuse (exit 2) |
+| `fno agents resume`, dead-row arm (`claude --resume`) | yes | re-apply via `--settings`, or refuse (exit 13) |
+| `fno agents resume`, live arm (`claude attach`) | no | nothing to do |
+| `fno agents attach` | no | nothing to do |
+
+`fno agents resume` is two arms, and only one of them relaunches.
+It probes liveness first: a reachable supervisor gets `claude attach <short_id>`,
+which opens a session that is still running ("The session keeps running either
+way", `claude attach --help`), so the route lives in that process and no attach
+can lose it.
+An exited one gets `claude --resume <uuid>`, which starts a new process and is
+therefore a genuine relaunch that must carry the route.
+That arm lives in Rust (`client_verbs.rs`), not in `resume_cli.py`, because
+`resume` is in `RUST_CLIENT_VERBS` and auto-routes to the daemon binary - reading
+only the Python path is how you conclude, wrongly, that resume can never lose a
+route.
+
+Both doors apply the same usability rule, not just an existence check: a recorded
+file that is missing, unparseable, or carries only the auth-scrub floor all
+refuse.
+claude reads an empty settings value as unset, so a floor-only file selects
+nothing and the worker would come back on the default account in silence - the
+same outcome as a missing file, so it takes the same refusal.
+A check on one door that only tested existence would make the two disagree while
+this page calls them equivalent.
+
+The spawn restore resolves its source row by the transcript being resumed, not by
+the spawn's name: `spawn other-name --resume <uuid>` relaunches the same
+transcript under a fresh row, and the route lives on the old one.
+
+### Why this is claude-only
+
+The recorded artifact is a claude `--settings` JSON, and only claude's route
+lives entirely in env vars.
+A codex route selects its endpoint through inline `-c` config args
+(`model_providers.<name>` plus `model_provider`), and `CodexRoute.env` carries
+only the API key.
+Recording that env would let a relaunch "restore the route" onto codex's own
+default provider while holding the route's key: half a restore, reported as a
+whole one, which is worse than no restore at all.
+So a non-claude row records nothing and its relaunch behavior is unchanged.
+Codex route survival needs an artifact that also carries the config args; that is
+not built here.
+
+### Two things the restore deliberately does not replay
+
+The recorded file is the auth-scrub floor (every `SCRUB_AUTH_VARS` entry as an
+empty string) with the route written on top.
+An empty value means "unset" only to claude reading a settings *file*; a process
+environment has no such rule.
+So the restore returns the route's own keys and drops the floor, and the relaunch
+re-applies the floor when it writes its own settings file.
+Replaying it instead would hand the revived worker an `ANTHROPIC_API_KEY=""` that
+the original launch never carried.
+
+An explicit `--account` on a revive COMPOSES with the restored route, exactly as
+it does with a flag-supplied one: the route wins endpoint, auth, and
+model as one unit through the settings file, while the account's
+`CLAUDE_CONFIG_DIR` rides the spawn env and selects the per-account daemon.
+Nothing refuses the pair - `fno agents spawn` does not either, so a refusal here
+would have been this path inventing a rule the rest of the system does not have.
+
+The restored route goes THROUGH `resolve_spawn_route` rather than past it.
+That call is the single composition decision, and it is where managed OAuth
+refuses a foreign endpoint layered over the default Claude credential slot.
+A restored route assigned past it would be the one route in the system exempt
+from a guard every other route pays.
+
+The `pick_on_launch` headroom picker skips a `--resume` spawn on both seams
+(`_pick_account_at_seam` and `dispatch_spawn`), so any `--account` reaching the
+restore is one the operator typed rather than an advisory guess merged into the
+route.
+It has its own reason to stay out anyway: a transcript lives under the config dir
+it was created in, so pointing `CLAUDE_CONFIG_DIR` at a picked account resumes
+into a directory where the uuid does not exist.
+
+A restore is announced (`route: restored from <path>`) for the same reason the
+`fno agents resume` arm announces its own.
+A relaunch that changes destination silently is the failure this whole path
+exists to remove; a restore that says nothing is that silence pointed the other
+way.
+
+The recorded path answers "what was this worker launched with, so it can be
+launched that way again". It never answers "what is this worker running now" -
+a recorded value reports the intended route in exactly the case where a fallback
+happened, so that question is read from the session transcript instead.
+
+---
+
 ## dispatch_env() contract
 
 ```python

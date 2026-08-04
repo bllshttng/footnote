@@ -327,14 +327,11 @@ def headless_create(
     # picked. An --account spawn gets its auth/model scrub via the same channel
     # for the same reason (and for parity with bg); the env scrub still runs as
     # the floor below.
-    if route_env:
-        from fno.agents.model_routing import materialize_route_settings
+    from fno.agents.model_routing import route_settings_path_for
 
-        argv += ["--settings", materialize_route_settings(route_env)]
-    elif account_env:
-        from fno.agents.model_routing import materialize_account_scrub_settings
-
-        argv += ["--settings", materialize_account_scrub_settings(account_env)]
+    settings_path = route_settings_path_for(route_env, account_env)
+    if settings_path:
+        argv += ["--settings", settings_path]
     if permission_mode:
         argv += ["--permission-mode", permission_mode]
     else:
@@ -475,15 +472,9 @@ def bg_create(
     # when both are present the route wins the settings file (route-wins
     # atomicity - endpoint+auth+model as one unit), and the account overlay
     # rides the spawn env below (CLAUDE_CONFIG_DIR selects the per-account daemon).
-    settings_path: Optional[str] = None
-    if route_env:
-        from fno.agents.model_routing import materialize_route_settings
+    from fno.agents.model_routing import route_settings_path_for
 
-        settings_path = materialize_route_settings(route_env)
-    elif account_env:
-        from fno.agents.model_routing import materialize_account_scrub_settings
-
-        settings_path = materialize_account_scrub_settings(account_env)
+    settings_path = route_settings_path_for(route_env, account_env)
     argv = _build_argv(
         name=name,
         message=message,

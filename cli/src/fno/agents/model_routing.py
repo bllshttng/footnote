@@ -730,6 +730,71 @@ def materialize_account_scrub_settings(account_env: Mapping[str, str]) -> str:
     return materialize_route_settings({**scrub, **overlay})
 
 
+class RouteRestoreError(RuntimeError):
+    """A recorded route could not be read back, so a relaunch must refuse."""
+
+
+def route_settings_path_for(
+    route_env: Optional[Mapping[str, str]],
+    account_env: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    """The ``--settings`` path a spawn carrying this overlay launches with.
+
+    ONE place expressing the route-wins-the-settings-file precedence (x-5ed4),
+    so the spawn seam and the registry row it stamps can never disagree about
+    which file a worker was launched with. Both writers are content-addressed,
+    so re-asking for an already-materialized overlay returns the same path
+    rather than writing a second file - which is what lets a caller that only
+    holds the resolved env recover the path without threading it through.
+    """
+    if route_env:
+        return materialize_route_settings(route_env)
+    if account_env:
+        return materialize_account_scrub_settings(account_env)
+    return None
+
+
+def read_route_settings(path: str) -> dict[str, str]:
+    """Read a recorded route-settings file back into the route it expressed.
+
+    Returns the route's OWN keys only. The stored file is the auth-scrub floor
+    (every ``SCRUB_AUTH_VARS`` entry as an empty string) with the route written
+    on top, and an empty value means "unset" only to claude reading a settings
+    FILE. Handing the floor back to a spawn would put it in the child's process
+    environment instead, where the original launch had those vars simply absent
+    - a revived worker carrying ``ANTHROPIC_API_KEY=""`` and every unset tier
+    var is not running the env it ran under. The floor is re-applied by
+    :func:`materialize_route_settings` when the relaunch writes its own settings
+    file, so dropping it here loses nothing and keeps the replay faithful.
+
+    Raises :class:`RouteRestoreError` when the file is gone, unreadable, or
+    malformed. Every caller is a relaunch, and a relaunch that cannot restore
+    its route must refuse rather than fall back: an unrouted worker WORKS, so
+    it bills the default Anthropic account and reports nothing - the one
+    failure shape an operator discovers from an invoice.
+    """
+    import json
+    from pathlib import Path
+
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+        env = payload["env"]
+    except OSError as exc:
+        raise RouteRestoreError(f"route settings file {path} is unreadable: {exc}") from exc
+    except (ValueError, KeyError, TypeError) as exc:
+        raise RouteRestoreError(f"route settings file {path} is malformed: {exc}") from exc
+    if not isinstance(env, dict):
+        raise RouteRestoreError(f"route settings file {path} has no env mapping")
+    route = {str(k): str(v) for k, v in env.items() if str(v) != ""}
+    if not route:
+        # The row claims this worker was routed, and the file is readable but
+        # carries only the scrub floor. Returning {} would read as "never routed"
+        # to the caller and relaunch on the default account without a word - the
+        # same silent fallback as a missing file, so it takes the same refusal.
+        raise RouteRestoreError(f"route settings file {path} records no route")
+    return route
+
+
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
 # (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
 # (OpenAI's API); a routed third-party provider almost always wants "chat".

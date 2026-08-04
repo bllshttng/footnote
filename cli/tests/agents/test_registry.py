@@ -258,7 +258,7 @@ def test_ac3_hp_flock_blocks_concurrent_write(tmp_path: Path, monkeypatch) -> No
 def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> None:
     """AC4-ERR: loading a file with a future schema_version raises RegistryVersionError.
 
-    SCHEMA_VERSION is now 11 (crown fields); v12 is the future-drift case.
+    SCHEMA_VERSION is now 12 (route_settings_path); v13 is the future-drift case.
     """
     use_tmpdir(monkeypatch, tmp_path)
 
@@ -267,15 +267,15 @@ def test_ac4_err_future_schema_version_raises(tmp_path: Path, monkeypatch) -> No
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
     registry_path.write_text(
-        json.dumps({"schema_version": 12, "agents": []}), encoding="utf-8"
+        json.dumps({"schema_version": 13, "agents": []}), encoding="utf-8"
     )
 
     with pytest.raises(RegistryVersionError) as exc_info:
         load_registry(path=registry_path)
 
     msg = str(exc_info.value)
-    assert "12" in msg  # read version present
-    assert "11" in msg  # expected version present
+    assert "13" in msg  # read version present
+    assert "12" in msg  # expected version present
 
 
 def test_ac4_err_version_error_message_names_versions(tmp_path: Path, monkeypatch) -> None:
@@ -623,7 +623,7 @@ def test_us2_schema_version_is_three() -> None:
     """
     from fno.agents.registry import SCHEMA_VERSION
 
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
 
 
 def test_us2_agent_entry_has_status_and_last_message_at() -> None:
@@ -742,11 +742,11 @@ def test_ab_a171ceb2_v4_reads_host_mode_and_keeps_back_compat(
     """The v4 host_mode forward-compat bump reads cleanly with host_mode
     preserved, and the widened accepted range still reads v1..=v4 (the bump
     must not drop back-compat reads; ab-a171ceb2). The current SCHEMA_VERSION
-    is 7 after the screen-manifest bump."""
+    is 12 after the route-settings-path bump."""
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents.registry import SCHEMA_VERSION, load_registry
 
-    assert SCHEMA_VERSION == 11
+    assert SCHEMA_VERSION == 12
     registry_path = tmp_path / ".fno" / "agents" / "registry.json"
     registry_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -1773,7 +1773,7 @@ def test_v9_legacy_row_backfills_claude_short_id_into_short_id(
     # Write-back drops the legacy key and carries short_id at the current schema.
     write_registry(loaded, path=registry_path)
     raw = json.loads(registry_path.read_text(encoding="utf-8"))
-    assert raw["schema_version"] == 11
+    assert raw["schema_version"] == 12
     row = raw["agents"][0]
     assert "claude_short_id" not in row
     assert row["short_id"] == "7c5dcf5d"

@@ -216,7 +216,7 @@ while IFS= read -r source; do
 "
     fi
 done <<EOF
-$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | sort || true)
+$(git ls-files -- 'crates/**/*.rs' 2>/dev/null | grep -v '/tests/' | LC_ALL=C sort || true)
 EOF
 actual_status_identifiers="${actual_status_identifiers%$'\n'}"
 if [ "$actual_status_identifiers" != "$EXPECTED_RUST_STATUS_IDENTIFIERS" ]; then
@@ -237,7 +237,7 @@ crates/fno-agents/src/kill_criteria.rs"
 actual=$(
     git ls-files -z -- 'crates/**/*.rs' 2>/dev/null \
         | xargs -0 grep -lE 'read_to_string\(&?plan' 2>/dev/null \
-        | grep -v '/tests/' | sort || true
+        | grep -v '/tests/' | LC_ALL=C sort || true
 )
 if [ "$actual" != "$EXPECTED_RUST_PLAN_READERS" ]; then
     violation "the set of Rust sources reading a plan document changed" \
@@ -290,7 +290,7 @@ fi
 echo "--- Python: one rung table ---"
 tables=$(
     git ls-files -z -- 'cli/src/**/*.py' 2>/dev/null \
-        | xargs -0 grep -l '_STATUS_TO_RUNG' 2>/dev/null | sort || true
+        | xargs -0 grep -l '_STATUS_TO_RUNG' 2>/dev/null | LC_ALL=C sort || true
 )
 if [ "$tables" != "cli/src/fno/graph/ladder.py" ]; then
     violation "the rung table must live only in cli/src/fno/graph/ladder.py" \
