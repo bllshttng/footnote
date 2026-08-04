@@ -1362,11 +1362,31 @@ where
             .filter(|p| !p.is_empty());
         let mut argv: Vec<String> = vec!["claude".into()];
         if let Some(path) = route_settings {
-            if !Path::new(path).is_file() {
+            // Present is not enough. The file is the auth-scrub floor with the
+            // route written on top, and claude reads an empty settings value as
+            // UNSET - so a floor-only or malformed file hands claude a settings
+            // file that selects nothing and the worker comes back on the default
+            // account in silence. That is the same outcome as a missing file, so
+            // it takes the same refusal. Python's `read_route_settings` applies
+            // the identical rule; a check here that only tested existence would
+            // make these two doors disagree while the docs call them equivalent.
+            let usable = fs::read_to_string(path).ok().and_then(|raw| {
+                serde_json::from_str::<Value>(&raw).ok().map(|v| {
+                    v.get("env").and_then(Value::as_object).is_some_and(|env| {
+                        env.values()
+                            .any(|x| x.as_str().is_some_and(|s| !s.is_empty()))
+                    })
+                })
+            });
+            if usable != Some(true) {
+                let why = match usable {
+                    None => "cannot be read as a route settings file",
+                    _ => "records no route",
+                };
                 eprintln!(
                     "fno agents resume: {name} was launched on the route recorded at \
-                     {path}, and that file is gone; refusing to relaunch it on the \
-                     default account. Re-spawn with an explicit --route/-P to choose one."
+                     {path}, and it {why}; refusing to relaunch it on the default \
+                     account. Re-spawn with an explicit --route/-P to choose one."
                 );
                 return Err(13);
             }
@@ -3276,6 +3296,23 @@ mod tests {
                 ],
                 Some(uuid.to_string()),
             )
+        );
+
+        // Recorded but FLOOR-ONLY -> refuse too. claude reads an empty settings
+        // value as unset, so this file selects nothing and the worker would come
+        // back on the default account in silence - the same outcome as a missing
+        // file, and the same rule Python's read_route_settings applies.
+        fs::write(&route, r#"{"env":{"ANTHROPIC_API_KEY":""}}"#).unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
+        );
+
+        // Recorded but unparseable -> refuse, never a partial re-apply.
+        fs::write(&route, "{not json").unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
         );
 
         // Recorded but gone -> refuse. Relaunching would work, bill the default

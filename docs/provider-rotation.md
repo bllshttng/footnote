@@ -448,6 +448,15 @@ That arm lives in Rust (`client_verbs.rs`), not in `resume_cli.py`, because
 only the Python path is how you conclude, wrongly, that resume can never lose a
 route.
 
+Both doors apply the same usability rule, not just an existence check: a recorded
+file that is missing, unparseable, or carries only the auth-scrub floor all
+refuse.
+claude reads an empty settings value as unset, so a floor-only file selects
+nothing and the worker would come back on the default account in silence - the
+same outcome as a missing file, so it takes the same refusal.
+A check on one door that only tested existence would make the two disagree while
+this page calls them equivalent.
+
 The spawn restore resolves its source row by the transcript being resumed, not by
 the spawn's name: `spawn other-name --resume <uuid>` relaunches the same
 transcript under a fresh row, and the route lives on the old one.
