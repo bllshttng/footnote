@@ -16,6 +16,10 @@ roles:
     function: {id: growth-studio}
     mission: draft and ship marketing campaigns grounded in verified product truth and approved brand context
     deliverable_kinds: [campaign-plan, published-post]
+    required_capabilities: [growth.draft, growth.research]
+    context_selectors:
+      - {kind: artifact, identifier: product-truth, max_sensitivity: public}
+      - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -31,6 +35,10 @@ roles:
     function: {id: growth-studio}
     mission: draft external communications and statements that stay factually accurate and on brand
     deliverable_kinds: [press-draft, statement]
+    required_capabilities: [growth.draft, growth.statement]
+    context_selectors:
+      - {kind: artifact, identifier: product-truth, max_sensitivity: public}
+      - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -46,6 +54,9 @@ roles:
     function: {id: growth-studio}
     mission: produce reviewable rendered design artifacts with accessibility evidence, not source files alone
     deliverable_kinds: [rendered-mock, design-system-asset]
+    required_capabilities: [growth.render, growth.accessibility]
+    context_selectors:
+      - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -61,6 +72,10 @@ roles:
     function: {id: growth-studio}
     mission: draft and schedule social content grounded in verified product truth and approved brand context
     deliverable_kinds: [social-post, social-calendar]
+    required_capabilities: [growth.draft, growth.schedule]
+    context_selectors:
+      - {kind: artifact, identifier: product-truth, max_sensitivity: public}
+      - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
