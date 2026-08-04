@@ -101,6 +101,9 @@ agents:
   - id: growth-designer
     source: agents/growth-designer.md
     role: {id: design, function_id: growth-studio}
+  - id: growth-social
+    source: agents/growth-social.md
+    role: {id: social, function_id: growth-studio}
 
 evaluators:
   - id: factual-review
