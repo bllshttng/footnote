@@ -1827,9 +1827,25 @@ def test_exact_at_current_proceeds_live_when_unpainted(
     assert [r.name for r in load_registry()] == ["peer"], "a live spawn still writes the row"
 
 
+# What a LIVE zai route actually carries, not just its endpoint half: the two
+# connection keys plus `resolve_route`'s ANTHROPIC_MODEL, the four tier maps
+# from MODEL_ENV_KEYS (haiku separately remapped to the provider's cheaper
+# model), and the 1M compact window a `[1m]` model needs.
+#
+# The fixture used to hold only the two connection keys, so every happy test
+# proved the endpoint reaches the pane and proved nothing about the model. A
+# change that filtered keys anywhere along the carry would have kept the suite
+# green while a happy pane ran on whatever model the ambient environment
+# resolved -- or, quieter still, on the right model with a 200K window.
 _ROUTE = {
     "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
     "ANTHROPIC_AUTH_TOKEN": "zai-secret",
+    "ANTHROPIC_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_OPUS_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_SONNET_MODEL": "glm-5.2[1m]",
+    "ANTHROPIC_DEFAULT_HAIKU_MODEL": "glm-4.5-air",
+    "ANTHROPIC_DEFAULT_FABLE_MODEL": "glm-5.2[1m]",
+    "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "1000000",
 }
 
 
@@ -2028,8 +2044,24 @@ def test_cmd_spawn_explicit_happy_monitor_refuses_separate_model_override(
     assert "separate --model" in result.output
 
 
+def _claude_env_pairs(argv: list[str]) -> dict:
+    """The route as happy would receive it: every ``--claude-env KEY=VALUE``."""
+    return dict(
+        argv[i + 1].split("=", 1)
+        for i, token in enumerate(argv)
+        if token == "--claude-env"
+    )
+
+
 def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
-    """The route rides --claude-env, never --settings."""
+    """The WHOLE route rides --claude-env, never --settings.
+
+    Set equality against the route that was passed IN, not membership and not a
+    hardcoded key list. Membership is exactly what let five of seven keys go
+    unchecked while reading in review as "the route is covered"; comparing
+    against the supplied route is what keeps a shorter legitimate route (a
+    provider with no haiku_model, a model without the [1m] suffix) passing.
+    """
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
@@ -2037,10 +2069,27 @@ def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
 
     assert argv[0] == "happy"
     assert "--settings" not in argv
-    pairs = [argv[i + 1] for i, token in enumerate(argv) if token == "--claude-env"]
-    assert "ANTHROPIC_BASE_URL=https://api.z.ai/api/anthropic" in pairs
-    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    assert _claude_env_pairs(argv) == _ROUTE, "no key dropped and none invented"
     assert argv[-3:] == ["--model", "glm-5.2", "go"]
+
+
+def test_happy_pane_argv_carries_a_route_with_no_model_keys(monkeypatch) -> None:
+    """A route legitimately carrying only an endpoint and a credential passes.
+
+    The assertion above compares against the supplied route, so a provider with
+    no haiku_model and a model with no [1m] suffix are not held to the seven-key
+    shape a full zai route happens to have.
+    """
+    import fno.agents.mux_spawn as mux_spawn
+
+    minimal = {
+        "ANTHROPIC_BASE_URL": "https://api.example.test/anthropic",
+        "ANTHROPIC_AUTH_TOKEN": "other-secret",
+    }
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    argv = mux_spawn.happy_pane_argv(["claude", "go"], minimal)
+
+    assert _claude_env_pairs(argv) == minimal
 
 
 def test_happy_pane_argv_refuses_a_pinned_session_id(monkeypatch) -> None:
