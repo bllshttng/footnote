@@ -118,3 +118,159 @@ def test_the_flush_is_what_delivers_it(_drained) -> None:
     stdout genuinely withholds writes until flush()."""
     _observed, fake_out, _msg = _drained
     assert fake_out.flushes >= 1, "drain-self never flushed stdout at all"
+
+
+def test_ac3_err_hook_serialization_failure_leaves_cursor_for_retry(monkeypatch) -> None:
+    from fno import harness_identity
+    from fno.bus import cursor as cursor_mod
+    from fno.mail import cli as mail_cli
+
+    msg = _Msg(
+        id="m-retry",
+        from_="alice",
+        to="cl-abcd1234",
+        kind="note",
+        ts="2026-08-03T00:00:00Z",
+        body="retry me",
+    )
+
+    class _Ident:
+        harness = "claude"
+        session_id = "abcd1234"
+
+    monkeypatch.setattr(
+        harness_identity, "resolve_harness_identity", lambda: _Ident()
+    )
+    monkeypatch.setattr(
+        harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
+    )
+    monkeypatch.setattr(cursor_mod, "scan_unread", lambda handle: [msg])
+    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: (0, []))
+    advances: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cursor_mod,
+        "advance_cursor",
+        lambda handle, msg_id: advances.append((handle, msg_id)),
+    )
+    monkeypatch.setattr(
+        mail_cli.json,
+        "dumps",
+        lambda *args, **kwargs: (_ for _ in ()).throw(TypeError("cannot serialize")),
+    )
+
+    mail_cli.cmd_notify_self()
+
+    assert advances == []
+
+
+@pytest.mark.parametrize("failure_stage", ["write", "flush"])
+def test_ac3_err_hook_output_failure_retries_then_acks_once(
+    monkeypatch, failure_stage
+) -> None:
+    from fno import harness_identity
+    from fno.bus import cursor as cursor_mod
+    from fno.mail import cli as mail_cli
+
+    msg = _Msg(
+        id="m-output-retry",
+        from_="alice",
+        to="cl-abcd1234",
+        kind="note",
+        ts="2026-08-03T00:00:00Z",
+        body="retry after output failure",
+    )
+
+    class _Ident:
+        harness = "claude"
+        session_id = "abcd1234"
+
+    class _FailingStdout(_CountingStdout):
+        def write(self, s: str) -> int:
+            if failure_stage == "write":
+                raise OSError("write failed")
+            return super().write(s)
+
+        def flush(self) -> None:
+            if failure_stage == "flush":
+                raise OSError("flush failed")
+            super().flush()
+
+    monkeypatch.setattr(
+        harness_identity, "resolve_harness_identity", lambda: _Ident()
+    )
+    monkeypatch.setattr(
+        harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
+    )
+    monkeypatch.setattr(cursor_mod, "scan_unread", lambda handle: [msg])
+    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: (0, []))
+    advances: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        cursor_mod,
+        "advance_cursor",
+        lambda handle, msg_id: advances.append((handle, msg_id)),
+    )
+
+    with monkeypatch.context() as output_patch:
+        output_patch.setattr("sys.stdout", _FailingStdout())
+        mail_cli.cmd_notify_self()
+
+    assert advances == []
+
+    retry_out = _CountingStdout()
+    with monkeypatch.context() as output_patch:
+        output_patch.setattr("sys.stdout", retry_out)
+        mail_cli.cmd_notify_self()
+
+    assert advances == [("cl-abcd1234", msg.id)]
+    assert msg.body in "".join(retry_out.delivered)
+
+
+def test_ac2_hp_hook_json_is_flushed_before_cursor_advances(monkeypatch) -> None:
+    import json
+
+    from fno import harness_identity
+    from fno.bus import cursor as cursor_mod
+    from fno.mail import cli as mail_cli
+
+    msg = _Msg(
+        id="m-hook",
+        from_="alice",
+        to="cl-abcd1234",
+        kind="note",
+        ts="2026-08-03T00:00:00Z",
+        body="the active-turn payload",
+    )
+
+    class _Ident:
+        harness = "claude"
+        session_id = "abcd1234"
+
+    fake_out = _CountingStdout()
+    observed: dict[str, object] = {}
+    monkeypatch.setattr(
+        harness_identity, "resolve_harness_identity", lambda: _Ident()
+    )
+    monkeypatch.setattr(
+        harness_identity, "canonical_handle", lambda sid: "cl-abcd1234"
+    )
+    monkeypatch.setattr(cursor_mod, "scan_unread", lambda handle: [msg])
+    monkeypatch.setattr(mail_cli, "_sent_unclaimed", lambda handle, ttl: (0, []))
+
+    def _advance(handle, msg_id):
+        observed["handle"] = handle
+        observed["msg_id"] = msg_id
+        observed["delivered_at_ack"] = "".join(fake_out.delivered)
+        observed["still_buffered_at_ack"] = list(fake_out.buffer)
+        return True
+
+    monkeypatch.setattr(cursor_mod, "advance_cursor", _advance)
+    monkeypatch.setattr("sys.stdout", fake_out)
+
+    mail_cli.cmd_notify_self()
+
+    payload = json.loads(observed["delivered_at_ack"])
+    context = payload["hookSpecificOutput"]["additionalContext"]
+    assert msg.body in context
+    assert observed["still_buffered_at_ack"] == []
+    assert observed["handle"] == "cl-abcd1234"
+    assert observed["msg_id"] == msg.id

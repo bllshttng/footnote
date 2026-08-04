@@ -362,10 +362,42 @@ def test_ac10_kind_question_or_fyi_to_handle_refused(isolated, runner, kind):
     assert _bus_len() == 0  # nothing written for the refused combo
 
 
-def test_ac10_kind_headsup_to_handle_accepted(isolated, runner):
-    # heads-up to a handle stays accepted (the production notification pattern;
-    # its emitters are programmatic and not statically enumerable).
-    result = _invoke(runner, "cafe0001", "--kind", "heads-up", "-b", "hi", "--from-name", "web")
+def test_ac10_kind_headsup_to_handle_accepted(isolated, runner, monkeypatch):
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+
+    session_id = "00000000-0000-0000-0000-0000cafe0001"
+    empty = isolated / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+    monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(empty))
+    write_registry([
+        AgentEntry(
+            name="worker-a",
+            cwd="/Users/x/proj",
+            log_path="/tmp/worker-a.log",
+            harness="claude",
+            harness_session_id=session_id,
+            short_id="cafe0001",
+        )
+    ])
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
+    )
+
+    result = _invoke(
+        runner,
+        "cafe0001",
+        "--kind",
+        "heads-up",
+        "-b",
+        "hi",
+        "--from-name",
+        "web",
+    )
     assert result.exit_code == 0, result.output
     assert "queued (durable)" in result.output
     assert _bus_len() == 1

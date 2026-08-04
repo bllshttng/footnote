@@ -79,6 +79,171 @@ def test_send_then_unread_then_ack(runner, mailbox):
     assert json.loads(after.stdout.strip().splitlines()[-1]) == []
 
 
+def test_named_agent_heads_up_resolves_to_canonical_drain_handle(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import iter_messages
+    from fno.harness_identity import canonical_handle
+
+    session_id = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    empty = mailbox / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+    write_registry([
+        AgentEntry(
+            name="worker-a",
+            cwd="/Users/x/proj",
+            log_path="/tmp/worker-a.log",
+            harness="claude",
+            harness_session_id=session_id,
+            short_id="9a063cd3",
+        )
+    ])
+
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "worker-a", "Migration is ready",
+            "--kind", "heads-up", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "[param-forced: --kind heads-up]" in result.stdout
+    messages = list(iter_messages())
+    assert [(message.to, message.kind, message.body) for message in messages] == [
+        (canonical_handle(session_id), "heads-up", "Migration is ready")
+    ]
+
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_id)
+    drained = runner.invoke(app, ["mail", "drain-self", "--json"])
+    assert drained.exit_code == 0, drained.output
+    assert [item["body"] for item in json.loads(drained.stdout)] == [
+        "Migration is ready"
+    ]
+
+
+def test_unknown_agent_heads_up_exits_16_without_writing(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents import discover
+    from fno.bus.log import iter_messages
+
+    empty = mailbox / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "missing-worker", "Migration is ready",
+            "--kind", "heads-up", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 16
+    assert "unknown agent or live-session handle" in result.stderr
+    assert list(iter_messages()) == []
+    assert list(mailbox.glob("**/*.md")) == []
+
+
+def test_provisional_agent_heads_up_exits_16_without_writing(
+    runner, mailbox, monkeypatch
+):
+    from fno.agents import discover
+    from fno.agents.registry import AgentEntry, write_registry
+    from fno.bus.log import iter_messages
+
+    empty = mailbox / "discovery-empty"
+    empty.mkdir()
+    monkeypatch.setenv(discover.SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(empty))
+    monkeypatch.setenv(discover.OPENCODE_STORAGE_DIR_ENV, str(empty))
+    write_registry([
+        AgentEntry(
+            name="legacy-worker",
+            cwd="/Users/x/proj",
+            log_path="/tmp/legacy-worker.log",
+            harness="claude",
+            short_id="footnote-56",
+        )
+    ])
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "legacy-worker", "Migration is ready",
+            "--kind", "heads-up", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 16
+    assert "cannot resolve agent heads-up uniquely" in result.stderr
+    assert list(iter_messages()) == []
+    assert list(mailbox.glob("**/*.md")) == []
+
+
+@pytest.mark.parametrize("kind", ["question", "fyi"])
+def test_handle_question_and_fyi_are_refused_before_any_write(
+    runner, mailbox, kind
+):
+    from fno.bus.log import iter_messages
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "worker-a", "Should this route?",
+            "--kind", kind, "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 2
+    assert f"--kind {kind} to a session handle" in result.stderr
+    assert "Drop --kind to inject it live" in result.stderr
+    assert "add --to-project <project>" in result.stderr
+    assert list(iter_messages()) == []
+    assert list(mailbox.glob("**/*.md")) == []
+
+
+@pytest.mark.parametrize("kind", ["heads-up", "question", "fyi"])
+def test_all_explicit_project_kinds_remain_valid(
+    runner, mailbox, monkeypatch, kind
+):
+    from fno.bus.log import iter_messages
+
+    monkeypatch.setattr("fno.mail.cli._escalate_to_human", lambda *a, **k: "notified")
+    monkeypatch.setattr(
+        "fno.agents.dispatch.wake_if_asleep_claude", lambda recipient: (False, None)
+    )
+
+    result = runner.invoke(
+        app,
+        [
+            "mail", "send", "--to-project", "ready-web", "--kind", kind,
+            "Which contract should win?", "--from-name", "sender",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    messages = list(iter_messages())
+    assert [(message.to, message.kind, message.body) for message in messages] == [
+        ("ready-web", kind, "Which contract should win?")
+    ]
+
+
 # ---------------------------------------------------------------------------
 # AC1-EDGE: a deleted render is regenerated from the log, no message lost
 # ---------------------------------------------------------------------------
