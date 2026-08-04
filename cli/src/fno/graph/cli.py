@@ -4534,6 +4534,13 @@ def cmd_provenance(
         _spawned_walk(entries, node_id) if spawned else ([], False, False)
     )
 
+    # Runtime-attempt projection (x-2ccd wave 3): live/suspect/stale/interrupted
+    # attempts read off manifests + the claim, alongside the confirmed lifecycle
+    # rows below. Never a confirmed `do` row; never a graph mutation.
+    from fno.provenance.runtime_attempts import runtime_attempts
+
+    runtime = runtime_attempts(node_id, e)
+
     if json_out:
         import dataclasses
 
@@ -4558,6 +4565,7 @@ def cmd_provenance(
             "source_node_title": (index.get(origin_id) or {}).get("title"),
             "source_plan_path": e.get("source_plan_path"),
             "related": related_ids,
+            "runtime_attempts": runtime,
         }
         if spawned:
             output["spawned"] = {
@@ -4610,6 +4618,28 @@ def cmd_provenance(
             lines.append("    note: cycle detected; walk truncated at the repeat")
         if walk_truncated:
             lines.append(f"    note: depth cap {_SPAWNED_MAX_DEPTH} reached; walk truncated")
+
+    # Runtime attempts (x-2ccd wave 3): live/suspect/stale/interrupted attempts
+    # projected from manifests + the claim. Rendered BEFORE lifecycle so an
+    # operator sees the current/interrupted state first; explicitly labeled
+    # unconfirmed so it is never mistaken for a confirmed `do` lifecycle row.
+    if runtime:
+        lines.append("  runtime:")
+        for a in runtime:
+            work_bits = []
+            if a.get("commits_ahead"):
+                work_bits.append(f"{a['commits_ahead']} commits")
+            if a.get("pr_number"):
+                work_bits.append(f"PR #{a['pr_number']}")
+            work = ", ".join(work_bits) or "(no work evidence)"
+            lines.append(
+                f"    {a['attempt_state']:<11} {a.get('harness', '?')}:{a.get('harness_session_id', '?')}"
+            )
+            lines.append(f"      run:       {a.get('fno_id', '?')}")
+            lines.append(f"      worktree:  {a.get('worktree', '?')}")
+            lines.append(f"      claim:     {a.get('claim_state', '?')} pid={a.get('claim_pid')}")
+            lines.append(f"      work:      {work}")
+            lines.append(f"      lifecycle: {a.get('lifecycle', '?')}")
 
     # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
     # birth/spawn edges above -- those are single parent pointers; this is the
