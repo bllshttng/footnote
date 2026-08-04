@@ -34,6 +34,7 @@ forbidden = [
     "growth-studio",
     "marketing",
     "communications",
+    "comms",
     "design",
     "social",
     "support",

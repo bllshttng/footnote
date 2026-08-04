@@ -236,7 +236,12 @@ def activate(
 
     manifest, load_failure = load_manifest(target)
     if load_failure is not None or manifest is None:
-        detail = (load_failure.detail if load_failure else None) or "manifest could not be loaded"
+        # Preserve the load condition's result (AC5: a corrupt manifest is
+        # blocked, not merely failed) in the refusal detail.
+        if load_failure is not None:
+            detail = f"{load_failure.result.value}: {load_failure.detail}"
+        else:
+            detail = "manifest could not be loaded"
         raise ActivationRefusal(ActivationRefusalReason.VERIFICATION_FAILED, detail)
     digest = pack_digest(manifest)
 
