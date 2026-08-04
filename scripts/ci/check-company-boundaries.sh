@@ -119,20 +119,30 @@ def layer_for(module: str):
     return number, name
 
 
-def imported_modules(node: ast.AST, source_module: str) -> list[str]:
+def imported_modules(
+    node: ast.AST, source_module: str, *, source_is_package: bool
+) -> list[str]:
     if isinstance(node, ast.Import):
         return [alias.name for alias in node.names]
     if not isinstance(node, ast.ImportFrom):
         return []
     if node.level == 0:
-        return [node.module] if node.module else []
-    package = source_module if source_module.endswith(".__init__") else source_module.rpartition(".")[0]
-    parts = package.split(".") if package else []
-    keep = max(0, len(parts) - node.level + 1)
-    base = parts[:keep]
-    if node.module:
-        base.extend(node.module.split("."))
-    return [".".join(base)] if base else []
+        base = node.module or ""
+    else:
+        package = source_module if source_is_package else source_module.rpartition(".")[0]
+        parts = package.split(".") if package else []
+        keep = max(0, len(parts) - node.level + 1)
+        base_parts = parts[:keep]
+        if node.module:
+            base_parts.extend(node.module.split("."))
+        base = ".".join(base_parts)
+    candidates = [base] if base else []
+    candidates.extend(
+        f"{base}.{alias.name}" if base else alias.name
+        for alias in node.names
+        if alias.name != "*"
+    )
+    return list(dict.fromkeys(candidates))
 
 
 files = sorted(source_root.rglob("*.py"))
@@ -148,14 +158,18 @@ except (OSError, SyntaxError, UnicodeError) as exc:
 positive_control = False
 violations = []
 layer_edges = set()
+mapped_modules = 0
 for path, source, tree in parsed:
     source_module = module_name(path)
     source_layer = layer_for(source_module)
     if source_layer is None:
         continue
+    mapped_modules += 1
     lines = source.splitlines()
     for node in ast.walk(tree):
-        for imported in imported_modules(node, source_module):
+        for imported in imported_modules(
+            node, source_module, source_is_package=path.name == "__init__.py"
+        ):
             if (
                 source_module == "fno.roles.models"
                 and imported == "fno.company.contracts"
@@ -237,6 +251,6 @@ if violations or cycle:
 
 print(
     f"check-company-boundaries: {len(LAYERS)} layers, "
-    f"{len(files)} modules, 0 violations"
+    f"{mapped_modules} modules, 0 violations"
 )
 PY

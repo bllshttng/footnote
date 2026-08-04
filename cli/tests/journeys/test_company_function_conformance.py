@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ast
 import datetime as dt
+import shlex
 import subprocess
 from pathlib import Path
 
@@ -199,6 +201,21 @@ def test_pack_verification_runs_but_the_journey_carries_conformance() -> None:
     assert all(condition.checked for condition in scenario_conditions)
 
 
+def test_declared_scenario_commands_execute_real_journey_tests() -> None:
+    for scenario in CONFORMANCE.scenarios:
+        result = subprocess.run(
+            shlex.split(scenario.command),
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode == 0, (
+            scenario.id,
+            result.stdout,
+            result.stderr,
+        )
+
+
 def test_resolved_roles_match_every_declared_policy_axis(role_root: Path) -> None:
     records = discover_role_definitions(root=role_root)
     for declared in CONFORMANCE.roles:
@@ -290,6 +307,16 @@ def test_complete_delivery_evidence_passes(role_id: str) -> None:
     company_work = _company_work(role_id)
     verdict = evaluate_delivery(company_work, _complete_facts(company_work), evaluated_at=NOW)
     assert verdict.aggregate is EvidenceResult.PASSED, (role_id, verdict.diagnostics)
+
+
+def test_support_response_scenario(role_root: Path) -> None:
+    test_resolved_roles_match_every_declared_policy_axis(role_root)
+    test_complete_delivery_evidence_passes("support-response")
+
+
+def test_sales_outreach_scenario(role_root: Path) -> None:
+    test_resolved_roles_match_every_declared_policy_axis(role_root)
+    test_complete_delivery_evidence_passes("sales-outreach")
 
 
 MISSING_CASES = tuple(
@@ -487,3 +514,45 @@ def test_function_agnostic_guards_pass_over_both_packs() -> None:
             text=True,
         )
         assert result.returncode == 0, f"{script}: {result.stdout}\n{result.stderr}"
+
+    exact_names = {
+        manifest.id
+        for manifest in (CONFORMANCE, GROWTH)
+    } | {
+        role.role.id
+        for manifest in (CONFORMANCE, GROWTH)
+        for role in manifest.roles
+    }
+    prohibited_roots = (
+        "company",
+        "roles",
+        "delivery",
+        "approvals",
+        "plugins",
+    )
+    hits = []
+    for package in prohibited_roots:
+        for path in sorted((REPO_ROOT / "cli" / "src" / "fno" / package).rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            docstrings = {
+                id(body[0].value)
+                for node in ast.walk(tree)
+                if isinstance(
+                    node,
+                    (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef),
+                )
+                and (body := node.body)
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            }
+            for node in ast.walk(tree):
+                if (
+                    isinstance(node, ast.Constant)
+                    and isinstance(node.value, str)
+                    and id(node) not in docstrings
+                ):
+                    for name in exact_names:
+                        if name in node.value:
+                            hits.append(f"{path.relative_to(REPO_ROOT)}:{node.lineno}: {name}")
+    assert hits == [], "function or role literal in core:\n" + "\n".join(hits)

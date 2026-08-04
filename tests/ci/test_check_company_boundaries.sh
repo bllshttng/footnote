@@ -14,7 +14,7 @@ fail() { echo "  FAIL: $1"; FAILS=$((FAILS + 1)); }
 make_repo() {
     local root="$1"
     mkdir -p "$root/cli/src/fno/company" "$root/cli/src/fno/roles" \
-        "$root/agents" "$root/skills" "$root/plugins"
+        "$root/cli/src/fno/approvals" "$root/agents" "$root/skills" "$root/plugins"
     printf 'class WorkOrderRef:\n    pass\n' > "$root/cli/src/fno/company/contracts.py"
     printf 'from fno.company.contracts import WorkOrderRef\n' > "$root/cli/src/fno/roles/models.py"
     printf 'from fno.roles.models import RoleLayer\n' > "$root/cli/src/fno/company/topology.py"
@@ -29,6 +29,11 @@ echo "$out" | grep -q "positive control ok" \
     && ok "positive control is reported" || fail "positive control missing: $out"
 echo "$out" | grep -Eq '[0-9]+ layers, [0-9]+ modules, 0 violations' \
     && ok "clean result reports measured coverage" || fail "coverage missing: $out"
+
+printf 'value = 1\n' > "$CLEAN/cli/src/fno/unmapped.py"
+out="$(bash "$CHECK" "$CLEAN" 2>&1)"; rc=$?
+echo "$out" | grep -q '6 layers, 3 modules, 0 violations' \
+    && ok "coverage excludes unmapped modules" || fail "coverage over-counts: $out"
 
 echo "== a broken scan fails closed =="
 BROKEN="$TMP/broken"
@@ -69,6 +74,18 @@ out="$(FNO_BOUNDARY_TEST_COMPANY_PACKAGE_CORE=1 bash "$CHECK" "$PACKAGE_MAP" 2>&
 echo "$out" | grep -q \
     'cli/src/fno/company/topology.py:16: L1 core -> L2 roles / from fno.roles.models import RoleLayer' \
     && ok "package map names topology.py:16" || fail "topology evidence missing: $out"
+
+echo "== ImportFrom aliases and package-relative imports cannot bypass the map =="
+ALIASES="$TMP/aliases"
+make_repo "$ALIASES"
+printf 'from fno import roles\n' > "$ALIASES/cli/src/fno/company/contracts.py"
+printf 'from .. import roles\n' > "$ALIASES/cli/src/fno/approvals/__init__.py"
+out="$(bash "$CHECK" "$ALIASES" 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "alias forms exit one" || fail "expected exit 1, got $rc: $out"
+echo "$out" | grep -q 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles / from fno import roles' \
+    && ok "absolute package alias caught" || fail "absolute alias missed: $out"
+echo "$out" | grep -q 'cli/src/fno/approvals/__init__.py:1: L1 core -> L2 roles / from .. import roles' \
+    && ok "relative package alias caught" || fail "relative alias missed: $out"
 
 echo "== pack-marked root files are attributed to their source pack =="
 PROJECTION="$TMP/projection"
