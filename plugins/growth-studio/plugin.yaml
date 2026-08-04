@@ -91,6 +91,11 @@ workflows:
   - id: launch
     source: workflows/launch.yaml
 
+agents:
+  - id: growth-marketer
+    source: agents/growth-marketer.md
+    role: {id: marketing, function_id: growth-studio}
+
 evaluators:
   - id: factual-review
     command: bash evaluators/factual-check.sh
