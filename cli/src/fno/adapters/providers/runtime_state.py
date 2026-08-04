@@ -1074,7 +1074,12 @@ def evaluate_quota_signal(
         if horizon > 0 and h.resets_at <= now + horizon:
             defer = True
         after = cutover_low_after_minutes * 60
-        if after > 0 and h.resets_at > now + after:
+        # A nearby reset keeps the existing keep-or-defer policy. The two
+        # thresholds are independent knobs, so a cutover window shorter than the
+        # defer horizon makes both predicates true for the same reset; without
+        # this the caller (which tests cutover first) would churn harnesses on
+        # exactly the near reset the defer horizon exists to wait out.
+        if after > 0 and not defer and h.resets_at > now + after:
             cutover = True
     return QuotaSignal(provider_id, h.state, h.resets_at, defer, cutover, "probed")
 

@@ -23,7 +23,42 @@ import dataclasses
 from pathlib import Path
 from typing import Optional
 
-__all__ = ["AutonomousRoute", "select_autonomous_route"]
+__all__ = ["AutonomousRoute", "launch_is_pinned", "select_autonomous_route"]
+
+
+def launch_is_pinned(
+    node: Optional[dict] = None,
+    *,
+    provider: Optional[str] = None,
+    model: Optional[str] = None,
+    account: Optional[str] = None,
+    node_cwd: Optional[str] = None,
+) -> bool:
+    """True when this launch carries explicit intent quota policy must not move.
+
+    One implementation for both autonomous launchers, so they cannot drift on
+    what counts as a pin. Precedence is explicit invocation pin > node pin >
+    configured dispatch harness > quota policy, and each of those outranks an
+    automatic cutover.
+
+    The model pin matters as much as the provider one: a cutover swaps the
+    harness, so forwarding a claude-only model to codex launches a worker that
+    cannot start. An unreadable config pins nothing - fail-open, the same stance
+    as the rest of the quota path.
+    """
+    if any((v or "").strip() for v in (provider, model, account)):
+        return True
+    if node and any(
+        str(node.get(k) or "").strip() for k in ("provider", "model", "harness")
+    ):
+        return True
+    try:
+        from fno.config import load_settings, load_settings_for_repo
+
+        s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
+        return bool((s.dispatch.harness or "").strip())
+    except Exception:  # noqa: BLE001 - unreadable config pins nothing
+        return False
 
 
 @dataclasses.dataclass(frozen=True)

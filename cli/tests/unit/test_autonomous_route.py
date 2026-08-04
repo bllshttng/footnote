@@ -99,6 +99,51 @@ class TestRouteActions:
 
 
 class TestExplicitIntentWins:
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"provider": "ccm"},
+            {"model": "claude-opus-5"},
+            {"account": "ccr"},
+            {"node": {"provider": "ccm"}},
+            {"node": {"model": "claude-opus-5"}},
+            {"node": {"harness": "claude"}},
+        ],
+    )
+    def test_every_explicit_intent_counts_as_a_pin(self, monkeypatch, kwargs) -> None:
+        # AC4-LOCK: a model pin pins as hard as a provider one - a cutover swaps
+        # the harness, so a claude-only model must never ride one onto codex.
+        import fno.config as cfg
+
+        # The pin must be decided from the explicit intent alone; reaching config
+        # at all means the precedence order is wrong.
+        monkeypatch.setattr(
+            cfg,
+            "load_settings",
+            lambda *a, **k: pytest.fail("config read before the explicit pin won"),
+        )
+        assert ar.launch_is_pinned(**kwargs) is True
+
+    def test_configured_dispatch_harness_pins(self, monkeypatch) -> None:
+        # Precedence: configured dispatch harness outranks quota policy, so it
+        # must block an automatic reroute the same way an invocation pin does.
+        import fno.config as cfg
+
+        monkeypatch.setattr(
+            cfg,
+            "load_settings",
+            lambda *a, **k: SimpleNamespace(dispatch=SimpleNamespace(harness="codex")),
+        )
+        assert ar.launch_is_pinned({}) is True
+
+    def test_unreadable_config_pins_nothing(self, monkeypatch) -> None:
+        import fno.config as cfg
+
+        monkeypatch.setattr(
+            cfg, "load_settings", lambda *a, **k: (_ for _ in ()).throw(OSError("nope"))
+        )
+        assert ar.launch_is_pinned({}) is False
+
     def test_pinned_exhausted_defers_instead_of_rerouting(self, monkeypatch) -> None:
         # AC4-LOCK: quota policy never replaces a harness/account a human chose.
         _signal(monkeypatch, state=HeadroomState.EXHAUSTED, defer=True, cutover=True)

@@ -324,14 +324,19 @@ def _dispatch_one(
     cutover = None
     cutover_command = ""
     if not explicit:
-        from fno.agents.autonomous_route import select_autonomous_route
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
 
         route = select_autonomous_route(
             provider_id=_resolve_provider_id() or "",
             priority=priority,
-            # An explicit --account is a human's billing choice: quota policy
-            # may still defer behind it, but must never reroute off it.
-            pinned=bool(account),
+            # The same pin rule `backlog advance` applies, so the two launchers
+            # cannot disagree about whether a launch is rerouteable. An explicit
+            # --account is a human's billing choice: quota policy may still defer
+            # behind it, but must never reroute off it.
+            pinned=launch_is_pinned(picked, account=account, node_cwd=cwd),
             node_cwd=cwd,
         )
         if route.action == "cutover":

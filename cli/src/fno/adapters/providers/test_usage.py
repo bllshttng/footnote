@@ -743,6 +743,19 @@ class TestEvaluateQuotaDefer:
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 1800), probed_at=1000.0), now=1000.0)
         assert evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
+    def test_defer_wins_when_the_two_windows_overlap(self, state_path: Path, monkeypatch) -> None:
+        # AC3-EDGE: the cutover window and the defer horizon are independent
+        # knobs, so a cutover shorter than the horizon makes both predicates true
+        # for one reset. The caller tests cutover first, so without defer winning
+        # here a near reset would churn harnesses instead of waiting it out.
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
+
+        self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60, defer_threshold_pct=90.0)
+        # reset in 45 min: inside the 60-min defer horizon AND past a 30-min cutover.
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 2700), probed_at=1000.0), now=1000.0)
+        sig = evaluate_quota_signal("p1", priority="p2", cutover_low_after_minutes=30, now=1000.0)
+        assert sig.defer and not sig.cutover
+
     def test_low_outside_horizon_proceeds(self, state_path: Path, monkeypatch) -> None:
         from fno.adapters.providers.runtime_state import evaluate_quota_signal
 

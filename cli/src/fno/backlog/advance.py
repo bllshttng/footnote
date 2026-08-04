@@ -1801,20 +1801,30 @@ def advance(
     failover_window: Optional[str] = None
     failover_reason: Optional[str] = None
     try:
-        from fno.adapters.providers.loader import load_providers
-        from fno.agents.autonomous_route import select_autonomous_route
+        from fno.adapters.providers.loader import effective_active
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
 
         # Match the SAME provider precedence the spawn below uses
         # (eff_provider = provider arg -> node pin -> active default), so the
         # quota decision evaluates the provider the worker will actually run on,
-        # not a mismatched active record (x-5d3e review). An explicit or node
-        # provider pin is `pinned`: it may still defer, never reroute.
-        provider_id = provider or node.get("provider") or load_providers().active or ""
+        # not a mismatched active record (x-5d3e review). `effective_active` (not
+        # the raw `.active` pointer) is what `fno dispatch` probes: with managed
+        # rotation past the pointer the two launchers would otherwise probe
+        # different records and disagree about the route.
+        provider_id = provider or node.get("provider") or effective_active() or ""
         route = select_autonomous_route(
             provider_id=provider_id,
             priority=node.get("priority"),
-            pinned=bool(
-                (provider or "").strip() or str(node.get("provider") or "").strip()
+            # Every explicit launch intent pins: a provider or model named on the
+            # invocation or the node, and a configured dispatch harness (which
+            # outranks quota policy by precedence). A pinned launch may still
+            # defer; it must never be rerouted, or a claude-only model would ride
+            # a cutover onto codex.
+            pinned=launch_is_pinned(
+                node, provider=provider, model=model, node_cwd=node_cwd
             ),
             node_cwd=node_cwd,
         )
