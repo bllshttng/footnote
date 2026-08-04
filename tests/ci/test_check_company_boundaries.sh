@@ -41,6 +41,35 @@ echo "$out" | grep -q "positive control failed" \
 echo "$out" | grep -q "0 violations" \
     && fail "broken scan printed a clean verdict" || ok "broken scan never prints clean"
 
+echo "== prohibited edges report the exact path, line, layers, and statement =="
+VIOLATION="$TMP/violation"
+make_repo "$VIOLATION"
+{
+    printf '%s\n' '# padding' '# padding' '# padding' '# padding' '# padding'
+    printf '%s\n' '# padding' '# padding' '# padding' '# padding' '# padding' '# padding'
+    printf '%s\n' 'from fno.roles.models import ApprovalFloor'
+} > "$VIOLATION/cli/src/fno/company/contracts.py"
+out="$(bash "$CHECK" "$VIOLATION" 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "prohibited edge exits one" || fail "expected exit 1, got $rc: $out"
+echo "$out" | grep -q \
+    'cli/src/fno/company/contracts.py:12: L1 core -> L2 roles / from fno.roles.models import ApprovalFloor' \
+    && ok "finding carries exact evidence" || fail "exact evidence missing: $out"
+echo "$out" | grep -q 'layer cycle: L1 core -> L2 roles -> L1 core' \
+    && ok "declared-layer cycle is printed" || fail "cycle missing: $out"
+
+echo "== package-granularity company map fails on the shipped topology shape =="
+PACKAGE_MAP="$TMP/package-map"
+make_repo "$PACKAGE_MAP"
+{
+    for _ in {1..15}; do echo '# padding'; done
+    echo 'from fno.roles.models import RoleLayer'
+} > "$PACKAGE_MAP/cli/src/fno/company/topology.py"
+out="$(FNO_BOUNDARY_TEST_COMPANY_PACKAGE_CORE=1 bash "$CHECK" "$PACKAGE_MAP" 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "package map exits one" || fail "expected exit 1, got $rc: $out"
+echo "$out" | grep -q \
+    'cli/src/fno/company/topology.py:16: L1 core -> L2 roles / from fno.roles.models import RoleLayer' \
+    && ok "package map names topology.py:16" || fail "topology evidence missing: $out"
+
 echo ""
 if [[ $FAILS -eq 0 ]]; then
     echo "test_check_company_boundaries: ALL PASS"

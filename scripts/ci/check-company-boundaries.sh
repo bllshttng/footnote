@@ -6,6 +6,7 @@ ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
 
 python3 - "$ROOT" <<'PY'
 import ast
+import os
 import sys
 from pathlib import Path
 
@@ -60,6 +61,10 @@ def module_name(path: Path) -> str:
 
 
 def layer_for(module: str):
+    if os.environ.get("FNO_BOUNDARY_TEST_COMPANY_PACKAGE_CORE") == "1" and (
+        module == "fno.company" or module.startswith("fno.company.")
+    ):
+        return 1, "core"
     matches = []
     for number, name, prefixes in LAYERS:
         for prefix in prefixes:
@@ -99,6 +104,7 @@ except (OSError, SyntaxError, UnicodeError) as exc:
 
 positive_control = False
 violations = []
+layer_edges = set()
 for path, source, tree in parsed:
     source_module = module_name(path)
     source_layer = layer_for(source_module)
@@ -113,7 +119,11 @@ for path, source, tree in parsed:
             ):
                 positive_control = True
             target_layer = layer_for(imported)
-            if target_layer is None or source_layer[0] >= target_layer[0]:
+            if target_layer is None:
+                continue
+            if source_layer[0] != target_layer[0]:
+                layer_edges.add((source_layer[0], target_layer[0]))
+            if source_layer[0] >= target_layer[0]:
                 continue
             statement = lines[node.lineno - 1].strip()
             rel = path.relative_to(root)
@@ -130,11 +140,47 @@ if not positive_control:
     )
     sys.exit(2)
 
+
+def find_cycle(edges):
+    graph = {}
+    for source, target in edges:
+        graph.setdefault(source, set()).add(target)
+    visited = set()
+    active = []
+
+    def visit(node):
+        if node in active:
+            start = active.index(node)
+            return active[start:] + [node]
+        if node in visited:
+            return None
+        active.append(node)
+        for target in sorted(graph.get(node, ())):
+            cycle = visit(target)
+            if cycle:
+                return cycle
+        active.pop()
+        visited.add(node)
+        return None
+
+    for node in sorted(graph):
+        cycle = visit(node)
+        if cycle:
+            return cycle
+    return None
+
+
+cycle = find_cycle(layer_edges)
+names = {number: name for number, name, _ in LAYERS}
+
 print("check-company-boundaries: positive control ok (roles -> core edge observed)")
-if violations:
+if violations or cycle:
     print("check-company-boundaries: prohibited dependencies:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
+    if cycle:
+        rendered = " -> ".join(f"L{number} {names[number]}" for number in cycle)
+        print(f"  layer cycle: {rendered}", file=sys.stderr)
     print(
         "Legal direction is downward only; see docs/architecture/company-boundaries.md",
         file=sys.stderr,
