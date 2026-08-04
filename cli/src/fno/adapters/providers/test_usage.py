@@ -793,7 +793,7 @@ class TestDispatchOneQuotaDefer:
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
         )
-        monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda: "p1")
+        monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "p1")
         monkeypatch.setattr(
             dispatch_mod, "_next_node", lambda project: {"id": "ab-9f", "slug": "x", "priority": "p2"}
         )
