@@ -139,9 +139,20 @@ for external publication and an `authority_ceiling` no higher than `internal` fo
 drafting. It declares workflows, evaluators, assets, a maximum-expected
 publication ceiling, and a benchmark scenario.
 
-Pack skill bundling through `skill-bundles.yaml` is a build-time-only seam held
-back from this first pack: the bundle mechanism targets the plugin's own skill
-folders, so pack-contributed skills are a separable follow-up rather than a
-prerequisite for a verifiable, activatable, resolvable pack. `fno bundle check`
-reports the bundles fresh with no drift. Support, sales, and operations packs
-are later waves and are out of scope here.
+Pack skills, agents, and the invokable faucet are bundled at build time from the
+pack manifest, not re-declared in `skill-bundles.yaml`. The parser globs
+`plugins/*/plugin.yaml` and emits `pack-skill` and `pack-agent` rows whose
+destinations are root-relative (`skills/<id>`, `agents/<id>.md`); the generator
+copies them and the freshness gate audits them with no second declaration to
+drift. The growth-studio pack ships four role subagents and the
+`/fno:growth-launch` orchestrator this way.
+
+The split the phrase "activation extends the toolkit" hides is now delivered:
+presence is build time (skills and agents are copied into `skills/` and `agents/`
+and read at session start, unconditionally), and permission is runtime (a
+packaged role is projected into the plugin layer only on activation, and
+`/fno:growth-launch` refuses at step one when the pack is not active). Three
+lifetimes: build time bundles, activation permits, run time scopes. `fno bundle
+check` reports the bundles fresh with no drift.
+
+Support, sales, and operations packs are later waves and are out of scope here.
