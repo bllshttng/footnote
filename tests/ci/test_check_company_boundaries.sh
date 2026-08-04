@@ -70,6 +70,36 @@ echo "$out" | grep -q \
     'cli/src/fno/company/topology.py:16: L1 core -> L2 roles / from fno.roles.models import RoleLayer' \
     && ok "package map names topology.py:16" || fail "topology evidence missing: $out"
 
+echo "== pack-marked root files are attributed to their source pack =="
+PROJECTION="$TMP/projection"
+make_repo "$PROJECTION"
+mkdir -p "$PROJECTION/plugins/growth-studio" "$PROJECTION/skills/growth-launch"
+printf 'id: growth-studio\n' > "$PROJECTION/plugins/growth-studio/plugin.yaml"
+printf '%s\n' '---' 'name: growth-marketer' 'pack: growth-studio' '---' \
+    > "$PROJECTION/agents/growth-marketer.md"
+printf '%s\n' '---' 'name: growth-launch' 'pack: growth-studio' '---' \
+    > "$PROJECTION/skills/growth-launch/SKILL.md"
+out="$(bash "$CHECK" "$PROJECTION" 2>&1)"; rc=$?
+[[ $rc -eq 0 ]] && ok "valid projections stay clean" || fail "projection fixture failed: $out"
+echo "$out" | grep -q 'agents/growth-marketer.md -> growth-studio' \
+    && ok "agent projection attributed" || fail "agent attribution missing: $out"
+echo "$out" | grep -q 'skills/growth-launch -> growth-studio' \
+    && ok "skill projection attributed" || fail "skill attribution missing: $out"
+echo "$out" | grep -q 'no enforcement for fno-skills' \
+    && echo "$out" | grep -q 'fno-mux' \
+    && ok "uncovered seams named honestly" || fail "coverage caveat missing: $out"
+
+echo "== an orphaned pack marker is a violation =="
+ORPHAN="$TMP/orphan"
+make_repo "$ORPHAN"
+printf '%s\n' '---' 'name: orphan' 'pack: no-such-pack' '---' \
+    > "$ORPHAN/agents/orphan.md"
+out="$(bash "$CHECK" "$ORPHAN" 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "orphan exits one" || fail "expected exit 1, got $rc: $out"
+echo "$out" | grep -q \
+    "agents/orphan.md:3: pack marker 'no-such-pack' names no plugins/no-such-pack/plugin.yaml" \
+    && ok "orphan finding names file and marker" || fail "orphan evidence missing: $out"
+
 echo ""
 if [[ $FAILS -eq 0 ]]; then
     echo "test_check_company_boundaries: ALL PASS"
