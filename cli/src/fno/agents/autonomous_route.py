@@ -33,6 +33,7 @@ def launch_is_pinned(
     model: Optional[str] = None,
     account: Optional[str] = None,
     node_cwd: Optional[str] = None,
+    honors_config_harness: bool = True,
 ) -> bool:
     """True when this launch carries explicit intent quota policy must not move.
 
@@ -52,6 +53,12 @@ def launch_is_pinned(
         str(node.get(k) or "").strip() for k in ("provider", "model", "harness")
     ):
         return True
+    if not honors_config_harness:
+        # A launcher that hardcodes its harness does not honor this setting, so
+        # letting it pin would suppress a cutover to protect a choice the launch
+        # never makes. Only a launcher that actually reads the setting may pin on
+        # it.
+        return False
     try:
         from fno.config import load_settings, load_settings_for_repo
 

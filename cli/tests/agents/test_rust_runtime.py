@@ -1001,6 +1001,32 @@ def test_is_resume_bearing_spawn_predicate() -> None:
     assert not rr._is_resume_bearing_spawn("ask", ["ask", "w", "--resume", uuid])
 
 
+def test_is_dispatch_account_bearing_spawn_predicate() -> None:
+    # The cutover carrier is Python-only: the Rust spawn parser exits
+    # "unknown flag: --dispatch-account" and the launch dies before it starts.
+    # The rule lives in the router, not at one caller, so every caller is covered.
+    assert rr._is_dispatch_account_bearing_spawn(
+        "spawn", ["spawn", "w", "--dispatch-account", "ccr"]
+    )
+    assert rr._is_dispatch_account_bearing_spawn(
+        "spawn", ["spawn", "--name", "w", "--dispatch-account=ccr"]
+    )
+    assert not rr._is_dispatch_account_bearing_spawn(
+        "spawn", ["spawn", "w", "--account", "ccr"]
+    )
+    assert not rr._is_dispatch_account_bearing_spawn(
+        "ask", ["ask", "w", "--dispatch-account", "ccr"]
+    )
+
+
+def test_a_dispatch_account_spawn_never_auto_routes_to_the_binary() -> None:
+    # The predicate is only useful if the auto-route arm consults it.
+    import inspect
+
+    src = inspect.getsource(rr)
+    assert "or _is_dispatch_account_bearing_spawn(verb, args)" in src
+
+
 def test_is_output_format_bearing_spawn_predicate() -> None:
     assert rr._is_output_format_bearing_spawn(
         "spawn", ["spawn", "w", "--substrate", "headless", "--output-format", "json"]

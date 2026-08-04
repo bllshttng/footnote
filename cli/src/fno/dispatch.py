@@ -477,7 +477,15 @@ def _dispatch_one(
             # cannot disagree about whether a launch is rerouteable. An explicit
             # --account is a human's billing choice: quota policy may still defer
             # behind it, but must never reroute off it.
-            pinned=launch_is_pinned(picked, account=account, node_cwd=cwd),
+            pinned=launch_is_pinned(
+                picked,
+                account=account,
+                node_cwd=cwd,
+                # This verb hosts a claude pane and hardcodes that harness
+                # below, so config.dispatch.harness is not a choice it honors -
+                # pinning on it would block a cutover to protect nothing.
+                honors_config_harness=False,
+            ),
             node_cwd=cwd,
         )
         if route.action == "cutover":

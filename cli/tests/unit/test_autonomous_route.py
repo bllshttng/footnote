@@ -547,3 +547,20 @@ def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_pat
     monkeypatch.setattr(dm, "dispatch_spawn_pane", lambda **kw: SimpleNamespace(pane_id="p1"))
     dm._dispatch_one(session="s", node=None, project=None, account="ccr")
     assert seen["provider_id"] == "ccr"
+
+
+def test_a_launcher_that_hardcodes_its_harness_cannot_pin_on_the_config(monkeypatch) -> None:
+    """`fno dispatch one` hardcodes a claude pane, so config.dispatch.harness is
+    not a choice it honors. Pinning on it there would suppress a cutover to
+    protect a setting the launch ignores."""
+    import fno.config as cfg
+
+    monkeypatch.setattr(
+        cfg,
+        "load_settings",
+        lambda *a, **k: SimpleNamespace(dispatch=SimpleNamespace(harness="codex")),
+    )
+    assert ar.launch_is_pinned({}) is True
+    assert ar.launch_is_pinned({}, honors_config_harness=False) is False
+    # An explicit pin still wins regardless of the opt-out.
+    assert ar.launch_is_pinned({}, account="ccr", honors_config_harness=False) is True

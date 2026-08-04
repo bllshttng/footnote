@@ -487,6 +487,24 @@ def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--dispatch-account`` (the cutover carrier).
+
+    The Rust spawn parser does not know the flag and exits ``unknown flag:
+    --dispatch-account``, killing the launch. Python owns it: it resolves the
+    destination record's env overlay and refuses a harness mismatch. Keeping the
+    decision HERE rather than at one caller is the point - a shell dispatcher
+    pinning its own runtime protects only itself, and the next caller to reach
+    for the flag would hit the binary.
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--dispatch-account" or a.startswith("--dispatch-account=")
+        for a in args
+    )
+
+
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844).
 
@@ -1006,6 +1024,7 @@ def make_agents_group_cls() -> type:
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)
+                    or _is_dispatch_account_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
