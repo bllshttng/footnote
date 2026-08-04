@@ -156,3 +156,27 @@ lifetimes: build time bundles, activation permits, run time scopes. `fno bundle
 check` reports the bundles fresh with no drift.
 
 Support, sales, and operations packs are later waves and are out of scope here.
+
+## Boundary model (recorded design stance)
+
+The founder-approval boundary is the agent's tool list, not gates at every
+dispatch seam. A packaged agent that holds only `Read`, `Write`, `Edit`, `Glob`,
+and `Grep` cannot publish or delegate, on any reachable path: a direct
+`@fno:<agent>` invocation runs the same bounded frontmatter the orchestrator
+runs, exactly as a Codex subagent is bounded by its inherited `sandbox_mode`
+rather than by per-spawn gates. The orchestrator's activation and
+role-resolution gates are for the *composed* launch (a reviewed campaign
+bundle); an individual agent invoked directly can still only produce a draft.
+
+`growth-launch` is a Claude-plugin surface: it dispatches the role subagents
+through Claude's Task tool. The Codex agent TOMLs for these agents are
+intentionally not generated, because Codex's coarse sandbox (read-only or
+workspace-write) cannot express the bounded-tool allowlist the Claude harness
+enforces; advertising the skill on a harness that cannot bound its agents would
+be the defect, not the omission.
+
+The role resolver's candidate sort assumes one context reference per
+identifier, so an unreadable observation carries no `content_digest`
+(`None`) without a sort clash; the catalog producer guarantees that
+one-per-identifier invariant.
+

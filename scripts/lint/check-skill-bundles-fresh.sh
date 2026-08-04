@@ -90,6 +90,28 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   fi
 done < "$ROWS_FILE"
 
+# Detect orphaned pack bundles: when a pack removes or renames a declared skill
+# or agent, the parser emits no row for the old destination, so the loop above
+# never examines it. Scan committed pack-marked outputs and flag any whose
+# destination no pack currently declares - otherwise a stale agent stays
+# callable while this gate reports fresh.
+_pack_marker_value() {
+  awk 'NR==1 && /^---[[:space:]]*$/ {f=1; next} f && /^---[[:space:]]*$/ {exit} f && /^pack:/ {sub(/^pack:[[:space:]]*/,""); gsub(/["'\'']/,""); print; exit}' "$1" 2>/dev/null
+}
+EXPECTED_PACK_DESTS="$(grep -E '^(pack-skill|pack-agent)' "$ROWS_FILE" | cut -f4 | sort -u)"
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  [[ -n "$(_pack_marker_value "$f")" ]] || continue
+  dest="agents/$(basename "$f")"
+  grep -qxF "$dest" <<<"$EXPECTED_PACK_DESTS" || { echo "ERROR: stale pack bundle $dest no longer declared by any pack; remove it" >&2; DRIFT=1; }
+done < <(find "$REPO_ROOT/agents" -name '*.md' -type f 2>/dev/null)
+while IFS= read -r d; do
+  [[ -f "$d/SKILL.md" ]] || continue
+  [[ -n "$(_pack_marker_value "$d/SKILL.md")" ]] || continue
+  dest="skills/$(basename "$d")"
+  grep -qxF "$dest" <<<"$EXPECTED_PACK_DESTS" || { echo "ERROR: stale pack bundle $dest no longer declared by any pack; remove it" >&2; DRIFT=1; }
+done < <(find "$REPO_ROOT/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+
 if [[ $DRIFT -ne 0 ]]; then
   echo "" >&2
   echo "Run scripts/generate-skill-bundles.sh and commit the result." >&2
