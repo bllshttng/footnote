@@ -830,6 +830,22 @@ EOF
     _OWNED_COLLISION=""
   fi
 
+  # Feature-detect claim --harness: a deployed fno predating the option rejects
+  # it and fails claim acquisition, so pass it only when the installed CLI lists
+  # it. Otherwise omit (the claim falls to ambient - degraded, but the node is
+  # still claimed rather than left unclaimed on a stale install).
+  _CLAIM_HARNESS_FLAG=""
+  if command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
+    _CLAIM_HARNESS_FLAG="--harness $_OWNED_HARNESS"
+  fi
+
+  # The manifest `harness` field drives hook loading (doctor) and routing, so it
+  # carries the OWNED harness - or the recognized "unknown" sentinel when no
+  # harness was proven (ambiguous / stale-fno fail-open), never an unproven
+  # claude default that would load the wrong hooks for a non-claude session.
+  # PROVIDER (above) stays the operational default for session-id infix only.
+  _MANIFEST_HARNESS="${_OWNED_HARNESS:-unknown}"
+
   # ── Session identifiers ───────────────────────────────────────────
   local_owner_pid="${PPID:-$$}"
   local_owner_cwd="$REPO_ROOT"
@@ -987,7 +1003,7 @@ cross_project: $CROSS_PROJECT
 # Harness identity (canonical). harness supersedes provider; harness_session_id
 # supersedes claude_session_id/codex_thread_id. Those legacy keys stay for one
 # release as aliases (removed next release).
-harness: $PROVIDER
+harness: $_MANIFEST_HARNESS
 # Constant since the Gemini experimental project-agent mode was retired: no
 # harness varies its mode any more. Kept as a field (not dropped) because the
 # schema and the loop-check readers still expect the key.
@@ -1149,7 +1165,7 @@ PYEOF
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-            --harness "$_OWNED_HARNESS" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+            $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
@@ -1272,7 +1288,7 @@ PYEOF
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
               if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-                    --harness "$_OWNED_HARNESS" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+                    $_CLAIM_HARNESS_FLAG --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1
                 break
               fi
