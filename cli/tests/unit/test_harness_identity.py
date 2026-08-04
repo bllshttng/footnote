@@ -290,6 +290,37 @@ def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
     assert owned.rejected[0]["owner"] == owner
 
 
+def test_owned_proven_marker_wins_over_self_registration_collision(tmp_path):
+    """A session that has registered its OWN marker as a live row must not reject
+    that marker as a collision. Proof runs before collision, so the proven claude
+    marker wins even when a live row owns it (the session's own row), and an
+    unregistered foreign CODEX_THREAD_ID never becomes the fallback. This is the
+    inverse of the incident: without proof-first, the self-row collision would
+    reject claude and leave the foreign marker as the sole survivor."""
+    from fno.agents.registry import register_existing_session, row_owning_session_id
+
+    mine = "aaaa1111-mine-mine-mine-aaaaaaaaaaaa"
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    reg = tmp_path / "agents.json"
+    register_existing_session(
+        provider="claude", session_id=mine, cwd="/x", registry_path=reg
+    )
+
+    def collide(harness, sid):
+        return row_owning_session_id(sid, registry_path=reg)
+
+    env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": mine}
+    owned = resolve_owned_identity(
+        env, prove=lambda harness, sid: harness == "claude", collide=collide
+    )
+    assert owned.disposition == "proven"
+    assert owned.harness == "claude"
+    assert owned.session_id == mine
+    # The session's own row was NOT rejected: proof skipped its collision check.
+    assert owned.rejected == ()
+
+
+
 def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():
     """AC7-CON: three hand-mirrored resolvers (Python, Rust, the bash hook) must
     AGREE that a disagreeing marker set is never silently resolved to codex.

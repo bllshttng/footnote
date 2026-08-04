@@ -285,6 +285,16 @@ def resolve_owned_identity(
     proven: list[tuple[str, str, str]] = []
     survivors: list[tuple[str, str, str]] = []
     for marker, harness, value in markers:
+        # PROOF before COLLISION. A process-tree-proven marker IS this session,
+        # so a live registry row holding it is the session's own row, not a
+        # foreign owner: collision-checking it first would reject the session's
+        # own marker when it has registered itself, leaving an unproven foreign
+        # marker as the sole fallback. Proven markers skip the collision check
+        # entirely; collision applies only to markers proof could not attest
+        # (i.e. foreign ones).
+        if prove is not None and prove(harness, value):
+            proven.append((marker, harness, value))
+            continue
         owner = collide(harness, value) if collide is not None else None
         if owner:
             rejected.append(
@@ -296,9 +306,6 @@ def resolve_owned_identity(
                     "owner": owner,
                 }
             )
-            continue
-        if prove is not None and prove(harness, value):
-            proven.append((marker, harness, value))
         else:
             survivors.append((marker, harness, value))
     if len(proven) == 1:
