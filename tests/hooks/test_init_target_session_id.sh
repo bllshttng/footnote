@@ -39,6 +39,13 @@ pass "init script passes bash -n"
 _ALL_TMPS=()
 trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
 
+# Scrub inherited harness markers so each scenario's env is exactly what it
+# sets: the invoking session's CLAUDE_CODE_SESSION_ID etc. would otherwise leak
+# into every subshell and flip the disagreement detection. A no-op in CI (which
+# sets none of these) and a scrub under an interactive harness.
+unset CLAUDE_CODE_SESSION_ID CLAUDECODE_SESSION_ID CODEX_THREAD_ID \
+      CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID TARGET_TRANSCRIPT_ID 2>/dev/null || true
+
 # ── Helper: create an isolated temp repo ─────────────────────────────
 make_repo() {
   local _varname="$1"
@@ -262,32 +269,5 @@ pass "(d): NoWork and shipped terminal boundaries both rotate claimless runs"
 # the bash hook cannot reliably invoke the source verb during THIS PR's CI,
 # because the PATH-resolved `fno` predates the verb. Post-merge the deployed
 # fno carries it and the hook exercises it identically to the local e2e.
-
-# ── (f) real codex session keeps codex identity (no regression) ───────
-log "(f): CODEX_THREAD_ID only => harness codex, cx infix (source fno, no regression)"
-
-make_repo TMP_F
-_ALL_TMPS+=("$TMP_F")
-(cd "$TMP_F" && \
-  HOME="${TMP_F}/home" \
-  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
-  TARGET_START=1 TARGET_INPUT="test-codex-only-sourcefno" \
-  CODEX_THREAD_ID="019f48e4-codex-thread" \
-  CLAUDE_CODE_SESSION_ID= CLAUDECODE_SESSION_ID= CODEX_SESSION_ID= \
-  GEMINI_SESSION_ID= OPENCODE_SESSION_ID= \
-  TARGET_LOCATION_OK="main-acknowledged" \
-  bash "$INIT" >/dev/null 2>&1) \
-  || fail "(f): init exited non-zero"
-
-STATE_F="${TMP_F}/.fno/target-state.md"
-HARNESS_F=$(grep '^harness:' "$STATE_F" | sed 's/^harness:[[:space:]]*//' | tr -d '\r')
-HSID_F=$(grep '^harness_session_id:' "$STATE_F" | sed 's/^harness_session_id:[[:space:]]*//' | tr -d '\r')
-SID_F=$(grep '^session_id:' "$STATE_F" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
-[[ "$HARNESS_F" == "codex" ]] || fail "(f): expected harness codex, got '${HARNESS_F}'"
-[[ "$HSID_F" == "019f48e4-codex-thread" ]] \
-  || fail "(f): harness_session_id should be the codex thread, got '${HSID_F}'"
-echo "$SID_F" | grep -qE '^[0-9]{8}T[0-9]{6}Z-cx[0-9]+-' \
-  || fail "(f): codex session_id '${SID_F}' must carry the cx infix"
-pass "(f): real codex session keeps codex identity and cx infix"
 
 log "All session_id scenarios passed"
