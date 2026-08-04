@@ -445,6 +445,31 @@ class TestProbeUnknownReason:
         monkeypatch.setitem(usage_mod._PROBES, "claude", _boom)
         assert probe_usage_detail(_claude_record(tmp_path)) == (None, "probe-error")
 
+    def test_a_rejected_bearer_is_attribution_not_a_probe_failure(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A credential the slot would not vouch for never reaches the endpoint.
+
+        `_probe_claude` refuses every candidate whose bearer verdict is not
+        `match`/`unsupported`, so NO usage request is issued. Reporting that as
+        `probe-failed` sends an operator to debug a network path that was never
+        used - a confident wrong reason, which is worse than a bare unknown.
+        """
+        import fno.adapters.providers.usage as usage_mod
+
+        (tmp_path / ".credentials.json").write_text(
+            json.dumps({"claudeAiOauth": {"accessToken": "tok"}})
+        )
+        rec = _claude_record(tmp_path)
+        monkeypatch.setattr(usage_mod, "_bearer_verdict", lambda r, b, n: "mismatch")
+        monkeypatch.setattr(usage_mod, "_reconcile_slot_once", lambda r, n: False)
+
+        def _never(*a: object, **k: object) -> None:
+            pytest.fail("a rejected bearer must never reach the usage endpoint")
+
+        monkeypatch.setattr(usage_mod.urllib.request, "urlopen", _never)
+        assert probe_usage_detail(rec, now=1000.0) == (None, "unattributed")
+
     def test_probe_usage_delegates_to_the_detail_path(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -456,7 +481,7 @@ class TestProbeUnknownReason:
         import fno.adapters.providers.usage as usage_mod
 
         snap = _snap("claude-primary", UsageWindow("5h", 7.0, 9000.0))
-        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda record, now: snap)
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda record, now: (snap, None))
         rec = _claude_record(tmp_path)
         assert probe_usage(rec) is probe_usage_detail(rec)[0] is snap
 
@@ -899,12 +924,12 @@ class TestTaintSelfHeal:
 
         # The probe table binds the function at import; patching the module
         # attribute alone would leave the real probe wired up.
-        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: UsageSnapshot(
+        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: (UsageSnapshot(
             provider_id=r.id,
             windows=(UsageWindow(label="5h", used_pct=22.0, resets_at=now + 60),),
             probed_at=now,
             source="oauth-endpoint",
-        ))
+        ), None))
         self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True)
 
         snap = probe_usage(rec, now=1000.0)
@@ -966,7 +991,9 @@ class TestTaintSelfHeal:
             pytest.fail("a config_dir record must never enter slot reconciliation")
 
         self._arm(monkeypatch, usage_mod, rec, _reconcile, tainted=True)
-        monkeypatch.setitem(usage_mod._PROBES, "claude", lambda r, now: None)
+        monkeypatch.setitem(
+            usage_mod._PROBES, "claude", lambda r, now: (None, "probe-failed")
+        )
         assert probe_usage(rec, now=1000.0) is None
 
     def test_a_refusal_is_backed_off_not_retried_every_probe(
