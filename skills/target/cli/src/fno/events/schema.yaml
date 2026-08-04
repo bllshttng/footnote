@@ -879,6 +879,44 @@ event_types:
           description: "acquired_at on the prior claim - now superseded by the refresh."
     consumers: [operator]
 
+  - name: claim_rebound
+    description: "A native target resume rebound a same-holder local claim whose prior PID was dead to the resumed durable PID (x-2ccd). Distinct from claim_idempotent_reacquired (a live same-holder refresh) and claim_stale_reclaimed (a new holder taking a stale claim)."
+    sources: [fno-loop, target]
+    data:
+      required: [key, holder, pid, host, acquired_at, previous_pid, previous_state, mode]
+      properties:
+        key:
+          type: string
+        holder:
+          type: string
+          description: "Unchanged symbolic holder across the PID rebind."
+        pid:
+          type: integer
+          description: "The resumed durable PID now anchoring the claim."
+        host:
+          type: string
+        acquired_at:
+          type: integer
+        expires_at:
+          type: integer
+        previous_pid:
+          type: integer
+          description: "The dead prior PID that proved the rebind was safe."
+        previous_state:
+          type: string
+          description: "Claim state before rebind (live|suspect|stale)."
+        mode:
+          type: string
+          description: "rebound = a dead prior PID was rebound to the resumed durable PID; idempotent = a live same-PID lease refresh."
+        fno_id:
+          type: string
+          description: "Target run id from the manifest, when emitted by the resume path."
+        harness:
+          type: string
+        harness_session_id:
+          type: string
+    consumers: [operator]
+
   - name: claim_clock_skew_rejected
     description: "A refresh was rejected because computed expires_at landed in the past."
     sources: [fno-loop, target, megawalk, megatron]
