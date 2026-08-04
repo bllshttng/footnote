@@ -38,7 +38,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Iterable, Optional
 
 # Exact tag openers only: `<promise>` / `<promise ...>`, never `<promised>` or a
 # word that merely starts with the tag name. Mirrors the loop runtime's protocol
@@ -203,7 +203,7 @@ _MODEL_TAIL_BYTES = 256 * 1024
 
 
 def _models_in(
-    lines: "Any", reader: Callable[[dict], Optional[str]]
+    lines: Iterable[str], reader: Callable[[dict], Optional[str]]
 ) -> tuple[Optional[str], int]:
     """``(most recent model, how many records carried one)`` over ``lines``.
 
