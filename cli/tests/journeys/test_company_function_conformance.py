@@ -407,6 +407,74 @@ def test_observation_facts_cannot_satisfy_delivery_or_change_its_verdict(
     assert with_observation.aggregate is EvidenceResult.UNKNOWN
 
 
+def test_cadence_rejects_previous_cycle_residue_but_accepts_it_in_its_own_cycle() -> None:
+    current = _company_work("operations-recurring", attempt_id="attempt-current")
+    previous = _company_work("operations-recurring", attempt_id="attempt-previous")
+    observed_at = NOW - dt.timedelta(hours=2)
+    fresh_until = NOW - dt.timedelta(hours=1)
+    previous_facts = tuple(
+        _fact(
+            evidence,
+            fact_revision="facts-previous",
+            observed_at=observed_at,
+            fresh_until=fresh_until,
+        )
+        for evidence in previous.evidence
+    )
+
+    residue = evaluate_delivery(current, previous_facts, evaluated_at=NOW)
+    diagnostics = "\n".join(
+        diagnostic
+        for requirement in residue.requirements
+        for diagnostic in requirement.diagnostics
+    )
+    assert residue.aggregate is EvidenceResult.UNKNOWN
+    assert "attempt attempt-previous" in diagnostics
+    assert "stale after" in diagnostics
+
+    own_cycle = evaluate_delivery(
+        previous,
+        previous_facts,
+        evaluated_at=observed_at + dt.timedelta(minutes=30),
+    )
+    assert own_cycle.aggregate is EvidenceResult.PASSED
+    assert all(
+        requirement.result is EvidenceResult.PASSED
+        for requirement in own_cycle.requirements
+    )
+
+
+def test_cadence_mixed_fact_revisions_make_every_requirement_unknown() -> None:
+    current = _company_work("operations-recurring", attempt_id="attempt-current")
+    previous = _company_work("operations-recurring", attempt_id="attempt-previous")
+    previous_facts = tuple(
+        _fact(
+            evidence,
+            fact_revision="facts-previous",
+            observed_at=NOW - dt.timedelta(hours=2),
+            fresh_until=NOW - dt.timedelta(hours=1),
+        )
+        for evidence in previous.evidence
+    )
+
+    verdict = evaluate_delivery(
+        current,
+        (*_complete_facts(current), *previous_facts),
+        evaluated_at=NOW,
+    )
+
+    assert verdict.aggregate is EvidenceResult.UNKNOWN
+    assert any("mixed fact revisions" in diagnostic for diagnostic in verdict.diagnostics)
+    assert all(
+        requirement.result is EvidenceResult.UNKNOWN
+        for requirement in verdict.requirements
+    )
+    assert not any(
+        requirement.result is EvidenceResult.PASSED
+        for requirement in verdict.requirements
+    )
+
+
 def test_function_agnostic_guards_pass_over_both_packs() -> None:
     for script in (
         "scripts/ci/check-company-function-agnostic.sh",
