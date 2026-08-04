@@ -194,7 +194,7 @@ def _emit_agents(skill: str, agents: list) -> int:
         # of plain strings, but pin the invariant).
         if "\t" in meta_json or "\n" in meta_json:
             print(
-                f"ERROR: agent meta JSON contains tab/newline; refusing to emit",
+                "ERROR: agent meta JSON contains tab/newline; refusing to emit",
                 file=sys.stderr,
             )
             return 1

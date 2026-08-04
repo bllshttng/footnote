@@ -371,7 +371,8 @@ def context_catalog(
         return
     for reference in references:
         if reference.readable:
-            state = f"ok digest={reference.content_digest[:12]}"
+            digest = reference.content_digest[:12] if reference.content_digest else "(none)"
+            state = f"ok digest={digest}"
         else:
             state = f"unreadable: {reference.unavailable_reason}"
         typer.echo(

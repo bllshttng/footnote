@@ -720,7 +720,7 @@ def _agent_binding_conditions(manifest: PackManifest, base: Path) -> list[Condit
                     f"agent-frontmatter-identity:{agent.id}",
                     checked=True,
                     result=EvidenceResult.PASSED,
-                    detail=f"frontmatter name/pack/role match the declaration",
+                    detail="frontmatter name/pack/role match the declaration",
                 )
             )
         else:
