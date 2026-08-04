@@ -160,21 +160,21 @@ def test_owned_rejects_an_id_another_live_row_owns():
     assert owned.rejected[0]["reason"] == "owned_by_live_row"
 
 
-def test_owned_collision_fallthrough_takes_sole_survivor():
-    """AC3-ERR + AC1-HP: codex rejected (owned by another live row), no proof
-    available. The colliding id is provably someone else's, so rejecting it
-    leaves claude as the sole survivor - resolved by elimination, not by
-    precedence and not by guessing. This is the Layer 1 fall-through, and it is
-    what resolves the witnessed incident even before any transcript proof."""
+def test_owned_multi_family_without_proof_degrades_not_fallback():
+    """Two families, no prover: collision-elimination is unsafe without proof
+    (it could reject the session's own row when the prover is unavailable and
+    leave an inherited foreign marker as the winner), so even when one marker is
+    owned by another live row the resolver degrades rather than stamp the other
+    by elimination. The collision is still recorded for the event."""
     env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
 
     def collide(harness: str, sid: str):
         return "owner" if sid == "foreign" else None
 
     owned = resolve_owned_identity(env, collide=collide)  # no prove
-    assert owned.disposition == "fallback"
-    assert owned.harness == "claude"
-    assert owned.session_id == "mine"
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
     assert owned.rejected[0]["session_id"] == "foreign"
 
 
@@ -346,30 +346,7 @@ def test_owned_distinct_ids_in_one_proven_family_degrade():
     owned = resolve_owned_identity(env, prove=lambda harness, sid: harness == "codex")
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
-    assert owned.harness is None
-
-
-def test_owned_prover_cant_tell_falls_through_to_collision(tmp_path):
-    """A prover that returns None (no harness ancestor, e.g. CI) does NOT
-    force a degrade: it falls through to collision-elimination, so a foreign id
-    a live row owns is still rejected and the surviving family still wins.
-    This is the 3-state contract: None != False."""
-    from fno.agents.registry import register_existing_session, row_owning_session_id
-
-    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
-    reg = tmp_path / "agents.json"
-    register_existing_session(provider="codex", session_id=foreign, cwd="/x", registry_path=reg)
-
-    def collide(harness, sid):
-        return row_owning_session_id(sid, registry_path=reg)
-
-    env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": "mine"}
-    owned = resolve_owned_identity(env, prove=lambda harness, sid: None, collide=collide)
-    assert owned.disposition == "fallback"
-    assert owned.harness == "claude"
-    assert owned.session_id == "mine"
-
-
+    assert owned.harness == "codex"  # proven harness kept; only the id degrades
 
 
 def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():

@@ -809,10 +809,17 @@ EOF
     _OWNED_OUT="$(fno target resolve-owned-identity 2>/dev/null || true)"
   fi
   if [[ -n "$_OWNED_OUT" ]]; then
-    _OWNED_HARNESS="$(printf '%s\n' "$_OWNED_OUT" | sed -n 's/^HARNESS=//p' | head -1)"
-    _OWNED_SID="$(printf '%s\n' "$_OWNED_OUT" | sed -n 's/^SESSION_ID=//p' | head -1)"
-    _OWNED_DISP="$(printf '%s\n' "$_OWNED_OUT" | sed -n 's/^DISPOSITION=//p' | head -1)"
-    _OWNED_COLLISION="$(printf '%s\n' "$_OWNED_OUT" | sed -n 's/^COLLISION=//p' | head -1)"
+    # Parse the verb's KEY=value lines in one read (zero subprocesses), not four
+    # printf|sed|head pipelines.
+    _OWNED_HARNESS=""; _OWNED_SID=""; _OWNED_DISP=""; _OWNED_COLLISION=""
+    while IFS='=' read -r _k _v; do
+      case "$_k" in
+        HARNESS) _OWNED_HARNESS="$_v" ;;
+        SESSION_ID) _OWNED_SID="$_v" ;;
+        DISPOSITION) _OWNED_DISP="$_v" ;;
+        COLLISION) _OWNED_COLLISION="$_v" ;;
+      esac
+    done <<< "$_OWNED_OUT"
     # Ambiguous/unprovable -> empty harness -> default claude, NEVER precedence.
     PROVIDER="${_OWNED_HARNESS:-claude}"
   else
@@ -856,28 +863,20 @@ EOF
   # claude rather than stamping the precedence winner.
   _HARNESS_SESSION="$_OWNED_SID"
   if [[ -z "$_OWNED_OUT" ]]; then
-    # Fail-open (stale fno, no verb). Do NOT reproduce the leak: when two or
-    # more harness FAMILIES are present, raw precedence would launder an
-    # inherited marker into the identity, so leave it unset and default provider
-    # to claude rather than stamping the precedence winner. A single family
-    # keeps today's precedence behavior.
+    # Fail-open (stale fno, no verb): no proof is available, so NEVER stamp a
+    # session id from an ambient marker - that is the load-bearing identity this
+    # run refuses to launder. Leave it null. The manifest harness FIELD is
+    # metadata only; detect_provider already supplied it, and when two families
+    # disagree default to claude so an inherited marker's harness does not win.
+    # The whitespace glob matches detect_provider's blank-is-unset rule (a
+    # whitespace-only marker must not count as set).
+    _HARNESS_SESSION=""
     _failopen_families=0
-    { [[ -n "$_codex_thread_compact" ]] || [[ -n "${CODEX_SESSION_ID:-}" ]]; } && _failopen_families=$((_failopen_families+1))
-    [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]] && _failopen_families=$((_failopen_families+1))
-    [[ -n "${GEMINI_SESSION_ID:-}" ]] && _failopen_families=$((_failopen_families+1))
-    [[ -n "${OPENCODE_SESSION_ID:-}" ]] && _failopen_families=$((_failopen_families+1))
-    if [[ "$_failopen_families" -ge 2 ]]; then
-      PROVIDER="claude"
-      _HARNESS_SESSION=""
-    elif [[ -n "$_codex_thread_compact" ]]; then
-      _HARNESS_SESSION="$_codex_thread_raw"
-    elif [[ -n "$claude_transcript_id" && "$claude_transcript_id" != "null" ]]; then
-      _HARNESS_SESSION="$claude_transcript_id"
-    elif [[ -n "${GEMINI_SESSION_ID:-}" ]]; then
-      _HARNESS_SESSION="$GEMINI_SESSION_ID"
-    elif [[ -n "${OPENCODE_SESSION_ID:-}" ]]; then
-      _HARNESS_SESSION="$OPENCODE_SESSION_ID"
-    fi
+    { [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]] || [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
+    [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "$_failopen_families" -ge 2 ]] && PROVIDER="claude"
     unset _failopen_families
   fi
   _HARNESS_MODEL="${TARGET_HARNESS_MODEL:-${CLAUDE_MODEL:-${ANTHROPIC_MODEL:-}}}"
@@ -1149,7 +1148,7 @@ PYEOF
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-            --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+            --harness "$PROVIDER" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
@@ -1272,7 +1271,7 @@ PYEOF
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
               if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-                    --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+                    --harness "$PROVIDER" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1
                 break
               fi

@@ -1326,13 +1326,13 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     tmp_path, monkeypatch
 ) -> None:
     """AC1-HP + AC3-ERR at the verb: a CODEX_THREAD_ID a live row already owns
-    is refused and claude wins.
+    is refused and the proven claude marker wins.
 
     Proven in Python so it does not depend on the PATH-resolved `fno` carrying
     the verb - the bash hook test's CI limitation, since the PR's own CI runs a
-    `fno` that predates the verb. The prover is forced off to exercise the
-    collision-elimination path a non-claude runner (CI) takes, where claude is
-    the sole surviving family rather than the proven one.
+    `fno` that predates the verb. The prover is pinned to claude (a real claude
+    process's view) so the claude marker is proven and wins; the foreign codex
+    marker is refused as another live row's. CI-robust: no real process tree.
     """
     from fno.agents.registry import register_existing_session
     from fno.paths_testing import use_tmpdir
@@ -1342,10 +1342,11 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     owner = register_existing_session(
         provider="codex", session_id=foreign, cwd="/x"
     ).name
-    # No harness ancestor -> the prover attests nothing; collision alone resolves.
+    # Pin the prover to claude (what a real claude session's process tree sees),
+    # so the test does not depend on the runner's actual harness.
     monkeypatch.setattr(
         "fno.claims.session_pid.resolve_session_harness",
-        lambda from_pid=None: None,
+        lambda from_pid=None: "claude",
     )
     monkeypatch.setenv("CODEX_THREAD_ID", foreign)
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111-mine")
@@ -1359,7 +1360,7 @@ def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
     }
     assert fields["HARNESS"] == "claude"
     assert fields["SESSION_ID"] == "aaaa1111-mine"
-    assert fields["DISPOSITION"] == "fallback"
+    assert fields["DISPOSITION"] == "proven"
     assert fields["COLLISION"] == owner
     assert fields["COLLISION_ID"] == foreign
 

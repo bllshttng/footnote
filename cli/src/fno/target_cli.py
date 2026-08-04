@@ -893,9 +893,11 @@ def resolve_owned_identity_cmd() -> None:
         prove=_prove,
         collide=lambda _harness, sid: row_owning_session_id(sid),
     )
-    # AC5-CON: record any non-trivial resolution (disagreement or refused
-    # collision) so a future leak is reconstructable from the event log alone.
-    if owned.disposition in {"proven", "fallback", "ambiguous"}:
+    # AC5-CON: record any non-trivial resolution (a refused collision or a
+    # non-single disposition) so a future leak is reconstructable from the event
+    # log alone. A single-family resolve can still carry a refused collision, so
+    # emit on rejected too.
+    if owned.disposition in {"proven", "ambiguous"} or owned.rejected:
         from fno.agents.events import emit_identity_resolution
 
         emit_identity_resolution(owned)
