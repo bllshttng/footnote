@@ -1372,3 +1372,25 @@ def test_quota_probe_is_scoped_to_the_node_repository(state_path: Path, monkeypa
     evaluate_quota_signal("p1", priority="p2", now=1000.0, repo_root=tmp_path)
     assert seen["quota"] == tmp_path
     assert seen["refresh"] == tmp_path
+
+
+def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, monkeypatch) -> None:
+    """A probe that saw EXHAUSTED must not read back as UNKNOWN.
+
+    UNKNOWN proceeds, so a persist that lost a lock race would launch onto the
+    very provider the probe just observed as walled.
+    """
+    from fno.adapters.providers.model import QuotaConfig
+    from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_signal
+    import fno.adapters.providers.runtime_state as rs
+
+    monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True))
+    # The probe returns a walled snapshot; the disk keeps nothing.
+    monkeypatch.setattr(
+        rs, "refresh_usage",
+        lambda pid, **k: _snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
+    )
+    sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
+    assert sig.state is HeadroomState.EXHAUSTED
+    assert sig.defer and sig.cutover
+    assert sig.resets_at == 9e18

@@ -263,6 +263,19 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
 
         for rec in load_graph():
             if rec.get("id") == node_ref or rec.get("slug") == node_ref:
+                # A raw graph row carries only the RECORDED `cwd`; the work-map
+                # projection that turns a project into a root lives in
+                # `fno backlog get`. Without it a project-mapped node would have
+                # its quota probed against the dispatcher's own repository.
+                if not rec.get("_resolved_cwd") and rec.get("project"):
+                    try:
+                        from fno.graph._intake import project_root_from_settings
+
+                        root = project_root_from_settings(rec["project"])
+                        if root:
+                            rec["_resolved_cwd"] = root
+                    except Exception:  # noqa: BLE001 - best-effort enrichment
+                        pass
                 return rec
     except Exception:  # noqa: BLE001 - a graph read must never block a dispatch
         return None

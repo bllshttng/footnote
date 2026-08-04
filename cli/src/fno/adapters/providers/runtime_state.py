@@ -983,6 +983,24 @@ def headroom(
     if snap is not None and snap.probed_at < now - ttl_seconds:
         snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
+    return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct)
+
+
+def _headroom_from(
+    snap: UsageSnapshot | None,
+    rlu: float | None,
+    *,
+    now: float,
+    threshold_pct: float,
+) -> Headroom:
+    """The pure verdict, given an already-resolved snapshot and provider lock.
+
+    Split out of :func:`headroom` so a caller holding a FRESH snapshot can reach
+    the same verdict without a second disk read. That matters because a probe
+    whose persist lost a lock race would otherwise read back as UNKNOWN, and
+    UNKNOWN proceeds - turning a successful "this provider is exhausted"
+    observation into a launch onto the walled provider.
+    """
     binding = [w for w in (snap.windows if snap else ()) if w.resets_at > now]
     exhausted = [w for w in binding if w.used_pct >= 100.0]
     if rlu is not None or exhausted:
@@ -1068,7 +1086,7 @@ def evaluate_quota_signal(
 
     # Probe-on-stale so the decision uses fresh data (the dispatcher tick is
     # not latency-sensitive, unlike combo rotation which reads cache only).
-    refresh_usage(
+    fresh = refresh_usage(
         provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now, repo_root=repo_root
     )
     h = headroom(
@@ -1077,6 +1095,17 @@ def evaluate_quota_signal(
         ttl_seconds=quota.probe_ttl_seconds,
         threshold_pct=quota.defer_threshold_pct,
     )
+    if h.state is HeadroomState.UNKNOWN and fresh is not None and fresh.windows:
+        # The probe SAW the provider, but the read-back did not: a persist that
+        # lost a lock race reads as UNKNOWN, and UNKNOWN proceeds - which would
+        # launch onto a provider we just observed as exhausted. Trust the
+        # in-hand observation over the disk that failed to keep it.
+        h = _headroom_from(
+            fresh,
+            None,
+            now=now,
+            threshold_pct=quota.defer_threshold_pct,
+        )
     defer = cutover = False
     if h.state is HeadroomState.EXHAUSTED:
         defer = cutover = True
