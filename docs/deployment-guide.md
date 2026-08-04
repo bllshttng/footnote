@@ -22,7 +22,7 @@ Installation, setup, and multi-CLI deployment for the footnote plugin.
 | jq | 1.6+ | JSON processing in hook scripts |
 | yq | 4.x | YAML processing for settings and capabilities |
 | gh | 2.x | GitHub CLI for PR creation (`/pr create` skill) |
-| Node.js | 18+ | Context monitor hook (`context-monitor.js`) |
+| Node.js | 18+ | Spend / model-drift hook (`context-monitor.js`) |
 
 ### Optional (per workflow)
 
@@ -244,7 +244,7 @@ footnote/                          # Repository root
         target-stop-hook.sh       # Stop hook script
         session-start.sh            # Session bootstrap hook
         inject-project-vision.sh    # Vision injection
-        context-monitor.js          # Context monitoring (Node.js)
+        context-monitor.js          # Spend cap + model drift (Node.js)
       scripts/                      # Utility scripts
         setup.sh                    # Setup wizard
         run-target-loop.sh        # Cross-session loop runner
