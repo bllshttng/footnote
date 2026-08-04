@@ -61,6 +61,22 @@ def _stable_fno_py_cmd(monkeypatch):
     monkeypatch.setattr(_subprocess_util, "fno_py_cmd", lambda: ["fno-py"])
 
 
+@pytest.fixture(autouse=True)
+def _neutral_host_harness(monkeypatch):
+    """Keep synthetic session markers independent of the pytest host harness.
+
+    Identity tests set their own Claude, Codex, or Gemini markers.  A real
+    harness ancestor belongs to the test runner rather than the synthetic
+    session, so letting the process-tree prover observe it makes local results
+    depend on which harness launched pytest.  Tests of proven ownership pin the
+    resolver explicitly after this fixture runs.
+    """
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation (ab-2f78b48e)
 # ---------------------------------------------------------------------------
