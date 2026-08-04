@@ -1320,3 +1320,46 @@ def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
     assert result.exit_code == 9, result.output
     assert "UNSERIALIZED" in result.output
     assert "no lock for you" in result.output
+
+
+def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
+    tmp_path, monkeypatch
+) -> None:
+    """AC1-HP + AC3-ERR at the verb: a CODEX_THREAD_ID a live row already owns
+    is refused and claude wins.
+
+    Proven in Python so it does not depend on the PATH-resolved `fno` carrying
+    the verb - the bash hook test's CI limitation, since the PR's own CI runs a
+    `fno` that predates the verb. The prover is forced off to exercise the
+    collision-elimination path a non-claude runner (CI) takes, where claude is
+    the sole surviving family rather than the proven one.
+    """
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    owner = register_existing_session(
+        provider="codex", session_id=foreign, cwd="/x"
+    ).name
+    # No harness ancestor -> the prover attests nothing; collision alone resolves.
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", foreign)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111-mine")
+
+    result = runner.invoke(app, ["target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == "aaaa1111-mine"
+    assert fields["DISPOSITION"] == "fallback"
+    assert fields["COLLISION"] == owner
+    assert fields["COLLISION_ID"] == foreign
+
