@@ -91,6 +91,10 @@ workflows:
   - id: launch
     source: workflows/launch.yaml
 
+skills:
+  - id: growth-launch
+    source: skills/growth-launch
+
 agents:
   - id: growth-marketer
     source: agents/growth-marketer.md
