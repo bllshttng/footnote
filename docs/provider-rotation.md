@@ -477,10 +477,32 @@ re-applies the floor when it writes its own settings file.
 Replaying it instead would hand the revived worker an `ANTHROPIC_API_KEY=""` that
 the original launch never carried.
 
-An explicit `--account` on a revive is refused rather than merged or dropped.
-The route overrides the account's endpoint and auth, so the pair bills one vendor
-for another's traffic; `fno agents spawn` already refuses `--account` with
-`--route` for the same reason.
+An explicit `--account` on a revive COMPOSES with the restored route, exactly as
+it does with a flag-supplied one: the route wins endpoint, auth, and
+model as one unit through the settings file, while the account's
+`CLAUDE_CONFIG_DIR` rides the spawn env and selects the per-account daemon.
+Nothing refuses the pair - `fno agents spawn` does not either, so a refusal here
+would have been this path inventing a rule the rest of the system does not have.
+
+The restored route goes THROUGH `resolve_spawn_route` rather than past it.
+That call is the single composition decision, and it is where managed OAuth
+refuses a foreign endpoint layered over the default Claude credential slot.
+A restored route assigned past it would be the one route in the system exempt
+from a guard every other route pays.
+
+The `pick_on_launch` headroom picker skips a `--resume` spawn on both seams
+(`_pick_account_at_seam` and `dispatch_spawn`), so any `--account` reaching the
+restore is one the operator typed rather than an advisory guess merged into the
+route.
+It has its own reason to stay out anyway: a transcript lives under the config dir
+it was created in, so pointing `CLAUDE_CONFIG_DIR` at a picked account resumes
+into a directory where the uuid does not exist.
+
+A restore is announced (`route: restored from <path>`) for the same reason the
+`fno agents resume` arm announces its own.
+A relaunch that changes destination silently is the failure this whole path
+exists to remove; a restore that says nothing is that silence pointed the other
+way.
 
 The recorded path answers "what was this worker launched with, so it can be
 launched that way again". It never answers "what is this worker running now" -

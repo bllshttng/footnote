@@ -2110,11 +2110,12 @@ def dispatch_spawn(
     # pane path calls the same helper itself. Two seams, one implementation -
     # putting it in cli.py instead would miss every in-process caller that
     # bypasses argument parsing.
-    # Whether the CALLER named an account, captured before the pick can fill it
-    # in. The revive restore below needs the distinction: dropping an advisory
-    # pick is free, dropping an operator's explicit --account is not (x-ae2d).
-    account_was_explicit = account_env is not None
-    if account_env is None and provider == "claude":
+    # A --resume spawn is never picked for, the same seam rule `_pick_account_at_seam`
+    # applies to the CLI argv: the transcript being resumed lives under the config
+    # dir it was created in, so a picked CLAUDE_CONFIG_DIR points at a directory
+    # where that uuid does not exist. It also keeps the revive restore below
+    # honest - any --account reaching it is one the operator actually typed.
+    if account_env is None and provider == "claude" and not resume_session_id:
         account_env = _pick_account_env(role=role, route_env=route_env)
 
     launch_role = role
@@ -2271,28 +2272,43 @@ def dispatch_spawn(
             if resume_session_id and source_row is not None and not route_env:
                 restored_route = restore_route_for_relaunch(source_row)
                 if restored_route:
-                    # An explicit --account names a DIFFERENT destination than
-                    # the recorded route, and the two do not compose: the route
-                    # overrides the account's endpoint and auth, so the pair
-                    # bills one vendor for another's traffic. `fno agents spawn`
-                    # already refuses --account with --route for that reason;
-                    # refuse the same pair here rather than silently dropping
-                    # whichever half is easier to drop.
-                    if account_was_explicit:
-                        raise DispatchAskError(
-                            f"agent {source_row.name!r} was launched on the route recorded "
-                            f"at {source_row.route_settings_path}, and --account names a "
-                            f"different destination; the two do not compose (the route "
-                            f"overrides the account's endpoint and auth). Drop --account "
-                            f"to revive on the recorded route, or pass an explicit "
-                            f"--route/-P to move it deliberately.",
-                            exit_code=2,
+                    # An explicit --account COMPOSES with the restored route, the
+                    # same way it composes with a flag-supplied one (x-5ed4): the
+                    # route wins endpoint+auth+model as one unit through the
+                    # settings file, and the account's CLAUDE_CONFIG_DIR rides the
+                    # spawn env to select the per-account daemon. Nothing here
+                    # refuses the pair - `fno agents spawn` does not either, and
+                    # the picker that would otherwise inject an advisory
+                    # --account already skips a --resume spawn on both seams, so
+                    # an account reaching this point is one the operator typed.
+                    #
+                    # Through resolve_spawn_route, not assigned past it: that is
+                    # THE composition decision, and it is where managed OAuth
+                    # refuses a foreign endpoint layered over the default Claude
+                    # credential slot. A restored route that skipped it would be
+                    # the one route in the system exempt from the check - a guard
+                    # every other route pays and this one does not.
+                    from fno.agents.model_routing import resolve_spawn_route
+
+                    try:
+                        route_env = resolve_spawn_route(
+                            None,
+                            restored_route,
+                            intent=f"route recorded for {source_row.name!r}",
+                            notice=lambda note: print(note, file=sys.stderr),
+                            account_overlay=bool(account_env),
                         )
-                    # The route wins endpoint+auth+model as one unit (x-2af5), so
-                    # the advisory pick made above (route-less spawns only) must
-                    # not ride along and split the two axes.
-                    account_env = None
-                    route_env = restored_route
+                    except RouteCompositionError as exc:
+                        raise DispatchAskError(str(exc), exit_code=2) from exc
+                    # Say so. The Rust `resume` door prints its restore, and a
+                    # relaunch that silently changes destination is the failure
+                    # shape this whole path exists to remove - a receipt that
+                    # omits the restore is the same silence pointed the other way.
+                    print(
+                        f"route: restored from {source_row.route_settings_path} "
+                        f"(recorded when {source_row.name!r} launched)",
+                        file=sys.stderr,
+                    )
 
             # 4a2. Build the dispatch context so the create helpers' emits
             # (agent_ask_started/agent_ask_done) carry the same request_id /

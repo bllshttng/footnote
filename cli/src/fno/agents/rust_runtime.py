@@ -613,18 +613,28 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
     see, and the scrub below then applies the account's overlay exactly as it
     does for an explicit ``--account``.
 
-    Five spawns are left alone: one that already named an account (explicit
+    Six spawns are left alone: one that already named an account (explicit
     intent always wins), one carrying ``--role`` or ``--route``/``--provider``
     (the CLI refuses ``--account`` alongside either, because the route's
     ANTHROPIC_* would override the account's CLAUDE_CONFIG_DIR and mis-bill),
     one carrying ``--dispatch-account`` (a quota cutover already selected the
     destination account, and a second pick merges two overlays the same way),
-    and one pinned to a non-claude harness (``--account`` is claude-only).
+    one carrying ``--resume`` (see below), and one pinned to a non-claude
+    harness (``--account`` is claude-only).
     """
     out = list(args)
     if _spawn_flag_value(out, "--account") is not None:
         return out
     if _is_role_bearing_spawn("spawn", out) or _is_route_bearing_spawn("spawn", out):
+        return out
+    if _is_resume_bearing_spawn("spawn", out):
+        # A revive continues an EXISTING transcript, and that transcript lives
+        # under the config dir it was created in - so an injected --account
+        # points CLAUDE_CONFIG_DIR at a directory where the uuid does not exist.
+        # It also collides with the recorded-route restore in `dispatch_spawn`,
+        # which reads any --account as operator intent and refuses the pair:
+        # the operator would be told to drop a flag they never typed. Nothing to
+        # pick - the transcript already decided where it lives.
         return out
     if _is_dispatch_account_bearing_spawn("spawn", out):
         # A cutover already SELECTED its account, and picking a second one here

@@ -3247,6 +3247,57 @@ mod tests {
     }
 
     #[test]
+    fn claude_resume_dead_arm_restores_a_recorded_route_or_refuses() {
+        // x-ae2d: the dead arm RELAUNCHES, so it is the one door on this verb
+        // that can lose a route. Untested, the branch is a guard on paper: the
+        // Python spawn door has its own tests and neither covers this one.
+        let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
+        let home = cv_tmpdir();
+        let ch = ClaudeHome::at(home.path());
+        let route = home.path().join("route-settings-abc123.json");
+        fs::write(&route, r#"{"env":{"ANTHROPIC_BASE_URL":"https://z"}}"#).unwrap();
+        let entry = serde_json::json!({
+            "name": "w", "provider": "claude",
+            "short_id": "7c5dcf5d", "claude_session_uuid": uuid,
+            "route_settings_path": route.to_str().unwrap(),
+        });
+
+        // Recorded + present -> `--settings <path>` ahead of `--resume`, the
+        // same mechanism (and the same flag order) the original spawn used.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())).unwrap(),
+            (
+                vec![
+                    "claude".to_string(),
+                    "--settings".into(),
+                    route.to_str().unwrap().into(),
+                    "--resume".into(),
+                    uuid.into(),
+                ],
+                Some(uuid.to_string()),
+            )
+        );
+
+        // Recorded but gone -> refuse. Relaunching would work, bill the default
+        // Anthropic account, and report nothing.
+        fs::remove_file(&route).unwrap();
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("done".into())),
+            Err(13)
+        );
+
+        // The live arm never relaunches, so a recorded route changes nothing
+        // there - it must stay a bare `claude attach`.
+        assert_eq!(
+            claude_resume_argv_with_truth(&ch, &entry, "w", |_| Some("working".into())).unwrap(),
+            (
+                vec!["claude".into(), "attach".into(), "7c5dcf5d".into()],
+                None
+            )
+        );
+    }
+
+    #[test]
     fn claude_resume_socket_miss_requires_family1_death() {
         let home = cv_tmpdir();
         let ch = ClaudeHome::at(home.path());

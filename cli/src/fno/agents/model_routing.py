@@ -795,8 +795,6 @@ def read_route_settings(path: str) -> dict[str, str]:
     return route
 
 
-
-
 # Default codex wire protocol for a third-party OpenAI-compatible endpoint
 # (z.ai's paas/v4 speaks Chat Completions). Codex's own default is "responses"
 # (OpenAI's API); a routed third-party provider almost always wants "chat".

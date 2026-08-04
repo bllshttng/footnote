@@ -269,18 +269,29 @@ def test_restore_never_replays_the_auth_scrub_floor(tmp_path, monkeypatch) -> No
     assert not (set(blank) & set(got)), "an unset scrub var must not reach the spawn env"
 
 
-def test_an_explicit_account_on_a_revive_refuses_rather_than_losing_a_half(
+def test_an_explicit_account_composes_with_a_restored_route(
     tmp_path, monkeypatch
 ) -> None:
-    """A recorded route and an explicit --account name different destinations.
+    """--account and a route compose; the revive path must not refuse the pair.
 
-    They do not compose - the route overrides the account's endpoint and auth -
-    and `fno agents spawn` already refuses the pair. Dropping either half here
-    would bill one vendor for another's traffic with no output saying so.
+    Nothing in `fno agents spawn` refuses --account alongside --route: the route
+    wins endpoint+auth+model through the settings file while the account's
+    CLAUDE_CONFIG_DIR rides the spawn env to pick the per-account daemon
+    (x-5ed4). A restored route is a route like any other, so the revive path
+    inherits that contract rather than inventing a refusal for it.
     """
     from fno.agents.dispatch import DispatchAskError, dispatch_spawn
 
-    path = _routed_claude_row(tmp_path, monkeypatch)
+    _routed_claude_row(tmp_path, monkeypatch)
+    seen: dict = {}
+
+    def _fake_bg_create(**kwargs):
+        seen.update(kwargs)
+        raise DispatchAskError("stop here", exit_code=99)
+
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.setattr(claude_mod, "bg_create", _fake_bg_create)
     with pytest.raises(DispatchAskError) as exc:
         dispatch_spawn(
             name="router",
@@ -290,9 +301,9 @@ def test_an_explicit_account_on_a_revive_refuses_rather_than_losing_a_half(
             resume_session_id="sess-1",
             account_env={"CLAUDE_CONFIG_DIR": "/cfg"},
         )
-    assert exc.value.exit_code == 2
-    assert "--account" in str(exc.value)
-    assert path in str(exc.value)
+    assert exc.value.exit_code == 99, "the pair must reach the launch, not be refused"
+    assert seen["account_env"] == {"CLAUDE_CONFIG_DIR": "/cfg"}, "account survives"
+    assert seen["route_env"] == ROUTE_ENV, "and the restored route rides with it"
 
 
 def test_a_role_that_resolves_to_nothing_still_restores_the_route(
@@ -359,3 +370,94 @@ def test_a_renamed_relaunch_of_the_same_transcript_still_restores(
         )
     assert path in str(exc.value)
     assert "router" in str(exc.value), "the refusal names the row that owns the route"
+
+
+def test_the_account_picker_never_fires_on_a_revive(tmp_path, monkeypatch, capsys) -> None:
+    """An auto-picked account must not turn a revive into an exit-2 refusal.
+
+    `pick_on_launch` fills in `--account` for a spawn that named none, on BOTH
+    seams: the argv seam (`_pick_account_at_seam`) and the in-process one here.
+    Left running on a revive it prints an `account: <id> (picked)` receipt for a
+    destination the operator never chose, and composes that overlay with the
+    restored route - two axes merged by an advisory guess. A revive continues an
+    existing transcript, and that transcript lives under the config dir it was
+    created in, so a picked CLAUDE_CONFIG_DIR resumes into a directory where the
+    uuid does not exist.
+    """
+    import fno.agents.rust_runtime as rr
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    monkeypatch.setattr(
+        "fno.agents.dispatch.pick_account_id",
+        lambda *a, **k: pytest.fail("picked an account for a revive"),
+    )
+
+    # Seam 1: the argv rewrite the CLI applies before either runtime.
+    args = ["spawn", "router", "--resume", "sess-1", "--substrate", "bg"]
+    assert rr._pick_account_at_seam(args) == args
+
+    # Seam 2: the in-process caller that bypasses argument parsing. The restore
+    # runs (proved by the refusal naming the missing file), and no pick fires.
+    Path(path).unlink()
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert path in str(exc.value)
+    assert "--account" not in str(exc.value), "no refusal about a flag nobody typed"
+
+
+def test_a_restored_route_is_announced(tmp_path, monkeypatch, capsys) -> None:
+    """A relaunch that changes destination without saying so is the failure this
+    path exists to remove; a restore that says nothing is the same silence."""
+    from fno.agents.dispatch import dispatch_spawn
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+
+    def _stop(**kw):
+        raise RuntimeError(f"stop before launch; route={sorted(kw['route_env'] or {})}")
+
+    monkeypatch.setattr("fno.agents.dispatch._claude_create_path", _stop)
+    with pytest.raises(RuntimeError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert "ANTHROPIC_BASE_URL" in str(exc.value), "the restored route reaches the launch"
+    assert path in capsys.readouterr().err
+
+
+def test_a_restored_route_pays_the_managed_oauth_composition_guard(
+    tmp_path, monkeypatch
+) -> None:
+    """The restore goes THROUGH resolve_spawn_route, not past it.
+
+    Managed OAuth owns the default Claude credential slot, so resolve_spawn_route
+    refuses a foreign endpoint layered over it unless an account overlay is
+    present and the route is self-authed. A restored route assigned past that
+    call would be the one route in the system exempt from the check.
+    """
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    _routed_claude_row(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_PROVIDER_AUTH", "managed")
+    monkeypatch.setenv("FNO_PROVIDER_ID", "claude-managed")
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+        )
+    assert exc.value.exit_code == 2
+    assert "managed OAuth" in str(exc.value)
+    assert "no worker launched" in str(exc.value)
