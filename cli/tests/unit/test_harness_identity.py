@@ -349,6 +349,31 @@ def test_owned_distinct_ids_in_one_proven_family_degrade():
     assert owned.harness == "codex"  # proven harness kept; only the id degrades
 
 
+def test_sync_harness_aliases_unknown_suppresses_legacy_backfill():
+    """An explicit harness=unknown must not backfill harness_session_id from a
+    legacy marker. The manifest records an inherited CODEX_THREAD_ID additively
+    for diagnosis; without this guard, _backfill_harness would resurrect it as
+    the session's identity, undoing the whole fix."""
+    from fno.harness_identity import sync_harness_aliases
+
+    keys = {"claude": "claude_session_id", "codex": "codex_thread_id"}
+    data = {
+        "harness": "unknown",
+        "harness_session_id": None,
+        "codex_thread_id": "019fc87d-ddff-7c90-926a-6bdd7ebb186c",
+        "claude_session_id": None,
+    }
+    out = sync_harness_aliases(dict(data), keys)
+    assert out["harness_session_id"] in (None, "", "null")
+    assert out["codex_thread_id"] == "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+
+    # A KNOWN harness still backfills from its own legacy key (unchanged).
+    known = sync_harness_aliases(
+        {"harness": "codex", "harness_session_id": None, "codex_thread_id": "thread"}, keys
+    )
+    assert known["harness_session_id"] == "thread"
+
+
 def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():
     """AC7-CON: three hand-mirrored resolvers (Python, Rust, the bash hook) must
     AGREE that a disagreeing marker set is never silently resolved to codex.

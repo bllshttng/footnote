@@ -81,12 +81,15 @@ def _harness_name_of(proc: psutil.Process) -> Optional[str]:
         low = cand.lower()
         if not is_cmdline and "claude" in low:
             return "claude"
-        for seg in low.split("/"):
-            if seg in _SEGMENT_TOKENS:
-                return seg
-            stem = seg.rsplit(".", 1)[0]
-            if stem in _SEGMENT_TOKENS:
-                return stem
+        # Match the executable/script BASENAME only, never an intermediate path
+        # segment: an ancestor running /tmp/codex/wrapper.sh must not prove
+        # codex. The stem drops one extension (gemini.js -> gemini).
+        basename = low.rsplit("/", 1)[-1]
+        if basename in _SEGMENT_TOKENS:
+            return basename
+        stem = basename.rsplit(".", 1)[0]
+        if stem in _SEGMENT_TOKENS:
+            return stem
     return None
 
 

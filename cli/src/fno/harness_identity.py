@@ -158,6 +158,14 @@ def sync_harness_aliases(data: dict, legacy_session_keys: Mapping[str, str]) -> 
         if legacy_key:
             data[legacy_key] = data["harness_session_id"]
     else:
+        if harness == "unknown":
+            # Explicit unknown: the resolver could not prove a harness. Do NOT
+            # backfill from a legacy marker - that would resurrect a foreign
+            # inherited id (e.g. an inherited CODEX_THREAD_ID recorded additively
+            # for diagnosis) as this session's identity, the exact leak this field
+            # exists to prevent. Distinct from an absent harness (pre-migration),
+            # which still scans all keys below.
+            return data
         # Adopt from THIS harness's own legacy key when the harness is known, so a
         # row carrying a stale legacy id of a DIFFERENT harness can't cross-
         # contaminate. Only a genuinely unknown/absent harness scans all keys (the
