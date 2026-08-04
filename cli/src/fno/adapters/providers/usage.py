@@ -665,17 +665,31 @@ def probe_usage_detail(
     ``unknown``. The reason is a stable, non-secret slug - never a token, a
     bearer, or a remote response body:
 
+    - ``harness-unsupported``- no probe registered for ``record.harness``
+    - ``auth-unsupported``   - an api_key record; the probes read OAuth bearers
     - ``unattributed``       - no credential provably belongs to this record.
       Covers both the pre-probe refusal AND a probe that rejected every
       candidate bearer, since in neither case was a usage request issued.
-    - ``harness-unsupported``- no probe registered for ``record.harness``
     - ``probe-failed``       - the probe issued a request and could not read usage
     - ``probe-error``        - the probe raised (contained here, AC1-FR)
+
+    Order is part of the contract: CAPABILITY is classified before attribution.
+    A gemini record has no probe and an api_key record has no bearer to read, so
+    neither has an attribution problem to repair - telling an operator to fix
+    account binding there sends them after a fault that does not exist.
 
     ``reason`` is None exactly when ``snapshot`` is not None.
     """
     if now is None:
         now = time.time()
+    probe = _PROBES.get(record.harness)
+    if probe is None:
+        return None, "harness-unsupported"
+    if record.auth == "api_key":
+        # Record-scoped by construction (the key rides `env`), so attribution is
+        # not the missing piece: every probe reads an OAuth bearer, and this
+        # record has none. v1 leaves api_key usage unknown.
+        return None, "auth-unsupported"
     if not _attributed_credential_dir(record)[0]:
         # A tainted slot may be a FALSE taint (the five-day outage). Ask once
         # whether identity can be proven, then re-read attribution - a proven
@@ -686,9 +700,6 @@ def probe_usage_detail(
             return None, "unattributed"
         if not _attributed_credential_dir(record)[0]:
             return None, "unattributed"
-    probe = _PROBES.get(record.harness)
-    if probe is None:
-        return None, "harness-unsupported"
     try:
         snapshot, reason = probe(record, now)
     except Exception as exc:  # noqa: BLE001 - crash containment boundary (AC1-FR)

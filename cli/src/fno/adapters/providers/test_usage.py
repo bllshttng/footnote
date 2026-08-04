@@ -416,16 +416,38 @@ class TestProbeUnknownReason:
     """AC3-ERR: `None` is one value with four causes; name them."""
 
     def test_unattributed_record(self) -> None:
-        rec = ProviderRecord(
-            id="k", name="K", harness="claude", auth="api_key",
-            env={"ANTHROPIC_API_KEY": "x"},
-        )
+        """A managed record that is not its CLI's slot occupant."""
+        rec = ProviderRecord(id="m", name="M", harness="claude", auth="managed")
         assert probe_usage_detail(rec) == (None, "unattributed")
 
     def test_harness_without_a_probe(self, tmp_path: Path) -> None:
         rec = ProviderRecord(
             id="g", name="G", harness="gemini", auth="oauth_dir",
             credentials_source=tmp_path,
+        )
+        assert probe_usage_detail(rec) == (None, "harness-unsupported")
+
+    def test_api_key_record_is_an_auth_gap_not_an_attribution_gap(self) -> None:
+        """An api_key record's credential IS its own; it just is not a bearer.
+
+        Reporting `unattributed` here would send an operator to repair an
+        account binding that is already correct.
+        """
+        rec = ProviderRecord(
+            id="k", name="K", harness="claude", auth="api_key",
+            env={"ANTHROPIC_API_KEY": "x"},
+        )
+        assert probe_usage_detail(rec) == (None, "auth-unsupported")
+
+    def test_capability_is_classified_before_attribution(self) -> None:
+        """An unsupported harness answers first, whatever its auth shape.
+
+        Otherwise every gemini/openclaw api_key record - the common case - reads
+        as an attribution failure that no amount of re-login can fix.
+        """
+        rec = ProviderRecord(
+            id="g", name="G", harness="gemini", auth="api_key",
+            env={"GEMINI_API_KEY": "x"},
         )
         assert probe_usage_detail(rec) == (None, "harness-unsupported")
 

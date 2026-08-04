@@ -1354,9 +1354,13 @@ is absent or stale, behavior is byte-for-byte the reactive baseline.
   and that disagreement is what once printed `unknown` while the probe returned real
   windows. An unknown provider is `{"state": "unknown", "reason": "<slug>"}` in JSON
   and `unknown (<slug>)` in human output, where the slug names the boundary that
-  failed - `unattributed` (no credential provably this record's), `harness-unsupported`,
-  `probe-failed`, `probe-error`, `record-missing`, `config-unreadable`, `no-windows`,
-  or `not-probed` (no `--refresh` and no fresh snapshot). A known provider additionally
+  failed - `harness-unsupported` (no probe for this CLI), `auth-unsupported` (an
+  api_key record; the probes read OAuth bearers), `unattributed` (no credential
+  provably this record's), `probe-failed`, `probe-error`, `record-missing`,
+  `config-unreadable`, `no-windows`, or `not-probed` (no `--refresh` and no fresh
+  snapshot). Capability is classified before attribution, so an unsupported harness
+  or an api_key record is never reported as an account-binding fault it does not
+  have. A known provider additionally
   carries `"persisted": false` when the reading is good but its cache write lost the
   update-lock race; the reading is still displayed, because persistence and
   displayability are separate outcomes.
