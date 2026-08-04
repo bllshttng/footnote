@@ -110,6 +110,34 @@ def emit_with_context(
     emit(kind, path=path, **merged)
 
 
+# Harness identity resolution. Emitted when resolution was NOT a plain single-
+# marker win, so a disagreement or refused collision is reconstructable from
+# the event record alone: every marker present, the disposition chosen, the
+# resolved harness, and the owning row when a candidate id was refused. The
+# originating ambient-leak incident was unrecoverable (the process was gone
+# before anyone looked); this record exists so the next one is not.
+KIND_HARNESS_IDENTITY_RESOLVED = "harness_identity_resolved"
+
+
+def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None:
+    """Record a non-trivial harness identity resolution (AC5-CON).
+
+    ``owned`` is an ``OwnedHarnessIdentity`` whose resolution was not a plain
+    single-marker win. Best-effort: the underlying ``emit()`` swallows OSError.
+    """
+    emit(
+        KIND_HARNESS_IDENTITY_RESOLVED,
+        path=path,
+        disposition=owned.disposition,
+        harness=owned.harness,
+        markers_present=[
+            {"marker": marker, "harness": harness}
+            for marker, harness in owned.markers_present
+        ],
+        rejected=[dict(entry) for entry in owned.rejected],
+    )
+
+
 # ---------------------------------------------------------------------
 # Phase 5 — MCP channel + streaming event kinds
 # ---------------------------------------------------------------------
