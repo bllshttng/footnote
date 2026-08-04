@@ -293,3 +293,44 @@ def test_an_explicit_account_on_a_revive_refuses_rather_than_losing_a_half(
     assert exc.value.exit_code == 2
     assert "--account" in str(exc.value)
     assert path in str(exc.value)
+
+
+def test_a_role_that_resolves_to_nothing_still_restores_the_route(
+    tmp_path, monkeypatch
+) -> None:
+    """A NAMED role is not a resolved route.
+
+    `resolve_route` is fail-safe: a protected role, a disabled block, an
+    unconfigured provider, or a missing key all return None. Keying the restore
+    on "was --role mentioned" would skip it in exactly those cases and relaunch
+    on the default account - the silent fallback this whole node exists to stop.
+    """
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    Path(path).unlink()  # make the restore refuse, so it is observable
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="router",
+            message="go",
+            provider="claude",
+            cwd=tmp_path,
+            resume_session_id="sess-1",
+            role="a-role-that-resolves-to-nothing",
+        )
+    assert path in str(exc.value), "the restore must run even when a role was named"
+
+
+def test_a_route_file_holding_only_the_scrub_floor_refuses(tmp_path, monkeypatch) -> None:
+    """Readable but routeless is the same silent fallback as missing."""
+    from fno.agents.dispatch import DispatchAskError, restore_route_for_relaunch
+    from fno.agents.account_env import SCRUB_AUTH_VARS
+    from fno.agents.registry import load_registry
+
+    path = _routed_claude_row(tmp_path, monkeypatch)
+    Path(path).write_text(
+        json.dumps({"env": {v: "" for v in SCRUB_AUTH_VARS}}), encoding="utf-8"
+    )
+    with pytest.raises(DispatchAskError) as exc:
+        restore_route_for_relaunch(load_registry()[0])
+    assert exc.value.exit_code == 2

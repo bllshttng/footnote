@@ -785,7 +785,14 @@ def read_route_settings(path: str) -> dict[str, str]:
         raise RouteRestoreError(f"route settings file {path} is malformed: {exc}") from exc
     if not isinstance(env, dict):
         raise RouteRestoreError(f"route settings file {path} has no env mapping")
-    return {str(k): str(v) for k, v in env.items() if str(v) != ""}
+    route = {str(k): str(v) for k, v in env.items() if str(v) != ""}
+    if not route:
+        # The row claims this worker was routed, and the file is readable but
+        # carries only the scrub floor. Returning {} would read as "never routed"
+        # to the caller and relaunch on the default account without a word - the
+        # same silent fallback as a missing file, so it takes the same refusal.
+        raise RouteRestoreError(f"route settings file {path} records no route")
+    return route
 
 
 

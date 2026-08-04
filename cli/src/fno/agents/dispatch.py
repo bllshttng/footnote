@@ -1326,6 +1326,15 @@ def _claude_create_path(
                 time.sleep(_PIN_LOOKUP_BACKOFF_S)
         return False
 
+    # x-ae2d: materialize the route file BEFORE the supervisor exists. It does
+    # mkdir + open + replace under the state dir, and doing it at row-write time
+    # would put that I/O after the launch, where an OSError escapes uncaught and
+    # strands a live supervisor with no registry row. Content-addressed, so this
+    # is the same path bg_create resolves for itself moments later.
+    from fno.agents.model_routing import route_settings_path_for
+
+    route_settings_path = route_settings_path_for(route_env)
+
     try:
         result: ProviderResult = claude_mod.bg_create(
             name=name,
@@ -1401,8 +1410,6 @@ def _claude_create_path(
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
     # Registry write.
-    from fno.agents.model_routing import route_settings_path_for
-
     log_path = _derive_log_path(name)
     new_entry = AgentEntry(
         name=name,
@@ -1421,10 +1428,9 @@ def _claude_create_path(
         # ROUTE only, never an account overlay: the account settings file omits
         # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
         # that config), so recording it would promise a restore that silently
-        # leaves the account behind. `route_env` is already resolved here, and
-        # the writer is content-addressed, so this is the same path bg_create
-        # handed claude rather than a second guess at it.
-        route_settings_path=route_settings_path_for(route_env),
+        # leaves the account behind. Resolved before the launch (above) so its
+        # I/O cannot strand a live supervisor.
+        route_settings_path=route_settings_path,
     )
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
@@ -2234,9 +2240,18 @@ def dispatch_spawn(
                 )
 
             # x-ae2d: a revive relaunches the supervisor, so it must come back on
-            # the route the row was born with unless this invocation names its
-            # own. Raises (exit 15) when the recorded route is unrestorable.
-            if revive and not route_env and role is None:
+            # the route the row was born with unless this invocation resolved one
+            # of its own. Raises (exit 2) when the recorded route is unrestorable.
+            #
+            # Keyed on the RESOLVED route, never on whether --role was mentioned.
+            # `resolve_route` is fail-SAFE: a protected role, a disabled block, an
+            # unconfigured provider, or a missing key all return None and leave
+            # route_env unset. Skipping the restore because a role was NAMED would
+            # therefore relaunch unrouted in exactly the case where the role
+            # produced nothing - the silent default-account fallback this exists
+            # to prevent. A role that DID resolve leaves route_env truthy, so it
+            # still wins over the recorded route.
+            if revive and not route_env:
                 assert existing is not None  # revive implies a matching row
                 restored_route = restore_route_for_relaunch(existing)
                 if restored_route:
