@@ -249,3 +249,53 @@ def test_fold_ignores_lines_missing_observation_id() -> None:
     junk = {"type": "worktree_overlap_observed", "data": {"peer_session_ids": ["x"]}, "ts": NOW.isoformat()}
     folded = fold_overlap_events([junk], since_days=28, now=NOW)
     assert folded["distinct_observations"] == 0
+
+
+# -- carrier contract: the real Typer command accepts the carrier's invocation --
+#
+# The unit tests above call the Python functions directly; the hook test uses a
+# fno shim. Neither exercises real flag parsing, so a missing --stdin option on
+# the command would ship green while the carrier's invocation failed every time.
+# This pins the carrier's exact argv against the real command.
+
+
+def test_overlap_record_cli_accepts_carrier_invocation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno"))
+    runner = CliRunner()
+    from fno.worktree_cli.cli import app
+
+    result = runner.invoke(
+        app,
+        ["overlap-record", "--stdin", "--since", "28"],
+        input=PAYLOAD,
+    )
+    assert result.exit_code == 0, result.output
+    parsed = json.loads(result.stdout.strip())
+    assert parsed["recorded"] is True
+    assert parsed["fold"]["distinct_observations"] == 1
+    # The journal now holds one durable line.
+    from fno.paths import global_events_json
+
+    assert global_events_json().exists()
+
+
+def test_overlaps_cli_reports_and_exits_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from typer.testing import CliRunner
+
+    monkeypatch.setenv("FNO_HOME", str(tmp_path / "fno"))
+    runner = CliRunner()
+    from fno.worktree_cli.cli import app
+
+    # Record one, then report.
+    rec = runner.invoke(app, ["overlap-record", "--stdin"], input=PAYLOAD)
+    assert rec.exit_code == 0
+    rep = runner.invoke(app, ["overlaps", "--since", "28", "--json"])
+    assert rep.exit_code == 0, rep.output
+    report = json.loads(rep.stdout.strip())
+    assert report["distinct_observations"] == 1
+    # Text mode renders without raising.
+    txt = runner.invoke(app, ["overlaps", "--since", "28"])
+    assert txt.exit_code == 0
+    assert "1 distinct" in txt.output

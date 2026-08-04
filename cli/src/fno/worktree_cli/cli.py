@@ -341,6 +341,11 @@ def overlap_record_cmd(
         "--since",
         help="Fold window (days) for the recurrence count returned after recording.",
     ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read one observation from stdin (the only input mode; the carrier contract).",
+    ),
 ) -> None:
     """Record one worktree overlap observation read from stdin (carrier-facing).
 
@@ -348,9 +353,12 @@ def overlap_record_cmd(
     typed event to the machine-global journal under a 250 ms lock bound, and
     folds the recurrence window. Always exits 0: recording and fold status ride
     on the emitted JSON line; the carrier renders advisories and keeps exit-zero.
+    ``--stdin`` is the carrier's invocation contract; the verb reads stdin
+    unconditionally (it is the only input mode).
     """
     from fno.worktree_cli.overlaps import overlap_record
 
+    del stdin  # accepted for the carrier contract; stdin is the only input mode
     _result, code = overlap_record(since)
     raise typer.Exit(code=code)
 
