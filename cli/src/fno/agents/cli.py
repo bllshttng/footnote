@@ -2160,13 +2160,15 @@ def cmd_peek(
         False, "--json", "-J", help="Emit JSON-Lines rows instead of human lines."
     ),
 ) -> None:
-    """Observe a peer read-only — the twin of `fno mail send`.
+    """Observe a peer read-only.
 
-    Resolves ``<handle>`` through the same union resolver mail send uses, so any
-    peer you can message you can observe. Prefers normalized status events when
-    present, else tails the peer's on-disk transcript (claude/codex). Never
-    writes anything the peer reads. Exit 13 = unknown peer, 1 = known peer whose
-    harness has no reader yet, 0 = observed (or "no activity yet").
+    Resolves ``<handle>`` to a live session and tails its transcript
+    (claude/codex), preferring normalized status events when present. A
+    pane-substrate worker (the default substrate) has no transcript; peek
+    resolves it through the registry's mux ref and reads its pane. Never
+    writes anything the peer reads. Exit 13 = unknown peer, 1 = known peer
+    whose substrate has no reader or whose mux pane did not answer,
+    0 = observed (or "no activity yet").
     """
     from fno.agents.peek import peek
     from fno.paths import state_dir
