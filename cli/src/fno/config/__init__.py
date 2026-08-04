@@ -2867,6 +2867,38 @@ class WorktreeBlock(BaseModel):
     policy: Optional[str] = None
 
 
+class ArtifactConfig(BaseModel):
+    """One project-supplied context artifact (a value in ``context.artifacts``).
+
+    ``path`` points at the audited, repository-tracked content the role reads;
+    ``sensitivity`` is the ceiling a selector must accept to receive it. The
+    string values mirror ``fno.roles.models.Sensitivity`` verbatim but are kept
+    as a Literal here so the config layer never imports the roles package
+    (roles imports paths, which imports config - that direction would cycle).
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    path: str
+    sensitivity: Literal["public", "internal", "sensitive", "restricted"] = "internal"
+
+
+class ContextBlock(BaseModel):
+    """Project-supplied context artifacts (nested under 'config.context').
+
+    A GENERIC identifier -> artifact map. Core never learns a function's
+    vocabulary: a role's context selector names an identifier and the
+    installing project resolves it here, so a pack installed in a second
+    project is reviewed against that project's facts, not the first's. Empty
+    by default; an unconfigured identifier blocks resolution with
+    MISSING_CONTEXT rather than falling back to a pack asset.
+    """
+
+    model_config = ConfigDict(extra="ignore")
+
+    artifacts: dict[str, ArtifactConfig] = Field(default_factory=dict)
+
+
 class ConfigBlock(BaseModel):
     """Top-level config block (nested under 'config:' in settings.yaml)."""
 
@@ -2887,6 +2919,7 @@ class ConfigBlock(BaseModel):
     research: ResearchBlock = Field(default_factory=ResearchBlock)
     review: ReviewBlock = Field(default_factory=ReviewBlock)
     approvals: ApprovalsBlock = Field(default_factory=ApprovalsBlock)
+    context: ContextBlock = Field(default_factory=ContextBlock)
     # The repo-wide ship-gate probe list, TOP-LEVEL because the file is flat.
     # ENFORCED by the Rust loop-check gate (crates/fno-agents/src/loopcheck.rs),
     # which runs it alongside a plan's own `done_probes` and refuses DonePRGreen
