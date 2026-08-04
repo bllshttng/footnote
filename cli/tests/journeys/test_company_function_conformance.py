@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import ast
 import datetime as dt
+import os
 import shlex
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -202,12 +204,20 @@ def test_pack_verification_runs_but_the_journey_carries_conformance() -> None:
 
 
 def test_declared_scenario_commands_execute_real_journey_tests() -> None:
+    uv = shutil.which("uv")
+    assert uv is not None
+    env = os.environ.copy()
+    env["PATH"] = os.pathsep.join((str(Path(uv).parent), "/usr/bin", "/bin"))
     for scenario in CONFORMANCE.scenarios:
+        command = shlex.split(scenario.command)
+        assert command[0] == "uv"
+        command[0] = uv
         result = subprocess.run(
-            shlex.split(scenario.command),
+            command,
             cwd=REPO_ROOT,
             capture_output=True,
             text=True,
+            env=env,
         )
         assert result.returncode == 0, (
             scenario.id,
