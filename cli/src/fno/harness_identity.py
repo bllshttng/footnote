@@ -346,12 +346,12 @@ def resolve_owned_identity(
         return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
 
     # No marker proven.
-    if len(distinct) == 1 and not contradicted and unresolved:
-        # SINGLE family, prover absent or silent, no collision: byte-identical to
-        # resolve_harness_identity (AC2-HP, the dominant case). A prover that
-        # actively contradicted it set `contradicted`, so a lone foreign marker
-        # degrades below instead of stamping a stranger. Precedence-first when
-        # the family has several markers.
+    if len(distinct) == 1 and not contradicted and not rejected_t and unresolved:
+        # SINGLE family, prover absent or silent, no collision and no
+        # contradiction: byte-identical to resolve_harness_identity (AC2-HP, the
+        # dominant case). A collision or an active contradiction makes the
+        # remaining unproven marker suspect (a same-family sibling could be
+        # foreign), so those degrade below rather than stamp by elimination.
         _marker, harness, value = unresolved[0]
         return OwnedHarnessIdentity(value, harness, present, "single", rejected_t)
     # Multi-family with no proof, or a single family the prover contradicted:

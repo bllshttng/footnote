@@ -178,6 +178,28 @@ def test_owned_multi_family_without_proof_degrades_not_fallback():
     assert owned.rejected[0]["session_id"] == "foreign"
 
 
+def test_owned_single_family_with_collision_degrades_not_promote_sibling(tmp_path):
+    """A same-family collision must not promote an unproven sibling id. Two codex
+    markers, one owned by another live row (rejected): without proof, the
+    surviving codex marker is unproven and could be foreign, so degrade rather
+    than stamp it by elimination."""
+    from fno.agents.registry import register_existing_session, row_owning_session_id
+
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    reg = tmp_path / "agents.json"
+    register_existing_session(provider="codex", session_id=foreign, cwd="/x", registry_path=reg)
+
+    def collide(harness, sid):
+        return row_owning_session_id(sid, registry_path=reg)
+
+    env = {"CODEX_THREAD_ID": foreign, "CODEX_SESSION_ID": "sibling-maybe-foreign"}
+    owned = resolve_owned_identity(env, collide=collide)  # no prove
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert owned.rejected[0]["session_id"] == foreign
+
+
 def test_owned_two_unprovable_survivors_degrade():
     """No collision, no proof, two families -> genuinely unknown. Do not pick by
     precedence; None is honest where a stranger's id is the bug."""
