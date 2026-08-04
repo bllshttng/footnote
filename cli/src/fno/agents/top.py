@@ -42,7 +42,10 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
             {
                 "source": w.source,
                 "name": w.name,
-                "provider": w.provider,
+                # HARNESS, not PROVIDER: the value is `row.harness` (the CLI),
+                # so the old name made a claude-hosted worker on a z.ai route
+                # read as running on claude. Same rename as the list row.
+                "harness": w.harness,
                 "substrate": w.substrate,
                 "pid": w.pid,
                 "rss_mb": _rss_mb(w.pid),
@@ -67,7 +70,7 @@ def render_top(as_json: bool = False) -> str:
 
     out: list[str] = []
     out.extend(c.warnings)
-    header = f"{'SOURCE':<7} {'NAME':<24} {'PROVIDER':<9} {'SUBSTRATE':<10} {'PID':>7} {'RSS_MB':>7} STATUS"
+    header = f"{'SOURCE':<7} {'NAME':<24} {'HARNESS':<9} {'SUBSTRATE':<10} {'PID':>7} {'RSS_MB':>7} STATUS"
     out.append(header)
     if not rows:
         out.append("no live workers")
@@ -75,7 +78,7 @@ def render_top(as_json: bool = False) -> str:
         # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
         name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
         out.append(
-            f"{r['source']:<7} {name_cell:<24} {r['provider']:<9} "
+            f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['pid'] or '-':>7} "
             f"{r['rss_mb'] if r['rss_mb'] is not None else '-':>7} {r['status']}"
         )

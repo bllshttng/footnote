@@ -230,12 +230,28 @@ def _models_in(
     return last, samples
 
 
+# claude writes its OWN notices (API errors, interrupts, refusals) as
+# `type: assistant` records carrying this placeholder instead of a model id. No
+# vendor answered one, so it is not an observation -- and it lands LAST on a
+# worker that just errored, which is precisely when an operator is checking the
+# route. Measured on 200 local transcripts: 13 of them end on one.
+_CLAUDE_SYNTHETIC_MODEL = "<synthetic>"
+
+
 def _claude_model(rec: dict) -> Optional[str]:
-    """claude stamps the answering model on every assistant message."""
+    """claude stamps the answering model on every assistant message it received.
+
+    Its own synthetic notices are skipped, so the reading falls back to the last
+    record a vendor actually answered rather than reporting ``<synthetic>`` as
+    the model.
+    """
     if rec.get("type") != "assistant":
         return None
     msg = rec.get("message")
-    return msg.get("model") if isinstance(msg, dict) else None
+    if not isinstance(msg, dict):
+        return None
+    model = msg.get("model")
+    return None if model == _CLAUDE_SYNTHETIC_MODEL else model
 
 
 def _codex_model(rec: dict) -> Optional[str]:

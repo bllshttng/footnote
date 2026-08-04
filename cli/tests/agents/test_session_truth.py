@@ -389,6 +389,37 @@ def test_observed_model_no_model_yet_is_separable_from_no_transcript(tmp_path):
     assert observed_model("claude", path) != {"kind": "no-transcript"}
 
 
+def test_observed_model_skips_claudes_own_synthetic_records(tmp_path):
+    """A `<synthetic>` record is claude's own notice, not a vendor answer.
+
+    It is written as `type: assistant` for an API error or an interrupt and so
+    lands LAST exactly when an operator is checking the route (measured
+    2026-08-04: 893 occurrences locally, and 14 of 200 transcripts end on one). Reporting it as the model would answer the
+    fallback question with a string no vendor ever served.
+    """
+    from fno.agents.session_truth import observed_model
+
+    path = tmp_path / "errored.jsonl"
+    path.write_text(
+        json.dumps({"type": "assistant", "message": {"model": "glm-5.2"}})
+        + "\n"
+        + json.dumps({"type": "assistant", "message": {"model": "<synthetic>"}})
+        + "\n"
+    )
+
+    assert observed_model("claude", path) == {
+        "kind": "observed",
+        "model": "glm-5.2",
+        "samples": 1,
+    }
+
+    # Nothing but synthetic notices is "never answered", not an observation.
+    path.write_text(
+        json.dumps({"type": "assistant", "message": {"model": "<synthetic>"}}) + "\n"
+    )
+    assert observed_model("claude", path) == {"kind": "no-model-yet"}
+
+
 def test_observed_model_torn_final_line_is_unreadable_then_succeeds(tmp_path):
     """AC5-CON: read while the writer is mid-line; no lock, correct next read."""
     from fno.agents.session_truth import observed_model
