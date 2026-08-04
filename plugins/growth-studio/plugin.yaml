@@ -98,6 +98,9 @@ agents:
   - id: growth-comms
     source: agents/growth-comms.md
     role: {id: communications, function_id: growth-studio}
+  - id: growth-designer
+    source: agents/growth-designer.md
+    role: {id: design, function_id: growth-studio}
 
 evaluators:
   - id: factual-review
