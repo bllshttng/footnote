@@ -204,10 +204,22 @@ def test_desktop_canonical_start_requests_native_handoff_without_side_effects(
     assert "project=footnote" in result.output
     assert "/worktree" in result.output
     assert "fno target start x-0b3f" in result.output
-    assert len(calls) == 1
-    assert calls[0][0][0][:5] == [
-        "git", "-C", str(canonical), "fetch", "--quiet"
-    ]
+    # "No side effects" means nothing MUTATING ran, not "no subprocess ran".
+    # Counting every call made this order-dependent: `fno.paths.resolve_repo_root`
+    # is @cache'd and shells `git worktree list` on its first use in a process,
+    # so whichever test ran first paid that read. The count was 1 with the file
+    # and 3 in isolation, which is why CI's sharding could fail it alone.
+    argvs = [c[0][0] for c in calls]
+    fetches = [a for a in argvs if a[:5] == ["git", "-C", str(canonical), "fetch", "--quiet"]]
+    assert len(fetches) == 1, argvs
+    mutating = {"add", "checkout", "branch", "commit", "push", "worktree"}
+    for argv in argvs:
+        verbs = [t for t in argv if t in mutating]
+        # `worktree list` is a read; `worktree add` is not.
+        assert not verbs or argv[argv.index(verbs[0]) : argv.index(verbs[0]) + 2] == [
+            "worktree",
+            "list",
+        ], f"mutating call during a native-handoff start: {argv}"
 
 
 def test_codex_tui_canonical_start_does_not_request_desktop_handoff(
