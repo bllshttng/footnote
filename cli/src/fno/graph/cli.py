@@ -1564,6 +1564,64 @@ def cmd_decompose(
             # `parent` pointer alone. Why adopted nodes never get `group_slug`
             # is on the NormalizedGroup field in _decompose.py.
             adopted: list[str] = []
+            # A DEAD delivery unit cannot own containment. Once per
+            # group, before the adopt loop, because deadness is a property of
+            # the owner rather than of each target - and it has to run BEFORE
+            # the stamp's back-fill convergence leg at :1739, which is exactly
+            # what re-applies containment that the death transition released.
+            #
+            # Unreachable by every repair path if it lands:
+            # _release_contained_children fires once, at the moment the unit
+            # dies, and nothing re-runs it (cmd_undefer deliberately does not
+            # re-contain); _strandable_contained_ids keys on the owner's
+            # completed_at, which a deferred or superseded owner does not have;
+            # and both dispatch halves then refuse the adoptee forever
+            # (selection_guards' `contained:` guard, _redirect_if_contained).
+            # The only escape is a manual `--parent null` per node.
+            #
+            # Fields, not the derived `status` string: recompute_statuses
+            # re-persists status after every locked mutation, so it is a
+            # snapshot rather than truth (selection_guards' dead-ancestor guard
+            # documents the same reasoning). completed_at first, reproducing the
+            # cascade's done > superseded > deferred precedence, so a unit that
+            # was superseded and later closed does not trip a false refusal -
+            # a done owner is healable by the merge cascade. Both death fields
+            # are read even though every writer sets deferred_at today, so a
+            # future supersede path that forgets it cannot slip through.
+            #
+            # Gated on a non-empty adopt list: a dead group child with nothing
+            # to adopt still updates its title, waves, and blocked_by as it does
+            # today. Refusing there would deadlock an epic doc whose group was
+            # deferred for unrelated reasons.
+            if grp["adopt"] and not node.get("completed_at") and (
+                node.get("deferred_at") or node.get("superseded_by")
+            ):
+                _superseder = node.get("superseded_by")
+                # The remedy branches on the cause: `fno backlog undefer` clears
+                # deferred_at only and never superseded_by (:6046), so offering
+                # it to a superseded owner sends the operator through a command
+                # that exits 0 and changes nothing this refusal reads.
+                if _superseder:
+                    _how = f"was superseded by {_superseder}"
+                    _remedy = (
+                        "Point the adopt list at the superseding node, or give "
+                        "the group a new slug so it mints a live delivery unit "
+                        "(`fno backlog undefer` does not clear superseded_by)"
+                    )
+                else:
+                    _how = "is deferred"
+                    _remedy = (
+                        f"Run `fno backlog undefer {node['id']}` first, or drop "
+                        "the adopt list from this group"
+                    )
+                raise DecomposeError(
+                    f"group {grp['slug']!r} resolves to {node['id']}, which "
+                    f"{_how}; its death already released the nodes it contained "
+                    "and nothing re-runs that release, so stamping containment "
+                    "here would leave every adoptee undispatchable with no verb "
+                    f"to free it. {_remedy}",
+                    exit_code=2,
+                )
             for adopt_id in grp["adopt"]:
                 target = _find_node(graph_entries, adopt_id)
                 if target is None:
