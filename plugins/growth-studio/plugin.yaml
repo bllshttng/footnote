@@ -95,6 +95,9 @@ agents:
   - id: growth-marketer
     source: agents/growth-marketer.md
     role: {id: marketing, function_id: growth-studio}
+  - id: growth-comms
+    source: agents/growth-comms.md
+    role: {id: communications, function_id: growth-studio}
 
 evaluators:
   - id: factual-review
