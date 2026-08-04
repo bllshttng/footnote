@@ -1740,35 +1740,33 @@ mod tests {
         // screen scrape), so if it dropped this field on write-back the guard
         // would read None on every row it had passed through - a guard on one of
         // N paths, which is no guard. This asserts the passthrough holds.
-        let routed = r#"{"schema_version":12,"agents":[
-            {"name":"router","harness":"claude","cwd":"/p","log_path":"/l",
-             "created_at":"2026-08-04T00:00:00Z","status":"live",
-             "route_settings_path":"/home/me/.fno/route-settings/abc123.json"}]}"#;
-        let reg: Registry = serde_json::from_str(routed).unwrap();
-        assert_eq!(
-            reg.entries[0].route_settings_path.as_deref(),
-            Some("/home/me/.fno/route-settings/abc123.json")
-        );
-        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
-        assert_eq!(
-            back["agents"][0]["route_settings_path"],
-            "/home/me/.fno/route-settings/abc123.json",
-            "the daemon must re-emit a Python-stamped route path, not drop it"
-        );
+        const PATH: &str = "/home/me/.fno/route-settings/abc123.json";
 
-        // A pre-v12 row reads as never-routed rather than as corrupt.
-        let legacy = r#"{"schema_version":11,"agents":[
-            {"name":"old","harness":"claude","cwd":"/p","log_path":"/l",
-             "created_at":"2026-08-04T00:00:00Z","status":"live"}]}"#;
-        let reg: Registry = serde_json::from_str(legacy).unwrap();
-        assert_eq!(reg.entries[0].route_settings_path, None);
-
-        // An unrouted row omits the key, so Python's AgentEntry(**row) gains no
-        // unexpected kwarg.
+        // A row Python stamped: build it through the real serializer and inject
+        // only the new key, so this stays a round-trip test rather than a
+        // hand-written fixture that can drift from the struct.
         let mut reg = Registry::default();
         reg.entries.push(sample_entry("plain"));
-        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
-        assert!(out["agents"][0].get("route_settings_path").is_none());
+        let mut wire: serde_json::Value = serde_json::to_value(&reg).unwrap();
+
+        // (a) An unrouted row OMITS the key, so Python's AgentEntry(**row) gains
+        // no unexpected kwarg.
+        assert!(wire["agents"][0].get("route_settings_path").is_none());
+
+        // (b) A pre-v12 row (the same shape, key absent) reads as never-routed
+        // rather than as corrupt.
+        let reg: Registry = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(reg.entries[0].route_settings_path, None);
+
+        // (c) The daemon must re-emit a stamped path, not drop it on write-back.
+        wire["agents"][0]["route_settings_path"] = serde_json::Value::from(PATH);
+        let reg: Registry = serde_json::from_value(wire).unwrap();
+        assert_eq!(reg.entries[0].route_settings_path.as_deref(), Some(PATH));
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["route_settings_path"], PATH,
+            "the daemon must re-emit a Python-stamped route path, not drop it"
+        );
     }
 
     #[test]
