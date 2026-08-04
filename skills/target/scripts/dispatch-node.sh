@@ -346,16 +346,20 @@ for id in "${NODES[@]}"; do
     route_harness="$(printf '%s' "$route_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
     route_substrate="$(printf '%s' "$route_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
     route_command="$(printf '%s' "$route_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
-    # All four or none: a half-applied cutover is the wrong-binary / wrong-billing
-    # launch the selector exists to prevent, so an incomplete tuple stays put.
-    if [[ -n "$route_account" && -n "$route_harness" && -n "$route_substrate" && -n "$route_command" ]]; then
-      DISPATCH_PROVIDER="$route_harness"
-      DISPATCH_SUBSTRATE="$route_substrate"
-      DISPATCH_COMMAND="$route_command"
-      # The record id travels on argv; spawn resolves its credentials itself.
-      cutover_args=(--dispatch-account "$route_account")
-      echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
+    # All four or none. Falling back to the BASE harness here would launch on the
+    # very account the selector just ruled out, so an incomplete tuple parks the
+    # node instead - fail closed, leaving it ready and re-dispatchable.
+    if [[ -z "$route_account" || -z "$route_harness" || -z "$route_substrate" || -z "$route_command" ]]; then
+      echo "parked $id reason=\"cutover selected but its destination is incomplete; not launching on the exhausted harness\""
+      n_parked=$((n_parked + 1))
+      continue
     fi
+    DISPATCH_PROVIDER="$route_harness"
+    DISPATCH_SUBSTRATE="$route_substrate"
+    DISPATCH_COMMAND="$route_command"
+    # The record id travels on argv; spawn resolves its credentials itself.
+    cutover_args=(--dispatch-account "$route_account")
+    echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
   fi
 
   # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title

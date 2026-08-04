@@ -264,20 +264,6 @@ def _resolve_provider_id() -> Optional[str]:
         return None
 
 
-def _healthy_alternate_exists() -> bool:
-    """True when launch-time picking is armed AND has a live account to pick.
-
-    Best-effort and conservative: anything unreadable, or picking disarmed,
-    returns False so the existing defer stands. Only a positive answer - an
-    account the spawn seam could actually launch on - suppresses the defer."""
-    try:
-        from fno.adapters.providers.cli import pick_account
-
-        return pick_account(if_armed=True).account is not None
-    except Exception:  # noqa: BLE001 - a probe must never block a dispatch
-        return False
-
-
 def _cutover_command(harness: Optional[str], node_id: str) -> str:
     """The destination harness's own target command, or "" if unresolvable.
 
@@ -419,13 +405,12 @@ def _dispatch_one(
                 route = dataclasses.replace(route, action="stay")
             else:
                 route = dataclasses.replace(route, action="defer")
-        if route.action == "defer" and not _healthy_alternate_exists():
-            # Deferring is the floor, not the answer, once launch-time picking
-            # can reroute: holding work because the ACTIVE account is exhausted
-            # while another account has headroom is the stall this feature
-            # exists to delete. The spawn seam does the actual picking; here we
-            # only defer when neither a combo cutover nor the account picker
-            # has somewhere to go.
+        if route.action == "defer":
+            # The selector already weighed both reroutes - a combo cutover and
+            # launch-time account picking - so a defer that survives it is the
+            # real floor. This used to re-check the account picker here, which
+            # made identical fixtures defer under `backlog advance` and launch
+            # under this verb.
             _emit_quota_deferred(
                 node_id, route.source_record, route.window or "", route.retry_at
             )

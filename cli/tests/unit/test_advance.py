@@ -1550,6 +1550,13 @@ def _force_exhausted(monkeypatch, provider_id="ccm"):
     so provider_id resolves via load_providers().active)."""
     from fno.adapters.providers.runtime_state import HeadroomState, QuotaSignal
 
+    # Import providers.cli BEFORE the patch below. It binds `load_providers` at
+    # module scope, so a first import while the stub is installed would capture
+    # the stub for the rest of the session - and `fno config accounts` lives in
+    # that module, so an unrelated later test would then read this fixture's
+    # fake provider set. The selector reaches that module via pick_account.
+    import fno.adapters.providers.cli  # noqa: F401
+
     monkeypatch.setattr(
         "fno.adapters.providers.runtime_state.evaluate_quota_signal",
         lambda pid, **kw: QuotaSignal(
@@ -1717,7 +1724,9 @@ def _dispatch_one_capture(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda: "ccm")
     monkeypatch.setattr(dispatch_mod, "_next_node", lambda project: DISPATCH_NODE)
-    monkeypatch.setattr(dispatch_mod, "_healthy_alternate_exists", lambda: False)
+    from fno.agents import autonomous_route as ar
+
+    monkeypatch.setattr(ar, "_healthy_alternate_exists", lambda: False)
     monkeypatch.setattr(
         dispatch_mod,
         "dispatch_spawn_pane",

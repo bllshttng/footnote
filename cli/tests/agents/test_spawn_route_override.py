@@ -933,3 +933,57 @@ def test_seam_scrub_runs_for_account_only_spawn(
     rust_runtime._scrub_account_auth_at_seam(args)
     assert "ANTHROPIC_AUTH_TOKEN" not in os.environ  # scrubbed
     assert os.environ.get("CLAUDE_CONFIG_DIR") == "/x/.claude"  # overlay applied
+
+
+def test_dispatch_account_refuses_a_harness_mismatch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The cutover carrier must agree with the binary it spawns.
+
+    A codex record's CODEX_HOME handed to a claude spawn authenticates nothing
+    and launches the wrong binary - the exact miss this flag exists to prevent,
+    so the record's harness is verified rather than trusted from the caller.
+    """
+    from types import SimpleNamespace
+
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(
+            by_id={"codex-acct": SimpleNamespace(harness="codex")}
+        ),
+    )
+    monkeypatch.setattr(
+        "fno.adapters.providers.dispatch.dispatch_env",
+        lambda *a, **k: pytest.fail("staged an overlay for the wrong harness"),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w", "hi", "--harness", "claude", "--headless",
+         "--dispatch-account", "codex-acct"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "codex account but the spawn resolves claude" in result.output
+
+
+def test_dispatch_account_refuses_an_unregistered_record(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from fno.agents import spawn_gate
+
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    monkeypatch.setattr(
+        "fno.adapters.providers.loader.load_providers",
+        lambda *a, **k: SimpleNamespace(by_id={}),
+    )
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w", "hi", "--harness", "codex", "--headless",
+         "--dispatch-account", "ghost"],
+    )
+    assert result.exit_code == 2, result.output
+    assert "not a registered provider record" in result.output

@@ -1259,9 +1259,29 @@ def cmd_spawn(
     # contract, while a cutover's whole point is landing on another harness.
     if dispatch_account is not None:
         from fno.adapters.providers.dispatch import dispatch_env
+        from fno.adapters.providers.loader import load_providers
 
         try:
-            account_env = {**(account_env or {}), **dispatch_env(dispatch_account)}
+            # Resolve against the WORKER's root, not the dispatcher's cwd: the
+            # record was selected out of the node's project registry, and reading
+            # a different one here would stage another project's account.
+            rec = load_providers(repo_root=workdir).by_id.get(dispatch_account)
+            if rec is None:
+                raise ValueError("not a registered provider record")
+            rec_harness = (getattr(rec, "harness", "") or "").strip()
+            # The overlay and the binary must agree. A codex record's CODEX_HOME
+            # handed to a claude spawn authenticates nothing and launches the
+            # wrong binary - the exact miss this carrier exists to prevent, so it
+            # is checked here rather than assumed from the caller's bookkeeping.
+            if harness and rec_harness and rec_harness != harness:
+                raise ValueError(
+                    f"record is a {rec_harness} account but the spawn resolves "
+                    f"{harness}"
+                )
+            account_env = {
+                **(account_env or {}),
+                **dispatch_env(dispatch_account, repo_root=workdir),
+            }
         except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
             print(
                 f"refusing --dispatch-account {dispatch_account!r}: {exc}; "

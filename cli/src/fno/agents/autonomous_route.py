@@ -138,29 +138,49 @@ def _select_destination(
         # The active combo via the settings_combo rung (env={} so no TARGET_COMBO
         # pin leaks in; a synthetic agent name has no per-agent pin). A bare active
         # PROVIDER (no combo) resolves to combo_name=None -> defer (nothing to walk).
+        # One repo root for every read below. Resolving settings against the node
+        # while loading the combo and record set from the CALLER's cwd would pick
+        # a destination out of the wrong project's registry - the dispatcher runs
+        # from wherever it happens to be, not from the node's checkout.
+        root = Path(node_cwd) if node_cwd else None
         target = resolve_dispatch_target(
             "advance-failover",
-            repo_root=Path(node_cwd) if node_cwd else None,
+            repo_root=root,
             env={},
         )
         if not target.combo_name:
             return None
-        combo = load_combos().get(target.combo_name)
+        combo = load_combos(repo_root=root).get(target.combo_name)
         if combo is None:
             return None
         pid = next_healthy_provider(combo, exclude={exhausted_provider})
         if pid is None:
             return None
-        rec = load_providers().by_id.get(pid)
+        rec = load_providers(repo_root=root).by_id.get(pid)
         harness = (getattr(rec, "harness", "") or "").strip()
         if not harness:
             return None  # a record with no harness cannot pick a --provider
         # Stage the account env; an unstaged/unresolvable account -> defer (never
         # spawn onto a broken account).
-        account_env = dispatch_env(pid, repo_root=Path(node_cwd) if node_cwd else None)
+        account_env = dispatch_env(pid, repo_root=root)
         return (pid, harness, account_env)
     except Exception:  # noqa: BLE001 - never dispatch onto an unresolved provider
         return None
+
+
+def _healthy_alternate_exists() -> bool:
+    """True when launch-time account picking is armed AND has a live account.
+
+    Best-effort and conservative: anything unreadable, or picking disarmed,
+    returns False so the defer stands. Only a positive answer - an account the
+    spawn seam could actually launch on - suppresses it.
+    """
+    try:
+        from fno.adapters.providers.cli import pick_account
+
+        return pick_account(if_armed=True).account is not None
+    except Exception:  # noqa: BLE001 - a probe must never block a dispatch
+        return False
 
 
 def select_autonomous_route(
@@ -204,6 +224,19 @@ def select_autonomous_route(
                 defer_fallback=sig.defer,
             )
     if sig.defer:
+        # Deferring is the floor, not the answer. Before holding work, check the
+        # OTHER reroute: launch-time account picking. Holding because the active
+        # account is walled while a sibling account has headroom is the stall
+        # this whole path exists to delete. A pinned launch skips it - picking is
+        # a reroute, and a pin forbids reroutes, not defers. This lives HERE and
+        # not in one caller because the two launchers must reach the same
+        # verdict; when only `fno dispatch` had it, identical fixtures deferred
+        # on one path and launched on the other.
+        if not pinned and _healthy_alternate_exists():
+            return AutonomousRoute(
+                "stay", "alternate-account-available",
+                source_record=sig.provider_id, window=window,
+            )
         return AutonomousRoute(
             "defer",
             "pinned" if (pinned and sig.cutover) else sig.reason,
