@@ -19,27 +19,37 @@ export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
 
 PASS=0
 FAIL=0
+SKIP=0
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
+skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
 TMP="$(mktemp -d -t arm-handoff-XXXXXX)"
 trap 'FNO_CLAIMS_ROOT="$TMP" fno claim release "node:x-test" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 SID="sess-xyz"
 
 # Hermetic claims root: `fno claim` reads/writes <root>/.fno/claims/.
+# The `fno` binary is Rust and is NOT built in every CI lane, so the two cases
+# that need a real claim announce themselves as skipped rather than failing or,
+# worse, passing vacuously. Everything else runs everywhere: target_is_active
+# needs no claim to decide a manifest with no claim key, which is the shape the
+# default fixture uses.
 export FNO_CLAIMS_ROOT="$TMP"
-fno claim acquire "node:x-test" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1 \
-  || { echo "FAIL: could not acquire the fixture claim" >&2; exit 1; }
+HAVE_CLAIM=0
+if command -v fno >/dev/null 2>&1 \
+   && fno claim acquire "node:x-test" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
+  HAVE_CLAIM=1
+fi
 
 # Build a workspace in the shape PRODUCTION actually produces: a DEAD owner_pid
 # plus a live node claim. owner_pid is the transient `fno target init` wrapper
 # pid and is dead within ~1s of init returning, so a fixture that writes a live
 # `owner_pid: $$` tests a state no real session is ever in - which is how the
 # hook shipped gated on `kill -0 owner_pid` and exited on 100% of real fires.
-# $1=dir $2=used_tokens $3=last assistant text $4=claim key (default node:x-test,
-# pass "" to model a claimless free-text/plan run).
+# $1=dir $2=used_tokens $3=last assistant text $4=claim key (default none, which
+# models a free-text/plan run and needs no `fno` to evaluate).
 setup_ws() {
-  local dir="$1" used_tokens="$2" last_text="$3" claim_key="${4-node:x-test}"
+  local dir="$1" used_tokens="$2" last_text="$3" claim_key="${4-}"
   rm -rf "$dir"; mkdir -p "$dir/.fno"
   cat > "$dir/.fno/target-state.md" <<EOF
 ---
@@ -101,18 +111,22 @@ setup_ws "$TMP/e" 800000 "working"
 # 6. Liveness. owner_pid can only ever PROVE life, never death, so DEATH is
 #    asserted from the node claim alone - the same asymmetry
 #    cli/src/fno/target/orient.py::_manifest_liveness encodes.
-# 6a. Dead owner pid + claim free/absent -> no arm (genuinely stale state).
-setup_ws "$TMP/f" 800000 "working" "node:x-not-claimed-zzz"
-run_arm "$TMP/f"
-[[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when the claim is free (stale state)" \
-  || fail "armed on stale (free-claim) state"
+if [[ $HAVE_CLAIM -eq 1 ]]; then
+  # 6a. Dead owner pid + claim free/absent -> no arm (genuinely stale state).
+  setup_ws "$TMP/f" 800000 "working" "node:x-not-claimed-zzz"
+  run_arm "$TMP/f"
+  [[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when the claim is free (stale state)" \
+    || fail "armed on stale (free-claim) state"
 
-# 6b. Dead owner pid + LIVE claim -> arm. This is the shape EVERY real session
-#     is in, and the one the shipped `kill -0 owner_pid` gate always rejected.
-setup_ws "$TMP/f2" 800000 "working"
-run_arm "$TMP/f2"
-[[ -f "$TMP/f2/.fno/.handoff-armed-$SID" ]] && pass "arms on a dead owner_pid with a LIVE claim" \
-  || fail "dead owner_pid + live claim did not arm (the hook is unreachable)"
+  # 6b. Dead owner pid + LIVE claim -> arm. This is the shape EVERY real session
+  #     is in, and the one the shipped `kill -0 owner_pid` gate always rejected.
+  setup_ws "$TMP/f2" 800000 "working" "node:x-test"
+  run_arm "$TMP/f2"
+  [[ -f "$TMP/f2/.fno/.handoff-armed-$SID" ]] && pass "arms on a dead owner_pid with a LIVE claim" \
+    || fail "dead owner_pid + live claim did not arm (the hook is unreachable)"
+else
+  skip "claim-state cases (6a/6b): no \`fno\` binary on PATH"
+fi
 
 # 6c. Dead owner pid + NO claim key (free-text / plan run) -> arm. There is no
 #     durable death signal, so bias live; a false arm costs one advisory nudge,
@@ -147,5 +161,5 @@ echo "$OUT" | grep -q "Handoff armed" && fail "still nudging after marker cleare
   || pass "no nudge once marker cleared"
 
 echo ""
-echo "arm-handoff: $PASS passed, $FAIL failed"
+echo "arm-handoff: $PASS passed, $FAIL failed, $SKIP skipped"
 [[ $FAIL -eq 0 ]]

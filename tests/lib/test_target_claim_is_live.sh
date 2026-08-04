@@ -24,15 +24,24 @@ source "$GUARD_LIB"
 
 PASS=0
 FAIL=0
+SKIP=0
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
+skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
 TMP="$(mktemp -d -t claim-live-XXXXXX)"
 trap 'FNO_CLAIMS_ROOT="$TMP" fno claim release "node:x-live" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 export FNO_CLAIMS_ROOT="$TMP"
 
-fno claim acquire "node:x-live" --holder "target-session:test" --ttl 1h >/dev/null 2>&1 \
-  || { echo "FAIL: could not acquire the fixture claim" >&2; exit 1; }
+# `fno` is the Rust binary and is not built in every CI lane. Cases that need a
+# real claim skip loudly there; the wiring assertions at the bottom are pure
+# greps and run everywhere, which matters because they are the half that catches
+# a correct helper reachable from only one of three guards.
+HAVE_CLAIM=0
+if command -v fno >/dev/null 2>&1 \
+   && fno claim acquire "node:x-live" --holder "target-session:test" --ttl 1h >/dev/null 2>&1; then
+  HAVE_CLAIM=1
+fi
 
 # A manifest carrying a dead owner_pid (the shape init always leaves behind)
 # and the given claim key.
@@ -51,13 +60,20 @@ EOF
   return 0
 }
 
-manifest "$TMP/live/.fno/target-state.md" "node:x-live"
-target_claim_is_live "$TMP/live/.fno/target-state.md" \
-  && pass "live claim + dead owner_pid -> live" || fail "live claim read as dead"
-
 manifest "$TMP/free/.fno/target-state.md" "node:x-never-claimed-zzz"
-target_claim_is_live "$TMP/free/.fno/target-state.md" \
-  && fail "free claim read as live" || pass "free claim -> not live"
+if [[ $HAVE_CLAIM -eq 1 ]]; then
+  manifest "$TMP/live/.fno/target-state.md" "node:x-live"
+  target_claim_is_live "$TMP/live/.fno/target-state.md" \
+    && pass "live claim + dead owner_pid -> live" || fail "live claim read as dead"
+
+  target_claim_is_live "$TMP/free/.fno/target-state.md" \
+    && fail "free claim read as live" || pass "free claim -> not live"
+
+  target_is_active "$TMP/free/.fno/target-state.md" \
+    && fail "target_is_active called a free claim active" || pass "target_is_active: free claim -> inactive"
+else
+  skip "claim-state cases: no \`fno\` binary on PATH"
+fi
 
 manifest "$TMP/nokey/.fno/target-state.md" ""
 target_claim_is_live "$TMP/nokey/.fno/target-state.md" \
@@ -71,8 +87,6 @@ target_claim_is_live "$TMP/does-not-exist/target-state.md" \
 target_is_active "$TMP/nokey/.fno/target-state.md" \
   && pass "target_is_active still fails open with no claim key" \
   || fail "target_is_active regressed to strict; a claimless live session now reads dead"
-target_is_active "$TMP/free/.fno/target-state.md" \
-  && fail "target_is_active called a free claim active" || pass "target_is_active: free claim -> inactive"
 
 # Wiring. Each teardown guard must actually call the helper; a guard that only
 # checks owner_pid is a guard that never fires.
@@ -88,5 +102,5 @@ grep -qE 'kill -0 .*OWNER_PID' "$REPO_ROOT/hooks/arm-handoff-precompact.sh" \
   || pass "arm-handoff-precompact.sh has no bare owner_pid gate"
 
 echo ""
-echo "target_claim_is_live: $PASS passed, $FAIL failed"
+echo "target_claim_is_live: $PASS passed, $FAIL failed, $SKIP skipped"
 [[ $FAIL -eq 0 ]]
