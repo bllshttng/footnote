@@ -551,8 +551,8 @@ def _resolution_conditions(manifest: PackManifest) -> list[Condition]:
 def _declared_source_conditions(manifest: PackManifest, base: Path) -> list[Condition]:
     # Each declared workflow, skill, and asset source must resolve to an existing
     # entry beneath the pack directory, so a pack that references a missing or
-    # escaping file cannot verify (and then activate) clean. Evaluator commands
-    # are declarative for the delivery layer and are not checked here.
+    # escaping file cannot verify (and then activate) clean. Evaluator command
+    # runnability is checked separately by _evaluator_conditions.
     conditions: list[Condition] = []
     declared: list[tuple[str, str, str]] = []
     declared += [("workflow", w.id, w.source) for w in manifest.workflows]
@@ -837,6 +837,48 @@ def _declared_test_conditions(manifest: PackManifest, base: Path) -> list[Condit
     return conditions
 
 
+def _evaluator_conditions(manifest: PackManifest, base: Path) -> list[Condition]:
+    # Evaluator commands are required evidence producers, so a declared command
+    # that does not resolve on PATH or as an executable pack-relative path blocks
+    # verification - closing the gap the substrate's own comment named, where a
+    # pack reported green while its evidence producers were vaporware. Reuses the
+    # same static _command_is_runnable check the declared-test family does.
+    conditions: list[Condition] = []
+    for evaluator in manifest.evaluators:
+        if _command_is_runnable(evaluator.command, base):
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"evaluator-runnable:{evaluator.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"{evaluator.id} command runnable: {evaluator.command}",
+                )
+            )
+        else:
+            token = evaluator.command.split()[0] if evaluator.command.split() else ""
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"evaluator-runnable:{evaluator.id}",
+                    checked=True,
+                    result=EvidenceResult.BLOCKED,
+                    detail=f"{evaluator.id} command {token!r} is absent or not executable",
+                )
+            )
+    if not manifest.evaluators:
+        conditions.append(
+            Condition(
+                ConditionFamily.SCHEMA,
+                "no-declared-evaluators",
+                checked=True,
+                result=EvidenceResult.PASSED,
+                detail="pack declares no evaluators; nothing to fail",
+            )
+        )
+    return conditions
+
+
 def verify_manifest(
     manifest: PackManifest,
     *,
@@ -860,6 +902,7 @@ def verify_manifest(
     conditions.extend(_capability_conditions(manifest))
     conditions.extend(_compatibility_conditions(manifest))
     conditions.extend(_declared_test_conditions(manifest, base_path))
+    conditions.extend(_evaluator_conditions(manifest, base_path))
     return VerificationReport(pack_path=str(base_path), conditions=tuple(conditions))
 
 

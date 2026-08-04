@@ -57,7 +57,7 @@ def _full_pack() -> PackManifest:
                 ),
             ),
         ),
-        evaluators=(EvaluatorDeclaration(id="factual-review", command="fno growth factual-check"),),
+        evaluators=(EvaluatorDeclaration(id="factual-review", command="true"),),
         assets=(AssetDeclaration(id="brand-voice", source="assets/brand-voice.md"),),
         permissions=(EffectDeclaration(effect_class="external.publication", destination="social-network"),),
         scenarios=(

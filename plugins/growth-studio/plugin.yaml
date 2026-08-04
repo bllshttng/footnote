@@ -93,13 +93,13 @@ workflows:
 
 evaluators:
   - id: factual-review
-    command: fno growth factual-check
+    command: bash evaluators/factual-check.sh
     required: true
   - id: brand-review
-    command: fno growth brand-check
+    command: bash evaluators/brand-check.sh
     required: true
   - id: accessibility-review
-    command: fno growth accessibility-check
+    command: bash evaluators/accessibility-check.sh
     required: true
 
 adapters:

@@ -1,11 +1,12 @@
 from __future__ import annotations
 
+import subprocess
 from pathlib import Path
 
 import yaml
 
 from fno.company.contracts import EvidenceResult, RoleRef
-from fno.plugins.manifest import AgentDeclaration, PackManifest
+from fno.plugins.manifest import AgentDeclaration, EvaluatorDeclaration, PackManifest
 from fno.plugins.verify import (
     Condition,
     ConditionFamily,
@@ -13,6 +14,9 @@ from fno.plugins.verify import (
     verify_pack,
 )
 from tests.unit.plugins.test_manifest import _full_pack, _materialize_declared_sources
+
+REPO_ROOT = Path(__file__).resolve().parents[4]
+_PACK = REPO_ROOT / "plugins" / "growth-studio"
 
 
 def _write_pack(tmp_path: Path, manifest: PackManifest, name: str = "growth-studio") -> Path:
@@ -287,3 +291,65 @@ def test_agent_unbounded_tools_fail(tmp_path):
     detail = cond.detail or ""
     for offender in ("Bash", "Task", "WebSearch", "WebFetch", "mcp__evil__steal"):
         assert offender in detail
+
+
+# AC7-ERR: a declared evaluator whose command does not resolve blocks verify.
+
+
+def test_evaluator_command_not_runnable_blocks(tmp_path):
+    bad = _full_pack().model_copy(
+        update={
+            "evaluators": (
+                EvaluatorDeclaration(id="factual-review", command="definitely-not-a-command-xyz"),
+            )
+        }
+    )
+    pack_dir = _write_pack(tmp_path, bad)
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    cond = by_name["evaluator-runnable:factual-review"]
+    assert cond.checked is True
+    assert cond.result is EvidenceResult.BLOCKED
+    assert not report.ok
+
+
+def test_evaluator_runnable_passes_for_pack_scripts(tmp_path):
+    pack_dir = _write_pack(tmp_path, _full_pack())
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    assert by_name["evaluator-runnable:factual-review"].ok
+
+
+# AC8-HP: factual-check.sh passes a cited draft and fails an uncited one.
+
+
+def _run_evaluator(script: str, draft: Path, *args: str) -> int:
+    return subprocess.run(
+        ["bash", str(_PACK / "evaluators" / script), str(draft), *map(str, args)],
+        capture_output=True,
+    ).returncode
+
+
+def test_factual_check_passes_a_cited_draft(tmp_path):
+    truth = _PACK / "assets" / "product-truth.md"
+    draft = tmp_path / "draft.md"
+    draft.write_text(
+        "# Plan\n\n"
+        "Footnote ships a delivery pipeline from idea to pull request.\n\n"
+        "## Claims\n\n"
+        "- Five phases in one graph [Delivery pipeline].\n"
+        "- A capability needs a scoped fact [Progressive exposure].\n",
+        encoding="utf-8",
+    )
+    assert _run_evaluator("factual-check.sh", draft, truth) == 0
+
+
+def test_factual_check_fails_an_uncited_claim(tmp_path):
+    truth = _PACK / "assets" / "product-truth.md"
+    draft = tmp_path / "draft.md"
+    draft.write_text(
+        "# Plan\n\n## Claims\n\n"
+        "- An assertion with no citation at all.\n",
+        encoding="utf-8",
+    )
+    assert _run_evaluator("factual-check.sh", draft, truth) != 0
