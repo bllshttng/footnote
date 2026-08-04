@@ -128,12 +128,17 @@ None of these run automatically. A maintainer performs them deliberately.
 
 - [ ] Publish `fno-agents` on crates.io and `fno` on PyPI over the reserved `0.0.0` placeholders (US7's by-name install and the cargo channel both depend on the real `fno` being published)
 - [ ] Set repo secrets `CARGO_REGISTRY_TOKEN` (crates.io) and `PYPI_API_TOKEN` (PyPI)
-- [ ] Cut a release: `git tag vX.Y.Z && git push origin vX.Y.Z` — builds wheels + binaries and attaches binaries to the GitHub Release (no PyPI/crates upload yet)
-- [ ] Publish wheels to PyPI: re-run `release-wheels` via workflow_dispatch with `publish=true`
-- [ ] Publish the crate: run `crates-publish` via workflow_dispatch with `confirm=true` (permanent; a version cannot be re-uploaded)
+- [ ] Bump every version surface first: `scripts/release/sync-version.sh X.Y.Z`, land it on the default branch, then verify with `scripts/release/sync-version.sh --check`. The wheel, both crates, and all six plugin/extension manifests must agree before the tag exists.
+- [ ] Cut a release: `git tag vX.Y.Z && git push origin vX.Y.Z` - builds wheels + binaries, creates the GitHub Release and attaches the binaries. Push the tag with your own credentials: a tag pushed by `GITHUB_TOKEN` (what `nightly-release-tag.yml` does) fires no `on: push` workflow, so it builds nothing and creates no Release.
+- [ ] Write the release notes: `release-binaries` seeds the body with `generate_release_notes`, which spans only the previous tag. Replace it with `gh release edit vX.Y.Z --notes-file <path>`.
+- [ ] Approve the two publish jobs. The tag push already started them; each is parked on the `release` environment, so this is an approval click in the run's page, not a re-dispatch:
+  - `release-wheels` -> PyPI. A failing `wheel windows-x64` leg is expected and does not block: Windows is built but deliberately not released this phase.
+  - `crates-publish` -> crates.io. Permanent; a version cannot be re-uploaded.
+  - The `workflow_dispatch` inputs (`publish=true` / `confirm=true`) remain for republishing without a tag.
 - [ ] fno.sh channel: wire DNS for `fno.sh` to Cloudflare with CF-managed TLS, and deploy `scripts/install/fno.sh` to `https://fno.sh` (Cloudflare Pages git-integration or a `wrangler` CI step) served as `text/plain` with purge-on-deploy. The one-liner ends in `uv tool install fno` by name, so it also depends on the PyPI publish above.
   - **Bump-on-script-change:** the deployed `fno.sh` is byte-identical to this repo's `scripts/install/fno.sh`; the fno-web Worker serves it and owns none of its logic. When this script changes (e.g. the `uv tool update-shell` PATH step), the change is a deliberate, tagged, redeployed event: cut a new tag (`vX.Y.Z`), bump the Worker's `INSTALL_SCRIPT_URL` pin to that tag, and redeploy `fno.sh`. That tag-bump cost is the intended consequence of pinning the served script to a tag.
 - [ ] brew channel (depends on the PyPI publish above): create the own tap repo `github.com/<owner>/homebrew-fno` and copy `scripts/install/homebrew/fno.rb` into it as `Formula/fno.rb`. Fill the placeholder `url` + `sha256` with the published per-arch macOS wheels (arm64 + x86_64, in lockstep - a `url` bump without its `sha256` is caught by `brew audit`/install). Deps install from PyPI at install time (own-tap formulae install with network); vendoring them as offline `resource` blocks (`brew update-python-resources fno`) is optional and only needed for a future homebrew-core submission. Verify with `brew audit --strict --new fno` + `brew install <owner>/fno/fno` + `brew test fno` on a clean macOS host. On every later release, re-bump `url`+`sha256` together. **Move the tap by GitHub repo transfer + redirect, never by delete** - deleting the old repo breaks the redirect and every installed user (`brew update`/`brew upgrade` resolve through GitHub's 301).
 
-Before the first real publish, bump versions in lockstep: `crates/fno-agents/Cargo.toml`
-and `cli/pyproject.toml` are independent `0.1.0` today.
+Version lockstep is no longer hand-maintained: `scripts/release/sync-version.sh` is the
+single propagation point, and `--check` is the drift guard that fails when any surface
+lags the wheel.
