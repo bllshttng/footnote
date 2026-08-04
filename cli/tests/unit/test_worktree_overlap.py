@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.events import append_event, worktree_overlap_observed
+from fno.events import ValidationError, append_event, validate, worktree_overlap_observed
 from fno.paths import global_events_json
 from fno.worktree_cli.overlaps import (
     fold_overlap_events,
@@ -274,6 +274,39 @@ def test_record_degrades_fold_on_degenerate_window(tmp_path: Path) -> None:
     assert code == 0
     assert result["recorded"] is True
     assert result["fold"]["state"] == "unknown"
+
+
+def test_render_text_handles_degenerate_window() -> None:
+    """The degenerate-window report has no coverage key; text render must not crash."""
+    report, _ = overlaps_report(since_days=0, journal=Path("/nonexistent/events.jsonl"), now=NOW)
+    text = render_overlaps_text(report)
+    assert "unknown" in text
+
+
+def test_validate_rejects_observation_id_not_matching_fields() -> None:
+    """A hand-crafted id that does not match the field digest must fail loud."""
+    event = worktree_overlap_observed(
+        observer_session_id="obs-1",
+        peer_session_ids=["peer-a"],
+        repository_key="/r/.git",
+        worktree_key="/r/.git/wt1",
+    )
+    # Tamper: a valid 64-hex id that is NOT the digest of these fields.
+    event["data"]["observation_id"] = "0" * 64
+    with pytest.raises(ValidationError):
+        validate(event)
+
+
+def test_validate_accepts_builder_event_with_matching_digest() -> None:
+    """The builder's own event (digest computed from its fields) validates."""
+    event = worktree_overlap_observed(
+        observer_session_id="obs-1",
+        peer_session_ids=["peer-b", "peer-a"],  # unsorted input; builder sorts+dedupes
+        repository_key="/r/.git",
+        worktree_key="/r/.git/wt1",
+    )
+    assert validate(event) is None
+
 
 
 

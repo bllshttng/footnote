@@ -531,6 +531,25 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(
                 "worktree_overlap_observed observation_id must be a 64-hex sha256 digest"
             )
+        # Recompute the digest from the fields so a hand-crafted event cannot
+        # carry another observation's id and skew the recurrence fold. The
+        # digest helper is the single implementation; validate reuses it.
+        repo = data.get("repository_key")
+        wt = data.get("worktree_key")
+        obs = data.get("observer_session_id")
+        if not (
+            isinstance(repo, str) and repo
+            and isinstance(wt, str) and wt
+            and isinstance(obs, str) and obs
+        ):
+            raise ValidationError(
+                "worktree_overlap_observed requires non-empty repository_key, "
+                "worktree_key, and observer_session_id strings"
+            )
+        if oid != _overlap_observation_id(repo, wt, obs, sorted(set(peers))):
+            raise ValidationError(
+                "worktree_overlap_observed observation_id does not match its fields"
+            )
 
     try:
         _json.dumps(data, separators=(",", ":"), ensure_ascii=False).encode("utf-8")

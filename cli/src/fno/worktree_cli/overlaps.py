@@ -311,17 +311,17 @@ def overlaps_report(
 def render_overlaps_text(report: dict) -> str:
     """Human-readable one-screen rendering of the overlap report."""
     state = report.get("state")
+    cov = report.get("coverage") or {}
+    where = cov.get("path", "the overlap journal")
     if state == "no_data":
         return (
             f"no worktree overlap observations in the last "
             f"{report.get('since_days', RECURRENCE_WINDOW_DAYS)} days "
-            f"(journal absent at {report['coverage']['path']})"
+            f"(journal absent at {where})"
         )
     if state == "unknown":
-        return (
-            f"unknown: overlap journal unreadable at {report['coverage']['path']} "
-            f"({report['coverage'].get('malformed_lines', 0)} malformed lines)"
-        )
+        reason = report.get("error") or "overlap journal unreadable"
+        return f"unknown: {reason} at {where} ({cov.get('malformed_lines', 0)} malformed lines)"
     lines: list[str] = []
     n = report.get("distinct_observations", 0)
     lines.append(
