@@ -227,8 +227,9 @@ class OwnedHarnessIdentity:
 
     * ``single``   - exactly one harness family present; byte-identical to
                      :func:`resolve_harness_identity` (the dominant case).
-    * ``proven``   - two families disagreed and exactly one was proven ours
-                     (or the other was rejected as another live row's id).
+    * ``proven``   - two families disagreed and exactly one was proven ours.
+    * ``fallback`` - two families disagreed, none was proven, but collision
+                     rejected every other family, leaving one survivor.
     * ``ambiguous``- two families disagreed and none was provably ours;
                      ``session_id``/``harness`` are ``None`` (degrade, do not
                      guess by precedence).
@@ -282,6 +283,7 @@ def resolve_owned_identity(
 
     rejected: list[dict[str, str]] = []
     proven: list[tuple[str, str, str]] = []
+    survivors: list[tuple[str, str, str]] = []
     for marker, harness, value in markers:
         owner = collide(harness, value) if collide is not None else None
         if owner:
@@ -297,9 +299,19 @@ def resolve_owned_identity(
             continue
         if prove is not None and prove(harness, value):
             proven.append((marker, harness, value))
+        else:
+            survivors.append((marker, harness, value))
     if len(proven) == 1:
         _marker, harness, value = proven[0]
         return OwnedHarnessIdentity(value, harness, present, "proven", tuple(rejected))
+    if not proven and len(survivors) == 1:
+        # No proof available, but collision eliminated every other family: the
+        # sole survivor is the only candidate left. A colliding id is provably
+        # another live row's, so rejecting it leaves the remaining family as ours
+        # without guessing by precedence. Two+ unprovable survivors is a genuine
+        # unknown and degrades below.
+        _marker, harness, value = survivors[0]
+        return OwnedHarnessIdentity(value, harness, present, "fallback", tuple(rejected))
     return OwnedHarnessIdentity(None, None, present, "ambiguous", tuple(rejected))
 
 

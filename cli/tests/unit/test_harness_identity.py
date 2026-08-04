@@ -160,18 +160,32 @@ def test_owned_rejects_an_id_another_live_row_owns():
     assert owned.rejected[0]["reason"] == "owned_by_live_row"
 
 
-def test_owned_rejected_and_unproven_degrades_to_ambiguous():
-    """AC3-ERR + degrade: codex rejected (owned elsewhere), claude unproven ->
-    no guess; None is honest, a stranger's id is the bug."""
+def test_owned_collision_fallthrough_takes_sole_survivor():
+    """AC3-ERR + AC1-HP: codex rejected (owned by another live row), no proof
+    available. The colliding id is provably someone else's, so rejecting it
+    leaves claude as the sole survivor - resolved by elimination, not by
+    precedence and not by guessing. This is the Layer 1 fall-through, and it is
+    what resolves the witnessed incident even before any transcript proof."""
     env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
 
     def collide(harness: str, sid: str):
         return "owner" if sid == "foreign" else None
 
     owned = resolve_owned_identity(env, collide=collide)  # no prove
+    assert owned.disposition == "fallback"
+    assert owned.harness == "claude"
+    assert owned.session_id == "mine"
+    assert owned.rejected[0]["session_id"] == "foreign"
+
+
+def test_owned_two_unprovable_survivors_degrade():
+    """No collision, no proof, two families -> genuinely unknown. Do not pick by
+    precedence; None is honest where a stranger's id is the bug."""
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+    owned = resolve_owned_identity(env)  # no collide, no prove
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
-    assert owned.rejected[0]["session_id"] == "foreign"
+    assert owned.harness is None
 
 
 def test_owned_two_proven_is_still_ambiguous():
@@ -194,6 +208,87 @@ def test_ambient_identity_env_covers_direct_read_markers():
     # Routing vars are NOT identity and must never be swept.
     assert "CLAUDE_CONFIG_DIR" not in AMBIENT_IDENTITY_ENV
     assert "ANTHROPIC_API_KEY" not in AMBIENT_IDENTITY_ENV
+
+
+# ---- registry collision (AC3-ERR / AC4-ERR) ----------------------------
+
+
+def _register(tmp_path, session_id, provider="codex", status="live"):
+    from fno.agents.registry import register_existing_session
+
+    reg = tmp_path / "agents.json"
+    entry = register_existing_session(
+        provider=provider, session_id=session_id, cwd="/x", registry_path=reg
+    )
+    if status != "live":
+        import json
+
+        data = json.loads(reg.read_text())
+        for row in data.get("agents", []):
+            if row.get("name") == entry.name:
+                row["status"] = status
+        reg.write_text(json.dumps(data))
+    return entry.name, reg
+
+
+def test_row_owning_session_id_finds_live_owner(tmp_path):
+    """AC3-ERR: a live row owning a candidate id proves it is not this
+    session's; the collider returns the owner's name."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    name, reg = _register(tmp_path, sid)
+    assert row_owning_session_id(sid, registry_path=reg) == name
+    # A different id is free.
+    assert row_owning_session_id("019fffff-0000-0000-0000-ffffffffffff", registry_path=reg) is None
+    # Case-insensitive UUID match.
+    assert row_owning_session_id(sid.upper(), registry_path=reg) == name
+
+
+def test_row_owning_session_id_absent_or_unreadable_is_none(tmp_path):
+    """AC4-ERR: an absent or unreadable registry returns None (cannot prove a
+    collision) and never raises, so an unreadable registry never blocks init."""
+    from fno.agents.registry import row_owning_session_id
+
+    assert row_owning_session_id("019fc87d-...", registry_path=tmp_path / "nope.json") is None
+    corrupt = tmp_path / "agents.json"
+    corrupt.write_text("{not valid json")
+    assert row_owning_session_id("019fc87d-...", registry_path=corrupt) is None
+    assert row_owning_session_id("", registry_path=corrupt) is None
+
+
+def test_row_owning_session_id_exited_row_releases_ownership(tmp_path):
+    """An exited/orphaned row no longer owns its id; the id is free to claim."""
+    from fno.agents.registry import row_owning_session_id
+
+    sid = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    for terminal in ("exited", "orphaned", "permanent_dead"):
+        _name, reg = _register(tmp_path, sid, status=terminal)
+        assert row_owning_session_id(sid, registry_path=reg) is None
+
+
+def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
+    """AC3-ERR end-to-end: the owned resolver, wired to the real collider against
+    a temp registry, refuses a foreign id a live row owns and records the owner,
+    falling through to the claude marker instead of guessing codex."""
+    from fno.agents.registry import row_owning_session_id
+
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    owner, reg = _register(tmp_path, foreign)
+
+    def collide(harness, sid):
+        return row_owning_session_id(sid, registry_path=reg)
+
+    env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": "mine"}
+    owned = resolve_owned_identity(
+        env, prove=lambda h, s: h == "claude", collide=collide
+    )
+    assert owned.harness == "claude"
+    assert owned.session_id == "mine"
+    assert len(owned.rejected) == 1
+    assert owned.rejected[0]["session_id"] == foreign
+    assert owned.rejected[0]["owner"] == owner
+
 
 
 

@@ -747,6 +747,51 @@ def _is_identity_token(value: object) -> bool:
     )
 
 
+# A row in one of these statuses represents a session that still owns its
+# identity: a harness_session_id held here is provably NOT another acquiring
+# session's. Terminal/exit statuses (orphaned, failed, exited, permanent_dead)
+# release ownership, so an id last held by an exited row is free to claim.
+_OWNERSHIP_LIVE_STATUSES = frozenset(
+    {"spawning", "ready", "idle", "busy", "live", "restarting"}
+)
+
+
+def row_owning_session_id(
+    session_id: str, registry_path: Optional[Path] = None
+) -> Optional[str]:
+    """Name of an active registry row whose ``harness_session_id`` is
+    ``session_id``, or None.
+
+    Two live sessions cannot share a harness session id, so a hit proves a
+    candidate id is NOT this session's - the cause-agnostic detector that would
+    have caught the ambient-leak incident regardless of how the marker entered
+    the environment. Only rows in an ownership-live status count; an exited
+    row's id is free.
+
+    Degrade-safe by contract (AC4-ERR): an absent, unreadable, or alien-shape
+    registry returns None (cannot prove a collision) rather than raising, so an
+    unreadable registry never blocks init. Callers that must know whether the
+    check ran inspect the returned owner against None after a successful read.
+    """
+    if not session_id:
+        return None
+    from fno.harness_identity import session_identity_key
+
+    needle = session_identity_key(session_id)
+    try:
+        entries = load_registry(registry_path)
+    except Exception:
+        # Unreadable / wrong-schema / absent: cannot prove a collision.
+        return None
+    for entry in entries:
+        if entry.status not in _OWNERSHIP_LIVE_STATUSES:
+            continue
+        candidate = getattr(entry, "harness_session_id", None)
+        if candidate and session_identity_key(candidate) == needle:
+            return entry.name
+    return None
+
+
 def load_registry(path: Optional[Path] = None) -> list[AgentEntry]:
     """Load the registry. Returns ``[]`` if the file does not exist.
 
