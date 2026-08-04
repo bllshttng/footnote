@@ -234,6 +234,13 @@ if [[ "$DISPATCH_SUBSTRATE" != "bg" ]]; then
     -d "{\"harness\":\"$DISPATCH_PROVIDER\",\"from\":\"bg\",\"to\":\"$DISPATCH_SUBSTRATE\"}" >/dev/null 2>&1 || true
 fi
 
+# The resolve above is node-agnostic, so it is the BASE every node starts from.
+# A per-node quota cutover overrides the loop-local copies below; keeping the
+# base separate is what stops one node's cutover leaking into the next node.
+DISPATCH_PROVIDER_BASE="$DISPATCH_PROVIDER"
+DISPATCH_SUBSTRATE_BASE="$DISPATCH_SUBSTRATE"
+DISPATCH_COMMAND_BASE="$DISPATCH_COMMAND"
+
 # ---- per-node dispatch ------------------------------------------------------
 n_launched=0; n_parked=0; n_already=0; n_skipped=0; n_done=0; n_failed=0; n_capped=0
 
@@ -310,6 +317,45 @@ for id in "${NODES[@]}"; do
     echo "already-running $id reason=\"node carries open PR #$pr_number; not re-dispatching\""
     n_already=$((n_already + 1))
     continue
+  fi
+
+  # ---- The shared quota route decision (same seam as backlog advance / fno
+  # dispatch). This shell rung used to reach only `fno dispatch resolve`, which
+  # answers "which harness is configured", never "does that harness have quota
+  # left" - so /target bg and blueprint auto-launch stayed on a walled account
+  # while an idle harness sat there. `--autonomous` folds the route in.
+  # No --harness is passed: an explicit harness IS a pin, and passing the
+  # configured default as if it were one would disable the reroute it gates.
+  # Reset from the base first so a previous node's cutover never leaks forward.
+  DISPATCH_PROVIDER="$DISPATCH_PROVIDER_BASE"
+  DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
+  DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
+  cutover_args=(); route_account=""
+  route_json="$(fno dispatch resolve --autonomous --node "$id" -J 2>/dev/null)"
+  route_action="$(printf '%s' "$route_json" | jq -r '.route_action | select(. != null and . != "")' 2>/dev/null)"
+  if [[ "$route_action" == "defer" ]]; then
+    # The node stays ready and nothing is claimed; the next run after the reset
+    # dispatches it. Same outcome the Python launchers report as quota-deferred.
+    route_retry="$(printf '%s' "$route_json" | jq -r '.route_retry_at // ""' 2>/dev/null)"
+    echo "parked $id reason=\"quota-deferred on $(printf '%s' "$route_json" | jq -r '.route_source // "?"') (retry_at=${route_retry:-unknown})\""
+    n_parked=$((n_parked + 1))
+    continue
+  fi
+  if [[ "$route_action" == "cutover" ]]; then
+    route_account="$(printf '%s' "$route_json" | jq -r '.route_account | select(. != null and . != "")' 2>/dev/null)"
+    route_harness="$(printf '%s' "$route_json" | jq -r '.harness | select(. != null and . != "")' 2>/dev/null)"
+    route_substrate="$(printf '%s' "$route_json" | jq -r '.substrate | select(. != null and . != "")' 2>/dev/null)"
+    route_command="$(printf '%s' "$route_json" | jq -r '.command | select(. != null and . != "")' 2>/dev/null)"
+    # All four or none: a half-applied cutover is the wrong-binary / wrong-billing
+    # launch the selector exists to prevent, so an incomplete tuple stays put.
+    if [[ -n "$route_account" && -n "$route_harness" && -n "$route_substrate" && -n "$route_command" ]]; then
+      DISPATCH_PROVIDER="$route_harness"
+      DISPATCH_SUBSTRATE="$route_substrate"
+      DISPATCH_COMMAND="$route_command"
+      # The record id travels on argv; spawn resolves its credentials itself.
+      cutover_args=(--dispatch-account "$route_account")
+      echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
+    fi
   fi
 
   # Provenance-carrying name: target-<full-node-id>-<slug> so the bg thread title
@@ -679,7 +725,7 @@ for id in "${NODES[@]}"; do
   fi
 
   if [[ "$DRY_RUN" -eq 1 ]]; then
-    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
+    echo "launched $id name=$agent_name session=DRY-RUN cwd=${dry_cwd} hint=\"would run: fno agents spawn --harness $DISPATCH_PROVIDER --substrate $DISPATCH_SUBSTRATE ${cwd_hint}${squad_hint}${role_hint}${ROUTE:+--route $ROUTE }${model_pin:+--model $model_pin }${perm_hint}${route_account:+--dispatch-account $route_account }--name $agent_name '$tgt_cmd'\"${TARGET_BRIEF_ENV:+ brief=set} route=${route_val}"
     n_launched=$((n_launched + 1))
     continue
   fi
@@ -736,7 +782,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
@@ -757,16 +803,16 @@ for id in "${NODES[@]}"; do
         _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
         [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       fi
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then

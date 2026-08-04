@@ -1400,6 +1400,19 @@ never synthesizes one. An explicit harness, provider, account, model, or node
 pin is never rerouted - it may still defer. The receipt is
 `dispatch_failover`, emitted only after the spawn succeeds.
 
+The two knobs are independent, so a cutover window shorter than the defer
+horizon makes both predicates true for one `LOW` reset. Defer wins that overlap:
+a near reset is waited out rather than churning harnesses, which is the policy
+the horizon exists to express.
+
+Shell dispatchers reach the same decision through `fno dispatch resolve
+--autonomous`, which folds the route into the resolved tuple and adds
+`route_action` / `route_account` / `route_source` / `route_retry_at`. Only the
+destination's record id crosses that boundary; `fno agents spawn
+--dispatch-account <record>` resolves its credentials on the other side.
+That is a separate flag from `--account`, which is operator intent and
+claude-only, while a cutover exists to land on another harness.
+
 Probing and display are always on; only the autonomous *deferral* is gated,
 matching the opt-in posture of `backlog advance` and auto-merge. Cost-to-finish
 routing is out of scope for v1; the headroom seam is where cost data plugs in

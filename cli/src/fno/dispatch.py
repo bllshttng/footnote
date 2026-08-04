@@ -106,16 +106,30 @@ def cmd_resolve(
     trigger: str = typer.Option(
         "autonomous", "--trigger", help="autonomous (fire-and-forget) | attended. Autonomous never resolves pane."
     ),
+    autonomous: bool = typer.Option(
+        False,
+        "--autonomous",
+        help=(
+            "Fold the shared quota route decision into the tuple, so a shell "
+            "dispatcher gets the same stay/defer/cutover verdict the Python "
+            "launchers get. Adds route_action, route_reason, route_account, "
+            "route_source, route_window; on a cutover, harness and command are "
+            "already the destination's. Off by default: the bare verb stays pure."
+        ),
+    ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the resolved tuple as JSON (default: key=value lines)."
     ),
 ) -> None:
     """Resolve (config + context) -> (harness, substrate, command, permission_bypass, env).
 
-    Pure: reads the harness-capability map + config.dispatch, resolves nothing at
-    runtime, never spawns or claims. Exit 0 on a resolved tuple; exit 2 naming the
-    harness and the map when it cannot resolve (unknown harness, bad substrate,
-    empty/unsubstituted command).
+    Pure by default: reads the harness-capability map + config.dispatch, resolves
+    nothing at runtime, never spawns or claims. ``--autonomous`` adds ONE runtime
+    read - the shared quota route decision - so the shell dispatchers converge on
+    the same seam as `backlog advance` and `fno dispatch` instead of routing
+    around it. Exit 0 on a resolved tuple; exit 2 naming the harness and the map
+    when it cannot resolve (unknown harness, bad substrate, empty/unsubstituted
+    command).
     """
     from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
 
@@ -125,12 +139,18 @@ def cmd_resolve(
     # dispatcher (dispatch-node.sh) included - carries the same context, not only
     # advance.py's daemon paths. An explicit --brief still wins (it IS rung 1).
     brief_source = "explicit" if brief else "none"
-    if brief is None and node:
-        rec = _lookup_node(node)
-        if rec:
-            from fno.provenance.autobrief import resolve_dispatch_brief
+    rec = _lookup_node(node) if node else None
+    if brief is None and rec:
+        from fno.provenance.autobrief import resolve_dispatch_brief
 
-            brief, brief_source = resolve_dispatch_brief(rec)
+        brief, brief_source = resolve_dispatch_brief(rec)
+
+    route = _autonomous_route_for(rec, harness, node) if autonomous else None
+    if route is not None and route.action == "cutover":
+        # The destination owns the harness AND the command surface (codex takes
+        # `$fno:target`, never a raw slash verb), so resolve the tuple FOR it
+        # rather than resolving here and patching the harness afterwards.
+        harness = route.harness
 
     try:
         out = resolve_dispatch(
@@ -147,11 +167,25 @@ def cmd_resolve(
         raise typer.Exit(code=2)
 
     out["brief_source"] = brief_source
+    if autonomous:
+        # A cutover whose destination command cannot render is not a cutover: the
+        # resolve above would have exited 2, so reaching here means the whole
+        # destination tuple is good. Report the record id only; the credentials
+        # ride `fno agents spawn --dispatch-account`, never argv.
+        out["route_action"] = route.action if route else "unknown-proceed"
+        out["route_reason"] = route.reason if route else "route-unavailable"
+        out["route_account"] = (route.record_id or "") if route else ""
+        out["route_source"] = (route.source_record or "") if route else ""
+        out["route_window"] = (route.window or "") if route else ""
+        out["route_retry_at"] = (route.retry_at if route else None) or ""
     if json_output:
         typer.echo(json.dumps(out))
     else:
         for key in ("harness", "substrate", "command", "command_surface"):
             typer.echo(f"{key}={out[key]}")
+        for key in ("route_action", "route_reason", "route_account", "route_retry_at"):
+            if key in out:
+                typer.echo(f"{key}={out[key]}")
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
         typer.echo(f"bg={out['bg']}")
         typer.echo(f"resume={out['resume']}")
@@ -161,6 +195,38 @@ def cmd_resolve(
             typer.echo(f"brief_bytes={len(out['env']['TARGET_BRIEF'].encode('utf-8'))}")
         typer.echo(f"brief_source={brief_source}")
     raise typer.Exit(code=0)
+
+
+def _autonomous_route_for(
+    rec: Optional[dict], harness: Optional[str], node: Optional[str]
+):
+    """The shared route decision for a shell dispatcher, or None to proceed.
+
+    An explicit ``--harness`` on the invocation is the strongest pin there is, so
+    it never reroutes. Everything else routes through the same
+    ``select_autonomous_route`` the Python launchers use, which is the point of
+    this rung: the shell path used to skip the quota seam entirely and stayed on
+    a walled account while an idle harness sat there.
+
+    Best-effort by design - any failure resolves to None (proceed as configured),
+    matching the fail-open stance of every other quota read.
+    """
+    try:
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
+
+        cwd = (rec or {}).get("_resolved_cwd") or (rec or {}).get("cwd")
+        return select_autonomous_route(
+            provider_id=_resolve_provider_id() or "",
+            priority=(rec or {}).get("priority"),
+            pinned=bool((harness or "").strip())
+            or launch_is_pinned(rec, node_cwd=cwd),
+            node_cwd=cwd,
+        )
+    except Exception:  # noqa: BLE001 - a quota read must never block a dispatch
+        return None
 
 
 def _lookup_node(node_ref: str) -> Optional[dict]:

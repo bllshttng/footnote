@@ -99,12 +99,26 @@ A single `dispatch_failover{from, to, harness_to?, window?, reason?}` receipt fo
 
 The decision itself is not `advance`'s.
 `fno.agents.autonomous_route.select_autonomous_route` is the single seam: it takes one quota probe and returns `stay`, `defer`, `cutover`, or `unknown-proceed`, and for a cutover the whole destination tuple (record id, harness, account overlay).
-Both autonomous target launchers consume it - `backlog advance` (which the active backlog and the merge trigger route through) and `fno dispatch` (which dispatch-node and blueprint auto-launch route through) - so identical node, config, and quota fixtures resolve to the identical destination on either path.
+Three autonomous entry points consume it, so identical node, config, and quota fixtures resolve to the identical destination on every path:
+
+- `backlog advance` (the active backlog and the merge trigger route through it) calls the selector directly.
+- `fno dispatch` calls it directly.
+- `skills/target/scripts/dispatch-node.sh` (which backs `/target bg` and blueprint auto-launch) is a shell rung and cannot import Python, so it reaches the same seam through `fno dispatch resolve --autonomous`.
+
+That flag is the whole reason the shell rung is not a fourth, divergent policy.
+Bare `fno dispatch resolve` is pure - it answers "which harness is configured", never "does that harness have quota left" - so a dispatcher that called only the bare verb would sit on a walled account while an idle harness waited.
+`--autonomous` folds the route decision into the same tuple: on a cutover the returned `harness`, `substrate`, and `command` are already the destination's, and `route_action` / `route_account` / `route_source` / `route_retry_at` carry the verdict.
+The destination's credentials never cross that boundary - only its record id does, which `fno agents spawn --dispatch-account <record>` resolves on the other side.
+That flag exists because `--account` is operator intent and claude-only by contract, while a cutover's whole point is landing on another harness.
+A `route_action=defer` parks the node with a receipt and claims nothing; a cutover tuple missing any of account, harness, substrate, or command is not applied at all, since a half-applied cutover is the wrong-binary launch the selector exists to prevent.
+
 The sibling context-think resolver and per-harness pane capability are owned elsewhere and are deliberately not duplicated here.
 Attended operator spawns stay outside the automatic policy entirely.
 
 Precedence is explicit invocation pin > node pin > configured dispatch harness > quota policy > built-in harness default.
 A pinned launch may still defer; it is never rerouted, because quota policy must not change a billing or harness choice a human made.
+Every explicit intent pins, not just a provider: a model pin counts too, because a cutover swaps the harness and a claude-only model forwarded to codex launches a worker that cannot start.
+`fno.agents.autonomous_route.launch_is_pinned` is the one implementation of that rule, shared by the launchers so they cannot drift on what counts as a pin.
 
 **Proactive LOW cutover (`config.dispatch.cutover_low_after_minutes`, default 0 = off).**
 An `EXHAUSTED` window cuts over immediately when a healthy candidate exists.

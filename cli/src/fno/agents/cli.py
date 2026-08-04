@@ -706,6 +706,18 @@ def cmd_spawn(
             "spawned on refusal."
         ),
     ),
+    dispatch_account: str | None = typer.Option(
+        None,
+        "--dispatch-account",
+        help=(
+            "The destination provider RECORD of an autonomous quota cutover, as "
+            "chosen by `fno dispatch resolve --autonomous`. Unlike --account "
+            "(operator intent, claude-only) this carries the record's dispatch "
+            "env for ANY harness, which is what a claude->codex cutover needs. "
+            "The record id travels on argv; its credentials never do. "
+            "Fail-closed: an unknown or unstageable record spawns nothing."
+        ),
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -1241,6 +1253,22 @@ def cmd_spawn(
 
         overlay = resolve_account_overlay_or_exit(account)
         account_env = overlay.env if overlay else None
+
+    # The autonomous-cutover carrier. Same fail-closed posture as --account, and
+    # deliberately a separate flag: --account's claude-only refusal is an operator
+    # contract, while a cutover's whole point is landing on another harness.
+    if dispatch_account is not None:
+        from fno.adapters.providers.dispatch import dispatch_env
+
+        try:
+            account_env = {**(account_env or {}), **dispatch_env(dispatch_account)}
+        except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
+            print(
+                f"refusing --dispatch-account {dispatch_account!r}: {exc}; "
+                "no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from exc
 
     # Resolve node provenance once for every substrate. A node-bearing spawn is
     # itself a dispatcher route, so it must cross the same family-2 decision and

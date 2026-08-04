@@ -65,6 +65,13 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     )
 
     assert "fno dispatch resolve" in dispatch_node
+    # `fno dispatch resolve` alone answers "which harness is configured", never
+    # "does it have quota left" - so asserting only that string let the shell
+    # dispatcher route around the quota seam while this census stayed green.
+    # Pin the quota rung and the carrier that makes a cutover reach the spawn.
+    assert "dispatch resolve --autonomous" in dispatch_node
+    assert "--dispatch-account" in dispatch_node
+    assert 'route_action" == "defer"' in dispatch_node
     assert 'DISPATCH="$REPO_ROOT/skills/target/scripts/dispatch-node.sh"' in blueprint
     assert '"backlog",\n                "advance",' in active_backlog
     assert "harness_map.resolve_dispatch(**resolve_kwargs)" in advance

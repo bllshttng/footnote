@@ -7,6 +7,7 @@ LOW predicate, and the refusal to return a half-resolved destination.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -290,3 +291,65 @@ def test_select_destination_no_active_combo_defers(monkeypatch):
         lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
     )
     assert ar._select_destination(None, "ccm") is None
+
+
+class TestAutonomousResolveRung:
+    """`fno dispatch resolve --autonomous`: the seam the shell dispatcher uses.
+
+    dispatch-node.sh reached only the pure resolver, so /target bg and blueprint
+    auto-launch never saw a quota verdict. These pin the folded tuple.
+    """
+
+    def _resolve(self, monkeypatch, route, *, harness=None, node="ab-1111aaaa"):
+        import fno.dispatch as dm
+        from typer.testing import CliRunner
+
+        monkeypatch.setattr(dm, "_lookup_node", lambda ref: {"id": node, "priority": "p2"})
+        monkeypatch.setattr(dm, "_autonomous_route_for", lambda *a, **k: route)
+        args = ["resolve", "--autonomous", "--node", node, "-J"]
+        if harness:
+            args += ["--harness", harness]
+        return CliRunner().invoke(dm.dispatch_app, args)
+
+    def test_cutover_returns_the_destination_harness_and_command(self, monkeypatch) -> None:
+        route = ar.AutonomousRoute(
+            "cutover",
+            "exhausted-cutover",
+            source_record="ccm",
+            record_id="ccr",
+            harness="codex",
+            account_env={"CODEX_HOME": "/acct/ccr"},
+            window="exhausted",
+        )
+        out = json.loads(self._resolve(monkeypatch, route).stdout)
+        assert out["route_action"] == "cutover"
+        assert out["harness"] == "codex"
+        # Codex takes its own command surface, never a raw claude slash verb.
+        assert out["command"].startswith("$fno:target")
+        # The record id crosses the process boundary; the credentials never do.
+        assert out["route_account"] == "ccr"
+        assert "CODEX_HOME" not in json.dumps(out)
+
+    def test_defer_is_reported_so_the_shell_can_park(self, monkeypatch) -> None:
+        route = ar.AutonomousRoute(
+            "defer", "exhausted", source_record="ccm", retry_at=9e18, window="exhausted"
+        )
+        out = json.loads(self._resolve(monkeypatch, route).stdout)
+        assert out["route_action"] == "defer"
+        assert out["route_source"] == "ccm"
+        assert out["route_retry_at"] == 9e18
+
+    def test_bare_resolve_stays_pure(self, monkeypatch) -> None:
+        import fno.dispatch as dm
+        from typer.testing import CliRunner
+
+        monkeypatch.setattr(dm, "_lookup_node", lambda ref: {"id": "ab-1111aaaa"})
+        monkeypatch.setattr(
+            dm,
+            "_autonomous_route_for",
+            lambda *a, **k: pytest.fail("bare resolve probed quota"),
+        )
+        out = json.loads(
+            CliRunner().invoke(dm.dispatch_app, ["resolve", "--node", "ab-1111aaaa", "-J"]).stdout
+        )
+        assert "route_action" not in out
