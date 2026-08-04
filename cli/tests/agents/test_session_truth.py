@@ -495,3 +495,115 @@ def test_observed_model_unsupported_harness_has_no_transcript(tmp_path):
     assert observed_model("opencode", tmp_path / "anything") == {
         "kind": "no-transcript"
     }
+
+
+# ---------------------------------------------------------------------------
+# render_truth: the model on the line (US1 + US3)
+# ---------------------------------------------------------------------------
+
+def _truth_result(observed):
+    return {
+        "handle": "569d8d39",
+        "state": "working",
+        "reason": None,
+        "last_activity_age_s": 6,
+        "session_id": "s",
+        "observed_model": observed,
+        "suggestions": [],
+    }
+
+
+def test_render_truth_names_the_observed_model():
+    """AC1-HP: the operator asks one verb and gets the real model."""
+    from fno.agents.session_truth import render_truth
+
+    line = render_truth(
+        _truth_result({"kind": "observed", "model": "glm-5.2", "samples": 300})
+    )
+    assert line == "truth 569d8d39: working on glm-5.2 (active, last activity 6s ago)"
+
+
+def test_render_truth_no_model_yet_does_not_read_as_healthy():
+    """AC4-ERR: distinct from no-transcript, and visible as its own state."""
+    from fno.agents.session_truth import render_truth
+
+    line = render_truth(_truth_result({"kind": "no-model-yet"}))
+    assert "no model yet" in line
+    assert render_truth(_truth_result({"kind": "no-transcript"})) != line
+
+
+def test_render_truth_omits_the_clause_when_there_is_no_transcript():
+    """A worker spawned two seconds ago must not look broken."""
+    from fno.agents.session_truth import render_truth
+
+    line = render_truth(_truth_result({"kind": "no-transcript"}))
+    assert line == "truth 569d8d39: working (active, last activity 6s ago)"
+
+
+def test_render_truth_says_so_when_the_transcript_is_unreadable():
+    from fno.agents.session_truth import render_truth
+
+    line = render_truth(_truth_result({"kind": "unreadable", "reason": "EIO"}))
+    assert "model unreadable" in line
+
+
+def test_truth_verb_json_carries_observed_model_and_keeps_exit_zero(
+    tmp_path, monkeypatch
+):
+    """The --json payload is an explicit key allowlist, so a field added to the
+    resolver reaches nobody until it is added there too. Exit code is unchanged:
+    this is a reporting field, never a gate."""
+    from typer.testing import CliRunner
+
+    from fno.agents import session_truth
+    from fno.cli import app
+
+    cwd = "/Users/bb16/code/footnote/footnote"
+    sid = "0badc0de-1111-0000-0000-000000000001"
+    _write_claude_transcript_with_model(tmp_path, cwd, sid, "glm-5.2", turns=2)
+    session = SimpleNamespace(agent="claude", session_id=sid, cwd=cwd, short_id=sid[:8])
+
+    real = session_truth.resolve_session_truth
+    monkeypatch.setattr(
+        session_truth,
+        "resolve_session_truth",
+        lambda handle, **kw: real(
+            handle, resolve=_resolver(session), projects_root=tmp_path
+        ),
+    )
+
+    result = CliRunner().invoke(app, ["agents", "truth", "w1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["observed_model"] == {
+        "kind": "observed",
+        "model": "glm-5.2",
+        "samples": 2,
+    }
+
+
+def test_observed_model_escalates_past_an_inconclusive_tail(tmp_path):
+    """A bounded tail cannot claim absence.
+
+    codex stamps the model once per TURN on `turn_context`, so one tool-heavy
+    turn pushes it clean out of a fixed tail window (measured: a 622 KB rollout
+    whose only turn_context sat at byte 126850). Reporting "no model yet" from
+    a window we never looked past would call a healthy worker unhealthy -- the
+    exact wrong diagnosis this reading exists to prevent.
+    """
+    from fno.agents.session_truth import _MODEL_TAIL_BYTES, observed_model
+
+    path = tmp_path / "rollout.jsonl"
+    context = json.dumps({"type": "turn_context", "payload": {"model": "gpt-5.6-sol"}})
+    filler = json.dumps({"type": "event_msg", "payload": {"text": "x" * 900}})
+    with path.open("w") as fh:
+        fh.write(context + "\n")  # the only model record, at the very top
+        for _ in range(_MODEL_TAIL_BYTES // len(filler) + 50):
+            fh.write(filler + "\n")
+
+    assert path.stat().st_size > _MODEL_TAIL_BYTES
+    assert observed_model("codex", path) == {
+        "kind": "observed",
+        "model": "gpt-5.6-sol",
+        "samples": 1,
+    }

@@ -2364,6 +2364,12 @@ def cmd_truth(
     in one evening). This is the supervision state agent-view's working/idle
     cannot express. Read-only; exits 13 on an unresolvable handle (peek parity),
     0 otherwise.
+
+    The line also names the model the worker is ACTUALLY answering as, read
+    from the same transcript -- so a route that silently fell back to the
+    primary vendor shows a `claude-*` id here and disagrees visibly with what
+    the spawn asked for. A worker that came up and never answered reads "no
+    model yet"; one with no transcript yet omits the clause entirely.
     """
     import json as _json
 
@@ -2373,7 +2379,14 @@ def cmd_truth(
     if json_out:
         payload = {
             k: result.get(k)
-            for k in ("handle", "state", "reason", "last_activity_age_s", "session_id")
+            for k in (
+                "handle",
+                "state",
+                "reason",
+                "last_activity_age_s",
+                "session_id",
+                "observed_model",
+            )
         }
         sys.stdout.write(_json.dumps(payload) + "\n")
     else:

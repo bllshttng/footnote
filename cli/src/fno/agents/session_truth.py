@@ -202,6 +202,34 @@ def _resolve_transcript_path(
 _MODEL_TAIL_BYTES = 256 * 1024
 
 
+def _models_in(
+    lines: "Any", reader: Callable[[dict], Optional[str]]
+) -> tuple[Optional[str], int]:
+    """``(most recent model, how many records carried one)`` over ``lines``.
+
+    A line that is not parseable JSON is skipped rather than fatal: inside the
+    window it is a stray, and the one place a torn line MATTERS (the end of the
+    file) is checked by the caller before it gets here.
+    """
+    last: Optional[str] = None
+    samples = 0
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rec = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(rec, dict):
+            continue
+        model = reader(rec)
+        if isinstance(model, str) and model:
+            last = model
+            samples += 1
+    return last, samples
+
+
 def _claude_model(rec: dict) -> Optional[str]:
     """claude stamps the answering model on every assistant message."""
     if rec.get("type") != "assistant":
@@ -279,22 +307,21 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
         # Our own window boundary cut the first line, not the writer.
         lines = lines[1:]
 
-    last: Optional[str] = None
-    samples = 0
-    for line in lines:
-        line = line.strip()
-        if not line:
-            continue
+    last, samples = _models_in(lines, reader)
+    if last is None and windowed:
+        # The tail was inconclusive, and "no model yet" read off a window we
+        # never looked past is a claim rather than an observation. claude
+        # stamps the model on every assistant message so its tail always
+        # answers; codex stamps it once per TURN on `turn_context`, which one
+        # tool-heavy turn pushes clean out of the window (measured: a 622 KB
+        # rollout whose only turn_context sits at byte 126850). Escalate to a
+        # full streaming scan before claiming absence -- paid only on the rare
+        # inconclusive tail, never on the common read.
         try:
-            rec = json.loads(line)
-        except ValueError:
-            continue  # a stray non-JSON line inside the window, not the tail
-        if not isinstance(rec, dict):
-            continue
-        model = reader(rec)
-        if isinstance(model, str) and model:
-            last = model
-            samples += 1
+            with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
+                last, samples = _models_in(fh, reader)
+        except OSError as exc:
+            return {"kind": "unreadable", "reason": str(exc)}
     if last is None:
         return {"kind": "no-model-yet"}
     return {"kind": "observed", "model": last, "samples": samples}
@@ -427,8 +454,29 @@ def _humanize_age(seconds: Optional[int]) -> str:
     return f"{seconds // 3600}h"
 
 
+def _model_clause(observed: Any) -> str:
+    """The model half of the truth line, or '' when there is nothing to say.
+
+    ``no-transcript`` renders NOTHING rather than "unknown": a worker spawned
+    two seconds ago has no transcript yet and must not look broken. The other
+    three each get their own words, because a session that came up and never
+    answered is the state this reading exists to make visible and must not read
+    as healthy.
+    """
+    if not isinstance(observed, dict):
+        return ""
+    kind = observed.get("kind")
+    if kind == "observed":
+        return f" on {observed.get('model')}"
+    if kind == "no-model-yet":
+        return ", no model yet"
+    if kind == "unreadable":
+        return ", model unreadable"
+    return ""
+
+
 def render_truth(result: dict[str, Any]) -> str:
-    """One legible human line with the state and its evidence."""
+    """One legible human line with the state, the model, and the evidence."""
     handle = result.get("handle", "?")
     state = str(result.get("state") or "")
     if state == "unknown":
@@ -438,4 +486,8 @@ def render_truth(result: dict[str, Any]) -> str:
             line += f" -- did you mean: {', '.join(suggestions)}"
         return line
     age = _humanize_age(result.get("last_activity_age_s"))
-    return f"truth {handle}: {state} ({_EVIDENCE.get(state, '')}, last activity {age} ago)"
+    model = _model_clause(result.get("observed_model"))
+    return (
+        f"truth {handle}: {state}{model} "
+        f"({_EVIDENCE.get(state, '')}, last activity {age} ago)"
+    )
