@@ -123,16 +123,19 @@ def emit_identity_resolution(owned: Any, *, path: Optional[Path] = None) -> None
     """Record a non-trivial harness identity resolution (AC5-CON).
 
     ``owned`` is an ``OwnedHarnessIdentity`` whose resolution was not a plain
-    single-marker win. Best-effort: the underlying ``emit()`` swallows OSError.
+    single-marker win. Carries the resolved session id and every marker's value
+    so the resolution (and a leak path) is reconstructable from this one record.
+    Best-effort: the underlying ``emit()`` swallows OSError.
     """
     emit(
         KIND_HARNESS_IDENTITY_RESOLVED,
         path=path,
         disposition=owned.disposition,
         harness=owned.harness,
+        session_id=owned.session_id,
         markers_present=[
-            {"marker": marker, "harness": harness}
-            for marker, harness in owned.markers_present
+            {"marker": marker, "harness": harness, "session_id": value}
+            for marker, harness, value in owned.markers_present
         ],
         rejected=[dict(entry) for entry in owned.rejected],
     )

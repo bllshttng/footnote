@@ -878,11 +878,15 @@ def resolve_owned_identity_cmd() -> None:
 
     true_harness = resolve_session_harness()
 
-    def _prove(harness: str, _sid: str) -> bool:
-        # A marker whose harness matches this process's nearest harness ancestor
-        # is one this process minted; any other is inherited. Degrade (None) when
-        # no harness ancestor is found rather than attesting ownership blindly.
-        return bool(true_harness) and harness == true_harness
+    def _prove(harness: str, _sid: str) -> Optional[bool]:
+        # Three states: True (this process mints this harness), False (the
+        # process tree resolves to a DIFFERENT harness, so this marker is
+        # foreign), None (no harness ancestor found - CI / degraded - cannot
+        # tell). Only True skips the collision check; None falls through to
+        # collision-elimination so the verb still resolves in a headless runner.
+        if true_harness is None:
+            return None
+        return harness == true_harness
 
     owned = resolve_owned_identity(
         os.environ,

@@ -95,7 +95,7 @@ def test_owned_single_marker_matches_precedence(marker, session_id, harness):
     assert owned.session_id == session_id
     assert owned.harness == harness
     assert owned == OwnedHarnessIdentity(
-        session_id, harness, ((marker, harness),), "single"
+        session_id, harness, ((marker, harness, session_id),), "single"
     )
     # The dominant case must not change the answer precedence gives.
     assert (owned.session_id, owned.harness) == (
@@ -122,8 +122,8 @@ def test_owned_disagreement_degrades_without_proof():
     assert owned.disposition == "ambiguous"
     assert owned.session_id is None
     assert owned.harness is None
-    assert ("CODEX_THREAD_ID", "codex") in owned.markers_present
-    assert ("CLAUDE_CODE_SESSION_ID", "claude") in owned.markers_present
+    assert ("CODEX_THREAD_ID", "codex", "foreign") in owned.markers_present
+    assert ("CLAUDE_CODE_SESSION_ID", "claude", "mine") in owned.markers_present
 
 
 def test_owned_disagreement_prefers_the_proven_marker():
@@ -318,6 +318,57 @@ def test_owned_proven_marker_wins_over_self_registration_collision(tmp_path):
     assert owned.session_id == mine
     # The session's own row was NOT rejected: proof skipped its collision check.
     assert owned.rejected == ()
+
+
+def test_owned_lone_foreign_marker_is_not_stamped_when_prover_contradicts():
+    """The single-family fast path used to stamp the only marker without any
+    ownership check, so a claude hook carrying only an inherited
+    CODEX_THREAD_ID recorded the foreign codex identity. A prover that resolves
+    to a different harness (False) excludes the lone foreign marker and the
+    result degrades to None rather than stamping a stranger's id."""
+    env = {"CODEX_THREAD_ID": "foreign"}
+    owned = resolve_owned_identity(env, prove=lambda harness, sid: False)
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+
+
+def test_owned_two_same_family_proven_collapse_to_one(monkeypatch):
+    """Two markers of the proven harness (CODEX_THREAD_ID + CODEX_SESSION_ID,
+    both codex) plus a foreign claude marker collapse to the one proven family
+    rather than reading as two-proven-ambiguous. Precedence-first within the
+    family wins (the thread id)."""
+    env = {
+        "CODEX_THREAD_ID": "thread",
+        "CODEX_SESSION_ID": "session",
+        "CLAUDE_CODE_SESSION_ID": "claude-mine",
+    }
+    owned = resolve_owned_identity(env, prove=lambda harness, sid: harness == "codex")
+    assert owned.disposition == "proven"
+    assert owned.harness == "codex"
+    assert owned.session_id == "thread"  # precedence-first within the proven family
+
+
+def test_owned_prover_cant_tell_falls_through_to_collision(tmp_path):
+    """A prover that returns None (no harness ancestor, e.g. CI) does NOT
+    force a degrade: it falls through to collision-elimination, so a foreign id
+    a live row owns is still rejected and the surviving family still wins.
+    This is the 3-state contract: None != False."""
+    from fno.agents.registry import register_existing_session, row_owning_session_id
+
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    reg = tmp_path / "agents.json"
+    register_existing_session(provider="codex", session_id=foreign, cwd="/x", registry_path=reg)
+
+    def collide(harness, sid):
+        return row_owning_session_id(sid, registry_path=reg)
+
+    env = {"CODEX_THREAD_ID": foreign, "CLAUDE_CODE_SESSION_ID": "mine"}
+    owned = resolve_owned_identity(env, prove=lambda harness, sid: None, collide=collide)
+    assert owned.disposition == "fallback"
+    assert owned.harness == "claude"
+    assert owned.session_id == "mine"
+
 
 
 

@@ -183,8 +183,8 @@ def test_emit_identity_resolution_records_markers_disposition_collision(
         session_id="mine",
         harness="claude",
         markers_present=(
-            ("CODEX_THREAD_ID", "codex"),
-            ("CLAUDE_CODE_SESSION_ID", "claude"),
+            ("CODEX_THREAD_ID", "codex", "foreign"),
+            ("CLAUDE_CODE_SESSION_ID", "claude", "mine"),
         ),
         disposition="proven",
         rejected=(
@@ -203,8 +203,17 @@ def test_emit_identity_resolution_records_markers_disposition_collision(
     assert rec["kind"] == KIND_HARNESS_IDENTITY_RESOLVED
     assert rec["disposition"] == "proven"
     assert rec["harness"] == "claude"
-    assert {"marker": "CODEX_THREAD_ID", "harness": "codex"} in rec["markers_present"]
-    assert {"marker": "CLAUDE_CODE_SESSION_ID", "harness": "claude"} in rec["markers_present"]
+    assert rec["session_id"] == "mine"
+    assert {
+        "marker": "CODEX_THREAD_ID",
+        "harness": "codex",
+        "session_id": "foreign",
+    } in rec["markers_present"]
+    assert {
+        "marker": "CLAUDE_CODE_SESSION_ID",
+        "harness": "claude",
+        "session_id": "mine",
+    } in rec["markers_present"]
     assert rec["rejected"][0]["owner"] == "7ebb186c"
     assert rec["rejected"][0]["session_id"] == "foreign"
     assert rec["rejected"][0]["reason"] == "owned_by_live_row"

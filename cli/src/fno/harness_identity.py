@@ -225,23 +225,25 @@ class OwnedHarnessIdentity:
 
     ``disposition`` is one of:
 
-    * ``single``   - exactly one harness family present; byte-identical to
-                     :func:`resolve_harness_identity` (the dominant case).
-    * ``proven``   - two families disagreed and exactly one was proven ours.
-    * ``fallback`` - two families disagreed, none was proven, but collision
-                     rejected every other family, leaving one survivor.
-    * ``ambiguous``- two families disagreed and none was provably ours;
+    * ``single``   - the resolved family was the only one present; byte-identical
+                     to :func:`resolve_harness_identity` for the dominant case.
+    * ``proven``   - more than one family was present and exactly one was proven
+                     ours (or the others were rejected as foreign).
+    * ``fallback`` - more than one family was present, none was proven, but
+                     collision rejected every other family, leaving one survivor.
+    * ``ambiguous``- no marker could be resolved as this session's;
                      ``session_id``/``harness`` are ``None`` (degrade, do not
                      guess by precedence).
     * ``empty``    - no marker present.
 
-    ``markers_present`` and ``rejected`` carry what the resolver saw, so an
-    ambiguous resolve can be reconstructed from the event record alone.
+    ``markers_present`` carries every marker seen (with its value) and
+    ``rejected`` the ids a live row already owns, so an ambiguous resolve can be
+    reconstructed from the event record alone.
     """
 
     session_id: Optional[str]
     harness: Optional[str]
-    markers_present: tuple[tuple[str, str], ...] = ()
+    markers_present: tuple[tuple[str, str, str], ...] = ()
     disposition: str = "empty"
     rejected: tuple[dict[str, str], ...] = field(default_factory=tuple)
 
@@ -249,50 +251,49 @@ class OwnedHarnessIdentity:
 def resolve_owned_identity(
     env: Optional[Mapping[str, str]] = None,
     *,
-    prove: Optional[Callable[[str, str], bool]] = None,
+    prove: Optional[Callable[[str, str], Optional[bool]]] = None,
     collide: Optional[Callable[[str, str], Optional[str]]] = None,
 ) -> OwnedHarnessIdentity:
     """Resolve the harness identity this process can PROVE it owns.
 
-    Unlike :func:`resolve_harness_identity`, when two harness families are both
-    present this never silently picks the higher-precedence one: an inherited
+    Unlike :func:`resolve_harness_identity`, when more than one harness family
+    is present this never silently picks the higher-precedence one: an inherited
     marker (a codex worker's ``CODEX_THREAD_ID`` lingering in a claude child's
-    environment) would otherwise be laundered into ownership. Instead it prefers
-    a marker that is provably this process's, and refuses to guess when it
-    cannot prove one.
+    environment) would otherwise be laundered into ownership. It prefers a
+    marker that is provably this process's, and refuses to guess when it cannot
+    resolve one.
 
-    ``prove(harness, session_id) -> bool`` attests a marker is this process's
-    own (a fresh transcript exists for it); default ``None`` attests nothing.
+    ``prove(harness, session_id) -> True | False | None`` attests a marker:
+    ``True`` is this process's (a process-tree match), ``False`` is provably
+    NOT this process's (the tree resolves to a different harness), ``None`` is
+    "cannot tell" (no harness ancestor, e.g. a CI runner). Default ``None``
+    (callback absent) means "cannot tell" for every marker.
     ``collide(harness, session_id) -> owner | None`` reports when a live
     registry row already owns an id (two live sessions cannot share one);
     default ``None`` skips the check. Both default off so this module stays
     dependency-free; the consuming verb injects the real prover and collider.
 
-    A rejected or unprovable disagreement degrades to ``None`` rather than
-    guessing: ``harness_session_id`` is nullable, and a record that names no
-    identity is honest where one that names a stranger's is the bug.
+    Resolution order: a uniquely proven family wins; collision rejects ids a
+    live row owns (recorded regardless of proof, so the owner is named); a
+    marker the prover actively contradicts is excluded; among the rest, the sole
+    surviving family wins or the result degrades to ``None``.
     """
     environ = os.environ if env is None else env
     markers = present_harness_markers(environ)
-    present = tuple((marker, harness) for marker, harness, _ in markers)
+    present = tuple(markers)
     if not markers:
         return OwnedHarnessIdentity(None, None, (), "empty")
-    if len({harness for _, harness, _ in markers}) == 1:
-        marker, harness, value = markers[0]
-        return OwnedHarnessIdentity(value, harness, present, "single")
+    distinct = {harness for _, harness, _ in markers}
 
     rejected: list[dict[str, str]] = []
     proven: list[tuple[str, str, str]] = []
     survivors: list[tuple[str, str, str]] = []
     for marker, harness, value in markers:
-        # PROOF before COLLISION. A process-tree-proven marker IS this session,
-        # so a live registry row holding it is the session's own row, not a
-        # foreign owner: collision-checking it first would reject the session's
-        # own marker when it has registered itself, leaving an unproven foreign
-        # marker as the sole fallback. Proven markers skip the collision check
-        # entirely; collision applies only to markers proof could not attest
-        # (i.e. foreign ones).
-        if prove is not None and prove(harness, value):
+        verdict = prove(harness, value) if prove is not None else None
+        if verdict is True:
+            # PROOF is self: a live row holding this id is the session's own
+            # row, not a foreign owner, so skip the collision check (a session
+            # that registered itself must not reject its own marker).
             proven.append((marker, harness, value))
             continue
         owner = collide(harness, value) if collide is not None else None
@@ -306,20 +307,34 @@ def resolve_owned_identity(
                     "owner": owner,
                 }
             )
-        else:
-            survivors.append((marker, harness, value))
-    if len(proven) == 1:
+            continue
+        if verdict is False:
+            # The prover actively says this marker is NOT this process's
+            # (foreign). Exclude it without stamping, even as the only marker.
+            continue
+        survivors.append((marker, harness, value))
+
+    rejected_t = tuple(rejected)
+    proven_families = {harness for _, harness, _ in proven}
+    if len(proven_families) == 1:
+        # A uniquely proven family wins. Multiple markers of that family
+        # (CODEX_THREAD_ID + CODEX_SESSION_ID, both proven) collapse to one,
+        # precedence-first.
         _marker, harness, value = proven[0]
-        return OwnedHarnessIdentity(value, harness, present, "proven", tuple(rejected))
-    if not proven and len(survivors) == 1:
-        # No proof available, but collision eliminated every other family: the
-        # sole survivor is the only candidate left. A colliding id is provably
-        # another live row's, so rejecting it leaves the remaining family as ours
-        # without guessing by precedence. Two+ unprovable survivors is a genuine
-        # unknown and degrades below.
+        return OwnedHarnessIdentity(
+            value, harness, present, "single" if len(distinct) == 1 else "proven", rejected_t
+        )
+    if len(proven_families) > 1:
+        return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
+
+    survivor_families = {harness for _, harness, _ in survivors}
+    if len(survivor_families) == 1 and survivors:
         _marker, harness, value = survivors[0]
-        return OwnedHarnessIdentity(value, harness, present, "fallback", tuple(rejected))
-    return OwnedHarnessIdentity(None, None, present, "ambiguous", tuple(rejected))
+        return OwnedHarnessIdentity(
+            value, harness, present, "single" if len(distinct) == 1 else "fallback", rejected_t
+        )
+    return OwnedHarnessIdentity(None, None, present, "ambiguous", rejected_t)
+
 
 
 
