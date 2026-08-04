@@ -232,6 +232,21 @@ def _identity_conditions(manifest: PackManifest, path: str) -> list[Condition]:
         )
     )
     duplicate = next((value for value in role_ids if role_ids.count(value) > 1), None)
+    lower_ids = [rid.lower() for rid in role_ids]
+    case_duplicate = next((rid for rid in role_ids if lower_ids.count(rid.lower()) > 1), None)
+    conditions.append(
+        Condition(
+            ConditionFamily.IDENTITY,
+            "role-ids-case-unique",
+            checked=True,
+            result=EvidenceResult.PASSED if case_duplicate is None else EvidenceResult.FAILED,
+            detail=(
+                None
+                if case_duplicate is None
+                else f"role id {case_duplicate!r} collides case-insensitively"
+            ),
+        )
+    )
     conditions.append(
         Condition(
             ConditionFamily.IDENTITY,
@@ -548,9 +563,10 @@ def _declared_source_conditions(manifest: PackManifest, base: Path) -> list[Cond
         try:
             resolved = (base / source).resolve()
             contained = resolved != base_resolved and base_resolved in resolved.parents
-        except (ValueError, RuntimeError):
-            contained = False
-        if contained and resolved.exists():
+            exists = contained and resolved.exists()
+        except (ValueError, RuntimeError, OSError):
+            exists = False
+        if exists:
             conditions.append(
                 Condition(
                     ConditionFamily.SCHEMA,
