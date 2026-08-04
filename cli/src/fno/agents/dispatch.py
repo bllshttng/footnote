@@ -1401,6 +1401,8 @@ def _claude_create_path(
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
     # Registry write.
+    from fno.agents.model_routing import route_settings_path_for
+
     log_path = _derive_log_path(name)
     new_entry = AgentEntry(
         name=name,
@@ -1415,6 +1417,14 @@ def _claude_create_path(
         spawned_by_session=spawned_by_session,
         spawned_by_harness=spawned_by_harness,
         spawned_by_cwd=spawned_by_cwd,
+        # x-ae2d: the route this launch got, so a relaunch can come back on it.
+        # ROUTE only, never an account overlay: the account settings file omits
+        # CLAUDE_CONFIG_DIR by construction (it cannot live in a file read FROM
+        # that config), so recording it would promise a restore that silently
+        # leaves the account behind. `route_env` is already resolved here, and
+        # the writer is content-addressed, so this is the same path bg_create
+        # handed claude rather than a second guess at it.
+        route_settings_path=route_settings_path_for(route_env),
     )
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
@@ -1846,6 +1856,41 @@ def _is_revival(
     return True
 
 
+def restore_route_for_relaunch(entry: "AgentEntry") -> Optional[Mapping[str, str]]:
+    """The route a relaunch of ``entry`` must come back on, or ``None`` (x-ae2d).
+
+    The claude relaunch door: a ``--resume`` revive starts a NEW supervisor, and
+    its route comes only from the flags on THAT invocation, so a revive issued
+    without ``-P``/``--route`` silently moves the work onto the default Anthropic
+    account. Silent is the whole problem - the worker runs fine, bills the wrong
+    vendor, and reports nothing.
+
+    A faithful replay, not a re-resolution: the recorded file is read back and
+    handed to the spawn as an explicit route, which ``resolve_spawn_route`` passes
+    through unchanged. Re-resolving against today's config would relaunch the
+    worker onto a route that may differ from the one it ran under, which is a
+    behavior change wearing the word "resume".
+
+    Raises:
+        DispatchAskError: exit 15, when the row names a route file that is gone
+            or unreadable. Refusing beats relaunching unrouted.
+    """
+    path = getattr(entry, "route_settings_path", None)
+    if not path:
+        return None
+    from fno.agents.model_routing import RouteRestoreError, read_route_settings
+
+    try:
+        return read_route_settings(path)
+    except RouteRestoreError as exc:
+        raise DispatchAskError(
+            f"agent {entry.name!r} was launched on the route recorded at {path}, "
+            f"and it cannot be restored ({exc}). Refusing to relaunch it on the "
+            f"default account; re-spawn with an explicit --route/-P to choose one.",
+            exit_code=15,
+        ) from exc
+
+
 def _picked_headroom_note(account_id: str) -> str:
     """The picked account's worst window, for the receipt. Never raises."""
     try:
@@ -2179,6 +2224,30 @@ def dispatch_spawn(
                     f"use 'fno agents rm {name}' first or pick another name",
                     exit_code=2,
                 )
+
+            # x-ae2d: a revive relaunches the supervisor, so it must come back on
+            # the route the row was born with unless this invocation names its
+            # own. Raises (exit 15) when the recorded route is unrestorable.
+            if revive and not route_env and role is None:
+                assert existing is not None  # revive implies a matching row
+                restored_route = restore_route_for_relaunch(existing)
+                if restored_route:
+                    route_env = restored_route
+                    # The route wins endpoint+auth+model as one unit (x-2af5).
+                    # The advisory account pick above fires only for a route-less
+                    # spawn, so letting it ride along here would split the two
+                    # axes and bill the picked account for the route's endpoint.
+                    account_env = None
+                    # Same guard on this path as on a flag-supplied route: a
+                    # --model pin under the restored tier map must fail closed
+                    # here too, or the revive relaunches a worker that dies on
+                    # its first turn behind a live receipt.
+                    try:
+                        check_spawn_tier_remap(
+                            provider, model, role=None, route_env=route_env, account_env=None
+                        )
+                    except RouteCompositionError as exc:
+                        raise DispatchAskError(str(exc), exit_code=2) from exc
 
             # 4a2. Build the dispatch context so the create helpers' emits
             # (agent_ask_started/agent_ask_done) carry the same request_id /

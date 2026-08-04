@@ -1614,6 +1614,7 @@ fn build_claude_stream_entry(
         crown_level: None,
         crown_scope: None,
         crown_grantor: None,
+        route_settings_path: None,
     }
 }
 
@@ -4854,6 +4855,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             crown_grantor: None,
+            route_settings_path: None,
         }
     }
 
@@ -5135,6 +5137,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 crown_grantor: None,
+                route_settings_path: None,
             });
         })
         .unwrap();
@@ -5205,6 +5208,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 crown_grantor: None,
+                route_settings_path: None,
             });
         })
         .unwrap();
@@ -5344,6 +5348,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 crown_grantor: None,
+                route_settings_path: None,
             });
         })
         .unwrap();
@@ -5606,6 +5611,7 @@ mod tests {
                 crown_level: None,
                 crown_scope: None,
                 crown_grantor: None,
+                route_settings_path: None,
             });
         })
         .unwrap();
@@ -5696,6 +5702,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             crown_grantor: None,
+            route_settings_path: None,
         });
         assert_eq!(derive_short_id("worker-A", &reg), "workerA1");
     }
@@ -5734,6 +5741,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             crown_grantor: None,
+            route_settings_path: None,
         }
     }
 
@@ -6586,6 +6594,7 @@ done
                 crown_level: None,
                 crown_scope: None,
                 crown_grantor: None,
+                route_settings_path: None,
             });
         })
         .unwrap();

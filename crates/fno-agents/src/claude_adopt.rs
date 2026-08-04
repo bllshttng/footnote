@@ -79,6 +79,7 @@ pub fn mint_adopted_entry(w: &RosterWorker, now: &str) -> RegistryEntry {
         crown_level: None,
         crown_scope: None,
         crown_grantor: None,
+        route_settings_path: None,
         legacy_claude_short_id: None,
     }
 }

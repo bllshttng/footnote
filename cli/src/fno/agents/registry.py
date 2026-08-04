@@ -145,7 +145,12 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # v11 (US9): additive crown fields (crown_level/crown_scope/crown_grantor).
 # asdict emits them as null on every written row, so a pre-v11 reader must
 # reject the store rather than TypeError on the unknown keys.
-SCHEMA_VERSION = 11
+# v12 (x-ae2d): additive `route_settings_path` - the route-settings file a
+# routed worker was LAUNCHED with, so a relaunch can re-apply it instead of
+# silently coming back on the default account. Same additive-optional shape and
+# same forward-compat rationale as v11: asdict emits the key on every written
+# row, so a pre-v12 reader must reject the store rather than TypeError on it.
+SCHEMA_VERSION = 12
 
 
 class RegistryVersionError(RuntimeError):
@@ -309,6 +314,23 @@ class AgentEntry:
     crown_level: Optional[int] = None
     crown_scope: Optional[str] = None
     crown_grantor: Optional[str] = None
+    # The PATH of the route-settings/<sha16>.json this CLAUDE worker was launched
+    # with (x-ae2d, v12), or None for a worker that was never routed. Written by
+    # the spawn seams only; read only by the relaunch paths, which re-apply it or
+    # refuse. A path, never the contents: that file is 0600 and carries a live
+    # ANTHROPIC_AUTH_TOKEN, while the registry has no such guarantee.
+    #
+    # Claude-only by construction: the file IS a claude `--settings` JSON, and a
+    # codex route lives in `-c` config args rather than the env, so recording a
+    # codex row's env here would promise a restore that lands on codex's default
+    # provider holding the route's key. A non-claude row is left unrecorded.
+    #
+    # NOT an answer to "what is this worker running now" - a recorded value
+    # reports the INTENDED route in exactly the case where a fallback happened,
+    # so that question is read from the transcript (x-cf40) and never from here.
+    # Rust's RegistryEntry mirrors it as additive-optional passthrough, or the
+    # daemon would drop a Python-stamped path on its next read-modify-write.
+    route_settings_path: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:

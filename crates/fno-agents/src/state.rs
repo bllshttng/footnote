@@ -77,7 +77,14 @@ use std::path::{Path, PathBuf};
 // dropped when the daemon re-serializes the row). Python's asdict emits them on
 // every written row, so a pre-v11 reader must reject a v11 store rather than
 // TypeError on the unknown keys. Accepted set widens to 1..=11.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 11;
+//
+// v12 (x-ae2d) adds `route_settings_path` - the route-settings file a routed
+// worker was launched with - mirrored here for the same reason as the crown
+// fields: a Python-only field is dropped when the daemon re-serializes the row,
+// which would leave the relaunch guard reading None on every row the daemon has
+// touched. Python's asdict emits the key on every written row, so a pre-v12
+// reader must reject a v12 store. Accepted set widens to 1..=12.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 12;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -503,6 +510,17 @@ pub struct RegistryEntry {
     pub crown_scope: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub crown_grantor: Option<String>,
+    /// Route-settings path (x-ae2d, v12): the `route-settings/<sha16>.json`
+    /// this worker was launched with, or `None` when it was never routed. The
+    /// Python spawn seams are the sole writers and the Python relaunch paths
+    /// the sole readers; the daemon only custodies it so a stamped path
+    /// survives a read-modify-write - without this mirror the daemon's next GC
+    /// or screen-state write would drop it and the relaunch guard would read
+    /// `None` on every row it had touched. Same X3 passthrough treatment as
+    /// `crown_*`. A path, never route contents: that file is 0600 and carries a
+    /// live `ANTHROPIC_AUTH_TOKEN`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route_settings_path: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1269,6 +1287,7 @@ mod tests {
             crown_level: None,
             crown_scope: None,
             crown_grantor: None,
+            route_settings_path: None,
             legacy_claude_short_id: None,
         }
     }
@@ -1715,6 +1734,44 @@ mod tests {
     }
 
     #[test]
+    fn route_settings_path_survives_a_daemon_read_modify_write() {
+        // v12 (x-ae2d): Python stamps the route path at spawn and the Python
+        // relaunch paths read it back. The daemon touches the same rows (GC,
+        // screen scrape), so if it dropped this field on write-back the guard
+        // would read None on every row it had passed through - a guard on one of
+        // N paths, which is no guard. This asserts the passthrough holds.
+        let routed = r#"{"schema_version":12,"agents":[
+            {"name":"router","harness":"claude","cwd":"/p","log_path":"/l",
+             "created_at":"2026-08-04T00:00:00Z","status":"live",
+             "route_settings_path":"/home/me/.fno/route-settings/abc123.json"}]}"#;
+        let reg: Registry = serde_json::from_str(routed).unwrap();
+        assert_eq!(
+            reg.entries[0].route_settings_path.as_deref(),
+            Some("/home/me/.fno/route-settings/abc123.json")
+        );
+        let back: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert_eq!(
+            back["agents"][0]["route_settings_path"],
+            "/home/me/.fno/route-settings/abc123.json",
+            "the daemon must re-emit a Python-stamped route path, not drop it"
+        );
+
+        // A pre-v12 row reads as never-routed rather than as corrupt.
+        let legacy = r#"{"schema_version":11,"agents":[
+            {"name":"old","harness":"claude","cwd":"/p","log_path":"/l",
+             "created_at":"2026-08-04T00:00:00Z","status":"live"}]}"#;
+        let reg: Registry = serde_json::from_str(legacy).unwrap();
+        assert_eq!(reg.entries[0].route_settings_path, None);
+
+        // An unrouted row omits the key, so Python's AgentEntry(**row) gains no
+        // unexpected kwarg.
+        let mut reg = Registry::default();
+        reg.entries.push(sample_entry("plain"));
+        let out: serde_json::Value = serde_json::to_value(&reg).unwrap();
+        assert!(out["agents"][0].get("route_settings_path").is_none());
+    }
+
+    #[test]
     fn screen_state_cross_language_round_trip_parity() {
         // v7: the additive `screen_state` verdict must round-trip both
         // directions across the Rust<->Python registry boundary, exactly like
@@ -2039,15 +2096,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v12, or - for an old daemon -
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v13, or - for an old daemon -
         // a version it cannot interpret), while v1..=current still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":12,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":13,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 12);
+                assert_eq!(found, 13);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),

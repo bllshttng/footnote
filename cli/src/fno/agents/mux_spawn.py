@@ -1517,6 +1517,31 @@ def dispatch_spawn_pane(
         # actually requested (crown_level is not None).
         crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
 
+        # x-ae2d: record WHICH route this pane launched with, so a later relaunch
+        # (which re-launches a process rather than attaching to this live one) can
+        # re-apply it or refuse. A happy pane carries its route as --claude-env
+        # rather than --settings, so nothing has materialized the file yet;
+        # materializing here is what makes the route recoverable at all. The
+        # writer is content-addressed, so this costs one 0600 file per distinct
+        # route, not one per spawn.
+        #
+        # ROUTE only, never an account overlay: the account settings writer drops
+        # CLAUDE_CONFIG_DIR by construction, so recording one would promise a
+        # restore that silently leaves the account behind.
+        #
+        # CLAUDE only, for the same reason. A codex route lives in `-c` config
+        # args (`model_providers.<name>` + `model_provider`), not in the env -
+        # `CodexRoute.env` carries only the API key. Recording that env would let
+        # a relaunch "restore the route" into codex's DEFAULT provider holding the
+        # route's key: half a restore, reported as a whole one. Codex route
+        # survival needs an artifact this design does not model, so it stays
+        # unrecorded and codex relaunch behavior is unchanged.
+        from fno.agents.model_routing import route_settings_path_for
+
+        route_settings_path = (
+            route_settings_path_for(route_env) if provider == "claude" else None
+        )
+
         stored_session_uuid: Optional[str] = None
         row_status: AgentStatus = "live"
 
@@ -1560,6 +1585,7 @@ def dispatch_spawn_pane(
                     crown_level=crown_level,
                     crown_scope=crown_scope,
                     crown_grantor=crown_grantor_val,
+                    route_settings_path=route_settings_path,
                 )
             )
             return rows
