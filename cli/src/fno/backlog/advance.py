@@ -1553,7 +1553,7 @@ def _claims_root_for(key: str):
 
 def _walker_key() -> str:
     """``walker:<canonical_repo_root>`` - byte-identical to the key the Rust
-    megawalk loop writes (loop_megawalk.rs)."""
+    loop runtime writes for walker-scoped claims."""
     from fno.paths import resolve_canonical_repo_root
 
     return f"walker:{resolve_canonical_repo_root()}"

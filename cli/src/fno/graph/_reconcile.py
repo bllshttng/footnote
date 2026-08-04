@@ -266,8 +266,8 @@ def node_pr_refs(node: dict) -> list[tuple[int, Optional[str]]]:
     return refs
 
 
-# The exit-code contract, owned here so no verb can fork it. loop_megawalk keys
-# on 5 for AwaitingMerge, so these numbers are load-bearing: do not renumber.
+# The exit-code contract, owned here so no verb can fork it. The loop runtime
+# keys on 5 for AwaitingMerge, so these numbers are load-bearing: do not renumber.
 REFUSAL_EXIT_CODES = {"awaiting_merge": 5, "outage": 4, "refused": 3}
 
 

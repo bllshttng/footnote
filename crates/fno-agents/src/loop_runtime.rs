@@ -107,8 +107,7 @@ pub struct Unit {
     pub plan_path: Option<String>,
     /// Driver-specific extra env vars to inject into the child process.
     /// The runtime passes these through to the Dispatcher without inspecting
-    /// them. MegawalkQueue populates TARGET_MISSION_* for fleet nodes;
-    /// TargetQueue leaves this empty. Megatron will use this seam too.
+    /// them; TargetQueue leaves this empty.
     pub extra_env: Vec<(String, String)>,
 }
 
@@ -146,7 +145,7 @@ pub struct DispatchCtx {
 // ── NextStep ──────────────────────────────────────────────────────────────────
 
 /// The richer return type for Queue::next_step(). Used by policy-aware queues
-/// (MegawalkQueue) to signal a walk-level pause without returning an error.
+/// to signal a walk-level pause without returning an error.
 ///
 /// - `Dispatch(Unit)`: there is work to do; dispatch this unit.
 /// - `Drained`: the queue is empty; the walk may complete with NoWork.
@@ -185,8 +184,8 @@ pub enum NextStep {
 pub trait Queue {
     /// Return the next unit, or `None` if the queue is empty.
     ///
-    /// Queues that implement walk policy (e.g. MegawalkPolicyQueue) should
-    /// use `next_step()` instead. This default impl calls `next_step()` and
+    /// Queues that implement walk policy should use `next_step()` instead.
+    /// This default impl calls `next_step()` and
     /// maps Dispatch->Some, Drained->None, Pause->Err(LoopError::Pause{..}).
     fn next(&mut self) -> Result<Option<Unit>, LoopError> {
         match self.next_step()? {
@@ -203,8 +202,7 @@ pub trait Queue {
     /// The default panics to make missing overrides detectable at test time.
     fn next_step(&mut self) -> Result<NextStep, LoopError> {
         // Default: not implemented. Queues override exactly one of next() or
-        // next_step(). TargetQueue overrides next() only (returns Option).
-        // MegawalkPolicyQueue overrides next_step() only (returns NextStep).
+        // next_step(); TargetQueue overrides next() only (returns Option).
         panic!("Queue::next_step() not implemented; override next() or next_step()");
     }
 

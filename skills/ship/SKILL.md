@@ -1,6 +1,6 @@
 ---
 name: ship
-description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (= today's /pr), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target or /megawalk."
+description: "Drive any deliverable to its finish line. The umbrella over delivery terminals: 'ship pr' is the PR lifecycle (= today's /pr), 'ship doc' ships a research brief to output_dir and grades it. Use when: 'ship this', 'ship a PR', 'ship the doc', 'ship the brief', 'deliver this'. Not for ongoing areas (budget, community) - those have no finish line; use /target."
 argument-hint: "<pr|doc>  (pr: create|check|merged - the PR lifecycle; doc: <topic> [--golden <discovery-*.md>])  - a type is required, there is no default"
 requires:
   binaries:
@@ -20,7 +20,7 @@ requires:
 
 ## The membership test (load-bearing)
 
-A thing is a ship type ONLY if it has a definable **green** - a finish line readable mechanically. `pr` and `doc` both do. An ongoing *area* (`budget`, `community`) has no crisp green: it never "finishes", so it is not a deliverable. Admitting areas would make `/ship` mean "do stuff", which is exactly what `/target` already is. Route areas through `/target` or `/megawalk`. Types with a plausible-but-unwired green (`gtm` / launch) are post-MVP and rejected until each has a defined green.
+A thing is a ship type ONLY if it has a definable **green** - a finish line readable mechanically. `pr` and `doc` both do. An ongoing *area* (`budget`, `community`) has no crisp green: it never "finishes", so it is not a deliverable. Admitting areas would make `/ship` mean "do stuff", which is exactly what `/target` already is. Route areas through `/target`. Types with a plausible-but-unwired green (`gtm` / launch) are post-MVP and rejected until each has a defined green.
 
 ## Vocabulary: "ship" the verb vs the ship phase/gate
 
@@ -48,7 +48,7 @@ This is a **router**, not a monolith. Parse the first argument token:
 
   ```
   '<token>' is not a ship type: it is an ongoing area with no mechanical finish line.
-  Route it through /target (one feature) or /megawalk (a backlog of them).
+  Route it through /target (one feature at a time).
   ```
 
 - **`gtm`** or **`launch`** -> a plausible deliverable, but its green is not wired yet (post-MVP). Print and stop with a non-zero result:
