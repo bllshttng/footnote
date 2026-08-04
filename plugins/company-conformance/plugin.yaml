@@ -1,0 +1,74 @@
+# Internal conformance scenarios, not an independent extraction consumer.
+id: company-conformance
+version: 0.1.0
+footnote_compat:
+  minimum: "0.3.0"
+
+roles:
+  - role: {id: support-response, function_id: company-conformance}
+    function: {id: company-conformance}
+    mission: prepare an accurate support response and retain acknowledgment evidence
+    deliverable_kinds: [support-response]
+    required_capabilities: [support.respond]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [accuracy-review]
+    delivery_policy:
+      required_evidence: [accuracy-review, acknowledgment]
+      require_all_deliverables: true
+    default_topology: direct
+    approval_floor: founder
+
+  - role: {id: sales-outreach, function_id: company-conformance}
+    function: {id: company-conformance}
+    mission: prepare consent-aware outreach and retain approval and acknowledgment evidence
+    deliverable_kinds: [sales-outreach]
+    required_capabilities: [sales.outreach]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [accuracy-review, consent-review]
+    delivery_policy:
+      required_evidence: [accuracy-review, consent-review, approval, acknowledgment]
+      require_all_deliverables: true
+    default_topology: pipeline
+    approval_floor: founder
+
+  - role: {id: operations-recurring, function_id: company-conformance}
+    function: {id: company-conformance}
+    mission: complete one recurring operations cycle with checklist and probe evidence
+    deliverable_kinds: [operations-cycle]
+    required_capabilities: [operations.run-cycle]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [checklist-review]
+    delivery_policy:
+      required_evidence: [checklist-review, probe]
+      require_all_deliverables: true
+    default_topology: loop
+    approval_floor: none
+
+# Maximum expected effect ceiling only. Activation grants no authority.
+permissions:
+  - effect_class: external.communication
+    destination: support-channel
+  - effect_class: external.outreach
+    destination: prospect-channel
+
+# recorded_result is author self-attestation and is not conformance evidence.
+# The journey test named by each runnable command carries the evidence.
+scenarios:
+  - id: support-response
+    command: fno test cli/tests/journeys/test_company_function_conformance.py -k support_response
+    recorded_result: passed
+  - id: sales-outreach
+    command: fno test cli/tests/journeys/test_company_function_conformance.py -k sales_outreach
+    recorded_result: passed
+  - id: operations-recurring
+    command: fno test cli/tests/journeys/test_company_function_conformance.py -k cadence
+    recorded_result: passed
