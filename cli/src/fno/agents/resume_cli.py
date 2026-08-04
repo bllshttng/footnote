@@ -149,7 +149,8 @@ def resume_logic(
             exit_code=13,
             stderr=(
                 f"fno agents resume: {exc}. "
-                f"Use `fno agents list` to see registered agents.\n"
+                f"Use `fno agents list` to see registered agents, "
+                f"or pass a full session id to resume an orphaned session.\n"
             ),
         )
 
