@@ -51,23 +51,6 @@ make_repo() {
   printf '# isolated global\n' > "${_dir}/home/.fno/config.toml"
 }
 
-# ── Helper: put THIS checkout's source fno on PATH ───────────────────
-# The hook shells out to `fno`; the deployed binary predates new verbs, so a
-# test that must exercise them resolves the source fno-py (canonical venv +
-# worktree source on PYTHONPATH). cli/.venv is gitignored and not copied into
-# worktrees, so the venv is found via the worktree's git-common-dir parent.
-make_source_fno_shim() {
-  local _out_var="$1" _dir _canon
-  _dir="$(mktemp -d -t init-src-fno.XXXXXX)" || fail "mktemp failed"
-  _canon="$(dirname "$(cd "$REPO_ROOT" && git rev-parse --git-common-dir)")"
-  cat > "$_dir/fno" <<EOF
-#!/usr/bin/env bash
-exec env PYTHONPATH="$REPO_ROOT/cli/src\${PYTHONPATH:+:\$PYTHONPATH}" "$_canon/cli/.venv/bin/fno-py" "\$@"
-EOF
-  chmod +x "$_dir/fno"
-  eval "${_out_var}=\"\${_dir}\""
-}
-
 # ── Helper: register a live row owning a session id (collision seed) ──
 # Pins state_dir at <home>/.fno via FNO_CONFIG + a migration sentinel so the
 # seed and the verb's collider resolve the SAME registry regardless of any
@@ -303,15 +286,17 @@ log "(e): foreign CODEX_THREAD_ID owned by a live row => claude identity, id ref
 
 make_repo TMP_E
 _ALL_TMPS+=("$TMP_E")
-make_source_fno_shim SHIM_E
-_ALL_TMPS+=("$SHIM_E")
 FOREIGN_E="019fc87d-ddff-7c90-926a-6bdd7ebb186c"
 CLAUDE_SID_E="aaaa1111-mine-mine-mine-aaaaaaaaaaaa"
 plant_owner "${TMP_E}/home" "$FOREIGN_E" || fail "(e): could not seed registry owner"
 
 STDERR_E="${TMP_E}/init-stderr.txt"
+# Source fno via PYTHONPATH: the inherited `fno` launcher execs fno-py, which
+# imports THIS checkout's source, so the verb runs without a deployed/stale fno
+# or a venv-path shim (the smoke runner already exports this PYTHONPATH).
 (cd "$TMP_E" && \
-  HOME="${TMP_E}/home" FNO_CONFIG="${TMP_E}/home/.fno/settings.yaml" PATH="${SHIM_E}:${PATH}" \
+  HOME="${TMP_E}/home" FNO_CONFIG="${TMP_E}/home/.fno/settings.yaml" \
+  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
   TARGET_START=1 TARGET_INPUT="test-ac1-hp-collision" \
   CODEX_THREAD_ID="$FOREIGN_E" \
   CLAUDE_CODE_SESSION_ID="$CLAUDE_SID_E" \
@@ -345,10 +330,9 @@ log "(f): CODEX_THREAD_ID only => harness codex, cx infix (source fno, no regres
 
 make_repo TMP_F
 _ALL_TMPS+=("$TMP_F")
-make_source_fno_shim SHIM_F
-_ALL_TMPS+=("$SHIM_F")
 (cd "$TMP_F" && \
-  HOME="${TMP_F}/home" PATH="${SHIM_F}:${PATH}" \
+  HOME="${TMP_F}/home" \
+  PYTHONPATH="$REPO_ROOT/cli/src${PYTHONPATH:+:$PYTHONPATH}" \
   TARGET_START=1 TARGET_INPUT="test-codex-only-sourcefno" \
   CODEX_THREAD_ID="019f48e4-codex-thread" \
   CLAUDE_CODE_SESSION_ID= CLAUDECODE_SESSION_ID= CODEX_SESSION_ID= \
