@@ -54,15 +54,38 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   if [[ -z "$TYPE" ]]; then
     continue
   fi
-  COMMITTED="$REPO_ROOT/skills/$SKILL/$DEST"
-  GENERATED="$TMP/skills/$SKILL/$DEST"
+  # Pack rows land at root-relative plugin paths (agents/<id>.md, skills/<id>);
+  # the legacy types stay under skills/<skill>/.
+  case "$TYPE" in
+    pack-skill|pack-agent)
+      COMMITTED="$REPO_ROOT/$DEST"
+      GENERATED="$TMP/$DEST"
+      ;;
+    *)
+      COMMITTED="$REPO_ROOT/skills/$SKILL/$DEST"
+      GENERATED="$TMP/skills/$SKILL/$DEST"
+      ;;
+  esac
+  if [[ "$TYPE" == "pack-skill" ]]; then
+    # Directory bundle: compare the whole tree.
+    if [[ ! -d "$COMMITTED" ]]; then
+      echo "ERROR: missing pack skill bundle: $DEST (run scripts/generate-skill-bundles.sh)" >&2
+      DRIFT=1
+      continue
+    fi
+    if ! diff -rq "$COMMITTED" "$GENERATED" >/dev/null; then
+      echo "ERROR: $DEST out of sync with canonical $SOURCE [$TYPE]" >&2
+      DRIFT=1
+    fi
+    continue
+  fi
   if [[ ! -f "$COMMITTED" ]]; then
-    echo "ERROR: missing bundle: skills/$SKILL/$DEST (run scripts/generate-skill-bundles.sh)" >&2
+    echo "ERROR: missing bundle: ${COMMITTED#$REPO_ROOT/} (run scripts/generate-skill-bundles.sh)" >&2
     DRIFT=1
     continue
   fi
   if ! cmp -s "$COMMITTED" "$GENERATED"; then
-    echo "ERROR: skills/$SKILL/$DEST out of sync with canonical $SOURCE [$TYPE]" >&2
+    echo "ERROR: ${COMMITTED#$REPO_ROOT/} out of sync with canonical $SOURCE [$TYPE]" >&2
     DRIFT=1
   fi
 done < "$ROWS_FILE"

@@ -87,6 +87,22 @@ if ! "${PY[@]}" "$PARSER" "$MANIFEST" > "$ROWS_FILE"; then
   exit 1
 fi
 
+# pack-marker check: a bundled pack destination carries a `pack:` key in its
+# frontmatter. Used by the collision guard so the generator never clobbers a
+# hand-authored (non-pack) file or skill. Returns 0 when the marker is present.
+_pack_marker_present() {
+  local target="$1"
+  local file=""
+  if [[ -f "$target" ]]; then
+    file="$target"
+  elif [[ -d "$target" && -f "$target/SKILL.md" ]]; then
+    file="$target/SKILL.md"
+  else
+    return 1
+  fi
+  awk 'NR==1 && /^---[[:space:]]*$/ {f=1; next} f && /^---[[:space:]]*$/ {exit} f && /^pack:/ {found=1; exit} END {exit !found}' "$file"
+}
+
 # Iterate manifest entries: <type>\t<skill>\t<source>\t<dest>\t<meta_json>
 while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   # Skip blank lines from the parser (shouldn't happen, but be defensive).
@@ -94,22 +110,41 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
     continue
   fi
   SRC_PATH="$SOURCE_ROOT/$SOURCE"
-  DST_PATH="$TARGET_ROOT/skills/$SKILL/$DEST"
 
-  if [[ ! -f "$SRC_PATH" ]]; then
-    echo "ERROR: source not found: $SOURCE" >&2
+  # Pack rows land at the plugin paths the harness reads (root-relative);
+  # existing types stay under skills/<skill>/.
+  case "$TYPE" in
+    pack-skill|pack-agent)
+      DST_PATH="$TARGET_ROOT/$DEST"
+      ;;
+    *)
+      DST_PATH="$TARGET_ROOT/skills/$SKILL/$DEST"
+      ;;
+  esac
+
+  # Source existence: a directory for pack-skill, a file otherwise.
+  if [[ "$TYPE" == "pack-skill" ]]; then
+    [[ -d "$SRC_PATH" ]] || { echo "ERROR: pack skill source dir not found: $SOURCE" >&2; exit 1; }
+  else
+    [[ -f "$SRC_PATH" ]] || { echo "ERROR: source not found: $SOURCE" >&2; exit 1; }
+  fi
+
+  # Collision guard: refuse to overwrite an existing destination that is not
+  # already a bundled pack output (no `pack:` marker). A pack skill named
+  # `target` must never clobber the plugin's own driver skill.
+  if [[ "$TYPE" == pack-* && -e "$DST_PATH" ]] && ! _pack_marker_present "$DST_PATH"; then
+    echo "ERROR: refusing to overwrite $DST_PATH: existing path lacks a 'pack:' marker (not a bundled pack output)" >&2
     exit 1
   fi
 
   mkdir -p "$(dirname "$DST_PATH")"
 
-  # Write to a tmp file beside the destination, then atomically rename
-  # into place. Direct `> "$DST_PATH"` would truncate the existing bundle
-  # before python3 runs; if python3 then fails the destination is left
-  # empty on disk (set -e aborts the script, but the empty file remains
-  # and a subsequent commit can ship it). The tmp + mv pattern keeps the
-  # committed bundle valid as long as some prior generator run succeeded.
+  # Write to a tmp path beside the destination, then atomically rename into
+  # place. Direct writes would truncate the existing bundle before the copy
+  # completes; the tmp + mv pattern keeps the committed bundle valid as long
+  # as some prior generator run succeeded.
   TMP_DST="${DST_PATH}.tmp.$$"
+  rm -rf "$TMP_DST"
 
   case "$TYPE" in
     file)
@@ -123,27 +158,33 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
     agent)
       # Rewrite frontmatter as subagent prompt. The parser emits
       # subagent_meta as a compact JSON string in column 5. Convert to YAML
-      # via python3 -c so the helper can parse it without us implementing
-      # JSON->YAML in bash. Truncate META_FILE first so a prior iteration's
-      # content cannot leak through if the inline python3 fails before
-      # writing.
+      # via the helper so the dump parameters stay in one place.
       : > "$META_FILE"
-      # JSON -> YAML conversion lives in bundle-frontmatter.py so the dump
-      # parameters (width=10000, sort_keys=False, allow_unicode=True) stay
-      # in one place. Previously this was an inline `python3 -c ...` that
-      # could drift from _render_subagent_frontmatter's parameters.
       "${PY[@]}" "$FRONTMATTER_HELPER" json-to-yaml "$META" > "$META_FILE"
       "${PY[@]}" "$FRONTMATTER_HELPER" rewrite "$SRC_PATH" \
         --as subagent --meta-file "$META_FILE" > "$TMP_DST"
       ;;
+    pack-agent)
+      # A pack agent is copied verbatim: its frontmatter is the source of truth
+      # (verified at agent-tools-bounded), so no rewrite.
+      cp -p "$SRC_PATH" "$TMP_DST"
+      ;;
+    pack-skill)
+      # A pack skill is a directory copied recursively.
+      cp -R "$SRC_PATH" "$TMP_DST"
+      ;;
     *)
       echo "ERROR: unknown bundle type: $TYPE" >&2
-      rm -f "$TMP_DST"
+      rm -rf "$TMP_DST"
       exit 1
       ;;
   esac
 
+  # pack-skill staged a directory; replace the destination whole.
+  if [[ "$TYPE" == "pack-skill" && -e "$DST_PATH" ]]; then
+    rm -rf "$DST_PATH"
+  fi
   mv "$TMP_DST" "$DST_PATH"
 
-  echo "bundled: $SOURCE -> skills/$SKILL/$DEST [$TYPE]"
+  echo "bundled: $SOURCE -> $DEST [$TYPE]"
 done < "$ROWS_FILE"

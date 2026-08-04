@@ -245,6 +245,40 @@ def emit_rows(manifest_path: Path) -> int:
             return 1
         if _emit_agents(skill, agents) != 0:
             return 1
+    # Pack scan: a pack's skills and agents are bundled from the one place they
+    # are declared (its plugin.yaml), not re-declared in skill-bundles.yaml.
+    # Globbing */plugin.yaml skips hermes/openclaw dirs that carry no manifest.
+    return _emit_pack_rows(manifest_path.parent)
+
+
+def _emit_pack_rows(repo_root: Path) -> int:
+    plugins_dir = repo_root / "plugins"
+    if not plugins_dir.is_dir():
+        return 0
+    for pack_yaml in sorted(plugins_dir.glob("*/plugin.yaml")):
+        pack_id = pack_yaml.parent.name
+        try:
+            data = _load_yaml(pack_yaml, require_pyyaml=True)
+        except ValueError as exc:
+            print(f"ERROR: pack manifest {pack_yaml}: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(data, dict):
+            continue
+        for skill in data.get("skills") or []:
+            if not isinstance(skill, dict):
+                continue
+            sid = skill.get("id")
+            source = skill.get("source")
+            if sid and source:
+                # <type>\t<pack>\t<source>\t<dest>\t<meta>
+                print(f"pack-skill\t{pack_id}\tplugins/{pack_id}/{source}\tskills/{sid}\t")
+        for agent in data.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            aid = agent.get("id")
+            source = agent.get("source")
+            if aid and source:
+                print(f"pack-agent\t{pack_id}\tplugins/{pack_id}/{source}\tagents/{aid}.md\t")
     return 0
 
 
