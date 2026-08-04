@@ -467,41 +467,21 @@ def load_orientation(
 
 # Body keys appended below the frontmatter (init-target-state.sh writes them as
 # `key: value` lines, NOT YAML frontmatter), so load_agent_context (frontmatter
-# only) never sees them. Mirror _maybe_dispatch_work_start's regex read.
+# only) never sees them. The shared reader in target.manifest owns this set and
+# the merge; orient keeps a thin wrapper so existing callers are unchanged.
 _BODY_KEYS = ("graph_node_id", "target_claim_key", "target_claim_holder")
 
 
 def _read_manifest(project_root: Path) -> Optional[Dict[str, Any]]:
-    """Merged session manifest: frontmatter (via load_agent_context) + the body
-    `key: value` lines that carry graph_node_id / target_claim_*. None when no
-    manifest exists. Never raises."""
-    raw: Optional[Dict[str, Any]] = None
-    try:
-        from fno.agent.state import load_agent_context
+    """Merged session manifest via the shared :mod:`fno.target.manifest` reader.
 
-        # Pin to project_root so the frontmatter read and the body read below
-        # resolve the SAME manifest (load_agent_context otherwise detects the
-        # root from cwd, which can differ under FNO_REPO_ROOT / a subdirectory).
-        ctx = load_agent_context(project_root_override=project_root)
-        if ctx.session is not None:
-            raw = dict(ctx.session.raw)
-    except Exception:  # noqa: BLE001 - no/unreadable manifest is fine
-        pass
-    manifest = project_root / ".fno" / "target-state.md"
-    try:
-        text = manifest.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError):
-        return raw
-    for key in _BODY_KEYS:
-        if raw and raw.get(key):
-            continue
-        m = re.search(rf"^{key}\s*:\s*(.+)$", text, re.MULTILINE)
-        if m:
-            val = m.group(1).strip().strip("\"'")
-            if val and val != "null":
-                raw = raw or {}
-                raw[key] = val
-    return raw
+    Thin wrapper kept so existing orient callers are unchanged; the body-key set
+    and the frontmatter+body merge live in one place now (x-2ccd), so the
+    resume-bind primitive and the orienter share one contract.
+    """
+    from fno.target.manifest import read_target_manifest
+
+    return read_target_manifest(project_root)
 
 
 def _self_check() -> None:

@@ -29,10 +29,11 @@ from .events import (
     emit_claim_force_overridden,
     emit_claim_idempotent_reacquired,
     emit_claim_refreshed,
+    emit_claim_rebound,
     emit_claim_released,
     emit_claim_stale_reclaimed,
 )
-from .hostid import machine_id
+from .hostid import is_same_machine, machine_id
 from .io import (
     ClaimAlreadyHeld,
     ClaimCorrupted,
@@ -83,6 +84,30 @@ class ClaimValidationError(ValueError):
     """Inputs to a verb failed validation (ttl out of range, key too long, ...)."""
 
 
+class RebindRefused(Exception):
+    """``compare_and_rebind`` refused to move the claim (fail-closed, x-2ccd).
+
+    Native resume never silently believes it owns a claim: every path that is
+    not an affirmative same-holder local rebind raises this with a named
+    reason. Carries the observed ``state``/``holder``/``pid`` so the caller can
+    render a loud, specific refusal.
+    """
+
+    def __init__(
+        self,
+        reason: str,
+        *,
+        state: Optional[str] = None,
+        holder: Optional[str] = None,
+        pid: Optional[int] = None,
+    ) -> None:
+        self.reason = reason
+        self.state = state
+        self.holder = holder
+        self.pid = pid
+        super().__init__(reason)
+
+
 # Re-export low-level exceptions so callers can ``from fno.claims import ClaimGoneAway``.
 __all__ = [
     "ClaimAlreadyHeld",
@@ -91,8 +116,10 @@ __all__ = [
     "ClaimHeldByOther",
     "ClaimValidationError",
     "HolderMismatch",
+    "RebindRefused",
     "acquire_claim",
     "claim_status",
+    "compare_and_rebind",
     "force_release_claim",
     "list_claims",
     "refresh_claim",
@@ -345,6 +372,179 @@ def acquire_claim(
         host=existing.host,
         key=key,
     )
+
+
+def _rebound_claim(existing: Claim, new_pid: int, ttl_ms: Optional[int]) -> Claim:
+    """A rebound claim: identity fields preserved, process anchor + lease fresh.
+
+    The native-resume rebind keeps ``key``/``holder``/``reason``/``metadata``/
+    ``harness`` (one target attempt retains one symbolic owner) and rewrites
+    only ``pid``/``host``/``machine_id``/``acquired_at``/``expires_at``. A
+    PID-liveness claim stays PID-liveness (``ttl_ms`` None and no prior
+    ``expires_at``); a TTL claim refreshes to ``now + prior_window`` so the
+    deadline never compounds across rebinds (the renew() lesson).
+    """
+    acquired = now_ms()
+    if ttl_ms is not None:
+        expires_at: Optional[int] = acquired + ttl_ms
+    elif existing.expires_at is not None:
+        expires_at = acquired + max(existing.expires_at - existing.acquired_at, MIN_TTL_MS)
+    else:
+        expires_at = None
+    return Claim(
+        schema_version=existing.schema_version,
+        key=existing.key,
+        holder=existing.holder,
+        acquired_at=acquired,
+        expires_at=expires_at,
+        pid=new_pid,
+        host=socket.gethostname(),
+        machine_id=machine_id() or None,
+        reason=existing.reason,
+        harness=existing.harness,
+        metadata=existing.metadata,
+    )
+
+
+def compare_and_rebind(
+    key: str,
+    expected_holder: str,
+    *,
+    new_pid: Optional[int] = None,
+    ttl_ms: Optional[int] = None,
+    root: Optional[Path] = None,
+    emit: bool = True,
+    fno_id: Optional[str] = None,
+    harness_tag: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+) -> Claim:
+    """Atomically rebind a same-holder LOCAL claim whose prior PID is dead.
+
+    The native-resume primitive (x-2ccd). A resumed durable session proves it
+    owns a target claim by matching the symbolic holder AND showing the
+    recorded PID is dead on THIS machine, then takes a fresh PID + lease.
+    Distinct from ``acquire_claim``, which overwrites a same-holder claim even
+    when its PID is still live: two concurrent processes of one durable
+    conversation could then steal the claim back and forth.
+
+    Under the per-claim recovery mutex (the same one ``acquire_claim`` uses for
+    stale recovery), re-read and re-classify, then:
+
+    - prior PID still LIVE, == this pid  -> idempotent lease refresh;
+    - prior PID still LIVE, != this pid  -> ``RebindRefused`` (concurrent writer);
+    - SUSPECT/STALE but off-host          -> ``RebindRefused`` (death unproven);
+    - holder changed / claim gone / free / corrupt -> ``RebindRefused``;
+    - local same-holder, prior PID dead  -> atomically rebind to ``new_pid``.
+
+    Never creates a missing/free claim and never archives another holder (that
+    is the explicit ``fno target start`` successor path). Emits ``claim_rebound``;
+    raises ``RebindRefused`` on any refusal.
+
+    Returns ``(claim, mode)`` where mode is ``"rebind"`` (a dead prior PID was
+    rebound) or ``"idempotent"`` (a live same-PID lease refresh).
+    """
+    _validate_inputs(key, expected_holder, ttl_ms)
+    path = claim_path(key, root=root)
+    npid = new_pid if new_pid is not None else os.getpid()
+    recovery_lock = path.with_name(path.name + ".recovery.d")
+    acquired_lock = False
+    recovery_token = ""
+    try:
+        try:
+            recovery_lock.mkdir(parents=True)
+            recovery_token = _stamp_owner(recovery_lock)
+            acquired_lock = True
+        except FileExistsError:
+            # A peer is mid-recovery, or a recoverer died holding the mutex.
+            # Steal a corpse so a killed peer cannot brick the rebind; else wait.
+            if steal_if_stale(recovery_lock) and recovery_lock.mkdir(parents=True) is None:
+                recovery_token = _stamp_owner(recovery_lock)
+                acquired_lock = True
+            if not acquired_lock:
+                _wait_for_recovery_release(recovery_lock)
+                raise RebindRefused(
+                    "claim recovery mutex busy; retry the resume bind",
+                    state=None,
+                )
+
+        # Inside the mutex: re-read + classify before any mutation.
+        try:
+            existing = read_claim_file(path)
+        except ClaimGoneAway:
+            raise RebindRefused(
+                "claim vanished; this target no longer owns the node "
+                "(use `fno target start` to reclaim)",
+                state="free",
+            )
+        except ClaimCorrupted:
+            raise RebindRefused(
+                "claim corrupted; cannot verify ownership (use `fno claim force-release`)",
+                state="corrupted",
+            )
+
+        if existing.holder != expected_holder:
+            raise RebindRefused(
+                f"holder mismatch: expected {expected_holder!r}, claim held by "
+                f"{existing.holder!r} (pid={existing.pid})",
+                state=classify(existing).value,
+                holder=existing.holder,
+                pid=existing.pid,
+            )
+
+        state = classify(existing)
+        if state == ClaimState.LIVE:
+            if existing.pid == npid:
+                # Idempotent: already bound to this process; refresh lease only.
+                rebound = _rebound_claim(existing, npid, ttl_ms)
+                _atomic_replace(path, serialize_claim(rebound))
+                if emit:
+                    emit_claim_rebound(
+                        rebound,
+                        previous_pid=existing.pid,
+                        previous_state=state.value,
+                        mode="idempotent",
+                        fno_id=fno_id,
+                        harness=harness_tag,
+                        harness_session_id=harness_session_id,
+                    )
+                return rebound, "idempotent"
+            # A DIFFERENT live PID holds this same durable session: a concurrent
+            # writer of one conversation. Refuse rather than yank the claim.
+            raise RebindRefused(
+                f"concurrent writer: claim held by live pid {existing.pid}, "
+                f"this pid is {npid}; refusing to rebind a live owner",
+                state="live",
+                pid=existing.pid,
+            )
+
+        # SUSPECT or STALE. Rebind only when the dead owner is on THIS machine
+        # (death proven locally). Off-host/unverifiable -> refuse: Footnote
+        # cannot prove the owner is dead, so rebind would be a foreign takeover.
+        if not is_same_machine(existing.host, existing.machine_id):
+            raise RebindRefused(
+                "owner is off-host or machine identity is unverifiable; "
+                "death unproven, will not rebind a foreign claim",
+                state=state.value,
+                pid=existing.pid,
+            )
+
+        # Local same-holder, prior PID dead: the resume rebind.
+        rebound = _rebound_claim(existing, npid, ttl_ms)
+        _atomic_replace(path, serialize_claim(rebound))
+        if emit:
+            emit_claim_rebound(
+                rebound,
+                previous_pid=existing.pid,
+                previous_state=state.value,
+                mode="rebound",
+                fno_id=fno_id,
+                harness=harness_tag,
+                harness_session_id=harness_session_id,
+            )
+        return rebound, "rebound"
+    finally:
+        if acquired_lock:
+            release_dir_mutex(recovery_lock, recovery_token)
 
 
 _RECOVERY_LOCK_POLL_INTERVAL_S = 0.02

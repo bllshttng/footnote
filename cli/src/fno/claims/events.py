@@ -96,6 +96,35 @@ def emit_claim_idempotent_reacquired(claim: Claim, *, previous: Claim) -> None:
     _emit(_build("claim_idempotent_reacquired", data))
 
 
+def emit_claim_rebound(
+    claim: Claim,
+    *,
+    previous_pid: int,
+    previous_state: str,
+    mode: str,
+    fno_id: Optional[str] = None,
+    harness: Optional[str] = None,
+    harness_session_id: Optional[str] = None,
+) -> None:
+    """A native target resume rebound a same-holder local claim (x-2ccd).
+
+    ``mode`` is ``rebind`` (a dead prior PID rebound to the resumed durable
+    PID) or ``idempotent`` (a live same-PID lease refresh). The claim file is
+    authoritative; this audit row is observability, like every claim event.
+    """
+    data = _common(claim)
+    data["previous_pid"] = int(previous_pid)
+    data["previous_state"] = previous_state
+    data["mode"] = mode
+    if fno_id is not None:
+        data["fno_id"] = fno_id
+    if harness is not None:
+        data["harness"] = harness
+    if harness_session_id is not None:
+        data["harness_session_id"] = harness_session_id
+    _emit(_build("claim_rebound", data))
+
+
 def emit_claim_force_overridden(
     *,
     key: str,
@@ -127,6 +156,7 @@ __all__ = [
     "emit_claim_force_overridden",
     "emit_claim_idempotent_reacquired",
     "emit_claim_refreshed",
+    "emit_claim_rebound",
     "emit_claim_released",
     "emit_claim_stale_reclaimed",
 ]
