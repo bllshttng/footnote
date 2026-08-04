@@ -487,6 +487,24 @@ def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--dispatch-account`` (the cutover carrier).
+
+    The Rust spawn parser does not know the flag and exits ``unknown flag:
+    --dispatch-account``, killing the launch. Python owns it: it resolves the
+    destination record's env overlay and refuses a harness mismatch. Keeping the
+    decision HERE rather than at one caller is the point - a shell dispatcher
+    pinning its own runtime protects only itself, and the next caller to reach
+    for the flag would hit the binary.
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--dispatch-account" or a.startswith("--dispatch-account=")
+        for a in args
+    )
+
+
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--resume`` / ``-r`` (x-f76e / x-9844).
 
@@ -595,16 +613,24 @@ def _pick_account_at_seam(args: Sequence[str]) -> list[str]:
     see, and the scrub below then applies the account's overlay exactly as it
     does for an explicit ``--account``.
 
-    Four spawns are left alone: one that already named an account (explicit
+    Five spawns are left alone: one that already named an account (explicit
     intent always wins), one carrying ``--role`` or ``--route``/``--provider``
     (the CLI refuses ``--account`` alongside either, because the route's
     ANTHROPIC_* would override the account's CLAUDE_CONFIG_DIR and mis-bill),
+    one carrying ``--dispatch-account`` (a quota cutover already selected the
+    destination account, and a second pick merges two overlays the same way),
     and one pinned to a non-claude harness (``--account`` is claude-only).
     """
     out = list(args)
     if _spawn_flag_value(out, "--account") is not None:
         return out
     if _is_role_bearing_spawn("spawn", out) or _is_route_bearing_spawn("spawn", out):
+        return out
+    if _is_dispatch_account_bearing_spawn("spawn", out):
+        # A cutover already SELECTED its account, and picking a second one here
+        # merges two overlays: the destination's config_dir with the picked
+        # account's api key, which is the mis-bill this function already refuses
+        # for --route. Nothing to pick - the selector decided.
         return out
     harness = _spawn_flag_value(out, "--harness", "-H")
     if harness not in (None, "", "claude"):
@@ -1006,6 +1032,7 @@ def make_agents_group_cls() -> type:
                     or _is_provenance_bearing_spawn(verb, args)
                     or _is_resume_bearing_spawn(verb, args)
                     or _is_output_format_bearing_spawn(verb, args)
+                    or _is_dispatch_account_bearing_spawn(verb, args)
                 )
                 if mode == "rust" and not py_spawn:
                     _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs

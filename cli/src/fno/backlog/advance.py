@@ -1694,70 +1694,6 @@ def _emit(kind: str, data: dict, events_path: Path) -> None:
         print(f"advance: WARNING: event emit failed ({kind}): {exc}", file=sys.stderr)
 
 
-def _select_exhaustion_failover(
-    node_cwd: Optional[str], exhausted_provider: str
-) -> Optional[tuple[str, str, dict]]:
-    """x-0676: pick the next non-exhausted provider from the active combo when
-    ``config.dispatch.on_exhaustion == "failover"``.
-
-    Returns ``(record_id, harness, account_env)`` for the selected provider, or
-    ``None`` for the defer floor: not configured for failover, no active COMBO to
-    walk (a bare active-provider is not a combo), the whole combo exhausted, an
-    unresolvable harness, an unstageable account, or ANY read error. Failover never
-    guesses - every non-clean path degrades to defer.
-
-    The three parts stage a spawn correctly (a combo member is a provider RECORD
-    id, NOT a harness): ``harness`` (the record's ``cli``) becomes ``--provider``
-    (validated against the harness set, so a record id must never go there) and
-    drives the resolver's substrate; ``account_env`` (``dispatch_env`` of the
-    record: ``CLAUDE_CONFIG_DIR`` / ``base_url`` / api key) selects the ACCOUNT via
-    the spawn subprocess env. A cross-harness failover (claude->codex) rides the
-    ``harness`` change.
-    """
-    try:
-        from fno.config import load_settings, load_settings_for_repo
-
-        s = load_settings_for_repo(Path(node_cwd)) if node_cwd else load_settings()
-        if (s.dispatch.on_exhaustion or "defer") != "failover":
-            return None
-    except Exception:  # noqa: BLE001 - unreadable config -> defer floor
-        return None
-    try:
-        from fno.adapters.providers.dispatch import dispatch_env
-        from fno.adapters.providers.loader import load_combos, load_providers
-        from fno.adapters.providers.rotation import next_healthy_provider
-        from fno.sigma_dispatch import resolve_dispatch_target
-
-        # The active combo via the CG8 settings_combo rung (env={} so no TARGET_COMBO
-        # pin leaks in; a synthetic agent name has no per-agent pin). A bare active
-        # PROVIDER (no combo) resolves to combo_name=None -> defer (nothing to walk).
-        target = resolve_dispatch_target(
-            "advance-failover",
-            repo_root=Path(node_cwd) if node_cwd else None,
-            env={},
-        )
-        if not target.combo_name:
-            return None
-        combo = load_combos().get(target.combo_name)
-        if combo is None:
-            return None
-        pid = next_healthy_provider(combo, exclude={exhausted_provider})
-        if pid is None:
-            return None
-        rec = load_providers().by_id.get(pid)
-        harness = (getattr(rec, "harness", "") or "").strip()
-        if not harness:
-            return None  # a record with no harness cannot pick a --provider
-        # Stage the account env; an unstaged/unresolvable account -> defer (never
-        # spawn onto a broken account).
-        account_env = dispatch_env(
-            pid, repo_root=Path(node_cwd) if node_cwd else None
-        )
-        return (pid, harness, account_env)
-    except Exception:  # noqa: BLE001 - never dispatch onto an unresolved provider
-        return None
-
-
 # ---------------------------------------------------------------------------
 # advance() - the decision matrix
 # ---------------------------------------------------------------------------
@@ -1853,42 +1789,70 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
+    #     The route decision itself is shared with `fno dispatch` so
+    #     both autonomous launchers stay / defer / cut over identically; the
+    #     tuple it returns is pinned for this attempt and the worker never
+    #     re-switches. The dispatch_failover receipt is emitted after the spawn
+    #     below so it only lands when a worker actually launched.
     failover_record: Optional[str] = None
     failover_harness: Optional[str] = None
     failover_env: Optional[dict] = None
     failover_from: Optional[str] = None
+    failover_window: Optional[str] = None
+    failover_reason: Optional[str] = None
     try:
-        from fno.adapters.providers.loader import load_providers
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.loader import effective_active
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
 
         # Match the SAME provider precedence the spawn below uses
         # (eff_provider = provider arg -> node pin -> active default), so the
         # quota decision evaluates the provider the worker will actually run on,
-        # not a mismatched active record (x-5d3e review).
-        provider_id = provider or node.get("provider") or load_providers().active or ""
-        decision = evaluate_quota_defer(provider_id, priority=node.get("priority"))
+        # not a mismatched active record (x-5d3e review). `effective_active` (not
+        # the raw `.active` pointer) is what `fno dispatch` probes: with managed
+        # rotation past the pointer the two launchers would otherwise probe
+        # different records and disagree about the route.
+        provider_id = (
+            provider
+            or node.get("provider")
+            # Scoped to the NODE's repository, like every other read in the
+            # route decision: resolving the active record from the dispatcher's
+            # own checkout would evaluate one project's quota for another
+            # project's launch.
+            or effective_active(repo_root=Path(node_cwd) if node_cwd else None)
+            or ""
+        )
+        route = select_autonomous_route(
+            provider_id=provider_id,
+            priority=node.get("priority"),
+            # Every explicit launch intent pins: a provider or model named on the
+            # invocation or the node, and a configured dispatch harness (which
+            # outranks quota policy by precedence). A pinned launch may still
+            # defer; it must never be rerouted, or a claude-only model would ride
+            # a cutover onto codex.
+            pinned=launch_is_pinned(
+                node, provider=provider, model=model, node_cwd=node_cwd
+            ),
+            node_cwd=node_cwd,
+        )
     except Exception:  # noqa: BLE001 - a quota read must never wedge advance
-        decision = None
-    if decision is not None:
-        # x-0676: the resolved provider is exhausted. Default = defer (the floor).
-        # config.dispatch.on_exhaustion == "failover" + NO explicit/node provider
-        # pin -> rotate to the next healthy provider in the active combo (precedence
-        # explicit > node pin > combo, so a pin never fails over). Any miss (not
-        # configured, no active combo, whole-combo exhausted, read error) falls back
-        # to today's quota-deferred skip. Selection is pinned here; the worker never
-        # re-switches. The dispatch_failover receipt is emitted at the spawn below so
-        # it only lands when a worker is actually launched.
-        has_pin = bool((provider or "").strip() or str(node.get("provider") or "").strip())
-        selected = None if has_pin else _select_exhaustion_failover(node_cwd, decision.provider_id)
-        if selected is None:
-            return skip(
-                "quota-deferred",
-                node_id=node_id,
-                provider=decision.provider_id,
-                retry_at=decision.retry_at,
-            )
-        failover_record, failover_harness, failover_env = selected
-        failover_from = decision.provider_id
+        route = None
+    if route is not None and route.action == "defer":
+        return skip(
+            "quota-deferred",
+            node_id=node_id,
+            provider=route.source_record,
+            retry_at=route.retry_at,
+        )
+    if route is not None and route.action == "cutover":
+        failover_record = route.record_id
+        failover_harness = route.harness
+        failover_env = route.account_env
+        failover_from = route.source_record
+        failover_window = route.window
+        failover_reason = route.reason
 
     # 5. Reserve dispatch:<id> (O_EXCL dedup + boot-window bridge token).
     from fno.claims.core import ClaimHeldByOther, acquire_claim
@@ -1914,19 +1878,6 @@ def advance(
     #    is non-raising (_safe_release) so the decision event below always lands.
     try:
         if failover_record is not None:
-            # x-0676: the pre-spawn failover receipt (from -> to), paired with the
-            # advance_dispatched below - not a competing decision. `to` is the
-            # record id; --provider gets the harness, the account env selects it.
-            _emit(
-                EVENT_FAILOVER,
-                {
-                    "node_id": node_id,
-                    "from": failover_from or "",
-                    "to": failover_record,
-                    "harness_to": failover_harness or "",
-                },
-                ev_path,
-            )
             # --provider is the HARNESS (a record id would be rejected by the spawn
             # front door's known-provider gate); the account rides extra_env.
             eff_provider = failover_harness
@@ -1953,6 +1904,24 @@ def advance(
 
     # 7. Dispatched. Leave dispatch:<id> to expire by TTL: the worker now owns
     #    (or is acquiring) node:<id>, which guards later dispatches.
+    if failover_record is not None:
+        # The cutover receipt (from -> to), emitted only now that a worker
+        # actually launched: a routing decision is not a completed cutover, so a
+        # failed spawn must not leave a receipt claiming one. Paired with the
+        # advance_dispatched below, not a competing decision. `to` is the record
+        # id; --provider got the harness, the account env selected it.
+        _emit(
+            EVENT_FAILOVER,
+            {
+                "node_id": node_id,
+                "from": failover_from or "",
+                "to": failover_record,
+                "harness_to": failover_harness or "",
+                "window": failover_window or "",
+                "reason": failover_reason or "",
+            },
+            ev_path,
+        )
     _emit(
         EVENT_DISPATCHED,
         {

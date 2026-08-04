@@ -17,6 +17,7 @@ its lifecycle (target_cli._maybe_reconcile_lane_slot) - identical to the daemon
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 from pathlib import Path
@@ -105,16 +106,30 @@ def cmd_resolve(
     trigger: str = typer.Option(
         "autonomous", "--trigger", help="autonomous (fire-and-forget) | attended. Autonomous never resolves pane."
     ),
+    autonomous: bool = typer.Option(
+        False,
+        "--autonomous",
+        help=(
+            "Fold the shared quota route decision into the tuple, so a shell "
+            "dispatcher gets the same stay/defer/cutover verdict the Python "
+            "launchers get. Adds route_action, route_reason, route_account, "
+            "route_source, route_window; on a cutover, harness and command are "
+            "already the destination's. Off by default: the bare verb stays pure."
+        ),
+    ),
     json_output: bool = typer.Option(
         False, "--json", "-J", help="Emit the resolved tuple as JSON (default: key=value lines)."
     ),
 ) -> None:
     """Resolve (config + context) -> (harness, substrate, command, permission_bypass, env).
 
-    Pure: reads the harness-capability map + config.dispatch, resolves nothing at
-    runtime, never spawns or claims. Exit 0 on a resolved tuple; exit 2 naming the
-    harness and the map when it cannot resolve (unknown harness, bad substrate,
-    empty/unsubstituted command).
+    Pure by default: reads the harness-capability map + config.dispatch, resolves
+    nothing at runtime, never spawns or claims. ``--autonomous`` adds ONE runtime
+    read - the shared quota route decision - so the shell dispatchers converge on
+    the same seam as `backlog advance` and `fno dispatch` instead of routing
+    around it. Exit 0 on a resolved tuple; exit 2 naming the harness and the map
+    when it cannot resolve (unknown harness, bad substrate, empty/unsubstituted
+    command).
     """
     from fno.agents.harness_map import DispatchResolveError, resolve_dispatch
 
@@ -124,16 +139,26 @@ def cmd_resolve(
     # dispatcher (dispatch-node.sh) included - carries the same context, not only
     # advance.py's daemon paths. An explicit --brief still wins (it IS rung 1).
     brief_source = "explicit" if brief else "none"
-    if brief is None and node:
-        rec = _lookup_node(node)
-        if rec:
-            from fno.provenance.autobrief import resolve_dispatch_brief
+    # An explicit --brief is rung 1 and the node is never consulted for it, so
+    # the lookup stays demand-driven: only a brief that must be synthesized, or
+    # the autonomous route (which reads the node's priority and cwd), pays it.
+    rec = _lookup_node(node) if node and (brief is None or autonomous) else None
+    if brief is None and rec:
+        from fno.provenance.autobrief import resolve_dispatch_brief
 
-            brief, brief_source = resolve_dispatch_brief(rec)
+        brief, brief_source = resolve_dispatch_brief(rec)
 
-    try:
-        out = resolve_dispatch(
-            harness=harness,
+    route = _autonomous_route_for(rec, harness, node) if autonomous else None
+    base_harness = harness
+    if route is not None and route.action == "cutover":
+        # The destination owns the harness AND the command surface (codex takes
+        # `$fno:target`, never a raw slash verb), so resolve the tuple FOR it
+        # rather than resolving here and patching the harness afterwards.
+        harness = route.harness
+
+    def _resolve(target_harness: Optional[str]) -> dict:
+        return resolve_dispatch(
+            harness=target_harness,
             substrate=substrate,
             node_id=node,
             command=command,
@@ -141,16 +166,58 @@ def cmd_resolve(
             brief=brief,
             trigger=trigger,
         )
+
+    try:
+        out = _resolve(harness)
     except DispatchResolveError as exc:
-        typer.echo(f"dispatch resolve: {exc}", err=True)
-        raise typer.Exit(code=2)
+        # A cutover whose destination cannot render is not a cutover - but the
+        # quota verdict behind it still stands, so falling back to the ORIGINAL
+        # harness would launch on the very account the selector ruled out. Carry
+        # the route's own fallback instead: defer when the window was binding,
+        # stay when it was only the proactive LOW case.
+        if route is not None and route.action == "cutover":
+            route = dataclasses.replace(
+                route,
+                action="defer" if route.defer_fallback else "stay",
+                reason=f"{route.reason}-destination-unrenderable",
+                record_id=None,
+                harness=None,
+                account_env=None,
+            )
+            try:
+                out = _resolve(base_harness)
+            except DispatchResolveError as exc2:
+                typer.echo(f"dispatch resolve: {exc2}", err=True)
+                raise typer.Exit(code=2)
+        else:
+            typer.echo(f"dispatch resolve: {exc}", err=True)
+            raise typer.Exit(code=2)
 
     out["brief_source"] = brief_source
+    if autonomous:
+        # Report the record id only; the credentials ride `fno agents spawn
+        # --dispatch-account`, never argv.
+        out["route_action"] = route.action if route else "unknown-proceed"
+        out["route_reason"] = route.reason if route else "route-unavailable"
+        out["route_account"] = (route.record_id or "") if route else ""
+        out["route_source"] = (route.source_record or "") if route else ""
+        out["route_window"] = (route.window or "") if route else ""
+        out["route_retry_at"] = (route.retry_at if route else None) or ""
     if json_output:
         typer.echo(json.dumps(out))
     else:
         for key in ("harness", "substrate", "command", "command_surface"):
             typer.echo(f"{key}={out[key]}")
+        for key in (
+            "route_action",
+            "route_reason",
+            "route_account",
+            "route_source",
+            "route_window",
+            "route_retry_at",
+        ):
+            if key in out:
+                typer.echo(f"{key}={out[key]}")
         typer.echo(f"permission_bypass={' '.join(out['permission_bypass'])}")
         typer.echo(f"bg={out['bg']}")
         typer.echo(f"resume={out['resume']}")
@@ -162,6 +229,74 @@ def cmd_resolve(
     raise typer.Exit(code=0)
 
 
+def _autonomous_route_for(
+    rec: Optional[dict], harness: Optional[str], node: Optional[str]
+):
+    """The shared route decision for a shell dispatcher, or None to proceed.
+
+    An explicit ``--harness`` on the invocation is the strongest pin there is, so
+    it never reroutes. Everything else routes through the same
+    ``select_autonomous_route`` the Python launchers use, which is the point of
+    this rung: the shell path used to skip the quota seam entirely and stayed on
+    a walled account while an idle harness sat there.
+
+    Best-effort by design - any failure resolves to None (proceed as configured),
+    matching the fail-open stance of every other quota read.
+    """
+    # A named node we could not resolve has no known repository, and routing it
+    # from the CALLER's would pick a combo and an account out of the wrong
+    # project's registry. Proceed as configured instead of routing on a guess.
+    if node and rec is None:
+        return None
+    try:
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
+
+        cwd = (rec or {}).get("_resolved_cwd") or (rec or {}).get("cwd")
+        provider_id = _resolve_provider_id(cwd) or ""
+        # An explicit harness is a pin, so the launch can only stay or defer -
+        # and deferring it on the ACTIVE record's quota would hold a codex launch
+        # because a claude account is walled. Those are unrelated pools, so when
+        # the pin does not match the probed record's harness there is nothing
+        # here worth probing: proceed as configured.
+        if (harness or "").strip() and not _record_is_harness(provider_id, harness, cwd):
+            return None
+        return select_autonomous_route(
+            provider_id=provider_id,
+            priority=(rec or {}).get("priority"),
+            pinned=bool((harness or "").strip())
+            or launch_is_pinned(rec, node_cwd=cwd),
+            node_cwd=cwd,
+        )
+    except Exception:  # noqa: BLE001 - a quota read must never block a dispatch
+        return None
+
+
+def _record_is_harness(
+    provider_id: str, harness: Optional[str], node_cwd: Optional[str]
+) -> bool:
+    """True when ``provider_id``'s record runs on ``harness``.
+
+    Unknown answers True so the probe still happens: skipping quota policy on a
+    read failure is the change that could dispatch onto a walled account, and
+    fail-open here means "keep the existing behaviour", not "skip the check".
+    """
+    try:
+        from pathlib import Path as _Path
+
+        from fno.adapters.providers.loader import load_providers
+
+        rec = load_providers(
+            repo_root=_Path(node_cwd) if node_cwd else None
+        ).by_id.get(provider_id)
+        rec_harness = (getattr(rec, "harness", "") or "").strip()
+        return not rec_harness or rec_harness == (harness or "").strip()
+    except Exception:  # noqa: BLE001 - an unreadable registry keeps today's path
+        return True
+
+
 def _lookup_node(node_ref: str) -> Optional[dict]:
     """Best-effort graph record for an explicit ``--node`` (id or slug). A
     missing/corrupt graph degrades to None; the dispatch still proceeds with the
@@ -171,41 +306,92 @@ def _lookup_node(node_ref: str) -> Optional[dict]:
 
         for rec in load_graph():
             if rec.get("id") == node_ref or rec.get("slug") == node_ref:
+                # A raw graph row carries only the RECORDED `cwd`; the work-map
+                # projection that turns a project into a root lives in
+                # `fno backlog get`. Without it a project-mapped node would have
+                # its quota probed against the dispatcher's own repository.
+                if not rec.get("_resolved_cwd") and rec.get("project"):
+                    try:
+                        from fno.graph._intake import project_root_from_settings
+
+                        root = project_root_from_settings(rec["project"])
+                        if root:
+                            rec["_resolved_cwd"] = root
+                    except Exception:  # noqa: BLE001 - best-effort enrichment
+                        pass
                 return rec
     except Exception:  # noqa: BLE001 - a graph read must never block a dispatch
         return None
     return None
 
 
-def _resolve_provider_id() -> Optional[str]:
+def _resolve_provider_id(node_cwd: Optional[str] = None) -> Optional[str]:
     """The provider record a default dispatch would run on (the active one).
 
     Routes through the SAME resolver `fno config accounts list` displays, so a managed
     routing-active pointer the slot has moved past no longer evaluates one
     account's headroom for a worker that spawns on another's credential.
 
+    Scoped to the NODE's repository when one is known: a cross-project dispatch
+    that read the active record from the dispatcher's own checkout would judge
+    one project's quota for another project's launch.
+
     Best-effort: an unconfigured / unreadable providers block yields None, which
     reads as UNKNOWN headroom and proceeds (fail-open)."""
     try:
         from fno.adapters.providers.loader import effective_active
 
-        return effective_active()
+        return effective_active(repo_root=Path(node_cwd) if node_cwd else None)
     except Exception:  # noqa: BLE001 - a config read must never block a dispatch
         return None
 
 
-def _healthy_alternate_exists() -> bool:
-    """True when launch-time picking is armed AND has a live account to pick.
+def _cutover_command(harness: Optional[str], node_id: str) -> str:
+    """The destination harness's own target command, or "" if unresolvable.
 
-    Best-effort and conservative: anything unreadable, or picking disarmed,
-    returns False so the existing defer stands. Only a positive answer - an
-    account the spawn seam could actually launch on - suppresses the defer."""
+    This verb hosts a pane in THIS mux session, so the substrate is not the
+    destination's default; only the COMMAND needs the per-harness render
+    (codex takes `$fno:target`, never a raw slash verb). An empty return is the
+    caller's signal to stage nothing - a half-resolved destination must not
+    spawn.
+
+    This verb's normal path always spawns `/target no-merge`, so the cutover
+    renders the SAME posture on the destination. Going through the full resolver
+    would read `config.dispatch.auto_merge` and could hand a rerouted worker the
+    merge authority the non-cutover launch never gets: quota exhaustion must not
+    change who may merge."""
     try:
-        from fno.adapters.providers.cli import pick_account
+        from fno.agents.harness_map import dispatch_command
 
-        return pick_account(if_armed=True).account is not None
-    except Exception:  # noqa: BLE001 - a probe must never block a dispatch
-        return False
+        return dispatch_command(harness or "", allow_merge=False).replace(
+            "{id}", node_id
+        )
+    except Exception:  # noqa: BLE001 - an unresolvable harness never spawns
+        return ""
+
+
+def _emit_failover(node_id: str, route) -> None:
+    """Emit the one cross-harness cutover receipt. Non-fatal, post-spawn only."""
+    try:
+        from fno.backlog.advance import EVENT_FAILOVER
+        from fno.events import _build, append_event
+
+        append_event(
+            _build(
+                EVENT_FAILOVER,
+                "backlog",
+                {
+                    "node_id": node_id,
+                    "from": route.source_record,
+                    "to": route.record_id or "",
+                    "harness_to": route.harness or "",
+                    "window": route.window or "",
+                    "reason": route.reason,
+                },
+            )
+        )
+    except Exception:  # noqa: BLE001 - a telemetry write must never block dispatch
+        pass
 
 
 def _emit_quota_deferred(node_id: str, provider: str, state: str, retry_at: Optional[float]) -> None:
@@ -270,28 +456,65 @@ def _dispatch_one(
     # 1b. Quota-aware defer (x-5d3e). Only the ambient/autonomous default
     #     selection defers; an explicit --node dispatch always fires (LD#5).
     #     Fail-open: defer_dispatch off, p0, or UNKNOWN headroom -> proceed.
+    #     The route decision is the SAME one `backlog advance` reads,
+    #     so identical node + config + quota fixtures resolve to the identical
+    #     destination tuple on both autonomous launchers.
+    cutover = None
+    cutover_command = ""
     if not explicit:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.agents.autonomous_route import (
+            launch_is_pinned,
+            select_autonomous_route,
+        )
 
-        decision = evaluate_quota_defer(_resolve_provider_id() or "", priority=priority)
-        if decision is not None and _healthy_alternate_exists():
-            # Deferring is the floor, not the answer, once launch-time picking
-            # can reroute: holding work because the ACTIVE account is exhausted
-            # while another account has headroom is the stall this feature
-            # exists to delete. The spawn seam does the actual picking; here we
-            # only decline to defer when it has somewhere to go.
-            decision = None
-        if decision is not None:
+        route = select_autonomous_route(
+            # An explicit --account IS the record this launch runs on, so probe
+            # THAT one. Probing the active record instead would defer a healthy
+            # pinned account because an unrelated active account is walled.
+            provider_id=(account or "").strip() or _resolve_provider_id(cwd) or "",
+            priority=priority,
+            # The same pin rule `backlog advance` applies, so the two launchers
+            # cannot disagree about whether a launch is rerouteable. An explicit
+            # --account is a human's billing choice: quota policy may still defer
+            # behind it, but must never reroute off it.
+            pinned=launch_is_pinned(
+                picked,
+                account=account,
+                node_cwd=cwd,
+                # This verb hosts a claude pane and hardcodes that harness
+                # below, so config.dispatch.harness is not a choice it honors -
+                # pinning on it would block a cutover to protect nothing.
+                honors_config_harness=False,
+            ),
+            node_cwd=cwd,
+        )
+        if route.action == "cutover":
+            # Render the destination's own command HERE, before any claim or
+            # lane slot is taken: an unresolvable harness must fall back to the
+            # defer floor rather than reach the spawn with a claude command.
+            cutover_command = _cutover_command(route.harness, node_id)
+            if cutover_command:
+                cutover = route
+            elif not route.defer_fallback:
+                route = dataclasses.replace(route, action="stay")
+            else:
+                route = dataclasses.replace(route, action="defer")
+        if route.action == "defer":
+            # The selector already weighed both reroutes - a combo cutover and
+            # launch-time account picking - so a defer that survives it is the
+            # real floor. This used to re-check the account picker here, which
+            # made identical fixtures defer under `backlog advance` and launch
+            # under this verb.
             _emit_quota_deferred(
-                node_id, decision.provider_id, decision.state.value, decision.retry_at
+                node_id, route.source_record, route.window or "", route.retry_at
             )
             return {
                 "outcome": "quota-deferred",
                 "node": node_id,
                 "slug": slug or "",
-                "provider": decision.provider_id,
-                "headroom": decision.state.value,
-                "retry_at": decision.retry_at,
+                "provider": route.source_record,
+                "headroom": route.window or "",
+                "retry_at": route.retry_at,
             }
 
     # 2. Boot-window dedup (mirrors advance()): a node already being worked
@@ -349,11 +572,21 @@ def _dispatch_one(
     provenance = resolve_provenance(node_id, slug)
     if account:
         provenance["FNO_ACCOUNT"] = account
+    # A cutover replaces all three parts of the launch together (harness,
+    # command, credential overlay); passing one without the others is the
+    # wrong-billing / wrong-binary launch the selector exists to prevent.
+    spawn_harness = "claude"
+    message = f"/target no-merge {node_id}"
+    if cutover is not None:
+        spawn_harness = cutover.harness or "claude"
+        message = cutover_command
+        account_env = cutover.account_env
+        provenance["FNO_ACCOUNT"] = cutover.record_id or ""
     try:
         result = dispatch_spawn_pane(
             name=_worker_agent_name(node_id, slug),
-            message=f"/target no-merge {node_id}",
-            provider="claude",
+            message=message,
+            provider=spawn_harness,
             cwd=workdir,
             session=session,
             provenance=provenance,
@@ -363,6 +596,9 @@ def _dispatch_one(
         release_lane_slot(node_id)
         release_claim(dispatch_key, dispatch_holder, root=dispatch_root)
         return {"outcome": "failed", "node": node_id, "slug": slug or "", "detail": str(exc)[:200]}
+    if cutover is not None:
+        # Post-spawn only: a route decision is not a completed cutover.
+        _emit_failover(node_id, cutover)
     return {
         "outcome": "launched",
         "node": node_id,

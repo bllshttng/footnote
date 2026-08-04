@@ -706,6 +706,18 @@ def cmd_spawn(
             "spawned on refusal."
         ),
     ),
+    dispatch_account: str | None = typer.Option(
+        None,
+        "--dispatch-account",
+        help=(
+            "The destination provider RECORD of an autonomous quota cutover, as "
+            "chosen by `fno dispatch resolve --autonomous`. Unlike --account "
+            "(operator intent, claude-only) this carries the record's dispatch "
+            "env for ANY harness, which is what a claude->codex cutover needs. "
+            "The record id travels on argv; its credentials never do. "
+            "Fail-closed: an unknown or unstageable record spawns nothing."
+        ),
+    ),
     model: str | None = typer.Option(
         None,
         "--model",
@@ -1241,6 +1253,48 @@ def cmd_spawn(
 
         overlay = resolve_account_overlay_or_exit(account)
         account_env = overlay.env if overlay else None
+
+    # The autonomous-cutover carrier. Same fail-closed posture as --account, and
+    # deliberately a separate flag: --account's claude-only refusal is an operator
+    # contract, while a cutover's whole point is landing on another harness.
+    if dispatch_account is not None:
+        from fno.adapters.providers.dispatch import dispatch_env
+        from fno.adapters.providers.loader import load_providers
+
+        try:
+            # Resolve against the WORKER's root, not the dispatcher's cwd: the
+            # record was selected out of the node's project registry, and reading
+            # a different one here would stage another project's account.
+            rec = load_providers(repo_root=workdir).by_id.get(dispatch_account)
+            if rec is None:
+                raise ValueError("not a registered provider record")
+            rec_harness = (getattr(rec, "harness", "") or "").strip()
+            # The overlay and the binary must agree. A codex record's CODEX_HOME
+            # handed to a claude spawn authenticates nothing and launches the
+            # wrong binary - the exact miss this carrier exists to prevent, so it
+            # is checked here rather than assumed from the caller's bookkeeping.
+            # Compare against the RESOLVED harness, not the raw --harness option:
+            # omitting the flag leaves it None, and trusting that would stage a
+            # codex account onto the resolved claude default unchecked.
+            # Require a harness AND exact equality. Treating an empty harness as
+            # "no objection" would wave through the one record we can say least
+            # about, which is the opposite of what a fail-closed guard is for.
+            if rec_harness != provider:
+                raise ValueError(
+                    f"record is a {rec_harness or '<no harness>'} account but "
+                    f"the spawn resolves {provider}"
+                )
+            account_env = {
+                **(account_env or {}),
+                **dispatch_env(dispatch_account, repo_root=workdir),
+            }
+        except Exception as exc:  # noqa: BLE001 - never spawn onto an unresolved record
+            print(
+                f"refusing --dispatch-account {dispatch_account!r}: {exc}; "
+                "no worker launched",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2) from exc
 
     # Resolve node provenance once for every substrate. A node-bearing spawn is
     # itself a dispatcher route, so it must cross the same family-2 decision and

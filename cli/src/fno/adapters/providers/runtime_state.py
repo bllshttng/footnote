@@ -158,11 +158,22 @@ class ProviderRuntimeState:
     schema_version: int = SCHEMA_VERSION
 
 
-def _resolve_state_path() -> Path:
-    """Return the active runtime-state path, honoring env override."""
+def _resolve_state_path(repo_root: Path | None = None) -> Path:
+    """Return the active runtime-state path, honoring env override.
+
+    The path is project-local by design, so it resolves against ``repo_root``
+    when the caller knows which repository the operation concerns. Cross-project
+    dispatch needs that: the record set and the cached snapshot for a node must
+    come from the SAME repository, or a same-id record in the dispatcher's own
+    project would answer for the node's. The env override still wins (it is how
+    tests pin a state file) and an omitted root keeps the process cwd, which is
+    correct for every operation that concerns the caller's own repo.
+    """
     override = os.environ.get("FNO_RUNTIME_STATE_PATH")
     if override:
         return Path(override)
+    if repo_root is not None:
+        return Path(repo_root) / RUNTIME_STATE_PATH
     return Path(RUNTIME_STATE_PATH)
 
 
@@ -758,6 +769,7 @@ def read_usage(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageSnapshot | None:
     """Lock-free read of the cached usage snapshot for ``provider_id``.
 
@@ -768,7 +780,7 @@ def read_usage(
     """
     if now is None:
         now = time.time()
-    state_path = _resolve_state_path()
+    state_path = _resolve_state_path(repo_root)
     raw = _read_disk_payload(state_path)
     if raw is None:
         return None
@@ -781,7 +793,11 @@ def read_usage(
     return snap
 
 
-def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> bool:
+def write_usage_snapshot(
+    snapshot: UsageSnapshot,
+    now: float | None = None,
+    repo_root: Path | None = None,
+) -> bool:
     """Persist ``snapshot`` under ``usage[provider_id]``; True if it landed.
 
     Serializes on the same ``.update.lock`` as health/cursor writes. On lock
@@ -795,7 +811,7 @@ def write_usage_snapshot(snapshot: UsageSnapshot, now: float | None = None) -> b
     """
     if now is None:
         now = time.time()
-    state_path = _resolve_state_path()
+    state_path = _resolve_state_path(repo_root)
     state_path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = _lock_path(state_path)
     try:
@@ -857,6 +873,7 @@ def refresh_usage_detailed(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageRefresh:
     """Return the full refresh observation for ``provider_id``.
 
@@ -875,7 +892,9 @@ def refresh_usage_detailed(
     """
     if now is None:
         now = time.time()
-    cached = read_usage(provider_id, ttl_seconds=ttl_seconds, now=now)
+    cached = read_usage(
+        provider_id, ttl_seconds=ttl_seconds, now=now, repo_root=repo_root
+    )
     if cached is not None:
         return UsageRefresh(cached, None if cached.windows else "no-windows")
     # Local import: loader pulls in rotation/model; keep the module-load graph
@@ -884,7 +903,7 @@ def refresh_usage_detailed(
     from fno.adapters.providers.usage import probe_usage_detail
 
     try:
-        record = load_providers().by_id.get(provider_id)
+        record = load_providers(repo_root=repo_root).by_id.get(provider_id)
     except Exception:  # noqa: BLE001 - a config read must never break a probe
         return UsageRefresh(None, "config-unreadable")
     if record is None:
@@ -893,7 +912,7 @@ def refresh_usage_detailed(
     if snapshot is None:
         return UsageRefresh(None, reason)
     # Persist, then report the SNAPSHOT regardless of how the write went.
-    persisted = write_usage_snapshot(snapshot, now=now)
+    persisted = write_usage_snapshot(snapshot, now=now, repo_root=repo_root)
     return UsageRefresh(
         snapshot, None if snapshot.windows else "no-windows", persisted
     )
@@ -903,6 +922,7 @@ def refresh_usage(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageSnapshot | None:
     """Return a fresh snapshot for ``provider_id``, probing if the cache is stale.
 
@@ -910,7 +930,9 @@ def refresh_usage(
     only need ``UsageSnapshot | None`` (headroom and its consumers). Any failure
     returns None fail-open - the caller treats it as UNKNOWN headroom.
     """
-    return refresh_usage_detailed(provider_id, ttl_seconds=ttl_seconds, now=now).snapshot
+    return refresh_usage_detailed(
+        provider_id, ttl_seconds=ttl_seconds, now=now, repo_root=repo_root
+    ).snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -949,6 +971,7 @@ def headroom(
     now: float | None = None,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     threshold_pct: float = 90.0,
+    repo_root: Path | None = None,
 ) -> Headroom:
     """Compute the headroom verdict for ``provider_id`` from cached usage.
 
@@ -968,7 +991,7 @@ def headroom(
     if now is None:
         now = time.time()
     try:
-        raw = _read_disk_payload(_resolve_state_path())
+        raw = _read_disk_payload(_resolve_state_path(repo_root))
     except Exception:  # noqa: BLE001 - a corrupt state read never breaks dispatch
         raw = None
     health = _parse_state_payload(raw).get(provider_id) if raw else None
@@ -979,6 +1002,24 @@ def headroom(
     if snap is not None and snap.probed_at < now - ttl_seconds:
         snap = None  # stale snapshot reads as absent (same TTL as read_usage)
 
+    return _headroom_from(snap, rlu, now=now, threshold_pct=threshold_pct)
+
+
+def _headroom_from(
+    snap: UsageSnapshot | None,
+    rlu: float | None,
+    *,
+    now: float,
+    threshold_pct: float,
+) -> Headroom:
+    """The pure verdict, given an already-resolved snapshot and provider lock.
+
+    Split out of :func:`headroom` so a caller holding a FRESH snapshot can reach
+    the same verdict without a second disk read. That matters because a probe
+    whose persist lost a lock race would otherwise read back as UNKNOWN, and
+    UNKNOWN proceeds - turning a successful "this provider is exhausted"
+    observation into a launch onto the walled provider.
+    """
     binding = [w for w in (snap.windows if snap else ()) if w.resets_at > now]
     exhausted = [w for w in binding if w.used_pct >= 100.0]
     if rlu is not None or exhausted:
@@ -1001,29 +1042,41 @@ def headroom(
 
 
 @dataclasses.dataclass(frozen=True)
-class QuotaDeferDecision:
-    """A dispatcher's verdict that a node should be held for quota reasons."""
+class QuotaSignal:
+    """What one quota probe says about a provider for an autonomous launch.
+
+    ``defer`` and ``cutover`` are two verdicts read off the SAME probe because
+    their predicates point in OPPOSITE directions on the same LOW window: a
+    reset that is near is a reason to wait (defer), and a reset that is far is
+    a reason to leave this harness now (cutover), because waiting is the only
+    alternative. EXHAUSTED sets both - hold unless there is somewhere to go.
+
+    ``reason`` says why the verdicts are what they are, so a caller can report
+    "not probed" honestly instead of dressing it up as headroom.
+    """
 
     provider_id: str
-    state: HeadroomState  # EXHAUSTED or LOW
-    retry_at: float | None
+    state: HeadroomState
+    resets_at: float | None
+    defer: bool
+    cutover: bool
+    reason: str
 
 
-def evaluate_quota_defer(
+def evaluate_quota_signal(
     provider_id: str,
     *,
     priority: str | None = None,
+    cutover_low_after_minutes: float = 0.0,
     now: float | None = None,
-) -> QuotaDeferDecision | None:
-    """Return a defer decision for an autonomous dispatch, or None to proceed.
+    repo_root: Path | None = None,
+) -> QuotaSignal:
+    """Probe one provider's headroom and derive the defer/cutover verdicts.
 
-    Fail-open and opt-in (Locked Decisions 1/4/5/6):
-    - ``defer_dispatch`` off (the default) -> never defers.
-    - ``p0`` -> never defers.
-    - EXHAUSTED -> defer with the reset as ``retry_at``.
-    - LOW with a reset within ``defer_horizon_minutes`` -> defer.
-    - OK / UNKNOWN, or no provider, or LOW with a distant/absent reset ->
-      proceed (None). UNKNOWN never defers: absence of data is not trouble.
+    Fail-open and opt-in (Locked Decisions 1/4/5/6): no provider,
+    ``defer_dispatch`` off (the default), or ``p0`` short-circuits to a probe-
+    less UNKNOWN with both verdicts false, so a fresh install never defers and
+    never reroutes.
 
     This is the ONE probe site the dispatcher owns: it refreshes the snapshot
     (probe-on-stale) before consulting headroom, so the ~1-minute tick pays at
@@ -1033,31 +1086,62 @@ def evaluate_quota_defer(
     if now is None:
         now = time.time()
     if not provider_id:
-        return None
+        return QuotaSignal("", HeadroomState.UNKNOWN, None, False, False, "no-provider")
     from fno.adapters.providers.loader import load_quota_config
 
-    quota = load_quota_config()
+    # Scoped to the NODE's repository like every other read in the route
+    # decision: probing the dispatcher's own project would judge one project's
+    # quota for another project's launch, and an absent record there reads as
+    # UNKNOWN, which proceeds instead of cutting over.
+    quota = load_quota_config(repo_root=repo_root)
     if not quota.defer_dispatch:
-        return None
+        return QuotaSignal(
+            provider_id, HeadroomState.UNKNOWN, None, False, False, "defer-dispatch-off"
+        )
     if (priority or "").strip().lower() == "p0":
-        return None
+        return QuotaSignal(
+            provider_id, HeadroomState.UNKNOWN, None, False, False, "p0-exempt"
+        )
 
     # Probe-on-stale so the decision uses fresh data (the dispatcher tick is
     # not latency-sensitive, unlike combo rotation which reads cache only).
-    refresh_usage(provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now)
+    fresh = refresh_usage(
+        provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now, repo_root=repo_root
+    )
     h = headroom(
         provider_id,
         now=now,
         ttl_seconds=quota.probe_ttl_seconds,
         threshold_pct=quota.defer_threshold_pct,
+        repo_root=repo_root,
     )
+    if h.state is HeadroomState.UNKNOWN and fresh is not None and fresh.windows:
+        # The probe SAW the provider, but the read-back did not: a persist that
+        # lost a lock race reads as UNKNOWN, and UNKNOWN proceeds - which would
+        # launch onto a provider we just observed as exhausted. Trust the
+        # in-hand observation over the disk that failed to keep it.
+        h = _headroom_from(
+            fresh,
+            None,
+            now=now,
+            threshold_pct=quota.defer_threshold_pct,
+        )
+    defer = cutover = False
     if h.state is HeadroomState.EXHAUSTED:
-        return QuotaDeferDecision(provider_id, h.state, h.resets_at)
-    if h.state is HeadroomState.LOW and h.resets_at is not None:
+        defer = cutover = True
+    elif h.state is HeadroomState.LOW and h.resets_at is not None:
         horizon = quota.defer_horizon_minutes * 60
         if horizon > 0 and h.resets_at <= now + horizon:
-            return QuotaDeferDecision(provider_id, h.state, h.resets_at)
-    return None
+            defer = True
+        after = cutover_low_after_minutes * 60
+        # A nearby reset keeps the existing keep-or-defer policy. The two
+        # thresholds are independent knobs, so a cutover window shorter than the
+        # defer horizon makes both predicates true for the same reset; without
+        # this the caller (which tests cutover first) would churn harnesses on
+        # exactly the near reset the defer horizon exists to wait out.
+        if after > 0 and not defer and h.resets_at > now + after:
+            cutover = True
+    return QuotaSignal(provider_id, h.state, h.resets_at, defer, cutover, "probed")
 
 
 # ---------------------------------------------------------------------------

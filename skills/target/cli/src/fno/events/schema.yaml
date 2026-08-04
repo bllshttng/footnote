@@ -2189,7 +2189,7 @@ event_types:
     consumers: [operator]
 
   - name: dispatch_failover
-    description: "Emitted by `fno backlog advance` (x-0676) when config.dispatch.on_exhaustion='failover' and the resolved provider is exhausted: instead of deferring, advance dispatched the next non-exhausted provider in the active combo. Paired with the following advance_dispatched (this is the receipt of the switch, not a competing decision); a whole-combo exhaustion falls back to a quota-deferred skip instead. The switch may cross harnesses (claude->codex)."
+    description: "Emitted by an autonomous launcher (`fno backlog advance`, `fno dispatch`, or the shell dispatcher `dispatch-node.sh`) when config.dispatch.on_exhaustion='failover' and the shared route selector chose a cutover instead of a defer: the node launched on the next healthy record in the active combo, which may be on another harness (claude->codex). Emitted only AFTER the spawn succeeds - a routing decision is not a completed cutover. From `backlog advance` it is paired with the following advance_dispatched (the receipt of the switch, not a competing decision); `fno dispatch` and the shell dispatcher report their launch in their own verdict line and emit this receipt alone. A whole-combo exhaustion, an unresolvable destination, or an explicit pin falls back to a quota-deferred skip instead."
     sources: [backlog]
     data:
       required: [node_id, from, to]
@@ -2206,6 +2206,12 @@ event_types:
         harness_to:
           type: string
           description: "The failover provider's harness (cli), when it differs from claude (a cross-harness failover, e.g. codex). Empty/omitted for a same-harness account switch."
+        window:
+          type: string
+          description: "The headroom state of the window that triggered the cutover (exhausted, or low for a proactive dispatch.cutover_low_after_minutes cutover)."
+        reason:
+          type: string
+          description: "The route selector's reason for the cutover (e.g. exhausted-cutover, low-cutover)."
     consumers: [operator]
 
   - name: dispatch_claim_observed

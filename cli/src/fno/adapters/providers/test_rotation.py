@@ -949,7 +949,7 @@ _QUOTA = SimpleNamespace(probe_ttl_seconds=300.0, defer_threshold_pct=90.0)
 def _patch_headroom(monkeypatch, states):
     """Patch headroom() to return the mapped HeadroomState per id (default OK)."""
 
-    def fake(pid, *, now=None, ttl_seconds=300.0, threshold_pct=90.0):
+    def fake(pid, *, now=None, ttl_seconds=300.0, threshold_pct=90.0, **_):
         return Headroom(states.get(pid, HeadroomState.OK), None)
 
     monkeypatch.setattr("fno.adapters.providers.runtime_state.headroom", fake)

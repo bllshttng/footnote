@@ -520,7 +520,7 @@ class TestRefreshObservation:
         from fno.adapters.providers import runtime_state as rs
 
         snap = _snap("p1", UsageWindow("5h", 12.0, 9000.0))
-        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None: False)
+        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None, **k: False)
         monkeypatch.setattr(
             "fno.adapters.providers.loader.load_providers",
             lambda *a, **k: type(
@@ -699,7 +699,7 @@ class TestHeadroom:
 
 
 # ---------------------------------------------------------------------------
-# evaluate_quota_defer: the dispatcher decision core (US3: AC2-HP, AC2-FR, LD)
+# evaluate_quota_signal: the dispatcher decision core (US3: AC2-HP, AC2-FR, LD)
 # ---------------------------------------------------------------------------
 
 
@@ -711,57 +711,70 @@ class TestEvaluateQuotaDefer:
         monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: cfg)
 
     def test_off_by_default_never_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=False)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
     def test_p0_never_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p0", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p0", now=1000.0).defer
 
     def test_exhausted_defers_with_retry_at(self, state_path: Path, monkeypatch) -> None:
-        # AC2-HP core: exhausted -> defer, retry_at == the window reset.
-        from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_defer
+        # AC2-HP core: exhausted -> defer, resets_at == the window reset.
+        from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0), now=1000.0)
-        d = evaluate_quota_defer("p1", priority="p2", now=1000.0)
-        assert d is not None
-        assert d.state is HeadroomState.EXHAUSTED
-        assert d.retry_at == 9e18
+        sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
+        assert sig.defer
+        assert sig.state is HeadroomState.EXHAUSTED
+        assert sig.resets_at == 9e18
 
     def test_low_within_horizon_defers(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60, defer_threshold_pct=90.0)
         # reset in 30 min (< 60 horizon), 95% -> LOW -> defer.
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 1800), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is not None
+        assert evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
+
+    def test_defer_wins_when_the_two_windows_overlap(self, state_path: Path, monkeypatch) -> None:
+        # AC3-EDGE: the cutover window and the defer horizon are independent
+        # knobs, so a cutover shorter than the horizon makes both predicates true
+        # for one reset. The caller tests cutover first, so without defer winning
+        # here a near reset would churn harnesses instead of waiting it out.
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
+
+        self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60, defer_threshold_pct=90.0)
+        # reset in 45 min: inside the 60-min defer horizon AND past a 30-min cutover.
+        write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 2700), probed_at=1000.0), now=1000.0)
+        sig = evaluate_quota_signal("p1", priority="p2", cutover_low_after_minutes=30, now=1000.0)
+        assert sig.defer and not sig.cutover
 
     def test_low_outside_horizon_proceeds(self, state_path: Path, monkeypatch) -> None:
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True, defer_horizon_minutes=60)
         # reset in 2h (> 60 horizon), 95% -> LOW but too far -> proceed.
         write_usage_snapshot(_snap("p1", UsageWindow("5h", 95.0, 1000.0 + 7200), probed_at=1000.0), now=1000.0)
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
     def test_unknown_never_strands(self, state_path: Path, monkeypatch) -> None:
         # AC2-FR: a deferred node whose snapshot ages out degrades to UNKNOWN,
         # which never defers -> the next tick dispatches (deferral cannot outlive
-        # the evidence). No fresh snapshot -> UNKNOWN -> None. refresh_usage will
-        # try to probe; with no provider record it returns None, staying UNKNOWN.
+        # the evidence). No fresh snapshot -> UNKNOWN. refresh_usage will try to
+        # probe; with no provider record it returns None, staying UNKNOWN.
         from fno.adapters.providers.model import ProvidersConfig
-        from fno.adapters.providers.runtime_state import evaluate_quota_defer
+        from fno.adapters.providers.runtime_state import evaluate_quota_signal
 
         self._quota(monkeypatch, defer_dispatch=True)
         monkeypatch.setattr(loader, "load_providers", lambda *a, **k: ProvidersConfig(records=[]))
-        assert evaluate_quota_defer("p1", priority="p2", now=1000.0) is None
+        assert not evaluate_quota_signal("p1", priority="p2", now=1000.0).defer
 
 
 class TestDispatchOneQuotaDefer:
@@ -780,7 +793,7 @@ class TestDispatchOneQuotaDefer:
         monkeypatch.setattr(
             loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True)
         )
-        monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda: "p1")
+        monkeypatch.setattr(dispatch_mod, "_resolve_provider_id", lambda *a, **k: "p1")
         monkeypatch.setattr(
             dispatch_mod, "_next_node", lambda project: {"id": "ab-9f", "slug": "x", "priority": "p2"}
         )
@@ -1336,3 +1349,82 @@ class TestAmbiguousSlotIsNotAttributable:
         )
 
         assert probe_usage(rec, now=1000.0) is None
+
+
+def test_quota_probe_is_scoped_to_the_node_repository(state_path: Path, monkeypatch, tmp_path) -> None:
+    """Every read in the route decision resolves against the NODE's repo.
+
+    An unscoped probe judges the dispatcher's own project, and an absent record
+    there reads as UNKNOWN - which proceeds instead of cutting over.
+    """
+    from fno.adapters.providers.model import QuotaConfig
+    from fno.adapters.providers.runtime_state import evaluate_quota_signal
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        loader, "load_quota_config", lambda *a, **k: seen.update(quota=k.get("repo_root")) or QuotaConfig(defer_dispatch=True)
+    )
+    import fno.adapters.providers.runtime_state as rs
+
+    monkeypatch.setattr(
+        rs, "refresh_usage", lambda pid, **k: seen.update(refresh=k.get("repo_root"))
+    )
+    evaluate_quota_signal("p1", priority="p2", now=1000.0, repo_root=tmp_path)
+    assert seen["quota"] == tmp_path
+    assert seen["refresh"] == tmp_path
+
+
+def test_a_lost_persist_does_not_turn_exhausted_into_unknown(state_path: Path, monkeypatch) -> None:
+    """A probe that saw EXHAUSTED must not read back as UNKNOWN.
+
+    UNKNOWN proceeds, so a persist that lost a lock race would launch onto the
+    very provider the probe just observed as walled.
+    """
+    from fno.adapters.providers.model import QuotaConfig
+    from fno.adapters.providers.runtime_state import HeadroomState, evaluate_quota_signal
+    import fno.adapters.providers.runtime_state as rs
+
+    monkeypatch.setattr(loader, "load_quota_config", lambda *a, **k: QuotaConfig(defer_dispatch=True))
+    # The probe returns a walled snapshot; the disk keeps nothing.
+    monkeypatch.setattr(
+        rs, "refresh_usage",
+        lambda pid, **k: _snap(pid, UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
+    )
+    sig = evaluate_quota_signal("p1", priority="p2", now=1000.0)
+    assert sig.state is HeadroomState.EXHAUSTED
+    assert sig.defer and sig.cutover
+    assert sig.resets_at == 9e18
+
+
+def test_usage_cache_does_not_bleed_between_repositories(monkeypatch, tmp_path) -> None:
+    """A record id is only unique WITHIN a repository.
+
+    The runtime-state file is project-local, so a cross-project route decision
+    must read and write the node's repo. Sharing one cache keyed by id alone
+    would let the dispatcher's own project answer for the node's.
+    """
+    from fno.adapters.providers.runtime_state import read_usage, write_usage_snapshot
+
+    # No env override: exercise the repo_root branch, not the test pin.
+    monkeypatch.delenv("FNO_RUNTIME_STATE_PATH", raising=False)
+    repo_a, repo_b = tmp_path / "a", tmp_path / "b"
+    for r in (repo_a, repo_b):
+        (r / ".fno").mkdir(parents=True)
+
+    # Same record id, different observations, one per repository.
+    assert write_usage_snapshot(
+        _snap("shared-id", UsageWindow("5h", 100.0, 9e18), probed_at=1000.0),
+        now=1000.0,
+        repo_root=repo_a,
+    )
+    assert write_usage_snapshot(
+        _snap("shared-id", UsageWindow("5h", 1.0, 9e18), probed_at=1000.0),
+        now=1000.0,
+        repo_root=repo_b,
+    )
+
+    a = read_usage("shared-id", now=1000.0, repo_root=repo_a)
+    b = read_usage("shared-id", now=1000.0, repo_root=repo_b)
+    assert a is not None and b is not None
+    assert a.windows[0].used_pct == 100.0
+    assert b.windows[0].used_pct == 1.0
