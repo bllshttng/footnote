@@ -835,7 +835,7 @@ EOF
   # it. Otherwise omit (the claim falls to ambient - degraded, but the node is
   # still claimed rather than left unclaimed on a stale install).
   _CLAIM_HARNESS_FLAG=""
-  if command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
+  if [[ -n "$_OWNED_HARNESS" ]] && command -v fno >/dev/null 2>&1 && fno claim acquire --help 2>&1 | grep -q -- '--harness'; then
     _CLAIM_HARNESS_FLAG="--harness $_OWNED_HARNESS"
   fi
 
