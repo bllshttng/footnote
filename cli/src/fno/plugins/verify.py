@@ -657,7 +657,28 @@ def _agent_binding_conditions(manifest: PackManifest, base: Path) -> list[Condit
                 )
             )
 
-        frontmatter = _read_agent_frontmatter((base / agent.source).resolve())
+        # Containment before read: an agent source that escapes the pack
+        # directory is already failed by source:agent, and verification must not
+        # read (or hang on) an arbitrary external path to inspect its tools.
+        agent_resolved = (base / agent.source).resolve()
+        base_resolved = base.resolve()
+        contained = agent_resolved == base_resolved or base_resolved in agent_resolved.parents
+        if not contained:
+            for cond_name in (
+                f"agent-tools-bounded:{agent.id}",
+                f"agent-frontmatter-identity:{agent.id}",
+            ):
+                conditions.append(
+                    Condition(
+                        ConditionFamily.SCHEMA,
+                        cond_name,
+                        checked=True,
+                        result=EvidenceResult.BLOCKED,
+                        detail=f"{agent.source} escapes the pack directory; not read",
+                    )
+                )
+            continue
+        frontmatter = _read_agent_frontmatter(agent_resolved)
         if frontmatter is None:
             conditions.append(
                 Condition(

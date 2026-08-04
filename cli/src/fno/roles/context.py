@@ -18,6 +18,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
+from fno.paths import resolve_repo_root
 from fno.roles.models import ContextKind, ContextReference, Sensitivity
 
 __all__ = ["build_artifact_catalog", "catalog_revision"]
@@ -79,7 +80,10 @@ def build_artifact_catalog(
     references: list[ContextReference] = []
     for identifier, spec in artifacts.items():
         sensitivity = _artifact_sensitivity(spec)
-        resolved = Path(_artifact_path(spec)).expanduser()
+        raw_path = Path(_artifact_path(spec)).expanduser()
+        # Anchor relative paths to the repo root, not the process cwd, so the
+        # same configuration resolves the same file wherever the command runs.
+        resolved = raw_path if raw_path.is_absolute() else resolve_repo_root() / raw_path
         try:
             data = resolved.read_bytes()
         except OSError as exc:

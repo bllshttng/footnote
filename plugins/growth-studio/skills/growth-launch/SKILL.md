@@ -21,8 +21,11 @@ costs a bounded two dispatches and then stops.
 ## 1. Activation gate
 
 Run `fno plugins ls`.
-If growth-studio is absent or not active, print exactly this line and stop with
-a non-zero exit, creating no campaign directory and falling back to nothing:
+If growth-studio is absent or not active, print the activate command for this
+pack's `plugin.yaml` and stop with a non-zero exit, creating no campaign
+directory and falling back to nothing. The path is the pack's source manifest:
+in this (dogfood) checkout that is `plugins/growth-studio/plugin.yaml`; in a
+consuming project it is wherever that project installed the pack:
 
     fno plugins activate plugins/growth-studio/plugin.yaml
 
