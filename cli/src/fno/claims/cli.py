@@ -109,6 +109,16 @@ def acquire(
     ),
     json_output: bool = typer.Option(False, "--json", "-J", help="Emit JSON to stdout"),
     verbose: bool = typer.Option(False, "--verbose", help="More detail on stderr"),
+    harness: Optional[str] = typer.Option(
+        None,
+        "--harness",
+        help=(
+            "Pin the owning harness on the claim instead of resolving it from "
+            "ambient markers. The init hook passes the PROVEN harness here so a "
+            "session that inherited a foreign marker does not tag its claim with "
+            "the precedence winner."
+        ),
+    ),
 ) -> None:
     """Acquire a claim on KEY for HOLDER. Idempotent re-acquire if HOLDER matches."""
     # ponytail: an omitted --pid used to anchor to the TRANSIENT acquiring process
@@ -132,6 +142,7 @@ def acquire(
             ttl_ms=_parse_ttl(ttl),
             metadata=_parse_metadata(metadata),
             pid=pid,
+            harness=harness,
             root=_node_aware_root(key),
         )
     except ClaimValidationError as exc:

@@ -163,3 +163,58 @@ def test_emit_swallows_oserror_and_warns(
     captured = capsys.readouterr()
     assert "warning" in captured.err.lower()
     assert "agent_test" in captured.err
+
+
+def test_emit_identity_resolution_records_markers_disposition_collision(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """AC5-CON: a non-trivial harness resolution is reconstructable from one
+    event record - every marker present, the disposition, the resolved harness,
+    and the owning row when a candidate id was refused."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.events import (
+        KIND_HARNESS_IDENTITY_RESOLVED,
+        emit_identity_resolution,
+    )
+    from fno.harness_identity import OwnedHarnessIdentity
+
+    events_path = tmp_path / ".fno" / "events.jsonl"
+    owned = OwnedHarnessIdentity(
+        session_id="mine",
+        harness="claude",
+        markers_present=(
+            ("CODEX_THREAD_ID", "codex", "foreign"),
+            ("CLAUDE_CODE_SESSION_ID", "claude", "mine"),
+        ),
+        disposition="proven",
+        rejected=(
+            {
+                "marker": "CODEX_THREAD_ID",
+                "harness": "codex",
+                "session_id": "foreign",
+                "reason": "owned_by_live_row",
+                "owner": "7ebb186c",
+            },
+        ),
+    )
+    emit_identity_resolution(owned, path=events_path)
+
+    rec = json.loads(events_path.read_text(encoding="utf-8").strip())
+    assert rec["kind"] == KIND_HARNESS_IDENTITY_RESOLVED
+    assert rec["disposition"] == "proven"
+    assert rec["harness"] == "claude"
+    assert rec["session_id"] == "mine"
+    assert {
+        "marker": "CODEX_THREAD_ID",
+        "harness": "codex",
+        "session_id": "foreign",
+    } in rec["markers_present"]
+    assert {
+        "marker": "CLAUDE_CODE_SESSION_ID",
+        "harness": "claude",
+        "session_id": "mine",
+    } in rec["markers_present"]
+    assert rec["rejected"][0]["owner"] == "7ebb186c"
+    assert rec["rejected"][0]["session_id"] == "foreign"
+    assert rec["rejected"][0]["reason"] == "owned_by_live_row"
+

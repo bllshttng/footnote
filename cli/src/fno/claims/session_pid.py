@@ -67,27 +67,39 @@ def _candidate_strings(proc: psutil.Process) -> Iterator[tuple[str, bool]]:
             yield value, True
 
 
-def _matches_harness(proc: psutil.Process) -> bool:
-    """True iff PROC is a recognized harness session binary."""
+def _harness_name_of(proc: psutil.Process) -> Optional[str]:
+    """The harness name PROC runs as, or None when it is not a harness binary.
+
+    ``claude`` matches by substring on name/exe only (its versioned binary hides
+    the name in the exe path, and a ``.claude/`` install segment in a wrapper
+    argv must not match - codex P1, PR #419); the rest match by exact path
+    SEGMENT, never substring (``agy`` is a substring of ``legacy``; the ChatGPT
+    desktop tree is full of non-``codex`` segments). The returned name IS the
+    harness, so a caller can prove which session id this process owns.
+    """
     for cand, is_cmdline in _candidate_strings(proc):
         low = cand.lower()
-        # claude: substring match, but NEVER against a cmdline entry. argv carries
-        # full paths that often contain a `.claude/` install segment - a wrapper
-        # `bash ~/.claude/plugins/fno/hooks/.../init-target-state.sh` is an
-        # ancestor of `fno claim session-pid`, and a substring test there would
-        # match that transient shell and return its short-lived pid instead of the
-        # real long-lived claude process (codex P1, PR #419). name/exe of such a
-        # wrapper are just `bash`/`/bin/bash`, so the substring rule stays sound.
+        # Claude matches by substring on name/exe ONLY (its versioned binary
+        # embeds the name in the exe path and the basename alone may not carry
+        # it), never on a cmdline entry - a dedicated test pins that a wrapper
+        # path on the command line does not prove claude.
         if not is_cmdline and "claude" in low:
-            return True
-        for seg in low.split("/"):
-            # Segment-exact tokens are safe on argv too: a path segment equals a
-            # token only when it IS the harness binary. Compare the segment and
-            # its extension-stripped stem, so both `bin/gemini` and
-            # `bundle/gemini.js` match `gemini`.
-            if seg in _SEGMENT_TOKENS or seg.rsplit(".", 1)[0] in _SEGMENT_TOKENS:
-                return True
-    return False
+            return "claude"
+        # Other harnesses match the executable/script BASENAME token (stem drops
+        # one extension, gemini.js -> gemini); intermediate path segments never
+        # count, so /tmp/codex/wrapper.sh does not prove codex.
+        basename = low.rsplit("/", 1)[-1]
+        if basename in _SEGMENT_TOKENS:
+            return basename
+        stem = basename.rsplit(".", 1)[0]
+        if stem in _SEGMENT_TOKENS:
+            return stem
+    return None
+
+
+def _matches_harness(proc: psutil.Process) -> bool:
+    """True iff PROC is a recognized harness session binary."""
+    return _harness_name_of(proc) is not None
 
 
 def resolve_session_pid(from_pid: Optional[int] = None) -> Optional[int]:
@@ -136,4 +148,37 @@ def resolve_session_pid(from_pid: Optional[int] = None) -> Optional[int]:
     return None
 
 
-__all__ = ["resolve_session_pid"]
+def resolve_session_harness(from_pid: Optional[int] = None) -> Optional[str]:
+    """The harness of this process's nearest harness ancestor, or None.
+
+    The companion of :func:`resolve_session_pid`: the same ancestor walk,
+    returning the harness NAME rather than the pid. A process owns the harness
+    of its nearest harness ancestor (a claude worker spawned by codex anchors to
+    claude, not codex), so this is the strong, process-tree proof of which
+    harness an ambient session id belongs to. That distinguishes a marker this
+    process minted from one it merely inherited - the difference between
+    resolving a claude session correctly and laundering a foreign
+    CODEX_THREAD_ID into its identity.
+
+    Degrades to None when no harness ancestor is found (a plain shell), so a
+    caller treats "unproven" and "no ancestor" identically.
+    """
+    start = from_pid if from_pid is not None else os.getppid()
+    try:
+        proc: Optional[psutil.Process] = psutil.Process(start)
+    except (psutil.NoSuchProcess, psutil.AccessDenied, ValueError):
+        return None
+    depth = 0
+    while proc is not None and depth < _MAX_DEPTH:
+        name = _harness_name_of(proc)
+        if name is not None:
+            return name
+        try:
+            proc = proc.parent()
+        except _PSUTIL_ERRORS:
+            return None
+        depth += 1
+    return None
+
+
+__all__ = ["resolve_session_pid", "resolve_session_harness"]

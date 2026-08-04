@@ -854,6 +854,19 @@ def _mesh_env_wrapper(
         f"FNO_AGENT_ROW_PENDING={name}",
     ]
     unset: list[str] = []
+    # A spawned child inherits its parent's ROUTE (account, model, node
+    # provenance below) but never its parent's IDENTITY. An ambient session
+    # marker riding through this seam is exactly how a claude worker spawned
+    # from a codex parent comes to carry a foreign CODEX_THREAD_ID and resolve
+    # as the wrong harness; each harness re-mints its own marker for the child
+    # process, so scrubbing the inherited set is lossless. AMBIENT_IDENTITY_ENV
+    # is identity-only (the resolver tuples plus the direct-read legacy markers
+    # like CLAUDECODE_SESSION_ID), never routing, so an account or auth var
+    # cannot be swept here. `env -u` on an unset var is a harmless no-op.
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+
+    for _id_name in AMBIENT_IDENTITY_ENV:
+        unset += ["-u", _id_name]
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")

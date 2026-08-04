@@ -39,6 +39,13 @@ pass "init script passes bash -n"
 _ALL_TMPS=()
 trap 'rm -rf "${_ALL_TMPS[@]}"' EXIT
 
+# Scrub inherited harness markers so each scenario's env is exactly what it
+# sets: the invoking session's CLAUDE_CODE_SESSION_ID etc. would otherwise leak
+# into every subshell and flip the disagreement detection. A no-op in CI (which
+# sets none of these) and a scrub under an interactive harness.
+unset CLAUDE_CODE_SESSION_ID CLAUDECODE_SESSION_ID CODEX_THREAD_ID \
+      CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID TARGET_TRANSCRIPT_ID 2>/dev/null || true
+
 # ── Helper: create an isolated temp repo ─────────────────────────────
 make_repo() {
   local _varname="$1"
@@ -198,7 +205,6 @@ _ALL_TMPS+=("$TMP_D")
   TARGET_INPUT="test-codex-thread-id" \
   CODEX_THREAD_ID="019f48e4-codex-thread" \
   TARGET_SESSION_ID= \
-  CLAUDE_CODE_SESSION_ID="claude-transcript-stays-separate" \
   TARGET_LOCATION_OK="main-acknowledged" \
   bash "$INIT" >/dev/null 2>&1) \
   || fail "(d): init exited non-zero"
@@ -208,15 +214,12 @@ STATE_D="${TMP_D}/.fno/target-state.md"
 
 SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 CODEX_THREAD_ID_D=$(grep '^codex_thread_id:' "$STATE_D" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
-CLAUDE_SESSION_ID_D=$(grep '^claude_session_id:' "$STATE_D" | sed 's/^claude_session_id:[[:space:]]*//' | tr -d '\r')
 echo "$SESSION_ID_D" | grep -qE '^[0-9]{8}T[0-9]{6}Z-cx[0-9]+-[0-9a-f]{6}$' \
   || fail "(d): expected unique cx-tagged target session_id, got '${SESSION_ID_D}'"
 [[ "$SESSION_ID_D" != "019f48e4-codex-thread" ]] \
   || fail "(d): stable Codex thread was reused as the target session_id"
 [[ "$CODEX_THREAD_ID_D" == "019f48e4-codex-thread" ]] \
   || fail "(d): expected codex_thread_id in manifest, got '${CODEX_THREAD_ID_D}'"
-[[ "$CLAUDE_SESSION_ID_D" == "claude-transcript-stays-separate" ]] \
-  || fail "(d): Claude transcript semantics changed, got '${CLAUDE_SESSION_ID_D}'"
 pass "(d): Codex thread remains owner metadata while target session id is unique"
 
 # A successful finalize event is the explicit run boundary for claimless
@@ -259,5 +262,12 @@ SESSION_ID_F=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^ses
 [[ "$SESSION_ID_F" != "$SESSION_ID_E" ]] \
   || fail "(d): shipped target reused session_id '${SESSION_ID_E}'"
 pass "(d): NoWork and shipped terminal boundaries both rotate claimless runs"
+
+# AC1-HP (claude wins over an inherited foreign codex id) and AC3-ERR (the id a
+# live row owns is refused) are proven at the verb level in Python
+# (test_target_cli.py::test_resolve_owned_identity_verb_refuses_collision):
+# the bash hook cannot reliably invoke the source verb during THIS PR's CI,
+# because the PATH-resolved `fno` predates the verb. Post-merge the deployed
+# fno carries it and the hook exercises it identically to the local e2e.
 
 log "All session_id scenarios passed"

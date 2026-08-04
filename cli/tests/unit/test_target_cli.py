@@ -1320,3 +1320,47 @@ def test_check_contained_says_so_when_the_graph_lock_is_unavailable(tmp_path,
     assert result.exit_code == 9, result.output
     assert "UNSERIALIZED" in result.output
     assert "no lock for you" in result.output
+
+
+def test_resolve_owned_identity_verb_refuses_collision_resolves_claude(
+    tmp_path, monkeypatch
+) -> None:
+    """AC1-HP + AC3-ERR at the verb: a CODEX_THREAD_ID a live row already owns
+    is refused and the proven claude marker wins.
+
+    Proven in Python so it does not depend on the PATH-resolved `fno` carrying
+    the verb - the bash hook test's CI limitation, since the PR's own CI runs a
+    `fno` that predates the verb. The prover is pinned to claude (a real claude
+    process's view) so the claude marker is proven and wins; the foreign codex
+    marker is refused as another live row's. CI-robust: no real process tree.
+    """
+    from fno.agents.registry import register_existing_session
+    from fno.paths_testing import use_tmpdir
+
+    use_tmpdir(monkeypatch, tmp_path)
+    foreign = "019fc87d-ddff-7c90-926a-6bdd7ebb186c"
+    owner = register_existing_session(
+        provider="codex", session_id=foreign, cwd="/x"
+    ).name
+    # Pin the prover to claude (what a real claude session's process tree sees),
+    # so the test does not depend on the runner's actual harness.
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: "claude",
+    )
+    monkeypatch.setenv("CODEX_THREAD_ID", foreign)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "aaaa1111-mine")
+
+    result = runner.invoke(app, ["target", "resolve-owned-identity"])
+    assert result.exit_code == 0, result.output
+    fields = {
+        line.split("=", 1)[0]: line.split("=", 1)[1]
+        for line in result.stdout.splitlines()
+        if "=" in line
+    }
+    assert fields["HARNESS"] == "claude"
+    assert fields["SESSION_ID"] == "aaaa1111-mine"
+    assert fields["DISPOSITION"] == "proven"
+    assert fields["COLLISION"] == owner
+    assert fields["COLLISION_ID"] == foreign
+

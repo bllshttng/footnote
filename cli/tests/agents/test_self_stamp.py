@@ -19,10 +19,26 @@ _IDENTITY_MARKERS = (
 )
 
 
+_HARNESS_BY_MARKER = {
+    "CODEX_THREAD_ID": "codex",
+    "CLAUDE_CODE_SESSION_ID": "claude",
+    "CODEX_SESSION_ID": "codex",
+    "GEMINI_SESSION_ID": "gemini",
+    "OPENCODE_SESSION_ID": "opencode",
+}
+
+
 def _set_identity(monkeypatch, marker, session_id):
     for name in _IDENTITY_MARKERS:
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv(marker, session_id)
+    # The stamper proves ownership via the process tree; pin it to the marker's
+    # harness so these tests are independent of which harness runs pytest (a
+    # codex runner would otherwise contradict a CLAUDE marker and floor it).
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: _HARNESS_BY_MARKER.get(marker),
+    )
 
 
 def _write_claude_transcript(projects_dir, *, session_id, model):

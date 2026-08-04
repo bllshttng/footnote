@@ -851,6 +851,75 @@ def check_review_gate() -> None:
         raise typer.Exit(code=REVIEW_GATE_REFUSED) from None
 
 
+@target_app.command("resolve-owned-identity", hidden=True)
+def resolve_owned_identity_cmd() -> None:
+    """Resolve the harness identity this process can PROVE it owns.
+
+    The init hook has no Python and must stamp ``harness``/``harness_session_id``
+    on the manifest; precedence alone launders an inherited marker into
+    ownership, so it calls this verb instead. Returns the proven (or
+    collision-surviving) identity plus any collision detected, as ``KEY=value``
+    lines on stdout. The caller parses what it needs and treats a stale ``fno``
+    without this verb (Click exit 2) as 'unavailable', falling back to today's
+    precedence rather than bricking init.
+
+    The prover is process-tree truth: the harness of the nearest harness
+    ancestor is the one marker this process minted, so a foreign marker it
+    merely inherited never wins. The collider is the cause-agnostic backstop:
+    an id a live registry row already owns is provably not this session's. With
+    neither available the resolver still falls through to the sole
+    non-colliding survivor rather than guessing by precedence.
+
+    Read-only; writes no state. Always exits 0 - it is a resolver, not a gate.
+    """
+    from fno.agents.registry import row_owning_session_id
+    from fno.claims.session_pid import resolve_session_harness
+    from fno.harness_identity import resolve_owned_identity
+
+    true_harness = resolve_session_harness()
+
+    # The hook's claude session id may arrive as TARGET_TRANSCRIPT_ID (a footnote
+    # hook input) when CLAUDE_CODE_SESSION_ID is not in the env; honor it as the
+    # claude marker so a claude hook that exposes its id only through hook input
+    # can still prove and stamp its identity.
+    env = dict(os.environ)
+    if not (env.get("CLAUDE_CODE_SESSION_ID") or "").strip() and (
+        env.get("TARGET_TRANSCRIPT_ID") or ""
+    ).strip():
+        env["CLAUDE_CODE_SESSION_ID"] = env["TARGET_TRANSCRIPT_ID"]
+
+    def _prove(harness: str, _sid: str) -> Optional[bool]:
+        # Three states: True (this process mints this harness), False (the
+        # process tree resolves to a DIFFERENT harness, so this marker is
+        # foreign), None (no harness ancestor found - CI / degraded - cannot
+        # tell). Only True skips the collision check; None falls through to
+        # collision-elimination so the verb still resolves in a headless runner.
+        if true_harness is None:
+            return None
+        return harness == true_harness
+
+    owned = resolve_owned_identity(
+        env,
+        prove=_prove,
+        collide=lambda _harness, sid: row_owning_session_id(sid),
+    )
+    # AC5-CON: record any non-trivial resolution (a refused collision or a
+    # non-single disposition) so a future leak is reconstructable from the event
+    # log alone. A single-family resolve can still carry a refused collision, so
+    # emit on rejected too.
+    if owned.disposition in {"proven", "ambiguous"} or owned.rejected:
+        from fno.agents.events import emit_identity_resolution
+
+        emit_identity_resolution(owned)
+    rejected = owned.rejected[0] if owned.rejected else {}
+    typer.echo(f"HARNESS={owned.harness or ''}")
+    typer.echo(f"SESSION_ID={owned.session_id or ''}")
+    typer.echo(f"DISPOSITION={owned.disposition}")
+    typer.echo(f"COLLISION={rejected.get('owner', '')}")
+    typer.echo(f"COLLISION_ID={rejected.get('session_id', '')}")
+    typer.echo(f"COLLISION_MARKER={rejected.get('marker', '')}")
+
+
 @target_app.command("check-contained", hidden=True)
 def check_contained() -> None:
     """Refuse a contained node for a non-Python caller (x-e957 task 1.3b).

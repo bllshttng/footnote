@@ -987,16 +987,32 @@ pub fn resolve_harness() -> Option<String> {
 }
 
 /// Testable core of [`resolve_harness`]: `get` supplies each marker's value so
-/// the precedence contract is exercised without mutating process-global env.
+/// the resolution contract is exercised without mutating process-global env.
 /// A set-but-blank marker is UNSET (matches the Python `.strip()` check), so a
 /// lower-precedence real marker still wins.
+///
+/// A single harness family present (the dominant case: one marker, or several
+/// that agree) resolves to it. Two DISAGREEING families are ambiguous, and
+/// precedence must not silently launder an inherited marker - a foreign
+/// CODEX_THREAD_ID lingering in a claude child's env - into the claim's harness
+/// tag. The Rust writer cannot prove which marker this process owns (that needs
+/// a process-tree/transcript check the Python resolver does), so it records
+/// `None` for the ambiguous case rather than guessing; the authoritative proven
+/// harness is stamped on the manifest by the init hook via that resolver.
 pub fn resolve_harness_from(get: impl Fn(&str) -> Option<String>) -> Option<String> {
+    let mut resolved: Option<&'static str> = None;
     for (marker, harness) in HARNESS_SESSION_MARKERS {
         if get(marker).map(|v| !v.trim().is_empty()).unwrap_or(false) {
-            return Some((*harness).to_string());
+            if let Some(prev) = resolved {
+                if prev != *harness {
+                    return None;
+                }
+            } else {
+                resolved = Some(*harness);
+            }
         }
     }
-    None
+    resolved.map(|h| h.to_string())
 }
 
 fn make_claim(key: &str, holder: &str, opts: &AcquireOpts) -> ClaimRecord {
@@ -1805,14 +1821,22 @@ mod tests {
     }
 
     #[test]
-    fn resolve_harness_precedence_and_blank_is_unset() {
-        // Highest-precedence marker wins.
+    fn resolve_harness_single_family_wins_disagreement_is_unknown() {
+        // Two DISAGREEING families are ambiguous: precedence must not pick codex
+        // and tag the claim with a harness this process cannot prove it owns.
         let both = |k: &str| match k {
             "CODEX_THREAD_ID" => Some("cx".to_string()),
             "CLAUDE_CODE_SESSION_ID" => Some("cl".to_string()),
             _ => None,
         };
-        assert_eq!(resolve_harness_from(both).as_deref(), Some("codex"));
+        assert_eq!(resolve_harness_from(both).as_deref(), None);
+        // Two markers of ONE family agree -> that family, not ambiguous.
+        let same_family = |k: &str| match k {
+            "CODEX_THREAD_ID" => Some("cx".to_string()),
+            "CODEX_SESSION_ID" => Some("cx2".to_string()),
+            _ => None,
+        };
+        assert_eq!(resolve_harness_from(same_family).as_deref(), Some("codex"));
         // A blank higher-precedence marker is UNSET; a lower real one still wins.
         let blank_hi = |k: &str| match k {
             "CODEX_THREAD_ID" => Some("   ".to_string()),

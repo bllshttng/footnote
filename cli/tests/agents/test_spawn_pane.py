@@ -1120,6 +1120,68 @@ def test_ad_hoc_spawn_exports_no_provenance(tmp_path: Path, monkeypatch) -> None
     )
 
 
+def test_mesh_env_wrapper_scrubs_inherited_session_identity() -> None:
+    """AC6-HP: a spawned child inherits its parent's ROUTE but never its
+    parent's IDENTITY. An ambient session marker riding through this seam is
+    exactly how a claude worker spawned from a codex parent comes to carry a
+    foreign CODEX_THREAD_ID and resolves as the wrong harness. Each harness
+    re-mints its own marker for the child, so scrubbing the inherited set is
+    lossless.
+
+    Every name in AMBIENT_IDENTITY_ENV must be unset (the direct-read legacy
+    markers like CLAUDECODE_SESSION_ID are included, not just the resolver
+    tuple), while a routing var survives untouched.
+    """
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+
+    wrapper = _mesh_env_wrapper(
+        "child-1",
+        "claude",
+        role=None,
+        argv=["claude", "--print", "hi"],
+        account_env={"CLAUDE_CONFIG_DIR": "/acct"},
+        route_env={"ANTHROPIC_API_KEY": "sk-route"},
+    )
+    assert wrapper[0] == "env"
+    unset_names = {
+        wrapper[i + 1] for i, token in enumerate(wrapper) if token == "-u"
+    }
+    # Every ambient identity name is unset, whatever the harness family.
+    for name in AMBIENT_IDENTITY_ENV:
+        assert name in unset_names, f"identity marker {name} not scrubbed"
+
+    # No identity name is re-assigned to the child.
+    assignments = {
+        token.split("=", 1)[0]
+        for token in wrapper
+        if isinstance(token, str) and "=" in token and not token.startswith("-")
+    }
+    for name in AMBIENT_IDENTITY_ENV:
+        assert name not in assignments, f"identity marker {name} re-exported"
+
+    # Routing survives the scrub: route and account vars are untouched.
+    assert "ANTHROPIC_API_KEY=sk-route" in wrapper
+    assert "CLAUDE_CONFIG_DIR=/acct" in wrapper
+
+
+def test_mesh_env_wrapper_scrubs_identity_for_every_provider() -> None:
+    """AC6-HP: the scrub is not claude-specific. A codex pane spawned from a
+    claude parent sheds CLAUDE_CODE_SESSION_ID the same way; identity is
+    per-process, never inherited, for every harness family."""
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    for provider in ("codex", "gemini", "opencode", "agy", "claude"):
+        wrapper = _mesh_env_wrapper(
+            "child", provider, role=None, argv=["shell", "-c", "true"]
+        )
+        unset_names = {
+            wrapper[i + 1] for i, token in enumerate(wrapper) if token == "-u"
+        }
+        assert "CLAUDE_CODE_SESSION_ID" in unset_names
+        assert "CODEX_THREAD_ID" in unset_names
+
+
 def test_resolve_provenance_branches(tmp_path: Path, monkeypatch) -> None:
     """resolve_provenance: explicit slug/plan skip the graph read; a linked plan
     yields FNO_PLAN, an empty one drops it; no node -> {}."""

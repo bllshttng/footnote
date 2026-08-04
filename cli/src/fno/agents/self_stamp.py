@@ -14,10 +14,22 @@ import json
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
-from fno.harness_identity import canonical_handle, resolve_harness_identity
+from fno.harness_identity import canonical_handle, resolve_owned_identity
 
 _TAIL_BYTES = 256 * 1024
 _EXPANDED_TAIL_BYTES = 2 * 1024 * 1024
+
+
+def _owned_ident(env: Optional[Mapping[str, str]] = None):
+    """Owned identity with the process-tree prover wired, so a foreign marker
+    this process inherited is contradicted (not stamped) even from a stamper
+    that has no registry collider. ``None`` harness-ancestor -> no proof
+    attested (single marker still resolves, disagreement degrades)."""
+    from fno.claims.session_pid import resolve_session_harness
+
+    true_harness = resolve_session_harness()
+    prove = None if true_harness is None else (lambda harness, sid: harness == true_harness)
+    return resolve_owned_identity(env, prove=prove)
 
 
 def stamp_from(from_name: Optional[str]) -> str:
@@ -30,7 +42,11 @@ def stamp_from(from_name: Optional[str]) -> str:
     """
     if from_name is not None:
         return from_name
-    ident = resolve_harness_identity()
+    # Owned resolution with the process-tree prover: a session that inherited a
+    # foreign marker is contradicted and floors to "fno" rather than address the
+    # return leg to a stranger. A single marker (the dominant case, and any
+    # worker after the spawn-time scrub) resolves to its own handle.
+    ident = _owned_ident()
     if ident.session_id and ident.harness:
         return canonical_handle(ident.session_id)
     return "fno"
@@ -43,7 +59,7 @@ def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:
     ``turn_context``. Any miss (no ambient identity, unreadable store, no match)
     floors to ``"unknown"`` so a send is never blocked on model resolution.
     """
-    ident = resolve_harness_identity(env)
+    ident = _owned_ident(env)
     if not ident.session_id or not ident.harness:
         return "unknown"
     try:
