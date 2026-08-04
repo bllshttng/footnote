@@ -211,6 +211,7 @@ source = { editable = "." }
 dependencies = [
     { name = "click" },
     { name = "filelock" },
+    { name = "packaging" },
     { name = "psutil" },
     { name = "pydantic" },
     { name = "pyyaml" },
@@ -234,6 +235,7 @@ dev = [
 requires-dist = [
     { name = "click", specifier = ">=8.1" },
     { name = "filelock", specifier = ">=3.12" },
+    { name = "packaging", specifier = ">=23.1" },
     { name = "psutil", specifier = ">=5.9" },
     { name = "pydantic", specifier = ">=2" },
     { name = "pyyaml", specifier = ">=6" },

@@ -1,0 +1,116 @@
+# Function-pack manifest for the growth studio.
+#
+# This is content, not code: nothing in cli/src/fno/plugins/ branches on the pack
+# id or on any function name below. The pack is discovered by path and validated
+# by schema. Every role declares approval_floor founder for external publication
+# and an authority_ceiling no higher than internal for drafting, so a higher layer
+# can tighten but never loosen it. permissions is a MAXIMUM EXPECTED EFFECT
+# CEILING for review; activation grants none of it.
+id: growth-studio
+version: 0.1.0
+footnote_compat:
+  minimum: "0.3.0"
+
+roles:
+  - role: {id: marketing, function_id: growth-studio}
+    function: {id: growth-studio}
+    mission: draft and ship marketing campaigns grounded in verified product truth and approved brand context
+    deliverable_kinds: [campaign-plan, published-post]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [factual-review, brand-review]
+    delivery_policy:
+      required_evidence: [factual-review, brand-review]
+      require_all_deliverables: true
+    default_topology: pipeline
+    approval_floor: founder
+
+  - role: {id: communications, function_id: growth-studio}
+    function: {id: growth-studio}
+    mission: draft external communications and statements that stay factually accurate and on brand
+    deliverable_kinds: [press-draft, statement]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [factual-review, brand-review]
+    delivery_policy:
+      required_evidence: [factual-review, brand-review]
+      require_all_deliverables: true
+    default_topology: loop
+    approval_floor: founder
+
+  - role: {id: design, function_id: growth-studio}
+    function: {id: growth-studio}
+    mission: produce reviewable rendered design artifacts with accessibility evidence, not source files alone
+    deliverable_kinds: [rendered-mock, design-system-asset]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [factual-review, brand-review, accessibility-review]
+    delivery_policy:
+      required_evidence: [factual-review, accessibility-review]
+      require_all_deliverables: true
+    default_topology: squad
+    approval_floor: founder
+
+  - role: {id: social, function_id: growth-studio}
+    function: {id: growth-studio}
+    mission: draft and schedule social content grounded in verified product truth and approved brand context
+    deliverable_kinds: [social-post, social-calendar]
+    authority_ceiling: internal
+    review_policy:
+      required: true
+      minimum_reviewers: 1
+      required_review_kinds: [factual-review, brand-review]
+    delivery_policy:
+      required_evidence: [factual-review, brand-review]
+      require_all_deliverables: true
+    default_topology: direct
+    approval_floor: founder
+
+workflows:
+  - id: launch
+    source: workflows/launch.yaml
+
+evaluators:
+  - id: factual-review
+    command: fno growth factual-check
+    required: true
+  - id: brand-review
+    command: fno growth brand-check
+    required: true
+  - id: accessibility-review
+    command: fno growth accessibility-check
+    required: true
+
+adapters:
+  - id: social-publisher
+    destination: social-network
+    conformance:
+      adapter_id: social-publisher
+      adapter_version: 0.1.0
+      remote_idempotency: true
+      reconciliation: false
+
+assets:
+  - id: brand-voice
+    source: assets/brand-voice.md
+  - id: product-truth
+    source: assets/product-truth.md
+
+# permissions: the pack's MAXIMUM EXPECTED EFFECT ceiling for review, not a grant.
+# The destination is a declared external surface; activation grants nothing and
+# the approval authority is unchanged, so this effect still requires founder
+# approval exactly as it did before activation.
+permissions:
+  - effect_class: external.publication
+    destination: social-network
+
+scenarios:
+  - id: launch-smoke
+    command: bash scenarios/launch-smoke.sh
+    recorded_result: passed

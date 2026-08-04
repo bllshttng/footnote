@@ -78,6 +78,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Company campaign inspection and proposals.",
         {"hidden": True},
     ),
+    "plugins": (
+        "fno.plugins.cli:plugins_app",
+        "Install, verify, activate, and inspect function packs.",
+        {"hidden": True},
+    ),
     "log": (
         "fno.log_cmd:app",
         "Append a progress entry to the per-worktree agent-progress.jsonl",
