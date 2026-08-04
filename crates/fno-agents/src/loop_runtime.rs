@@ -72,14 +72,6 @@ pub enum LoopError {
     #[error("queue error: {0}")]
     Queue(String),
 
-    /// Walk policy requests a pause. Not a true error: `run_loop` maps it to a
-    /// `walk_paused` journal event + `TerminationReason::NoProgress`. Kept
-    /// distinct from `Queue` so a real queue error whose message happens to
-    /// start with `pause:` can never be misrouted to the pause path. Structural
-    /// twin of `NextStep::Pause`, carrying the same typed `policy`/`detail`.
-    #[error("walk paused (policy={policy}): {detail}")]
-    Pause { policy: String, detail: String },
-
     /// Dispatcher operation failed.
     #[error("dispatch error: {0}")]
     Dispatch(String),
@@ -142,32 +134,6 @@ pub struct DispatchCtx {
     pub iteration: u64,
 }
 
-// ── NextStep ──────────────────────────────────────────────────────────────────
-
-/// The richer return type for Queue::next_step(). Used by policy-aware queues
-/// to signal a walk-level pause without returning an error.
-///
-/// - `Dispatch(Unit)`: there is work to do; dispatch this unit.
-/// - `Drained`: the queue is empty; the walk may complete with NoWork.
-/// - `Pause{policy, detail}`: walk policy says stop; run_loop maps this to
-///   walk_paused + loop_terminated{reason: NoProgress}.
-///
-/// Queues that do not implement walk policy (TargetQueue) return only
-/// Dispatch / Drained (i.e., they translate their Option<Unit> to these two).
-pub enum NextStep {
-    /// There is a unit ready to dispatch.
-    Dispatch(Unit),
-    /// The queue is empty; no more work.
-    Drained,
-    /// Walk policy requests a pause.
-    Pause {
-        /// Short tag: "consecutive_failures" | "p0_failed".
-        policy: String,
-        /// Human-readable detail (unit IDs involved, streak count, etc.).
-        detail: String,
-    },
-}
-
 // ── traits ────────────────────────────────────────────────────────────────────
 
 /// Source of work units. Each call to `next` either returns the next unit to
@@ -175,36 +141,14 @@ pub enum NextStep {
 ///
 /// ## Why `&mut self` (F8 rationale)
 ///
-/// Group-2 megawalk Queue carries real cursor state (current position in the
-/// backlog, consecutive-failure counters, etc.). Using `&self` would force
-/// pointless `Mutex`-wrapping for state that is inherently sequential in the
+/// A Queue can carry real cursor state. Using `&self` would force pointless
+/// `Mutex`-wrapping for state that is inherently sequential in the
 /// single-threaded walk loop. No threading requirement exists at this seam:
 /// `run_loop` is always called from a single thread. `&mut self` is the natural
 /// fit and avoids unnecessary interior-mutability noise.
 pub trait Queue {
     /// Return the next unit, or `None` if the queue is empty.
-    ///
-    /// Queues that implement walk policy should use `next_step()` instead.
-    /// This default impl calls `next_step()` and
-    /// maps Dispatch->Some, Drained->None, Pause->Err(LoopError::Pause{..}).
-    fn next(&mut self) -> Result<Option<Unit>, LoopError> {
-        match self.next_step()? {
-            NextStep::Dispatch(u) => Ok(Some(u)),
-            NextStep::Drained => Ok(None),
-            NextStep::Pause { policy, detail } => Err(LoopError::Pause { policy, detail }),
-        }
-    }
-
-    /// Richer variant of `next()` that can signal a walk-level pause.
-    /// Policy-aware queues override this; simple queues (TargetQueue) can
-    /// leave the default which panics (they override `next()` directly instead).
-    ///
-    /// The default panics to make missing overrides detectable at test time.
-    fn next_step(&mut self) -> Result<NextStep, LoopError> {
-        // Default: not implemented. Queues override exactly one of next() or
-        // next_step(); TargetQueue overrides next() only (returns Option).
-        panic!("Queue::next_step() not implemented; override next() or next_step()");
-    }
+    fn next(&mut self) -> Result<Option<Unit>, LoopError>;
 
     /// Mark a unit as closed (done/parked/refused) given the termination
     /// evidence extracted from the journal.
@@ -633,8 +577,6 @@ fn is_bg_guard_refusal(exit_code: i32, output_tail: Option<&str>) -> bool {
 /// loop:
 ///   check cancel -> Interrupted
 ///   unit = queue.next()  -> None: NoWork
-///                        -> Err(LoopError::Pause{policy, detail}):
-///                             journal walk_paused + loop_terminated(NoProgress) -> NoProgress
 ///   resume guard: if journal has a termination event for unit.session_key,
 ///     close the unit without dispatching, journal node_closed, and continue.
 ///   inner dispatch loop:
@@ -694,8 +636,7 @@ pub fn run_loop(
         // queue.next() may return:
         //   Ok(None)  -> backlog empty -> NoWork
         //   Ok(Some)  -> dispatch this unit
-        //   Err(LoopError::Pause{policy, detail}) -> walk policy pause -> NoProgress
-        //   Err(other) -> hard failure (a real LoopError::Queue now falls here)
+        //   Err(other) -> hard failure (a real LoopError::Queue falls here)
         let unit = match queue.next() {
             Ok(None) => {
                 journal.append(
@@ -713,33 +654,6 @@ pub fn run_loop(
                 });
             }
             Ok(Some(u)) => u,
-            Err(LoopError::Pause { policy, detail }) => {
-                // Walk policy pause: the typed variant carries policy/detail
-                // directly, so there is nothing to parse. A real LoopError::Queue
-                // can no longer reach this arm (it hits the catch-all below).
-                journal.append(
-                    "walk_paused",
-                    json!({
-                        "policy": policy,
-                        "detail": detail,
-                        "iterations_used": iterations_used,
-                        "units_closed": units.len(),
-                    }),
-                )?;
-                journal.append(
-                    "loop_terminated",
-                    json!({
-                        "reason": "NoProgress",
-                        "iterations_used": iterations_used,
-                        "units_closed": units.len(),
-                    }),
-                )?;
-                return Ok(LoopOutcome {
-                    reason: TerminationReason::NoProgress,
-                    iterations_used,
-                    units,
-                });
-            }
             Err(e) => return Err(e),
         };
 
@@ -868,10 +782,8 @@ pub fn run_loop(
             // re-dispatching is an infinite respawn loop. Park the unit instead
             // (a later native attach / detach frees the slot for a fresh walk).
             // Mirror the per-unit-cap park: close with NoProgress evidence + a
-            // node_closed event whose detail identifies the bg-guard cause. Do
-            // NOT emit walk_paused -- that event is reserved for QUEUE-level
-            // policy pauses (schema.yaml enum: consecutive_failures|p0_failed),
-            // not per-unit parks (codex peer review).
+            // node_closed event whose detail identifies the bg-guard cause (a
+            // per-unit park, not a queue-level pause).
             if is_bg_guard_refusal(exit_code, session.output_tail().as_deref()) {
                 let evidence = Evidence {
                     reason: TerminationReason::NoProgress,
