@@ -88,11 +88,21 @@ check_window() { # label  model  expected_window  expected_pct
 check_window "opus-5"      "claude-opus-5"          1000000 10
 check_window "sonnet-5"    "claude-sonnet-5"        1000000 10
 check_window "opus-4-8"    "claude-opus-4-8"        1000000 10
+check_window "opus-4-6"    "claude-opus-4-6"        1000000 10
 check_window "sonnet-4-6"  "claude-sonnet-4-6"      1000000 10
 check_window "fable-5"     "claude-fable-5"         1000000 10
+check_window "zai-1m"      "glm-5.2[1m]"            1000000 10
 check_window "haiku-4-5"   "claude-haiku-4-5-20251001" 200000 50
-check_window "legacy-3-5"  "claude-3-5-sonnet-20241022" 200000 50
-check_window "unknown"     "some-other-model"        200000 50
+
+# 1M is an allowlist, so every unlisted id lands on 200K. These four are the
+# reason: a `claude-*` catch-all would hand each of them a 1M denominator,
+# understate pressure 5x, and let the session run out of context - the failure
+# direction this table exists to avoid. A future 1M model landing here fires the
+# handoff early, which is the cheap error and is fixed by adding one line above.
+check_window "legacy-opus-4-5"   "claude-opus-4-5-20250929"   200000 50
+check_window "legacy-sonnet-4-5" "claude-sonnet-4-5-20250929" 200000 50
+check_window "legacy-3-5"        "claude-3-5-sonnet-20241022" 200000 50
+check_window "unknown"           "some-other-model"           200000 50
 
 # ---------------------------------------------------------------------------
 # Multiple assistant lines -> LAST one wins

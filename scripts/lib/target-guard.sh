@@ -89,8 +89,7 @@ target_is_active() {
 # owner_pid is not a substitute and never was. It is the transient
 # `fno target init` wrapper pid, dead within about a second of init returning,
 # so `kill -0 owner_pid` is false for EVERY live session; a guard resting on it
-# alone reads as protection and never once fires (x-cbf1: the PreCompact
-# handoff hook sat behind exactly that gate across 124k events).
+# alone reads as protection and never once fires.
 target_claim_is_live() {
     local state_file="${1:-.fno/target-state.md}"
     [[ -f "$state_file" ]] || return 1

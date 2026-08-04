@@ -29,17 +29,39 @@ trap 'FNO_CLAIMS_ROOT="$TMP" fno claim release "node:x-test" >/dev/null 2>&1; rm
 SID="sess-xyz"
 
 # Hermetic claims root: `fno claim` reads/writes <root>/.fno/claims/.
-# The `fno` binary is Rust and is NOT built in every CI lane, so the two cases
-# that need a real claim announce themselves as skipped rather than failing or,
-# worse, passing vacuously. Everything else runs everywhere: target_is_active
-# needs no claim to decide a manifest with no claim key, which is the shape the
-# default fixture uses.
 export FNO_CLAIMS_ROOT="$TMP"
-HAVE_CLAIM=0
-if command -v fno >/dev/null 2>&1 \
-   && fno claim acquire "node:x-test" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
-  HAVE_CLAIM=1
+# `fno` is the Rust binary and is not built in every CI lane. Rather than skip
+# the claim cases there - which would leave the load-bearing behavior unverified
+# on exactly the lane that gates merge - fall back to a deterministic stub that
+# emits the `fno claim status -J` shape for a fixed live key. The real binary is
+# preferred whenever present, so the stub can never be the ONLY thing that ever
+# ran; it exists so the parse and both branches are exercised everywhere.
+setup_claim_backend() {  # $1 = the key that should read live
+  local live_key="$1"
+  if command -v fno >/dev/null 2>&1 \
+     && fno claim acquire "$live_key" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
+    CLAIM_BACKEND="real"
+    return 0
+  fi
+  CLAIM_BACKEND="stub"
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/fno" <<STUB
+#!/usr/bin/env bash
+# Minimal stand-in for \`fno claim status <key> -J\`. Any key other than the one
+# live fixture reads free, which is what a never-acquired claim really returns.
+[ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
+if [ "\$3" = "$live_key" ]; then
+  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"
+else
+  printf '{"key": "%s", "state": "free"}\\n' "\$3"
 fi
+STUB
+  chmod +x "$TMP/bin/fno"
+  PATH="$TMP/bin:$PATH"
+  export PATH
+}
+setup_claim_backend "node:x-test"
+echo "  (claim backend: $CLAIM_BACKEND)"
 
 # Build a workspace in the shape PRODUCTION actually produces: a DEAD owner_pid
 # plus a live node claim. owner_pid is the transient `fno target init` wrapper
@@ -111,22 +133,18 @@ setup_ws "$TMP/e" 800000 "working"
 # 6. Liveness. owner_pid can only ever PROVE life, never death, so DEATH is
 #    asserted from the node claim alone - the same asymmetry
 #    cli/src/fno/target/orient.py::_manifest_liveness encodes.
-if [[ $HAVE_CLAIM -eq 1 ]]; then
-  # 6a. Dead owner pid + claim free/absent -> no arm (genuinely stale state).
-  setup_ws "$TMP/f" 800000 "working" "node:x-not-claimed-zzz"
-  run_arm "$TMP/f"
-  [[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when the claim is free (stale state)" \
-    || fail "armed on stale (free-claim) state"
+# 6a. Dead owner pid + claim free/absent -> no arm (genuinely stale state).
+setup_ws "$TMP/f" 800000 "working" "node:x-not-claimed-zzz"
+run_arm "$TMP/f"
+[[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when the claim is free (stale state)" \
+  || fail "armed on stale (free-claim) state"
 
-  # 6b. Dead owner pid + LIVE claim -> arm. This is the shape EVERY real session
-  #     is in, and the one the shipped `kill -0 owner_pid` gate always rejected.
-  setup_ws "$TMP/f2" 800000 "working" "node:x-test"
-  run_arm "$TMP/f2"
-  [[ -f "$TMP/f2/.fno/.handoff-armed-$SID" ]] && pass "arms on a dead owner_pid with a LIVE claim" \
-    || fail "dead owner_pid + live claim did not arm (the hook is unreachable)"
-else
-  skip "claim-state cases (6a/6b): no \`fno\` binary on PATH"
-fi
+# 6b. Dead owner pid + LIVE claim -> arm. This is the shape EVERY real session
+#     is in, and the one the shipped `kill -0 owner_pid` gate always rejected.
+setup_ws "$TMP/f2" 800000 "working" "node:x-test"
+run_arm "$TMP/f2"
+[[ -f "$TMP/f2/.fno/.handoff-armed-$SID" ]] && pass "arms on a dead owner_pid with a LIVE claim" \
+  || fail "dead owner_pid + live claim did not arm (the hook is unreachable)"
 
 # 6c. Dead owner pid + NO claim key (free-text / plan run) -> arm. There is no
 #     durable death signal, so bias live; a false arm costs one advisory nudge,
@@ -161,5 +179,5 @@ echo "$OUT" | grep -q "Handoff armed" && fail "still nudging after marker cleare
   || pass "no nudge once marker cleared"
 
 echo ""
-echo "arm-handoff: $PASS passed, $FAIL failed, $SKIP skipped"
+echo "arm-handoff: $PASS passed, $FAIL failed, $SKIP skipped (claim backend: $CLAIM_BACKEND)"
 [[ $FAIL -eq 0 ]]

@@ -88,15 +88,21 @@ used_tokens=$(( input_tokens + cache_create + cache_read ))
 # no Anthropic model id carries it, so matching on it ALONE put every Claude
 # model on the 200K branch - a flat 5x inflation (21% real read as 108%) that
 # made the caller's pressure trigger fire at a fifth of the intended usage.
-# An UNKNOWN model stays at 200K on purpose: firing the handoff early is the
-# safe error, running out of context is not.
-# ponytail: a literal table, not a lookup - it changes once per model launch.
+# 1M is an ALLOWLIST, never a catch-all. Only ids known to have a 1M window get
+# one; everything else - an older Claude, a future id, a non-Claude model - falls
+# to 200K. That direction is deliberate and asymmetric: a too-small denominator
+# overstates pressure and fires the handoff early, which costs one extra
+# succession, while a too-large one understates it and lets the session run out
+# of context, which loses the run. A `claude-*` catch-all would put every legacy
+# 200K model (Opus 4.5, Sonnet 4.5) on the losing side of that trade.
+# A literal table, not a lookup: it changes once per model launch.
 case "$model" in
-  *\[1m\]*)  window_tokens=1000000 ;;  # zai/GLM 1M routing marker
-  *haiku*)   window_tokens=200000  ;;  # Haiku 4.5: the only current 200K Claude
-  claude-3*) window_tokens=200000  ;;  # legacy Claude 3.x
-  claude-*)  window_tokens=1000000 ;;  # Opus 4.6+/5, Sonnet 4.6+/5, Fable 5
-  *)         window_tokens=200000  ;;  # unknown -> conservative
+  *\[1m\]*)                              window_tokens=1000000 ;;  # zai/GLM 1M routing marker
+  *haiku*)                               window_tokens=200000  ;;  # Haiku 4.5 is 200K
+  *opus-5*|*sonnet-5*|*fable-5*)         window_tokens=1000000 ;;
+  *opus-4-8*|*opus-4-7*|*opus-4-6*)      window_tokens=1000000 ;;
+  *sonnet-4-6*)                          window_tokens=1000000 ;;
+  *)                                     window_tokens=200000  ;;  # unlisted -> conservative
 esac
 
 # Integer percent, rounded: round(100 * used / window)
