@@ -1060,3 +1060,15 @@ def test_routing_predicates_stop_at_argv_boundary() -> None:
     assert rr._is_resume_bearing_spawn(
         "spawn", ["spawn", "w", "--resume", "u", "--argv", "--", "tool"]
     )
+
+
+def test_the_account_picker_leaves_a_cutover_spawn_alone(monkeypatch) -> None:
+    """A cutover already selected its account. Picking a second one merges the
+    destination's overlay with the picked account's - the same mis-bill this
+    seam already refuses for --route."""
+    monkeypatch.setattr(
+        "fno.agents.dispatch.pick_account_id",
+        lambda *a, **k: pytest.fail("picked an account for a cutover spawn"),
+    )
+    args = ["spawn", "w", "--harness", "claude", "--dispatch-account", "ccr"]
+    assert rr._pick_account_at_seam(args) == args
