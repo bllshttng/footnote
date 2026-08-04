@@ -407,7 +407,7 @@ def test_iso_to_epoch_handles_z_suffix() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Typed refresh observation (x-0aec): a successful probe survives a failed cache
+# Typed refresh observation: a successful probe survives a failed cache
 # write, and every unknown names the boundary that produced it.
 # ---------------------------------------------------------------------------
 

@@ -180,7 +180,7 @@ def usage_providers(
     ``--refresh`` renders the observation the probe just produced, in memory,
     with no second cache read: re-reading the cache after refreshing creates a
     SECOND observation, and a losing write race or a TTL edge then turns a
-    successful live probe into a displayed ``unknown`` (AC1-HP, x-0aec).
+    successful live probe into a displayed ``unknown``.
     Every unknown names the boundary it failed at, so an operator can tell
     "repair attribution" from "the endpoint moved" (AC3-ERR).
     """

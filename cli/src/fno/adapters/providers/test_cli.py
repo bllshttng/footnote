@@ -1843,7 +1843,7 @@ class TestReconcileSlot:
 
 
 # ---------------------------------------------------------------------------
-# usage --refresh: the probe result IS the displayed result (x-0aec)
+# usage --refresh: the probe result IS the displayed result
 #
 # The defect these pin: `probe_usage` returned real 5h/weekly windows while
 # `fno config accounts usage --refresh` printed `unknown` in the same revision.
