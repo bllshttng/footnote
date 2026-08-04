@@ -97,7 +97,10 @@ target_claim_is_live() {
     claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
     _target_guard_is_empty_yaml "$claim_key" && return 1
     command -v fno >/dev/null 2>&1 || return 1
-    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null || true)
+    # No `|| true` here, unlike the fail-open twin above: a nonzero exit means
+    # the read did not complete, and a truncated payload can still carry the
+    # bytes `"state": "live"`. Strict means an incomplete read is not live.
+    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null) || return 1
     case "$claim_json" in
         *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
         *) return 1 ;;

@@ -102,6 +102,21 @@ target_claim_is_live "$TMP/nokey/.fno/target-state.md" \
 target_claim_is_live "$TMP/does-not-exist/target-state.md" \
   && fail "missing manifest read as live" || pass "missing manifest -> not live"
 
+# A read that did not complete is not live, even when the truncated bytes happen
+# to contain the live marker. `|| true` on the capture would swallow the exit
+# code and accept this payload, which is the fail-open behavior the strict twin
+# exists to avoid.
+BROKEN_BIN="$TMP/broken-bin"; mkdir -p "$BROKEN_BIN"
+cat > "$BROKEN_BIN/fno" <<'BROKEN'
+#!/usr/bin/env bash
+printf '{"key": "node:x-live", "state": "live"'
+exit 1
+BROKEN
+chmod +x "$BROKEN_BIN/fno"
+( PATH="$BROKEN_BIN:$PATH"; target_claim_is_live "$TMP/live/.fno/target-state.md" ) \
+  && fail "a nonzero claim-status read carrying live bytes was accepted" \
+  || pass "nonzero claim-status exit -> not live (strict, even on live-looking output)"
+
 # target_is_active keeps the OPPOSITE bias on the same inputs: it fails OPEN,
 # because there a false "dead" archives a running session.
 target_is_active "$TMP/nokey/.fno/target-state.md" \

@@ -52,9 +52,11 @@ The `session_satisfied(trigger=delegated)` event written at step 8 is the audit 
 - Input: path to the session transcript JSONL (resolved from the session manifest's `claude_transcript_id` field)
 - Selects the last assistant message carrying a `usage` block
 - Computes `used_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
-- Window size, by model family: `[1m]` (a zai/GLM routing marker) -> 1,000,000; `haiku` -> 200,000; `claude-3*` -> 200,000; any other `claude-*` -> 1,000,000; unknown -> 200,000.
+- Window size: 1,000,000 is an **allowlist**, never a catch-all. It covers the `[1m]` suffix (a zai/GLM routing marker) and the ids known to have a 1M window: Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6, Sonnet 4.6.
+  Everything else falls to 200,000, including Haiku 4.5, the legacy 200K Claudes (Opus 4.5, Sonnet 4.5, Claude 3.x), and any unrecognized or future id.
   No Anthropic model id carries `[1m]`, so a table keyed on that suffix alone put every Claude model on the 200K branch and inflated `used_pct` 5x on a 1M model.
-  Unknown stays at 200,000 deliberately: firing the handoff early is the safe error, exhausting context is not.
+  The fallback direction is asymmetric on purpose: too small a denominator overstates pressure and fires the handoff early, costing one extra succession, while too large understates it and lets the session run out of context, losing the run.
+  A `claude-*` catch-all would put every legacy 200K model on the losing side of that trade, so a new 1M model earns a line in the table rather than inheriting one.
 - Output (stdout, exit 0): `{"used_tokens": N, "window_tokens": N, "used_pct": N, "model": "..."}`
 - Exit 3 ("unreadable"): missing file, jq absent, no assistant line with usage block, parse failure
 - Any nonzero exit is treated as no-pressure (fail-safe toward not firing)
