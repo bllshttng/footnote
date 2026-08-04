@@ -215,6 +215,7 @@ def select_autonomous_route(
         priority=priority,
         cutover_low_after_minutes=_cutover_low_after_minutes(node_cwd),
         now=now,
+        repo_root=Path(node_cwd) if node_cwd else None,
     )
     window = sig.state.value
     if sig.cutover and not pinned:

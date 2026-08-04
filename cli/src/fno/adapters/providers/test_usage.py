@@ -1349,3 +1349,26 @@ class TestAmbiguousSlotIsNotAttributable:
         )
 
         assert probe_usage(rec, now=1000.0) is None
+
+
+def test_quota_probe_is_scoped_to_the_node_repository(state_path: Path, monkeypatch, tmp_path) -> None:
+    """Every read in the route decision resolves against the NODE's repo.
+
+    An unscoped probe judges the dispatcher's own project, and an absent record
+    there reads as UNKNOWN - which proceeds instead of cutting over.
+    """
+    from fno.adapters.providers.model import QuotaConfig
+    from fno.adapters.providers.runtime_state import evaluate_quota_signal
+
+    seen: dict = {}
+    monkeypatch.setattr(
+        loader, "load_quota_config", lambda *a, **k: seen.update(quota=k.get("repo_root")) or QuotaConfig(defer_dispatch=True)
+    )
+    import fno.adapters.providers.runtime_state as rs
+
+    monkeypatch.setattr(
+        rs, "refresh_usage", lambda pid, **k: seen.update(refresh=k.get("repo_root"))
+    )
+    evaluate_quota_signal("p1", priority="p2", now=1000.0, repo_root=tmp_path)
+    assert seen["quota"] == tmp_path
+    assert seen["refresh"] == tmp_path

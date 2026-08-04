@@ -857,6 +857,7 @@ def refresh_usage_detailed(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageRefresh:
     """Return the full refresh observation for ``provider_id``.
 
@@ -884,7 +885,7 @@ def refresh_usage_detailed(
     from fno.adapters.providers.usage import probe_usage_detail
 
     try:
-        record = load_providers().by_id.get(provider_id)
+        record = load_providers(repo_root=repo_root).by_id.get(provider_id)
     except Exception:  # noqa: BLE001 - a config read must never break a probe
         return UsageRefresh(None, "config-unreadable")
     if record is None:
@@ -903,6 +904,7 @@ def refresh_usage(
     provider_id: str,
     ttl_seconds: float = DEFAULT_USAGE_TTL_SECONDS,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> UsageSnapshot | None:
     """Return a fresh snapshot for ``provider_id``, probing if the cache is stale.
 
@@ -910,7 +912,9 @@ def refresh_usage(
     only need ``UsageSnapshot | None`` (headroom and its consumers). Any failure
     returns None fail-open - the caller treats it as UNKNOWN headroom.
     """
-    return refresh_usage_detailed(provider_id, ttl_seconds=ttl_seconds, now=now).snapshot
+    return refresh_usage_detailed(
+        provider_id, ttl_seconds=ttl_seconds, now=now, repo_root=repo_root
+    ).snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -1028,6 +1032,7 @@ def evaluate_quota_signal(
     priority: str | None = None,
     cutover_low_after_minutes: float = 0.0,
     now: float | None = None,
+    repo_root: Path | None = None,
 ) -> QuotaSignal:
     """Probe one provider's headroom and derive the defer/cutover verdicts.
 
@@ -1047,7 +1052,11 @@ def evaluate_quota_signal(
         return QuotaSignal("", HeadroomState.UNKNOWN, None, False, False, "no-provider")
     from fno.adapters.providers.loader import load_quota_config
 
-    quota = load_quota_config()
+    # Scoped to the NODE's repository like every other read in the route
+    # decision: probing the dispatcher's own project would judge one project's
+    # quota for another project's launch, and an absent record there reads as
+    # UNKNOWN, which proceeds instead of cutting over.
+    quota = load_quota_config(repo_root=repo_root)
     if not quota.defer_dispatch:
         return QuotaSignal(
             provider_id, HeadroomState.UNKNOWN, None, False, False, "defer-dispatch-off"
@@ -1059,7 +1068,9 @@ def evaluate_quota_signal(
 
     # Probe-on-stale so the decision uses fresh data (the dispatcher tick is
     # not latency-sensitive, unlike combo rotation which reads cache only).
-    refresh_usage(provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now)
+    refresh_usage(
+        provider_id, ttl_seconds=quota.probe_ttl_seconds, now=now, repo_root=repo_root
+    )
     h = headroom(
         provider_id,
         now=now,
