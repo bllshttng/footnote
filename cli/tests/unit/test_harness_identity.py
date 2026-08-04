@@ -5,14 +5,18 @@ from __future__ import annotations
 import pytest
 
 from fno.harness_identity import (
+    AMBIENT_IDENTITY_ENV,
     HARNESS_SESSION_MARKERS,
     HarnessIdentity,
     LEGACY_HANDLE_RE,
+    OwnedHarnessIdentity,
     canonical_handle,
     claude_transport_short_id,
     current_session_id,
     current_session_ids,
+    present_harness_markers,
     resolve_harness_identity,
+    resolve_owned_identity,
     session_identity_key,
 )
 
@@ -55,6 +59,142 @@ def test_whitespace_markers_are_skipped_in_precedence_order():
 
 def test_no_marker_returns_empty_identity():
     assert resolve_harness_identity({}) == HarnessIdentity(None, None)
+
+
+# ---- ambiguity-aware owned resolution (AC1-HP / AC2-HP / AC5-CON) --------
+
+
+def test_present_harness_markers_lists_nonblank_in_precedence_order():
+    env = {
+        "CODEX_THREAD_ID": "  thread  ",
+        "CLAUDE_CODE_SESSION_ID": "",
+        "OPENCODE_SESSION_ID": "ses_1",
+    }
+    assert present_harness_markers(env) == (
+        ("CODEX_THREAD_ID", "codex", "thread"),
+        ("OPENCODE_SESSION_ID", "opencode", "ses_1"),
+    )
+    assert present_harness_markers({}) == ()
+
+
+@pytest.mark.parametrize(
+    ("marker", "session_id", "harness"),
+    [
+        ("CODEX_THREAD_ID", "thread-1", "codex"),
+        ("CLAUDE_CODE_SESSION_ID", "claude-1", "claude"),
+        ("CODEX_SESSION_ID", "codex-1", "codex"),
+        ("GEMINI_SESSION_ID", "gemini-1", "gemini"),
+        ("OPENCODE_SESSION_ID", "ses_OpenCode1", "opencode"),
+    ],
+)
+def test_owned_single_marker_matches_precedence(marker, session_id, harness):
+    """AC2-HP: exactly one marker -> byte-identical to resolve_harness_identity."""
+    env = {marker: session_id}
+    owned = resolve_owned_identity(env)
+    assert owned.disposition == "single"
+    assert owned.session_id == session_id
+    assert owned.harness == harness
+    assert owned == OwnedHarnessIdentity(
+        session_id, harness, ((marker, harness),), "single"
+    )
+    # The dominant case must not change the answer precedence gives.
+    assert (owned.session_id, owned.harness) == (
+        resolve_harness_identity(env).session_id,
+        resolve_harness_identity(env).harness,
+    )
+
+
+def test_owned_two_same_family_is_single_not_ambiguous():
+    """Two markers of ONE harness (both codex) agree; that is not the bug
+    shape. Precedence-first wins, byte-identical to today."""
+    env = {"CODEX_THREAD_ID": "thread", "CODEX_SESSION_ID": "session"}
+    owned = resolve_owned_identity(env)
+    assert owned.disposition == "single"
+    assert owned.harness == "codex"
+    assert owned.session_id == "thread"
+
+
+def test_owned_disagreement_degrades_without_proof():
+    """AC1-HP core: a claude session with a foreign CODEX_THREAD_ID, and no
+    proof available, degrades rather than guessing codex by precedence."""
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+    owned = resolve_owned_identity(env)  # no prove/collide injected
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.harness is None
+    assert ("CODEX_THREAD_ID", "codex") in owned.markers_present
+    assert ("CLAUDE_CODE_SESSION_ID", "claude") in owned.markers_present
+
+
+def test_owned_disagreement_prefers_the_proven_marker():
+    """AC1-HP: when one marker is provably this process's, the disagreeing set
+    resolves to it, not to precedence."""
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+
+    def prove(harness: str, sid: str) -> bool:
+        return harness == "claude" and sid == "mine"
+
+    owned = resolve_owned_identity(env, prove=prove)
+    assert owned.disposition == "proven"
+    assert owned.harness == "claude"
+    assert owned.session_id == "mine"
+
+
+def test_owned_rejects_an_id_another_live_row_owns():
+    """AC3-ERR: a candidate owned by a live registry row is rejected and
+    recorded, so the claim is never anchored to another worker's session."""
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+
+    def collide(harness: str, sid: str):
+        return "x-8224-codex" if sid == "foreign" else None
+
+    def prove(harness: str, sid: str) -> bool:
+        return harness == "claude"
+
+    owned = resolve_owned_identity(env, prove=prove, collide=collide)
+    assert owned.disposition == "proven"
+    assert owned.harness == "claude"
+    assert len(owned.rejected) == 1
+    assert owned.rejected[0]["session_id"] == "foreign"
+    assert owned.rejected[0]["owner"] == "x-8224-codex"
+    assert owned.rejected[0]["reason"] == "owned_by_live_row"
+
+
+def test_owned_rejected_and_unproven_degrades_to_ambiguous():
+    """AC3-ERR + degrade: codex rejected (owned elsewhere), claude unproven ->
+    no guess; None is honest, a stranger's id is the bug."""
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+
+    def collide(harness: str, sid: str):
+        return "owner" if sid == "foreign" else None
+
+    owned = resolve_owned_identity(env, collide=collide)  # no prove
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+    assert owned.rejected[0]["session_id"] == "foreign"
+
+
+def test_owned_two_proven_is_still_ambiguous():
+    """If both markers were somehow provable (two live identities in one tree),
+    do not pick by precedence; record and degrade."""
+    env = {"CODEX_THREAD_ID": "a", "CLAUDE_CODE_SESSION_ID": "b"}
+    owned = resolve_owned_identity(env, prove=lambda *_: True)
+    assert owned.disposition == "ambiguous"
+    assert owned.session_id is None
+
+
+def test_ambient_identity_env_covers_direct_read_markers():
+    """AC6-HP scrub coverage: the env list includes the legacy direct-read
+    markers (CLAUDECODE_SESSION_ID, HERMES_SESSION_ID), not just the resolver
+    tuple, so a module reading a marker directly is scrubbed too."""
+    assert "CLAUDECODE_SESSION_ID" in AMBIENT_IDENTITY_ENV
+    assert "HERMES_SESSION_ID" in AMBIENT_IDENTITY_ENV
+    assert "CODEX_THREAD_ID" in AMBIENT_IDENTITY_ENV
+    assert "CLAUDE_CODE_SESSION_ID" in AMBIENT_IDENTITY_ENV
+    # Routing vars are NOT identity and must never be swept.
+    assert "CLAUDE_CONFIG_DIR" not in AMBIENT_IDENTITY_ENV
+    assert "ANTHROPIC_API_KEY" not in AMBIENT_IDENTITY_ENV
+
 
 
 def test_current_session_helpers_share_precedence_and_legacy_fallback():
