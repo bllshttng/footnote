@@ -98,12 +98,29 @@ impl OrphanReason {
     }
 }
 
-pub fn family1_truth_state(handle: &str) -> Option<String> {
+/// One family-1 truth answer: the supervision state, plus the model the worker
+/// is ACTUALLY answering as.
+///
+/// Both come from the SAME probe. `observed_model` is derived by the Python
+/// resolver from the worker's own transcript, so the Rust list emitter reports
+/// the identical reading the Python one does instead of growing a second
+/// transcript reader that could drift from it.
+#[derive(Debug, Clone)]
+pub struct TruthProbe {
+    pub state: String,
+    pub observed_model: serde_json::Value,
+}
+
+pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     let mut command = std::process::Command::new("fno");
     command
         .args(["agents", "truth", handle, "--json"])
         .env("FNO_AGENTS_RUNTIME", "python");
-    family1_truth_state_with_command(command, Duration::from_secs(5), handle)
+    family1_truth_probe_with_command(command, Duration::from_secs(5), handle)
+}
+
+pub fn family1_truth_state(handle: &str) -> Option<String> {
+    family1_truth_probe(handle).map(|probe| probe.state)
 }
 
 /// Diagnostic for a failed family-1 truth probe. truth writes its refusal
@@ -139,11 +156,11 @@ fn truth_failure_is_routine(detail: &str) -> bool {
     detail.trim() == TRUTH_NOT_FOUND
 }
 
-fn family1_truth_state_with_command(
+fn family1_truth_probe_with_command(
     mut command: std::process::Command,
     timeout: Duration,
     handle: &str,
-) -> Option<String> {
+) -> Option<TruthProbe> {
     command
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
@@ -193,11 +210,22 @@ fn family1_truth_state_with_command(
         }
         return None;
     }
-    let state = serde_json::from_slice::<serde_json::Value>(&output.stdout)
-        .ok()
+    let parsed = serde_json::from_slice::<serde_json::Value>(&output.stdout).ok();
+    let state = parsed
+        .as_ref()
         .and_then(|value| value.get("state")?.as_str().map(str::to_owned));
     match state.as_deref() {
-        Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => state,
+        Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => {
+            Some(TruthProbe {
+                state: state.unwrap_or_default(),
+                // Absent on a truth build that predates the field: null rather
+                // than a fabricated variant, so a stale `fno` reads as "this
+                // probe did not answer" instead of asserting no transcript.
+                observed_model: parsed
+                    .and_then(|value| value.get("observed_model").cloned())
+                    .unwrap_or(serde_json::Value::Null),
+            })
+        }
         _ => {
             eprintln!("WARN: family-1 truth probe for {handle} returned malformed output");
             None
@@ -3849,19 +3877,53 @@ mod tests {
         }
     }
 
+    /// The state half of a probe, for the tests that only pin the state enum.
+    fn probe_state(
+        command: std::process::Command,
+        timeout: Duration,
+        handle: &str,
+    ) -> Option<String> {
+        family1_truth_probe_with_command(command, timeout, handle).map(|p| p.state)
+    }
+
+    #[test]
+    fn family1_truth_probe_carries_the_observed_model() {
+        // One probe answers both halves: the list emitter must not run a second
+        // shellout, and must not grow a second transcript reader that could
+        // report a different model than the truth verb does for the same worker.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '{\"state\":\"working\",\"observed_model\":\
+             {\"kind\":\"observed\",\"model\":\"glm-5.2\",\"samples\":300}}'",
+        ]);
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert_eq!(probe.state, "working");
+        assert_eq!(probe.observed_model["model"], "glm-5.2");
+
+        // A truth build that predates the field yields null, never a fabricated
+        // variant: "the probe did not answer" is not "there is no transcript".
+        let mut old = std::process::Command::new("sh");
+        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
+        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert!(stale.observed_model.is_null());
+    }
+
     #[test]
     fn family1_truth_subprocess_is_bounded_and_validated() {
         let mut valid = std::process::Command::new("sh");
         valid.args(["-c", "printf '{\"state\":\"watching\"}'"]);
         assert_eq!(
-            family1_truth_state_with_command(valid, Duration::from_secs(1), "h1").as_deref(),
+            probe_state(valid, Duration::from_secs(1), "h1").as_deref(),
             Some("watching")
         );
 
         let mut invalid = std::process::Command::new("sh");
         invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
         assert_eq!(
-            family1_truth_state_with_command(invalid, Duration::from_secs(1), "h1"),
+            probe_state(invalid, Duration::from_secs(1), "h1"),
             None
         );
 
@@ -3869,7 +3931,7 @@ mod tests {
         hung.args(["-c", "sleep 5"]);
         let started = Instant::now();
         assert_eq!(
-            family1_truth_state_with_command(hung, Duration::from_millis(50), "h1"),
+            probe_state(hung, Duration::from_millis(50), "h1"),
             None
         );
         assert!(started.elapsed() < Duration::from_secs(1));
@@ -3903,7 +3965,7 @@ mod tests {
             "printf '{\"state\":\"unknown\",\"reason\":\"not-found\"}'; exit 13",
         ]);
         assert_eq!(
-            family1_truth_state_with_command(not_found, Duration::from_secs(1), "ses_1d9e"),
+            probe_state(not_found, Duration::from_secs(1), "ses_1d9e"),
             None
         );
 
@@ -3914,7 +3976,7 @@ mod tests {
             "printf '{\"state\":\"unknown\",\"reason\":\"transcript-unreadable\"}'; exit 13",
         ]);
         assert_eq!(
-            family1_truth_state_with_command(broken, Duration::from_secs(1), "abcd1234"),
+            probe_state(broken, Duration::from_secs(1), "abcd1234"),
             None
         );
     }

@@ -53,7 +53,7 @@ def test_serialize_entry_claude_includes_short_id_and_live_status() -> None:
     row = serialize_entry(entry, live_status="Working")
 
     assert row["name"] == "worker-frontend"
-    assert row["provider"] == "claude"
+    assert row["harness"] == "claude"
     assert row["short_id"] == "abc12345"
     assert row["cwd"] == "/Users/foo/code/proj"
     assert row["status"] == "live"
@@ -66,7 +66,7 @@ def test_serialize_entry_codex_keeps_short_id_null_and_live_status_null() -> Non
 
     row = serialize_entry(entry, live_status=None)
 
-    assert row["provider"] == "codex"
+    assert row["harness"] == "codex"
     assert row["short_id"] is None
     assert row["live_status"] is None
 
@@ -108,7 +108,8 @@ def test_serialize_entry_shape_is_stable_across_providers() -> None:
     assert set(claude_row.keys()) == set(codex_row.keys())
     assert {
         "name",
-        "provider",
+        "harness",
+        "observed_model",
         "short_id",
         "session_id",
         "cwd",
@@ -181,7 +182,7 @@ def test_render_table_header_row_present() -> None:
 
     # Header tokens — flexible to width-adjustment, strict on presence.
     assert "NAME" in out
-    assert "PROVIDER" in out
+    assert "HARNESS" in out
     assert "STATUS" in out
     assert "LIVE" in out
     assert "LAST MESSAGE" in out
@@ -240,7 +241,7 @@ def test_render_table_for_empty_registry_emits_header_only() -> None:
     out = render_table([])
 
     assert "NAME" in out
-    assert "PROVIDER" in out
+    assert "HARNESS" in out
     # No data row implies no agent-name tokens; we don't have any to assert
     # absence of, so just confirm the call doesn't crash on empty input.
 
@@ -302,5 +303,29 @@ def test_serialize_entry_emits_identity_and_hosting_fields() -> None:
     assert row["harness_session_id"] == "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
     assert row["mux"] == {"session": "main", "pane_id": 10}
     assert row["crown"] == "L1 epic-x"
-    # The legacy alias keeps working for consumers that predate the rename.
-    assert row["provider"] == "claude"
+
+
+def test_serialize_entry_carries_the_observed_model() -> None:
+    """The derived reading reaches the row, and defaults to the same
+    `no-transcript` the resolver reports when it finds no file -- never to a
+    missing key, which an operator correctly reads as proving nothing."""
+    observed = {"kind": "observed", "model": "glm-5.2", "samples": 300}
+
+    row = serialize_entry(_claude_entry(), live_status=None, observed_model=observed)
+    assert row["observed_model"] == observed
+
+    default = serialize_entry(_claude_entry(), live_status=None)
+    assert default["observed_model"] == {"kind": "no-transcript"}
+
+
+def test_serialize_entry_emits_no_key_that_names_a_vendor(_unused=None) -> None:
+    """AC8: no key whose name says vendor and whose value is a harness.
+
+    `provider: "claude"` on a zai-routed worker is what produced the wrong
+    diagnosis this row shape was fixed for. Leaving it beside a correct
+    `observed_model` would hand a reader two answers and no way to rank them.
+    """
+    row = serialize_entry(_claude_entry(), live_status=None)
+
+    assert "provider" not in row
+    assert row["harness"] == "claude"

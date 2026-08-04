@@ -60,7 +60,6 @@ Returns a canonical object suitable for scripts:
     {
       "name": "worker-frontend",
       "harness": "claude",
-      "provider": "claude",
       "harness_session_id": "e6f78b98-e594-47ed-ad81-84f8a78b8bb7",
       "short_id": "e6f78b98",
       "session_id": "e6f78b98",
@@ -69,6 +68,7 @@ Returns a canonical object suitable for scripts:
       "last_message_at": "2026-05-20T17:30:12Z",
       "status": "live",
       "live_status": null,
+      "observed_model": { "kind": "observed", "model": "glm-5.2", "samples": 300 },
       "pid": 75742,
       "last_reconciled_at": "2026-05-20T17:30:00Z",
       "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl",
@@ -88,9 +88,27 @@ Returns a canonical object suitable for scripts:
 }
 ```
 
-The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on provider to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
+The row's key set is pinned by [`schemas/agents-list-row.json`](../../schemas/agents-list-row.json), which both serializers are tested against; edit that file first when adding a key. Every entry carries the same keys regardless of harness, so a consumer never branches on harness to find a field. JSON is the default whenever stdout is a pipe, so `fno agents list | jq .` Just Works without an explicit `--json`.
 
-`harness` is the identity axis; `provider` is a legacy alias of it, retained for consumers written before the rename. `harness_session_id` is the worker's own session id in its harness's store.
+`harness` is the sole identity axis, and it names the CLI the worker runs under, never the model vendor.
+There used to be a `provider` alias beside it carrying the same harness value, so a worker routed to z.ai still listed `provider: claude`; an operator read that as proof the route had silently fallen back and nearly killed three healthy workers over it.
+That key is gone. `harness_session_id` is the worker's own session id in its harness's store.
+
+`observed_model` answers the question `provider` looked like it answered: which model the worker is ACTUALLY running.
+It is derived from the worker's own transcript at read time, never recorded at spawn, because a spawn records intent and would report the intended model in exactly the case you suspect a fallback.
+A worker that quietly fell back to Anthropic reports a `claude-*` id here and disagrees visibly with what you asked for.
+The value is a discriminated object, and the four kinds never collapse into one "unknown":
+
+| `kind` | Meaning |
+|--------|---------|
+| `observed` | The worker has answered. Carries `model` and `samples` (how many records in the read backed it). |
+| `no-transcript` | No transcript file resolved. A worker spawned two seconds ago is legitimately here. |
+| `no-model-yet` | The transcript exists and carries no answered turn: the shape of a session that came up and never processed one. Not healthy. |
+| `unreadable` | The file exists and could not be parsed. Carries `reason`; the row still renders. |
+
+```bash
+fno agents list --json | jq -r '.agents[] | "\(.name)\t\(.harness)\t\(.observed_model.model // .observed_model.kind)"'
+```
 
 `session_id` is the unified, harness-resolving resume target: `short_id` for claude, `harness_session_id` for codex, gemini, and opencode. `short_id` is the transport key and stays claude-only for back-compat (the claude jobId, by construction the leading 8 hex of the session uuid), so for a codex agent you get `short_id: null` but `session_id: "<uuid>"`, and that UUID is exactly what `fno agents resume` (and `codex resume <uuid>`) consume. It is `null` when the id was never captured, and for a claude pane row, which has no transport key for it to resolve from.
 

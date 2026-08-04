@@ -44,7 +44,7 @@ list_agents(filters, json_out, tty)
    │         ├─ subprocess.run(timeout=3.0, capture)
    │         ├─ on every failure mode → ({}, [warning])
    │         └─ on success → {short_id: {live_status, ...}}
-   ├─ serialize_entry(entry, live_status)  ← canonical row dict per provider
+   ├─ serialize_entry(entry, live_status, observed_model)  ← canonical row dict
    └─ render_json | render_table           ← format selection
 ```
 
@@ -99,13 +99,14 @@ Without these checks, the loop would hang silently on every common log-rotation 
   "agents": [
     {
       "name": "worker-frontend",
-      "provider": "claude",
+      "harness": "claude",
       "short_id": "abc123",
       "cwd": "/Users/foo/code/proj",
       "created_at": "2026-05-20T17:00:00Z",
       "last_message_at": "2026-05-20T17:30:12Z",
       "status": "live",
       "live_status": "Working",
+      "observed_model": { "kind": "observed", "model": "glm-5.2", "samples": 300 },
       "log_path": "/Users/foo/.fno/agents/worker-frontend/output.jsonl"
     }
   ],
@@ -117,7 +118,9 @@ Without these checks, the loop would hang silently on every common log-rotation 
 
 The schema version is owned by `format.py::JSON_SCHEMA_VERSION` and is intentionally distinct from the registry's `SCHEMA_VERSION`. The CLI output and the storage substrate evolve on independent cadences.
 
-All entries have the same key set regardless of provider. Consumers that grep for keys can rely on `short_id == null` for non-Claude entries rather than checking for key presence.
+All entries have the same key set regardless of harness. Consumers that grep for keys can rely on `short_id == null` for non-Claude entries rather than checking for key presence.
+
+`harness` names the CLI; `observed_model` names the model the worker is actually answering as, derived per row from its own transcript by `session_truth.observed_model`. The two list emitters reach that one resolver rather than each reading transcripts: Python calls it directly at `read.py`, and the Rust daemon gets it back from the `fno agents truth --json` probe it already runs once per row for `status`. There is deliberately no `provider` key: it was an alias carrying the harness value, and it read as evidence that a routed worker had fallen back to Anthropic.
 
 ## Format selection
 

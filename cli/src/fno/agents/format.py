@@ -25,7 +25,11 @@ from fno.agents.registry import AgentEntry
 JSON_SCHEMA_VERSION = 2
 
 
-def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
+def serialize_entry(
+    entry: AgentEntry,
+    live_status: Optional[str],
+    observed_model: Optional[dict] = None,
+) -> dict:
     """Produce the canonical dict shape for one agent.
 
     Returns the same key set for every provider so JSON consumers can
@@ -45,13 +49,23 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
     right now" signal. It is ``None`` for non-Claude entries and for
     Claude entries when the ``claude agents --json`` shellout failed or
     omitted the entry.
+
+    ``observed_model`` is the four-variant reading from
+    :func:`fno.agents.session_truth.observed_model` -- what the worker is
+    ACTUALLY answering as, derived from its own transcript rather than from
+    anything the spawn recorded. Defaulted rather than required so a caller
+    that has no truth reading still produces the full key set; the default is
+    the same ``no-transcript`` the resolver reports when it finds no file.
     """
     return {
         "name": entry.name,
-        # `harness` is the canonical identity axis; `provider` is its legacy
-        # alias, still emitted for consumers that predate the rename.
+        # `harness` is the sole identity axis. The `provider` alias that used to
+        # sit beside it carried the HARNESS value ("claude") for a worker routed
+        # to another vendor, and an operator read that as proof the route had
+        # fallen back to Anthropic. A key whose name says vendor and whose value
+        # is a harness is worse than no key, so it is gone; `observed_model`
+        # below is the honest answer to the question it looked like it answered.
         "harness": entry.harness,
-        "provider": entry.harness,
         # The worker's own session id in its harness's store. Distinct from
         # `session_id` (the resume-target id, which is the 8-hex jobId for
         # claude) and from `short_id` (the transport key).
@@ -63,6 +77,10 @@ def serialize_entry(entry: AgentEntry, live_status: Optional[str]) -> dict:
         "last_message_at": entry.last_message_at,
         "status": entry.status,
         "live_status": live_status,
+        # The model the worker is answering as, read from its transcript. A
+        # spawn-recorded route would report the INTENDED model in exactly the
+        # case an operator suspects a silent fallback; this cannot.
+        "observed_model": observed_model or {"kind": "no-transcript"},
         "log_path": entry.log_path,
         # Crown (US9): a compact "L1 epic-x" descriptor + the raw fields, so a
         # minion can resolve who to escalate to and a second live crown over the
@@ -105,13 +123,15 @@ def render_json(
 
 # --- Human table rendering ---------------------------------------------------
 #
-# Column layout (in order): NAME, PROVIDER, STATUS, LIVE, LAST MESSAGE, CWD.
+# Column layout (in order): NAME, HARNESS, STATUS, LIVE, LAST MESSAGE, CWD.
 # Width auto-sizes to terminal columns. STATUS and LIVE never truncate —
 # they are short-text columns. NAME and CWD truncate with right-aligned
 # ellipsis if needed; LAST MESSAGE is rendered as a relative-time string
 # from ``last_message_at``.
 
-_HEADERS = ("NAME", "PROVIDER", "STATUS", "LIVE", "LAST MESSAGE", "CWD")
+# HARNESS, not PROVIDER: the column has always shown the harness, and the old
+# heading made a claude-hosted worker on a zai route read as running on claude.
+_HEADERS = ("NAME", "HARNESS", "STATUS", "LIVE", "LAST MESSAGE", "CWD")
 _HOME_PREFIX_PLACEHOLDER = "~"
 
 
@@ -230,7 +250,7 @@ def render_table(
         display_rows.append(
             {
                 "name": name,
-                "provider": row.get("provider") or "-",
+                "harness": row.get("harness") or "-",
                 "status": row.get("status") or "-",
                 "live": live,
                 "last_message": last_msg,
@@ -242,7 +262,7 @@ def render_table(
     # NAME and CWD are the truncation candidates if the row overflows.
     min_widths = {
         "name": len("NAME"),
-        "provider": len("PROVIDER"),
+        "harness": len("HARNESS"),
         "status": len("STATUS"),
         "live": len("LIVE"),
         "last_message": len("LAST MESSAGE"),
@@ -267,7 +287,7 @@ def render_table(
             col_widths["name"] -= name_shrink
 
     def _format_row(values: list[str]) -> str:
-        keys = ["name", "provider", "status", "live", "last_message", "cwd"]
+        keys = ["name", "harness", "status", "live", "last_message", "cwd"]
         cells = []
         for key, val in zip(keys, values):
             cell_text = str(val)
@@ -282,7 +302,7 @@ def render_table(
             _format_row(
                 [
                     r["name"],
-                    r["provider"],
+                    r["harness"],
                     r["status"],
                     r["live"],
                     r["last_message"],
