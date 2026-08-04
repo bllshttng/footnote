@@ -38,34 +38,62 @@ Create `.fno/campaigns/<slug>/`.
 If that directory already exists, refuse and name it rather than interleaving
 into a prior campaign.
 
-Resolve the two artifacts the roles read, in this order:
+Derive the activated pack's root from its receipt so paths resolve whether the
+pack is the in-tree dogfood copy or an installed pack in another project:
 
-- `product-truth`: the path the project configured under `[context.artifacts]`
-  in `.fno/config.toml`. Read it with `fno roles context --json` and take the
-  `product-truth` entry's `provenance`. If none is configured, stop and tell the
-  founder to configure it (resolution would block with MISSING_CONTEXT).
-- `brand-voice`: the pack-supplied `plugins/growth-studio/assets/brand-voice.md`.
+```bash
+PACK_ROOT="$(dirname "$(fno plugins inspect growth-studio --json \
+  | python3 -c 'import json,sys;print(json.load(sys.stdin)["source_path"])')")"
+```
+
+The roles read two artifacts, both resolved through the project's context
+catalog (`[context.artifacts]` in `.fno/config.toml`):
+
+- `product-truth`: project-supplied product facts (sensitivity `public`).
+- `brand-voice`: the pack-supplied voice contract. Voice is a property of the
+  pack, so the project configures this entry to point at the pack's
+  `$PACK_ROOT/assets/brand-voice.md` (sensitivity `internal`).
+
+Build the catalog and confirm both are present and readable:
+
+```bash
+fno roles context --json > .fno/campaigns/<slug>/catalog.json
+```
+
+If either `product-truth` or `brand-voice` is absent from the catalog or
+`readable: false`, stop and name the missing artifact and its config key
+(resolution would block with MISSING_CONTEXT or UNREADABLE_CONTEXT).
 
 ## 3. Resolution gate
 
 Before dispatching any subagent, resolve each role for this work order so the
-capability and context gates are enforced at launch time, not bypassed.
-Build the context catalog once and mint a work-order-scoped capability fact for
-every capability the role declares:
+capability and context gates are enforced at launch, not bypassed. Stamp one
+shared revision - the plugin role layer's snapshot revision - on the catalog,
+the facts, and the resolve call so they agree (a mismatch blocks with
+MIXED_REVISION):
 
 ```bash
+REV="$(fno roles show marketing --json \
+  | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d[-1]["snapshot_revision"])')"
 fno roles context --json --snapshot "$REV" > .fno/campaigns/<slug>/catalog.json
 ```
 
-For each role, write a capability-facts JSON whose entries cover that role's
+For each role, write a capability-facts JSON covering that role's
 `required_capabilities` (marketing: `growth.draft`, `growth.research`;
 communications: `growth.draft`, `growth.statement`; design: `growth.render`,
-`growth.accessibility`; social: `growth.draft`, `growth.schedule`), each
-`available: true` and `work_order_scope` set to this campaign's work order, then
-resolve:
+`growth.accessibility`; social: `growth.draft`, `growth.schedule`). Each fact
+carries every required field, scoped to this work order:
+
+```json
+[{"capability": "growth.draft", "available": true,
+  "source_id": "growth-launch/<slug>", "snapshot_revision": "<REV>",
+  "work_order_scope": {"node_id": "<slug>", "attempt_id": "<attempt>", "role_id": "<role>"}}]
+```
+
+Then resolve, passing the shared revision explicitly:
 
 ```bash
-fno roles resolve <role> --work-order <slug> --attempt <attempt> \
+fno roles resolve <role> --work-order <slug> --attempt <attempt> --snapshot "$REV" \
   --capabilities .fno/campaigns/<slug>/<role>-capabilities.json \
   --context .fno/campaigns/<slug>/catalog.json --json
 ```
@@ -96,12 +124,12 @@ other three.
 
 ## 5. One evaluation round
 
-Run the three evaluator scripts over each returned draft, from the pack
-directory so the pack-relative paths resolve:
+Run the three evaluator scripts over each returned draft, using the derived
+pack root so the pack-relative script and asset paths resolve:
 
-- `bash evaluators/factual-check.sh <draft> <product-truth-path>`
-- `bash evaluators/brand-check.sh <draft>`
-- `bash evaluators/accessibility-check.sh <draft>` (design role only)
+- `bash "$PACK_ROOT/evaluators/factual-check.sh" <draft> <product-truth-path>`
+- `bash "$PACK_ROOT/evaluators/brand-check.sh" <draft>`
+- `bash "$PACK_ROOT/evaluators/accessibility-check.sh" <draft>` (design role only)
 
 Write each verdict as a JSON evidence file beside its draft, for example
 `campaign-plan.factual.json` and `campaign-plan.brand.json`, recording

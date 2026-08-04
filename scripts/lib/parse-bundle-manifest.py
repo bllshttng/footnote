@@ -251,6 +251,17 @@ def emit_rows(manifest_path: Path) -> int:
     return _emit_pack_rows(manifest_path.parent)
 
 
+def _is_safe_component(value: str) -> bool:
+    """A safe single path component: no separator, no traversal, no NUL."""
+    return (
+        bool(value)
+        and "/" not in value
+        and "\\" not in value
+        and value not in (".", "..")
+        and "\x00" not in value
+    )
+
+
 def _emit_pack_rows(repo_root: Path) -> int:
     plugins_dir = repo_root / "plugins"
     if not plugins_dir.is_dir():
@@ -273,16 +284,24 @@ def _emit_pack_rows(repo_root: Path) -> int:
                 continue
             sid = skill.get("id")
             source = skill.get("source")
-            if sid and source:
-                # <type>\t<pack>\t<source>\t<dest>\t<meta>
-                print(f"pack-skill\t{pack_id}\tplugins/{pack_id}/{source}\tskills/{sid}\t")
+            if not (sid and source):
+                continue
+            if not _is_safe_component(str(sid)):
+                print(f"ERROR: pack {pack_id} skill id is not a safe path component: {sid!r}", file=sys.stderr)
+                return 1
+            # <type>\t<pack>\t<source>\t<dest>\t<meta>
+            print(f"pack-skill\t{pack_id}\tplugins/{pack_id}/{source}\tskills/{sid}\t")
         for agent in data.get("agents") or []:
             if not isinstance(agent, dict):
                 continue
             aid = agent.get("id")
             source = agent.get("source")
-            if aid and source:
-                print(f"pack-agent\t{pack_id}\tplugins/{pack_id}/{source}\tagents/{aid}.md\t")
+            if not (aid and source):
+                continue
+            if not _is_safe_component(str(aid)):
+                print(f"ERROR: pack {pack_id} agent id is not a safe path component: {aid!r}", file=sys.stderr)
+                return 1
+            print(f"pack-agent\t{pack_id}\tplugins/{pack_id}/{source}\tagents/{aid}.md\t")
     return 0
 
 
