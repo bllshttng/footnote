@@ -516,8 +516,9 @@ def test_function_agnostic_guards_pass_over_both_packs() -> None:
         assert result.returncode == 0, f"{script}: {result.stdout}\n{result.stderr}"
 
     exact_names = {
-        manifest.id
+        role.function.id
         for manifest in (CONFORMANCE, GROWTH)
+        for role in manifest.roles
     } | {
         role.role.id
         for manifest in (CONFORMANCE, GROWTH)

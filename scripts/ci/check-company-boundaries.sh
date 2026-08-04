@@ -60,6 +60,7 @@ LAYERS = (
         1,
         "core",
         (
+            "fno.company",
             "fno.company.contracts",
             "fno.graph",
             "fno.claims",
@@ -167,6 +168,7 @@ for path, source, tree in parsed:
     mapped_modules += 1
     lines = source.splitlines()
     for node in ast.walk(tree):
+        seen_target_layers = set()
         for imported in imported_modules(
             node, source_module, source_is_package=path.name == "__init__.py"
         ):
@@ -178,6 +180,9 @@ for path, source, tree in parsed:
             target_layer = layer_for(imported)
             if target_layer is None:
                 continue
+            if target_layer[0] in seen_target_layers:
+                continue
+            seen_target_layers.add(target_layer[0])
             if source_layer[0] != target_layer[0]:
                 layer_edges.add((source_layer[0], target_layer[0]))
             if source_layer[0] >= target_layer[0]:

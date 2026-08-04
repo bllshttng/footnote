@@ -84,8 +84,19 @@ out="$(bash "$CHECK" "$ALIASES" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "alias forms exit one" || fail "expected exit 1, got $rc: $out"
 echo "$out" | grep -q 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles / from fno import roles' \
     && ok "absolute package alias caught" || fail "absolute alias missed: $out"
+[[ "$(echo "$out" | grep -c 'cli/src/fno/company/contracts.py:1: L1 core -> L2 roles')" -eq 1 ]] \
+    && ok "absolute alias emits one finding" || fail "absolute alias duplicated: $out"
 echo "$out" | grep -q 'cli/src/fno/approvals/__init__.py:1: L1 core -> L2 roles / from .. import roles' \
     && ok "relative package alias caught" || fail "relative alias missed: $out"
+
+echo "== the public fno.company facade is part of the core layer =="
+FACADE="$TMP/facade"
+make_repo "$FACADE"
+printf 'from fno.company import WorkOrderRef\n' > "$FACADE/cli/src/fno/paths.py"
+out="$(bash "$CHECK" "$FACADE" 2>&1)"; rc=$?
+[[ $rc -eq 1 ]] && ok "public facade edge exits one" || fail "expected exit 1, got $rc: $out"
+echo "$out" | grep -q 'cli/src/fno/paths.py:1: L0 platform -> L1 core / from fno.company import WorkOrderRef' \
+    && ok "public facade edge caught" || fail "public facade edge missed: $out"
 
 echo "== pack-marked root files are attributed to their source pack =="
 PROJECTION="$TMP/projection"
