@@ -2410,7 +2410,7 @@ const CLIENT_VERB_USAGE: &[&str] = &[
     "resume <name> [--print-command]",
     "attach <name>",
     "logs <name> [--follow] [options]",
-    "loop run --driver target|megawalk [options]",
+    "loop run --driver target [options]",
     "report --session-id <uuid> --seq <n> --state working|blocked|done [--reason <text>] [--ttl-ms <n>]",
     "wait --agent <name> --state idle|blocked|done [--timeout-ms <n>] [--json]",
     "subscribe [--agent <name>] [--kinds state,exit] [--json]",

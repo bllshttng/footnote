@@ -19,10 +19,8 @@
 # frontmatter status and specified a fixture-corpus parity harness against it.
 # Reading the source says otherwise: loopcheck.rs and loop_target.rs parse
 # `.fno/target-state.md` (a DIFFERENT vocabulary - COMPLETE|BLOCKED|ABORTED),
-# finalize.rs shells out to `fno plan validate`/`stamp`, and loop_megawalk.rs
-# takes plan_path from `fno backlog next` JSON whose status Python already
-# derived. The registered Rust plan readers consume activation-specific keys,
-# never `status:`.
+# finalize.rs shells out to `fno plan validate`/`stamp`. The registered Rust
+# plan readers consume activation-specific keys, never `status:`.
 #
 # So there is nothing on the far side to pin, and a parity harness would freeze
 # a contract with one participant. What can actually regress is someone ADDING
@@ -147,7 +145,6 @@ crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:1
 crates/fno-agents/src/daemon.rs:128
 crates/fno-agents/src/delivery_completion.rs:4
-crates/fno-agents/src/dispatch_posture.rs:3
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:32
 crates/fno-agents/src/gc.rs:14
@@ -155,7 +152,6 @@ crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
 crates/fno-agents/src/lib.rs:12
 crates/fno-agents/src/loop_dispatch.rs:6
-crates/fno-agents/src/loop_megawalk.rs:23
 crates/fno-agents/src/loopcheck.rs:31
 crates/fno-agents/src/manifest.rs:2
 crates/fno-agents/src/needs.rs:1

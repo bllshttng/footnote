@@ -4652,7 +4652,7 @@ fn handle_push_to_channel(ctx: &Ctx, req: &Request) -> Response {
 fn deliver_envelope(channel_id: &str, envelope: &Value) -> Result<(), String> {
     use std::io::Write;
     use std::process::Stdio;
-    let mut child = crate::loop_megawalk::fno_cmd("fno")
+    let mut child = crate::loop_dispatch::fno_cmd("fno")
         .args(["mcp", "send", "--session-id", channel_id])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

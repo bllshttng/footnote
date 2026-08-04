@@ -61,7 +61,7 @@ use serde_json::json;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
-use crate::loop_megawalk::{fno_cmd, retry_etxtbsy};
+use crate::loop_dispatch::{fno_cmd, retry_etxtbsy};
 use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };

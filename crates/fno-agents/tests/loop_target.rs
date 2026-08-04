@@ -523,28 +523,19 @@ fn e2e_binary_missing_driver_binary() {
     );
 }
 
-// ── test 9: e2e binary megawalk driver starts (ab-7303e5d7 group-2 landed) ────
+// ── test 9: e2e binary megawalk driver is rejected (driver removed) ──────────
 //
-// Previously this test verified that --driver megawalk was rejected with exit 2.
-// After ab-7303e5d7 (group 2), megawalk is a real driver.  An empty stub fno
-// that returns "null" from `backlog next` causes the walk to exit 0 (NoWork).
-// Verify the header line and exit code 0 (not 2 = config error).
+// The megawalk driver was deprecated and its loop arm deleted; `--driver` now
+// accepts only `target`. Pin that `--driver megawalk` is rejected with exit 2 so
+// a stray reintroduction fails loudly instead of silently reviving a dead path.
 
 #[test]
-fn e2e_binary_megawalk_starts() {
+fn e2e_binary_megawalk_rejected() {
     let dir = TempDir::new().unwrap();
     let lib_dir = dir.path().join("lib");
     let bin_dir = dir.path().join("bin");
     write_stub_driver(&lib_dir, "claude-code", 40, "exit 0");
-
-    // Stub fno that returns null from backlog next (empty backlog) and
-    // exits 0 for all other subcommands.
-    write_stub_binary(
-        &bin_dir,
-        "fno",
-        r#"if [[ "$1" == "backlog" && "$2" == "next" ]]; then echo 'null'; exit 0; fi
-exit 0"#,
-    );
+    write_stub_binary(&bin_dir, "fno", "exit 0");
     write_stub_binary(&bin_dir, "claude", "exit 0");
 
     let output = std::process::Command::new(BINARY)
@@ -563,17 +554,16 @@ exit 0"#,
         .output()
         .unwrap();
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     assert_eq!(
         output.status.code(),
-        Some(0),
-        "megawalk driver with empty backlog must exit 0 (NoWork);\nstdout={stdout}\nstderr={stderr}"
+        Some(2),
+        "--driver megawalk must be rejected (driver removed);\nstderr={stderr}"
     );
     assert!(
-        stdout.contains("megawalk"),
-        "header must mention megawalk: {stdout}"
+        stderr.contains("unknown --driver"),
+        "stderr must explain the rejection: {stderr}"
     );
 }
 

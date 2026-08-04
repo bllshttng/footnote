@@ -56,7 +56,6 @@ mod completion_output;
 pub mod daemon;
 pub mod delivery_completion;
 pub mod digest;
-pub mod dispatch_posture;
 pub mod drift;
 pub mod envelope;
 pub mod events;
@@ -68,7 +67,6 @@ pub mod kill_criteria;
 pub mod logs;
 pub mod logs_client;
 pub mod loop_dispatch;
-pub mod loop_megawalk;
 pub mod loop_runtime;
 pub mod loop_target;
 pub mod loopcheck;
@@ -786,7 +784,7 @@ pub fn emit_schema_json() -> serde_json::Value {
                 "source": {
                     "type": "string",
                     "anyOf": [
-                        { "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "megatron", "megawalk", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
+                        { "enum": ["active-backlog", "approvals", "backlog", "daemon", "fno-loop", "hook", "megatron", "migration", "observer", "skill_diff", "subagent", "target", "test"] },
                         { "pattern": "^(worker|stream-worker):.+$" }
                     ],
                     "description": "Producer identity: a fixed-string source or a per-agent worker (worker:<id> / stream-worker:<id>)"

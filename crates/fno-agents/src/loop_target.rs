@@ -282,17 +282,6 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     let mut cli_alias: Option<String> = None;
     let mut driver_lib_dir: Option<PathBuf> = None;
     let mut cwd: PathBuf = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    // Megawalk-only flags.
-    let mut project: Option<String> = None;
-    let mut all = false;
-    // x-4391 tri-state: None = unset (megawalk resolves config.dispatch.auto_merge;
-    // target rejects any posture flag). Some(true)=--allow-merge, Some(false)=--no-merge.
-    let mut allow_merge: Option<bool> = None;
-    let mut parallel_cap: Option<u64> = None;
-    let mut max_units: Option<u64> = None;
-    // Megawalk flags (group 3, ab-9fd662c6).
-    let mut mission: Option<String> = None;
-    let mut termination_key: Option<String> = None;
 
     // Helper: advance i and return the next argument, or emit a "missing value"
     // usage error (exit 2) if the flag is trailing with no following value.
@@ -362,52 +351,6 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
             "--cwd" => {
                 cwd = PathBuf::from(require_value!("--cwd", args, i));
             }
-            "--project" => {
-                project = Some(require_value!("--project", args, i).to_string());
-            }
-            "--all" => {
-                all = true;
-            }
-            "--allow-merge" => {
-                allow_merge = Some(true);
-            }
-            "--no-merge" => {
-                allow_merge = Some(false);
-            }
-            "--parallel-cap" => {
-                let v = require_value!("--parallel-cap", args, i);
-                let parsed = v
-                    .parse::<u64>()
-                    .map_err(|_| format!("--parallel-cap: expected integer, got '{v}'"))?;
-                parallel_cap = Some(crate::loop_megawalk::clamp_parallel_cap(parsed));
-                if parsed > 1 {
-                    eprintln!(
-                        "fno-agents loop megawalk: --parallel-cap {parsed} accepted; \
-                         execution remains SEQUENTIAL (collision-conservative default, \
-                         group-2 serializes regardless of cap)"
-                    );
-                }
-            }
-            "--max-units" => {
-                let v = require_value!("--max-units", args, i);
-                let parsed = v
-                    .parse::<u64>()
-                    .map_err(|_| format!("--max-units: expected integer >= 1, got '{v}'"))?;
-                if parsed == 0 {
-                    eprintln!(
-                        "fno-agents loop run: --max-units must be >= 1, got 0 \
-                         (use --max-units 1 for the /megawalk once modifier)"
-                    );
-                    return Ok(2);
-                }
-                max_units = Some(parsed);
-            }
-            "--mission" => {
-                mission = Some(require_value!("--mission", args, i).to_string());
-            }
-            "--termination-key" => {
-                termination_key = Some(require_value!("--termination-key", args, i).to_string());
-            }
             _ => {
                 eprintln!("fno-agents loop run: unknown flag '{flag}'");
                 return Ok(2);
@@ -417,78 +360,20 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
     }
 
     // ── driver validation ─────────────────────────────────────────────────────
-    let driver = match driver.as_deref() {
+    match driver.as_deref() {
         None => {
             eprintln!("fno-agents loop run: --driver is required");
-            eprintln!("Usage: fno-agents loop run --driver <target|...> [options]");
+            eprintln!("Usage: fno-agents loop run --driver target [options]");
             return Ok(2);
         }
-        Some("megawalk") => {
-            // x-4391: an explicit --allow-merge/--no-merge wins; otherwise the
-            // per-project config.dispatch.auto_merge decides (default false =
-            // no-merge). Resolve before `cwd` is moved into run().
-            let allow_merge =
-                allow_merge.unwrap_or_else(|| crate::agents_config::dispatch_auto_merge(&cwd));
-            return Ok(crate::loop_megawalk::run(
-                &dispatcher_name,
-                max_iterations,
-                max_turns,
-                budget_usd,
-                model.as_deref(),
-                prompt_file.as_deref(),
-                cli_alias.as_deref(),
-                driver_lib_dir,
-                cwd,
-                project,
-                all,
-                allow_merge,
-                parallel_cap,
-                max_units,
-                mission,
-                termination_key,
-            ));
-        }
-        Some("target") => {
-            // A merge-posture flag is megawalk-only; a /target session's merge
-            // posture is its own concern and config is never consulted here
-            // (x-4391). Reject either flag with an accurate message.
-            if allow_merge == Some(true) {
-                eprintln!(
-                    "fno-agents loop run: --allow-merge is only valid with --driver megawalk"
-                );
-                return Ok(2);
-            }
-            if allow_merge == Some(false) {
-                eprintln!("fno-agents loop run: --no-merge is only valid with --driver megawalk");
-                return Ok(2);
-            }
-            // --max-units is megawalk-only; reject with clear message.
-            if max_units.is_some() {
-                eprintln!("fno-agents loop run: --max-units is only valid with --driver megawalk");
-                return Ok(2);
-            }
-            // --mission / --termination-key are megawalk flags.
-            if mission.is_some() {
-                eprintln!("fno-agents loop run: --mission is only valid with --driver megawalk");
-                return Ok(2);
-            }
-            if termination_key.is_some() {
-                eprintln!(
-                    "fno-agents loop run: --termination-key is only valid with --driver megawalk"
-                );
-                return Ok(2);
-            }
-            "target"
-        }
+        Some("target") => {}
         Some(other) => {
             eprintln!(
-                "fno-agents loop run: unknown --driver '{other}'; \
-                 supported: 'target', 'megawalk'"
+                "fno-agents loop run: unknown --driver '{other}'; supported: 'target'"
             );
             return Ok(2);
         }
-    };
-    let _ = driver; // "target" confirmed
+    }
 
     // ── resolve driver-lib-dir ────────────────────────────────────────────────
     let lib_dir = match driver_lib_dir {

@@ -10,7 +10,6 @@ an exit handler that unlinks it).
 
 The ONLY source files permitted to release a ``node:<id>`` claim:
   1. ``skills/target/scripts/handoff.sh``      - deliberate self-handoff (holder-verified)
-  2. ``crates/fno-agents/src/loop_megawalk.rs`` - the megawalk walker (owner, on success)
 
 A "node-release site" is a ``claim release`` invocation whose released KEY
 resolves to a ``node:`` prefix (a literal, or a local variable / ``format!``
@@ -41,13 +40,12 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 # owner) and any future Rust releaser live there.
 SCAN_DIRS = ["cli/src/fno", "scripts", "skills", "hooks", "crates"]
 
-# The two sanctioned node:<id> release sites. Each releases a node claim as a
+# Sanctioned node:<id> release sites. Each releases a node claim as a
 # legitimate owner/successor with holder verification; see ab-588326a7 / x-73cc.
 # A NEW entry here requires an equivalent justification (a holder-verified,
 # single-authority release at a sanctioned lifecycle boundary).
 ALLOWLIST = {
     "skills/target/scripts/handoff.sh",
-    "crates/fno-agents/src/loop_megawalk.rs",
     # `fno backlog unclaim`/`release`: the sanctioned one-shot un-claim verb. Its
     # lockfile release is holder-verified - it drops the lock ONLY when the
     # holder is stale (PID dead / TTL expired) or matches the invoking session,
