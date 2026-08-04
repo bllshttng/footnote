@@ -539,7 +539,10 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary, retry_etxtbsy, PICKED_ENV_KEY};
+    use super::{
+        interpret_pick, pick_would_undo_a_route, resolve_driver_binary, retry_etxtbsy,
+        PICKED_ENV_KEY,
+    };
 
     fn pair(k: &str, v: &str) -> (String, String) {
         (k.to_string(), v.to_string())

@@ -26,7 +26,7 @@
 //! (invariant from ab-d0337fbc). Closing the backlog graph node and stamping the
 //! plan belong to `reconcile` and `stamp-plan` respectively; calling them here
 //! would duplicate work and couple the loop runtime to concerns it must not own.
-//! `megawalk`'s Queue (group 2, ab-7303e5d7) IS where `fno backlog done` runs.
+//! The active-backlog daemon (the keep-set) is where `fno backlog done` runs.
 
 use crate::loop_dispatch::{
     driver_default_max, preflight, resolve_driver_binary, ShelloutDispatcher,
@@ -136,7 +136,7 @@ pub(crate) fn parse_target_manifest(content: &str) -> Option<TargetManifest> {
 /// `close()` is intentionally inert: the session's own stop hook already
 /// emitted the termination event; the manifest is immutable; graph-node closing
 /// and plan-stamping belong to `reconcile` / `stamp-plan`, not the loop runtime.
-/// megawalk's Queue (group 2, ab-7303e5d7) is where `fno backlog done` runs.
+/// The active-backlog daemon is where `fno backlog done` runs.
 /// See module documentation for why `close()` is inert.
 ///
 /// ## Why Option<Unit> (not Mutex) (F8)
@@ -189,7 +189,7 @@ impl Queue for TargetQueue {
     /// The session's loop-check stop hook already emitted the termination event.
     /// The manifest is immutable (ab-d0337fbc invariant). Graph-node closing and
     /// plan-stamping belong to reconcile / stamp-plan, not the loop runtime.
-    /// megawalk's Queue (group 2, ab-7303e5d7) is where `fno backlog done` runs.
+    /// The active-backlog daemon is where `fno backlog done` runs.
     fn close(&mut self, _unit: &Unit, _evidence: &Evidence) -> Result<CloseOutcome, LoopError> {
         Ok(CloseOutcome::Closed)
     }
@@ -368,9 +368,7 @@ fn run_loop_verb_inner(args: &[String]) -> Result<i32, Box<dyn std::error::Error
         }
         Some("target") => {}
         Some(other) => {
-            eprintln!(
-                "fno-agents loop run: unknown --driver '{other}'; supported: 'target'"
-            );
+            eprintln!("fno-agents loop run: unknown --driver '{other}'; supported: 'target'");
             return Ok(2);
         }
     }
