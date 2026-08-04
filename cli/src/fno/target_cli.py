@@ -853,7 +853,7 @@ def check_review_gate() -> None:
 
 @target_app.command("resolve-owned-identity", hidden=True)
 def resolve_owned_identity_cmd() -> None:
-    """Resolve the harness identity this process can PROVE it owns (x-0bb9).
+    """Resolve the harness identity this process can PROVE it owns.
 
     The init hook has no Python and must stamp ``harness``/``harness_session_id``
     on the manifest; precedence alone launders an inherited marker into
