@@ -309,7 +309,6 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/hooks/test_loop_check_e2e.sh\n"
      "bash tests/events/test-loop-check-emission-schema.sh\n"
      "bash tests/hooks/test_loop_check_backstop_subprocess.sh"),
-    ("megawalk-walk smoke test", ".", "bash tests/smoke-megawalk-walk.sh"),
     ("Target self-handoff harness", ".",
      "bash tests/test-handoff.sh\n"
      "bash tests/target/test_handoff_ledger_record.sh"),

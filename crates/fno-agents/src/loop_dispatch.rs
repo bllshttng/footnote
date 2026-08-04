@@ -124,6 +124,46 @@ pub fn driver_default_max(lib: &Path) -> Result<u64, LoopError> {
     })
 }
 
+// ── shared `fno` shellout helpers ─────────────────────────────────────────────
+
+/// Build a [`Command`] for the `fno` binary.
+///
+/// Binary resolution: `fno_bin` (the path/name given by the caller, overridden
+/// by `$FNO_BIN` for tests). If `FNO_BIN` is set and non-empty it wins;
+/// otherwise `fno_bin` is used as-is (callers pass `"fno"` for production and a
+/// tempdir stub path for tests).
+pub(crate) fn fno_cmd(fno_bin: &str) -> Command {
+    let binary = std::env::var("FNO_BIN")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fno_bin.to_string());
+    Command::new(binary)
+}
+
+/// Run a spawn closure, retrying briefly on ETXTBSY ("Text file busy", os error
+/// 26). The spawned file is the `fno` / `fno-agents` binary: a concurrent
+/// `fno update` relinks it in place, and under `cargo test` a sibling thread
+/// that just wrote+exec'd a stub leaves a transient write-fd open in another
+/// thread's fork window; either way the kernel can refuse the exec with
+/// ETXTBSY. The condition clears within microseconds once the writing fd closes,
+/// so a bounded retry turns a hard spawn failure into a short wait. Any other
+/// error, and the successful value, passes through unchanged.
+pub(crate) fn retry_etxtbsy<T>(
+    mut spawn: impl FnMut() -> std::io::Result<T>,
+) -> std::io::Result<T> {
+    const MAX_RETRIES: u32 = 5;
+    let mut attempt: u32 = 0;
+    loop {
+        match spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) && attempt < MAX_RETRIES => {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(2 * u64::from(attempt)));
+            }
+            other => return other,
+        }
+    }
+}
+
 /// Resolve the binary name for a given driver name.
 ///
 /// F2: takes an explicit `cli_alias` parameter (from `--cli` flag) instead of
@@ -499,10 +539,65 @@ impl Dispatcher for ShelloutDispatcher {
 
 #[cfg(test)]
 mod tests {
-    use super::{interpret_pick, pick_would_undo_a_route, resolve_driver_binary, PICKED_ENV_KEY};
+    use super::{
+        interpret_pick, pick_would_undo_a_route, resolve_driver_binary, retry_etxtbsy,
+        PICKED_ENV_KEY,
+    };
 
     fn pair(k: &str, v: &str) -> (String, String) {
         (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn retry_etxtbsy_passes_success_through_without_retry() {
+        let mut calls = 0u32;
+        let r: std::io::Result<u8> = retry_etxtbsy(|| {
+            calls += 1;
+            Ok(7)
+        });
+        assert_eq!(r.unwrap(), 7);
+        assert_eq!(calls, 1, "a successful spawn must not retry");
+    }
+
+    #[test]
+    fn retry_etxtbsy_retries_then_succeeds() {
+        // Simulate ETXTBSY clearing after a couple of attempts.
+        let mut calls = 0u32;
+        let r: std::io::Result<u8> = retry_etxtbsy(|| {
+            calls += 1;
+            if calls < 3 {
+                Err(std::io::Error::from_raw_os_error(libc::ETXTBSY))
+            } else {
+                Ok(42)
+            }
+        });
+        assert_eq!(r.unwrap(), 42);
+        assert_eq!(calls, 3, "must retry past transient ETXTBSY");
+    }
+
+    #[test]
+    fn retry_etxtbsy_does_not_swallow_other_errors() {
+        // A non-ETXTBSY error returns immediately, no retry.
+        let mut calls = 0u32;
+        let r: std::io::Result<u8> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(libc::ENOENT))
+        });
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::ENOENT));
+        assert_eq!(calls, 1, "a non-ETXTBSY error must not retry");
+    }
+
+    #[test]
+    fn retry_etxtbsy_gives_up_after_max_retries() {
+        // Persistent ETXTBSY surfaces after the bounded retry budget (1 initial
+        // + 5 retries = 6 calls) rather than spinning forever.
+        let mut calls = 0u32;
+        let r: std::io::Result<u8> = retry_etxtbsy(|| {
+            calls += 1;
+            Err(std::io::Error::from_raw_os_error(libc::ETXTBSY))
+        });
+        assert_eq!(r.unwrap_err().raw_os_error(), Some(libc::ETXTBSY));
+        assert_eq!(calls, 6, "1 initial attempt + MAX_RETRIES(5)");
     }
 
     // A GLM/zai loop pins ANTHROPIC_BASE_URL + ANTHROPIC_AUTH_TOKEN. The pick

@@ -52,7 +52,7 @@ stays as the single idempotency floor).
 | 1 | `fno agents spawn` / `dispatch_spawn` | `agents/dispatch.py:2011`, `agents/cli.py:486` | KEEP, canonical | — |
 | 2 | pr-watch `fire_skill` hand-assembled `claude --print` | `pr_watch/_dispatch.py:143,216` | RETIRE through canonical spawn | OPEN |
 | 3 | `scripts/post-merge/watch.sh` hand-assembled `claude --print` | `watch.sh:71` | DELETE | #573 |
-| 4 | Rust `ShelloutDispatcher` -> `driver-claude-code.sh` | `crates/fno-agents/src/loop_megawalk.rs:1208` | RETIRE, migration needed after reachability trace | OPEN |
+| 4 | Rust `ShelloutDispatcher` -> `driver-claude-code.sh` | `crates/fno-agents/src/loop_dispatch.rs` | KEEP; serves the target driver (megawalk path removed) | closed |
 | 5 | Python megawalk walker + `ClaudeCodeDriver` | `megawalk_drivers/claude_code.py:53` | DELETE | #573 |
 | 6 | Claude/Codex adapter worker spawns | `adapters/{claude_code,codex}.py` | DELETE; review caller migrated to canonical dispatch | #573 |
 | 7 | One-shot `claude -p` LLM-as-a-function | `inbox/triage.py:304` and three sites | OUT OF SCOPE | — |
@@ -62,8 +62,8 @@ stays as the single idempotency floor).
 The Claude/Codex adapter row was closed after its live review caller migrated to canonical one-shot dispatch.
 The Gemini row is closed by removing the Python adapter and its dispatch-only tests while retaining readable legacy registry identities, pane support, and the harness-map refusal pointing at agy.
 
-Leg 6 reachability trace (2026-07-23): `loop_target.rs:420-427` dispatches `--driver megawalk` to `loop_megawalk::run`; `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`; `loop_dispatch.rs:250-272` implements the live dispatcher.
-The dispatcher is reachable, so this PR does not partially delete it or `scripts/lib/driver-claude-code.sh`; the row remains `RETIRE (migration needed)` for the later driver cutover.
+Leg 6 reachability trace (2026-07-23): `loop_target.rs:420-427` dispatched `--driver megawalk` to `loop_megawalk::run`; `loop_megawalk.rs:1153-1155` constructed `ShelloutDispatcher`; `loop_dispatch.rs:250-272` implemented the live dispatcher.
+The `--driver megawalk` arm and `loop_megawalk.rs` were removed on 2026-08-03; `ShelloutDispatcher` (now in `loop_dispatch.rs`) survives, serving the target driver.
 
 ## Census 5: session liveness / observation
 
@@ -147,5 +147,4 @@ Neither reads a field `_apply_graph_defaults` rewrites, so neither is a drift la
 
 ### Leg 6 reachability evidence (2026-07-23)
 
-The Rust dispatcher is reachable: `crates/fno-agents/src/loop_target.rs:420-427` routes `--driver megawalk` to `crate::loop_megawalk::run`, `loop_megawalk.rs:1153-1155` constructs `ShelloutDispatcher`, and `loop_dispatch.rs:250-272` implements its live `Dispatcher` path.
-This leg therefore records `RETIRE (migration needed)` and deletes neither `ShelloutDispatcher` nor `scripts/lib/driver-claude-code.sh`.
+The Rust dispatcher was reachable via the megawalk driver (removed 2026-08-03); `ShelloutDispatcher` (now in `loop_dispatch.rs`) is retained for the target driver, as is `scripts/lib/driver-claude-code.sh`.

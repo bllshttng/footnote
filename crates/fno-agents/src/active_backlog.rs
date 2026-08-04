@@ -61,7 +61,7 @@ use serde_json::json;
 
 use crate::claims::{self, ClaimState};
 use crate::events::EventEmitter;
-use crate::loop_megawalk::{fno_cmd, retry_etxtbsy};
+use crate::loop_dispatch::{fno_cmd, retry_etxtbsy};
 use crate::loop_runtime::{
     CloseOutcome, Evidence, GlobalJournalPath, Journal, ProjectJournalPath, UnitResult,
 };
@@ -407,9 +407,8 @@ pub struct PendingDispatch {
 /// claim before a claim-absent verdict counts as a boot crash.
 const BOOT_GRACE_TICKS: u32 = 3;
 
-/// True for the terminal reasons `MegawalkQueue::close` marks the node done
-/// (mirrors `loop_megawalk::is_done_reason`, kept local to avoid widening its
-/// visibility). `DoneBatched`/`DoneAwaitingMerge` are NOT here - they close at
+/// True for the terminal reasons that mark a node done (a successful code or
+/// doc delivery). `DoneBatched`/`DoneAwaitingMerge` are NOT here - they close at
 /// merge and are recognized as success by `map_outcome`'s keep-set instead.
 fn is_done_reason(r: &TerminationReason) -> bool {
     matches!(
@@ -491,10 +490,9 @@ fn resolve_dispatch(
     node_id: &str,
     ev: Evidence,
 ) {
-    // Mirror MegawalkQueue::close EXACTLY: a successful delivery close runs
-    // `fno backlog done` (retry_etxtbsy for a transient busy binary) and Closes
-    // only on success - a failed `done` Parks with the error, so the breaker
-    // counts it as a failure just as the supervised path did (never a false
+    // A successful delivery close runs `fno backlog done` (retry_etxtbsy for a
+    // transient busy binary) and Closes only on success - a failed `done` Parks
+    // with the error, so the breaker counts it as a failure (never a false
     // success). Exit 5 (PR OPEN, not merged) is AwaitingMerge, not a failure:
     // a no-merge dispatch lands its PR open, so `done` exits 5 and the node
     // closes at the human merge via reconcile - map_outcome's keep-set counts
@@ -1134,7 +1132,7 @@ mod tests {
 
     #[test]
     fn is_done_reason_includes_generic_delivery() {
-        // The two reasons MegawalkQueue::close treats as a `backlog done`;
+        // The terminal reasons that count as a `backlog done`;
         // DoneBatched/DoneAwaitingMerge are the map_outcome keep-set, not here.
         assert!(is_done_reason(&TerminationReason::DonePRGreen));
         assert!(is_done_reason(&TerminationReason::DoneAdvisory));
@@ -1487,9 +1485,9 @@ mod tests {
 
     #[test]
     fn resolve_dispatch_failed_done_records_failure_not_false_success() {
-        // Parity with MegawalkQueue::close: if `fno backlog done` FAILS, the node
-        // was not actually closed, so the dispatch must Park (a failure toward the
-        // streak), never a false success. Regression guard for the review finding.
+        // If `fno backlog done` FAILS, the node was not actually closed, so the
+        // dispatch must Park (a failure toward the streak), never a false success.
+        // Regression guard for the review finding.
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");
@@ -1528,7 +1526,7 @@ mod tests {
         // x-aba7: a no-merge dispatch lands its PR OPEN, so `fno backlog done`
         // exits 5 (awaiting merge). That is a SUCCESSFUL dispatch (the node
         // closes at the human merge via reconcile), so the breaker must NOT
-        // record a failure - mirror of MegawalkQueue::close's exit-5 mapping.
+        // record a failure for the exit-5 awaiting-merge mapping.
         let _env = env_guard();
         let tmp = tempfile::TempDir::new().unwrap();
         let bin = tmp.path().join("bin");

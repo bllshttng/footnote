@@ -136,9 +136,8 @@ def _container_ids(entries: list[dict]) -> set[str]:
     automatically via ``_cascade_close_parents`` on the merge that finishes its
     last child (uniform across projects), so it is already ``done`` - never a
     lingering ``ready`` container that selection would have to surface for
-    closure. That replaces the old "walker closes the epic via next" path
-    (loop_megawalk.rs grilled-decision-9), which conflicted with never building a
-    container.
+    closure. That replaces the old "walker closes the epic via next" path,
+    which conflicted with never building a container.
     """
     return {
         p for e in entries
@@ -3726,7 +3725,7 @@ def cmd_next(
             "project": e.get("project"), "cwd": e.get("cwd"),
             "size": e.get("size"), "plan_path": e.get("plan_path"),
             # x-571f: the per-node model pin must ride in the next-JSON so the
-            # megawalk drain (loop_megawalk.rs) can prefer it over cfg.model.
+            # active-backlog drain can prefer it over cfg.model.
             # model_tier rides alongside it so the dispatch-time tier resolver
             # sees the annotation (else it silently falls back to the default).
             "model": e.get("model"),

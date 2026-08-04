@@ -210,7 +210,7 @@ pub fn is_file_mode_0600(path: &Path) -> bool {
 /// returns itself (so a `--fresh`-style redirect is a no-op there). Mirrors the
 /// Python `resolve_canonical_worktree` in `cli/src/fno/paths.py` so the two
 /// layers cannot drift (ab-77b691dc; review HIGH). Shared by the client `--fresh`
-/// dispatch (`bin/client.rs`) and the megawalk worker launch (`loop_megawalk.rs`).
+/// dispatch (`bin/client.rs`).
 pub fn canonical_repo_root(cwd: &Path) -> Option<PathBuf> {
     let out = std::process::Command::new("git")
         .arg("-C")

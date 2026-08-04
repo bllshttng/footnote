@@ -88,7 +88,7 @@ footnote/
 
 ## Commands
 
-Six advertised verbs: `/fno:target`, `/fno:megawalk`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (`/fno:review sigma|peer`, `/fno:think what-if|panel`, `/fno:pr create|check|merged`, `/fno:do flat|waves`). Everything else stays invocable by full name; the advertised set lives in `skills/using-fno/SKILL.md`, injected at SessionStart. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
+Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/fno:fix`, each fanning out to modes (`/fno:review sigma|peer`, `/fno:think what-if|panel`, `/fno:pr create|check|merged`, `/fno:do flat|waves`). Everything else stays invocable by full name; the advertised set lives in `skills/using-fno/SKILL.md`, injected at SessionStart. Always write verbs plugin-qualified (`/fno:...`) - a bare `/do` can resolve to another plugin.
 
 | Command | Purpose |
 |---------|---------|
@@ -96,13 +96,12 @@ Six advertised verbs: `/fno:target`, `/fno:megawalk`, `/fno:think`, `/fno:review
 | `/fno:target path/to/plan` \| `<node-id>` | Execute an existing plan or backlog node |
 | `/fno:target L "feature"` | Large size: full ceremony including adversarial |
 | `/fno:target auto-merge "..."` | Auto-merge once external review passes (opt-in). [auto-merge](skills/target/references/auto-merge.md) |
-| `/fno:megawalk` | Loop the ready backlog until done. `roadmap <vision.md>` generates a backlog first |
 | `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `/fno:do` | Execute a plan: `flat` (default) or `waves` |
 | `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
 | `/fno:pr create` \| `check` \| `merged` | Open PR (Haiku worker) / poll+implement external review / post-merge ritual |
 
-Surface evolution: bare `/fno:megawalk` replaced `continue`/`next`/`adopt --batch` ([megawalk-migration](docs/architecture/megawalk-migration.md)); `/fno:blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
+Surface evolution: `/fno:blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
 
 ## Backlog (`fno backlog`)
 
@@ -121,7 +120,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
-- *Cross-session:* `fno-agents loop run` drives `--driver target` and `--driver megawalk`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
+- *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
 - Signal distress without stopping: `<help reason="..." evidence="...">...</help>`. Cancel: `touch .fno/.target-cancelled` or `TARGET_CANCEL=1`. Subprocess agents return `RESULT: BLOCKED` on stdout.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
 
@@ -133,9 +132,9 @@ NEVER edit these directly (a `PreToolUse` hook detects it). Use `fno backlog` / 
 
 | File | Default | Purpose | Owner |
 |------|---------|---------|-------|
-| `paths.graph_json()` | `~/.fno/graph.json` (+ `.md` Kanban) | Feature dependency graph | megawalk |
+| `paths.graph_json()` | `~/.fno/graph.json` (+ `.md` Kanban) | Feature dependency graph | backlog |
 | `paths.ledger_json()` | `~/.fno/ledger.json` | Execution history + cost | target |
-| `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | megawalk |
+| `paths.briefs_dir()` | `~/.fno/briefs/{id}.md` | Sidecar discovery briefs | backlog |
 | `.fno/target-state.md` | project-relative | Immutable session manifest | target |
 | `.fno/STATE.md` / `SUMMARY.md` / `00-INDEX.md` | project-relative | Wave progress / completion / strategy | /do, operator, /blueprint |
 | `{plan_path}.artifacts/` | plan-relative | Quick-plan sidecar | target stop hook |
@@ -185,7 +184,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## Skill / agent development
 
 - **Skill:** `skills/<name>/SKILL.md` (+ optional `references/`, `scripts/`). **Agent:** `agents/<name>.md` with frontmatter.
-- **Self-containment (CI-enforced):** driver skills (`/target`, `/megawalk`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse happens at build time via `skill-bundles.yaml` + `fno bundle` (`fno bundle check` gates freshness).
+- **Self-containment (CI-enforced):** driver skills (`/target`) must be portable - no `${REPO_ROOT}/scripts/` refs, no path escapes, no runtime `Skill()` calls between drivers. Cross-skill reuse happens at build time via `skill-bundles.yaml` + `fno bundle` (`fno bundle check` gates freshness).
 - **TDD:** failing test -> red -> minimal code -> green -> verify -> atomic commit.
 - **Testing:** `python skills/do/orchestrator.py --help`; `./scripts/validate-test-first.sh`.
 
