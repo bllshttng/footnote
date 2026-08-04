@@ -873,9 +873,10 @@ EOF
     _HARNESS_SESSION=""
     _failopen_families=0
     { [[ "${CODEX_THREAD_ID:-}" == *[![:space:]]* ]] || [[ "${CODEX_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
-    [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    { [[ "${CLAUDE_CODE_SESSION_ID:-}" == *[![:space:]]* ]] || [[ "${CLAUDECODE_SESSION_ID:-}" == *[![:space:]]* ]]; } && _failopen_families=$((_failopen_families+1))
     [[ "${GEMINI_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
     [[ "${OPENCODE_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
+    [[ "${HERMES_SESSION_ID:-}" == *[![:space:]]* ]] && _failopen_families=$((_failopen_families+1))
     [[ "$_failopen_families" -ge 2 ]] && PROVIDER="claude"
     unset _failopen_families
   fi
@@ -1148,7 +1149,7 @@ PYEOF
       # empty "${array[@]}"); the regex guarantees $_SESSION_PID is digits only.
       if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
             --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-            --harness "$PROVIDER" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+            --harness "$_OWNED_HARNESS" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
         # Acquire-then-validate (codex P1, x-e957), BEFORE the manifest lines
         # below so a refusal leaves no claim fields behind. Every containment
         # gate above runs before this claim, so adoption committing in that
@@ -1271,7 +1272,7 @@ PYEOF
               _waited=$((_waited + (_WAIT_INTERVAL > 0 ? _WAIT_INTERVAL : 1)))
               if FNO_CLAIMS_ROOT="$HOME" fno claim acquire "$_CLAIM_KEY" \
                     --holder "$_CLAIM_HOLDER" --ttl "$_CLAIM_TTL" $_PID_FLAGS \
-                    --harness "$PROVIDER" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
+                    --harness "$_OWNED_HARNESS" --reason "target dispatch" >/dev/null 2>"$STATE_DIR/.claim-err"; then
                 _claim_acquired=1
                 break
               fi
