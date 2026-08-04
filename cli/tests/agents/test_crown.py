@@ -214,7 +214,7 @@ def test_top_rows_join_the_crown_by_name() -> None:
     from fno.agents.top import _rows
 
     w = LiveWorker(
-        source="fno", name="king-epic", provider="claude",
+        source="fno", name="king-epic", harness="claude",
         substrate="pane", pid=1, status="live",
     )
     assert _rows([w], {"king-epic": "L1 epic-x"})[0]["crown"] == "L1 epic-x"

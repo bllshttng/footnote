@@ -2201,16 +2201,19 @@ fn render_checked(last_reconciled_at: Option<&str>, now: chrono::DateTime<chrono
 /// Render agents list as a human-readable table (Task 3.1; CHECKED/PID added by
 /// plan ab-70faa65b, Architecture C).
 ///
-/// Columns: NAME PROVIDER STATUS CHECKED PID LAST MESSAGE CWD. CHECKED is the
+/// Columns: NAME HARNESS STATUS CHECKED PID LAST MESSAGE CWD. CHECKED is the
 /// relative age since the last reconcile probe (`never` when unprobed); it
 /// replaces the old always-`-` LIVE column (AC5-UI). PID is the worker pid for a
 /// PTY agent (`-` for a one-shot ask, which has no managed process). This is a
 /// functional table; byte-exact match with Python is not required (Python's
 /// table is time-dependent via relative timestamps).
 fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
+    // HARNESS, not PROVIDER: the column has always shown the harness, and the
+    // old heading made a claude-hosted worker on a zai route read as running
+    // on claude. Same rename on the Python renderer.
     let headers = [
         "NAME",
-        "PROVIDER",
+        "HARNESS",
         "STATUS",
         "CHECKED",
         "PID",
@@ -2226,7 +2229,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
         .iter()
         .map(|r| {
             let name = r["name"].as_str().unwrap_or("-").to_string();
-            let provider = r["provider"].as_str().unwrap_or("-").to_string();
+            let harness = r["harness"].as_str().unwrap_or("-").to_string();
             let status = r["status"].as_str().unwrap_or("-").to_string();
             let checked = render_checked(r["last_reconciled_at"].as_str(), now);
             let pid = r["pid"]
@@ -2235,7 +2238,7 @@ fn render_list_table(agents: &Value, discovered: &[Value]) -> String {
                 .unwrap_or_else(|| "-".to_string());
             let last_msg = r["last_message_at"].as_str().unwrap_or("-").to_string();
             let cwd = r["cwd"].as_str().unwrap_or("-").to_string();
-            [name, provider, status, checked, pid, last_msg, cwd]
+            [name, harness, status, checked, pid, last_msg, cwd]
         })
         .collect();
 
@@ -3879,7 +3882,8 @@ mod tests {
         let agents = json!([
             {
                 "name": "worker-a",
-                "provider": "claude",
+                "harness": "claude",
+                "observed_model": {"kind": "observed", "model": "glm-5.2", "samples": 300},
                 "short_id": "cl-abc123",
                 "session_id": "cl-abc123",
                 "cwd": "/home/user/project",
@@ -3929,7 +3933,8 @@ mod tests {
         let row = &parsed["agents"][0];
         for key in &[
             "name",
-            "provider",
+            "harness",
+            "observed_model",
             "short_id",
             "session_id",
             "cwd",
@@ -3984,7 +3989,7 @@ mod tests {
         let agents = json!([
             {
                 "name": "pty-worker",
-                "provider": "codex",
+                "harness": "codex",
                 "short_id": "wk1",
                 "session_id": null,
                 "cwd": "/home/user/project",
@@ -3998,7 +4003,7 @@ mod tests {
             },
             {
                 "name": "ask-row",
-                "provider": "claude",
+                "harness": "claude",
                 "short_id": null,
                 "session_id": "cl-xyz",
                 "cwd": "/home/user/other",
@@ -4016,7 +4021,7 @@ mod tests {
         // AC5-UI: header shows STATUS + CHECKED + PID, and LIVE is gone.
         assert!(
             lines[0].contains("NAME")
-                && lines[0].contains("PROVIDER")
+                && lines[0].contains("HARNESS")
                 && lines[0].contains("STATUS")
                 && lines[0].contains("CHECKED")
                 && lines[0].contains("PID")

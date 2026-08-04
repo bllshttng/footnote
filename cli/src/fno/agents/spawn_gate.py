@@ -185,7 +185,11 @@ class LiveWorker:
 
     source: Literal["fno", "claude"]
     name: str
-    provider: str
+    # The CLI the worker runs under, never the model vendor. Named `provider`
+    # once, which made a claude-hosted worker on a z.ai route read as running on
+    # claude; `fno agents list` had the identical alias and it drove a wrong
+    # diagnosis. Only reader is `fno agents top`.
+    harness: str
     substrate: str
     pid: Optional[int]
     status: str
@@ -263,7 +267,7 @@ def census() -> LiveCensus:
                 LiveWorker(
                     source="claude",
                     name=short_id,
-                    provider="claude",
+                    harness="claude",
                     substrate="(foreign)",
                     pid=pid,
                     status="live",
@@ -331,7 +335,7 @@ def census() -> LiveCensus:
             LiveWorker(
                 source="fno",
                 name=row.name,
-                provider=row.harness,
+                harness=row.harness,
                 substrate=substrate,
                 pid=row.pid,
                 status=str(row.status),

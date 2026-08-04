@@ -2846,12 +2846,12 @@ fn registry_truth_handle(entry: &RegistryEntry) -> String {
 }
 
 fn handle_list(ctx: &Ctx, req: &Request) -> Response {
-    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_state)
+    handle_list_with_truth(ctx, req, crate::claude_ask::family1_truth_probe)
 }
 
 fn handle_list_with_truth<F>(ctx: &Ctx, req: &Request, truth_fn: F) -> Response
 where
-    F: Fn(&str) -> Option<String>,
+    F: Fn(&str) -> Option<crate::claude_ask::TruthProbe>,
 {
     let all = req
         .params
@@ -2935,12 +2935,22 @@ where
         .map(|e| {
             let truth_handle = registry_truth_handle(e);
             let truth = truth_fn(&truth_handle);
-            (e, rendered_status_from_truth(truth.as_deref()))
+            let rendered_status =
+                rendered_status_from_truth(truth.as_ref().map(|t| t.state.as_str()));
+            // A probe that did not answer is the same situation Python's
+            // resolver reports as `no-transcript` (its dominant cause here is
+            // the routine exit-13 miss), so both emitters say the same thing
+            // about the same row instead of one of them inventing a null.
+            let observed_model = truth
+                .map(|t| t.observed_model)
+                .filter(|v| !v.is_null())
+                .unwrap_or_else(|| json!({"kind": "no-transcript"}));
+            (e, rendered_status, observed_model)
         })
         .collect();
     let entries: Vec<Value> = classified
         .into_iter()
-        .filter(|(_e, rendered_status)| {
+        .filter(|(_e, rendered_status, _observed)| {
             if let Some(ref st) = filter_status {
                 if rendered_status != &st.as_str() {
                     return false;
@@ -2948,7 +2958,7 @@ where
             }
             true
         })
-        .map(|(e, rendered_status)| {
+        .map(|(e, rendered_status, observed_model)| {
             // Return the full row shape matching Python's serialize_entry. The
             // key set is pinned by schemas/agents-list-row.json, asserted here
             // and by the Python test; edit that file before adding a key.
@@ -3013,11 +3023,13 @@ where
             };
             json!({
                 "name": e.name,
-                // `harness` is the canonical identity axis; `provider` is its
-                // legacy alias, still emitted for consumers that predate the
-                // rename. Both are in schemas/agents-list-row.json.
+                // `harness` is the sole identity axis, and it names the CLI,
+                // never the model vendor. The `provider` alias that sat beside
+                // it carried this same harness value, so a worker routed to
+                // another vendor still listed `provider: claude` and read as
+                // proof the route had fallen back. `observed_model`
+                // below is the honest answer to that question.
                 "harness": e.harness_name(),
-                "provider": e.harness_name(),
                 "harness_session_id": e.harness_session_id,
                 "short_id": short_id,
                 "session_id": session_id,
@@ -3026,6 +3038,11 @@ where
                 "last_message_at": e.last_message_at,
                 "status": rendered_status,
                 "live_status": null,
+                // The model this worker is ACTUALLY answering as, from the same
+                // family-1 probe that produced `status` above -- so the daemon
+                // never grows a second transcript reader that could disagree
+                // with the truth verb about the same session.
+                "observed_model": observed_model,
                 // Architecture C (plan ab-70faa65b): additive keys, never removing
                 // live_status (Locked #4 back-compat). `pid` is the worker pid for
                 // a PTY agent, null for a one-shot ask (no managed process). The
@@ -6479,6 +6496,16 @@ mod tests {
         assert!(!entry_holds_session(&row, "other-uuid"));
     }
 
+    /// A stub family-1 probe answer for the tests that only pin the state.
+    /// `observed_model` null here stands for "this probe did not answer it",
+    /// which the row renders as `no-transcript` rather than inventing a model.
+    fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
+        Some(crate::claude_ask::TruthProbe {
+            state: state.into(),
+            observed_model: Value::Null,
+        })
+    }
+
     fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
         Ctx {
             home,
@@ -6648,7 +6675,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -6660,7 +6687,11 @@ done
         // always null is the same lie in a different shape. Assert the values
         // reach the row.
         assert_eq!(row["harness"], "claude");
-        assert_eq!(row["provider"], "claude", "legacy alias still emitted");
+        // No key whose name says vendor and whose value is a harness (AC8).
+        // Dropping it from one emitter only would be worse than keeping it
+        // everywhere: the field would then be present or absent depending on
+        // which reader answered.
+        assert!(row.get("provider").is_none());
         assert_eq!(
             row["harness_session_id"],
             "e6f78b98-e594-47ed-ad81-84f8a78b8bb7"
@@ -6685,6 +6716,44 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    /// The row reports the model the worker is ACTUALLY answering as, taken
+    /// from the same family-1 probe that produced `status`.
+    ///
+    /// Both list emitters derive this from ONE resolver -- Python's
+    /// `session_truth.observed_model`, which the daemon reaches through the
+    /// `fno agents truth --json` probe it already runs per row -- so neither
+    /// side can report a different model than the other for the same worker
+    /// (AC9-CON). The Python half of that binding is asserted in
+    /// cli/tests/agents/test_cli_list_logs.py.
+    #[test]
+    fn list_row_carries_the_observed_model_from_the_truth_probe() {
+        let home = short_home("listobserved");
+        seed_stream_row(&home, "worker-zai", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| {
+            Some(crate::claude_ask::TruthProbe {
+                state: "working".into(),
+                observed_model: json!({
+                    "kind": "observed", "model": "glm-5.2", "samples": 300
+                }),
+            })
+        });
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["observed_model"]["model"], "glm-5.2");
+        assert_eq!(row["observed_model"]["kind"], "observed");
+
+        // A probe that did not answer must not leave a bare null: an absent
+        // value is what an operator correctly reads as proving nothing, which
+        // is the exact misreading this field exists to end.
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
+        let row = &response.result().unwrap()["agents"][0];
+        assert_eq!(row["observed_model"], json!({"kind": "no-transcript"}));
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     /// An opencode row resolves `session_id` from `harness_session_id`, the only
     /// place its id is persisted. Without the arm it fell through to the generic
     /// `session_id`, which is Rust-set only and so null for every Python-written
@@ -6704,7 +6773,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -6730,7 +6799,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let result = response.result().unwrap();
 
         assert_eq!(result["agents"][0]["crown"], "L1 ?");
@@ -6747,7 +6816,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let result = response.result().unwrap();
         let row = &result["agents"][0];
 
@@ -6803,7 +6872,7 @@ done
         let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
         let req = Request::new(1, "agent.list", json!({"status": "live"}));
 
-        let response = handle_list_with_truth(&ctx, &req, |_handle| Some("working".into()));
+        let response = handle_list_with_truth(&ctx, &req, |_handle| probe("working"));
         let result = response.result().unwrap();
         let agents = result["agents"].as_array().unwrap();
         assert_eq!(agents.len(), 1);
@@ -6822,7 +6891,7 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handle| {
             seen.borrow_mut().push(handle.to_string());
-            Some("working".into())
+            probe("working")
         });
 
         assert!(response.result().is_some());
@@ -6847,7 +6916,7 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handle| {
             seen.borrow_mut().push(handle.to_string());
-            Some("working".into())
+            probe("working")
         });
 
         assert!(response.result().is_some());
@@ -6874,7 +6943,7 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handle| {
             seen.borrow_mut().push(handle.to_string());
-            Some("working".into())
+            probe("working")
         });
 
         assert!(response.result().is_some());
@@ -6902,7 +6971,7 @@ done
 
         let response = handle_list_with_truth(&ctx, &req, |handle| {
             seen.borrow_mut().push(handle.to_string());
-            Some("working".into())
+            probe("working")
         });
 
         assert!(response.result().is_some());

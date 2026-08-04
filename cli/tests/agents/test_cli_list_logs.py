@@ -400,3 +400,70 @@ def test_agent_status_filter_is_the_rendered_family1_vocabulary():
     from fno.agents.cli import AgentStatusFilter
 
     assert {m.value for m in AgentStatusFilter} == {"live", "orphaned", "unknown"}
+
+
+# ---------------------------------------------------------------------------
+# observed_model on the row
+#
+# The registry records what a spawn INTENDED; the transcript records what the
+# vendor answered as. Only the second one is still right when a route silently
+# falls back, so the row carries the derived reading.
+# ---------------------------------------------------------------------------
+
+
+def test_list_json_rows_carry_their_own_observed_model(
+    tmp_path, monkeypatch, runner, _patch_claude_subprocess
+):
+    """AC2-HP: every row carries an observed_model derived from THAT row's own
+    transcript, taken off the truth call the row already makes."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry([_claude(name="alpha"), _codex(name="bravo")])
+
+    from fno.agents import session_truth
+
+    models = {
+        "alpha": {"kind": "observed", "model": "glm-5.2", "samples": 300},
+        "bravo": {"kind": "observed", "model": "gpt-5.6-sol", "samples": 12},
+    }
+
+    def fake(handle, **_kw):
+        # The discovered-sessions lane resolves truth for its own handles too,
+        # so default rather than raise on anything outside the registry rows.
+        return {
+            "handle": handle,
+            "state": "working",
+            "reason": None,
+            "last_activity_age_s": 5,
+            "session_id": "s",
+            "observed_model": models.get(handle, {"kind": "no-transcript"}),
+            "suggestions": [],
+        }
+
+    monkeypatch.setattr(session_truth, "resolve_session_truth", fake)
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = {r["name"]: r for r in json.loads(result.output)["agents"]}
+    # Per-row, not one value smeared across the listing: the read must survive
+    # the later rebinding of `truth` to the unrelated node-claim reading.
+    assert rows["alpha"]["observed_model"] == models["alpha"]
+    assert rows["bravo"]["observed_model"] == models["bravo"]
+
+
+def test_list_json_row_without_a_transcript_says_so(
+    tmp_path, monkeypatch, runner, _patch_claude_subprocess
+):
+    """AC3-ERR: no transcript -> the row still renders, exit code unchanged."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry([_claude(name="alpha")])
+
+    from fno.agents.cli import agents_app
+
+    result = runner.invoke(agents_app, ["list", "--json"])
+
+    assert result.exit_code == 0, result.output
+    row = json.loads(result.output)["agents"][0]
+    assert row["observed_model"] == {"kind": "no-transcript"}

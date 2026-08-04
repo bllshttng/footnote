@@ -130,6 +130,9 @@ def list_agents(
             entry.name, resolve=lambda _handle: (known, [])
         )
         truth_state = truth.get("state")
+        # Read off the SAME call, before `truth` is rebound below to the
+        # unrelated node-claim reading; no second transcript read is paid.
+        observed_model = truth.get("observed_model")
         rendered_status = "unknown"
         if truth_state in {"working", "watching", "your-move"}:
             rendered_status = "live"
@@ -153,7 +156,9 @@ def list_agents(
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
                     live_status = rendered
-        row = fmt.serialize_entry(entry, live_status=live_status)
+        row = fmt.serialize_entry(
+            entry, live_status=live_status, observed_model=observed_model
+        )
         row["status"] = rendered_status
         rows.append(row)
 
