@@ -284,8 +284,15 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
 
         {"kind": "observed", "model": str, "samples": int}
         {"kind": "no-transcript"}
+        {"kind": "not-file-backed"}
         {"kind": "no-model-yet"}
         {"kind": "unreadable", "reason": str}
+
+    ``not-file-backed`` is separate from ``no-transcript`` for the same reason
+    the others are separate: an opencode worker keeps no per-session file and so
+    would report "no transcript yet" forever, which reads as a worker that just
+    spawned. Permanently-not-available and not-available-yet are different
+    facts, and collapsing them is what this shape exists to avoid.
 
     ``samples`` counts the model-bearing records inside the tail window, not
     the whole session. Read-only, takes no lock (the transcript is append-only,
@@ -294,7 +301,9 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
     liveness reporting for the caller.
     """
     reader = _MODEL_READERS.get(agent)
-    if reader is None or transcript_path is None:
+    if reader is None:
+        return {"kind": "not-file-backed"}
+    if transcript_path is None:
         return {"kind": "no-transcript"}
     try:
         with open(transcript_path, "rb") as fh:
@@ -333,6 +342,15 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
         # rollout whose only turn_context sits at byte 126850). Escalate to a
         # full streaming scan before claiming absence -- paid only on the rare
         # inconclusive tail, never on the common read.
+        #
+        # Ceiling, measured 2026-08-04: a full scan of the largest local rollout
+        # (15 MB) is 56 ms. That matters because on the Rust list path this whole
+        # verb runs inside the family-1 probe's 5s budget, and a probe timeout
+        # costs `status` too -- the row would render `unknown` and drop out of
+        # `--status live`, so a reporting field would have degraded the liveness
+        # field it rides along with. At ~1% of the budget there is headroom; if
+        # transcripts ever grow an order of magnitude, pre-filter this loop on the
+        # marker substring before json.loads rather than widening the budget.
         try:
             with open(transcript_path, "r", encoding="utf-8", errors="replace") as fh:
                 last, samples = _models_in(fh, reader)
@@ -474,10 +492,12 @@ def _model_clause(observed: Any) -> str:
     """The model half of the truth line, or '' when there is nothing to say.
 
     ``no-transcript`` renders NOTHING rather than "unknown": a worker spawned
-    two seconds ago has no transcript yet and must not look broken. The other
-    three each get their own words, because a session that came up and never
-    answered is the state this reading exists to make visible and must not read
-    as healthy.
+    two seconds ago has no transcript yet and must not look broken.
+    ``not-file-backed`` renders nothing for the same reason one level over --
+    an opencode worker will never have one, and saying so on every line would be
+    noise, not news. The remaining two each get their own words, because a
+    session that came up and never answered is the state this reading exists to
+    make visible and must not read as healthy.
     """
     if not isinstance(observed, dict):
         return ""

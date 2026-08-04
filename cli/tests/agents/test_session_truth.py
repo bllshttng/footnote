@@ -519,11 +519,22 @@ def test_observed_model_reads_a_bounded_tail_not_the_whole_file(tmp_path):
     }
 
 
-def test_observed_model_unsupported_harness_has_no_transcript(tmp_path):
-    """opencode keeps a shared store, not a per-session file: no file, no claim."""
+def test_observed_model_separates_never_from_not_yet(tmp_path):
+    """A harness with no per-session file is not the same as one whose file has
+    not appeared yet.
+
+    opencode keeps a shared SQLite store, so it would report "no transcript yet"
+    forever -- which the contract documents as "spawned two seconds ago". A
+    permanent absence and a pending one are different facts, and this shape
+    exists precisely so they do not collapse.
+    """
     from fno.agents.session_truth import observed_model
 
     assert observed_model("opencode", tmp_path / "anything") == {
+        "kind": "not-file-backed"
+    }
+    # claude IS file-backed, so a missing file there really is "not yet".
+    assert observed_model("claude", tmp_path / "missing.jsonl") == {
         "kind": "no-transcript"
     }
 

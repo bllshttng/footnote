@@ -97,12 +97,13 @@ That key is gone. `harness_session_id` is the worker's own session id in its har
 `observed_model` answers the question `provider` looked like it answered: which model the worker is ACTUALLY running.
 It is derived from the worker's own transcript at read time, never recorded at spawn, because a spawn records intent and would report the intended model in exactly the case you suspect a fallback.
 A worker that quietly fell back to Anthropic reports a `claude-*` id here and disagrees visibly with what you asked for.
-The value is a discriminated object, and the four kinds never collapse into one "unknown":
+The value is a discriminated object, and the five kinds never collapse into one "unknown":
 
 | `kind` | Meaning |
 |--------|---------|
 | `observed` | The worker has answered. Carries `model` and `samples` (how many records in the read backed it). |
-| `no-transcript` | No transcript file resolved. A worker spawned two seconds ago is legitimately here. |
+| `no-transcript` | The harness keeps a per-session transcript and none has resolved yet. A worker spawned two seconds ago is legitimately here. |
+| `not-file-backed` | The harness keeps no per-session file at all (opencode uses a shared store), so there is nothing to read and never will be. Distinct from `no-transcript`: a permanent absence must not read as a pending one. |
 | `no-model-yet` | The transcript exists and carries no answered turn: the shape of a session that came up and never processed one. Not healthy. |
 | `unreadable` | The file exists and could not be parsed. Carries `reason`; the row still renders. |
 
