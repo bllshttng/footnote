@@ -84,7 +84,13 @@ use std::path::{Path, PathBuf};
 // which would leave the relaunch guard reading None on every row the daemon has
 // touched. Python's asdict emits the key on every written row, so a pre-v12
 // reader must reject a v12 store. Accepted set widens to 1..=12.
-pub const REGISTRY_SCHEMA_VERSION: u32 = 12;
+//
+// v13 (x-0358) adds `fno_id` - the target-minted run id of an adopted /target
+// orphan, so a revived session is durably linked to the node it was working
+// (recoverable even if the worktree moves). Same X3 passthrough rationale: a
+// Python-only field would be dropped on the daemon's read-modify-write.
+// Accepted set widens to 1..=13.
+pub const REGISTRY_SCHEMA_VERSION: u32 = 13;
 /// Current per-agent state schema version (design: schema v1).
 pub const STATE_SCHEMA_VERSION: u32 = 1;
 
@@ -521,6 +527,14 @@ pub struct RegistryEntry {
     /// live `ANTHROPIC_AUTH_TOKEN`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub route_settings_path: Option<String>,
+    /// fno target run id (x-0358, v13): the `fno_id` of the /target session an
+    /// adopted orphan was working, so the revived session is linked to its node.
+    /// Set by the adopt verb from the matched `.fno/target-state.md`; `None` for
+    /// every row that did not come from a target manifest. Identity-adjacent
+    /// linkage, never read for liveness or ownership (those stay with the live
+    /// claim and the manifest). Same X3 passthrough as `route_settings_path`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fno_id: Option<String>,
     /// v9 backfill-only (x-1b1e): the removed `claude_short_id`. Deserialized
     /// (under its old key) so a legacy row's jobId survives the read, but NEVER
     /// serialized -- [`RegistryEntry::backfill_short_id`] moves it into
@@ -1288,6 +1302,7 @@ mod tests {
             crown_scope: None,
             crown_grantor: None,
             route_settings_path: None,
+            fno_id: None,
             legacy_claude_short_id: None,
         }
     }
@@ -2094,15 +2109,15 @@ mod tests {
     #[test]
     fn load_registry_rejects_unsupported_schema_version() {
         // Codex P2 (ab-a171ceb2): the typed daemon read path must reject a version
-        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v13, or - for an old daemon -
+        // outside 1..=REGISTRY_SCHEMA_VERSION (a future v14, or - for an old daemon -
         // a version it cannot interpret), while v1..=current still read.
         let dir = tmpdir("version-guard");
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("registry.json");
-        std::fs::write(&path, r#"{"schema_version":13,"agents":[]}"#).unwrap();
+        std::fs::write(&path, r#"{"schema_version":14,"agents":[]}"#).unwrap();
         match load_registry(&path) {
             Err(StateError::UnsupportedSchemaVersion { found, max }) => {
-                assert_eq!(found, 13);
+                assert_eq!(found, 14);
                 assert_eq!(max, REGISTRY_SCHEMA_VERSION);
             }
             other => panic!("expected UnsupportedSchemaVersion, got {other:?}"),
