@@ -50,15 +50,23 @@ if [[ ! -d "$WORKTREE_PATH" ]]; then
     exit 0
 fi
 
-# Check for an active target session in the worktree. Legacy manifests carried
-# status: IN_PROGRESS; the modern immutable manifest has no status field and
-# signals liveness with a live owner_pid instead - so a status-only guard would
-# fall through and `git worktree remove` a running claimed target's cwd. Mirror
-# _wt_live / archive-worktree.sh: preserve on IN_PROGRESS OR a live owner_pid.
+# Check for an active target session in the worktree, or `git worktree remove`
+# takes a running claimed target's cwd out from under it. Three signals, in
+# descending order of trustworthiness: a legacy `status: IN_PROGRESS`, a LIVE
+# NODE CLAIM (session-pid anchored + TTL - the only durable one), and a live
+# owner_pid. owner_pid is kept last and only as a positive signal: it is the
+# transient `fno target init` wrapper pid, dead about a second after init
+# returns, so before the claim check this guard preserved essentially nothing.
 ST="$WORKTREE_PATH/.fno/target-state.md"
 if [[ -f "$ST" ]]; then
     PRESERVE=""
     grep -qE '^status:[[:space:]]*IN_PROGRESS' "$ST" 2>/dev/null && PRESERVE="active_target"
+    if [[ -z "$PRESERVE" ]]; then
+        GUARD_LIB="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/target-guard.sh"
+        # shellcheck source=../scripts/lib/target-guard.sh
+        [[ -f "$GUARD_LIB" ]] && source "$GUARD_LIB" 2>/dev/null \
+            && target_claim_is_live "$ST" && PRESERVE="live_claim"
+    fi
     if [[ -z "$PRESERVE" ]]; then
         OWNER_PID="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$ST" 2>/dev/null)"
         [[ -n "$OWNER_PID" ]] && kill -0 "$OWNER_PID" 2>/dev/null && PRESERVE="live_owner_pid"

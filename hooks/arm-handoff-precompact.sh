@@ -21,25 +21,13 @@ GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 # shellcheck source=../scripts/lib/target-guard.sh
 source "$GUARD_LIB" 2>/dev/null || exit 0
 
-# Owner liveness. The manifest is statusless post-wedge (ab-d0337fbc), so
-# target_is_active's status check no longer applies. owner_pid is NOT the signal:
-# it is the transient `fno target init` wrapper pid, dead within ~1s of init
-# returning, so it can only ever PROVE life, never death. Gating on
-# `kill -0 owner_pid` alone made this hook exit here on 100% of real fires - it
-# never reached the probe and never armed once. The node claim is the durable
-# anchor (session-pid + TTL), so DEATH is asserted from a claim confirmed
-# free/stale and from nothing else. Same asymmetry as
-# cli/src/fno/target/orient.py::_manifest_liveness; keep the two in step.
-OWNER_PID="$(target_state_field owner_pid "$STATE_FILE" 2>/dev/null || true)"
-if ! { [[ "$OWNER_PID" =~ ^[0-9]+$ ]] && kill -0 "$OWNER_PID" 2>/dev/null; }; then
-  CLAIM_KEY="$(target_state_field target_claim_key "$STATE_FILE" 2>/dev/null || true)"
-  # No claim key (free-text / plan run) or an unreadable claim -> bias live: a
-  # false arm costs one advisory nudge, a false decline costs the whole guard.
-  if [[ -n "$CLAIM_KEY" ]] && command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
-    CLAIM_STATE="$(fno claim status "$CLAIM_KEY" 2>/dev/null | jq -r '.state // ""' 2>/dev/null || true)"
-    case "$CLAIM_STATE" in free|stale) exit 0 ;; esac
-  fi
-fi
+# Owner liveness, from the shared claim-based helper. This used to gate on
+# `kill -0 owner_pid`, which is the transient `fno target init` wrapper pid,
+# dead within about a second of init returning - so the hook exited HERE on
+# 100% of real fires and never once reached the probe or armed. owner_pid can
+# only ever prove life, never death; the node claim (session-pid anchored +
+# TTL) is the durable signal, and target_is_active already reads it.
+target_is_active "$STATE_FILE" || exit 0
 
 # Key markers on the MANIFEST session_id so they share handoff.sh's namespace
 # (handoff.sh writes/clears .handoff-{done,armed}-<manifest_session_id>).
