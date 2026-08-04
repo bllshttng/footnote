@@ -1918,7 +1918,7 @@ class TestUsageRefreshContract:
             "readyrule", (UsageWindow("5h", 12.0, 1_800_000_000.0),), 1_700_000_000.0, "oauth-endpoint"
         )
         _stub_probe(monkeypatch, {"readyrule": probed})
-        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None: False)
+        monkeypatch.setattr(rs, "write_usage_snapshot", lambda s, now=None, **k: False)
 
         result = _invoke(["usage", "--refresh", "--json"], cwd=tmp_path, home=tmp_path)
         entry = _json.loads(result.output.strip())["readyrule"]
