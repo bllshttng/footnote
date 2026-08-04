@@ -3922,18 +3922,12 @@ mod tests {
 
         let mut invalid = std::process::Command::new("sh");
         invalid.args(["-c", "printf '{\"state\":\"invented\"}'"]);
-        assert_eq!(
-            probe_state(invalid, Duration::from_secs(1), "h1"),
-            None
-        );
+        assert_eq!(probe_state(invalid, Duration::from_secs(1), "h1"), None);
 
         let mut hung = std::process::Command::new("sh");
         hung.args(["-c", "sleep 5"]);
         let started = Instant::now();
-        assert_eq!(
-            probe_state(hung, Duration::from_millis(50), "h1"),
-            None
-        );
+        assert_eq!(probe_state(hung, Duration::from_millis(50), "h1"), None);
         assert!(started.elapsed() < Duration::from_secs(1));
     }
 

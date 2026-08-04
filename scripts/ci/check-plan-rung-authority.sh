@@ -29,6 +29,14 @@
 # Pure text extraction: no build, no Rust binary, no Python import.
 set -uo pipefail
 
+# Every ratchet below compares a `sort`ed inventory against a literal frozen in
+# this file, so the collation order IS the contract. Left to the ambient locale
+# it is not: a UTF-8 locale folds punctuation and orders `client_verbs.rs` before
+# `client.rs`, while CI's C locale does the reverse, so the same tree failed on a
+# developer machine and passed on CI with a diff no one could read (the two lists
+# hold identical entries in swapped positions). Pin it once, here.
+export LC_ALL=C
+
 cd "$(dirname "$0")/../.." || exit 2
 fail=0
 
@@ -143,7 +151,7 @@ crates/fno-agents/src/client.rs:25
 crates/fno-agents/src/client_verbs.rs:58
 crates/fno-agents/src/codex_ask.rs:3
 crates/fno-agents/src/codex_inject.rs:1
-crates/fno-agents/src/daemon.rs:128
+crates/fno-agents/src/daemon.rs:130
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
 crates/fno-agents/src/finalize.rs:32
