@@ -166,6 +166,22 @@ def test_invalid_utf8_journal_is_unknown(tmp_path: Path) -> None:
     assert code == 1
 
 
+def test_non_object_json_lines_are_partial(tmp_path: Path) -> None:
+    """A JSON-valid non-object line (bare scalar/array) is corrupt, not clean."""
+    journal = tmp_path / "events.jsonl"
+    valid = _overlap_event(observer="o1", peers=["a"], worktree="/r/.git/wt1", ts=NOW)
+    journal.write_text(
+        json.dumps(valid) + "\n42\n" + json.dumps([1, 2]) + "\n",
+        encoding="utf-8",
+    )
+    report, code = overlaps_report(journal=journal, now=NOW)
+    assert report["state"] == "partial"
+    assert code == 1
+    assert report["coverage"]["malformed_lines"] == 2
+    assert report["distinct_observations"] == 1
+
+
+
 
 # -- AC6-ERR: recording failure is loud and non-blocking --------------------
 #

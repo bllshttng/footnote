@@ -86,10 +86,14 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
         "path": str(journal),
     }
     events: list[dict] = []
-    if not journal.exists():
-        return events, coverage
     try:
         text = journal.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        # Only a genuinely missing journal is a valid empty source (no_data).
+        # A stat/permission failure must not masquerade as no_data, so do not
+        # pre-check .exists(); read directly and let the OSError arm classify
+        # any other failure as unknown.
+        return events, coverage
     except (OSError, UnicodeError) as exc:
         # UnicodeDecodeError (invalid UTF-8) is a ValueError, not an OSError,
         # so it must be caught here too or it escapes as a crash instead of the
@@ -107,7 +111,12 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
         except json.JSONDecodeError:
             coverage["malformed_lines"] += 1
             continue
-        if isinstance(e, dict) and e.get("type") == "worktree_overlap_observed":
+        # A JSON-valid non-object line (bare scalar/array) is corrupt evidence,
+        # not a clean line; count it malformed so coverage reads partial.
+        if not isinstance(e, dict):
+            coverage["malformed_lines"] += 1
+            continue
+        if e.get("type") == "worktree_overlap_observed":
             # A JSON-valid-but-schema-invalid overlap line would count toward
             # recurrence while coverage reported complete. Schema-validate it
             # and treat a rejection as a malformed line (partial coverage) so
@@ -118,6 +127,7 @@ def _read_overlap_events(journal: Path) -> tuple[list[dict], dict]:
                 coverage["malformed_lines"] += 1
                 continue
             events.append(e)
+        # A valid event of any other type is irrelevant here, not malformed.
     coverage["state"] = "partial" if coverage["malformed_lines"] else "complete"
     return events, coverage
 
