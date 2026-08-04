@@ -117,6 +117,10 @@ def fold_overlap_events(events: list[dict], *, since_days: int, now: datetime) -
     deliveries of one observation never inflate recurrence. An observation is
     in-window when its latest delivery timestamp falls inside the window.
     """
+    if since_days < 1:
+        # A zero/negative window would collapse to "nothing in window" and read
+        # as no-data, misrepresenting absent evidence. Reject it loudly.
+        raise ValueError("since_days must be at least 1")
     cutoff = now - timedelta(days=since_days)
     by_id: dict[str, dict] = {}
     for e in events:
@@ -250,7 +254,13 @@ def overlap_record(
         result["fold"] = {"state": "unknown", "error": str(exc)}
         return result, _emit()
     now = now or datetime.now(timezone.utc)
-    folded = fold_overlap_events(events, since_days=since_days, now=now)
+    try:
+        folded = fold_overlap_events(events, since_days=since_days, now=now)
+    except ValueError:
+        # since_days < 1 is a degenerate window; degrade the fold rather than
+        # crash (the carrier owns exit-zero). The carrier always passes 28.
+        result["fold"] = {"state": "unknown", "error": "since_days < 1"}
+        return result, _emit()
     result["fold"] = {"state": coverage["state"], **folded}
     return result, _emit()
 
@@ -271,6 +281,12 @@ def overlaps_report(
     from fno.paths import global_events_json
 
     journal = journal or global_events_json()
+    if since_days < 1:
+        typer.echo(
+            f"worktree overlaps: --since must be at least 1 (got {since_days})",
+            err=True,
+        )
+        return {"state": "unknown", "since_days": since_days, "error": "since_days < 1"}, 1
     try:
         events, coverage = _read_overlap_events(journal)
     except OverlapReadError as exc:

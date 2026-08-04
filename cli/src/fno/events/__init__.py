@@ -514,7 +514,9 @@ def validate(event: dict[str, Any]) -> None:
     # overlaps`: an empty or non-list peer_session_ids would record an overlap
     # with no peers, a self-contradiction that must fail loud at the chokepoint
     # (the generic emit CLI is a writer here) rather than land and inflate or
-    # corrupt the fold.
+    # corrupt the fold. observation_id is a 64-hex sha256 digest; rejecting a
+    # non-digest id here blocks a hand-crafted event from impersonating another
+    # observation and skewing the recurrence fold.
     if type_name == "worktree_overlap_observed":
         peers = data.get("peer_session_ids")
         if not isinstance(peers, list) or not peers or not all(
@@ -523,6 +525,11 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(
                 "worktree_overlap_observed peer_session_ids must be a non-empty "
                 "list of non-empty strings"
+            )
+        oid = data.get("observation_id")
+        if not isinstance(oid, str) or _re.fullmatch(r"[0-9a-f]{64}", oid) is None:
+            raise ValidationError(
+                "worktree_overlap_observed observation_id must be a 64-hex sha256 digest"
             )
 
     try:
@@ -1002,7 +1009,7 @@ def worktree_overlap_observed(
         raise ValidationError(
             "worktree_overlap_observed live_window_seconds must be a positive integer"
         )
-    sorted_peers = sorted(peer_session_ids)
+    sorted_peers = sorted(set(peer_session_ids))
     data: dict[str, Any] = {
         "observation_id": _overlap_observation_id(
             repository_key, worktree_key, observer_session_id, sorted_peers

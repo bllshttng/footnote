@@ -251,6 +251,32 @@ def test_fold_ignores_lines_missing_observation_id() -> None:
     assert folded["distinct_observations"] == 0
 
 
+def test_fold_rejects_degenerate_window() -> None:
+    """A zero/negative window would silently read as no-data; reject it loudly."""
+    import pytest as _pytest
+
+    with _pytest.raises(ValueError):
+        fold_overlap_events([], since_days=0, now=NOW)
+    with _pytest.raises(ValueError):
+        fold_overlap_events([], since_days=-3, now=NOW)
+
+
+def test_report_rejects_degenerate_window_exits_nonzero(tmp_path: Path) -> None:
+    report, code = overlaps_report(since_days=0, journal=tmp_path / "e.jsonl", now=NOW)
+    assert code == 1
+    assert report["state"] == "unknown"
+
+
+def test_record_degrades_fold_on_degenerate_window(tmp_path: Path) -> None:
+    # The carrier always passes 28; a bad window degrades the fold but keeps
+    # exit-zero and still records the observation.
+    result, code = overlap_record(since_days=0, journal=tmp_path / "e.jsonl", stdin=PAYLOAD)
+    assert code == 0
+    assert result["recorded"] is True
+    assert result["fold"]["state"] == "unknown"
+
+
+
 # -- carrier contract: the real Typer command accepts the carrier's invocation --
 #
 # The unit tests above call the Python functions directly; the hook test uses a

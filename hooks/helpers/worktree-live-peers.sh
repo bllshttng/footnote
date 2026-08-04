@@ -17,10 +17,17 @@ worktree_live_dir() {
 }
 
 # Minimal JSON string escaper for safe token values (session ids and paths).
+# Escapes the JSON-significant metachars and the named control characters so a
+# legal-but-unusual path cannot turn the observation into invalid JSON.
 json_str() {
   local s="${1-}"
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
   printf '"%s"' "$s"
 }
 
