@@ -79,3 +79,30 @@ target_is_active() {
         *) return 1 ;;
     esac
 }
+
+# Strict twin of the claim block above: return 0 ONLY when the manifest records
+# a claim that reads live/suspect right now. No claim key, no `fno`, or an
+# unreadable claim all return 1, so this NEVER preserves on absence of signal -
+# use it where a false "live" would block a legitimate teardown, and
+# target_is_active where a false "dead" would be worse.
+#
+# owner_pid is not a substitute and never was. It is the transient
+# `fno target init` wrapper pid, dead within about a second of init returning,
+# so `kill -0 owner_pid` is false for EVERY live session; a guard resting on it
+# alone reads as protection and never once fires.
+target_claim_is_live() {
+    local state_file="${1:-.fno/target-state.md}"
+    [[ -f "$state_file" ]] || return 1
+    local claim_key claim_json
+    claim_key=$(target_state_field "target_claim_key" "$state_file" || true)
+    _target_guard_is_empty_yaml "$claim_key" && return 1
+    command -v fno >/dev/null 2>&1 || return 1
+    # No `|| true` here, unlike the fail-open twin above: a nonzero exit means
+    # the read did not complete, and a truncated payload can still carry the
+    # bytes `"state": "live"`. Strict means an incomplete read is not live.
+    claim_json=$(fno claim status "$claim_key" -J 2>/dev/null) || return 1
+    case "$claim_json" in
+        *'"state": "live"'* | *'"state": "suspect"'*) return 0 ;;
+        *) return 1 ;;
+    esac
+}

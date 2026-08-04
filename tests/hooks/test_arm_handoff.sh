@@ -19,27 +19,70 @@ export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
 
 PASS=0
 FAIL=0
+SKIP=0
 pass() { echo "  PASS: $*"; PASS=$((PASS + 1)); }
 fail() { echo "  FAIL: $*"; FAIL=$((FAIL + 1)); }
+skip() { echo "  SKIP: $*"; SKIP=$((SKIP + 1)); }
 
 TMP="$(mktemp -d -t arm-handoff-XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+trap 'FNO_CLAIMS_ROOT="$TMP" fno claim release "node:x-test" >/dev/null 2>&1; rm -rf "$TMP"' EXIT
 SID="sess-xyz"
 
-# Build a workspace: manifest owned by THIS (live) pid + a transcript at a given
-# used_pct. $1=used_tokens (window is 200000, so used_pct = tokens/2000).
+# Hermetic claims root: `fno claim` reads/writes <root>/.fno/claims/.
+export FNO_CLAIMS_ROOT="$TMP"
+# `fno` is the Rust binary and is not built in every CI lane. Rather than skip
+# the claim cases there - which would leave the load-bearing behavior unverified
+# on exactly the lane that gates merge - fall back to a deterministic stub that
+# emits the `fno claim status -J` shape for a fixed live key. The real binary is
+# preferred whenever present, so the stub can never be the ONLY thing that ever
+# ran; it exists so the parse and both branches are exercised everywhere.
+setup_claim_backend() {  # $1 = the key that should read live
+  local live_key="$1"
+  if command -v fno >/dev/null 2>&1 \
+     && fno claim acquire "$live_key" --holder "target-session:$SID" --ttl 1h >/dev/null 2>&1; then
+    CLAIM_BACKEND="real"
+    return 0
+  fi
+  CLAIM_BACKEND="stub"
+  mkdir -p "$TMP/bin"
+  cat > "$TMP/bin/fno" <<STUB
+#!/usr/bin/env bash
+# Minimal stand-in for \`fno claim status <key> -J\`. Any key other than the one
+# live fixture reads free, which is what a never-acquired claim really returns.
+[ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
+if [ "\$3" = "$live_key" ]; then
+  printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"
+else
+  printf '{"key": "%s", "state": "free"}\\n' "\$3"
+fi
+STUB
+  chmod +x "$TMP/bin/fno"
+  PATH="$TMP/bin:$PATH"
+  export PATH
+}
+setup_claim_backend "node:x-test"
+echo "  (claim backend: $CLAIM_BACKEND)"
+
+# Build a workspace in the shape PRODUCTION actually produces: a DEAD owner_pid
+# plus a live node claim. owner_pid is the transient `fno target init` wrapper
+# pid and is dead within ~1s of init returning, so a fixture that writes a live
+# `owner_pid: $$` tests a state no real session is ever in - which is how the
+# hook shipped gated on `kill -0 owner_pid` and exited on 100% of real fires.
+# $1=dir $2=used_tokens $3=last assistant text $4=claim key (default none, which
+# models a free-text/plan run and needs no `fno` to evaluate).
 setup_ws() {
-  local dir="$1" used_tokens="$2" last_text="$3"
+  local dir="$1" used_tokens="$2" last_text="$3" claim_key="${4-}"
   rm -rf "$dir"; mkdir -p "$dir/.fno"
   cat > "$dir/.fno/target-state.md" <<EOF
 ---
 session_id: $SID
-owner_pid: $$
+owner_pid: 999999
 graph_node_id: x-test
 input: x-test
 plan_path: /tmp/plan
 ---
 EOF
+  [[ -n "$claim_key" ]] && printf 'target_claim_key: "%s"\n' "$claim_key" >> "$dir/.fno/target-state.md"
   # Minimal transcript: one assistant line carrying usage + text.
   printf '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":%s,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"%s"}]}}\n' \
     "$used_tokens" "$last_text" > "$dir/transcript.jsonl"
@@ -51,7 +94,7 @@ run_arm() { # dir  -> runs the hook from within dir with transcript on stdin
 }
 
 # 1. Pressure (80%) + outstanding work -> arm marker written.
-setup_ws "$TMP/a" 160000 "still working on it"
+setup_ws "$TMP/a" 800000 "still working on it"
 MANIFEST_BEFORE="$(cat "$TMP/a/.fno/target-state.md")"
 run_arm "$TMP/a"
 [[ -f "$TMP/a/.fno/.handoff-armed-$SID" ]] && pass "arms on pressure + outstanding work" \
@@ -62,41 +105,58 @@ grep -q '"node_id":"x-test"' "$TMP/a/.fno/.handoff-armed-$SID" && pass "marker c
   && pass "manifest NOT mutated (invariant)" || fail "manifest was mutated"
 
 # 2. <promise> present -> no arm (session finishing).
-setup_ws "$TMP/b" 160000 "<promise>MISSION COMPLETE: done</promise>"
+setup_ws "$TMP/b" 800000 "<promise>MISSION COMPLETE: done</promise>"
 run_arm "$TMP/b"
 [[ ! -f "$TMP/b/.fno/.handoff-armed-$SID" ]] && pass "no arm when <promise> present" \
   || fail "armed despite <promise>"
 
 # 3. Below threshold (10%) -> no arm.
-setup_ws "$TMP/c" 20000 "early days"
+setup_ws "$TMP/c" 100000 "early days"
 run_arm "$TMP/c"
 [[ ! -f "$TMP/c/.fno/.handoff-armed-$SID" ]] && pass "no arm below threshold" \
   || fail "armed below threshold"
 
 # 4. Done sentinel present -> no arm.
-setup_ws "$TMP/d" 160000 "working"
+setup_ws "$TMP/d" 800000 "working"
 touch "$TMP/d/.fno/.handoff-done-$SID"
 run_arm "$TMP/d"
 [[ ! -f "$TMP/d/.fno/.handoff-armed-$SID" ]] && pass "no arm when handoff already done" \
   || fail "armed despite done sentinel"
 
 # 5. Unreadable transcript -> decline (no false arm), exit 0.
-setup_ws "$TMP/e" 160000 "working"
+setup_ws "$TMP/e" 800000 "working"
 ( cd "$TMP/e" && printf '{"transcript_path":"/nonexistent/transcript.jsonl"}' | bash "$ARM" ); RC=$?
 [[ $RC -eq 0 ]] && pass "unreadable transcript exits 0" || fail "unreadable transcript rc=$RC"
 [[ ! -f "$TMP/e/.fno/.handoff-armed-$SID" ]] && pass "unreadable transcript -> no arm" \
   || fail "armed on unreadable transcript"
 
-# 6. Dead owner pid -> no arm (stale state).
-setup_ws "$TMP/f" 160000 "working"
-sed -i.bak "s/^owner_pid: .*/owner_pid: 999999/" "$TMP/f/.fno/target-state.md" && rm -f "$TMP/f/.fno/target-state.md.bak"
+# 6. Liveness. owner_pid can only ever PROVE life, never death, so DEATH is
+#    asserted from the node claim alone - the same asymmetry
+#    cli/src/fno/target/orient.py::_manifest_liveness encodes.
+# 6a. Dead owner pid + claim free/absent -> no arm (genuinely stale state).
+setup_ws "$TMP/f" 800000 "working" "node:x-not-claimed-zzz"
 run_arm "$TMP/f"
-[[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when owner pid is dead" \
-  || fail "armed on stale (dead-owner) state"
+[[ ! -f "$TMP/f/.fno/.handoff-armed-$SID" ]] && pass "no arm when the claim is free (stale state)" \
+  || fail "armed on stale (free-claim) state"
+
+# 6b. Dead owner pid + LIVE claim -> arm. This is the shape EVERY real session
+#     is in, and the one the shipped `kill -0 owner_pid` gate always rejected.
+setup_ws "$TMP/f2" 800000 "working" "node:x-test"
+run_arm "$TMP/f2"
+[[ -f "$TMP/f2/.fno/.handoff-armed-$SID" ]] && pass "arms on a dead owner_pid with a LIVE claim" \
+  || fail "dead owner_pid + live claim did not arm (the hook is unreachable)"
+
+# 6c. Dead owner pid + NO claim key (free-text / plan run) -> arm. There is no
+#     durable death signal, so bias live; a false arm costs one advisory nudge,
+#     a false decline costs the whole guard.
+setup_ws "$TMP/f3" 800000 "working" ""
+run_arm "$TMP/f3"
+[[ -f "$TMP/f3/.fno/.handoff-armed-$SID" ]] && pass "arms on a claimless run (biased live)" \
+  || fail "claimless run declined; owner_pid was treated as proof of death"
 
 # 6b. Stale <promise> in an EARLIER turn, but the LAST assistant turn has
 #     outstanding work -> must still arm (only the last turn counts).
-setup_ws "$TMP/p" 160000 "still working, nothing done yet"
+setup_ws "$TMP/p" 800000 "still working, nothing done yet"
 # Prepend an older assistant turn that DID carry a promise.
 printf '{"type":"assistant","message":{"model":"claude-opus-4-8","usage":{"input_tokens":1000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"<promise>MISSION COMPLETE: earlier subtask</promise>"}]}}\n%s' \
   "$(cat "$TMP/p/transcript.jsonl")" > "$TMP/p/transcript.jsonl.new" && mv "$TMP/p/transcript.jsonl.new" "$TMP/p/transcript.jsonl"
@@ -106,7 +166,7 @@ run_arm "$TMP/p"
 
 # 7. PostCompact re-surfaces an armed marker (even though target_is_active is
 #    false for the statusless manifest).
-setup_ws "$TMP/g" 160000 "working"
+setup_ws "$TMP/g" 800000 "working"
 run_arm "$TMP/g"
 OUT="$( cd "$TMP/g" && printf '{"session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
 echo "$OUT" | grep -q "Handoff armed" && pass "PostCompact re-surfaces the armed marker" \
@@ -119,5 +179,5 @@ echo "$OUT" | grep -q "Handoff armed" && fail "still nudging after marker cleare
   || pass "no nudge once marker cleared"
 
 echo ""
-echo "arm-handoff: $PASS passed, $FAIL failed"
+echo "arm-handoff: $PASS passed, $FAIL failed, $SKIP skipped (claim backend: $CLAIM_BACKEND)"
 [[ $FAIL -eq 0 ]]

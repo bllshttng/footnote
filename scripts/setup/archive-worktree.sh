@@ -202,13 +202,23 @@ if [[ "$FORCE" -eq 0 ]]; then
 
   # 3. Live target session. target-state.md is the source of truth for
   #    in-progress autonomous work. Legacy manifests carried status:
-  #    IN_PROGRESS; the modern immutable manifest has no status field, so a
-  #    live owner_pid is the liveness signal (else this check was a silent
-  #    no-op for every current session).
+  #    IN_PROGRESS; the modern immutable manifest has no status field. The
+  #    durable liveness signal is the NODE CLAIM (session-pid anchored + TTL).
+  #    owner_pid is checked last and only as a positive signal: it is the
+  #    transient `fno target init` wrapper pid, dead about a second after init
+  #    returns, so on its own this check was a silent no-op for every current
+  #    session and would happily archive a running target's worktree.
   TARGET_STATE="$TARGET/.fno/target-state.md"
   if [[ -f "$TARGET_STATE" ]]; then
     if grep -qE '^status:[[:space:]]*IN_PROGRESS' "$TARGET_STATE"; then
       echo "archive-worktree: target session IN_PROGRESS at $TARGET_STATE" >&2
+      echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
+      exit 2
+    fi
+    GUARD_LIB="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)/scripts/lib/target-guard.sh"
+    # shellcheck source=../lib/target-guard.sh
+    if [[ -f "$GUARD_LIB" ]] && source "$GUARD_LIB" 2>/dev/null && target_claim_is_live "$TARGET_STATE"; then
+      echo "archive-worktree: live target session (node claim held) at $TARGET_STATE" >&2
       echo "    Cancel it first (touch $TARGET/.fno/.target-cancelled) or use --force." >&2
       exit 2
     fi

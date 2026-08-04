@@ -10,11 +10,21 @@ set -uo pipefail
 # --- merged-mode helpers (used only by `cleanup --merged`) ------------------
 
 # Live target session? Legacy manifests carried status: IN_PROGRESS; the modern
-# immutable manifest has no status field, so a live owner_pid is the signal.
+# immutable manifest has no status field, so the durable signal is the node
+# claim (session-pid anchored + TTL). owner_pid is checked last and only as a
+# positive signal: it is the transient `fno target init` wrapper pid, dead about
+# a second after init returns, so on its own this returned 1 for every live
+# session and the merged-cleanup sweep would prune a running target's worktree.
 _wt_live() {
     local st="$1/.fno/target-state.md"
     [[ -f "$st" ]] || return 1
     grep -qE '^status:[[:space:]]*IN_PROGRESS' "$st" && return 0
+    local guard_lib
+    guard_lib="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/target-guard.sh"
+    # shellcheck source=./target-guard.sh
+    if [[ -f "$guard_lib" ]] && source "$guard_lib" 2>/dev/null; then
+        target_claim_is_live "$st" && return 0
+    fi
     local pid
     # Pipeline-free extraction so a no-match never SIGPIPEs an upstream grep.
     pid="$(sed -nE '/^owner_pid:[[:space:]]*[0-9]+/{s/^owner_pid:[[:space:]]*//;p;q;}' "$st" 2>/dev/null)"

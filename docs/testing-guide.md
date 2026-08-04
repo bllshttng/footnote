@@ -444,10 +444,14 @@ Before resetting a `COMPLETE` or `BLOCKED` state file, the helper checks the `cr
 - Restores in-progress state from previous sessions
 - Injects project vision and workspace context
 
-**Context monitoring (`context-monitor.js`):**
+**Spend and model drift (`context-monitor.js`):**
 
-- Tracks context window usage
-- Triggers pre-compact preservation of critical state
+- Enforces the interactive spend cap
+- Checks the routed model against the attested one
+
+**Context pressure (`skills/target/scripts/context-probe.sh`):**
+
+- Counts tokens from the transcript and reports `used_pct` against a per-family window
 
 **Testing hook scripts manually:**
 

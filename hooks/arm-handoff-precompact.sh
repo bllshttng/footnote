@@ -21,13 +21,13 @@ GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 # shellcheck source=../scripts/lib/target-guard.sh
 source "$GUARD_LIB" 2>/dev/null || exit 0
 
-# Owner liveness. The manifest is statusless post-wedge (ab-d0337fbc), so
-# target_is_active's status check no longer applies - gate on the live owner pid
-# directly (a dead owner means stale state from a prior session; do not arm).
-OWNER_PID="$(target_state_field owner_pid "$STATE_FILE" 2>/dev/null || true)"
-if [[ "$OWNER_PID" =~ ^[0-9]+$ ]]; then
-  kill -0 "$OWNER_PID" 2>/dev/null || exit 0
-fi
+# Owner liveness, from the shared claim-based helper. This used to gate on
+# `kill -0 owner_pid`, which is the transient `fno target init` wrapper pid,
+# dead within about a second of init returning - so the hook exited HERE on
+# 100% of real fires and never once reached the probe or armed. owner_pid can
+# only ever prove life, never death; the node claim (session-pid anchored +
+# TTL) is the durable signal, and target_is_active already reads it.
+target_is_active "$STATE_FILE" || exit 0
 
 # Key markers on the MANIFEST session_id so they share handoff.sh's namespace
 # (handoff.sh writes/clears .handoff-{done,armed}-<manifest_session_id>).

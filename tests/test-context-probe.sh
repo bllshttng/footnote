@@ -67,20 +67,42 @@ check_eq "AC2-UI: 1M model window_tokens=1000000" "1000000" "$(printf '%s' "$out
 check_eq "AC2-UI: 1M model used_tokens=320000" "320000" "$(printf '%s' "$output" | jq -r '.used_tokens' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
-# Default window: model does NOT contain "[1m]" -> window_tokens=200000
-# usage sum: 50000 + 30000 + 20000 = 100000; pct = round(100*100000/200000) = 50
+# Per-family window table. Pins the DENOMINATOR per model family, which is the
+# whole point: a Claude id never carries the "[1m]" marker, so keying only on
+# that suffix put every 1M Claude model on the 200K branch and inflated
+# used_pct 5x. usage sum below is 100000 in every case, so the expected pct is
+# just 100000/window: 10 on a 1M window, 50 on a 200K one.
 # ---------------------------------------------------------------------------
-FIXTURE_DEFAULT="$TMPDIR_FIXTURES/transcript_default.jsonl"
-cat > "$FIXTURE_DEFAULT" <<'EOF'
-{"type":"user","message":{"role":"user","content":"hello"}}
-{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":50000,"cache_creation_input_tokens":30000,"cache_read_input_tokens":20000},"content":[]}}
-EOF
+check_window() { # label  model  expected_window  expected_pct
+  local label="$1" model="$2" want_window="$3" want_pct="$4"
+  local fixture="$TMPDIR_FIXTURES/transcript_window.jsonl"
+  printf '{"type":"user","message":{"role":"user","content":"hello"}}\n{"type":"assistant","message":{"role":"assistant","model":"%s","usage":{"input_tokens":50000,"cache_creation_input_tokens":30000,"cache_read_input_tokens":20000},"content":[]}}\n' \
+    "$model" > "$fixture"
+  run_probe "$fixture"
+  check_exit "window[$label] exits 0" "0" "$probe_exit"
+  check_eq "window[$label] window_tokens=$want_window" "$want_window" "$(printf '%s' "$output" | jq -r '.window_tokens' 2>/dev/null)"
+  check_eq "window[$label] used_pct=$want_pct" "$want_pct" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
+  check_eq "window[$label] model echoed" "$model" "$(printf '%s' "$output" | jq -r '.model' 2>/dev/null)"
+}
 
-run_probe "$FIXTURE_DEFAULT"
-check_exit "Default window exits 0" "0" "$probe_exit"
-check_eq "Default window used_pct=50" "50" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
-check_eq "Default window window_tokens=200000" "200000" "$(printf '%s' "$output" | jq -r '.window_tokens' 2>/dev/null)"
-check_eq "Default window model returned" "claude-sonnet-4-6" "$(printf '%s' "$output" | jq -r '.model' 2>/dev/null)"
+check_window "opus-5"      "claude-opus-5"          1000000 10
+check_window "sonnet-5"    "claude-sonnet-5"        1000000 10
+check_window "opus-4-8"    "claude-opus-4-8"        1000000 10
+check_window "opus-4-6"    "claude-opus-4-6"        1000000 10
+check_window "sonnet-4-6"  "claude-sonnet-4-6"      1000000 10
+check_window "fable-5"     "claude-fable-5"         1000000 10
+check_window "zai-1m"      "glm-5.2[1m]"            1000000 10
+check_window "haiku-4-5"   "claude-haiku-4-5-20251001" 200000 50
+
+# 1M is an allowlist, so every unlisted id lands on 200K. These four are the
+# reason: a `claude-*` catch-all would hand each of them a 1M denominator,
+# understate pressure 5x, and let the session run out of context - the failure
+# direction this table exists to avoid. A future 1M model landing here fires the
+# handoff early, which is the cheap error and is fixed by adding one line above.
+check_window "legacy-opus-4-5"   "claude-opus-4-5-20250929"   200000 50
+check_window "legacy-sonnet-4-5" "claude-sonnet-4-5-20250929" 200000 50
+check_window "legacy-3-5"        "claude-3-5-sonnet-20241022" 200000 50
+check_window "unknown"           "some-other-model"           200000 50
 
 # ---------------------------------------------------------------------------
 # Multiple assistant lines -> LAST one wins
@@ -97,7 +119,7 @@ EOF
 run_probe "$FIXTURE_MULTI"
 check_exit "Multiple lines exits 0" "0" "$probe_exit"
 check_eq "Multiple lines: last wins (used_tokens=10000)" "10000" "$(printf '%s' "$output" | jq -r '.used_tokens' 2>/dev/null)"
-check_eq "Multiple lines: used_pct=5 (10000/200000)" "5" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
+check_eq "Multiple lines: used_pct=1 (10000/1000000)" "1" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # Missing file -> exit 3, no JSON
@@ -140,7 +162,7 @@ EOF
 run_probe "$FIXTURE_PARTIAL"
 check_exit "Partial usage block exits 0" "0" "$probe_exit"
 check_eq "Partial usage: used_tokens=80000" "80000" "$(printf '%s' "$output" | jq -r '.used_tokens' 2>/dev/null)"
-check_eq "Partial usage: used_pct=40" "40" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
+check_eq "Partial usage: used_pct=8 (80000/1000000)" "8" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
 # Zero usage (all fields 0) -> used_tokens=0, used_pct=0

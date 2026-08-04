@@ -52,12 +52,31 @@ The `session_satisfied(trigger=delegated)` event written at step 8 is the audit 
 - Input: path to the session transcript JSONL (resolved from the session manifest's `claude_transcript_id` field)
 - Selects the last assistant message carrying a `usage` block
 - Computes `used_tokens = input_tokens + cache_creation_input_tokens + cache_read_input_tokens`
-- Window size: `[1m]` in model string -> 1,000,000; else 200,000
+- Window size: 1,000,000 is an **allowlist**, never a catch-all. It covers the `[1m]` suffix (a zai/GLM routing marker) and the ids known to have a 1M window: Opus 5, Sonnet 5, Fable 5, Opus 4.8/4.7/4.6, Sonnet 4.6.
+  Everything else falls to 200,000, including Haiku 4.5, the legacy 200K Claudes (Opus 4.5, Sonnet 4.5, Claude 3.x), and any unrecognized or future id.
+  No Anthropic model id carries `[1m]`, so a table keyed on that suffix alone put every Claude model on the 200K branch and inflated `used_pct` 5x on a 1M model.
+  The fallback direction is asymmetric on purpose: too small a denominator overstates pressure and fires the handoff early, costing one extra succession, while too large understates it and lets the session run out of context, losing the run.
+  A `claude-*` catch-all would put every legacy 200K model on the losing side of that trade, so a new 1M model earns a line in the table rather than inheriting one.
 - Output (stdout, exit 0): `{"used_tokens": N, "window_tokens": N, "used_pct": N, "model": "..."}`
 - Exit 3 ("unreadable"): missing file, jq absent, no assistant line with usage block, parse failure
 - Any nonzero exit is treated as no-pressure (fail-safe toward not firing)
 
-The statusline chain (`statusline-wrapper.sh` -> `~/.claude/.session-context.json` -> `hooks/context-monitor.js`) is disqualified as a trigger source for two reasons: the wrapper is not installed in the current environment (the sidecar is 1 byte; the monitor exits silently every fire), and when it was wired it produced false positives consistent with percentages computed against a 200K window on a 1M-context model (`opus-4-8[1m]`). `hooks/context-monitor.js` remains as advisory UX only; its repair or retirement is a separate carveout.
+The statusline chain (`statusline-wrapper.sh` -> `~/.claude/.session-context.json` -> `hooks/context-monitor.js`) is **retired**, not merely disqualified.
+The wrapper was never shipped, nothing in this repo ever wrote the sidecar or its `/tmp` bridge fallback, and the read consequently failed on every fire, so the hook never warned once.
+It was also structurally the wrong source: a second-hand percentage whose denominator footnote could neither see nor validate, which is how it reported 200K-window numbers on a 1M-context model.
+`hooks/context-monitor.js` now carries only the spend-cap and model-drift guards; its context-percentage path was deleted.
+
+`context-probe.sh` is the single context-measurement path: first-hand token counts from the transcript, with a denominator this repo owns.
+
+### Why the PreCompact arm hook was silent
+
+`hooks/arm-handoff-precompact.sh` is registered on `PreCompact` and enabled by default, yet it never armed once.
+It gated on `kill -0 owner_pid`, and `owner_pid` is the transient `fno target init` wrapper pid that dies within about a second of init returning, so the gate rejected every live session and the hook returned before reading the payload or running the probe.
+`owner_pid` can only ever prove life, never death; death is asserted from the node claim, which is session-pid anchored and TTL-protected.
+The hook now follows the same asymmetry as `cli/src/fno/target/orient.py::_manifest_liveness`.
+
+Its unit test hid this for the whole time the bug shipped, because the fixture wrote `owner_pid: $$` - a live pid that no real session has after init.
+A guard whose test constructs a state production never produces is not covered, however green the suite reads.
 
 ## Terminal-session resolution rule
 
