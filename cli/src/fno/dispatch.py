@@ -468,7 +468,10 @@ def _dispatch_one(
         )
 
         route = select_autonomous_route(
-            provider_id=_resolve_provider_id(cwd) or "",
+            # An explicit --account IS the record this launch runs on, so probe
+            # THAT one. Probing the active record instead would defer a healthy
+            # pinned account because an unrelated active account is walled.
+            provider_id=(account or "").strip() or _resolve_provider_id(cwd) or "",
             priority=priority,
             # The same pin rule `backlog advance` applies, so the two launchers
             # cannot disagree about whether a launch is rerouteable. An explicit

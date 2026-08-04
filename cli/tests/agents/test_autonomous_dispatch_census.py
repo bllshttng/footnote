@@ -72,6 +72,16 @@ def test_all_autonomous_entry_points_reach_an_owned_routing_seam() -> None:
     assert "dispatch resolve --autonomous" in dispatch_node
     assert "--dispatch-account" in dispatch_node
     assert 'route_action" == "defer"' in dispatch_node
+    # The cutover spawn MUST pin the Python runtime. `spawn` auto-routes to the
+    # Rust client, which does not know --dispatch-account and rejects the whole
+    # launch ("fno-agents: unknown flag"), so the flag alone is not enough - the
+    # earlier version of this census asserted only that the flag appeared.
+    assert "spawn_runtime=(env FNO_AGENTS_RUNTIME=python)" in dispatch_node
+    pin_at = dispatch_node.index("spawn_runtime=(env FNO_AGENTS_RUNTIME=python)")
+    flag_at = dispatch_node.index("--dispatch-account")
+    assert flag_at < pin_at, "the runtime pin must be set alongside the flag"
+    for spawn in re.findall(r"spawn_out=\"\$\((.*?) fno agents spawn", dispatch_node):
+        assert "spawn_runtime" in spawn, f"spawn site not runtime-pinnable: {spawn}"
     assert 'DISPATCH="$REPO_ROOT/skills/target/scripts/dispatch-node.sh"' in blueprint
     assert '"backlog",\n                "advance",' in active_backlog
     assert "harness_map.resolve_dispatch(**resolve_kwargs)" in advance

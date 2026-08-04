@@ -522,3 +522,28 @@ class TestPinnedHarnessSkipsAnUnrelatedPool:
             "fno.agents.autonomous_route.select_autonomous_route", lambda **k: sentinel
         )
         assert dm._autonomous_route_for({}, "codex", None) is sentinel
+
+
+def test_an_explicit_account_is_the_record_that_gets_probed(monkeypatch, tmp_path) -> None:
+    """--account names the record the launch runs on, so it is the record whose
+    quota decides. Probing the active one would defer a healthy pinned account
+    because an unrelated active account is walled."""
+    import fno.dispatch as dm
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(dm, "_next_node", lambda project: {"id": "ab-1111aaaa", "priority": "p2"})
+    monkeypatch.setattr(
+        dm, "_resolve_provider_id", lambda *a, **k: pytest.fail("probed the active record")
+    )
+    seen = {}
+    monkeypatch.setattr(
+        "fno.agents.autonomous_route.select_autonomous_route",
+        lambda **k: seen.update(k) or ar.AutonomousRoute("stay", "ok"),
+    )
+    monkeypatch.setattr(
+        "fno.agents.account_env.resolve_account_overlay",
+        lambda a, **k: SimpleNamespace(env={"CLAUDE_CONFIG_DIR": "/acct/ccr"}),
+    )
+    monkeypatch.setattr(dm, "dispatch_spawn_pane", lambda **kw: SimpleNamespace(pane_id="p1"))
+    dm._dispatch_one(session="s", node=None, project=None, account="ccr")
+    assert seen["provider_id"] == "ccr"

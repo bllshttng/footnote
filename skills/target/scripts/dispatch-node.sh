@@ -330,7 +330,7 @@ for id in "${NODES[@]}"; do
   DISPATCH_PROVIDER="$DISPATCH_PROVIDER_BASE"
   DISPATCH_SUBSTRATE="$DISPATCH_SUBSTRATE_BASE"
   DISPATCH_COMMAND="$DISPATCH_COMMAND_BASE"
-  cutover_args=(); route_account=""
+  cutover_args=(); route_account=""; spawn_runtime=()
   # An explicit --route is a human's model-and-billing choice, and precedence
   # puts every explicit pin above quota policy. Passing the configured harness
   # makes the resolver treat this launch as pinned: it may still DEFER, but it
@@ -373,6 +373,12 @@ for id in "${NODES[@]}"; do
     DISPATCH_COMMAND="$route_command"
     # The record id travels on argv; spawn resolves its credentials itself.
     cutover_args=(--dispatch-account "$route_account")
+    # `spawn` auto-routes to the Rust client, which does not know this flag
+    # ("fno-agents: unknown flag: --dispatch-account") and would kill the launch
+    # before it starts. The overlay resolver is Python, so pin the runtime for a
+    # cutover spawn - the same pin spawn-guard and `agents name` already use for
+    # Python-only surfaces in this script.
+    spawn_runtime=(env FNO_AGENTS_RUNTIME=python)
     echo "note: $id cutting over to harness '$route_harness' (account $route_account); $(printf '%s' "$route_json" | jq -r '.route_reason // "quota"')" >&2
   fi
 
@@ -800,7 +806,7 @@ for id in "${NODES[@]}"; do
   # failure (empty $wt) so the dispatch is never blocked; --here -> inherit.
   launch_cwd="${node_cwd:-$(pwd)}"
   if [[ -n "$node_cwd" ]]; then
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$node_cwd" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   elif [[ "$HERE" -eq 0 ]]; then
     wt=""
     # DISPATCH_PROVIDER is the RESOLVED harness (.harness from dispatch resolve),
@@ -821,16 +827,16 @@ for id in "${NODES[@]}"; do
         _wt_setup="$CANONICAL_ROOT/scripts/setup/setup-worktree.sh"
         [[ -f "$_wt_setup" ]] && CANONICAL="$CANONICAL_ROOT" WORKTREE="$wt" bash "$_wt_setup" >/dev/null 2>&1
       fi
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --cwd "$wt" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       launch_cwd="$wt"
     else
-      spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+      spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" --fresh "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
       # --fresh lands the worker in canonical main; report that real path (not a
       # space-containing label) so the cwd= field stays machine-parseable.
       launch_cwd="${CANONICAL_ROOT:-$(pwd)}"
     fi
   else
-    spawn_out="$(fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
+    spawn_out="$("${spawn_runtime[@]+"${spawn_runtime[@]}"}" fno agents spawn --harness "$DISPATCH_PROVIDER" --substrate "$DISPATCH_SUBSTRATE" --node "$id" "${squad_args[@]+"${squad_args[@]}"}" "${role_args[@]+"${role_args[@]}"}" "${route_args[@]+"${route_args[@]}"}" "${model_args[@]+"${model_args[@]}"}" "${perm_args[@]+"${perm_args[@]}"}" "${cutover_args[@]+"${cutover_args[@]}"}" --name "$agent_name" "$tgt_cmd" 2>"$spawn_err_file")"; spawn_rc=$?
   fi
   spawn_err="$(cat "$spawn_err_file" 2>/dev/null)"; rm -f "$spawn_err_file"
   if [[ "$spawn_rc" -ne 0 ]]; then
