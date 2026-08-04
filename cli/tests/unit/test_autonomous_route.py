@@ -228,7 +228,7 @@ def test_select_destination_configured_picks_provider_and_cli(monkeypatch):
     monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
     monkeypatch.setattr(
         "fno.adapters.providers.rotation.next_healthy_provider",
-        lambda combo, exclude=(): "ccr",
+        lambda combo, exclude=(), **k: "ccr",
     )
     monkeypatch.setattr(
         "fno.adapters.providers.loader.load_providers",
@@ -262,7 +262,7 @@ def test_select_destination_unstaged_account_defers(monkeypatch):
     monkeypatch.setattr("fno.adapters.providers.loader.load_combos", lambda *a, **k: {"combo1": combo})
     monkeypatch.setattr(
         "fno.adapters.providers.rotation.next_healthy_provider",
-        lambda combo, exclude=(): "ccr",
+        lambda combo, exclude=(), **k: "ccr",
     )
     monkeypatch.setattr(
         "fno.adapters.providers.loader.load_providers",
@@ -473,3 +473,52 @@ class TestUnresolvableNodeIsNotRouted:
             "fno.agents.autonomous_route.select_autonomous_route", lambda **k: sentinel
         )
         assert dm._autonomous_route_for(None, None, None) is sentinel
+
+
+class TestPinnedHarnessSkipsAnUnrelatedPool:
+    def test_a_codex_pin_is_not_deferred_by_a_walled_claude_account(self, monkeypatch) -> None:
+        """A pin can only stay or defer, so deferring it on the ACTIVE record's
+        quota would hold a codex launch because a claude account is walled.
+        Those are unrelated pools."""
+        import fno.dispatch as dm
+
+        monkeypatch.setattr(dm, "_resolve_provider_id", lambda *a, **k: "ccm")
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: SimpleNamespace(by_id={"ccm": SimpleNamespace(harness="claude")}),
+        )
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route",
+            lambda **k: pytest.fail("probed an unrelated pool for a pinned harness"),
+        )
+        assert dm._autonomous_route_for({}, "codex", None) is None
+
+    def test_a_matching_pin_still_probes(self, monkeypatch) -> None:
+        # Same harness = same pool: the pin still may defer on its own quota.
+        import fno.dispatch as dm
+
+        sentinel = object()
+        monkeypatch.setattr(dm, "_resolve_provider_id", lambda *a, **k: "ccm")
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: SimpleNamespace(by_id={"ccm": SimpleNamespace(harness="claude")}),
+        )
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route", lambda **k: sentinel
+        )
+        assert dm._autonomous_route_for({}, "claude", None) is sentinel
+
+    def test_an_unreadable_registry_keeps_probing(self, monkeypatch) -> None:
+        # Fail-open means "keep today's behaviour", never "skip the quota check".
+        import fno.dispatch as dm
+
+        sentinel = object()
+        monkeypatch.setattr(dm, "_resolve_provider_id", lambda *a, **k: "ccm")
+        monkeypatch.setattr(
+            "fno.adapters.providers.loader.load_providers",
+            lambda *a, **k: (_ for _ in ()).throw(OSError("unreadable")),
+        )
+        monkeypatch.setattr(
+            "fno.agents.autonomous_route.select_autonomous_route", lambda **k: sentinel
+        )
+        assert dm._autonomous_route_for({}, "codex", None) is sentinel

@@ -1789,7 +1789,7 @@ def advance(
     #     defers. The node stays in ready (skip mutates nothing); the next tick
     #     after the reset dispatches it. Never fatal - a defer read failure just
     #     proceeds to dispatch.
-    #     The route decision itself is shared with `fno dispatch` (x-2716) so
+    #     The route decision itself is shared with `fno dispatch` so
     #     both autonomous launchers stay / defer / cut over identically; the
     #     tuple it returns is pinned for this attempt and the worker never
     #     re-switches. The dispatch_failover receipt is emitted after the spawn

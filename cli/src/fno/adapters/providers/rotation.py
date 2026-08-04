@@ -165,6 +165,7 @@ def next_healthy_provider(
     *,
     exclude: Collection[str] = (),
     quota: Any = None,
+    repo_root: Any = None,
 ) -> str | None:
     """First combo member whose live headroom is not EXHAUSTED, in combo order.
 
@@ -184,8 +185,12 @@ def next_healthy_provider(
     from fno.adapters.providers.loader import load_quota_config
     from fno.adapters.providers.runtime_state import HeadroomState, headroom
 
+    # ``repo_root`` scopes both reads to the repository the launch concerns. A
+    # cross-project failover that judged health from the DISPATCHER's project
+    # would pick an exhausted destination, or skip a healthy one, off another
+    # project's snapshot.
     if quota is None:
-        quota = load_quota_config()
+        quota = load_quota_config(repo_root=repo_root)
     excluded = set(exclude)
     for pid in combo.providers:
         if pid in excluded:
@@ -194,6 +199,7 @@ def next_healthy_provider(
             pid,
             ttl_seconds=quota.probe_ttl_seconds,
             threshold_pct=quota.defer_threshold_pct,
+            repo_root=repo_root,
         ).state
         if st is not HeadroomState.EXHAUSTED:
             return pid

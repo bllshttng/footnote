@@ -153,7 +153,9 @@ def _select_destination(
         combo = load_combos(repo_root=root).get(target.combo_name)
         if combo is None:
             return None
-        pid = next_healthy_provider(combo, exclude={exhausted_provider})
+        pid = next_healthy_provider(
+            combo, exclude={exhausted_provider}, repo_root=root
+        )
         if pid is None:
             return None
         rec = load_providers(repo_root=root).by_id.get(pid)
