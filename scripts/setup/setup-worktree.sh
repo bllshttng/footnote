@@ -49,8 +49,22 @@ fi
 # Resolve worktree root (where we are linking INTO). Default to cwd.
 WORKTREE="${WORKTREE:-$(pwd)}"
 
+# Refuse the whole script when the two roots are one directory, BEFORE the
+# mkdir and every link helper. Not a check inside link_artifact/link_file/
+# link_dir: when the roots coincide the script is a no-op at best and
+# destructive at worst, so the answer is to not run it at all. link_artifact
+# `rm -f`s the real file before `ln -sf "$source" "$target"`, which with equal
+# paths leaves a symlink pointing at itself - that is how this repo's
+# .fno/codemap.md was lost on 2026-07-26.
+#
+# `-ef` compares device+inode, so a symlinked, relative, or /tmp-vs-/private/tmp
+# invocation cannot slip past it the way a string equality test would.
+#
+# Exit 0, not non-zero: "already canonical, nothing to link" is a successful
+# no-op, and `fno target start` treats any non-zero from this script as fatal
+# ("refusing to initialize against unverified shared state", target_cli.py).
 if [[ "$CANONICAL" -ef "$WORKTREE" ]]; then
-  echo "setup-worktree: refusing to symlink canonical -> canonical (no-op)" >&2
+  echo "setup-worktree: refusing to symlink canonical -> canonical (no-op): $CANONICAL" >&2
   exit 0
 fi
 

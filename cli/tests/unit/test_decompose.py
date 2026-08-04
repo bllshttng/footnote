@@ -2882,3 +2882,231 @@ def test_adopt_still_permits_a_landed_pr_bearing_node(graph_env, monkeypatch):
     kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
     assert kid.get("contained_in") is None
     assert kid["pr_number"] == 612
+
+
+# -- a dead delivery unit cannot own containment --
+
+
+def _decompose(groups):
+    return _invoke(
+        ["backlog", "decompose", "ab-epic0001", "--groups", _groups_json(groups)]
+    )
+
+
+ADOPT_ONE = [{"slug": "one", "title": "One", "waves": "1", "adopt": ["ab-kid00001"]}]
+BARE_ONE = [{"slug": "one", "title": "One", "waves": "1"}]
+
+
+def _deferred_unit(g, read_entries):
+    """Seed one adoptable child, mint group child `one`, then defer it."""
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _decompose(BARE_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    assert _invoke(["backlog", "defer", unit, "--reason", "parked"]).exit_code == 0
+    return unit
+
+
+def _legacy_deferred_unit(g, read_entries):
+    """Seed one adoptable child, mint group child `one`, then park it with the
+    pre-feature workaround: ``completed_at: "deferred:<ts>"`` and no deferred_at.
+
+    ``recompute_statuses`` migrates this marker to ``deferred_at``, but only
+    AFTER a mutator returns, so the decompose mutator sees it raw - exactly the
+    shape that bypassed the guard before the legacy-prefix fix.
+    """
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _decompose(BARE_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    entries = json.loads(g.read_text())["entries"]
+    parked = next(e for e in entries if e["id"] == unit)
+    parked["completed_at"] = "deferred:2026-07-01T00:00:00+00:00"
+    parked.pop("deferred_at", None)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+    return unit
+
+
+def test_adopt_under_a_deferred_group_child_is_refused(graph_env):
+    """AC1: the stamp would be unreachable by every repair path that exists.
+
+    `_release_contained_children` already ran when the unit was deferred and
+    nothing re-runs it; `_strandable_contained_ids` keys on the owner's
+    completed_at, which a deferred owner has not got. So a re-stamped adoptee is
+    refused by both dispatch halves forever, with `update --parent null` as the
+    only escape. Refusing at the single write site is what keeps that state from
+    existing at all.
+    """
+    g, read_entries = graph_env
+    unit = _deferred_unit(g, read_entries)
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 2, result.output
+    assert unit in result.output
+    assert "deferred" in result.output
+    assert "undefer" in result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+
+
+def test_adopt_under_a_legacy_deferred_group_child_is_refused(graph_env):
+    """The pre-feature ``completed_at: "deferred:<ts>"`` workaround must not
+    bypass the guard.
+
+    ``recompute_statuses`` migrates the marker to ``deferred_at`` only after the
+    mutator returns, so reading ``completed_at`` raw would treat a deferred owner
+    as done, skip the guard, and stamp the permanently-contained state it exists
+    to prevent. The marker is folded into the effective deferred_at for the
+    deadness check, so the guard fires identically to the deferred_at case.
+    """
+    g, read_entries = graph_env
+    unit = _legacy_deferred_unit(g, read_entries)
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 2, result.output
+    assert unit in result.output
+    assert "deferred" in result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+
+
+def test_adopt_after_undeferring_the_group_child_succeeds(graph_env):
+    """AC2: the refusal is a gate, not a wall - the named remedy actually works.
+
+    `cmd_undefer` clears deferred_at and deliberately does NOT re-contain, so
+    the stamp arrives through decompose's own back-fill convergence leg rather
+    than through the undefer.
+    """
+    g, read_entries = graph_env
+    unit = _deferred_unit(g, read_entries)
+    assert _decompose(ADOPT_ONE).exit_code == 2
+    assert _invoke(["backlog", "undefer", unit]).exit_code == 0
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 0, result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid["contained_in"] == unit
+
+
+def test_a_deferred_group_child_with_no_adopt_list_still_updates(graph_env):
+    """AC3: the guard is gated on the adopt list, not on the group.
+
+    Refusing every re-run against a deferred group child would deadlock an epic
+    doc whose group was parked for unrelated reasons - including by
+    `maintain --apply`, which defers without the operator choosing it. With no
+    adoptees there is no stamp to withhold, so nothing is at stake.
+    """
+    g, read_entries = graph_env
+    unit = _deferred_unit(g, read_entries)
+
+    result = _decompose([
+        {"slug": "one", "title": "One renamed", "waves": "2",
+         "blocked_by_groups": ["two"]},
+        {"slug": "two", "title": "Two", "waves": "1"},
+    ])
+    assert result.exit_code == 0, result.output
+    entries = read_entries()
+    child = next(e for e in entries if e["id"] == unit)
+    assert child["title"] == "One renamed"
+    assert child["blocked_by"] == [_child(entries, "two")["id"]]
+    assert child["deferred_at"]
+
+
+def test_adopt_under_a_superseded_group_child_names_the_supersession(graph_env):
+    """AC4: the remedy has to branch, because `undefer` is not total.
+
+    `cmd_supersede` sets superseded_by AND deferred_at, but `cmd_undefer`
+    clears only the second. Offering undefer here would send the operator
+    through a command that exits 0, changes nothing this guard reads, and
+    refuses identically on the next run.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-new00001"))
+    assert _decompose(BARE_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    assert _invoke([
+        "backlog", "supersede", "ab-new00001", "--replaces", unit,
+        "--reason", "reshaped",
+    ]).exit_code == 0
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 2, result.output
+    assert "ab-new00001" in result.output
+    assert "superseded" in result.output
+    # The remedy offers `unsupersede` (the verb that clears superseded_by), not
+    # `undefer` (which clears only deferred_at, so the next run refuses again).
+    assert f"unsupersede {unit}" in result.output
+    assert f"undefer {unit}" not in result.output
+    assert "clears superseded_by" in result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+
+
+def test_a_refused_decompose_leaves_the_graph_byte_identical(graph_env):
+    """AC5: read-and-raise inside the mutator, so nothing is written at all.
+
+    `locked_mutate_graph` calls `_create_backup` only after the mutator
+    returns, so a raise means no write, no `.bak`, and no re-rendered `.md`.
+    """
+    g, read_entries = graph_env
+    _deferred_unit(g, read_entries)
+    before = g.read_text()
+    baks_before = sorted(p.name for p in g.parent.glob("graph.json.bak.*"))
+
+    assert _decompose(ADOPT_ONE).exit_code == 2
+    assert g.read_text() == before
+    assert sorted(p.name for p in g.parent.glob("graph.json.bak.*")) == baks_before
+
+
+def test_the_backfill_convergence_leg_cannot_re_stamp_a_released_adoptee(graph_env):
+    """AC6: this is the exact path the finding travels.
+
+    The stamp sits BEFORE the already-adopted `continue` so a legacy
+    half-adopted node converges - which is also what re-applies containment the
+    defer just released. The adoptee keeps its `parent` pointer either way; only
+    the containment record stays gone.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"))
+    assert _decompose(ADOPT_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    assert next(
+        e for e in read_entries() if e["id"] == "ab-kid00001"
+    )["contained_in"] == unit
+
+    assert _invoke(["backlog", "defer", unit, "--reason", "parked"]).exit_code == 0
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None, "defer should have released it"
+
+    assert _decompose(ADOPT_ONE).exit_code == 2
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid.get("contained_in") is None
+    assert kid["parent"] == unit
+
+
+def test_a_superseded_but_completed_group_child_still_adopts(graph_env):
+    """AC7: completed_at first, reproducing done > superseded > deferred.
+
+    A unit that was superseded and later closed is history, not a dead end: the
+    merge cascade and the existing stranded sweep both handle a done owner, so
+    refusing here would be a false positive on a healable graph.
+    """
+    g, read_entries = graph_env
+    _seed_children(g, _epic_child("ab-kid00001"), _epic_child("ab-new00001"))
+    assert _decompose(BARE_ONE).exit_code == 0
+    unit = _child(read_entries(), "one")["id"]
+    assert _invoke([
+        "backlog", "supersede", "ab-new00001", "--replaces", unit,
+        "--reason", "reshaped",
+    ]).exit_code == 0
+
+    # Model what `_apply_completion_fields` does on close: stamp completed_at
+    # and clear deferred_at, leaving superseded_by behind.
+    entries = json.loads(g.read_text())["entries"]
+    closed = next(e for e in entries if e["id"] == unit)
+    closed["completed_at"] = "2026-07-01T00:00:00+00:00"
+    closed.pop("deferred_at", None)
+    g.write_text(json.dumps({"entries": entries}) + "\n")
+
+    result = _decompose(ADOPT_ONE)
+    assert result.exit_code == 0, result.output
+    kid = next(e for e in read_entries() if e["id"] == "ab-kid00001")
+    assert kid["contained_in"] == unit
