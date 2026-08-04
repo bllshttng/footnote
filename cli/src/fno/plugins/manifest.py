@@ -30,13 +30,14 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
-from fno.company.contracts import EvidenceResult, NonEmptyStr
+from fno.company.contracts import EvidenceResult, NonEmptyStr, RoleRef
 from fno.roles.models import ContextKind, RoleManifest, canonical_digest
 from packaging.version import InvalidVersion, Version
 
 __all__ = [
     "AdapterConformance",
     "AdapterDeclaration",
+    "AgentDeclaration",
     "AssetDeclaration",
     "CompatibilityRange",
     "EffectDeclaration",
@@ -90,6 +91,23 @@ class SkillDeclaration(_PackModel):
 
     id: NonEmptyStr
     source: NonEmptyStr
+
+
+class AgentDeclaration(_PackModel):
+    """A subagent contribution, bundled at build time (no runtime Task dispatch by the pack).
+
+    The agent's frontmatter is copied verbatim at bundle time, never synthesized,
+    so the source file's ``tools`` list IS the tool list that runs. Two verify
+    conditions bind that copied list to the role: ``agent-role-binding`` fails when
+    ``role`` names a role this pack does not declare, and ``agent-tools-bounded``
+    fails when the copied ``tools`` hold anything outside the bound role's
+    authority ceiling. Checking the copied frontmatter is what keeps the agent's
+    real tool list honest, since two copies of a tool list is how one drifts.
+    """
+
+    id: NonEmptyStr
+    source: NonEmptyStr
+    role: RoleRef | None = None
 
 
 class WorkflowDeclaration(_PackModel):
@@ -189,6 +207,7 @@ class PackManifest(_PackModel):
     footnote_compat: CompatibilityRange
     roles: tuple[RoleManifest, ...] = ()
     skills: tuple[SkillDeclaration, ...] = ()
+    agents: tuple[AgentDeclaration, ...] = ()
     workflows: tuple[WorkflowDeclaration, ...] = ()
     adapters: tuple[AdapterDeclaration, ...] = ()
     evaluators: tuple[EvaluatorDeclaration, ...] = ()
@@ -206,6 +225,7 @@ class PackManifest(_PackModel):
         )
         for field_name, items in (
             ("skills", self.skills),
+            ("agents", self.agents),
             ("workflows", self.workflows),
             ("adapters", self.adapters),
             ("evaluators", self.evaluators),
@@ -228,6 +248,7 @@ class PackManifest(_PackModel):
         component_counts = (
             self.roles,
             self.skills,
+            self.agents,
             self.workflows,
             self.adapters,
             self.evaluators,

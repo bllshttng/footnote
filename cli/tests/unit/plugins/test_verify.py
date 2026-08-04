@@ -4,8 +4,8 @@ from pathlib import Path
 
 import yaml
 
-from fno.company.contracts import EvidenceResult
-from fno.plugins.manifest import PackManifest
+from fno.company.contracts import EvidenceResult, RoleRef
+from fno.plugins.manifest import AgentDeclaration, PackManifest
 from fno.plugins.verify import (
     Condition,
     ConditionFamily,
@@ -215,3 +215,75 @@ def test_dependency_version_out_of_range_fails(tmp_path):
     assert dep.checked is True
     assert dep.result is EvidenceResult.FAILED
     assert "outside" in (dep.detail or "")
+
+
+# AC1-HP / AC2-ERR / AC3-SEC: agent declarations bind a role and a bounded tool list.
+
+_AGENT_ROLE = RoleRef(id="marketing", function_id="growth-studio")
+
+
+def _write_agent_file(pack_dir: Path, source: str, *, tools: list[str]) -> None:
+    target = pack_dir / source
+    target.parent.mkdir(parents=True, exist_ok=True)
+    frontmatter = yaml.safe_dump(
+        {"name": Path(source).stem, "pack": "growth-studio", "role": "marketing", "tools": tools},
+        sort_keys=False,
+    )
+    target.write_text(f"---\n{frontmatter}---\n\nagent body\n", encoding="utf-8")
+
+
+def _pack_with_agent(tmp_path: Path, agent: AgentDeclaration) -> Path:
+    manifest = _full_pack().model_copy(update={"agents": (agent,)})
+    pack_dir = _write_pack(tmp_path, manifest)
+    return pack_dir
+
+
+def test_agent_with_valid_binding_and_bounded_tools_checks_and_passes(tmp_path):
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=_AGENT_ROLE)
+    pack_dir = _pack_with_agent(tmp_path, agent)
+    _write_agent_file(pack_dir, "agents/growth-marketer.md", tools=["Read", "Write", "Glob", "Grep"])
+
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    assert by_name["source:agent:growth-marketer"].ok
+    assert by_name["agent-role-binding:growth-marketer"].ok
+    assert by_name["agent-tools-bounded:growth-marketer"].ok
+    assert report.ok, [c.name for c in report.conditions if not c.ok]
+
+
+def test_agent_source_missing_or_escaping_fails(tmp_path):
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=_AGENT_ROLE)
+    pack_dir = _pack_with_agent(tmp_path, agent)
+    # Source file deliberately not written.
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    assert by_name["source:agent:growth-marketer"].result is EvidenceResult.FAILED
+    assert not report.ok
+
+
+def test_agent_role_not_declared_fails_binding(tmp_path):
+    bogus = RoleRef(id="nonexistent", function_id="growth-studio")
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=bogus)
+    pack_dir = _pack_with_agent(tmp_path, agent)
+    _write_agent_file(pack_dir, "agents/growth-marketer.md", tools=["Read"])
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    assert by_name["agent-role-binding:growth-marketer"].result is EvidenceResult.FAILED
+    assert "not declared" in (by_name["agent-role-binding:growth-marketer"].detail or "")
+
+
+def test_agent_unbounded_tools_fail(tmp_path):
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=_AGENT_ROLE)
+    pack_dir = _pack_with_agent(tmp_path, agent)
+    _write_agent_file(
+        pack_dir,
+        "agents/growth-marketer.md",
+        tools=["Read", "Bash", "Task", "WebSearch", "WebFetch", "mcp__evil__steal"],
+    )
+    report = verify_pack(pack_dir, installed={})
+    by_name = _results_by_name(report)
+    cond = by_name["agent-tools-bounded:growth-marketer"]
+    assert cond.result is EvidenceResult.FAILED
+    detail = cond.detail or ""
+    for offender in ("Bash", "Task", "WebSearch", "WebFetch", "mcp__evil__steal"):
+        assert offender in detail

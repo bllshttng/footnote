@@ -17,6 +17,7 @@ validated by schema.
 from fno.plugins.manifest import (
     AdapterConformance,
     AdapterDeclaration,
+    AgentDeclaration,
     AssetDeclaration,
     CompatibilityRange,
     EffectDeclaration,
@@ -32,6 +33,7 @@ from fno.plugins.manifest import (
 __all__ = [
     "AdapterConformance",
     "AdapterDeclaration",
+    "AgentDeclaration",
     "AssetDeclaration",
     "CompatibilityRange",
     "EffectDeclaration",

@@ -557,6 +557,7 @@ def _declared_source_conditions(manifest: PackManifest, base: Path) -> list[Cond
     declared: list[tuple[str, str, str]] = []
     declared += [("workflow", w.id, w.source) for w in manifest.workflows]
     declared += [("skill", s.id, s.source) for s in manifest.skills]
+    declared += [("agent", a.id, a.source) for a in manifest.agents]
     declared += [("asset", a.id, a.source) for a in manifest.assets]
     base_resolved = base.resolve()
     for kind, ident, source in declared:
@@ -584,6 +585,122 @@ def _declared_source_conditions(manifest: PackManifest, base: Path) -> list[Cond
                     checked=True,
                     result=EvidenceResult.FAILED,
                     detail=f"{source} missing or escapes the pack directory",
+                )
+            )
+    return conditions
+
+
+# A packaged agent's tool list is bounded: no ceiling grants a network, shell,
+# or delegation tool, so Bash, Task, WebSearch, WebFetch, and any mcp__ tool are
+# refused at every authority ceiling. The set is uniform today; the bound role's
+# ceiling is the hook a future, tighter per-ceiling policy slots into.
+_AGENT_TOOL_ALLOWLIST = frozenset({"Read", "Write", "Edit", "Glob", "Grep"})
+
+
+def _read_agent_frontmatter(source: Path) -> dict[str, Any] | None:
+    """Read an agent source's YAML frontmatter, or None if it cannot be read."""
+    try:
+        text = source.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        return None
+    if not text.startswith("---"):
+        return {}
+    lines = text.splitlines()
+    end = next((i for i in range(1, len(lines)) if lines[i].strip() == "---"), None)
+    if end is None:
+        return {}
+    try:
+        loaded = yaml.safe_load("\n".join(lines[1:end]))
+    except yaml.YAMLError:
+        return None
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _agent_binding_conditions(manifest: PackManifest, base: Path) -> list[Condition]:
+    # Two SCHEMA conditions per declared agent. ``agent-role-binding`` fails when
+    # ``role`` names a role this pack does not declare; ``agent-tools-bounded``
+    # parses the copied source frontmatter and fails when its ``tools`` hold
+    # anything outside the bounded allowlist. Frontmatter is copied verbatim at
+    # bundle time, so this check is the only thing binding the agent's real tool
+    # list to its role.
+    conditions: list[Condition] = []
+    declared_roles = {role.role for role in manifest.roles}
+    for agent in manifest.agents:
+        if agent.role is None:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-role-binding:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail="no role binding declared",
+                )
+            )
+        elif agent.role in declared_roles:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-role-binding:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"role {agent.role.id} declared by this pack",
+                )
+            )
+        else:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-role-binding:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=f"role {agent.role.id} is not declared by this pack",
+                )
+            )
+
+        frontmatter = _read_agent_frontmatter((base / agent.source).resolve())
+        if frontmatter is None:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-tools-bounded:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.BLOCKED,
+                    detail=f"cannot read {agent.source} to check tools",
+                )
+            )
+            continue
+        raw_tools = frontmatter.get("tools")
+        if not raw_tools:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-tools-bounded:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail="no tools declared; vacuously bounded",
+                )
+            )
+            continue
+        tool_list = raw_tools if isinstance(raw_tools, list) else [raw_tools]
+        offenders = sorted({str(t) for t in tool_list if str(t) not in _AGENT_TOOL_ALLOWLIST})
+        if offenders:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-tools-bounded:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.FAILED,
+                    detail=f"tools outside the bounded allowlist: {', '.join(offenders)}",
+                )
+            )
+        else:
+            conditions.append(
+                Condition(
+                    ConditionFamily.SCHEMA,
+                    f"agent-tools-bounded:{agent.id}",
+                    checked=True,
+                    result=EvidenceResult.PASSED,
+                    detail=f"all {len(tool_list)} tool(s) within the bounded allowlist",
                 )
             )
     return conditions
@@ -738,6 +855,7 @@ def verify_manifest(
     conditions.extend(_identity_conditions(manifest, str(base_path)))
     conditions.extend(_schema_conditions(manifest))
     conditions.extend(_declared_source_conditions(manifest, base_path))
+    conditions.extend(_agent_binding_conditions(manifest, base_path))
     conditions.extend(_dependency_conditions(manifest, installed))
     conditions.extend(_capability_conditions(manifest))
     conditions.extend(_compatibility_conditions(manifest))
