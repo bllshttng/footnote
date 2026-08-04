@@ -108,8 +108,8 @@ def resume_bind(
         return {
             "result": "refused",
             "reason": (
-                f"ambient harness_session_id does not match the manifest; "
-                f"this is not the same durable session that started the target"
+                "ambient harness_session_id does not match the manifest; "
+                "this is not the same durable session that started the target"
             ),
             "field": "harness_session_id",
         }

@@ -417,7 +417,7 @@ def compare_and_rebind(
     fno_id: Optional[str] = None,
     harness_tag: Optional[str] = None,
     harness_session_id: Optional[str] = None,
-) -> Claim:
+) -> tuple[Claim, str]:
     """Atomically rebind a same-holder LOCAL claim whose prior PID is dead.
 
     The native-resume primitive (x-2ccd). A resumed durable session proves it
@@ -457,9 +457,13 @@ def compare_and_rebind(
         except FileExistsError:
             # A peer is mid-recovery, or a recoverer died holding the mutex.
             # Steal a corpse so a killed peer cannot brick the rebind; else wait.
-            if steal_if_stale(recovery_lock) and recovery_lock.mkdir(parents=True) is None:
-                recovery_token = _stamp_owner(recovery_lock)
-                acquired_lock = True
+            if steal_if_stale(recovery_lock):
+                try:
+                    recovery_lock.mkdir(parents=True)
+                    recovery_token = _stamp_owner(recovery_lock)
+                    acquired_lock = True
+                except FileExistsError:
+                    pass
             if not acquired_lock:
                 _wait_for_recovery_release(recovery_lock)
                 raise RebindRefused(
