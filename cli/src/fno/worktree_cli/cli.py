@@ -366,7 +366,7 @@ def overlap_record_cmd(
 @app.command("overlaps")
 def overlaps_cmd(
     since: int = typer.Option(28, "--since", help="Rolling window in days (default 28)."),
-    json_out: bool = typer.Option(False, "--json", help="Emit the report as JSON."),
+    json_out: bool = typer.Option(False, "--json", "-J", help="Emit the report as JSON."),
 ) -> None:
     """Report deduplicated worktree overlap observations (read-only).
 
