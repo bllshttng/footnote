@@ -306,6 +306,11 @@ FIELD_META: dict[str, Meta] = {
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
     # --- config.dev.* (x-88b9: maintainer local-dev) ---
     "dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
+    # --- config.context.* (x-edf5: project-supplied context artifacts) ---
+    "context.artifacts": Meta(
+        "advanced",
+        "Project-supplied context artifacts: {identifier: {path, sensitivity}}. A role's context selector names an identifier resolved here (default sensitivity internal), so a pack installed in a second project is reviewed against that project's facts, not the first's. An unconfigured identifier blocks resolution with MISSING_CONTEXT.",
+    ),
     # --- config.loops.* (x-ce71: per-loop level + pause-all substrate) ---
     "loops": Meta(
         "advanced",

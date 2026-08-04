@@ -194,7 +194,7 @@ def _emit_agents(skill: str, agents: list) -> int:
         # of plain strings, but pin the invariant).
         if "\t" in meta_json or "\n" in meta_json:
             print(
-                f"ERROR: agent meta JSON contains tab/newline; refusing to emit",
+                "ERROR: agent meta JSON contains tab/newline; refusing to emit",
                 file=sys.stderr,
             )
             return 1
@@ -245,6 +245,72 @@ def emit_rows(manifest_path: Path) -> int:
             return 1
         if _emit_agents(skill, agents) != 0:
             return 1
+    # Pack scan: a pack's skills and agents are bundled from the one place they
+    # are declared (its plugin.yaml), not re-declared in skill-bundles.yaml.
+    # Globbing */plugin.yaml skips hermes/openclaw dirs that carry no manifest.
+    return _emit_pack_rows(manifest_path.parent)
+
+
+def _is_safe_component(value: str) -> bool:
+    """A safe single path component: no separator, no traversal, no NUL."""
+    return (
+        bool(value)
+        and "/" not in value
+        and "\\" not in value
+        and value not in (".", "..")
+        and "\x00" not in value
+    )
+
+
+def _emit_pack_rows(repo_root: Path) -> int:
+    plugins_dir = repo_root / "plugins"
+    if not plugins_dir.is_dir():
+        return 0
+    for pack_yaml in sorted(plugins_dir.glob("*/plugin.yaml")):
+        pack_id = pack_yaml.parent.name
+        try:
+            data = _load_yaml(pack_yaml, require_pyyaml=True)
+        except ValueError as exc:
+            print(f"ERROR: pack manifest {pack_yaml}: {exc}", file=sys.stderr)
+            return 1
+        if not isinstance(data, dict):
+            print(
+                f"ERROR: pack manifest {pack_yaml} is not a mapping (got {type(data).__name__})",
+                file=sys.stderr,
+            )
+            return 1
+        # The plugin directory name and the manifest id must agree, or the
+        # build-time bundle identity and the runtime activation identity diverge.
+        manifest_id = data.get("id")
+        if manifest_id != pack_id:
+            print(
+                f"ERROR: pack directory {pack_id!r} does not match manifest id {manifest_id!r}",
+                file=sys.stderr,
+            )
+            return 1
+        for skill in data.get("skills") or []:
+            if not isinstance(skill, dict):
+                continue
+            sid = skill.get("id")
+            source = skill.get("source")
+            if not (sid and source):
+                continue
+            if not _is_safe_component(str(sid)):
+                print(f"ERROR: pack {pack_id} skill id is not a safe path component: {sid!r}", file=sys.stderr)
+                return 1
+            # <type>\t<pack>\t<source>\t<dest>\t<meta>
+            print(f"pack-skill\t{pack_id}\tplugins/{pack_id}/{source}\tskills/{sid}\t")
+        for agent in data.get("agents") or []:
+            if not isinstance(agent, dict):
+                continue
+            aid = agent.get("id")
+            source = agent.get("source")
+            if not (aid and source):
+                continue
+            if not _is_safe_component(str(aid)):
+                print(f"ERROR: pack {pack_id} agent id is not a safe path component: {aid!r}", file=sys.stderr)
+                return 1
+            print(f"pack-agent\t{pack_id}\tplugins/{pack_id}/{source}\tagents/{aid}.md\t")
     return 0
 
 

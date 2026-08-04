@@ -8,9 +8,12 @@ from fno.company.contracts import WorkOrderRef
 from fno.plugins.activate import activate, deactivate
 from fno.plugins.registry import PackRegistryStore
 from fno.plugins.verify import verify_pack
+from fno.roles.context import build_artifact_catalog
 from fno.roles.models import (
     ApprovalFloor,
+    CapabilityFact,
     ContextBundleBounds,
+    ContextKind,
     RoleLayer,
     RoleResolutionBlocked,
     RoleResolutionReason,
@@ -20,6 +23,7 @@ from fno.roles.resolver import resolve_role
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PACK = REPO_ROOT / "plugins" / "growth-studio" / "plugin.yaml"
+PACK_ASSETS = REPO_ROOT / "plugins" / "growth-studio" / "assets"
 ROLE_IDS = ("marketing", "communications", "design", "social")
 
 
@@ -29,11 +33,42 @@ def _resolve_role(root: Path, role_id: str, function_id: str, *, extra_definitio
     definitions = tuple(r.definition for r in records if r.definition is not None and r.role == role_ref)
     revision = definitions[0].snapshot_revision
     work_order = WorkOrderRef(node_id="wo-1", attempt_id="attempt-1", role_id=role_id)
+    manifest = definitions[0].manifest
+    # The roles declare real required_capabilities now, so an empty fact tuple
+    # would block with MISSING_CAPABILITY. Mint work-order-scoped CapabilityFact
+    # values for every declared capability - the scoped-fact form AC5/AC6
+    # exercise, not a weakening of the roles.
+    facts = tuple(
+        CapabilityFact(
+            capability=capability,
+            available=True,
+            source_id="test-fixture",
+            snapshot_revision=revision,
+            work_order_scope=work_order,
+        )
+        for capability in manifest.required_capabilities
+    )
+    # Supply a context catalog satisfying every declared artifact selector. The
+    # content here is fixture-only (the pack's own asset files); AC16's
+    # project-supplied product-truth provenance is exercised separately in
+    # test_context_catalog.py and test_growth_studio_faucet.py.
+    catalog = build_artifact_catalog(
+        {
+            selector.identifier: {
+                "path": str(PACK_ASSETS / f"{selector.identifier}.md"),
+                "sensitivity": selector.max_sensitivity.value,
+            }
+            for selector in manifest.context_selectors
+            if selector.kind is ContextKind.ARTIFACT and selector.identifier
+        },
+        snapshot_revision=revision,
+        clock=datetime.now(UTC),
+    )
     return resolve_role(
         role=role_ref,
         definitions=(*definitions, *extra_definitions),
-        capability_facts=(),
-        context_catalog=(),
+        capability_facts=facts,
+        context_catalog=catalog,
         work_order=work_order,
         clock=datetime.now(UTC),
         snapshot_revision=revision,

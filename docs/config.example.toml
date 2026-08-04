@@ -174,6 +174,10 @@ enabled = false
 # Effect class -> principal ids allowed to approve it; the key `*` matches every class. Absent or empty means nobody may approve, so a fresh install can inspect pending approvals but cannot decide one. Financial, signature, employment, and destructive classes stay denied regardless of what is listed here.
 authorized_principals = {}
 
+[context]
+# Project-supplied context artifacts: {identifier: {path, sensitivity}}. A role's context selector names an identifier resolved here (default sensitivity internal), so a pack installed in a second project is reviewed against that project's facts, not the first's. An unconfigured identifier blocks resolution with MISSING_CONTEXT.
+artifacts = {}
+
 [target]
 # Opt-in cleanup of provably-dead duplicate state files.
 dedupe_dead_duplicates = false

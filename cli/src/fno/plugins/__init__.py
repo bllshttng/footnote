@@ -9,14 +9,14 @@ resolvable through the untouched resolver; it grants no capability and no
 effect, never writes ``config.approvals.authorized_principals``, and never mints
 a ``CapabilityFact``.
 
-This package contains no branch on a pack id or a function name. The first pack
-(``growth-studio``) is content under ``plugins/``, discovered by path and
-validated by schema.
+This package contains no branch on a pack id or a function name. A pack is
+content under ``plugins/``, discovered by path and validated by schema.
 """
 
 from fno.plugins.manifest import (
     AdapterConformance,
     AdapterDeclaration,
+    AgentDeclaration,
     AssetDeclaration,
     CompatibilityRange,
     EffectDeclaration,
@@ -32,6 +32,7 @@ from fno.plugins.manifest import (
 __all__ = [
     "AdapterConformance",
     "AdapterDeclaration",
+    "AgentDeclaration",
     "AssetDeclaration",
     "CompatibilityRange",
     "EffectDeclaration",

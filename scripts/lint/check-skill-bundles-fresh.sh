@@ -54,18 +54,63 @@ while IFS=$'\t' read -r TYPE SKILL SOURCE DEST META; do
   if [[ -z "$TYPE" ]]; then
     continue
   fi
-  COMMITTED="$REPO_ROOT/skills/$SKILL/$DEST"
-  GENERATED="$TMP/skills/$SKILL/$DEST"
+  # Pack rows land at root-relative plugin paths (agents/<id>.md, skills/<id>);
+  # the legacy types stay under skills/<skill>/.
+  case "$TYPE" in
+    pack-skill|pack-agent)
+      COMMITTED="$REPO_ROOT/$DEST"
+      GENERATED="$TMP/$DEST"
+      ;;
+    *)
+      COMMITTED="$REPO_ROOT/skills/$SKILL/$DEST"
+      GENERATED="$TMP/skills/$SKILL/$DEST"
+      ;;
+  esac
+  if [[ "$TYPE" == "pack-skill" ]]; then
+    # Directory bundle: compare the whole tree.
+    if [[ ! -d "$COMMITTED" ]]; then
+      echo "ERROR: missing pack skill bundle: $DEST (run scripts/generate-skill-bundles.sh)" >&2
+      DRIFT=1
+      continue
+    fi
+    if ! diff -rq "$COMMITTED" "$GENERATED" >/dev/null; then
+      echo "ERROR: $DEST out of sync with canonical $SOURCE [$TYPE]" >&2
+      DRIFT=1
+    fi
+    continue
+  fi
   if [[ ! -f "$COMMITTED" ]]; then
-    echo "ERROR: missing bundle: skills/$SKILL/$DEST (run scripts/generate-skill-bundles.sh)" >&2
+    echo "ERROR: missing bundle: ${COMMITTED#$REPO_ROOT/} (run scripts/generate-skill-bundles.sh)" >&2
     DRIFT=1
     continue
   fi
   if ! cmp -s "$COMMITTED" "$GENERATED"; then
-    echo "ERROR: skills/$SKILL/$DEST out of sync with canonical $SOURCE [$TYPE]" >&2
+    echo "ERROR: ${COMMITTED#$REPO_ROOT/} out of sync with canonical $SOURCE [$TYPE]" >&2
     DRIFT=1
   fi
 done < "$ROWS_FILE"
+
+# Detect orphaned pack bundles: when a pack removes or renames a declared skill
+# or agent, the parser emits no row for the old destination, so the loop above
+# never examines it. Scan committed pack-marked outputs and flag any whose
+# destination no pack currently declares - otherwise a stale agent stays
+# callable while this gate reports fresh.
+_pack_marker_value() {
+  awk 'NR==1 && /^---[[:space:]]*$/ {f=1; next} f && /^---[[:space:]]*$/ {exit} f && /^pack:/ {sub(/^pack:[[:space:]]*/,""); gsub(/["'\'']/,""); print; exit}' "$1" 2>/dev/null
+}
+EXPECTED_PACK_DESTS="$(grep -E '^(pack-skill|pack-agent)' "$ROWS_FILE" | cut -f4 | sort -u)"
+while IFS= read -r f; do
+  [[ -f "$f" ]] || continue
+  [[ -n "$(_pack_marker_value "$f")" ]] || continue
+  dest="agents/$(basename "$f")"
+  grep -qxF "$dest" <<<"$EXPECTED_PACK_DESTS" || { echo "ERROR: stale pack bundle $dest no longer declared by any pack; remove it" >&2; DRIFT=1; }
+done < <(find "$REPO_ROOT/agents" -name '*.md' -type f 2>/dev/null)
+while IFS= read -r d; do
+  [[ -f "$d/SKILL.md" ]] || continue
+  [[ -n "$(_pack_marker_value "$d/SKILL.md")" ]] || continue
+  dest="skills/$(basename "$d")"
+  grep -qxF "$dest" <<<"$EXPECTED_PACK_DESTS" || { echo "ERROR: stale pack bundle $dest no longer declared by any pack; remove it" >&2; DRIFT=1; }
+done < <(find "$REPO_ROOT/skills" -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
 
 if [[ $DRIFT -ne 0 ]]; then
   echo "" >&2

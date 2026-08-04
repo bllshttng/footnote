@@ -12,6 +12,7 @@ from fno.roles.models import AuthorityCeiling, DeliveryPolicy, ReviewPolicy, Rol
 from fno.plugins import (
     AdapterConformance,
     AdapterDeclaration,
+    AgentDeclaration,
     AssetDeclaration,
     CompatibilityRange,
     EffectDeclaration,
@@ -56,7 +57,7 @@ def _full_pack() -> PackManifest:
                 ),
             ),
         ),
-        evaluators=(EvaluatorDeclaration(id="factual-review", command="fno growth factual-check"),),
+        evaluators=(EvaluatorDeclaration(id="factual-review", command="true"),),
         assets=(AssetDeclaration(id="brand-voice", source="assets/brand-voice.md"),),
         permissions=(EffectDeclaration(effect_class="external.publication", destination="social-network"),),
         scenarios=(
@@ -172,3 +173,48 @@ def test_dependency_range_round_trips():
         ),
     )
     assert pack.depends_on[0].version_range.maximum == "0.2.0"
+
+
+def test_agent_declaration_round_trips_with_role_binding():
+    role = RoleRef(id="marketing", function_id="growth-studio")
+    agent = AgentDeclaration(id="growth-marketer", source="agents/growth-marketer.md", role=role)
+    pack = PackManifest(
+        id="growth-studio",
+        version="0.1.0",
+        footnote_compat=CompatibilityRange(minimum="0.3.0"),
+        roles=(_role_manifest(),),
+        agents=(agent,),
+    )
+    assert pack.agents[0].role == role
+    assert pack.agents[0].source == "agents/growth-marketer.md"
+
+
+def test_agent_declaration_role_is_optional():
+    # An agent with no role binding is legal; the verify condition reports it as
+    # an unbound agent rather than rejecting the manifest.
+    agent = AgentDeclaration(id="loose", source="agents/loose.md")
+    assert agent.role is None
+
+
+def test_duplicate_agent_ids_rejected():
+    role = RoleRef(id="marketing", function_id="growth-studio")
+    agent = AgentDeclaration(id="dup", source="agents/dup.md", role=role)
+    with pytest.raises(ValidationError, match="duplicate agents"):
+        PackManifest(
+            id="growth-studio",
+            version="0.1.0",
+            footnote_compat=CompatibilityRange(minimum="0.3.0"),
+            agents=(agent, agent),
+        )
+
+
+def test_pack_with_only_an_agent_is_not_empty():
+    role = RoleRef(id="marketing", function_id="growth-studio")
+    agent = AgentDeclaration(id="solo", source="agents/solo.md", role=role)
+    pack = PackManifest(
+        id="growth-studio",
+        version="0.1.0",
+        footnote_compat=CompatibilityRange(minimum="0.3.0"),
+        agents=(agent,),
+    )
+    assert pack.agents == (agent,)

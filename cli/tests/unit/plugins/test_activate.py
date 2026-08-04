@@ -16,10 +16,30 @@ from fno.plugins.activate import (
     ActivationRefusalReason,
     activate,
     deactivate,
+    unconfigured_required_artifacts,
 )
-from fno.plugins.manifest import pack_digest
+from fno.plugins.manifest import (
+    AssetDeclaration,
+    CompatibilityRange,
+    PackManifest,
+    ScenarioDeclaration,
+    pack_digest,
+)
 from fno.plugins.registry import PackRegistryStore
-from fno.roles.models import ContextBundleBounds, RoleDefinitionSource, RoleLayer, RoleResolutionBlocked
+from fno.company.contracts import EvidenceResult
+from fno.roles.models import (
+    AuthorityCeiling,
+    ContextBundleBounds,
+    ContextKind,
+    ContextSelector,
+    DeliveryPolicy,
+    ReviewPolicy,
+    RoleDefinitionSource,
+    RoleLayer,
+    RoleManifest,
+    RoleResolutionBlocked,
+    Sensitivity,
+)
 from fno.roles.registry import discover_role_definitions
 from fno.roles.resolver import resolve_role
 from tests.unit.plugins.test_manifest import _full_pack, _materialize_declared_sources
@@ -241,3 +261,78 @@ def test_upgrade_removes_stale_role_files(tmp_path):
     activate(_write_pack(tmp_path, v2, name="gs-v2"), registry_store=store, role_root=root)
     assert (root / "plugin" / "growth-studio" / "marketing.json").exists()
     assert not (root / "plugin" / "growth-studio" / "second.json").exists()
+
+
+# AC19-ERR: activation names unconfigured required artifacts without refusing.
+
+
+def _artifact_pack() -> PackManifest:
+    role = RoleManifest(
+        role=RoleRef(id="marketing", function_id="growth-studio"),
+        function=FunctionRef(id="growth-studio"),
+        mission="draft grounded in verified product truth",
+        deliverable_kinds=("campaign-plan",),
+        authority_ceiling=AuthorityCeiling.INTERNAL,
+        context_selectors=(
+            ContextSelector(
+                kind=ContextKind.ARTIFACT,
+                identifier="product-truth",
+                max_sensitivity=Sensitivity.PUBLIC,
+            ),
+        ),
+        review_policy=ReviewPolicy(required=True, minimum_reviewers=1),
+        delivery_policy=DeliveryPolicy(required_evidence=("factual-review",)),
+        default_topology="pipeline",
+        approval_floor="founder",
+    )
+    return PackManifest(
+        id="growth-studio",
+        version="0.1.0",
+        footnote_compat=CompatibilityRange(minimum="0.3.0"),
+        roles=(role,),
+        assets=(AssetDeclaration(id="product-truth", source="assets/product-truth.md"),),
+        scenarios=(
+            ScenarioDeclaration(id="smoke", command="true", recorded_result=EvidenceResult.PASSED),
+        ),
+    )
+
+
+def test_unconfigured_required_artifacts_names_missing_with_example() -> None:
+    missing = unconfigured_required_artifacts(_artifact_pack(), configured=set())
+    assert len(missing) == 1
+    assert missing[0].identifier == "product-truth"
+    assert missing[0].example_source == "assets/product-truth.md"
+
+
+def test_unconfigured_required_artifacts_empty_when_configured() -> None:
+    missing = unconfigured_required_artifacts(_artifact_pack(), configured={"product-truth"})
+    assert missing == ()
+
+
+def test_activation_reports_unconfigured_artifacts_and_writes_only_role_layer(tmp_path):
+    store, root = _store_and_root(tmp_path)
+    pack_dir = _write_pack(tmp_path, _artifact_pack())
+    # Nothing configured: activation still succeeds (exits zero = no refusal).
+    outcome = activate(pack_dir, registry_store=store, role_root=root, configured_artifacts=set())
+    assert [item.identifier for item in outcome.unconfigured_artifacts] == ["product-truth"]
+    # Every written path is a role-layer definition under plugin/<pack>/.
+    for written in outcome.receipt.written_paths:
+        assert written.startswith("plugin/growth-studio/")
+    plugin_root = root / "plugin" / "growth-studio"
+    assert (plugin_root / "marketing.json").exists()
+    # No stray file outside the role-layer namespace.
+    assert {p.relative_to(root).as_posix() for p in plugin_root.glob("*.json")} == {
+        "plugin/growth-studio/marketing.json"
+    }
+
+
+def test_activation_silent_on_required_artifacts_when_all_configured(tmp_path):
+    store, root = _store_and_root(tmp_path)
+    pack_dir = _write_pack(tmp_path, _artifact_pack())
+    outcome = activate(
+        pack_dir,
+        registry_store=store,
+        role_root=root,
+        configured_artifacts={"product-truth"},
+    )
+    assert outcome.unconfigured_artifacts == ()

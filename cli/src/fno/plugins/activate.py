@@ -27,6 +27,8 @@ from __future__ import annotations
 
 import os
 import tempfile
+from collections.abc import Container
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -39,7 +41,7 @@ from fno.plugins.registry import (
     conformance_for,
 )
 from fno.plugins.verify import load_manifest, resolve_manifest_path, verify_manifest
-from fno.roles.models import DefinitionStatus, RoleDefinitionSource, RoleLayer
+from fno.roles.models import ContextKind, DefinitionStatus, RoleDefinitionSource, RoleLayer
 from fno.roles.registry import default_role_root
 
 __all__ = [
@@ -47,9 +49,58 @@ __all__ = [
     "ActivationRefusal",
     "ActivationRefusalReason",
     "DeactivationOutcome",
+    "UnconfiguredArtifact",
     "activate",
     "deactivate",
+    "unconfigured_required_artifacts",
 ]
+
+
+@dataclass(frozen=True)
+class UnconfiguredArtifact:
+    """An artifact identifier a role requires but the project has not configured.
+
+    ``example_source`` is the pack's own asset source for the identifier (a
+    worked example / fallback), read off the manifest; ``None`` when the pack
+    declares no asset by that id. Activation grants nothing and writes role
+    definitions only - this is self-teaching text so a later MISSING_CONTEXT
+    block is not a mystery, not a gate.
+    """
+
+    identifier: str
+    example_source: str | None
+
+
+def unconfigured_required_artifacts(
+    manifest: PackManifest,
+    configured: Container[str],
+) -> tuple[UnconfiguredArtifact, ...]:
+    """Artifact identifiers the activated roles require that are unconfigured.
+
+    Stays generic: reads ``artifact`` identifiers off the roles'
+    ``context_selectors`` and the example path off ``manifest.assets``. Names no
+    pack id and no function name, so ``check-plugins-function-agnostic.sh``
+    stays green. Resolution is what actually blocks on a missing identifier
+    (MISSING_CONTEXT); this line just names it up front.
+    """
+    required: list[str] = []
+    seen: set[str] = set()
+    for role in manifest.roles:
+        for selector in role.context_selectors:
+            ident = selector.identifier
+            if (
+                selector.kind is ContextKind.ARTIFACT
+                and ident is not None
+                and ident not in seen
+            ):
+                seen.add(ident)
+                required.append(ident)
+    example = {asset.id: asset.source for asset in manifest.assets}
+    return tuple(
+        UnconfiguredArtifact(identifier=ident, example_source=example.get(ident))
+        for ident in required
+        if ident not in configured
+    )
 
 
 class ActivationRefusalReason(str, Enum):
@@ -207,9 +258,15 @@ def _definition_document(
 class ActivationOutcome:
     """The result of an activation: a receipt, or already-active for the same digest."""
 
-    def __init__(self, receipt: ActivationReceipt, already_active: bool) -> None:
+    def __init__(
+        self,
+        receipt: ActivationReceipt,
+        already_active: bool,
+        unconfigured_artifacts: tuple[UnconfiguredArtifact, ...] = (),
+    ) -> None:
         self.receipt = receipt
         self.already_active = already_active
+        self.unconfigured_artifacts = unconfigured_artifacts
 
 
 def activate(
@@ -217,6 +274,7 @@ def activate(
     *,
     registry_store: PackRegistryStore | None = None,
     role_root: Path | None = None,
+    configured_artifacts: Container[str] | None = None,
 ) -> ActivationOutcome:
     """Verify then project a pack's roles into the plugin role layer.
 
@@ -368,7 +426,14 @@ def activate(
                 backup.unlink(missing_ok=True)
             for _original, stale_backup in stale_backups:
                 stale_backup.unlink(missing_ok=True)
-            return ActivationOutcome(receipt=receipt, already_active=already_active)
+            unconfigured = unconfigured_required_artifacts(
+                manifest, configured_artifacts or set()
+            )
+            return ActivationOutcome(
+                receipt=receipt,
+                already_active=already_active,
+                unconfigured_artifacts=unconfigured,
+            )
     except RegistryCorrupt as exc:
         raise ActivationRefusal(ActivationRefusalReason.REGISTRY_CORRUPT, str(exc)) from exc
 

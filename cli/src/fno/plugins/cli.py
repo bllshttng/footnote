@@ -17,6 +17,7 @@ from typing import Any, NoReturn
 
 import typer
 
+from fno.config import load_settings
 from fno.handoff.output import json_mode, merge_json_flag
 from fno.plugins.activate import ActivationRefusal, activate, deactivate
 from fno.plugins.manifest import pack_digest
@@ -114,7 +115,12 @@ def activate_command(
     merge_json_flag(ctx, json_output)
     store, root = _store(ctx)
     try:
-        outcome = activate(path, registry_store=store, role_root=root)
+        outcome = activate(
+            path,
+            registry_store=store,
+            role_root=root,
+            configured_artifacts=load_settings().context.artifacts.keys(),
+        )
     except ActivationRefusal as exc:
         _error(ctx, f"refused ({exc.reason.value}): {exc.detail}")
     except Exception as exc:
@@ -126,6 +132,10 @@ def activate_command(
         "resolved_version": receipt.resolved_version,
         "written_paths": list(receipt.written_paths),
         "already_active": outcome.already_active,
+        "unconfigured_artifacts": [
+            {"identifier": item.identifier, "example_source": item.example_source}
+            for item in outcome.unconfigured_artifacts
+        ],
     }
     if _json_requested(ctx, json_output):
         _emit_json(_envelope(payload))
@@ -134,6 +144,13 @@ def activate_command(
         typer.echo(f"{label} {receipt.pack_id} {receipt.resolved_version} digest={receipt.pack_digest[:12]}")
         for written in receipt.written_paths:
             typer.echo(f"  wrote {written}")
+        for item in outcome.unconfigured_artifacts:
+            example = f" (pack example: {item.example_source})" if item.example_source else ""
+            typer.echo(
+                f"  unconfigured artifact '{item.identifier}' - add it under "
+                f"[context.artifacts] in .fno/config.toml or resolution will block"
+                f"{example}"
+            )
 
 
 @plugins_app.command("deactivate")
@@ -232,6 +249,7 @@ def inspect_command(
                 {
                     "pack_id": manifest.id,
                     "version": manifest.version,
+                    "manifest_path": pack.manifest_path,
                     "installed_digest": pack.pack_digest,
                     "digest_matches_install": digest_matches,
                     "declared_roles": declared_roles,
