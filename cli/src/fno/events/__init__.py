@@ -526,6 +526,14 @@ def validate(event: dict[str, Any]) -> None:
                 "worktree_overlap_observed peer_session_ids must be a non-empty "
                 "list of non-empty strings"
             )
+        # Stored peers must already be the sorted, deduped form the digest was
+        # computed from, and the observer cannot be its own peer (the read-only
+        # predicate excludes SELF_ID). A hand-crafted event that violates either
+        # is rejected rather than counted.
+        if peers != sorted(set(peers)):
+            raise ValidationError(
+                "worktree_overlap_observed peer_session_ids must be sorted and unique"
+            )
         oid = data.get("observation_id")
         if not isinstance(oid, str) or _re.fullmatch(r"[0-9a-f]{64}", oid) is None:
             raise ValidationError(
@@ -545,6 +553,10 @@ def validate(event: dict[str, Any]) -> None:
             raise ValidationError(
                 "worktree_overlap_observed requires non-empty repository_key, "
                 "worktree_key, and observer_session_id strings"
+            )
+        if obs in peers:
+            raise ValidationError(
+                "worktree_overlap_observed observer cannot be its own peer"
             )
         if oid != _overlap_observation_id(repo, wt, obs, sorted(set(peers))):
             raise ValidationError(
@@ -969,12 +981,14 @@ def _overlap_observation_id(
 ) -> str:
     """Deterministic digest of the (repo, worktree, observer, sorted peers) tuple.
 
-    Unit-separator (\\x1f) delimiter so the join is unambiguous: two different
-    tuples cannot collide by concatenating to the same bytes. The peer list is
-    already sorted by the caller, so repeated deliveries of one observation
-    yield one id."""
-    blob = "\x1f".join(
-        [repository_key, worktree_key, observer_session_id, *peer_session_ids]
+    JSON-encode the tuple so a field containing the delimiter (or any byte)
+    cannot make two different tuples collide on the same bytes. The peer list is
+    already sorted+deduped by the caller, so repeated deliveries of one
+    observation yield one id."""
+    blob = _json.dumps(
+        [repository_key, worktree_key, observer_session_id, peer_session_ids],
+        separators=(",", ":"),
+        ensure_ascii=False,
     )
     return _hashlib.sha256(blob.encode("utf-8")).hexdigest()
 

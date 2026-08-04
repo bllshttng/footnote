@@ -10,6 +10,7 @@ Covers:
 from __future__ import annotations
 
 import hashlib
+import json
 
 import pytest
 
@@ -448,7 +449,7 @@ def test_worktree_overlap_observed_builder_is_deterministic_and_valid() -> None:
     assert a["data"] == b["data"], "peer order must not change the observation"
     assert a["data"]["peer_session_ids"] == ["peer-a", "peer-b"], "peers sorted"
     assert a["data"]["observation_id"] == (
-        "583f1201601622a418cc8c775045aaac6c604a6ed42f74e9a6db25eeddc356aa"
+        "33acb94fc5648cc8d5289413548c0166fe29e7f51a7daccd922484ed95ce9d26"
     ), "observation id pinned for parity"
     assert validate(a) is None
 
@@ -477,4 +478,33 @@ def test_worktree_overlap_observed_rejects_empty_peers_at_build_and_validate() -
                     "live_window_seconds": 120,
                 },
             }
+        )
+
+
+def test_worktree_overlap_observed_rejects_unsorted_or_duplicate_stored_peers() -> None:
+    """validate requires the stored peer list to equal its sorted-unique form."""
+    base = worktree_overlap_observed(
+        observer_session_id="obs-1",
+        peer_session_ids=["peer-a", "peer-b"],
+        repository_key="/repo/.git",
+        worktree_key="/repo/.git/wt1",
+    )
+    unsorted = json.loads(json.dumps(base))
+    unsorted["data"]["peer_session_ids"] = ["peer-b", "peer-a"]
+    with pytest.raises(ValidationError):
+        validate(unsorted)
+    dup = json.loads(json.dumps(base))
+    dup["data"]["peer_session_ids"] = ["peer-a", "peer-a"]
+    with pytest.raises(ValidationError):
+        validate(dup)
+
+
+def test_worktree_overlap_observed_rejects_observer_as_its_own_peer() -> None:
+    """The observer cannot be its own peer (the predicate excludes SELF_ID)."""
+    with pytest.raises(ValidationError):
+        worktree_overlap_observed(
+            observer_session_id="obs-1",
+            peer_session_ids=["obs-1"],
+            repository_key="/repo/.git",
+            worktree_key="/repo/.git/wt1",
         )
