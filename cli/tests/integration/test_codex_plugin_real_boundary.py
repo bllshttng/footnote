@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 
+from fno import __version__ as FNO_VERSION
 from fno.setup.codex_plugin import CodexPluginError, converge
 
 
@@ -128,7 +129,11 @@ def test_codex_0145_rejects_escaping_alias_and_installs_canonical_identity(
     assert [
         row["name"] for row in json.loads(marketplaces.stdout)["marketplaces"]
     ] == ["footnote"]
-    cache = home / "plugins/cache/footnote/fno/0.3.0"
+    # Codex names the cache dir after the manifest version, so pinning a literal
+    # here turns every release bump red. sync-version.sh keeps __version__ and
+    # the plugin manifests in lockstep (and --check gates the drift), so the
+    # wheel version is the one true name of this directory.
+    cache = home / f"plugins/cache/footnote/fno/{FNO_VERSION}"
     for relative in ("skills", "agents", "commands", "hooks"):
         assert (cache / relative).is_dir(), relative
 
