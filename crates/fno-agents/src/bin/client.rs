@@ -183,6 +183,9 @@ async fn run(args: Vec<String>) -> i32 {
     if verb == "resume" {
         return fno_agents::client_verbs::run_resume(&args[1..], &AgentsHome::from_env());
     }
+    if verb == "adopt" {
+        return fno_agents::client_verbs::run_adopt(&args[1..], &AgentsHome::from_env());
+    }
     if verb == "attach" {
         return fno_agents::client_verbs::run_attach(&args[1..], &AgentsHome::from_env());
     }

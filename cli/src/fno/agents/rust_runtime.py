@@ -89,6 +89,7 @@ RUST_CLIENT_VERBS = frozenset(
         "trace",
         "ping",
         "resume",
+        "adopt",
         "attach",
         "logs",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
