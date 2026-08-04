@@ -290,6 +290,30 @@ def test_resolve_owned_rejects_a_live_rows_id_via_real_collider(tmp_path):
     assert owned.rejected[0]["owner"] == owner
 
 
+def test_ac7_con_no_resolver_guesses_codex_for_a_disagreement():
+    """AC7-CON: three hand-mirrored resolvers (Python, Rust, the bash hook) must
+    AGREE that a disagreeing marker set is never silently resolved to codex.
+
+    The Python owned resolver returns no harness for an unprovable disagreement
+    (pinned here). The Rust claim writer's ``resolve_harness_from`` returns None
+    for the same shape (pinned in claims.rs::
+    resolve_harness_single_family_wins_disagreement_is_unknown). The bash hook
+    resolves the proven harness via the verb and never codex (pinned in
+    tests/hooks/test_init_target_session_id.sh scenario e). The marker tuple
+    itself stays identical across Python and Rust (pinned in
+    test_rust_marker_mirror_matches_the_python_tuple). No single implementation
+    may launder an inherited CODEX_THREAD_ID into ownership.
+    """
+    env = {"CODEX_THREAD_ID": "foreign", "CLAUDE_CODE_SESSION_ID": "mine"}
+    owned = resolve_owned_identity(env)  # no proof, no collision
+    assert owned.harness is None
+    assert owned.session_id is None
+    # A single codex marker is NOT a disagreement and still resolves codex in
+    # every implementation (the dominant case, byte-identical across languages).
+    assert resolve_owned_identity({"CODEX_THREAD_ID": "thread"}).harness == "codex"
+
+
+
 
 
 def test_current_session_helpers_share_precedence_and_legacy_fallback():
