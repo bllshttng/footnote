@@ -839,7 +839,7 @@ def test_ac4_edge_rc0_parse_failure_stays_silent(tmp_graph, monkeypatch):
 
 def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
     """AC1-HP: a fresh `fno done` during a drive window emits the operator tag."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     captured: dict = {}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
@@ -865,7 +865,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
 
 def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
     """AC1-ERR: no drive window -> no operator tag; behavior unchanged."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     calls = {"n": 0}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: False)
@@ -888,7 +888,7 @@ def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
 def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
     """AC1-UI: the tag adds nothing to stdout; the completion line is identical
     whether or not a drive window is active."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     monkeypatch.setattr(da, "emit_operator_initiated", lambda *a, **k: None)
 
@@ -911,7 +911,7 @@ def test_done_audit_tag_adds_no_stdout(tmp_graph, monkeypatch):
 def test_done_no_tag_on_collision_even_when_driving(tmp_graph, monkeypatch):
     """AC1-EDGE: an already-done node hits the collision path (returns early) ->
     no completion occurred, so no operator tag even under an active drive."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     calls = {"n": 0}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
@@ -934,7 +934,7 @@ def test_done_no_tag_on_collision_even_when_driving(tmp_graph, monkeypatch):
 def test_done_no_tag_on_backfill_even_when_driving(tmp_graph, tmp_ledger, monkeypatch):
     """AC1-EDGE: `--backfill` is a rollup-only pass that returns before the
     completion path -> no operator tag even under an active drive."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     calls = {"n": 0}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
@@ -962,7 +962,7 @@ def test_done_no_tag_on_backfill_even_when_driving(tmp_graph, tmp_ledger, monkey
 def test_done_completes_even_when_audit_emit_raises(tmp_graph, monkeypatch):
     """AC1-FR: a raising emit (unwritable events.jsonl / non-serializable data)
     is swallowed -- the completion still succeeds and exits 0."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     def _boom(*a, **k):
         raise OSError("events.jsonl unwritable")
