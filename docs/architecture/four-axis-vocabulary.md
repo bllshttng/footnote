@@ -100,6 +100,6 @@ The guard's harness-literal set is the union the operator declared, broader than
 
 ## Prior attempts
 
-Four prior passes each fixed one surface and survived the conflation: x-4704 (`fno providers` to accounts, superseded), x-2599 (config managed-CLI entries, done), x-2966 (the `fno whoami` line, done), x-880e (the on-disk registry field, done).
-x-880e is the instructive failure: it resolved the collision by deleting the provider field and declaring harness the sole identity axis, which removed the ability to express a real axis rather than disambiguating it.
+Four prior passes each fixed one surface and survived the conflation: renaming `fno providers` to accounts (superseded), the config managed-CLI entries (done), the `fno whoami` line (done), and the on-disk registry field (done).
+The on-disk registry field pass is the instructive failure: it resolved the collision by deleting the provider field and declaring harness the sole identity axis, which removed the ability to express a real axis rather than disambiguating it.
 This cutover instead keeps the word `provider` and restores its one correct meaning, and it leaves behind the guard as the artifact none of the four prior attempts did, which is why this one is expected to hold.

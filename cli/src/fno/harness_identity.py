@@ -10,7 +10,7 @@ from typing import Callable, Mapping, Optional
 
 # --- FNO_AGENT_HARNESS env resolution (with pre-cutover compat window) -------
 # Spawn injects FNO_AGENT_HARNESS (the CLI binary). A worker spawned before the
-# x-9ae8 cutover carries the old FNO_AGENT_PROVIDER name in an environment no
+# FNO_AGENT_PROVIDER -> FNO_AGENT_HARNESS rename carries the old name in an
 # process can rewrite, so the read side accepts it for one release and warns.
 # The warning fires at most once per process so a dispatch that resolves context
 # and then whoami does not print it twice. The window is time-boxed: it is
