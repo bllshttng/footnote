@@ -27,23 +27,16 @@ If `no_clean` is `false`:
 
 This phase runs as a **separate context** from Execute to avoid negative-instruction interference. The Execute phase says "build this." The Clean phase says "remove the bad parts." Mixing these in the same prompt degrades both.
 
-## Review Phase (4) - Deferred Gate
+## Review Phase (4) - Advisory, harness-native by default
 
-The review phase invokes `fno:review`, which spawns subagents that may run in background. The pipeline does NOT block on review - ship and external review can proceed in parallel.
+The pre-ship review runs ONE native review of the diff on the invoking harness - a main-thread review of the changed files (on Claude, `/code-review`) - and does NOT dispatch the six-agent sigma panel. Sigma is opt-in: it runs only when `config.review.reviewers` names it, and then once, post-ship, against the final HEAD (see the Completion section of [SKILL.md](../SKILL.md)). The decision is `preship_review_plan(config.review.reviewers)` in `cli/src/fno/review_capability.py`:
 
-The review result is deferred: do NOT emit `<promise>` while sigma-review agents are still running. Wait until:
+- **sigma NOT configured (the default):** run the native review here, as advisory insurance. Address its real findings before ship; it does not gate `<promise>` on its own (the world does - PR green + reviewed).
+- **sigma configured:** SKIP this pre-ship run. Sigma is a *configured gate*, not advisory, and runs exactly once post-ship on the final shipped HEAD, where it emits the head-pinned attestation loop-check requires. Running it here too would be a wasted second panel whose attestation any later fix invalidates.
 
-1. All sigma-review agents have returned results (check task notifications)
-2. Critical and High findings are addressed (fixed or verified as false positives)
-3. The review report verdict is "Ready to merge"
-
-Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed.
-
-If both sigma-review agents AND external review (`/pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
+If a review you run does spawn agents (a configured sigma panel, or a native review that fans out), do NOT emit `<promise>` while they are still running: wait until all of them have returned, Critical and High findings are addressed (fixed or verified as false positives), and the report verdict is ready. Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed. If both that review and external review (`/pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
 
 While the PR's CI is still polling, read posted optional bot reviews at first-post rather than deferring every read to green - the first-post review watch and its once-at-green backstop are specified in the "Watch for posted optional reviews" / "Drain a posted optional review" paragraphs of [SKILL.md](../SKILL.md). Same story on both surfaces: a real finding folds into the fix round in flight instead of adding a post-green round.
-
-**Skip this pre-ship run when `config.review.reviewers` includes `sigma`.** In that case sigma is a *configured gate*, not advisory, and runs exactly once post-ship on the final shipped HEAD (see the Completion section of SKILL.md), where it emits the head-pinned attestation loop-check requires. Running it here too would be a wasted second panel whose attestation any later fix invalidates. When `sigma` is NOT a configured reviewer, run it here as the cheap advisory insurance as usual.
 
 ## Intent verification (no promise-time self-grade)
 

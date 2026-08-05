@@ -383,6 +383,43 @@ def resolve_reviewers(
     return out
 
 
+@dataclass(frozen=True)
+class PreShipReviewPlan:
+    """What the target spine does at its pre-ship review step.
+
+    The single codified answer the skill prose and docs defer to, so the skip
+    direction cannot drift on one surface while the others keep the old one.
+    A prose edit that re-inverts the default flips this contract red.
+    """
+
+    kind: Literal["native", "skip"]
+    reason: str
+
+
+def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
+    """Decide the target spine's pre-ship review step from `config.review.reviewers`.
+
+    Sigma is opt-in. When it is a configured reviewer it runs exactly once,
+    post-ship, against the final HEAD (the attestation gate in
+    skills/target/references/ship-and-promise.md), so the pre-ship step is
+    skipped to avoid a panel whose attestation any later fix would invalidate.
+    The default - no sigma reviewer - runs the invoking harness's own native
+    review of the diff and never dispatches the six-agent sigma panel.
+    """
+    names = {str(r).strip().lstrip("/") for r in reviewers}
+    if "sigma" in names:
+        return PreShipReviewPlan(
+            "skip",
+            "sigma is configured; it runs once post-ship on final HEAD, so the "
+            "pre-ship native review is skipped",
+        )
+    return PreShipReviewPlan(
+        "native",
+        "no sigma reviewer; run the invoking harness's native review and do not "
+        "dispatch the sigma panel",
+    )
+
+
 def _model_family(provider: str, model: object = None) -> str:
     """Resolve the model family a peer actually runs, independent of transport."""
     family = provider.strip().lower()
