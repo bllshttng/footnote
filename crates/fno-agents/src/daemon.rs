@@ -3698,16 +3698,18 @@ struct ReconcileOutcome {
 ///   already-`Orphaned` or terminal (`Exited`/`PermanentDead`) entry unchanged.
 /// - `Err` (inconclusive): preserve status, record an inconsistency. Never
 ///   orphan on a probe timeout (Failure Modes / Errors invariant).
-fn plan_reconcile<P, D, L>(
+fn plan_reconcile<P, D, L, B>(
     entries: &[RegistryEntry],
     mut probe: P,
     mut budget_exhausted: D,
     mut pid_live: L,
+    mut bg_live: B,
 ) -> (Vec<ReconcileChange>, ReconcileOutcome)
 where
     P: FnMut(&RegistryEntry) -> Result<bool, crate::provider::ReachabilityProbeError>,
     D: FnMut() -> bool,
     L: FnMut(&RegistryEntry) -> bool,
+    B: FnMut(&RegistryEntry) -> bool,
 {
     let mut changes = Vec::new();
     let mut out = ReconcileOutcome::default();
@@ -3724,8 +3726,16 @@ where
         // `probe` is skipped entirely here, so no provider reachability call can
         // decide an ask row's status. An already-terminal ask is left untouched.
         // [plan ab-70faa65b, Locked Decision #1]
+        // A `claude --substrate bg` thread lands in this same bucket (claude
+        // harness, no footnote pid, no mux) and yet it IS a running process --
+        // claude's own daemon owns it and lists it in `roster.json`. Reaping it
+        // unprobed made `wait --state done` answer "done (via exit)" seconds
+        // after spawn, for a worker whose transcript was still growing, so a
+        // court king read a live teammate as dead and could respawn a duplicate
+        // against it. `bg_live` asks the roster before we declare death; a
+        // genuinely finished ask is absent from it and still reaps to Exited.
         if entry.is_one_shot_ask() {
-            let new_status = if is_non_terminal(entry.status) {
+            let new_status = if is_non_terminal(entry.status) && !bg_live(entry) {
                 out.updated.push(entry.name.clone());
                 Some(AgentStatus::Exited)
             } else {
@@ -3980,11 +3990,34 @@ fn run_reconcile_sweep(
     let pid_live = |e: &RegistryEntry| -> bool {
         e.pid.map_or(true, |pid| pid_is_ours(pid, e.pid_start_time))
     };
+    // Liveness for a `claude --substrate bg` thread, which carries neither a
+    // footnote pid nor a worker socket: claude's own daemon roster is the only
+    // truth. Read once per sweep, not per row. A MISSING roster parses as zero
+    // workers (no claude daemon ever ran) and reaps as before; an UNREADABLE one
+    // is unknown liveness, where we refuse to declare death -- a false `exited`
+    // on a working teammate costs a duplicate spawn, a stale `live` costs a
+    // waiter its timeout.
+    let roster = crate::claude_roster::ClaudeRoster::load_default();
+    let bg_live = |e: &RegistryEntry| -> bool {
+        if e.harness_name() != "claude" {
+            return false;
+        }
+        match &roster {
+            Ok(r) => {
+                r.find(&e.short_id).is_some()
+                    || e.harness_session_id
+                        .as_deref()
+                        .is_some_and(|sid| r.find(sid).is_some())
+            }
+            Err(_) => true,
+        }
+    };
     let (changes, outcome) = plan_reconcile(
         &entries,
         probe,
         || start.elapsed() >= RECONCILE_SWEEP_BUDGET,
         pid_live,
+        bg_live,
     );
 
     // Ordered exit teardown (E3.3, AC-X2-4): for every row transitioning to
@@ -5894,6 +5927,7 @@ mod tests {
             },
             || false,
             |_| true,
+            |_| false,
         );
         assert_eq!(out.orphans, vec!["live-but-gone".to_string()]);
         assert_eq!(out.recovered, vec!["back-from-dead".to_string()]);
@@ -5918,7 +5952,7 @@ mod tests {
         interactive.host_mode = Some(crate::state::HOST_MODE_INTERACTIVE.to_string());
         let exec = rentry("one-shot", AgentStatus::Live, None);
         let entries = vec![interactive, exec];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true);
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true, |_| false);
         assert_eq!(
             changes[0].new_status, None,
             "a live interactive host must not be orphaned on a session-store miss"
@@ -5947,6 +5981,7 @@ mod tests {
             |_| Ok(false), // both store-miss
             || false,
             |e| e.name == "live-tui", // only live-tui's worker pid is alive
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status,
@@ -5989,6 +6024,7 @@ mod tests {
             |_| Ok(false), // session_index miss for all
             || false,
             |e| e.name == "live-pane", // only live-pane's pid is alive
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -6022,6 +6058,7 @@ mod tests {
             |_| Ok(true), // session still in the store for both
             || false,
             |e| e.name == "live-orphan",
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status, None,
@@ -6040,7 +6077,7 @@ mod tests {
         // Guards the blast radius of the pid gate above: `pid_live` is true for a
         // row with no recorded pid, so exec rows keep their old behavior.
         let entries = vec![rentry("pidless", AgentStatus::Orphaned, None)];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true);
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
         assert_eq!(changes[0].new_status, Some(AgentStatus::Live));
         assert_eq!(out.recovered, vec!["pidless".to_string()]);
     }
@@ -6064,7 +6101,13 @@ mod tests {
     #[test]
     fn reconcile_inconclusive_preserves_status() {
         let entries = vec![rentry("flaky", AgentStatus::Live, None)];
-        let (changes, out) = plan_reconcile(&entries, |_| Err(probe_err()), || false, |_| true);
+        let (changes, out) = plan_reconcile(
+            &entries,
+            |_| Err(probe_err()),
+            || false,
+            |_| true,
+            |_| false,
+        );
         assert_eq!(changes[0].new_status, None, "must NOT flip on inconclusive");
         assert!(out.orphans.is_empty());
         assert_eq!(out.inconsistent.len(), 1);
@@ -6079,7 +6122,7 @@ mod tests {
             rentry("done", AgentStatus::Exited, None),
             rentry("dead", AgentStatus::PermanentDead, None),
         ];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true);
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(false), || false, |_| true, |_| false);
         assert!(changes.iter().all(|c| c.new_status.is_none()));
         assert!(out.orphans.is_empty() && out.updated.is_empty());
     }
@@ -6108,6 +6151,7 @@ mod tests {
             |_| Ok(true), // reachable: session file exists -> resumable, NOT running
             || false,
             |_| true,
+            |_| false,
         );
         assert_eq!(
             changes[0].new_status,
@@ -6125,9 +6169,38 @@ mod tests {
     fn reconcile_one_shot_ask_already_terminal_is_untouched() {
         // An ask already Exited must not be re-flagged as updated (idempotent).
         let entries = vec![ask_entry("done-ask", AgentStatus::Exited)];
-        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true);
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
         assert_eq!(changes[0].new_status, None);
         assert!(out.updated.is_empty());
+    }
+
+    #[test]
+    fn reconcile_does_not_reap_a_bg_thread_that_is_live_in_claudes_roster() {
+        // x-beb7: a `claude --substrate bg` thread has claude's harness, no
+        // footnote pid and no mux, so it matches `is_one_shot_ask` exactly like a
+        // finished ask -- but it is a RUNNING process owned by claude's daemon.
+        // Reaping it unprobed made `fno-agents wait --state done` return
+        // "done (via exit)" within seconds for a worker whose transcript was
+        // still growing, which reads to a waiting king as a dead teammate.
+        let entries = vec![bg_claude_row("think-web-copy", "35570a01")];
+        assert!(
+            entries[0].is_one_shot_ask(),
+            "a bg thread must still match the ask shape, or this test proves nothing"
+        );
+
+        // Present in the roster == running: leave the row alone.
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| true);
+        assert_eq!(
+            changes[0].new_status, None,
+            "a bg thread claude's daemon still lists must not be reaped to exited"
+        );
+        assert!(out.updated.is_empty());
+
+        // Absent from the roster == genuinely gone: the ask reap still applies,
+        // so this is a liveness check, not a blanket exemption for claude rows.
+        let (changes, out) = plan_reconcile(&entries, |_| Ok(true), || false, |_| true, |_| false);
+        assert_eq!(changes[0].new_status, Some(AgentStatus::Exited));
+        assert_eq!(out.updated, vec!["think-web-copy".to_string()]);
     }
 
     #[test]
@@ -6369,6 +6442,7 @@ mod tests {
                 }
             },
             |_| true,
+            |_| false,
         );
         assert_eq!(out.deferred, 2, "two trailing entries should defer");
         assert_eq!(changes.len(), 1, "only one entry probed before budget");
