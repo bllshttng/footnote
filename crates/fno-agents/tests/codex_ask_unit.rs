@@ -163,7 +163,7 @@ fn build_argv_create_grants_git_metadata_write_in_a_repo() {
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(dir.path())
-        .status()
+        .output()
         .unwrap();
 
     let argv = build_argv_create(dir.path(), "hi", false, None, None, None);
@@ -188,7 +188,7 @@ fn build_argv_create_git_grant_composes_with_user_add_dir() {
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(dir.path())
-        .status()
+        .output()
         .unwrap();
 
     let argv = build_argv_create(dir.path(), "hi", false, None, None, Some("/extra"));
@@ -287,7 +287,7 @@ fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
     std::process::Command::new("git")
         .args(["init", "-q"])
         .current_dir(dir.path())
-        .status()
+        .output()
         .unwrap();
 
     let argv = build_argv_resume(dir.path(), "s123", "p", false);

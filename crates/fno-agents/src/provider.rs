@@ -477,6 +477,9 @@ pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<Str
 }
 
 /// Absolute git COMMON dir for `cwd`; `None` outside a repo or on any failure.
+///
+/// A failing `git rev-parse` writes only to stderr, so empty stdout already
+/// covers every failure the exit code would report.
 fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
@@ -484,9 +487,6 @@ fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
         .output()
         .ok()?;
-    if !out.status.success() {
-        return None;
-    }
     let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
     (!common.is_empty()).then_some(common)
 }
@@ -1393,7 +1393,7 @@ mod tests {
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(dir.path())
-            .status()
+            .output()
             .unwrap();
 
         let mut ctx = create_ctx();
@@ -1417,7 +1417,7 @@ mod tests {
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(dir.path())
-            .status()
+            .output()
             .unwrap();
 
         let mut ctx = create_ctx();
@@ -1445,7 +1445,7 @@ mod tests {
         std::process::Command::new("git")
             .args(["init", "-q"])
             .current_dir(dir.path())
-            .status()
+            .output()
             .unwrap();
 
         let ctx = ResumeContext {
@@ -1462,7 +1462,10 @@ mod tests {
             .find(|a| a.starts_with("sandbox_workspace_write.writable_roots="))
             .expect("writable_roots override present");
         let want = std::fs::canonicalize(dir.path().join(".git")).unwrap();
-        assert!(roots.contains(want.to_str().unwrap()), "{roots} vs {want:?}");
+        assert!(
+            roots.contains(want.to_str().unwrap()),
+            "{roots} vs {want:?}"
+        );
 
         // Full yolo is already unsandboxed: no posture to re-pin.
         let yolo = ResumeContext { yolo: true, ..ctx };
