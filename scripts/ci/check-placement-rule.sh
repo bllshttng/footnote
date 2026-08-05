@@ -202,7 +202,7 @@ cli/src/fno/setup/integration.py
 cli/src/fno/setup/recommended_rules.py
 cli/src/fno/setup/test_recommended_rules.py
 cli/src/fno/target_cli.py
-cli/src/fno/test_sigma_dispatch.py
+cli/src/fno/test_dispatch_target.py
 cli/src/fno/test_worktree_paths.py
 cli/src/fno/update.py
 cli/src/fno/wake/detect.py
