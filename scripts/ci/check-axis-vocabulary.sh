@@ -134,9 +134,15 @@ SELF_FILES = {
 }
 
 _axis_word = re.compile(r"(?i)(provider|harness|model)")
-# Word-bounded so "claude" does not match inside claude_mod / codex_session_id /
-# agy_adapter: those are identifier references, not the axis literal.
-_literal_in = re.compile(r"(?i)\b(claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\b")
+# A literal that is a COMPLETE value, not a sub-word of a larger token: either a
+# quoted string whose entire content is the axis word ("claude", NOT
+# "claude-sonnet-5"), or a bare token bounded by a separator/space/paren. The
+# lookbehind/lookahead anchor the value without consuming it, so the binding-name
+# search back from m.start() still sees the opening quote or separator, and so
+# "claude" inside claude_mod / codex_session_id never matches.
+_literal_in = re.compile(
+    r"(?i)(?:(?<=[\"'])|(?<=[:=,\s(]))(claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)(?=[\"'\s,);]|$)"
+)
 # A binding name is an identifier containing an axis word, with an optional
 # attribute/quote prefix. Matched against the text immediately preceding a literal.
 # Matches the binding name immediately preceding a literal across assignment,
@@ -256,6 +262,14 @@ if os.environ.get("AXIS_SELF_TEST") == "1":
 findings, observed = scan(root_arg)
 
 
+# An allowlist entry MUST carry a one-line justification: `allowlist: <path>:<line> <why>`.
+# This single regex is the authority for BOTH suppression (a bare line parses to no
+# key, so it cannot suppress) and baseline format validation (a bare line is
+# malformed -> exit 2). A bare `allowlist: file:line` with no justification therefore
+# fails in both modes - it can never silently absorb a finding.
+_ALLOWLIST_RE = re.compile(r"^allowlist:\s+(.+?):(\d+)\s+(\S.*)$")
+
+
 def _allowlist_keys(path: Path):
     """file:line keys allowlisted out of the violation set (correct ambiguous
     sites, time-boxed compat windows), with a required justification per line."""
@@ -263,7 +277,7 @@ def _allowlist_keys(path: Path):
     if path.exists():
         for line in path.read_text(encoding="utf-8").splitlines():
             s = line.strip()
-            m = re.match(r"allowlist:\s+(.+?):(\d+)\b", s)
+            m = _ALLOWLIST_RE.match(s)
             if m:
                 keys.add(f"{m.group(1)}:{m.group(2)}")
     return keys
@@ -351,20 +365,22 @@ except (OSError, UnicodeError) as exc:
     )
     sys.exit(2)
 
-# Baseline violation entries only. Allowlist lines are metadata consumed by the
-# suppression pass above, not findings to diff: a stable allowlist must not read
-# as drift just because it is not itself a violation.
-baseline = [
-    s.strip()
-    for s in raw
-    if s.strip() and not s.lstrip().startswith("#") and not s.strip().startswith("allowlist:")
-]
+# Split the checked-in baseline into violation entries and allowlist entries.
+# Allowlist lines are metadata (consumed by the suppression pass), not findings
+# to diff - but they ARE validated: each must carry a path, a line, and a
+# one-line justification (_ALLOWLIST_RE). A bare `allowlist: file:line` with no
+# justification is exactly how a finding would be smuggled past review, so a
+# missing justification or a malformed entry fails loudly here rather than
+# silently doing nothing.
+non_comment = [s.strip() for s in raw if s.strip() and not s.lstrip().startswith("#")]
+allowlist_lines = [s for s in non_comment if s.startswith("allowlist:")]
+baseline = [s for s in non_comment if not s.startswith("allowlist:")]
 finding_pat = re.compile(
     r"^.+?:\d+: .+?=\"(?:claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\" \(.+\)$"
 )
-allowlist_pat = re.compile(r"^allowlist:\s+.+$")
-malformed = [e for e in baseline if not finding_pat.match(e) and not allowlist_pat.match(e)]
-if malformed or len(baseline) != len(set(baseline)):
+bad_allowlist = [s for s in allowlist_lines if not _ALLOWLIST_RE.match(s)]
+malformed = [e for e in baseline if not finding_pat.match(e)] + bad_allowlist
+if malformed or len(baseline) != len(set(baseline)) or len(allowlist_lines) != len(set(allowlist_lines)):
     print("check-axis-vocabulary: baseline is malformed or contains duplicates", file=sys.stderr)
     for e in malformed:
         print(f"  {e}", file=sys.stderr)
