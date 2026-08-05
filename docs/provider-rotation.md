@@ -943,19 +943,6 @@ sigma-review SKILL
                               +----------------------------+
 ```
 
-### Failure-mode taxonomy
-
-The stop hook's `verify_event_evidence` path diagnoses five failure modes when
-at least one resolved agent is non-Claude:
-
-| Diagnostic | User-visible failure | When |
-|---|---|---|
-| `subagent_spawn_missing:<agent>` | "Review claimed to dispatch X but no spawn event recorded" | Caller forgot to wrap Task() in `dispatch_sigma_subagent` |
-| `subagent_complete_missing:<agent>` | "Subagent dispatched but never completed" | Subprocess crashed before complete event emitted (rare; structurally prevented by AC5-FR) |
-| `subagent_pair_count_mismatch:<agent>:expected=N:got=M` | "Agent listed N times in agents_dispatched but only M spawn/complete pairs found" | Same agent dispatched twice; one call skipped the dispatcher wrap |
-| `agent_mismatch:<agent_name>` | "Spawn event found for agent not declared in agents_dispatched" | Forged review artifact or caller dispatched an extra subagent without listing it |
-| `subagent_orchestrator_skipped:<agent>` | "Claude dispatch entered but orchestrator never called record_complete" | Bug in the calling skill - review the SKILL.md prose contract |
-
 ### Migration
 
 Existing `config.toml` files are unaffected. The `config.agents` block is optional;
@@ -965,14 +952,12 @@ or backfill required.
 
 ### verify_provenance evidence path
 
-The stop hook's `verify_provenance` extension activates the event-evidence path only
-when at least one resolved agent is non-Claude. Pure-Claude runs continue through the
-existing transcript-parser path with no behavior change. The evidence logic is the
-bundled binary's `fno-agents verify-evidence event` verb (folded out of the deleted
-`scripts/lib/verify-event-evidence.sh` in US1); see
-`crates/fno-agents/tests/verify_evidence_parity.rs` for the differential contract
-tests and `tests/integration/test_per_agent_routing_bdd_invariants.py` for the
-end-to-end BDD invariants.
+The bundled binary's `fno-agents verify-evidence` verb exposes three sub-commands
+(`child-promise`, `has-nonclaude`, `receipt`); the per-agent `event` sub-verb and
+its `subagent_spawn` / `subagent_complete` pair verifier were removed for cause
+(production sigma dispatch goes through the raw Task tool and never reached the
+wrapper). See `crates/fno-agents/tests/verify_evidence_parity.rs` for the
+contract tests against golden output captured before the bash oracle was deleted.
 
 ## Failover hardening (Plan A)
 

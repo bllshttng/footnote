@@ -29,7 +29,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 | Verb family | What it owns |
 |-------------|--------------|
-| `fno event emit\|audit\|verify-evidence` | events.jsonl writes + audit. |
+| `fno event emit\|audit` | events.jsonl writes + audit. |
 | `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
 | `fno pr merge\|verify\|rebase` | PR ops with canonical guards. |
 | `fno plan stamp\|graduate` | Plan frontmatter stamping at ship time. |

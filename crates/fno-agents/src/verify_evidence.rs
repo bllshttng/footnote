@@ -11,13 +11,6 @@
 //! strings, and stderr soft-warnings byte-for-byte. The bash script stays
 //! in-tree as the parity oracle (differential tests in
 //! `tests/verify_evidence_parity.rs`).
-//!
-//! Diagnostic vocabulary (event sub-verb, rc=1, one stdout line):
-//!   agent_mismatch:<agent>
-//!   subagent_spawn_missing:<agent>
-//!   subagent_complete_missing:<agent>
-//!   subagent_pair_count_mismatch:<agent>:expected=N:got=M
-//!   subagent_orchestrator_skipped:<agent>
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
