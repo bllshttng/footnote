@@ -225,6 +225,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Read-only, pure Python (fno.agents.session_truth reads the transcript via
     # peek); no Rust client port, so it must never auto-route to the daemon.
     "truth",
+    # x-7685: daemon-free registry read for hooks (`fno agents registry-json`).
+    # Pure Python (load_registry, a file read) - deliberately NOT the Rust-routed
+    # `fno agents list`, which lazy-starts the daemon a Stop hook must never wait
+    # on. No Rust client port, so it must never auto-route to the daemon.
+    "registry-json",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
