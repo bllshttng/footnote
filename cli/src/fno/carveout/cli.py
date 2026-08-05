@@ -59,6 +59,13 @@ def add(
         "-p",
         help="Priority hint pN (p0-p3) the harvested node should inherit; default p3 at triage.",
     ),
+    scope: str = typer.Option(
+        None,
+        "--scope",
+        help="The crown scope this carve-out discharges (e.g. an epic id). Lets a "
+        "structured match - the king orphan check reads this field rather than "
+        "grepping the description free text.",
+    ),
 ) -> None:
     """Record one deferred decision, out-of-scope bug, or data backfill for later triage."""
     if kind not in VALID_KINDS:
@@ -92,6 +99,7 @@ def add(
             description=description,
             need=need,
             priority=priority,
+            scope=scope,
             storage_root=storage_root,
         )
     except CarveoutError as exc:
