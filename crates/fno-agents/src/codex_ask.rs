@@ -110,7 +110,9 @@ pub fn approval_flag(yolo: bool) -> Vec<String> {
 /// Argv tokens for the sandbox mode on the resume path.
 /// `codex exec resume` only accepts the bypass flag; `--sandbox` is not
 /// honored on resume (verified against codex 0.130.0 --help).
-/// - default: `[]`  (inherits original session sandbox)
+/// - default: `[]` - resume does NOT inherit the create-time sandbox (it
+///   re-reads config), so the bounded posture is re-pinned through `-c` in
+///   [`build_argv_resume`] instead.
 /// - yolo:    `["--dangerously-bypass-approvals-and-sandbox"]`
 pub fn sandbox_flag_resume(yolo: bool) -> Vec<String> {
     if yolo {
