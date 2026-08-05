@@ -14,6 +14,7 @@ from types import SimpleNamespace
 import pytest
 from typer.testing import CliRunner
 
+from fno import rust_binary
 from fno.agents import rust_runtime as rr
 
 
@@ -93,33 +94,9 @@ def test_runtime_mode_auto_when_unset(monkeypatch) -> None:
 # resolve_installed_binary: bundled -> sibling -> PATH, NEVER cargo dev
 # --------------------------------------------------------------------------- #
 
-def test_installed_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
-    bundled = _make_exe(tmp_path / "bundled" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: bundled)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: None)
-    monkeypatch.setattr(rr, "_path_binary", lambda: None)
-    assert rr.resolve_installed_binary() == bundled
-
-
-def test_installed_resolve_excludes_cargo_dev(monkeypatch, tmp_path) -> None:
-    """A cargo dev artifact must NOT satisfy the installed-only resolver: a dev
-    checkout stays on Python by default (the test process is never replaced)."""
-    dev = _make_exe(tmp_path / "target" / "release" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: None)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: None)
-    monkeypatch.setattr(rr, "_path_binary", lambda: None)
-    # Even if the cargo dev finder would resolve, the installed-only path ignores it.
-    monkeypatch.setattr(rr, "_cargo_dev_binary", lambda: dev)
-    assert rr.resolve_installed_binary() is None
-
-
-# --------------------------------------------------------------------------- #
-# route_to_rust: pre-resolved binary skips _resolve (auto happy path)
-# --------------------------------------------------------------------------- #
-
 def test_route_uses_preresolved_binary(monkeypatch, tmp_path) -> None:
     """When `binary=` is passed, _resolve is never consulted."""
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     calls: list = []
 
     def fake_exec(path, argv):
@@ -141,76 +118,8 @@ def test_route_uses_preresolved_binary(monkeypatch, tmp_path) -> None:
 # resolve_binary resolution order: bundled -> PATH -> cargo dev
 # --------------------------------------------------------------------------- #
 
-def test_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
-    bundled = _make_exe(tmp_path / "bundled" / rr.BINARY_NAME)
-    on_path = _make_exe(tmp_path / "path" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: bundled)
-    monkeypatch.setattr(rr, "_path_binary", lambda: on_path)
-    assert rr.resolve_binary() == bundled
-
-
-def test_resolve_falls_back_to_sibling(monkeypatch, tmp_path) -> None:
-    sibling = _make_exe(tmp_path / "venvbin" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: None)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: sibling)
-    monkeypatch.setattr(rr, "_path_binary", lambda: None)
-    monkeypatch.setattr(rr, "_cargo_dev_binary", lambda: None)
-    assert rr.resolve_binary() == sibling
-
-
-def test_resolve_falls_back_to_path(monkeypatch, tmp_path) -> None:
-    on_path = _make_exe(tmp_path / "path" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: None)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: None)
-    monkeypatch.setattr(rr, "_path_binary", lambda: on_path)
-    monkeypatch.setattr(rr, "_cargo_dev_binary", lambda: None)
-    assert rr.resolve_binary() == on_path
-
-
-def test_resolve_falls_back_to_cargo_dev(monkeypatch, tmp_path) -> None:
-    dev = _make_exe(tmp_path / "target" / "release" / rr.BINARY_NAME)
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: None)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: None)
-    monkeypatch.setattr(rr, "_path_binary", lambda: None)
-    monkeypatch.setattr(rr, "_cargo_dev_binary", lambda: dev)
-    assert rr.resolve_binary() == dev
-
-
-def test_resolve_returns_none_when_absent(monkeypatch) -> None:
-    monkeypatch.setattr(rr, "_bundled_binary", lambda: None)
-    monkeypatch.setattr(rr, "_sibling_binary", lambda: None)
-    monkeypatch.setattr(rr, "_path_binary", lambda: None)
-    monkeypatch.setattr(rr, "_cargo_dev_binary", lambda: None)
-    assert rr.resolve_binary() is None
-
-
-def test_sibling_binary_finds_next_to_launcher(monkeypatch, tmp_path) -> None:
-    """_sibling_binary resolves the co-installed binary via the launcher dir."""
-    bindir = tmp_path / "venvbin"
-    launcher = _make_exe(bindir / "fno")
-    sibling = _make_exe(bindir / rr.BINARY_NAME)
-    monkeypatch.setattr(rr.sys, "argv", [str(launcher), "agents", "ask"])
-    assert rr._sibling_binary() == sibling
-
-
-def test_sibling_binary_none_when_absent(monkeypatch, tmp_path) -> None:
-    launcher = _make_exe(tmp_path / "venvbin" / "fno")  # no fno-agents beside it
-    monkeypatch.setattr(rr.sys, "argv", [str(launcher)])
-    assert rr._sibling_binary() is None
-
-
-def test_path_binary_uses_which(monkeypatch, tmp_path) -> None:
-    target = _make_exe(tmp_path / rr.BINARY_NAME)
-    monkeypatch.setattr(rr.shutil, "which", lambda name: str(target) if name == rr.BINARY_NAME else None)
-    assert rr._path_binary() == target
-
-
-# --------------------------------------------------------------------------- #
-# route_to_rust: argv forwarding + missing-binary error
-# --------------------------------------------------------------------------- #
-
 def test_route_forwards_verb_and_args(monkeypatch, tmp_path) -> None:
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     calls: list = []
 
     def fake_exec(path, argv):
@@ -232,13 +141,13 @@ def test_route_missing_binary_exits_127(capsys) -> None:
         rr.route_to_rust(["list"], _resolve=lambda: None)
     assert exc.value.code == rr.BIN_NOT_FOUND_EXIT
     err = capsys.readouterr().err
-    assert rr.BINARY_NAME in err
+    assert rust_binary.BINARY_NAME in err
     assert "not found" in err
 
 
 def test_route_exec_failure_exits_127(capsys, tmp_path) -> None:
     """A resolved binary whose exec raises OSError fails legibly, not as a traceback."""
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
 
     def boom_exec(path, argv):
         raise OSError("Exec format error")
@@ -348,7 +257,7 @@ def test_auto_routes_daemon_native_verb_when_installed(monkeypatch, tmp_path) ->
     """Default (auto): a Rust-only verb (no Python contract) routes to the binary."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     captured: list = []
 
     def fake_route(args, **kw):
@@ -356,7 +265,7 @@ def test_auto_routes_daemon_native_verb_when_installed(monkeypatch, tmp_path) ->
         raise SystemExit(99)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     # `status` exists only in the Rust client, so routing it regresses nothing.
     result = CliRunner().invoke(app, ["agents", "status"])
@@ -390,7 +299,7 @@ def test_auto_falls_back_to_python_without_installed_binary(monkeypatch) -> None
     called: list = []
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     CliRunner().invoke(app, ["agents", "status"])
     assert called == []
@@ -403,11 +312,11 @@ def test_ask_help_forwards_to_binary(monkeypatch, tmp_path) -> None:
     is the `args[0] in (-h, --help)` guard, covered separately.)"""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     CliRunner().invoke(app, ["agents", "ask", "--help"])
     assert called == [["ask", "--help"]]
@@ -417,11 +326,11 @@ def test_python_mode_forces_python_for_daemon_native_verb(monkeypatch, tmp_path)
     """=python suppresses routing even for an auto-routable verb with a binary."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "python")
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     CliRunner().invoke(app, ["agents", "status"])
     assert called == []
@@ -619,7 +528,7 @@ def test_ask_auto_routes_for_every_provider(monkeypatch, tmp_path, provider) -> 
     unconditional flip; gemini no longer stays on Python."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     captured: list = []
 
     def fake_route(args, **kw):
@@ -627,7 +536,7 @@ def test_ask_auto_routes_for_every_provider(monkeypatch, tmp_path, provider) -> 
         raise SystemExit(99)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", provider])
     assert result.exit_code == 99
@@ -640,7 +549,7 @@ def test_ask_routes_to_rust_without_provider_flag(monkeypatch, tmp_path) -> None
     resume and, when unresolvable, surfaces Python's exit-2 error itself."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     captured: list = []
 
     def fake_route(args, **kw):
@@ -648,7 +557,7 @@ def test_ask_routes_to_rust_without_provider_flag(monkeypatch, tmp_path) -> None
         raise SystemExit(99)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(app, ["agents", "ask", "ghost", "hi"])
     assert result.exit_code == 99
@@ -673,7 +582,7 @@ def test_ask_falls_back_to_python_without_installed_binary(monkeypatch) -> None:
         return SimpleNamespace(kind="create", short_id="stub", reply=None)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
     CliRunner().invoke(app, ["agents", "ask", "newagent", "hi", "--harness", "gemini"])
@@ -688,7 +597,7 @@ def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> N
     from fno.cli import app
     from fno.agents import dispatch as dispatch_mod
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
     dispatched: list = []
 
@@ -701,7 +610,7 @@ def test_python_mode_forces_python_for_ask(monkeypatch, tmp_path, provider) -> N
         return SimpleNamespace(kind="create", short_id="stub", reply=None)
 
     monkeypatch.setenv(rr.RUNTIME_ENV, "python")
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     monkeypatch.setattr(dispatch_mod, "dispatch_ask", fake_dispatch_ask)
     CliRunner().invoke(app, ["agents", "ask", "any", "hi", "--harness", provider])
@@ -799,7 +708,7 @@ def test_rust_only_verb_no_binary_emits_install_hint(monkeypatch) -> None:
     from fno.cli import app
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     result = CliRunner().invoke(app, ["agents", "restart"])
     assert result.exit_code == rr.BIN_NOT_FOUND_EXIT
     assert "Rust runtime" in result.output
@@ -811,7 +720,7 @@ def test_rust_only_verb_routes_when_installed(monkeypatch, tmp_path) -> None:
     never reached when an installed binary is present (routing is untouched)."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     captured: list = []
 
     def fake_route(args, **kw):
@@ -819,7 +728,7 @@ def test_rust_only_verb_routes_when_installed(monkeypatch, tmp_path) -> None:
         raise SystemExit(99)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
     result = CliRunner().invoke(app, ["agents", "trace"])
     assert result.exit_code == 99
@@ -832,9 +741,9 @@ def test_retired_verb_emits_mux_pointer(monkeypatch, tmp_path) -> None:
     is not auto-routed and not a silent no-op (AC5-EDGE)."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     for verb in rr.RETIRED_VERB_POINTERS:
         result = CliRunner().invoke(app, ["agents", verb])
         assert result.exit_code == 2, f"{verb} should exit non-zero"
@@ -853,11 +762,11 @@ def test_role_bearing_spawn_not_routed_to_rust(monkeypatch, tmp_path) -> None:
     """`spawn ... --role <r>` falls through to Python even with a binary present."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
     CliRunner().invoke(app, ["agents", "spawn", "--role", "consolidate", "--help"])
     assert called == [], "a --role spawn must not route to the Rust binary"
@@ -908,10 +817,10 @@ def test_output_format_spawn_not_routed_to_installed_rust(monkeypatch, tmp_path)
     """PR-watch's JSON-envelope spawn stays on the Python-owned provider path."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     called: list = []
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", lambda args, **kw: called.append(list(args)))
 
     result = CliRunner().invoke(
@@ -939,7 +848,7 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
     spawn still auto-routes."""
     from fno.cli import app
 
-    binary = _make_exe(tmp_path / rr.BINARY_NAME)
+    binary = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     captured: list = []
 
     def fake_route(args, **kw):
@@ -947,7 +856,7 @@ def test_plain_spawn_stays_python_bg_spawn_auto_routes(monkeypatch, tmp_path) ->
         raise SystemExit(99)
 
     monkeypatch.delenv(rr.RUNTIME_ENV, raising=False)
-    monkeypatch.setattr(rr, "resolve_installed_binary", lambda: binary)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: binary)
     monkeypatch.setattr(rr, "route_to_rust", fake_route)
 
     # Plain spawn: stays Python (the pane back half). It will fail inside the

@@ -1363,10 +1363,10 @@ def test_rust_report_revision_from_cargo_binary_single_spawn(
 ) -> None:
     # ab-716cd330: verdict `revision` = binary's crates/ subtree rev (marker-free).
     # gemini PR #491: when resolved == cargo binary, probe `version --json` ONCE.
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
     monkeypatch.setattr(
-        rust_runtime, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
+        rust_binary, "resolve_installed_binary", lambda: Path("/cargo/bin/fno-agents")
     )
     monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "/cargo/bin/fno-agents")
     calls: list[str | None] = []
@@ -1388,10 +1388,10 @@ def test_rust_report_revision_comes_from_cargo_not_resolved(
 ) -> None:
     # codex PR #491: a bundled sibling resolves, but the verdict rev must come
     # from the cargo binary the gate (_cargo_bin_present) + --fix target.
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
     monkeypatch.setattr(
-        rust_runtime, "resolve_installed_binary", lambda: Path("/bundled/fno-agents")
+        rust_binary, "resolve_installed_binary", lambda: Path("/bundled/fno-agents")
     )
     monkeypatch.setattr(doctor, "_cargo_bin_path", lambda: "/cargo/bin/fno-agents")
 

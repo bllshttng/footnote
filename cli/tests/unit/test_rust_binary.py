@@ -110,3 +110,97 @@ def test_installed_lookup_ignores_the_env_override(tmp_path, monkeypatch):
     monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
     assert rust_binary.resolve_installed_binary() is None
     assert os.environ[rust_binary.BINARY_ENV] == str(binary)
+
+
+# --------------------------------------------------------------------------- #
+# Resolution order. Moved here with the locator itself; these previously lived
+# in test_rust_runtime.py, next to the dispatch half that no longer owns them.
+# --------------------------------------------------------------------------- #
+
+def test_installed_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
+    bundled = _make_exe(tmp_path / "bundled" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: bundled)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    assert rust_binary.resolve_installed_binary() == bundled
+
+
+def test_installed_resolve_excludes_cargo_dev(monkeypatch, tmp_path) -> None:
+    """A cargo dev artifact must NOT satisfy the installed-only resolver: a dev
+    checkout stays on Python by default (the test process is never replaced)."""
+    dev = _make_exe(tmp_path / "target" / "release" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    # Even if the cargo dev finder would resolve, the installed-only path ignores it.
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: dev)
+    assert rust_binary.resolve_installed_binary() is None
+
+
+def test_resolve_prefers_bundled(monkeypatch, tmp_path) -> None:
+    bundled = _make_exe(tmp_path / "bundled" / rust_binary.BINARY_NAME)
+    on_path = _make_exe(tmp_path / "path" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: bundled)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: on_path)
+    assert rust_binary.resolve_binary() == bundled
+
+
+def test_resolve_falls_back_to_sibling(monkeypatch, tmp_path) -> None:
+    sibling = _make_exe(tmp_path / "venvbin" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: sibling)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)
+    assert rust_binary.resolve_binary() == sibling
+
+
+def test_resolve_falls_back_to_path(monkeypatch, tmp_path) -> None:
+    on_path = _make_exe(tmp_path / "path" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: on_path)
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)
+    assert rust_binary.resolve_binary() == on_path
+
+
+def test_resolve_falls_back_to_cargo_dev(monkeypatch, tmp_path) -> None:
+    dev = _make_exe(tmp_path / "target" / "release" / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: dev)
+    assert rust_binary.resolve_binary() == dev
+
+
+def test_resolve_returns_none_when_absent(monkeypatch) -> None:
+    monkeypatch.setattr(rust_binary, "_bundled_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_sibling_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_path_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "_cargo_dev_binary", lambda: None)
+    assert rust_binary.resolve_binary() is None
+
+
+def test_sibling_binary_finds_next_to_launcher(monkeypatch, tmp_path) -> None:
+    """_sibling_binary resolves the co-installed binary via the launcher dir."""
+    bindir = tmp_path / "venvbin"
+    launcher = _make_exe(bindir / "fno")
+    sibling = _make_exe(bindir / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary.sys, "argv", [str(launcher), "agents", "ask"])
+    assert rust_binary._sibling_binary() == sibling
+
+
+def test_sibling_binary_none_when_absent(monkeypatch, tmp_path) -> None:
+    launcher = _make_exe(tmp_path / "venvbin" / "fno")  # no fno-agents beside it
+    monkeypatch.setattr(rust_binary.sys, "argv", [str(launcher)])
+    assert rust_binary._sibling_binary() is None
+
+
+def test_path_binary_uses_which(monkeypatch, tmp_path) -> None:
+    target = _make_exe(tmp_path / rust_binary.BINARY_NAME)
+    monkeypatch.setattr(rust_binary.shutil, "which", lambda name: str(target) if name == rust_binary.BINARY_NAME else None)
+    assert rust_binary._path_binary() == target
+
+
+# --------------------------------------------------------------------------- #
+# route_to_rust: argv forwarding + missing-binary error
+# --------------------------------------------------------------------------- #
