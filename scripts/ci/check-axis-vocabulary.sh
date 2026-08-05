@@ -139,7 +139,11 @@ _axis_word = re.compile(r"(?i)(provider|harness|model)")
 _literal_in = re.compile(r"(?i)\b(claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\b")
 # A binding name is an identifier containing an axis word, with an optional
 # attribute/quote prefix. Matched against the text immediately preceding a literal.
-_name_before_sep = re.compile(r"(?i)([A-Za-z0-9_.]*?(?:provider|harness|model)[A-Za-z0-9_]*)[\"']?\s*[:=,]\s*[\"']?$")
+# Matches the binding name immediately preceding a literal across assignment,
+# dict/json key, env-injection, AND dict-subscript shapes:
+#   name = "x"  ·  "name": "x"  ·  .env("name", "x")  ·  env["name"] = "x"
+# The optional `\]` after the closing quote is what reaches the subscript shape.
+_name_before_sep = re.compile(r"(?i)([A-Za-z0-9_.]*?(?:provider|harness|model)[A-Za-z0-9_]*)[\"']?\]?\s*[:=,]\s*[\"']?$")
 
 
 def _classify(name: str, literal: str):
