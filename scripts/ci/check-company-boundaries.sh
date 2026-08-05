@@ -2,7 +2,73 @@
 # Enforce the module-granularity dependency boundary for company orchestration.
 set -euo pipefail
 
-ROOT="${1:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+MODE="baseline"
+MODE_SEEN=""
+BASELINE_FILE=""
+BASELINE_FILE_SEEN=0
+ROOT=""
+
+usage() {
+  cat <<'EOF'
+Usage: check-company-boundaries.sh [--baseline|--strict] [--baseline-file PATH] [ROOT]
+
+Modes:
+  --baseline  CI ratchet: pass only when the checked-in finding set is unchanged.
+              A reduction passes after its baseline is updated in the same PR.
+  --strict    Full audit: report every violation and fail while existing violations remain.
+
+The default mode is --baseline. ROOT defaults to the current repository root.
+EOF
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --baseline|--strict)
+      requested="${1#--}"
+      if [[ -n "$MODE_SEEN" && "$MODE_SEEN" != "$requested" ]]; then
+        echo "check-company-boundaries: choose exactly one mode" >&2
+        exit 2
+      fi
+      MODE="$requested"
+      MODE_SEEN="$requested"
+      shift
+      ;;
+    --baseline-file)
+      if [[ $# -lt 2 ]]; then
+        echo "check-company-boundaries: --baseline-file requires a path" >&2
+        exit 2
+      fi
+      BASELINE_FILE="$2"
+      BASELINE_FILE_SEEN=1
+      shift 2
+      ;;
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    -*)
+      echo "check-company-boundaries: unknown option: $1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$ROOT" ]]; then
+        echo "check-company-boundaries: unexpected argument: $1" >&2
+        exit 2
+      fi
+      ROOT="$1"
+      shift
+      ;;
+  esac
+done
+
+ROOT="${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
+BASELINE_FILE="${BASELINE_FILE:-$ROOT/scripts/ci/company-boundary-baseline.txt}"
+
+if [[ "$MODE" == "strict" && $BASELINE_FILE_SEEN -eq 1 ]]; then
+  echo "check-company-boundaries: --baseline-file is valid only with --baseline" >&2
+  exit 2
+fi
 
 # Keep this reader byte-for-byte equivalent to the freshness gate's reader so
 # both checks agree on which root files are build-time pack projections.
@@ -47,9 +113,10 @@ if [[ $ORPHANS -ne 0 ]]; then
   exit 1
 fi
 
-python3 - "$ROOT" <<'PY'
+python3 - "$ROOT" "$MODE" "$BASELINE_FILE" <<'PY'
 import ast
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -87,6 +154,8 @@ LAYERS = (
 )
 
 root = Path(sys.argv[1]).resolve()
+mode = sys.argv[2]
+baseline_path = Path(sys.argv[3])
 source_root = root / "cli" / "src" / "fno"
 if not source_root.is_dir():
     print(
@@ -234,6 +303,9 @@ def find_cycle(edges):
 
 cycle = find_cycle(layer_edges)
 names = {number: name for number, name, _ in LAYERS}
+rendered_cycle = None
+if cycle:
+    rendered_cycle = " -> ".join(f"L{number} {names[number]}" for number in cycle)
 
 print("check-company-boundaries: positive control ok (roles -> core edge observed)")
 print(
@@ -241,18 +313,80 @@ print(
     "(no Python package, markdown and shell under skills/) or fno-mux "
     "(Rust, crates/fno/src/mux_cli.rs)"
 )
-if violations or cycle:
+if mode == "strict" and (violations or cycle):
     print("check-company-boundaries: prohibited dependencies:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
-    if cycle:
-        rendered = " -> ".join(f"L{number} {names[number]}" for number in cycle)
-        print(f"  layer cycle: {rendered}", file=sys.stderr)
+    if rendered_cycle:
+        print(f"  layer cycle: {rendered_cycle}", file=sys.stderr)
     print(
         "Legal direction is downward only; see docs/architecture/company-boundaries.md",
         file=sys.stderr,
     )
     sys.exit(1)
+
+if mode == "baseline":
+    try:
+        raw_baseline = baseline_path.read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError) as exc:
+        print(
+            f"check-company-boundaries: baseline could not be read: {baseline_path}: {exc}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+    baseline = [
+        line.strip()
+        for line in raw_baseline
+        if line.strip() and not line.lstrip().startswith("#")
+    ]
+    violation_pattern = re.compile(
+        r"^cli/src/fno/.+\.py:\d+: L\d+ [a-z]+ -> L\d+ [a-z]+ / .+$"
+    )
+    cycle_pattern = re.compile(
+        r"^layer cycle: L\d+ [a-z]+(?: -> L\d+ [a-z]+)+$"
+    )
+    malformed = [
+        entry
+        for entry in baseline
+        if not violation_pattern.match(entry) and not cycle_pattern.match(entry)
+    ]
+    if malformed or len(baseline) != len(set(baseline)):
+        print(
+            "check-company-boundaries: baseline is malformed or contains duplicates",
+            file=sys.stderr,
+        )
+        for entry in malformed:
+            print(f"  {entry}", file=sys.stderr)
+        sys.exit(2)
+
+    current = list(violations)
+    if rendered_cycle:
+        current.append(f"layer cycle: {rendered_cycle}")
+    new_or_changed = sorted(set(current) - set(baseline))
+    resolved_or_changed = sorted(set(baseline) - set(current))
+    if new_or_changed or resolved_or_changed:
+        print("check-company-boundaries: baseline drift:", file=sys.stderr)
+        for entry in new_or_changed:
+            print(f"  new or changed violation: {entry}", file=sys.stderr)
+        for entry in resolved_or_changed:
+            print(f"  resolved or changed baseline entry: {entry}", file=sys.stderr)
+        print(
+            "Update the baseline in the same PR only when a violation is removed; "
+            "new or changed violations are prohibited.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    cycle_count = 1 if rendered_cycle else 0
+    if violations or cycle_count:
+        dependency_label = "dependency" if len(violations) == 1 else "dependencies"
+        cycle_label = "cycle" if cycle_count == 1 else "cycles"
+        print(
+            f"check-company-boundaries: baseline holds: {len(violations)} prohibited "
+            f"{dependency_label} and {cycle_count} {cycle_label}; strict audit remains red"
+        )
+        sys.exit(0)
 
 print(
     f"check-company-boundaries: {len(LAYERS)} layers, "

@@ -17,9 +17,10 @@ def test_company_boundary_gate_family_has_registered_callers() -> None:
     assert missing == [], f"unreachable company boundary gates: {missing}"
 
 
-def test_intentionally_red_boundary_verdict_runs_after_the_other_family_checks() -> None:
+def test_baseline_boundary_gate_runs_after_the_other_family_checks() -> None:
     commands = [command for _, _, command in _STRUCTURAL_STEPS]
-    boundary = commands.index("bash scripts/ci/check-company-boundaries.sh")
+    boundary_command = "bash scripts/ci/check-company-boundaries.sh --baseline"
+    boundary = commands.index(boundary_command)
     prerequisites = (
         "bash tests/ci/test_check_company_boundaries.sh",
         "bash scripts/ci/check-company-function-agnostic.sh",

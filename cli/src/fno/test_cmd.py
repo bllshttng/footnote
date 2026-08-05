@@ -342,7 +342,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Company function-agnosticism check", ".", "bash scripts/ci/check-company-function-agnostic.sh"),
     ("Plugin function-agnosticism check", ".", "bash scripts/ci/check-plugins-function-agnostic.sh"),
     ("Company module boundary self-test", ".", "bash tests/ci/test_check_company_boundaries.sh"),
-    ("Company module boundary check", ".", "bash scripts/ci/check-company-boundaries.sh"),
+    ("Company module boundary check", ".", "bash scripts/ci/check-company-boundaries.sh --baseline"),
     ("Skill snippet hazard lint", ".", "bash scripts/ci/check-skill-snippets.sh"),
     ("Skill snippet lint self-test", ".", "bash tests/ci/test_check_skill_snippets.sh"),
     ("No stale /spec refs (blueprint rename audit)", ".", "bash scripts/ci/check-no-stale-spec-refs.sh"),

@@ -11,6 +11,17 @@ The check scans Python imports with a known-present roles-to-contracts edge as i
 The current repository does not satisfy the declared map: the check reports an import from platform config into graph, three imports from platform events into agents, five imports from graph CLI into agents, and a platform/core layer cycle.
 Those results are findings in shipped code, not defects repaired by the conformance pass.
 
+## Audit and CI modes
+
+`bash scripts/ci/check-company-boundaries.sh --strict` is the full audit and remains red while any prohibited dependency or declared-layer cycle exists.
+The strict result currently names nine prohibited imports and the platform-to-core-to-platform cycle, so it preserves the falsification finding.
+
+`bash scripts/ci/check-company-boundaries.sh --baseline` is the gate registered in `fno test`.
+Its checked-in source of truth is `scripts/ci/company-boundary-baseline.txt`, which records each known finding as an importing file and line, layer pair, and import statement, plus the cycle.
+The baseline gate passes only when the exact finding set is unchanged.
+A new or changed finding fails, and a removed finding also fails until its human-readable baseline entry is removed in the same pull request.
+Therefore a green baseline verdict means the known debt did not grow; it does not mean the architecture is clean or supersede the red strict audit.
+
 The check enforces no edges for `fno-skills`, which is Markdown and shell content, or for `fno-mux`, which is Rust in `crates/fno/src/mux_cli.rs`.
 They remain named as uncovered seams instead of being counted as clean Python boundaries.
 
