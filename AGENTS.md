@@ -64,6 +64,14 @@ Before concluding "no callers left", verify the search found something it should
 - graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
 - added: 2026-07-27
 
+### A capability probe delivered over the mail bus can only ever return yes
+
+`fno mail send` injects its payload into the recipient pane's text input as user-shaped text, indistinguishable from operator typing. So any "can the agent do X on its own initiative?" probe delivered by mail probes the USER-TRIGGERED path and cannot fail: it tests "the operator asks for X and it runs," never "the agent self-invokes X." A success read as proof of autonomous capability is the same shape as the receipt-can-lie cluster - a snapshot that confirms a call was accepted, not that an agent could make it unaided. The valid test is a real run with no user-shaped prompt anywhere in the transcript.
+
+- specimens: this session, 2026-08-05 - a worker was mailed "run /code-review medium --fix," the Skill tool launched it, and the success was read as proof an in-session agent can self-invoke a harness-native review; the mail WAS the user-shaped trigger, so the test could only ever return yes. The capability it appeared to prove (autonomous invocation) is false; the capability it actually proved (user-triggered invocation) was never in dispute.
+- graduates-to: a probe harness that distinguishes user-shaped mail injection from an autonomous tool call (a spawn with no mail anywhere in the transcript), or a lint that flags a capability claim whose only evidence is a mail-delivered probe.
+- added: 2026-08-05
+
 ## Repository
 
 ```
@@ -171,6 +179,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno claim`** - the single work-claim primitive; atomic lockfiles under `.fno/claims/`. `fno target init` already claims the node - never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno mail` - king-mediated native review.** `fno mail send` injects as user-shaped text in the recipient pane, so a worker that cannot self-invoke its harness's native review verb (claude `/code-review`, codex `/review` - user-triggered) can mail its king; the king's reply triggers the verb in the worker's OWN harness. That is the sanctioned route to an in-harness review; a solo worker with no live king falls back to advisory self-review. [coordination](docs/architecture/coordination.md).
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.

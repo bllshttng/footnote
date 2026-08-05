@@ -68,10 +68,14 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     assert "internal sigma panel (cheap insurance)" not in phase
     assert "self-review" in skill.lower()
     # The skill must not tell the in-session agent to run a harness built-in
-    # review verb (Claude /code-review, codex /review) as the default mechanism:
-    # those are human-triggered, so instructing the agent to invoke one ships
-    # green and runs no review.
-    assert "code-review" not in skill.lower() or "human" in skill.lower()
+    # review verb (Claude /code-review, codex /review) as a self-invocation:
+    # those are user-triggered, so instructing the agent to invoke one itself
+    # ships green and runs no review. If /code-review is mentioned it must be
+    # qualified as not-self-invocable (user-triggered / user-shaped) and routed
+    # through a king trigger or a hand-run, never a self-call.
+    assert "code-review" not in skill.lower() or any(
+        w in skill.lower() for w in ("user-triggered", "user-shaped", "human-triggered", "king")
+    )
 
     # AC12: configured sigma runs once post-ship and the skip reads the same
     # direction as preship_review_plan (sigma configured -> pre-ship skipped).

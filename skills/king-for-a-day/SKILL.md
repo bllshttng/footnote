@@ -320,12 +320,13 @@ fno agents spawn --name <node-name> "$payload" --substrate pane --at current --s
 
 ### The minion contract rides every spawn payload
 
-The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the x-304c Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers four behaviors:
+The coordination contract is two-sided: your duties are worthless if the teammate does not know its own. End every spawn payload with the canonical minion clause - **paste it verbatim from [references/minion-clause.md](references/minion-clause.md)**, the single source. Do not compose it freehand: the x-304c Director did, three times, and each drift dropped something load-bearing (once the delivery doctrine itself, so reports rested undelivered on the durable bus). The clause covers five behaviors:
 
 1. **Report.** On finishing a unit of work or blocking, mail the king a `RESULT: ...` line with `--from-self`, and treat any receipt that is not `delivered (hosted)` or `delivered (woken)` as undelivered - peek; only if it did not already land, re-resolve and re-send; never re-queue. The verbatim report line and the full delivery doctrine live in the template.
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
-3. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
-4. **Escalate one level at a time.** IC -> Director -> VP -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
+3. **Ask for a review.** A minion cannot self-invoke its harness's native review verb (claude `/code-review`, codex `/review`) - it is user-triggered. When it needs one it mails you; your reply injects as user-shaped text in the minion's pane and its OWN harness serves the verb. Answering that request is your job, the same class as answering an in-scope question: mail the trigger so the review runs in the worker's harness, do not run it in yours, and never fan out a sigma panel the worker did not configure.
+4. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
+5. **Escalate one level at a time.** IC -> Director -> VP -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
 
 Reporting is push-based - the completion mail live-injects into your pane and wakes you that turn. It is the piece the live king's teammates never received, which is why a worker once shipped a PR in silence.
 
