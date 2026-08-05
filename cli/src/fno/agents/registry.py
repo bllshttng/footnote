@@ -150,7 +150,11 @@ REGISTRY_LEGACY_SESSION_KEYS = {
 # silently coming back on the default account. Same additive-optional shape and
 # same forward-compat rationale as v11: asdict emits the key on every written
 # row, so a pre-v12 reader must reject the store rather than TypeError on it.
-SCHEMA_VERSION = 12
+# v13 (x-0358): additive `fno_id` - the target run id of an adopted /target
+# orphan, linking a revived session to its node. Set by the Rust adopt verb from
+# the matched target manifest; None otherwise. Same additive-optional shape and
+# forward-compat rationale as v12.
+SCHEMA_VERSION = 13
 
 
 class RegistryVersionError(RuntimeError):
@@ -331,6 +335,12 @@ class AgentEntry:
     # Rust's RegistryEntry mirrors it as additive-optional passthrough, or the
     # daemon would drop a Python-stamped path on its next read-modify-write.
     route_settings_path: Optional[str] = None
+    # v13 (x-0358): the fno_id of the /target session an adopted orphan was
+    # working, set by the Rust adopt verb from the matched target manifest. None
+    # for every row not adopted from a target manifest. Identity-adjacent
+    # linkage only; never read for liveness or ownership. Rust mirrors it as
+    # additive-optional passthrough so the daemon's read-modify-write keeps it.
+    fno_id: Optional[str] = None
 
     @property
     def session_id(self) -> Optional[str]:
