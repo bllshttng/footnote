@@ -392,6 +392,24 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     )
 
 
+def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--crown`` (bestow-at-spawn).
+
+    ``--crown level=N,scope=X`` is implemented only in the Python spawn path
+    (``cmd_spawn`` -> ``_parse_crown`` stamps the crown onto the spawned row).
+    The Rust client does not parse ``--crown``, so a ``spawn ... --crown ...``
+    that auto-routed to the binary would exit with ``unknown flag: --crown`` -
+    the documented grammar reachable only from the path the default route never
+    reaches. Same shape and reason as ``--role`` above. Detected here so the call
+    falls through to the Python runtime that owns the implementation.
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--crown" or a.startswith("--crown=") for a in _args_before_argv(args)
+    )
+
+
 def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """Keep ``--monitor`` on the Python path that owns its pane-only guards."""
     if verb != "spawn":
@@ -955,6 +973,7 @@ def make_agents_group_cls() -> type:
                 # parser has no --resume flag, and Python owns the revival.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
+                    or _is_crown_bearing_spawn(verb, args)
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)
