@@ -42,23 +42,19 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
 | `fno carveout add` | Capture left-out work for retro-triage at merge. |
 
-**Replying to a2a mail (the one rule).** A message arrives as `<fno_mail from="H" ...>`. Reply with `fno mail send H "..."` - pass back the exact `from` handle, nothing else; the CLI resolves it across every live source and falls back to the durable bus. Never inspect `harness`/`model` to pick a transport. Replying is optional for FYIs.
+**Replying to a2a mail (the one rule).** A message arrives as `<fno_mail from="H" ...>`. Reply with `fno mail send H "..."` - pass back the exact `from` handle, nothing else. Never inspect `harness`/`model` to pick a transport. Replying is optional for FYIs.
 
-**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` is not confirmed and may never drain.
-No receipt is no coordination: only terminal success or recipient-transcript evidence proves a send.
-A bus-lock timeout exits 12 before durable append.
-Before re-sending queued mail, `peek` because a busy recipient may still receive it; `resume` or `attach` if needed.
+**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` is not and may never drain - no receipt is no coordination. Before re-sending queued mail, `peek` (a busy recipient may still receive it); `resume`/`attach` if needed.
 
 **Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer one with `fno mail reply --to <id> "..."`.
-A live injection has no bus record, but `reply --to <id>` resolves its envelope id from this session transcript.
 
-**Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project; if you will hold for the answer, add `--from-self`. The `mail:` line of `fno whoami` is the only valid `--from-name`.
+**Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project (add `--from-self` if you will hold for the answer). The `mail:` line of `fno whoami` is the only valid `--from-name`.
 
-**Observing = `fno agents peek <handle>`** (`--lines N`, `--follow`): tails a transcript peer, or reads a pane worker via its mux ref. Distinct from `fno agents logs <name>` (registry-scoped).
+**Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or a pane worker via its mux ref. Distinct from `fno agents logs <name>` (registry-scoped).
 
-**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens addressable by bare `<shortid>`; a hand-started session joins via `/fno-me` (or `agents.auto_register_sessions = true`). `fno mux` hosts all of it as panes you can watch, drive, or message.
+**You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as panes you can watch, drive, or message.
 
-**Mail is user-shaped, so it can trigger a worker's native harness verb - and a king is who supplies the trigger.** `fno mail send` injects into the recipient pane's text input as though the operator typed it. An agent cannot self-invoke a user-triggered harness command (claude `/code-review`, codex `/review`), but a mail from a king CAN: the injection is user-shaped, so the recipient's own harness serves the verb. This is the sanctioned route to an in-harness review - a worker mails its king "I need a review," the king mails the trigger, and the review runs in the WORKER'S harness (no cross-harness spawn, no sigma fan-out the worker did not configure). It needs a live king: a solo worker with no king, or one whose king has abdicated, has no trigger source and falls back to advisory self-review rather than waiting indefinitely. The same user-shaped property is why a capability probe sent over mail can only ever test the user-triggered path - never read a mail-delivered probe as proof an agent can act on its own initiative.
+**Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane - so a worker that cannot self-invoke its harness's native review verb can ask its king, whose reply triggers the verb in the worker's own harness (no live king -> advisory self-review; see AGENTS.md). The same property means a capability probe sent over mail can only test the user-triggered path, never autonomous action.
 
 **Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.
 
