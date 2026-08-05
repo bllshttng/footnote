@@ -7049,7 +7049,7 @@ def cmd_done(
     # action during a drive window, but audit-tag it so the trail attributes
     # the completion to the operator rather than the LLM. Best-effort.
     try:
-        from fno.agents.drive_authority import (
+        from fno.drive_authority import (
             emit_operator_initiated,
             is_drive_authority_active,
         )

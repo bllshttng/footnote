@@ -2430,7 +2430,7 @@ def cmd_drive_authority(
     """
     import json as _json
 
-    from fno.agents.drive_authority import active_drive_sessions
+    from fno.drive_authority import active_drive_sessions
 
     sessions = active_drive_sessions()
     if json_out:
