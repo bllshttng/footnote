@@ -24,7 +24,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 resolve node  →  fno target start <node>   worktree off origin/main + claim + init prints the orienter
               →  Step 0 (only if STALE)     orienter says boundary-reconcile: STALE -> read blocker diffs, append landed-facts sections
               →  implement                  edit the plan; atomic commits as you go
-              →  review                      harness-native review of the diff (sigma is opt-in, post-ship)
+              →  review                      advisory self-review of the diff (sigma is opt-in, post-ship)
               →  validate                    fno test  (real exit code; not bare pytest)
               →  /pr create                  Haiku worker opens the PR
               →  <promise>MISSION COMPLETE...  PR green + reviewed = done; merge if config.auto_merge.enabled
@@ -52,7 +52,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved (attended): [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md).
-- **The pre-ship review is harness-native by default; sigma is opt-in.** The spine's pre-ship step runs ONE native review of the diff on the invoking harness (a main-thread review of the changed files; on Claude `/code-review`) and does NOT dispatch the six-agent sigma panel. The decision is `preship_review_plan(config.review.reviewers)` in `cli/src/fno/review_capability.py`. **only if** `config.review.reviewers` includes `sigma`: SKIP that pre-ship native run - a configured sigma reviewer runs ONCE on the final shipped HEAD instead ([references/ship-and-promise.md](references/ship-and-promise.md)), because running it pre-ship too pays for the panel twice and the first attestation is invalidated by any later ship/fix commit.
+- **The pre-ship review is an advisory self-review by default; sigma is opt-in.** The spine's pre-ship step is an advisory self-review: the invoking agent reads its own changed files and reasons about them on the main thread. It does NOT dispatch the six-agent sigma panel and does NOT invoke a harness built-in review verb (Claude `/code-review`, codex `/review` are human-triggered - not callable by the session that wrote the diff; run yours by hand for a stronger pass). The decision is `preship_review_plan(config.review.reviewers)` in `cli/src/fno/review_capability.py`. **only if** `config.review.reviewers` includes `sigma`: SKIP that self-review - a configured sigma reviewer runs ONCE on the final shipped HEAD instead ([references/ship-and-promise.md](references/ship-and-promise.md)), because running it pre-ship too pays for the panel twice and the first attestation is invalidated by any later ship/fix commit.
 
 ---
 
@@ -284,7 +284,7 @@ fi
 After completing each phase:
 1. **INVOKE the next skill immediately** - do NOT stop between phases
 
-The pipeline runs in order (think -> blueprint/plan -> do -> review -> validate -> docs -> ship -> external review). The review phase is harness-native by default; sigma only when configured (see above). Phases are not enforced by gates; completion proof is the world itself (PR green + reviewed). The acceptance-criteria check that runs before `/do waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
+The pipeline runs in order (think -> blueprint/plan -> do -> review -> validate -> docs -> ship -> external review). The review phase is an advisory self-review by default; sigma only when configured (see above). Phases are not enforced by gates; completion proof is the world itself (PR green + reviewed). The acceptance-criteria check that runs before `/do waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
 
 The phase-routing table, invocation logic, scratchpad writes (after think and after spec), confirmation check (for `confirm: true` skills), Linear status sync, and the validate-phase artifact write live in [references/phase-invocations.md](references/phase-invocations.md) and [references/scratchpad-writes.md](references/scratchpad-writes.md).
 

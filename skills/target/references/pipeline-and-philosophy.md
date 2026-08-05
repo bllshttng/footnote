@@ -39,7 +39,7 @@ Docs and browser testing run BEFORE `/pr create` so they ride in the same PR, ge
 | Plan | `/blueprint` | Create waves + tasks | If no plan exists | Opus (inline) |
 | Execute |`/do waves` | Wave orchestration + TDD | Always | Opus (inline) |
 | Clean | `/simplify` | Remove AI slop patterns | Only with `clean` modifier | Opus (inline) |
-| Review | native review | Harness-native diff review (BEFORE push); sigma panel only when `config.review.reviewers` names it | Always | Opus (inline) |
+| Review | advisory self-review | Self-review of the changed files (BEFORE push); sigma panel only when `config.review.reviewers` names it | Always | Opus (inline) |
 | Validate | _(bash)_ | npm run build / pytest | Always | Opus (inline) |
 | Docs | `/ship-docs` | Architecture + how-to in parallel | Default YES, skip with `--no-docs` or config - runs BEFORE ship so docs ride in the same PR | **Sonnet** (agents) |
 | Browser | `/tdd` (browser-testing ref) | Human-like UI checks (advisory: runs and logs, never gates `<promise>`) | If `has_ui` - runs BEFORE ship | Sonnet (agent) |
@@ -54,7 +54,7 @@ See [usage-detail.md](usage-detail.md) for model-optimization rationale (when to
 - **/think + /blueprint**: only if you started from a bare idea, OR the bound plan is still design-stage (then `/blueprint` alone - the thinking is already done). A blueprint-complete plan skips straight to implement.
 - **/do waves**: for a multi-task plan with parallelizable waves. A single-file or locked refactor runs **inline**, not through the wave orchestrator.
 - **/simplify (clean)**: only with the `clean` modifier, or on AI-slop-prone new code.
-- **review**: run it; it is cheap insurance - a native review of the diff on the invoking harness, not the sigma panel (sigma only when `config.review.reviewers` names it). For a tiny prose/config change a light self-review is enough.
+- **review**: run it; it is cheap insurance - an advisory self-review of the diff by the invoking agent, not the sigma panel (sigma only when `config.review.reviewers` names it). For a tiny prose/config change a light self-review is enough.
 - **/ship-docs**: skip for an internal refactor with no public API or architecture change; run it when behavior or a public surface changed.
 - **browser testing**: only if `has_ui`.
 - **/pr create + `<promise>`**: always. That is the deliverable.

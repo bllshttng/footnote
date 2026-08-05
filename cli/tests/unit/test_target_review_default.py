@@ -1,14 +1,19 @@
-"""Target pre-ship review defaults to the harness's native review; sigma is opt-in.
+"""Target pre-ship review defaults to an advisory self-review; sigma is opt-in.
 
-AC11-HP: no `config.review.reviewers` -> the invoking harness's own native review
-runs and no six-agent sigma panel is dispatched.
+AC11-HP: no `config.review.reviewers` -> the invoking agent does an advisory
+self-review of its own diff and no six-agent sigma panel is dispatched. The
+self-review is honest about what an in-session agent can actually do: it reads
+its changed files on the main thread. It invokes no harness built-in review
+command (Claude `/code-review`, codex `/review` are human-triggered, not
+callable by the session that wrote the diff) - that framing is the trap this
+test guards against.
 AC12-CON: `reviewers` includes `sigma` -> sigma runs exactly once (post-ship, on
 the final HEAD) and the skip logic reads in the same direction as its docs.
 
 The decision lives in `preship_review_plan` so every target skill surface answers
 to one codified direction. These tests pin that direction and the config default
-that makes native review the default, then guard the prose from reverting to the
-old inverted framing where the bare default spawned the sigma panel.
+that makes the self-review the default, then guard the prose from reverting to
+the old inverted framing where the bare default spawned the sigma panel.
 """
 from __future__ import annotations
 
@@ -26,9 +31,9 @@ def test_default_reviewers_is_empty_so_native_review_is_the_default():
     assert ReviewBlock().reviewers == []
 
 
-def test_no_reviewers_runs_native_review_and_dispatches_no_sigma():
+def test_no_reviewers_runs_self_review_and_dispatches_no_sigma():
     plan = preship_review_plan([])
-    assert plan.kind == "native"
+    assert plan.kind == "self"
     assert "do not dispatch" in plan.reason
 
 
@@ -42,7 +47,7 @@ def test_sigma_configured_skips_preship_and_runs_once_post_ship():
 def test_sigma_presence_not_other_reviewers_decides_the_skip():
     # `/code-review` is a different local-attestation reviewer; sigma's presence
     # is what defers the pre-ship step, and a leading slash must not hide it.
-    assert preship_review_plan(["/code-review"]).kind == "native"
+    assert preship_review_plan(["/code-review"]).kind == "self"
     assert preship_review_plan(["/code-review", "sigma"]).kind == "skip"
     assert preship_review_plan(["sigma", "declare"]).kind == "skip"
 
@@ -55,11 +60,18 @@ def test_skill_prose_describes_the_same_direction_as_the_decision():
     ship = (REPO_ROOT / "skills" / "target" / "references" / "ship-and-promise.md").read_text()
     routing = (REPO_ROOT / "skills" / "target" / "references" / "phase-invocations.md").read_text()
 
-    # AC11: the default pre-ship step is a native review, never the sigma panel.
-    # The old inverted spine advertised the panel as cheap insurance; it is gone.
+    # AC11: the default pre-ship step is an advisory self-review, never the sigma
+    # panel and never an instruction to invoke a harness built-in the agent
+    # cannot call (the trap). The old inverted spine advertised the panel as
+    # cheap insurance; it is gone.
     assert "internal sigma panel (cheap insurance)" not in skill
     assert "internal sigma panel (cheap insurance)" not in phase
-    assert "native review" in skill.lower()
+    assert "self-review" in skill.lower()
+    # The skill must not tell the in-session agent to run a harness built-in
+    # review verb (Claude /code-review, codex /review) as the default mechanism:
+    # those are human-triggered, so instructing the agent to invoke one ships
+    # green and runs no review.
+    assert "code-review" not in skill.lower() or "human" in skill.lower()
 
     # AC12: configured sigma runs once post-ship and the skip reads the same
     # direction as preship_review_plan (sigma configured -> pre-ship skipped).
