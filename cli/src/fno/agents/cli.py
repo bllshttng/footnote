@@ -903,7 +903,7 @@ def cmd_spawn(
     squad = squad if squad is not None else squad_compat
 
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,

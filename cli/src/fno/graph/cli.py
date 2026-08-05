@@ -4125,7 +4125,7 @@ def cmd_dispatch_lanes(
     receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
     nothing (sequential: use ``fno backlog advance`` / ``next``).
     """
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,
@@ -7222,7 +7222,7 @@ def cmd_advance(
     across all projects. Idempotent; respects config.parallel.max_lanes per
     project + ``--max`` overall. ``--stop`` deactivates instead.
     """
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,

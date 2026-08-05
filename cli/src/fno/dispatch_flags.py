@@ -1,4 +1,10 @@
-"""Shared provider/model resolution for dispatch verbs.
+"""Shared ``--provider`` / ``--model`` flag resolution for dispatch verbs.
+
+Lives at the platform layer, not under ``fno.agents``, because it depends on
+nothing above it (stdlib plus the harness-marker table) and its callers span
+every layer: the backlog CLI, target, mail, provenance and the agents CLI all
+validate the same two flags. Parking it in the runtime package forced core
+callers into an upward import for what is pure flag validation.
 
 ``resolve_dispatch_provider`` centralizes one precedence so every dispatch verb
 defaults the provider the same way:

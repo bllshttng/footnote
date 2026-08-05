@@ -94,7 +94,7 @@ def dispatch(
     offered, 1 skipped (e.g. dedup / daily-cap), 2 bad input (no live session id
     or node not found).
     """
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,

@@ -1099,7 +1099,7 @@ def _name_lane_send(
     ``in_reply_to`` from ONE msg-id -- never one set, the other null. Exits 12 on
     a durable-floor write failure."""
     from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex, _mux_pane_send
-    from fno.agents.provider_resolve import infer_invoking_harness
+    from fno.dispatch_flags import infer_invoking_harness
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.agents.store_fallback import is_full_session_id
