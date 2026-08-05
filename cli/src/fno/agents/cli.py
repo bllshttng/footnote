@@ -2151,6 +2151,35 @@ def cmd_discovered_json(
     sys.stdout.write(_json.dumps(out))
 
 
+@agents_app.command("registry-json", hidden=True)
+def cmd_registry_json() -> None:
+    """Internal: emit registry rows DAEMON-FREE.
+
+    Hooks (king-context-nudge.sh) need the stored crown + spawn-edge fields
+    without the live-status enrichment that ``fno agents list`` lazy-starts the
+    daemon for. Output is ``{"agents": [...]}`` with name / session ids /
+    status / crown fields / spawned_by_session per row - a file read via
+    load_registry, no daemon, so a Stop hook never stalls on a daemon start.
+    """
+    import json as _json
+
+    from fno.agents.registry import load_registry
+
+    rows = [
+        {
+            "name": e.name,
+            "session_id": e.session_id,
+            "harness_session_id": e.harness_session_id,
+            "status": e.status,
+            "crown_level": e.crown_level,
+            "crown_scope": e.crown_scope,
+            "spawned_by_session": e.spawned_by_session,
+        }
+        for e in load_registry()
+    ]
+    sys.stdout.write(_json.dumps({"agents": rows}))
+
+
 #: `heal-token` exit codes. 13 mirrors the lifecycle verbs' not-found code; the
 #: ambiguity code is distinct from BOTH that and typer's internal-error 1 so the
 #: Rust caller can tell "refuse loudly with these candidates" from "degrade to

@@ -1,0 +1,7 @@
+{
+  "session_id": "king-test-session-id",
+  "transcript_path": "tests/fixtures/king-transcript.jsonl",
+  "cwd": "/repo",
+  "hook_event_name": "Stop",
+  "stop_hook_active": false
+}
