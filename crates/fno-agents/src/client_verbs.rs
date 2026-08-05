@@ -387,7 +387,7 @@ const KNOWN_STATUSES: &[&str] = &[
 /// pinned to a lower set rejects a newer store instead of silently dropping a
 /// field. v10 (x-880e) removes the on-disk `provider` + per-provider session-id
 /// trio; a legacy v1..=v9 row still carries `provider`, read leniently below.
-const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
+const ACCEPTED_SCHEMA_VERSIONS: &[u64] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13];
 
 // The accepted set's upper bound MUST equal the version this binary writes, or
 // a freshly-written store would be rejected by its own reader. Compiler-enforced
@@ -1254,6 +1254,418 @@ pub(crate) fn resolve_entry_with_heal(
     }
 }
 
+/// Identity parsed from a `.fno/target-state.md` manifest, the durable evidence
+/// source for adopting an orphaned `/target` session by its harness session id
+/// (plan x-0358 US1). Pure (no IO) so the match and the field extraction are
+/// tested without a live manifest. IDENTITY ONLY: the manifest's
+/// `target_claim_*` / `owner_pid` fields are an init-time snapshot and are never
+/// read as ownership or liveness truth (AGENTS.md pitfalls corpus, "Orienter
+/// output, claim snapshots, and liveness probes have all lied").
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct ManifestIdentity {
+    harness: String,
+    harness_session_id: String,
+    claude_session_id: String,
+    codex_thread_id: String,
+    owner_cwd: String,
+    fno_id: String,
+}
+
+impl ManifestIdentity {
+    /// The session-id fields, in canonical-first precedence.
+    fn session_ids(&self) -> [&str; 3] {
+        [
+            self.harness_session_id.as_str(),
+            self.claude_session_id.as_str(),
+            self.codex_thread_id.as_str(),
+        ]
+    }
+
+    /// Does `session_id` equal any harness-session-id the manifest records? The
+    /// legacy `claude_session_id` / `codex_thread_id` aliases are kept for one
+    /// release, so a pre-rename manifest still matches its session.
+    fn matches(&self, session_id: &str) -> bool {
+        let sid = session_id.trim();
+        !sid.is_empty()
+            && self
+                .session_ids()
+                .iter()
+                .any(|f| !f.is_empty() && f.trim() == sid)
+    }
+
+    /// The id an adopted row is keyed on: canonical `harness_session_id` when
+    /// present, else the legacy alias that carries it. init writes
+    /// `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real manifest can
+    /// record the session under `claude_session_id` alone; keying on the
+    /// canonical field alone would mint a row with an empty session id, empty
+    /// short_id and the name `target-`.
+    fn canonical_session_id(&self) -> &str {
+        self.session_ids()
+            .into_iter()
+            .find(|f| !f.is_empty())
+            .unwrap_or("")
+    }
+}
+
+/// First non-empty wins (frontmatter precedes body); never overwrite a real
+/// value with a later blank or an explicit `null`.
+fn set_first(slot: &mut String, val: &str) {
+    if slot.is_empty() && !val.is_empty() && val != "null" {
+        *slot = val.to_string();
+    }
+}
+
+/// Scan manifest content (frontmatter AND body) for the session-identity keys.
+/// Lines inside the multi-line `input` quoted scalar are UNTRUSTED (their keys
+/// never assign) so a `/target` argument containing `harness: ...` cannot forge
+/// an identity field -- the same forgery surface `finalize::parse_manifest_fields`
+/// guards for the merge posture. The manifest is not strict YAML, `fno target
+/// init` writes quoted scalars, so a line scan matches the writer rather than a
+/// YAML lib. Kept here rather than folded into finalize because finalize owns
+/// completion/merge fields and this owns session-identity fields; the scan is a
+/// handful of lines and the two concerns stay decoupled.
+///
+/// The terminator line is itself untrusted but still ADVANCES the scan rather
+/// than being consumed, exactly as finalize does: for an input ending in a lone
+/// backslash the closing quote is ambiguous and the real terminator is the next
+/// `plan_path: "..."` line. Consuming it (an unconditional skip) would leave the
+/// scalar open to EOF and silently drop every identity key below `input:` --
+/// init writes `input` before `harness`/`harness_session_id`/`owner_cwd`, so
+/// adopt would report "no evidence" for a manifest that matches.
+fn parse_manifest_identity(content: &str) -> ManifestIdentity {
+    let mut m = ManifestIdentity::default();
+    let mut in_input_scalar = false;
+    for line in content.lines() {
+        let line = line.trim();
+        let line_untrusted = in_input_scalar;
+        if in_input_scalar && line_closes_quoted_scalar(line) {
+            in_input_scalar = false;
+        }
+        if line.is_empty() || line.starts_with('#') || line == "---" {
+            continue;
+        }
+        let Some((k, v)) = line.split_once(':') else {
+            continue;
+        };
+        let k = k.trim();
+        let raw = v.trim();
+        // A multi-line `input: "..."` opens the scalar here. `len >= 2` so a bare
+        // opening quote is not read as its own terminator.
+        if !line_untrusted
+            && k == "input"
+            && raw.starts_with('"')
+            && !(raw.len() >= 2 && line_closes_quoted_scalar(raw))
+        {
+            in_input_scalar = true;
+        }
+        if line_untrusted {
+            continue;
+        }
+        let val = raw.trim_matches(|c| c == '"' || c == '\'');
+        match k {
+            "harness" => set_first(&mut m.harness, val),
+            "harness_session_id" => set_first(&mut m.harness_session_id, val),
+            "claude_session_id" => set_first(&mut m.claude_session_id, val),
+            "codex_thread_id" => set_first(&mut m.codex_thread_id, val),
+            "owner_cwd" => set_first(&mut m.owner_cwd, val),
+            "fno_id" => set_first(&mut m.fno_id, val),
+            _ => {}
+        }
+    }
+    m
+}
+
+/// Does `raw` (the text after `input:`) close its quoted scalar on the same
+/// line? Mirrors `finalize::ends_quoted_scalar`: a trailing quote with no
+/// preceding backslash is the terminator, because init prepends exactly one
+/// backslash to every user quote.
+fn line_closes_quoted_scalar(raw: &str) -> bool {
+    let Some(rest) = raw.strip_suffix('"') else {
+        return false;
+    };
+    !rest.ends_with('\\')
+}
+
+// ---------------------------------------------------------------------------
+// adopt: synthesize a registry entry from durable evidence (plan x-0358)
+// ---------------------------------------------------------------------------
+
+/// All non-bare git worktrees of the repo at `cwd`. The durable evidence for an
+/// adopted /target orphan lives in `<worktree>/.fno/target-state.md`, so the
+/// adopt path scans these. Mirrors [`crate::paths::canonical_repo_root`] but
+/// returns every worktree, not just the main checkout. Empty outside a git repo
+/// (callers also fall back to `cwd`).
+fn git_worktree_paths(cwd: &Path) -> Vec<PathBuf> {
+    let out = match std::process::Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["worktree", "list", "--porcelain"])
+        .output()
+    {
+        Ok(o) if o.status.success() => o,
+        _ => return Vec::new(),
+    };
+    let stdout = match String::from_utf8(out.stdout) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let mut paths = Vec::new();
+    for record in stdout.split("\n\n") {
+        let mut lines = record.lines();
+        let first = match lines.next() {
+            Some(l) => l,
+            None => continue,
+        };
+        let path_str = match first.strip_prefix("worktree ") {
+            Some(p) => p.trim(),
+            None => continue,
+        };
+        if lines.any(|l| l.trim() == "bare") || path_str.is_empty() {
+            continue;
+        }
+        paths.push(Path::new(path_str).to_path_buf());
+    }
+    paths
+}
+
+fn paths_eq(a: &Path, b: &Path) -> bool {
+    // Both-unresolvable must NOT compare equal (`None == None`): two different
+    // stale paths would read as the same directory.
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
+}
+
+/// Find the `.fno/target-state.md` whose session id matches, scanning the cwd's
+/// git worktrees (and cwd itself). Returns the parsed identity (cwd + fno_id +
+/// the harness-appropriate session id) or `None` when no manifest matches.
+/// Same-project by design; a cross-project orphan is not found here (the row's
+/// `cwd` still links it once adopted by full id another way).
+fn find_manifest_for_session(session_id: &str) -> Option<ManifestIdentity> {
+    let cwd = std::env::current_dir().ok()?;
+    let mut candidates = git_worktree_paths(&cwd);
+    if !candidates.iter().any(|p| paths_eq(p, &cwd)) {
+        candidates.push(cwd);
+    }
+    for wt in &candidates {
+        let manifest = wt.join(".fno").join("target-state.md");
+        let Ok(content) = fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let mut id = parse_manifest_identity(&content);
+        if id.matches(session_id) {
+            // `owner_cwd` is optional in the manifest schema; without it the
+            // minted row has an empty cwd and `resume` refuses ("no recorded
+            // cwd. Run `fno agents rm ...`") on the row it just wrote. The
+            // worktree the manifest was found in IS that cwd.
+            if id.owner_cwd.is_empty() {
+                id.owner_cwd = wt.to_string_lossy().into_owned();
+            }
+            return Some(id);
+        }
+    }
+    None
+}
+
+/// Collision-safe 8-char handle from a session id (the final-eight convention),
+/// falling back to the whole trimmed id when shorter. The row's `short_id`, so
+/// `peek`/`ask`/`resume` resolve the adopted orphan.
+fn derived_short_id(session_id: &str) -> String {
+    let s = session_id.trim();
+    let len = s.chars().count();
+    if len <= 8 {
+        s.to_string()
+    } else {
+        s.chars().skip(len - 8).collect()
+    }
+}
+
+/// Derivable, stable row name for a synthesized entry so re-adopting upserts one
+/// row (the upsert keys on `harness_session_id`; the name is for display + name
+/// addressing). `target-` tags the synthesis source (a /target orphan).
+fn synthesized_name(short: &str) -> String {
+    format!("target-{short}")
+}
+
+/// Build the registry row for an orphan adopted from a target manifest. Harness-
+/// generic ([`crate::claude_adopt::mint_adopted_entry`] is claude+RosterWorker-
+/// specific): the harness-appropriate session id comes from the manifest, claude
+/// also records the full uuid for its dead-arm `claude --resume`, and `fno_id`
+/// links the row to its node. `status: Idle`, no pid, default `exec` host_mode:
+/// a registered-but-not-driven row the GC keeps (non-terminal, no confirmed-dead
+/// pid -> `gc_action` Keep).
+fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
+    use crate::state::RegistryEntry;
+    let harness = if !id.harness.is_empty() {
+        id.harness.clone()
+    } else if id.harness_session_id.is_empty()
+        && id.claude_session_id.is_empty()
+        && !id.codex_thread_id.is_empty()
+    {
+        // No harness recorded and only the codex alias carries the session:
+        // defaulting to claude would mint an unresumable row.
+        "codex".to_string()
+    } else {
+        "claude".to_string()
+    };
+    let session = id.canonical_session_id().to_string();
+    let short = derived_short_id(&session);
+    let is_claude = harness == "claude";
+    RegistryEntry {
+        name: synthesized_name(&short),
+        short_id: short,
+        legacy_provider: String::new(),
+        harness: Some(harness),
+        harness_session_id: Some(session.clone()),
+        cwd: id.owner_cwd.clone(),
+        project_root: id.owner_cwd.clone(),
+        session_id: None,
+        claude_session_uuid: if is_claude { Some(session) } else { None },
+        messaging_socket_path: None,
+        codex_session_id: None,
+        gemini_session_id: None,
+        mcp_channel_id: None,
+        cc_session_id: None,
+        host_mode: None,
+        status: crate::AgentStatus::Idle,
+        last_message_at: Some(now.to_string()),
+        created_at: now.to_string(),
+        pid: None,
+        pid_start_time: None,
+        log_path: None,
+        last_reconciled_at: None,
+        inside_leg: None,
+        exited_at: None,
+        mux: None,
+        screen_state: None,
+        crown_level: None,
+        crown_scope: None,
+        crown_grantor: None,
+        route_settings_path: None,
+        fno_id: if id.fno_id.is_empty() {
+            None
+        } else {
+            Some(id.fno_id.clone())
+        },
+        legacy_claude_short_id: None,
+    }
+}
+
+/// Upsert a synthesized row, keyed on the canonical `harness_session_id`
+/// (covers claude too: its uuid syncs there). Reuses
+/// [`crate::state::update_registry`] (the one locked writer) -- not a second
+/// registry writer.
+fn upsert_synthesized_row(
+    registry_path: &Path,
+    entry: crate::state::RegistryEntry,
+) -> Result<(), crate::state::StateError> {
+    crate::state::update_registry(registry_path, |reg| {
+        let key = entry.harness_session_id.as_deref();
+        let idx = key.and_then(|k| {
+            reg.entries
+                .iter()
+                .position(|e| e.harness_session_id.as_deref() == Some(k))
+        });
+        match idx {
+            Some(i) => {
+                // Adopt knows IDENTITY, never runtime state. A row can already
+                // exist under the canonical id while the operator adopts by a
+                // legacy alias (`resolve_entry_with_heal` misses the alias), so
+                // a wholesale replace would downgrade a live row to Idle and
+                // drop its pid / log_path / mux. Liveness stays with reconcile.
+                let mut merged = entry;
+                let old = &reg.entries[i];
+                merged.name = old.name.clone();
+                merged.created_at = old.created_at.clone();
+                merged.status = old.status;
+                merged.pid = old.pid;
+                merged.pid_start_time = old.pid_start_time;
+                merged.log_path = old.log_path.clone();
+                merged.host_mode = old.host_mode.clone();
+                merged.mux = old.mux.clone();
+                merged.exited_at = old.exited_at.clone();
+                reg.entries[i] = merged;
+            }
+            None => reg.entries.push(entry),
+        }
+    })
+}
+
+/// Where an adoption's evidence came from (the receipt line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AdoptSource {
+    Registry,
+    Manifest,
+    HarnessStore,
+}
+
+impl AdoptSource {
+    fn label(self) -> &'static str {
+        match self {
+            AdoptSource::Registry => "registry",
+            AdoptSource::Manifest => "target manifest",
+            AdoptSource::HarnessStore => "harness store",
+        }
+    }
+}
+
+/// Why an adoption did not complete.
+#[derive(Debug)]
+enum AdoptError {
+    /// No evidence in any source.
+    NoEvidence,
+    /// A registry read/write or harness-store consultation failed.
+    Io(String),
+}
+
+/// Resolve `session_id` to one registry row, minting one if needed, through the
+/// plan precedence: an existing registry row; a `.fno/target-state.md` whose
+/// session id matches; then the harness session stores (the heal-token shellout,
+/// which adopts best-effort). Identity only. Returns the row (as JSON), any
+/// `fno_id` carried, and the source.
+fn synthesize_and_adopt(
+    session_id: &str,
+    home: &AgentsHome,
+) -> Result<(Value, Option<String>, AdoptSource), AdoptError> {
+    let registry_path = home.registry_json();
+    let entries = read_registry_entries(&registry_path).map_err(AdoptError::Io)?;
+    // 1. Already registered (name / full id / short resolution, no store heal yet).
+    if let Ok(e) = find_agent_entry(&entries, session_id) {
+        let fno_id = e
+            .get("fno_id")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        return Ok((e.clone(), fno_id, AdoptSource::Registry));
+    }
+    // 2. Target manifest.
+    if let Some(id) = find_manifest_for_session(session_id) {
+        let entry = mint_synthesized_entry(&id, &crate::daemon::now_rfc3339_like());
+        let fno_id = entry.fno_id.clone();
+        upsert_synthesized_row(&registry_path, entry.clone())
+            .map_err(|e| AdoptError::Io(e.to_string()))?;
+        let value = serde_json::to_value(&entry).map_err(|e| AdoptError::Io(e.to_string()))?;
+        return Ok((value, fno_id, AdoptSource::Manifest));
+    }
+    // 3. Harness session stores (heal-token adopts best-effort and writes the row).
+    match heal_token(session_id, &registry_path) {
+        Ok(Some(row)) => Ok((row, None, AdoptSource::HarnessStore)),
+        Ok(None) => Err(AdoptError::NoEvidence),
+        Err(msg) => Err(AdoptError::Io(msg)),
+    }
+}
+
+/// Manifest-only adoption used as the `resume` fallback: `resolve_entry_with_heal`
+/// already consulted the registry + harness stores, so this is just the manifest
+/// path. Returns the minted row (already upserted) or `None`.
+fn adopt_from_manifest(session_id: &str, home: &AgentsHome) -> Option<Value> {
+    let id = find_manifest_for_session(session_id)?;
+    let entry = mint_synthesized_entry(&id, &crate::daemon::now_rfc3339_like());
+    upsert_synthesized_row(&home.registry_json(), entry.clone()).ok()?;
+    serde_json::to_value(&entry).ok()
+}
+
 /// Provider-specific resume argv, mirroring Python `_build_resume_argv`.
 /// Returns `None` for unsupported providers.
 fn build_resume_argv(provider: &str, session_id: &str) -> Option<Vec<String>> {
@@ -1671,11 +2083,23 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     let entry = match resolve_entry_with_heal(&entries, &name, &home.registry_json()) {
         Ok(e) => e,
         Err(err) => {
-            eprintln!(
-                "fno agents resume: {}. Use `fno agents list` to see registered agents.",
-                err.message()
-            );
-            return 13;
+            // Session-shaped miss: try adopting from a target manifest (the durable
+            // evidence heal-token does not consult) before refusing, so
+            // `fno agents resume <session-id>` revives a /target orphan. A plain
+            // name keeps today's refusal (AC7-HP: byte-identical for name args).
+            let adopted = is_session_shaped(&name)
+                .then(|| adopt_from_manifest(&name, home))
+                .flatten();
+            match adopted {
+                Some(e) => e,
+                None => {
+                    eprintln!(
+                        "fno agents resume: {}. Use `fno agents list` to see registered agents, or pass a full session id to resume an orphaned session.",
+                        err.message()
+                    );
+                    return 13;
+                }
+            }
         }
     };
     let entry = &entry;
@@ -1796,6 +2220,77 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
     // exec only returns on failure.
     eprintln!("fno agents resume: failed to exec {}: {err}", argv[0]);
     1
+}
+
+// ---------------------------------------------------------------------------
+// adopt
+// ---------------------------------------------------------------------------
+
+/// `fno-agents adopt <session-id>` -- register an orphaned session (known only by
+/// its session id) so it is addressable by `peek`/`ask`/`resume`/mail. Exit 13 on
+/// no evidence (naming the sources searched), 2 on bad args. The row is minted
+/// through the existing registry writer; adopt takes NO single-writer claim (its
+/// process is transient -- the claim is acquired by `resume`'s dead arm, whose
+/// pid survives exec; a transient-pid claim would recreate the reanchor bug).
+pub fn run_adopt(rest: &[String], home: &AgentsHome) -> i32 {
+    let mut session_id: Option<String> = None;
+    for a in rest {
+        match a.as_str() {
+            other if other.starts_with("--") => {
+                eprintln!("fno-agents: unknown adopt flag: {other}");
+                return 2;
+            }
+            other => {
+                if session_id.is_some() {
+                    eprintln!("fno-agents: adopt takes one SESSION_ID (got extra: {other})");
+                    return 2;
+                }
+                session_id = Some(other.to_string());
+            }
+        }
+    }
+    let session_id = match session_id {
+        Some(s) => s,
+        None => {
+            eprintln!("fno-agents: adopt needs a <session-id>");
+            eprintln!(
+                "fno agents adopt: accepts a harness session id; resolves the registry, .fno/target-state.md, then harness stores."
+            );
+            return 2;
+        }
+    };
+
+    match synthesize_and_adopt(&session_id, home) {
+        Ok((row, fno_id, source)) => {
+            let name = row.get("name").and_then(Value::as_str).unwrap_or("");
+            let short = row.get("short_id").and_then(Value::as_str).unwrap_or("");
+            // Name on stdout so it composes; provenance + ids on stderr.
+            println!("{name}");
+            if !short.is_empty() {
+                eprintln!(
+                    "fno agents adopt: short_id={short} (resolved from {})",
+                    source.label()
+                );
+            }
+            if let Some(fid) = fno_id {
+                if !fid.is_empty() {
+                    eprintln!("fno agents adopt: fno_id={fid}");
+                }
+            }
+            0
+        }
+        Err(AdoptError::NoEvidence) => {
+            eprintln!(
+                "fno agents adopt: no evidence for session {}. Searched: the registry, .fno/target-state.md across git worktrees, and the harness session stores. Pass the full harness session id, or `fno agents list` to see registered agents.",
+                py_repr_str(&session_id)
+            );
+            13
+        }
+        Err(AdoptError::Io(msg)) => {
+            eprintln!("fno agents adopt: could not adopt {session_id}: {msg}");
+            13
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3383,6 +3878,298 @@ mod tests {
     }
 
     #[test]
+    fn parse_manifest_identity_reads_canonical_fields() {
+        let content = "---\n\
+            fno_id: 20260804T202518Z-cl99002-4e0236\n\
+            input: \"x-0358\"\n\
+            harness: claude\n\
+            harness_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            owner_cwd: \"/Users/x/code/wt\"\n\
+            claude_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            codex_thread_id: null\n\
+            ---\n\
+            graph_node_id: x-0358\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
+        assert_eq!(m.owner_cwd, "/Users/x/code/wt");
+        assert_eq!(m.fno_id, "20260804T202518Z-cl99002-4e0236");
+        // codex_thread_id: null stays empty, never "null".
+        assert_eq!(m.codex_thread_id, "");
+        // Matches on the canonical id and the legacy claude alias.
+        assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
+        assert!(!m.matches("nope"));
+        assert!(!m.matches(""));
+    }
+
+    #[test]
+    fn manifest_identity_matches_codex_legacy_alias() {
+        let m = ManifestIdentity {
+            codex_thread_id: "thread-abc".into(),
+            ..Default::default()
+        };
+        assert!(m.matches("thread-abc"));
+    }
+
+    #[test]
+    fn parse_manifest_identity_skips_forged_keys_in_input_scalar() {
+        // A `/target` argument whose text spills across lines and contains
+        // `key: value` continuations must NOT forge identity fields: the real
+        // harness / harness_session_id (written after input) must win.
+        let content = "---\n\
+            fno_id: real-run\n\
+            input: \"some feature\n\
+            harness: forged\n\
+            harness_session_id: forged-id\n\
+            \"\n\
+            harness: claude\n\
+            harness_session_id: real-id\n\
+            ---\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(m.harness_session_id, "real-id");
+        assert_eq!(m.fno_id, "real-run");
+        // The forged session id is never matchable.
+        assert!(!m.matches("forged-id"));
+    }
+
+    #[test]
+    fn parse_manifest_identity_survives_ambiguous_scalar_terminator() {
+        // `/target 'ship it \'` -> init writes an input whose closing quote is
+        // preceded by a lone backslash, so the scalar's real terminator is the
+        // next `plan_path: "..."` line. Consuming that line would leave the
+        // scalar open to EOF and drop every identity key below it (init writes
+        // `input` before harness / harness_session_id / owner_cwd), turning a
+        // matching manifest into "no evidence".
+        let content = "---\n\
+            fno_id: real-run\n\
+            input: \"ship it \\\"\n\
+            plan_path: \"internal/fno/plan.md\"\n\
+            harness: claude\n\
+            harness_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            owner_cwd: \"/Users/x/wt\"\n\
+            ---\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
+        assert_eq!(m.owner_cwd, "/Users/x/wt");
+        assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
+    }
+
+    #[test]
+    fn mint_uses_legacy_alias_when_canonical_session_is_null() {
+        // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real
+        // manifest can carry the session under the legacy alias alone. Keying on
+        // the canonical field alone minted an empty session id / short_id and the
+        // name `target-`.
+        let id = ManifestIdentity {
+            harness: "claude".into(),
+            claude_session_id: "c7dc6218-493a-4299-916a-330ec0b0b055".into(),
+            owner_cwd: "/Users/x/wt".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&id, "now");
+        assert_eq!(
+            e.harness_session_id.as_deref(),
+            Some("c7dc6218-493a-4299-916a-330ec0b0b055")
+        );
+        assert_eq!(e.short_id, "c0b0b055");
+        assert_eq!(e.name, "target-c0b0b055");
+
+        // Codex-alias-only manifest with no `harness` must not default to claude.
+        let codex = ManifestIdentity {
+            codex_thread_id: "thread-abcdef12".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&codex, "now");
+        assert_eq!(e.harness.as_deref(), Some("codex"));
+        assert_eq!(e.harness_session_id.as_deref(), Some("thread-abcdef12"));
+        assert_eq!(e.claude_session_uuid, None);
+    }
+
+    #[test]
+    fn parse_manifest_identity_single_line_input_does_not_open_scalar() {
+        // `input: "x-0358"` closes on the same line; the next real key parses.
+        let content = "input: \"x-0358\"\nharness: codex\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "codex");
+    }
+
+    #[test]
+    fn derived_short_id_uses_final_eight() {
+        assert_eq!(
+            derived_short_id("c7dc6218-493a-4299-916a-330ec0b0b055"),
+            "c0b0b055"
+        );
+        assert_eq!(derived_short_id("abc12345"), "abc12345");
+        assert_eq!(derived_short_id("short"), "short");
+    }
+
+    #[test]
+    fn mint_synthesized_entry_sets_identity_short_id_and_fno_id() {
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-1234567890".into(),
+            owner_cwd: "/Users/x/wt".into(),
+            fno_id: "20260804T202518Z-cl99002-4e0236".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&id, "2026-08-04T20:25:18Z");
+        assert_eq!(e.harness.as_deref(), Some("codex"));
+        assert_eq!(e.harness_session_id.as_deref(), Some("thread-1234567890"));
+        assert_eq!(e.cwd, "/Users/x/wt");
+        assert_eq!(e.project_root, "/Users/x/wt");
+        // codex carries no claude uuid; claude_session_uuid stays None.
+        assert_eq!(e.claude_session_uuid, None);
+        assert_eq!(e.fno_id.as_deref(), Some("20260804T202518Z-cl99002-4e0236"));
+        assert!(!e.short_id.is_empty());
+        assert_eq!(e.name, format!("target-{}", e.short_id));
+        assert_eq!(e.status, crate::AgentStatus::Idle);
+        assert!(e.pid.is_none());
+    }
+
+    #[test]
+    fn mint_synthesized_entry_claude_records_resume_uuid() {
+        let id = ManifestIdentity {
+            harness: "claude".into(),
+            harness_session_id: "c7dc6218-493a-4299-916a-330ec0b0b055".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&id, "now");
+        assert_eq!(
+            e.claude_session_uuid.as_deref(),
+            Some("c7dc6218-493a-4299-916a-330ec0b0b055")
+        );
+    }
+
+    #[test]
+    fn upsert_synthesized_row_is_idempotent_by_session_id() {
+        let dir = cv_tmpdir();
+        let reg = dir.path().join("registry.json");
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-1".into(),
+            owner_cwd: "/x".into(),
+            fno_id: "run-1".into(),
+            ..Default::default()
+        };
+        let mut e = mint_synthesized_entry(&id, "t1");
+        upsert_synthesized_row(&reg, e.clone()).unwrap();
+        // re-adopt with an updated cwd upserts (keyed on harness_session_id),
+        // never duplicates.
+        e.cwd = "/y".into();
+        upsert_synthesized_row(&reg, e).unwrap();
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        let rows: Vec<_> = loaded
+            .entries
+            .iter()
+            .filter(|r| r.harness_session_id.as_deref() == Some("thread-1"))
+            .collect();
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].cwd, "/y");
+        assert_eq!(rows[0].fno_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn upsert_synthesized_row_preserves_live_runtime_state() {
+        // Re-adopting a session that already has a LIVE row (reachable when the
+        // operator adopts by a legacy alias, which resolve_entry_with_heal
+        // misses) must not downgrade it to Idle or drop its pid.
+        let dir = cv_tmpdir();
+        let reg = dir.path().join("registry.json");
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-live".into(),
+            owner_cwd: "/x".into(),
+            ..Default::default()
+        };
+        let mut live = mint_synthesized_entry(&id, "t1");
+        live.status = crate::AgentStatus::Busy;
+        live.pid = Some(4242);
+        live.log_path = Some("/tmp/live.log".into());
+        upsert_synthesized_row(&reg, live).unwrap();
+
+        upsert_synthesized_row(&reg, mint_synthesized_entry(&id, "t2")).unwrap();
+
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        let row = loaded
+            .entries
+            .iter()
+            .find(|r| r.harness_session_id.as_deref() == Some("thread-live"))
+            .expect("row survives");
+        assert_eq!(row.status, crate::AgentStatus::Busy);
+        assert_eq!(row.pid, Some(4242));
+        assert_eq!(row.log_path.as_deref(), Some("/tmp/live.log"));
+        assert_eq!(row.created_at, "t1");
+    }
+
+    #[test]
+    fn gc_keeps_synthesized_idle_row() {
+        // An adopted orphan row (Idle, no pid, no exited_at) must survive the GC
+        // sweep: non-terminal + no confirmed-dead pid -> gc_action Keep, so the
+        // row stays addressable until the operator resumes it.
+        let row = crate::gc::GcRow {
+            status: crate::AgentStatus::Idle,
+            is_live: false,
+            pid_confirmed_dead: false,
+            is_ask: false,
+            exited_at: None,
+            worktree_clean: None,
+        };
+        assert_eq!(
+            crate::gc::gc_action(&row, 1000, 60),
+            crate::gc::GcAction::Keep
+        );
+    }
+
+    #[test]
+    fn synthesize_and_adopt_registry_hit_is_idempotent() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = cv_tmpdir();
+        std::env::set_var(crate::paths::HOME_ENV, dir.path());
+        let home = AgentsHome::from_env();
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-seed-1234".into(),
+            owner_cwd: "/x".into(),
+            ..Default::default()
+        };
+        upsert_synthesized_row(&home.registry_json(), mint_synthesized_entry(&id, "t")).unwrap();
+        let (row, fno_id, source) =
+            synthesize_and_adopt("thread-seed-1234", &home).expect("seeded row resolves");
+        assert_eq!(source, AdoptSource::Registry);
+        assert_eq!(
+            row.get("harness_session_id").and_then(Value::as_str),
+            Some("thread-seed-1234")
+        );
+        assert_eq!(fno_id, None, "seeded row carried no fno_id");
+        std::env::remove_var(crate::paths::HOME_ENV);
+    }
+
+    #[test]
+    fn synthesize_and_adopt_miss_writes_no_row() {
+        let _g = crate::claims::test_env_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let dir = cv_tmpdir();
+        std::env::set_var(crate::paths::HOME_ENV, dir.path());
+        let home = AgentsHome::from_env();
+        // A full session id absent from the registry, from every worktree manifest
+        // (cwd is a bare tempdir), and from the harness stores. No row is written.
+        let res = synthesize_and_adopt("deadbeef-1111-2222-3333-444455556666", &home);
+        assert!(
+            matches!(res, Err(AdoptError::NoEvidence) | Err(AdoptError::Io(_))),
+            "miss must refuse, not mint; got {res:?}"
+        );
+        assert!(read_registry_entries(&home.registry_json())
+            .unwrap()
+            .is_empty());
+        std::env::remove_var(crate::paths::HOME_ENV);
+    }
+
+    #[test]
     fn claude_attach_pointer_only_for_dead_revivable_claude_row() {
         use std::os::unix::net::UnixListener;
         let uuid = "0a1b2c3d-4e5f-6071-8293-a4b5c6d7e8f9";
@@ -3636,10 +4423,10 @@ mod tests {
         assert_eq!(load_registry_entries(&reg).unwrap().len(), 1);
 
         // Unknown schema_version -> Err (Python RegistryVersionError -> exit 12/13).
-        // v13 is the future-drift case a pre-bump reader would have on v12.
+        // v14 is the future-drift case a pre-bump reader would have on v13.
         fs::write(&reg, r#"{"schema_version":99,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
-        fs::write(&reg, r#"{"schema_version":13,"agents":[]}"#).unwrap();
+        fs::write(&reg, r#"{"schema_version":14,"agents":[]}"#).unwrap();
         assert!(load_registry_entries(&reg).is_err());
 
         // x-8dfc: an unknown provider no longer bricks the read -- it loads as

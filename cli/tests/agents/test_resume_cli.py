@@ -16,8 +16,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-import pytest
-
 
 @dataclass
 class _FakeAgentEntry:
@@ -67,6 +65,55 @@ def test_codex_resume_builds_correct_argv_and_cwd() -> None:
     assert res.exit_code == 0
     assert res.exec_argv == ["codex", "resume", "00000000-1111-2222-3333-444444444444"]
     assert res.exec_cwd == "/path/to/workdir"
+
+
+def test_codex_resume_grants_git_metadata_write_in_a_repo(tmp_path) -> None:
+    """A resumed codex in a linked worktree must still be able to commit.
+
+    Its git metadata lives at <repo>/.git/worktrees/<name>/, outside the
+    workspace a bounded sandbox makes writable, and `codex resume` takes no
+    --add-dir - so the grant rides the global -c, ahead of the subcommand.
+    """
+    import json
+    import pathlib
+    import subprocess
+
+    from fno.agents.resume_cli import resume_logic
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=repo, check=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(wt), "-b", "feat"], cwd=repo, check=True
+    )
+
+    res = resume_logic(
+        name="alpha",
+        registry_loader=lambda: [
+            _FakeAgentEntry(
+                name="alpha", harness="codex", cwd=str(wt),
+                harness_session_id="00000000-1111-2222-3333-444444444444",
+            )
+        ],
+        path_checker=_allow_all_path,
+        emit_event=lambda kind, **kw: None,
+        execvp=_no_exec,
+    )
+
+    argv = res.exec_argv
+    assert argv[0] == "codex"
+    assert argv[1] == "-c"
+    key, _, value = argv[2].partition("=")
+    assert key == "sandbox_workspace_write.writable_roots"
+    assert pathlib.Path(json.loads(value)[0]).resolve() == (repo / ".git").resolve()
+    # The grant is global, so it precedes the subcommand.
+    assert argv[3] == "resume"
 
 
 def test_agent_resumed_event_emitted_before_execvp() -> None:

@@ -89,6 +89,7 @@ RUST_CLIENT_VERBS = frozenset(
         "trace",
         "ping",
         "resume",
+        "adopt",
         "attach",
         "logs",
         # `host`/`promote` (interactive daemon PTY hosting) were retired at G4
@@ -273,6 +274,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
     "digest": "Catch-up 'while you were gone' fold over events + ledger for a session: --session <s> --since <ts> [--json].",
     "needs": "Needs-me queue fold over events + ledger across all sessions (review_wedged/budget_stop): [--since-epoch <secs>] [--fires-floor <n>] [--json].",
+    "adopt": "Register an orphaned session by its session id so it is addressable (peek/ask/resume/mail); resolves the registry, .fno/target-state.md, then harness stores.",
 }
 
 #: The only Rust-only verb the In-N-Out menu advertises (x-71b6). Every other

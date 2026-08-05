@@ -33,7 +33,11 @@ from .receipt import (
 
 cli = typer.Typer(
     name="resume",
-    help="Durable typed resume receipts (evidence, never write authority)",
+    help=(
+        "Durable typed resume receipts (evidence, never write authority). "
+        "To revive an agent SESSION by id, use `fno agents resume <session-id>` "
+        "(or `fno agents adopt <session-id>` to register it without resuming)."
+    ),
     no_args_is_help=True,
 )
 

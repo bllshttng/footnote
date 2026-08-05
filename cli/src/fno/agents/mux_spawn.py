@@ -756,6 +756,14 @@ def build_pane_argv(
                 if yolo
                 else ["--sandbox", "workspace-write"]
             )
+        # Any sandboxed posture (including --full-auto and an explicit
+        # <sandbox>:<approval>) inherits codex's read-only .git carveout and
+        # cannot commit without the grant. Only the two bypass postures skip it.
+        from fno.agents.providers.codex import git_writable_args
+
+        bounded = (permission_mode != "yolo") if permission_mode else not yolo
+        if bounded:
+            argv += git_writable_args(cwd)
         if model:
             argv += ["--model", model]
         if effort:

@@ -116,6 +116,7 @@ async fn cold_start_reconciles_stale_ask_row_to_exited() {
             crown_scope: None,
             crown_grantor: None,
             route_settings_path: None,
+            fno_id: None,
         });
     })
     .unwrap();
@@ -290,6 +291,7 @@ fn seed_codex_source(home: &AgentsHome, name: &str, uuid: &str, status: fno_agen
             crown_scope: None,
             crown_grantor: None,
             route_settings_path: None,
+            fno_id: None,
         });
     })
     .unwrap();
@@ -335,6 +337,7 @@ fn seed_pane_row(home: &AgentsHome, name: &str) {
             crown_scope: None,
             crown_grantor: None,
             route_settings_path: None,
+            fno_id: None,
         });
     })
     .unwrap();

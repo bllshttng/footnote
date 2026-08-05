@@ -533,6 +533,7 @@ mod tests {
             crown_scope: None,
             crown_grantor: None,
             route_settings_path: None,
+            fno_id: None,
         }
     }
 

@@ -938,6 +938,63 @@ def test_build_pane_argv_forwards_tier3_flags(tmp_path: Path) -> None:
     assert opencode[opencode.index("--agent") + 1] == "build"
 
 
+def _pane_repo(tmp_path: Path) -> Path:
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    return repo
+
+
+def test_build_pane_argv_codex_grants_git_metadata_write(tmp_path: Path) -> None:
+    """AC4-HP: a sandboxed codex pane in a repo carries --add-dir <.git>.
+
+    Same trap as the headless lane: workspace-write makes .git read-only, so
+    without the grant the pane worker cannot commit at all.
+    """
+    from fno.agents.mux_spawn import build_pane_argv
+
+    repo = _pane_repo(tmp_path)
+    argv = build_pane_argv("codex", "t", repo, False, None)
+
+    assert "--add-dir" in argv
+    assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+
+
+def test_build_pane_argv_codex_git_grant_tracks_resolved_posture(tmp_path: Path) -> None:
+    """AC5-EDGE: the grant follows whether the pane is actually sandboxed.
+
+    Only the two unsandboxed postures skip it. --full-auto and any
+    <sandbox>:<approval> form are still sandboxed and still need it.
+    """
+    from fno.agents.mux_spawn import build_pane_argv
+
+    repo = _pane_repo(tmp_path)
+
+    assert "--add-dir" not in build_pane_argv("codex", "t", repo, True, None)
+    assert "--add-dir" not in build_pane_argv(
+        "codex", "t", repo, False, None, permission_mode="yolo"
+    )
+    assert "--add-dir" in build_pane_argv(
+        "codex", "t", repo, False, None, permission_mode="full-auto"
+    )
+    assert "--add-dir" in build_pane_argv(
+        "codex", "t", repo, False, None, permission_mode="workspace-write:on-request"
+    )
+
+
+def test_build_pane_argv_codex_git_grant_composes_with_user_add_dir(tmp_path: Path) -> None:
+    """AC-EDGE: --add-dir is repeatable; a caller's own grant survives."""
+    from fno.agents.mux_spawn import build_pane_argv
+
+    repo = _pane_repo(tmp_path)
+    argv = build_pane_argv("codex", "t", repo, False, None, add_dir="/extra")
+
+    assert argv.count("--add-dir") == 2
+    assert "/extra" in argv
+
+
 def test_build_pane_argv_tier3_fails_closed(tmp_path: Path) -> None:
     # x-b6e2: a no-equivalent (provider, flag) cell raises BEFORE any spawn.
     from fno.agents.dispatch import DispatchAskError
