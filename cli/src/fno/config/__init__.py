@@ -1114,6 +1114,7 @@ class HandoffBlock(BaseModel):
 
     enabled: bool = True
     used_pct_trigger: int = 50
+    king_used_pct_trigger: int = 40
     generation_cap: int = 4
 
     @field_validator("used_pct_trigger")
@@ -1126,6 +1127,40 @@ class HandoffBlock(BaseModel):
                 f"got {v}"
             )
         return v
+
+    @field_validator("king_used_pct_trigger")
+    @classmethod
+    def king_used_pct_trigger_range(cls, v: int) -> int:
+        """Percentage must be 1-100; the cross-field upper bound is below."""
+        if not (1 <= v <= 100):
+            raise ValueError(
+                "config.target.handoff.king_used_pct_trigger must be in range 1-100; "
+                f"got {v}"
+            )
+        return v
+
+    @model_validator(mode="after")
+    def king_trigger_below_teammate_trigger(self) -> "HandoffBlock":
+        """A king hands off EARLIER than a teammate, so king_used_pct_trigger
+        must stay strictly below used_pct_trigger. The refusal MESSAGE is the
+        deliverable, not the field: the failure mode this prevents is a future
+        reader "tidying" 40 up to 50, and the rationale lands in front of the
+        exact person trying to delete it. A worker's degradation costs one node;
+        a king's propagates into every ruling it issues and every worker it
+        routes, and the handoff itself costs context. Consumed by the
+        king-context-nudge Stop hook via get_config "target.handoff.king_used_pct_trigger".
+        """
+        if self.king_used_pct_trigger >= self.used_pct_trigger:
+            raise ValueError(
+                "config.target.handoff.king_used_pct_trigger must be BELOW "
+                "used_pct_trigger "
+                f"(got {self.king_used_pct_trigger}, teammate trigger "
+                f"{self.used_pct_trigger}). A king hands off earlier than a "
+                "teammate on purpose: a worker's degradation costs one node, "
+                "a king's propagates into every ruling it issues and every "
+                "worker it routes, and the handoff itself costs context."
+            )
+        return self
 
     @field_validator("generation_cap")
     @classmethod
