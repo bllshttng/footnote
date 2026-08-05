@@ -12,8 +12,14 @@ The current repository does not satisfy the declared map: the check reports two 
 
 ### Map coverage is 35%, so a cleared finding is not automatically a removed dependency
 
-The map declares 152 of the 430 Python modules under `cli/src/fno/`.
-`fno.backlog`, `fno.harness_identity`, `fno.mail`, `fno.done`, `fno.target_cli` and 273 others are unmapped, and `layer_for` returns `None` for an unmapped module, so the scan skips those edges entirely.
+The map declares roughly a third of the Python modules under `cli/src/fno/`.
+Every run prints the live figure, so read it there rather than trusting a number in this document:
+
+```
+check-company-boundaries: map covers 152 of 431 modules (35%); 279 unmapped modules are not scanned
+```
+
+`fno.backlog`, `fno.harness_identity`, `fno.mail`, `fno.done` and `fno.target_cli` are among the unmapped, and `layer_for` returns `None` for an unmapped module, so the scan skips those edges entirely.
 
 The consequence is load-bearing when reading a burndown: routing a call through an unmapped module clears a finding without removing the upward dependency, and so does relocating a module without also declaring it here.
 Judge a boundary change by whether the dependency disappeared, never by whether the line left the baseline.

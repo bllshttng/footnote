@@ -325,6 +325,14 @@ if cycle:
     rendered_cycle = " -> ".join(f"L{number} {names[number]}" for number in cycle)
 
 print("check-company-boundaries: positive control ok (roles -> core edge observed)")
+# Printed on every run, not only a clean one: an unmapped module is invisible
+# to this scan, so the coverage figure is what tells a reader how much of a
+# green verdict is enforcement and how much is silence.
+print(
+    f"check-company-boundaries: map covers {mapped_modules} of {len(parsed)} "
+    f"modules ({mapped_modules * 100 // len(parsed)}%); "
+    f"{len(parsed) - mapped_modules} unmapped modules are not scanned"
+)
 print(
     "check-company-boundaries: no enforcement for fno-skills "
     "(no Python package, markdown and shell under skills/) or fno-mux "
