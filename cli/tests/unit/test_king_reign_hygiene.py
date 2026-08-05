@@ -54,14 +54,15 @@ PATH_RE = re.compile(
 CLAIM_RE = re.compile(
     r"[A-Za-z0-9_./-]+\.(?:py|sh|md|rs|toml|ya?ml|json|ts):\d+"
 )
-# Declarative abdication: capital-A first-person ("Abdicating.", "Abdicated."),
-# case-sensitive so prose discussion ("a pass abdicates at kickoff") is excluded.
-ABDICATION_RE = re.compile(r"\bAbdicat(?:ing|ed)\b")
+# Declarative abdication: a statement that LEADS the span ("Abdicating.",
+# "**Abdicated.**"), not a mid-sentence mention in prose discussion. Anchoring at
+# span start is what excludes "the skill discusses Abdicating at kickoff";
+# case-sensitivity alone only excludes lowercase prose.
+ABDICATION_RE = re.compile(r"^\s*\**\s*Abdicat(?:ing|ed)\b")
 # A real coronation CLI call at a command boundary, not inside a mail body.
 CORONATION_RE = re.compile(r"(^|[;|&\n])\s*fno agents crown\s")
-CROWN_SPAWN_RE = re.compile(r"fno agents spawn\b.*--crown", re.S)
+CROWN_SPAWN_RE = re.compile(r"(^|[;|&\n])\s*fno agents spawn\b.*--crown", re.S)
 PRWATCH_RE = re.compile(r"\bpr-watch\s+status\b")
-DISPATCH_RE = re.compile(r"\b(?:fno agents spawn\b|fno backlog advance\b)")
 # A ruling is the king acting on a worker's work: mailing a decision, encoding a
 # dispatch, or stating a ruling. Kickoff fan-out mail is excluded by ordering
 # (check 2 only counts rulings after the first abdication).
@@ -154,14 +155,16 @@ def _reads(entries) -> dict[str, list[int]]:
 
 def _covered(claim_path: str, read_paths) -> bool:
     cp = _norm(claim_path)
-    cb = cp.split("/")[-1]
     for rp in read_paths:
         rpn = _norm(rp)
         if cp == rpn:
             return True
+        # Suffix match covers a bare-basename read (claim 'a/b/x.py' covered by a
+        # read of 'x.py') and a bare-basename claim (claim 'x.py' covered by a
+        # read of 'a/b/x.py'). A bare-basename arm beyond this would let an
+        # unrelated same-name file in another directory ('c/d/x.py') falsely
+        # cover the claim, suppressing a real violation.
         if cp.endswith("/" + rpn) or rpn.endswith("/" + cp):
-            return True
-        if cb and cb == rpn.split("/")[-1]:
             return True
     return False
 
@@ -171,6 +174,19 @@ def _first(entries, pred) -> int | None:
         if pred(e):
             return e["index"]
     return None
+
+
+def _is_spawn(e) -> bool:
+    """A worker dispatch: the harness Agent tool OR an `fno agents spawn`/`backlog
+    advance` CLI call. Used by both check 2 (first spawn, and post-abdication
+    orchestration) and check 4 (first dispatch) so the Agent-tool path cannot be
+    a spawn in one check and invisible in the next - the decorative-guard shape."""
+    if e.get("kind") != "tool_use":
+        return False
+    if e.get("tool") == "Agent":
+        return True
+    t = e.get("target", "")
+    return "agents spawn" in t or "backlog advance" in t
 
 
 # --------------------------------------------------------------------------- #
@@ -227,11 +243,7 @@ def check2_spawn_abdicate_rule(entries) -> CheckResult:
     at kickoff, then orchestration actions for hours after. Fires when a spawn
     and a declarative abdication both exist AND any orchestration action (spawn,
     ruling mail, dispatch-encode, advance) follows the first abdication."""
-    first_spawn = _first(
-        entries,
-        lambda e: e.get("kind") == "tool_use"
-        and (e.get("tool") == "Agent" or "agents spawn" in e.get("target", "")),
-    )
+    first_spawn = _first(entries, _is_spawn)
     if first_spawn is None:
         return CheckResult("check2_spawn_abdicate_rule", False, "not-applicable",
                            "no spawn in reign; pass-shape abdicate rule does not apply")
@@ -242,18 +254,16 @@ def check2_spawn_abdicate_rule(entries) -> CheckResult:
     if first_abd is None:
         return CheckResult("check2_spawn_abdicate_rule", True, "violation",
                            "spawned but never declared abdication", first_spawn)
-    # Orchestration action after the first abdication = did not exit.
+    # Orchestration action after the first abdication = did not exit. Uses the
+    # same _is_spawn predicate as first_spawn so an Agent-tool spawn after
+    # abdication cannot slip past (the decorative-guard shape).
     for e in entries:
         if e["index"] <= first_abd:
             continue
         if e.get("kind") != "tool_use":
             continue
         t = e.get("target", "")
-        if (
-            "agents spawn" in t
-            or "backlog advance" in t
-            or RULING_CMD_RE.search(t)
-        ):
+        if _is_spawn(e) or RULING_CMD_RE.search(t):
             return CheckResult(
                 "check2_spawn_abdicate_rule", True, "violation",
                 f"abdicated at index {first_abd} then took orchestration action at "
@@ -306,10 +316,7 @@ def check4_prwatch_before_dispatch(entries) -> CheckResult:
     self-healed, but never confirmed at kickoff. Fires when a dispatch exists but
     no ``pr-watch status`` probe precedes it. Absence is over the whole prefix,
     not a sample: a probe at index 219 after a dispatch at 28 still fires."""
-    first_dispatch = _first(
-        entries,
-        lambda e: e.get("kind") == "tool_use" and DISPATCH_RE.search(e.get("target", "")),
-    )
+    first_dispatch = _first(entries, _is_spawn)
     if first_dispatch is None:
         return CheckResult("check4_prwatch_before_dispatch", False, "not-applicable",
                            "no dispatch in reign; pr-watch duty does not apply")
@@ -448,6 +455,34 @@ def test_ac4_check3_fails_on_late_crown():
     entries = load_entries(FIXTURE_DIR / "synthetic-late-crown.json")
     res = check3_crown_before_ruling(entries)
     res.assert_fires("synthetic-late-crown")
+
+
+def test_check1_same_basename_does_not_suppress_violation():
+    """Regression (review finding: basename arm): a read of an unrelated
+    same-basename file in another directory must NOT cover a claim. Without this,
+    a read of skills/do/SKILL.md would silently cover a claim about
+    skills/target/SKILL.md and check 1 would report clean on a real violation."""
+    entries = [
+        {"index": 0, "kind": "tool_use", "tool": "Read", "target": "skills/do/SKILL.md"},
+        {"index": 1, "kind": "assistant_text", "text": "skills/target/SKILL.md:40 pins the executor."},
+    ]
+    res = check1_claim_before_read(entries)
+    res.assert_fires("synthetic-basename-collision")
+
+
+def test_check2_agent_spawn_after_abdication_fires():
+    """Regression (review finding: Agent-tool path): a spawn via the harness
+    Agent tool after a declarative abdication must fire check 2. The Agent
+    tool_use's distilled target is 'agent:<name>', which lacks the 'agents spawn'
+    substring, so a check keyed only on that string would miss it - the
+    decorative-guard shape."""
+    entries = [
+        {"index": 0, "kind": "tool_use", "tool": "Bash", "target": "fno agents spawn w1 --crown level=0,scope=fno"},
+        {"index": 1, "kind": "assistant_text", "text": "Abdicating. Crown expired."},
+        {"index": 2, "kind": "tool_use", "tool": "Agent", "target": "agent:archer"},
+    ]
+    res = check2_spawn_abdicate_rule(entries)
+    res.assert_fires("synthetic-agent-spawn-after-abdication")
 
 
 # --------------------------------------------------------------------------- #

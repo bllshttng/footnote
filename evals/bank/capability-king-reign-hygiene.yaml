@@ -29,6 +29,19 @@
 # to state-claim surfaces (the gh mergeable field, the transcript mtime); it is
 # not built here because their claim-before-consult evidence is not in this
 # distilled reign. When a second reign supplies it, check 1 ports directly.
+#
+# THE MORE DANGEROUS SPECIMEN (also not caught by check 1). Check 1 fires only
+# when the code was NOT read before the claim. The harder case is an agent that
+# DID read the code, then asserted a causal mechanism from it without a
+# falsification test: every file:line citation accurate, the conclusion still
+# false, because no competing hypothesis was tried. Reading the source raised
+# confidence without raising correctness. An eval that catches only the no-read
+# version passes an agent doing this. It is not built here because the property
+# is "a causal claim citing read code, with no experiment run to falsify it" -
+# recognizing an experiment mechanically is a different shape than check 1's
+# ordering property, and the known instance lives in a session this fixture does
+# not distill. It is recorded here so the next check author does not mistake
+# check 1 for covering it.
 id: capability-king-reign-hygiene
 tier: capability
 grade:
