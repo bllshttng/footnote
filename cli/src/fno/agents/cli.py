@@ -419,6 +419,41 @@ def _scope_is_subset(target_scope: str, grantor_scope: str | None) -> bool:
     return bool(grantor_scope) and target_scope != grantor_scope
 
 
+def _derive_crown_level_from_scope(scope: str) -> int | None:
+    """The ladder altitude is a FACT ABOUT THE SCOPE, not an operator input
+    (US10): a project is a VP (0), an epic is a Director (1), any other backlog
+    node is an IC (2). Returns the derived level, or None when the scope
+    resolves to neither a graph entry nor a known project.
+
+    None is the refusal signal: the prior behavior fell through to level 0 for
+    ANY scope, so `fno agents crown bob --scope banana` minted a VP over a scope
+    nobody could find. A scope that resolves to nothing is a typo, and stamping
+    VP-over-a-typo is worse than exiting 2. An explicit ``--level`` bypasses
+    this entirely (it sets resolved_level before this runs), as does a
+    superset-king grant (which uses the grantor's level + 1); this only fires
+    for a human or config grant with no --level.
+    """
+    from fno import paths
+    from fno.graph.store import read_graph
+
+    # Resolve the path dynamically: read_graph()'s default arg is frozen at
+    # import time, so it would ignore a redirected state_dir (tests, overrides).
+    entry = next(
+        (e for e in read_graph(paths.graph_json())
+         if isinstance(e, dict) and e.get("id") == scope),
+        None,
+    )
+    if entry is not None:
+        return 1 if entry.get("type") == "epic" else 2
+    try:
+        from fno.projects.resolve import resolve_project_name
+
+        resolve_project_name(scope)
+        return 0
+    except Exception:
+        return None
+
+
 def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
     """The ``--succeed`` transfer (US6): move the caller's live crown over
     ``scope`` onto ``target`` in one atomic registry write.
@@ -631,7 +666,19 @@ def cmd_crown(
         )
         raise typer.Exit(code=2)
     if resolved_level is None:
-        resolved_level = 0
+        # No explicit --level and not a superset-king grant: the altitude is a
+        # fact about the scope (project=0, epic=1, node=2), not a default 0.
+        resolved_level = _derive_crown_level_from_scope(scope)
+        if resolved_level is None:
+            print(
+                f"refusing: --scope {scope!r} resolves to neither a backlog node "
+                "nor a known project, so it is likely a typo. A crown needs a real "
+                "scope; this path would otherwise stamp level 0 over a scope nobody "
+                "can find. Pass a project name (->0), an epic id (->1), a node id "
+                "(->2), or set --level explicitly to bypass scope derivation.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     if resolved_level > _MAX_CROWN_LEVEL:
         print(
             f"refusing: derived crown level {resolved_level} exceeds the ceiling "
