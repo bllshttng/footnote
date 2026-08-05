@@ -425,7 +425,6 @@ Every per-agent row records the requested route, observed runtime harness, and e
 The requested route comes from resolution; the observed runtime comes only from the dispatch mechanism or its receipt.
 When a finding comes from a cross-modeled agent, tag it with the dispatching provider and effective model from runtime dispatch evidence next to the existing `agent` field.
 This is forensics-only: a HIGH finding is HIGH regardless of provider and triggers the same blocking behavior.
-The forensic `subagent_spawn` / `subagent_complete` event pair, emitted through `dispatch_sigma_subagent` in `cli/src/fno/sigma_dispatch.py`, may still be emitted for non-Claude dispatches; it does not affect the verdict.
 
 Each explicit tuple creates a separate SessionStart preamble.
 At the measured 50–60K tokens per start, explicitly routing all six agents costs roughly 300–360K preamble tokens; keep this opt-in and prefer whole-session routing when every agent should use the same model.

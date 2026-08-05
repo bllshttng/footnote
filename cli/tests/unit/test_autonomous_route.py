@@ -202,7 +202,7 @@ def test_select_destination_not_configured_defers(monkeypatch):
 
     monkeypatch.setattr("fno.config.load_settings", lambda *a, **k: SettingsModel())
     monkeypatch.setattr(
-        "fno.sigma_dispatch.resolve_dispatch_target",
+        "fno.agents.dispatch_target.resolve_dispatch_target",
         lambda *a, **k: pytest.fail("defer must not read the active combo"),
     )
     assert ar._select_destination(None, "ccm") is None
@@ -214,14 +214,14 @@ def test_select_destination_configured_picks_provider_and_cli(monkeypatch):
     dispatch_env becomes the spawn account env."""
     from fno.adapters.providers.rotation import Combo
     from fno.config import SettingsModel
-    from fno.sigma_dispatch import DispatchTarget
+    from fno.agents.dispatch_target import DispatchTarget
 
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
     )
     monkeypatch.setattr(
-        "fno.sigma_dispatch.resolve_dispatch_target",
+        "fno.agents.dispatch_target.resolve_dispatch_target",
         lambda *a, **k: DispatchTarget(combo_name="combo1"),
     )
     combo = Combo(name="combo1", providers=("ccm", "ccr"))
@@ -248,14 +248,14 @@ def test_select_destination_unstaged_account_defers(monkeypatch):
     None (defer; never spawn onto a broken account)."""
     from fno.adapters.providers.rotation import Combo
     from fno.config import SettingsModel
-    from fno.sigma_dispatch import DispatchTarget
+    from fno.agents.dispatch_target import DispatchTarget
 
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
     )
     monkeypatch.setattr(
-        "fno.sigma_dispatch.resolve_dispatch_target",
+        "fno.agents.dispatch_target.resolve_dispatch_target",
         lambda *a, **k: DispatchTarget(combo_name="combo1"),
     )
     combo = Combo(name="combo1", providers=("ccm", "ccr"))
@@ -280,14 +280,14 @@ def test_select_destination_no_active_combo_defers(monkeypatch):
     """_select_destination: failover configured but the active target is a
     bare provider (no combo) -> None (nothing to walk)."""
     from fno.config import SettingsModel
-    from fno.sigma_dispatch import DispatchTarget
+    from fno.agents.dispatch_target import DispatchTarget
 
     monkeypatch.setattr(
         "fno.config.load_settings",
         lambda *a, **k: SettingsModel(dispatch={"on_exhaustion": "failover"}),
     )
     monkeypatch.setattr(
-        "fno.sigma_dispatch.resolve_dispatch_target",
+        "fno.agents.dispatch_target.resolve_dispatch_target",
         lambda *a, **k: DispatchTarget(provider_id="ccm", source="active_provider"),
     )
     assert ar._select_destination(None, "ccm") is None

@@ -651,7 +651,7 @@ resolve_from_config() {
   # above exists to prevent, and one no test would have caught.
   "${py_cmd[@]}" -c 'import sys
 try:
-    from fno.sigma_dispatch import resolve_dispatch_target as r
+    from fno.agents.dispatch_target import resolve_dispatch_target as r
     from fno.adapters.providers.loader import load_providers
     pid = getattr(r(sys.argv[1]), "provider_id", None)
     if pid:

@@ -238,13 +238,51 @@ def _parse_scalar(value: str):
     return value.strip('"').strip("'")
 
 
-def detect_provider() -> str:
-    """Detect current provider from environment variables."""
-    if os.environ.get("CODEX_PLUGIN_ROOT"):
+# The --harness/--provider value names the invoking HARNESS (which CLI binary
+# runs the work), not the model vendor. These are the values detect_provider()
+# can return and that an explicit argument may name.
+_KNOWN_HARNESSES = ("claude", "codex", "gemini")
+
+
+def detect_provider(env: Optional[dict] = None) -> str:
+    """Sniff the invoking harness from environment variables.
+
+    Compatibility FALLBACK only. Prefer an explicit ``--harness``/``--provider``
+    argument via :func:`resolve_invoking_harness`, which surfaces this sniff as
+    a fallback source so a Codex session that has not exported
+    ``CODEX_PLUGIN_ROOT`` cannot silently redirect its waves to Claude
+    subagents. Returns a harness (``claude`` | ``codex`` | ``gemini``), not a
+    model vendor.
+    """
+    environ = os.environ if env is None else env
+    if environ.get("CODEX_PLUGIN_ROOT"):
         return "codex"
-    if os.environ.get("GEMINI_PROJECT_DIR"):
+    if environ.get("GEMINI_PROJECT_DIR"):
         return "gemini"
     return "claude"
+
+
+def resolve_invoking_harness(
+    explicit: Optional[str] = None,
+    env: Optional[dict] = None,
+) -> tuple[str, str]:
+    """Resolve the invoking harness, explicit-first, env-sniff as a surfaced fallback.
+
+    Returns ``(harness, source)`` where ``source`` is ``"explicit"`` or
+    ``"env-fallback"``. An explicit value wins and is validated against the
+    known harnesses; the env sniff runs only when no explicit value was given,
+    and its result is reported as a fallback rather than reading as a deliberate
+    choice. The value is a harness, never a model vendor.
+    """
+    if explicit is not None and explicit.strip():
+        h = explicit.strip().lower()
+        if h not in _KNOWN_HARNESSES:
+            raise ValueError(
+                f"unknown harness {explicit!r}; expected one of "
+                f"{', '.join(_KNOWN_HARNESSES)}"
+            )
+        return h, "explicit"
+    return detect_provider(env=env), "env-fallback"
 
 
 def load_project_constraints() -> List[str]:
@@ -443,9 +481,10 @@ def resolve_wave_execution_mode(
     provider: Optional[str] = None,
 ) -> Dict[str, object]:
     """Resolve effective wave mode from requested mode and hidden file/shared-output conflicts."""
-    resolved_provider = provider or detect_provider()
+    resolved_provider, harness_source = resolve_invoking_harness(provider)
     decision: Dict[str, object] = {
         "provider": resolved_provider,
+        "harness_source": harness_source,
         "requested_mode": wave.mode,
         "effective_mode": wave.mode,
         "dispatch": "main-thread",
@@ -606,7 +645,9 @@ def print_wave_summary(
     provider: Optional[str] = None,
 ) -> None:
     """Print a summary of the execution strategy"""
+    harness, source = resolve_invoking_harness(provider)
     print(f"Execution mode: {strategy.execution_mode}")
+    print(f"Invoking harness: {harness} ({source})")
     print(f"Total waves: {len(strategy.waves)}")
     print()
 
@@ -1213,7 +1254,7 @@ if __name__ == "__main__":
         print("  orchestrator.py <index>                  Parse and display execution strategy")
         print("  orchestrator.py <index> --next            Show next wave to execute")
         print("  orchestrator.py <index> --state <state>   Resume from state file")
-        print("  orchestrator.py <index> --wave-decision N [--provider codex]")
+        print("  orchestrator.py <index> --wave-decision N [--harness codex|--provider codex]")
         print("                                           Show effective execution mode for a wave")
         print("  orchestrator.py --agent <description>     Determine agent for task")
         print()
@@ -1279,11 +1320,24 @@ if __name__ == "__main__":
     # Parse index file for all other commands
     index_path = sys.argv[1]
     strategy = load_plan_strategy(index_path)
-    provider = detect_provider()
-    if "--provider" in sys.argv:
-        provider_idx = sys.argv.index("--provider")
-        if provider_idx + 1 < len(sys.argv):
-            provider = sys.argv[provider_idx + 1]
+    # Harness identity: an explicit --harness (or legacy --provider) wins over
+    # the env sniff; the sniff stays as a surfaced fallback so an absent
+    # CODEX_PLUGIN_ROOT cannot silently redirect a Codex session to Claude.
+    # `provider` here is the EXPLICIT arg (None when no flag); each downstream
+    # resolver re-runs resolve_invoking_harness so the explicit/env-fallback
+    # source is surfaced correctly rather than collapsed to "explicit".
+    provider: Optional[str] = None
+    for flag in ("--harness", "--provider"):
+        if flag in sys.argv:
+            idx = sys.argv.index(flag)
+            if idx + 1 < len(sys.argv):
+                provider = sys.argv[idx + 1]
+            break
+    try:
+        resolve_invoking_harness(provider)  # validate the explicit value up front
+    except ValueError as exc:
+        print(f"Error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
     if not strategy:
         print("No execution strategy found in", index_path)

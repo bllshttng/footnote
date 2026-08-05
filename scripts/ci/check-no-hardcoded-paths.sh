@@ -90,7 +90,7 @@ add_violation() {
 #   update.py (try/except),
 #   adapters/providers/dispatch.py (try/except), adapters/providers/staging.py (try/except),
 #   adapters/providers/loader.py (bootstrap: settings loader self-reference)
-#   sigma_dispatch.py (bootstrap: settings loader self-reference)
+#   agents/dispatch_target.py (bootstrap: settings loader self-reference)
 #   cost/_register.py, cost/_session_cost.py (moved standalone metric scripts)
 #   graph/_constants.py (uses _state_dir() helper), test_*.py
 # ---------------------------------------------------------------------------
@@ -113,7 +113,7 @@ PY_HITS=$(
     | grep -v 'adapters/providers/dispatch\.py' \
     | grep -v 'adapters/providers/staging\.py' \
     | grep -v 'adapters/providers/loader\.py' \
-    | grep -v 'sigma_dispatch\.py' \
+    | grep -v 'agents/dispatch_target\.py' \
     | grep -v 'cost/_register\.py' \
     | grep -v 'cost/_session_cost\.py' \
     | grep -v 'doctor\.py' \

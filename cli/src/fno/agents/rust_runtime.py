@@ -114,9 +114,9 @@ RUST_CLIENT_VERBS = frozenset(
         # ab-58645f63): Rust ports of the deleted scripts/lib/kill-criteria.sh
         # and scripts/lib/verify-event-evidence.sh. Both dispatch DIRECTLY in
         # client.rs before build_request (no daemon RPC). The Python `fno phase
-        # kill-check` / `fno event verify-evidence` wrappers resolve the binary
-        # and invoke these verbs explicitly (not via `fno agents` routing);
-        # these entries exist so the client.rs<->router parity test stays in sync.
+        # kill-check` wrapper resolves the binary and invokes its verb
+        # explicitly (not via `fno agents` routing); these entries exist so
+        # the client.rs<->router parity test stays in sync.
         "kill-check",
         "verify-evidence",
         # Inside-leg state push (inside-out E3.2): a per-turn hook calls
@@ -268,7 +268,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "loop": "Unified driver loop: run --driver target [options] (step 5).",
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
-    "verify-evidence": "Verify subagent/child-promise event evidence (folded from verify-event-evidence.sh); usually via `fno event verify-evidence`.",
+    "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",

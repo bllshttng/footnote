@@ -118,7 +118,7 @@ def emit_event(
     envelope) instead. The legacy envelope fails ``fno.events.validate``
     because it lacks ``source`` and uses ``payload`` where the schema expects
     ``data``. Direct callers remain for backwards compatibility (gates,
-    sigma_dispatch, megawalk) and are out of scope for a single cleanup; a
+    megawalk) and are out of scope for a single cleanup; a
     separate spec will drain them.
 
     Args:

@@ -411,28 +411,6 @@ event_types:
           description: "Why the helper could not extract content."
     consumers: [postmortem]
 
-  - name: subagent_spawn
-    description: "Existing trust-boundary event; retained verbatim for back-compat."
-    sources: [hook, target, megawalk]
-    data:
-      required: [agent_name, provider_id, cli]
-      properties:
-        agent_name: { type: string }
-        provider_id: { type: string }
-        cli: { type: string }
-    consumers: [fno-agents verify-evidence]
-
-  - name: subagent_complete
-    description: "Existing trust-boundary event; retained verbatim."
-    sources: [hook, target, megawalk]
-    data:
-      required: [agent_name]
-      properties:
-        agent_name: { type: string }
-        exit_code:
-          description: "Subagent process exit code; integer or 'null' string token (jq -e rejects bare null)"
-    consumers: [fno-agents verify-evidence]
-
   - name: phase_init
     description: "Existing event from emit-gate-transition.sh / events.sh::emit_event_raw. Retained for back-compat."
     sources: [target, hook]

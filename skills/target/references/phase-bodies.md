@@ -27,23 +27,18 @@ If `no_clean` is `false`:
 
 This phase runs as a **separate context** from Execute to avoid negative-instruction interference. The Execute phase says "build this." The Clean phase says "remove the bad parts." Mixing these in the same prompt degrades both.
 
-## Review Phase (4) - Deferred Gate
+## Review Phase (4) - Advisory self-review by default
 
-The review phase invokes `fno:review`, which spawns subagents that may run in background. The pipeline does NOT block on review - ship and external review can proceed in parallel.
+The pre-ship review is an advisory self-review: the invoking agent reads its own changed files and reasons about them on the main thread. It does NOT dispatch the six-agent sigma panel, and it does NOT self-invoke a harness built-in review verb (Claude `/code-review`, codex `/review` are user-triggered - not callable by the session that wrote the diff). For a real in-harness review, ask your king: a mail from your king injects as user-shaped text and your own harness serves the verb (the sanctioned route). With no live king, run your native verb by hand, or accept this advisory self-review. Sigma is opt-in: it runs only when `config.review.reviewers` names it, and then once, post-ship, against the final HEAD (see the Completion section of [SKILL.md](../SKILL.md)). The decision is `preship_review_plan(config.review.reviewers)` in `cli/src/fno/review_capability.py`:
 
-The review result is deferred: do NOT emit `<promise>` while sigma-review agents are still running. Wait until:
+- **sigma NOT configured (the default):** do the self-review here, as advisory insurance. Address its real findings before ship. It does not gate `<promise>` on its own, and the external gate is only as strong as the configured reviewers (`reviewers`, `peers`, `required_bots`/`github_apps`) - which may be nothing, in which case `reviewed` is satisfied on zero reviews. Do not reassure yourself that "the world" caught what the self-review missed; on a default-ish config it did not. A real automated review is opt-in via `reviewers: [sigma]` (the panel) or `peers` (headless cross-model).
+- **sigma configured:** SKIP this pre-ship run. Sigma is a *configured gate*, not advisory, and runs exactly once post-ship on the final shipped HEAD, where it emits the head-pinned attestation loop-check requires. Running it here too would be a wasted second panel whose attestation any later fix invalidates.
 
-1. All sigma-review agents have returned results (check task notifications)
-2. Critical and High findings are addressed (fixed or verified as false positives)
-3. The review report verdict is "Ready to merge"
+**Substrate coverage of the king-mediated review is partial, and the fallback covers the gap.** A backgrounded review fork was measured to complete and return real findings on a `bg` substrate, but the headless one-shot substrate - which tears down at the end of its turn - is untested, and a fork inside it may not finish before teardown, which would present as "review ran" with nothing consumed. That is the same decorative outcome this phase exists to avoid, so do not lean on the king trigger on headless: the no-king advisory self-review is the fallback for any substrate or session where a triggered review cannot be obtained or cannot be confirmed to have landed.
 
-Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed.
-
-If both sigma-review agents AND external review (`/pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
+If a review you run does spawn agents (a configured sigma panel, or a peer review), do NOT emit `<promise>` while they are still running: wait until all of them have returned, Critical and High findings are addressed (fixed or verified as false positives), and the report verdict is ready. Do not assess the code yourself in lieu of waiting - the agents exist precisely to catch what you missed. If both that review and external review (`/pr check`) flag the same issue, that's confirmation - fix it once, both gates benefit.
 
 While the PR's CI is still polling, read posted optional bot reviews at first-post rather than deferring every read to green - the first-post review watch and its once-at-green backstop are specified in the "Watch for posted optional reviews" / "Drain a posted optional review" paragraphs of [SKILL.md](../SKILL.md). Same story on both surfaces: a real finding folds into the fix round in flight instead of adding a post-green round.
-
-**Skip this pre-ship run when `config.review.reviewers` includes `sigma`.** In that case sigma is a *configured gate*, not advisory, and runs exactly once post-ship on the final shipped HEAD (see the Completion section of SKILL.md), where it emits the head-pinned attestation loop-check requires. Running it here too would be a wasted second panel whose attestation any later fix invalidates. When `sigma` is NOT a configured reviewer, run it here as the cheap advisory insurance as usual.
 
 ## Intent verification (no promise-time self-grade)
 

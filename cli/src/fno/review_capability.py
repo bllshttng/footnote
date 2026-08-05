@@ -383,6 +383,48 @@ def resolve_reviewers(
     return out
 
 
+@dataclass(frozen=True)
+class PreShipReviewPlan:
+    """What the target spine does at its pre-ship review step.
+
+    The single codified answer the skill prose and docs defer to, so the skip
+    direction cannot drift on one surface while the others keep the old one.
+    A prose edit that re-inverts the default flips this contract red.
+    """
+
+    kind: Literal["self", "skip"]
+    reason: str
+
+
+def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
+    """Decide the target spine's pre-ship review step from `config.review.reviewers`.
+
+    Sigma is opt-in. When it is a configured reviewer it runs exactly once,
+    post-ship, against the final HEAD (the attestation gate in
+    skills/target/references/ship-and-promise.md), so the pre-ship step is
+    skipped to avoid a panel whose attestation any later fix would invalidate.
+    The default - no sigma reviewer - is an advisory SELF-REVIEW: the invoking
+    agent reads its own changed files and reasons about them on the main thread.
+    It is advisory (never gates the promise on its own), it dispatches no sigma
+    panel, and it invokes no harness built-in review command (Claude
+    `/code-review`, codex `/review` are human-triggered, not callable by the
+    session that wrote the diff). A real automated review is opt-in via
+    `reviewers: [sigma]` or `peers`.
+    """
+    names = {str(r).strip().lstrip("/") for r in reviewers}
+    if "sigma" in names:
+        return PreShipReviewPlan(
+            "skip",
+            "sigma is configured; it runs once post-ship on final HEAD, so the "
+            "pre-ship self-review is skipped",
+        )
+    return PreShipReviewPlan(
+        "self",
+        "no sigma reviewer; run an advisory self-review of the diff and do not "
+        "dispatch the sigma panel",
+    )
+
+
 def _model_family(provider: str, model: object = None) -> str:
     """Resolve the model family a peer actually runs, independent of transport."""
     family = provider.strip().lower()

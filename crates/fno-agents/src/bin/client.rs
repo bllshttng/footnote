@@ -152,7 +152,7 @@ async fn run(args: Vec<String>) -> i32 {
 
     // `verify-evidence` is the Rust port of scripts/lib/verify-event-evidence.sh
     // (packaging EPIC ab-8bdb4642). It dispatches on a leading sub-token
-    // (event | child-promise | has-nonclaude) and reproduces the bash exit
+    // (child-promise | has-nonclaude | receipt) and reproduces the bash exit
     // codes + stdout diagnostic kinds + stderr warnings. Direct dispatch.
     if verb == "verify-evidence" {
         return fno_agents::verify_evidence::run_verify_evidence(&args[1..]);

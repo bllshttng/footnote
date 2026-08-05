@@ -24,7 +24,7 @@ When `$CODEX_THREAD_ID` is nonblank, before any routing or work, Print exactly o
 resolve node  →  fno target start <node>   worktree off origin/main + claim + init prints the orienter
               →  Step 0 (only if STALE)     orienter says boundary-reconcile: STALE -> read blocker diffs, append landed-facts sections
               →  implement                  edit the plan; atomic commits as you go
-              →  /review                     internal sigma panel (cheap insurance)
+              →  review                      advisory self-review of the diff (sigma is opt-in, post-ship)
               →  validate                    fno test  (real exit code; not bare pytest)
               →  /pr create                  Haiku worker opens the PR
               →  <promise>MISSION COMPLETE...  PR green + reviewed = done; merge if config.auto_merge.enabled
@@ -52,7 +52,7 @@ That is the whole job when a backlog node or plan is already bound. `fno target 
 - **only if** the orienter printed `boundary-reconcile: STALE`: perform **Step 0** before any code commit - for each stale blocker, read its merged diff (`gh pr diff <n>`) and append a `### <blocker> landed ... - boundary reconcile` landed-facts section to the plan/brief. This is a *different* thing from de-stub reconcile below (hard-serialized dependent vs a stubbed contract). Full procedure + section format: [references/boundary-reconcile.md](references/boundary-reconcile.md).
 - **only if** spawned to de-stub a merged blocker: [§0b Reconcile mode](#0b-reconcile-mode---reconcile-manifest).
 - **only if** a Claude Plan-Mode plan was just approved (attended): [references/plan-mode-frontdoor.md](references/plan-mode-frontdoor.md).
-- **only if** `config.review.reviewers` includes `sigma`: SKIP the spine's pre-ship `/review` advisory run - a configured sigma reviewer runs ONCE on the final shipped HEAD instead ([references/ship-and-promise.md](references/ship-and-promise.md)). Running it pre-ship too pays for the six-agent panel twice, and the first attestation is invalidated by any later ship/fix commit.
+- **The pre-ship review is an advisory self-review by default; sigma is opt-in.** The spine's pre-ship step is an advisory self-review: the invoking agent reads its own changed files and reasons about them on the main thread. It does NOT dispatch the six-agent sigma panel and does NOT self-invoke a harness built-in review verb (Claude `/code-review`, codex `/review` are user-triggered - not callable by the session that wrote the diff). For a real in-harness review, ask your king: a mail from your king injects as user-shaped text and your own harness serves the verb (the sanctioned route). With no live king, run your native verb by hand, or accept this advisory self-review. The decision is `preship_review_plan(config.review.reviewers)` in `cli/src/fno/review_capability.py`. **only if** `config.review.reviewers` includes `sigma`: SKIP that self-review - a configured sigma reviewer runs ONCE on the final shipped HEAD instead ([references/ship-and-promise.md](references/ship-and-promise.md)), because running it pre-ship too pays for the panel twice and the first attestation is invalidated by any later ship/fix commit.
 
 ---
 
@@ -105,7 +105,7 @@ Read that RESOLVED field, never `fno config get auto_merge` directly. Init folds
 
 When it is `true` and `auto_merge.require_checks_pass` is satisfied, **MERGE FIRST, THEN promise**: `fno pr merge <n>`, then `fno backlog reconcile` to close the node (a merge from inside a worktree skips the local post-merge step). Order matters - a promise emitted first terminates the loop as `DonePRGreen` the moment CI goes green, so the session is never re-invoked and never merges. `fno-agents finalize` now arms GitHub's native auto-merge on that same `DonePRGreen` terminal, so the PR is no longer stranded when you promise first; it is queued behind GitHub's own branch protections rather than merged against the gate you just satisfied. Merging first is still the instruction, because it is the path that closes the node in this session (reconcile) instead of leaving it to a later merge detector. Config set once IS the standing authorization; re-asking each time re-imposes the step it was configured to delete.
 
-When it is `false` (the default), stop at a **green, reviewed, mergeable PR** and hand the merge to a human (any out-of-band merge also satisfies `done()`). Never write "handing the merge to a human" without having read that field in the same turn. The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal `/review` is advisory.
+When it is `false` (the default), stop at a **green, reviewed, mergeable PR** and hand the merge to a human (any out-of-band merge also satisfies `done()`). Never write "handing the merge to a human" without having read that field in the same turn. The gate reads `config.review.required_bots`; the loop-check code default is empty `[]` (no review gate, so a fresh install never hangs on an unconfigured bot), and a maintainer sets it explicitly (e.g. `["chatgpt-codex-connector"]`) to require an external pass. Internal review is advisory.
 
 ### How to end every turn
 
@@ -284,13 +284,13 @@ fi
 After completing each phase:
 1. **INVOKE the next skill immediately** - do NOT stop between phases
 
-The pipeline runs in order (think -> blueprint/plan -> do -> sigma-review -> validate -> docs -> ship -> external review). Phases are not enforced by gates; completion proof is the world itself (PR green + reviewed). The acceptance-criteria check that runs before `/do waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
+The pipeline runs in order (think -> blueprint/plan -> do -> review -> validate -> docs -> ship -> external review). The review phase is an advisory self-review by default; sigma only when configured (see above). Phases are not enforced by gates; completion proof is the world itself (PR green + reviewed). The acceptance-criteria check that runs before `/do waves` is documented in [references/phase-transition-guards.md](references/phase-transition-guards.md).
 
 The phase-routing table, invocation logic, scratchpad writes (after think and after spec), confirmation check (for `confirm: true` skills), Linear status sync, and the validate-phase artifact write live in [references/phase-invocations.md](references/phase-invocations.md) and [references/scratchpad-writes.md](references/scratchpad-writes.md).
 
 #### Postcondition Checking
 
-Per-phase postcondition verifiers were removed in the control-plane collapse (ab-d0337fbc). Postcondition checking collapsed into the external-truth `done()` reads performed by `fno-agents loop-check` when a `<promise>` is seen: PR exists for HEAD + CI green + reviewed. Run sigma-review and validate phases thoroughly; the loop-check verb verifies the outcome against the world, not against state booleans.
+Per-phase postcondition verifiers were removed in the control-plane collapse (ab-d0337fbc). Postcondition checking collapsed into the external-truth `done()` reads performed by `fno-agents loop-check` when a `<promise>` is seen: PR exists for HEAD + CI green + reviewed. Run the review and validate phases thoroughly; the loop-check verb verifies the outcome against the world, not against state booleans.
 
 #### Atomic Commit Discipline (NON-NEGOTIABLE for M/L)
 
