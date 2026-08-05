@@ -122,7 +122,24 @@ from pathlib import Path
 
 # This is the sole declared layer map. The architecture document cites it.
 LAYERS = (
-    (0, "platform", ("fno.paths", "fno.config", "fno.handoff", "fno.events")),
+    (
+        0,
+        "platform",
+        (
+            "fno.paths",
+            "fno.config",
+            "fno.handoff",
+            "fno.events",
+            # Leaf utilities with callers on both sides of the runtime boundary.
+            # Declared, not merely moved: an undeclared module is unmapped, and
+            # the scan skips unmapped modules entirely, so relocating code
+            # without adding it here would clear a finding while leaving the
+            # dependency in place.
+            "fno.dispatch_flags",
+            "fno.drive_authority",
+            "fno.rust_binary",
+        ),
+    ),
     (
         1,
         "core",
