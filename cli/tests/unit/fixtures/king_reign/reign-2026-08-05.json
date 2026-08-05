@@ -1,0 +1,1723 @@
+{
+ "meta": {
+  "reign_date": "2026-08-05",
+  "skill": "fno:king-for-a-day"
+ },
+ "entries": [
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-d7e4 2>&1 | head -60",
+   "index": 0,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-2388 2>&1 | head -60",
+   "index": 1,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh pr view 738 --json number,title,state,mergeable,statusCheckRollup,reviews,url 2>&1 | head -80",
+   "index": 2,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "ls -la ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md 2>&1",
+   "index": 3,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Skill",
+   "target": "skill:fno:king-for-a-day",
+   "index": 4,
+   "kind": "tool_use"
+  },
+  {
+   "text": "One fresh-context session reads a track, decides the next wave or two, writes that decision into the graph, kicks it off, and abdicates.",
+   "index": 5,
+   "kind": "user_text"
+  },
+  {
+   "text": "The cost is **per wake**: every time a court king is woken it re-reads context to act, and that re-read churns the prompt cache.",
+   "index": 6,
+   "kind": "user_text"
+  },
+  {
+   "text": "The payload decides what it does: free text is a verbatim **seed** (it opens a session, it does NOT build), a resolved node id is a **build**, a leading `/verb` is **passthrough**, and `--handoff <doc>` hands an in-flight thread to a fresh context.",
+   "index": 7,
+   "kind": "user_text"
+  },
+  {
+   "text": "Re-planning is a *new* pass with fresh context reading the map, which is the point: a monarch that persists accrues drift, and drift is what the graph exists to prevent.",
+   "index": 8,
+   "kind": "user_text"
+  },
+  {
+   "text": "The unit of continuity is the **node**, not the phase: one teammate session carries a node from think through blueprint through do. Mailing the next verb into the live pane IS the dispatch - no stop, no respawn, no re-explaining context the session already holds:",
+   "index": 9,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Write sibling facts once, into the brief; the mail points at them.** The ruling is per-teammate and cannot be shared, but cross-node facts are the same payload for everyone who touches the node, so restating them in every envelope costs you that context once per teammate and leaves the durable cop",
+   "index": 10,
+   "kind": "user_text"
+  },
+  {
+   "text": "The one reason to mint a new session is **context pressure**. Every teammate report carries `context: NN% used`. At a phase boundary, if `NN >= config.target.handoff.used_pct_trigger` (default 50), hand off instead of reusing: spawn a fresh successor into the mission workspace with an explicit `--sp",
+   "index": 11,
+   "kind": "user_text"
+  },
+  {
+   "text": "- **Backstop sweep at boundaries, not on a repeating clock.** Sweep while you are already awake and at a boundary you can name: a report you just processed, a ruling you just issued, a wave-gate check. Do not run a heartbeat and do not treat elapsed minutes as a signal - a poll costs a context re-re",
+   "index": 12,
+   "kind": "user_text"
+  },
+  {
+   "text": "It looks like a wait and behaves like the heartbeat this section replaced: every pass re-reads a status table into your context, and none of those passes sees a transition sooner than the armed wait would. One reign wrote this 25 times against 4 uses of the real verb, which is how the anti-pattern s",
+   "index": 13,
+   "kind": "user_text"
+  },
+  {
+   "text": "**This is a wiring gap, not a law, so do not build around it.** The durable push leg for `blocked` already exists on the event bus: `fno event emit -t blocked` auto-pushes a notice to the parent handle, and `fno event push-parent --type blocked` is the manual verb. What is missing is an emitter - no",
+   "index": 14,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Always `done`, and never `idle`.** `idle` looks like the portable choice and is a trap: it is the *default* verdict, returned for a lapsed hook, an unrecognized screen state, and any live row with no screen state at all. So a wait on `idle` can return instantly while the teammate is still working,",
+   "index": 15,
+   "kind": "user_text"
+  },
+  {
+   "text": "Arm it the way your harness tracks background work (on claude, a background Bash call): a detached process exits without waking anyone and the session idles forever. When it fires, sweep that teammate and either reconcile it or re-arm; if it timed out and the teammate is still live, re-arm. One arme",
+   "index": 16,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Crown: level 0, Director altitude, scope epic `x-d7e4`, bestowed by the human (attended). Shape: pass** (brief says \"plan the next wave, then abdicate\", no monitoring language). Mail handle `<handle>`.",
+   "index": 17,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog epic status x-d7e4 2>&1 | head -80",
+   "index": 18,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents top 2>&1 | head -40",
+   "index": 19,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh pr list --state open --json number,title,headRefName,mergeable --limit 30 2>&1",
+   "index": 20,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno config get auto_continue.enabled 2>&1; echo \"---pr-watch---\"; fno agents status 2>&1 | head -30",
+   "index": 21,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh run view 30957859933 --log-failed 2>&1 | tail -60",
+   "index": 22,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -n \"^#\\{1,3\\} \" ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md | head -80",
+   "index": 23,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh pr view 738 --json files,body,additions,deletions 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('additions',d['additions'],'deletions',d['deletions'])\nfor f in d['files']: print(f['additions'],f['deletions'],f['path'])\nprint('---BODY---')\nprint(d['body'][:3000])\n\"",
+   "index": 24,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "git log --oneline origin/main -3 -- scripts/ci/check-company-boundaries.sh 2>&1; echo \"---exists on main?---\"; git cat-file -e origin/main:scripts/ci/check-company-boundaries.sh 2>&1 && echo YES || echo NO",
+   "index": 25,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-9963 2>&1 | head -40",
+   "index": 26,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-7eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['id'],d['status'],d.get('pr_number'),d['title'])\"",
+   "index": 27,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents spawn --name node-x-9963 \"/fno:target x-9963\n\nWave 3: harness-agnostic ceremony. Plan is linked at ~/c3po/internal/fno/plans/20260805-wave-3-harness-agnostic-ceremony-x-9963.md - read it first.\n\nScope: AC11 through AC15 only. Make harness-native review the default and sigma opt-in; make sigma dispatch instrumentation truthful or delete the unused instrumentation; resolve PR creation from a declared model-routing role instead of hardcoded Haiku; make /fno:do accept an explicit harness with environment sniffing only as fallback.\n\nDo NOT begin Wave 4. Do NOT change worktree-policy resolution (owned by x-b28b). Do NOT reopen x-62b4. One node equals one PR.\" --harness claude --substrate bg -P zai --model \"glm-5.2[1m]\" --permission-mode bypassPermissions --cwd ~/co",
+   "index": 28,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Back to the crown. Reading the plan's wave structure and the x-2388 findings.",
+   "index": 29,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "sed -n '1,80p' ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md",
+   "index": 30,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -n \"Orchestration status\\|## Wave\\|Wave [0-9]\\|^## \" ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md | tail -40",
+   "index": 31,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "sed -n '477,510p' ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md",
+   "index": 32,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "sed -n '718,800p' ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md",
+   "index": 33,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-5ccb 2>&1 | head -40",
+   "index": 34,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-0eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['id'],d['status'],d.get('priority'),d.get('pr_number'),d['title'])\" 2>&1",
+   "index": 35,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "git fetch origin main -q 2>&1; gh pr diff 738 -- docs/architecture/company-boundaries.md 2>&1 | head -50",
+   "index": 36,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh pr diff 738 2>&1 | sed -n '/company-boundaries.md/,/^diff --git/p' | head -45",
+   "index": 37,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents peek <handle> --lines 5 2>&1 | tail -8; echo \"=== EXIT $? ===\"",
+   "index": 38,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "gh pr diff 738 2>&1 | grep -n \"baseline\\|BASELINE\\|allowlist\\|ALLOW\\|exception\" | head -20",
+   "index": 39,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents peek <handle> --lines 120 2>&1 | tail -100",
+   "index": 40,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog find \"boundary\" 2>&1 | head -20; echo \"=== layer/import ===\"; fno backlog find \"layer cycle import seam\" 2>&1 | head -20",
+   "index": 41,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno mail send <handle> \"Context for x-9963: the node's acceptance is 'AC11 through AC15 from the source design'. That source design is NOT your linked plan - it is the origin doc:\n\n  ~/c3po/internal/fno/plans/20260802-guards-resolve-object-not-session.md\n\nThat plan was broken into 4 waves, each its own node and PR; you are wave 3 only. Read the origin doc to resolve AC11-AC15 verbatim, and read your own linked plan (20260805-wave-3-harness-agnostic-ceremony-x-9963.md) for the wave-3 scoping. Do not implement ACs outside 11-15.\" --from-self 2>&1 | tail -5",
+   "index": 42,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno mail send <handle> \"RULING - authorization granted. From the Director crown over epic x-d7e4 (level 0, grantor: human operator, this session). This is the epic-scoped acceptance-contract call you asked for; it is mine to make and I am making it. Merge approval is NOT mine and remains the human's.\n\nAUTHORIZED: x-2388's delivery contract uses two modes.\n1. Strict audit - remains RED on all 9 existing violations plus the L0->L1->L0 cycle. Reachable by an explicit flag, and named in --help text so it is discoverable without reading the script.\n2. Baseline CI gate - the mode registered in 'fno test'. Passes only when the violation set is unchanged or reduced; fails on any NEW or CHANGED violation. Reducing the set requires updating the baseline in the same PR, so it ratchets down and cannot",
+   "index": 43,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog update x-2388 --dispatch-brief \"AUTHORIZED 2026-08-05 by Director crown over x-d7e4 (level 0, grantor: human operator): boundary check ships in two modes. (1) Strict audit stays RED on all 9 violations + the L0->L1->L0 cycle, behind an explicit flag named in --help. (2) Baseline gate is what 'fno test' registers; passes only when the violation set is unchanged or reduced, fails on any NEW or CHANGED violation, and a reduction must update the baseline in the same PR. Baseline must be a checked-in human-readable file naming each violation (file:line, layer pair, import statement) plus the cycle - an opaque hash or count does not satisfy this. Do NOT modify prohibited core files. Auto-merge stays OFF; merge approval is the human's (x-0eaf, the review-gate defect, is still open and",
+   "index": 44,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog idea \"Burn down the 9 upward module-boundary violations and the L0-L1 layer cycle\" --details \"Measured by the company boundary check landed in PR #738 (x-2388). The gate ships as a ratchet against a checked-in baseline, so main stays green and no NEW violation can land; this node retires the baseline entries themselves.\n\nThe 9 prohibited upward imports:\n- cli/src/fno/config/__init__.py:318 - L0 platform -> L1 core - from fno.graph._constants import RESERVED_PREFIXES\n- cli/src/fno/events/cli.py:110 - L0 platform -> L5 runtime - from fno.agents.self_stamp import resolve_self_model\n- cli/src/fno/events/cli.py:142 - L0 platform -> L5 runtime - from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry\n- cli/src/fno/events/cli.py:539 - L0 platform -> L5 runtime - from ",
+   "index": 45,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog update x-5c43 --dispatch-verb /fno:think --add-blocker x-2388 2>&1 | tail -3; echo \"=== verify ===\"; fno backlog get x-5c43 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| blocked_by:',d.get('blocked_by'),'| verb:',d.get('dispatch_verb'),'| plan:',d.get('plan_path','NONE'))\"",
+   "index": 46,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "wc -l ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md; echo \"=== tail ===\"; tail -12 ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md",
+   "index": 47,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cat >> ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md <<'PLANEOF'\n\n## Director pass 2026-08-05 (L0 crown over x-d7e4, grantor: human operator)\n\nState at pass time: 8 of 9 children done.\nx-2388 (wave 9) is the only child left, `in_review` as PR #738, and its CI is deliberately RED.\nThe epic's declared nine waves are therefore exhausted: there is no next wave inside the plan, only a delivery decision and the findings the falsification produced.\n\nThe prior pass's ruling still holds: x-0eaf is still `idea`, unplanned, and p1, so no child of this epic carries `auto_merge_approved: true` and #738 has zero reviews.\n\n### 1. The falsification is valid; the delivery contract was not\n\nPR #738 registers `scripts/ci/check-company-boundaries.sh` and that gate fails against main",
+   "index": 48,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents peek <handle> --lines 25 2>&1 | tail -25; echo \"=== registry ===\"; fno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nrows=d if isinstance(d,list) else d.get('agents',d.get('rows',[]))\nfor r in rows:\n    if 'x-9963' in str(r.get('name','')): print({k:r.get(k) for k in ('name','harness','model','provider','status','short_id')})\n\" 2>&1",
+   "index": 49,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cat >> ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md <<'PLANEOF'\n\n### Operator todos left by this pass\n\n- [ ] Confirm PR #738's strict audit stays red while CI goes green, then approve and merge it #jc \ud83d\udcc5 2026-08-06\n- [ ] Run `/fno:pr merged 738` to close wave 9 and unblock x-5c43 #jc \ud83d\udcc5 2026-08-06\n- [ ] Plan x-0eaf (p1, `idea`, unplanned since 2026-08-03): a reviewer's quota-exhaustion refusal still counts as a completed review, which gates honest merges in every project #jc \ud83d\udcc5 2026-08-08\n- [ ] Fix model routing: `ANTHROPIC_MODEL=glm-5.2[1m]` is set with `ANTHROPIC_BASE_URL` unset, so spawns silently fall back to Anthropic and bill the claude accounts #jc \ud83d\udcc5 2026-08-06\nPLANEOF\necho done",
+   "index": 50,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Abdicating. Crown expired.",
+   "index": 51,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "rg -n \"zai-claude-settings|--settings\" --glob '!target/**' -g '!*.log' | head -30",
+   "index": 52,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "rg -ln \"def .*register|registry\" cli/src/fno/agents/ | head -20",
+   "index": 53,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "sed -n '290,380p' cli/src/fno/agents/registry.py",
+   "index": 54,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "rg -n '\"model\"|\"provider\"|\\bmodel=|\\bprovider=' cli/src/fno/agents/registry.py | head -40",
+   "index": 55,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nrows=d if isinstance(d,list) else d.get('agents',d.get('rows',[]))\nfor r in rows:\n    if 'x-9963' in str(r.get('name','')):\n        print(json.dumps(r,indent=2))\n\"",
+   "index": 56,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "rg -n \"model\" cli/src/fno/agents/registry.py | head -20; echo \"=== x-cf40 ===\"; fno backlog get x-cf40 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['id'],d['status'],d.get('priority'),'|',d['title']); print(d.get('details','')[:600])\" 2>&1",
+   "index": 57,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog get x-cf40 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint('PR:',d.get('pr_number'),'completed:',d.get('completed_at'))\nprint(d.get('details',''))\"",
+   "index": 58,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents truth <handle> 2>&1 | head -25; echo \"=== EXIT $? ===\"",
+   "index": 59,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno agents list 2>&1 | head -12; echo \"=== help ===\"; fno agents truth --help 2>&1 | head -20",
+   "index": 60,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "ls cli/src/fno/agents/providers/ 2>&1; echo \"=== provider_resolve purpose ===\"; sed -n '1,25p' cli/src/fno/agents/provider_resolve.py 2>&1",
+   "index": 61,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "rg -n '\"provider\"|provider=' cli/src/fno/agents/spawn*.py cli/src/fno/agents/cli.py 2>&1 | head -20",
+   "index": 62,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog find \"provider harness naming\" 2>&1 | head -10; echo \"=== axis ===\"; fno backlog find \"axis conflation rename taxonomy\" 2>&1 | head -10; echo \"=== x-880e ===\"; fno backlog get x-880e 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['id'],d['status'],'|',d['title'])\" 2>&1",
+   "index": 63,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog idea \"Four-axis naming is conflated: provider is used for harness and for account, across code, receipts, config, and folder names\" --details \"The four axes AGENTS.md already declares distinct, stated by the operator 2026-08-05:\n\n- harness: the CLI binary. claude code, codex cli, oh-my-pi, openclaw, agy, opencode.\n- provider: an issuer of models. anthropic, openai, zai, deepseek, google/gemini.\n- model: the LLM. opus, gpt-5.6-sol, sonnet, glm-5.2[1m].\n- effort: how much reasoning the model spends. low/medium/high/xhigh/max.\n- account: a login granting access to a harness or provider; carries an API key or OAuth credential.\n\nAGENTS.md warns these 'share one neighbourhood and must not be confused' and notes opencode is legally BOTH a harness and a provider, so the axis can never ",
+   "index": 64,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno backlog update x-9ae8 --dispatch-verb /fno:think 2>&1 | tail -2; echo \"=== verify ===\"; fno backlog get x-9ae8 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('id:',d['id'],'| status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| verb:',d.get('dispatch_verb'),'| plan:',d.get('plan_path','NONE'))\"",
+   "index": 65,
+   "kind": "tool_use"
+  },
+  {
+   "text": "- `cli/src/fno/agents/cli.py:1842,1902,2307` \u2014 literal `provider=harness`",
+   "index": 66,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "- `cli.py:2325` \u2014 `register` emits JSON `provider` = the harness. That's the same misleading key x-cf40 removed from `list`; it survived on `register`",
+   "index": 67,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "- `cli.py:1542` \u2014 the spawn receipt. **This is what burned me an hour ago**: your `-P zai` spawn returned `\"provider\": \"claude\"`, I read it as a fallback, and reported a billing problem that didn't exist",
+   "index": 68,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "- `registry.py:951` \u2014 a migration that writes a row's provider **value** into the harness field, cementing it on disk",
+   "index": 69,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Skill",
+   "target": "skill:fno:think",
+   "index": 70,
+   "kind": "tool_use"
+  },
+  {
+   "text": "| `dispatch` | hand a named node to a bg `/think` carrying THIS conversation's context | you are mid-discussion about an fno node and want a deep think to pick it up off the main thread |",
+   "index": 71,
+   "kind": "user_text"
+  },
+  {
+   "text": "This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's body and follows it in this same context. It never calls another skill at runtime (it dispatches subagents via the Task/Agent tool and loads modes via Read).",
+   "index": 72,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical adaptive design flow: collect one deterministic discovery receipt, scale the reasoning depth to actual risk, explore alternatives, write the mandatory `## Failure Modes` handoff, and save a revie",
+   "index": 73,
+   "kind": "user_text"
+  },
+  {
+   "text": "**`$TARGET_BRIEF` (US3):** when a dispatcher launched this `/think` on a node via `dispatch_verb: /think`, it may set `$TARGET_BRIEF` in the environment - a plain-text brief (capped at 8 KB, carried via env not the command line) with the scope/\"why\" the dispatcher wanted explored. If it is set, fold",
+   "index": 74,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [what-if.md](references/what-if.md) and execute it in full, in this context. That body is the canonical scenario-exploration loop: seed -> decompose into 12 dimensions -> iterate one situation per pass -> classify -> write the two output files. When invoked with the `failure-modes` positional m",
+   "index": 75,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Thin input is fine.** A one-line scope still runs: what-if seeds from whatever it is given and explores the highest-priority dimensions. It never crashes on sparse input - if intent is too vague it gathers context in one batched question first.",
+   "index": 76,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [panel.md](references/panel.md) and execute it in full, in this context. That body is the canonical think-tank flow: assemble a panel of opinionated personas, run independent analysis, debate rounds with a mandatory Devil's Advocate, reach consensus, and write a ranked-recommendation report. Al",
+   "index": 77,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Thin input is fine.** `/think panel \"should we add dark mode\"` (a one-line decision) still convenes the full panel - the flow gathers project context itself and never crashes on a sparse prompt.",
+   "index": 78,
+   "kind": "user_text"
+  },
+  {
+   "text": "You are mid-conversation about an fno-touched node and want a deep `/think` to pick it up off the main thread, carrying THIS conversation as context. One verb hands the node to a fully interactive `claude --bg` `/think` worker that runs beside this thread in its own agents-view row. Codex and Gemini",
+   "index": 79,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "echo \"CODEX_THREAD_ID=[${CODEX_THREAD_ID}]\"; fno backlog get --strict \"x-9ae8\" 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('TITLE:',d['title'])\" ; echo \"exit=$?\"",
+   "index": 80,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cat skills/think/references/think.md",
+   "index": 81,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno think inspect \"x-9ae8\" --json 2>&1 | head -150",
+   "index": 82,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== provider mentions by tree ===\"\nfor d in cli/src crates skills docs hooks scripts agents commands; do\n  n=$(rg -c -i 'provider' -g '!*.log' \"$d\" 2>/dev/null | awk -F: '{s+=$2} END{print s+0}')\n  f=$(rg -l -i 'provider' -g '!*.log' \"$d\" 2>/dev/null | wc -l | tr -d ' ')\n  echo \"$d: $n hits in $f files\"\ndone\necho \"=== registry schema version ===\"\nrg -n \"SCHEMA_VERSION|schema_version *=\" cli/src/fno/agents/registry.py | head -5\necho \"=== rust mirror ===\"\nrg -n \"provider\" crates/fno-agents/src/*.rs 2>/dev/null | head -10",
+   "index": 83,
+   "kind": "tool_use"
+  },
+  {
+   "text": "~7,100 mentions across 300+ files. Found another specimen: `claude_ask.rs:1190` sets env `FNO_AGENT_PROVIDER=\"claude\"` \u2014 a harness value in a provider-named env var, and env vars are a public contract. Mapping the compat boundaries, since those decide whether a pure cutover is even possible.",
+   "index": 84,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== FNO_AGENT_PROVIDER consumers ===\"\nrg -n \"FNO_AGENT_PROVIDER\" -g '!*.log' | head -20\necho\necho \"=== spawn receipt line-parse consumers ===\"\nsed -n '1400,1412p;1536,1546p' cli/src/fno/agents/cli.py",
+   "index": 85,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== config keys naming the axes ===\"\nrg -n \"providers|accounts|model_routing|harness\" cli/src/fno/config/schema*.py cli/src/fno/config/__init__.py 2>/dev/null | rg -i \"class |: *(dict|list|str|Optional)\" | head -25",
+   "index": 86,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; sed -n '780,800p' cli/src/fno/config/__init__.py; echo \"=== ModelProvider ===\"; rg -n \"class ModelProvider\" -A 12 cli/src/fno/config/__init__.py | head -18",
+   "index": 87,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; fno plan path --slug \"four-axis-vocabulary-cutover\" --node \"x-9ae8\" 2>&1; echo \"=== -H flag check ===\"; fno agents spawn --help 2>&1 | rg -n \"harness|provider|model|effort|account\" | head -12",
+   "index": 88,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Write",
+   "target": "~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md",
+   "index": 89,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -10\necho \"=== link ===\"\nfno backlog update x-9ae8 --plan-path ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3\necho \"=== derived status ===\"\nfno backlog get x-9ae8 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| verb:',d.get('dispatch_verb')); print('plan:',d.get('plan_path'))\"",
+   "index": 90,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd ~/c3po/internal/fno/plans; grep -n \"It carries an explicit allowlist\\|a guard that fails CI when an identifier\" 20260805-four-axis-vocabulary-cutover-x-9ae8.md",
+   "index": 91,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Edit",
+   "target": "~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md",
+   "index": 92,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Edit",
+   "target": "~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md",
+   "index": 93,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; fno plan validate ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1 | tail -3",
+   "index": 94,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Resolve one thing first, it's a 2-minute sweep and layer 4 can't be scoped without it: **which in-repo consumers line-parse the spawn receipt's `provider` key?** `cli.py:1404` asserts they exist and names none.",
+   "index": 95,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh pr view 738 --json headRefOid,mergeable,reviewDecision 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('head:',d['headRefOid'][:12],'| mergeable:',d['mergeable'],'| reviewDecision:',d['reviewDecision'])\"; echo \"=== checks ===\"; gh pr checks 738 2>&1 | tail -25",
+   "index": 96,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh pr checks 738 --watch --interval 30 2>&1 | tail -30; echo \"=== WATCH EXIT=$? ===\"",
+   "index": 97,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cat /private/tmp/claude-501/-Users-bb16-code-footnote-footnote/<uuid>/tasks/b748exl9e.output 2>&1 | tail -25",
+   "index": 98,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh pr checks 738 2>&1 | rg -i \"smoke|pending|fail\" ; echo \"=== rollup ===\"; gh pr view 738 --json headRefOid,mergeable,reviewDecision,statusCheckRollup 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('head:',d['headRefOid'][:12],'| mergeable:',d['mergeable'],'| review:',repr(d['reviewDecision']))\nfrom collections import Counter\nc=Counter()\nfor r in d['statusCheckRollup']:\n    st=r.get('conclusion') or r.get('status')\n    c[st]+=1\n    if st not in ('SUCCESS','COMPLETED'): print('  NOT-GREEN:',r['name'],st)\nprint(dict(c))\n\"",
+   "index": 99,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nout=\"$CLAUDE_JOB_DIR/tmp/pr738-watch.txt\"\ngh pr checks 738 --watch --interval 30 > \"$out\" 2>&1\necho \"GH_EXIT=$?\"\ntail -6 \"$out\"",
+   "index": 100,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cat /private/tmp/claude-501/-Users-bb16-code-footnote-footnote/<uuid>/tasks/b94e9zgfm.output 2>&1 | tail -8",
+   "index": 101,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ngh pr view 738 --json statusCheckRollup,mergeable,reviewDecision 2>&1 | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nprint('rollup:',dict(c),'| mergeable:',d['mergeable'],'| review:',repr(d['reviewDecision']))\nfor r in d['statusCheckRollup']:\n    s=r.get('conclusion') or r.get('status')\n    if s!='SUCCESS': print('  NOT-GREEN:',r['name'],s)\n\"\necho \"=== files changed since my ruling ===\"\ngh pr diff 738 --name-only 2>&1 | tail -15",
+   "index": 102,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh api repos/bllshttng/footnote/contents/scripts/ci/company-boundary-baseline.txt?ref=00a2de1950fb78728e357988cd449fd59aaf33d8 --jq '.content' 2>&1 | base64 -d 2>&1 | head -30",
+   "index": 103,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== config.review ===\"; fno config get review 2>&1 | head -20\necho \"=== what satisfies the gate ===\"; rg -n \"peer|declare|code-review\" scripts/*attestation* skills/review/scripts/*attest* 2>/dev/null | head -20\necho \"=== attestation kinds ===\"; find . -name \"emit-attestation*\" -not -path \"*/worktrees/*\" 2>/dev/null | head -3",
+   "index": 104,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== attestation kinds accepted ===\"; rg -n \"^\\s*(peer|declare|sigma|code-review)\\)|KIND|kind=\" skills/review/scripts/emit-attestation.sh | head -20\necho \"=== who demands peer? ===\"; rg -rn \"peers\" --glob '!*.log' crates/fno-agents/src/loopcheck.rs cli/src/fno/ 2>/dev/null | rg -v test | head -12",
+   "index": 105,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== emit-attestation usage ===\"; rg -n \"usage|Usage|KINDS|valid kind|peer|declare\" skills/review/scripts/emit-attestation.sh | head -25",
+   "index": 106,
+   "kind": "tool_use"
+  },
+  {
+   "text": "emit-attestation.sh:14  a built-in (sigma | peer | code-review | declare)",
+   "index": 107,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== peer: spawn or headless? ===\"\nrg -n \"substrate|headless|spawn\" skills/review/references/peer*.md skills/review/SKILL.md 2>/dev/null | rg -i \"headless|substrate|spawn\" | head -12",
+   "index": 108,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; rg -n \"AC1[1-5]\" ~/c3po/internal/fno/plans/20260802-guards-resolve-object-not-session.md 2>/dev/null | head -20",
+   "index": 109,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**On peer: your hedge was right, it's headless.** `peer.md:218` \u2192 `fno agents spawn --harness \"$PROVIDER\" --headless -t 300`, a synchronous create/exchange/teardown one-shot. Not a persistent lane.",
+   "index": 110,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "fno mail send <handle> \"DESIGN INPUT for AC11, from the operator, load-bearing. Read before implementing 'harness-native review is the default'.\n\nTHE TRAP: an in-session agent CANNOT invoke a harness's native review command. '/code-review' is a Claude Code BUILT-IN, not a footnote skill. Claude Code's own operating instructions state it is user-triggered and billed, that the agent cannot launch it itself, and specifically that it must not be attempted via Bash. It does not appear in an agent's invocable skill list, while '/fno:review' does. Assume codex '/review' is the same class: a harness built-in typed by a human, not something a running session can call.\n\nSo AC11-HP ('the harness's own native review runs') is NOT implementable as a call the review phase makes. If you implement it as o",
+   "index": 111,
+   "kind": "tool_use"
+  },
+  {
+   "text": "3. **Accept an after-the-fact attestation.** `declare` is already a first-class kind (`emit-attestation.sh:14`). Constrained by your own rule: attesting a review that didn't run is self-certification.",
+   "index": 112,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== node ===\"; fno backlog get x-8a12 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint('id:',d['id'],'status:',d['status'],'pr:',d.get('pr_number'))\nprint('title:',d['title'])\nfor s in d.get('sessions',[]): print('  session:',s)\nprint('source_harness:',d.get('source_harness'),'| source_session:',d.get('source_session_id'))\n\"\necho \"=== claim ===\"; fno claim status node:x-8a12 2>&1 | head -10",
+   "index": 113,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh pr view 739 --json number,title,headRefOid,updatedAt,author,mergeable,statusCheckRollup 2>&1 | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nprint('PR',d['number'],'|',d['title'])\nprint('head:',d['headRefOid'][:12],'| updated:',d['updatedAt'],'| author:',d['author']['login'],'| mergeable:',d['mergeable'])\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nprint('checks:',dict(c))\nfor r in d['statusCheckRollup']:\n    s=r.get('conclusion') or r.get('status')\n    if s!='SUCCESS': print('  NOT-GREEN:',r['name'],s)\n\"",
+   "index": 114,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== claim expiry ===\"; python3 -c \"\nimport datetime\nprint('expired at:', datetime.datetime.fromtimestamp(1785899536241/1000))\nprint('now       :', datetime.datetime.now())\n\"\necho \"=== pid 19452 alive? ===\"; ps -p 19452 -o pid,etime,command 2>&1 | head -3\necho \"=== holder session transcript (authoritative) ===\"\nfind ~/.claude/projects -name \"<handle>*.jsonl\" -maxdepth 3 2>/dev/null | head -3 | while read f; do\n  echo \"$f\"; python3 -c \"\nimport os,sys,datetime\np='$f'\nprint('  mtime:', datetime.datetime.fromtimestamp(os.path.getmtime(p)))\n\"\ndone\necho \"=== any live agent on x-8a12? ===\"; fno agents top 2>&1 | rg -i \"8a12|<handle>\" || echo \"  none\"",
+   "index": 115,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== x-0eaf ===\"; fno backlog get x-0eaf 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint(d['id'],d['status'],d['priority'],'| created:',d.get('created_at'))\nprint(d.get('details','')[:900])\"\necho\necho \"=== does the gate detect quota-exhaustion text? ===\"\nrg -rn \"usage limit|quota|reached your|rate limit\" crates/fno-agents/src/loopcheck.rs cli/src/fno/ --glob '!*test*' 2>/dev/null | head -8 || echo \"  NO detection found\"",
+   "index": 116,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; grep -n \"usage_markers\" crates/fno-agents/src/loopcheck.rs | head",
+   "index": 117,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Read",
+   "target": "crates/fno-agents/src/loopcheck.rs",
+   "index": 118,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Read",
+   "target": "crates/fno-agents/src/loopcheck.rs",
+   "index": 119,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Definitive, and it's the opposite of fixed. `loopcheck.rs:2549-2562`:",
+   "index": 120,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; grep -n \"optional_apps\" crates/fno-agents/src/loopcheck.rs | head -12",
+   "index": 121,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Read",
+   "target": "crates/fno-agents/src/loopcheck.rs",
+   "index": 122,
+   "kind": "tool_use"
+  },
+  {
+   "text": "| `optional_apps` | `[\"chatgpt-codex-connector\"]` | *\"absence never blocks\"* (`loopcheck.rs:2494-2496`) |",
+   "index": 123,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-0eaf --details \"PR #716 (+2216/-0 of new core, cli/src/fno/company/*) merged 2026-08-03T20:37Z with reviewCount=0. The only bot output was chatgpt-codex-connector at 20:04: 'You have reached your Codex usage limits for code reviews.' The gate saw a comment from a required bot with no blocking finding and greened.\n\nThis is NOT the x-f226 / x-1951 failure (auto-merge racing ahead of the reviewer). The reviewer DID respond in time. The defect is that a refusal-to-review is indistinguishable from a clean review at the gate: 'bot commented, no blocking finding' is the wrong predicate.\n\nVERIFIED IN CODE 2026-08-05 (this is not inference; read the cited lines):\n\n1. The quota markers already exist and are wired to PASS the gate, not block ",
+   "index": 124,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Skill",
+   "target": "skill:fno:think",
+   "index": 125,
+   "kind": "tool_use"
+  },
+  {
+   "text": "| `dispatch` | hand a named node to a bg `/think` carrying THIS conversation's context | you are mid-discussion about an fno node and want a deep think to pick it up off the main thread |",
+   "index": 126,
+   "kind": "user_text"
+  },
+  {
+   "text": "This is a **router**, not a monolith. It parses the first argument as a mode, announces the resolved mode, then loads that mode's body and follows it in this same context. It never calls another skill at runtime (it dispatches subagents via the Task/Agent tool and loads modes via Read).",
+   "index": 127,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [think.md](references/think.md) and execute it in full, in this context. That body is the canonical adaptive design flow: collect one deterministic discovery receipt, scale the reasoning depth to actual risk, explore alternatives, write the mandatory `## Failure Modes` handoff, and save a revie",
+   "index": 128,
+   "kind": "user_text"
+  },
+  {
+   "text": "**`$TARGET_BRIEF` (US3):** when a dispatcher launched this `/think` on a node via `dispatch_verb: /think`, it may set `$TARGET_BRIEF` in the environment - a plain-text brief (capped at 8 KB, carried via env not the command line) with the scope/\"why\" the dispatcher wanted explored. If it is set, fold",
+   "index": 129,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [what-if.md](references/what-if.md) and execute it in full, in this context. That body is the canonical scenario-exploration loop: seed -> decompose into 12 dimensions -> iterate one situation per pass -> classify -> write the two output files. When invoked with the `failure-modes` positional m",
+   "index": 130,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Thin input is fine.** A one-line scope still runs: what-if seeds from whatever it is given and explores the highest-priority dimensions. It never crashes on sparse input - if intent is too vague it gathers context in one batched question first.",
+   "index": 131,
+   "kind": "user_text"
+  },
+  {
+   "text": "Load [panel.md](references/panel.md) and execute it in full, in this context. That body is the canonical think-tank flow: assemble a panel of opinionated personas, run independent analysis, debate rounds with a mandatory Devil's Advocate, reach consensus, and write a ranked-recommendation report. Al",
+   "index": 132,
+   "kind": "user_text"
+  },
+  {
+   "text": "**Thin input is fine.** `/think panel \"should we add dark mode\"` (a one-line decision) still convenes the full panel - the flow gathers project context itself and never crashes on a sparse prompt.",
+   "index": 133,
+   "kind": "user_text"
+  },
+  {
+   "text": "You are mid-conversation about an fno-touched node and want a deep `/think` to pick it up off the main thread, carrying THIS conversation as context. One verb hands the node to a fully interactive `claude --bg` `/think` worker that runs beside this thread in its own agents-view row. Codex and Gemini",
+   "index": 134,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; fno think inspect \"x-0eaf\" --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin)\nprint('complete:',d['complete'],'| warnings:',d.get('warnings'))\nr=d['repository']; print('branch:',r['branch'],'head:',r['head'][:12],'dirty:',len(r['dirty_paths']))\ng=d['graph']\nprint('resolved:',g['resolved']['id'],g['resolved']['status'])\nprint('DUPLICATES:')\nfor x in g.get('duplicates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:80],'| pr',x.get('pr_number'),x.get('merge_status'))\nprint('EPIC CANDIDATES:')\nfor x in g.get('epic_candidates',[]): print('  ',x['id'],x['status'],round(x['score'],3),x['title'][:70])\nprint('PRs:',d['pull_requests']['status'],d['pull_requests']['matches'])\nprint('db:',d['database']['schema_status'])\n\"",
+   "index": 135,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail reply --to msg-b2fad8 \"Resolution accepted - advisory self-review is the right default, and your path enumeration and the peer-wedge separation are both correct calls. File the peer wedge as its own node; do not fold it in.\n\nONE CORRECTION, and it is load-bearing for your safety argument. You wrote: 'It is advisory only - it never gates <promise>; the world still does (PR + CI + required_bots).'\n\nThat premise is FALSE on this operator's live config, verified in code today:\n- config.review.required_bots = null. There is no required-bot gate at all.\n- config.review.reviewers = []. No attestation gate.\n- config.review.optional_apps = ['chatgpt-codex-connector'], and loopcheck.rs:2494-2496 defines optional apps as 'honored-if-present but never req",
+   "index": 136,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== python-side gate? ===\"; rg -ln \"required_bots\" cli/src/fno/ --glob '!*test*' | head -6\necho \"=== where all_required_passed is consumed ===\"; grep -n \"all_required_passed\\|usage_limited\" crates/fno-agents/src/loopcheck.rs | head -12",
+   "index": 137,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail reply --to msg-b2fad8 \"Resolution accepted - advisory self-review is the right default, and your path enumeration and the peer-wedge separation are both correct calls. File the peer wedge as its own node; do not fold it in.\n\nONE CORRECTION, load-bearing for your safety argument. You wrote: 'It is advisory only - it never gates <promise>; the world still does (PR + CI + required_bots).'\n\nThat premise is FALSE on this operator's live config, verified in code today:\n- config.review.required_bots = null. No required-bot gate at all.\n- config.review.reviewers = []. No attestation gate.\n- config.review.optional_apps = ['chatgpt-codex-connector'], and loopcheck.rs:2494-2496 defines optional apps as 'honored-if-present but never required. Their blocki",
+   "index": 138,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Read",
+   "target": "crates/fno-agents/src/loopcheck.rs",
+   "index": 139,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno plan path --slug \"review-coverage-vs-objection\" --node \"x-0eaf\" 2>&1\necho \"=== did the reply deliver? ===\"\nfno mail reply --to msg-b2fad8 \"(delivery check, ignore) prior reply on the AC11 premise correction stands.\" 2>&1 | grep -Ei \"deliver|queue|hosted|woken\" | head -3",
+   "index": 140,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; fno mail reply --help 2>&1 | head -30",
+   "index": 141,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"RESEND - my previous reply to your AC11 message errored at the CLI and never reached you. Treat this as the first delivery.\n\nResolution ACCEPTED. Advisory self-review is the right default; your path enumeration is correct; and your call to separate the peer wedge into its own node rather than folding it into this PR is right. Do not touch peer's substrate.\n\nONE CORRECTION, load-bearing for your safety argument. You wrote: 'It is advisory only - it never gates <promise>; the world still does (PR + CI + required_bots).'\n\nThat premise is FALSE on this operator's live config, verified in code today:\n- config.review.required_bots = null. No required-bot gate at all.\n- config.review.reviewers = []. No attestation gate.\n- config.review",
+   "index": 142,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Write",
+   "target": "~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md",
+   "index": 143,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -3\nfno backlog update x-0eaf --plan-path ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md 2>&1 | tail -2\nfno backlog get x-0eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| p:',d['priority'],'| size:',d.get('size'))\"",
+   "index": 144,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-0eaf --size L 2>&1 | tail -2\nfno backlog get x-0eaf 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('x-0eaf |',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| plan linked:',bool(d.get('plan_path')))\"",
+   "index": 145,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"EMPIRICAL TEST, requested by the operator. This tests a claim I made to you earlier, and my claim may be WRONG. Do not reason from my earlier message - actually attempt this and report the literal outcome.\n\nTASK: run this, exactly as written, against your current working diff:\n\n  /code-review medium --fix\n\nATTEMPT IT FOR REAL. Do not decide in advance whether it will work. Do not substitute /fno:review, the fno:code-reviewer agent, or any other verb. Do not shell out to a Bash approximation. If your harness offers /code-review as an invocable command, invoke it.\n\nREPORT BACK, verbatim and specific, whichever happened:\n- If it RAN: say so, and give the literal first ~10 lines of what came back, how you invoked it (Skill tool? typ",
+   "index": 146,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"MY CLAIM WAS WRONG. Good test, and thank you for running it straight instead of agreeing with me. The correction, precisely: the constraint I carried is real but scoped to '/code-review ultra' (the billed multi-agent cloud review), and I generalized it to all of /code-review. The plain variant resolves through the Skill tool. Your result stands.\n\nMY CALL: HOLD. Do not rework AC11 toward shape 2 yet, and keep holding the push. Not because I doubt your result - because you proved INVOCATION, and AC11 needs OUTPUT. Those are different claims and the gap between them is exactly the decorative-guard pitfall we already agreed governs this AC.\n\nWhat you have so far is a launch receipt: 'Skill launched (forked execution, running in the ",
+   "index": 147,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd ~/c3po/internal/fno/plans; grep -n \"cannot invoke by any route\" 20260805-review-coverage-vs-objection-x-0eaf.md",
+   "index": 148,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Edit",
+   "target": "~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md",
+   "index": 149,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'EOF'\np='~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md'\ns=open(p).read()\nold=\"- `gemini-code-assist` ships with empty `usage_markers` (`loopcheck.rs:2017`), so its refusal shape is uncharacterized. Its quota behavior is unknown, not known-absent.\"\nnew=old+\"\\n- Whether harness-native `/code-review` can be *consumed* by a gating pipeline step is unestablished. Invocation was measured; completion, findings, `--fix` application, synchronous consumption, and behavior of its background fork on a headless one-shot substrate were not. This is being tested under x-9963 and its result may add a review lane this design currently treats as unavailable.\"\nassert old in s, \"anchor missing\"\nopen(p,'w').write(s.replace(",
+   "index": 150,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Edit",
+   "target": "~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md",
+   "index": 151,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"TEST INVALIDATED - my experimental design was broken, not your execution. Disregard my previous 'MY CLAIM WAS WRONG' message as a conclusion; its HOLD instruction still stands and now stands harder.\n\nWHY IT WAS INVALID, from the operator: 'fno mail send' injects its payload directly into the recipient pane's TEXT INPUT BOX, as though the operator typed it. So my instruction reached you as USER-SHAPED TEXT. /code-review is user-triggered. You were given a user-shaped trigger and you acted on it correctly.\n\nWhat the test therefore demonstrated is 'the operator asks for a code review, and it runs.' Nobody disputed that. It says nothing about the case AC11 actually needs: a PIPELINE STEP invoking review autonomously, mid-run, with n",
+   "index": 152,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; grep -c \"^### \" <(sed -n '/## Pitfalls corpus/,/## Repository/p' AGENTS.md) 2>&1; echo \"--- cap gate ---\"; ls scripts/ci/check-pitfalls.sh 2>&1",
+   "index": 153,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; sed -n '/## Pitfalls corpus/,/## Repository/p' AGENTS.md | grep -n \"^### \" | cat",
+   "index": 154,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"NEW INFORMATION FROM THE OPERATOR - this is not another reversal of my reasoning, it is a mechanism I did not know. It likely CHANGES your AC11 design, so read before you push if you have not already.\n\nTHE MECHANISM: 'fno mail send' injects into the recipient pane's TEXT INPUT as user-shaped text. I framed that as the flaw that invalidated my test. The operator's point is that it is also a CAPABILITY: a user-triggered harness command can be triggered by mail, because mail is user-shaped by construction. The pipeline cannot self-trigger /code-review. A KING CAN, on the worker's behalf, and the review then launches inside the WORKER'S OWN HARNESS.\n\nTHE PATTERN the operator wants encoded:\n1. A worker reaches the point in its PR whe",
+   "index": 155,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**This needs a live king.** A worker with no king \u2014 or one whose king abdicated, which is the *default* for a pass-shape reign like the one I ran this morning \u2014 has no trigger source and falls back to advisory self-review. Documenting it as though the king is always there would be the same over-claim I made twice today.",
+   "index": 156,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "Worth thinking about separately: that makes court mode load-bearing for review in a way it wasn't before. A pass abdicates at kickoff, so every worker it spawned is review-orphaned by construction.",
+   "index": 157,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "yes very true. we should never abdicate without handing it off, this is why it's crucial for you to be aware of your context used. Let's test, how much context have you used?",
+   "index": 158,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== context probe mechanisms ===\"; rg -ln \"context_probe|used_pct|context_pct\" --glob '!*.log' hooks/ scripts/ cli/src/fno/ skills/ 2>/dev/null | head -10\necho \"=== any fno verb? ===\"; fno help --all 2>&1 | rg -i \"context\" | head -5",
+   "index": 159,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; rg -n \"context_probe|used_pct\" hooks/arm-handoff-precompact.sh skills/king-for-a-day/references/minion-clause.md 2>/dev/null | head -15",
+   "index": 160,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; sed -n '50,66p' hooks/arm-handoff-precompact.sh",
+   "index": 161,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nT=\"$HOME/.claude/projects/-Users-bb16-code-footnote-footnote/<uuid>.jsonl\"\nls -la \"$T\" 2>&1 | tail -1\necho \"=== probe ===\"\nbash skills/target/scripts/context-probe.sh \"$T\" 2>&1; echo \"EXIT=$?\"",
+   "index": 162,
+   "kind": "tool_use"
+  },
+  {
+   "text": "I ran a **pass-shape** reign this morning: encoded the wave, kicked off, abdicated. Two workers are still alive right now \u2014 `<handle>` (x-2388) and `<handle>` (x-9963) \u2014 and by the pattern we just designed, both need a king to trigger their review. I abdicated at kickoff, so I orphaned them by construction, then spent the rest of the session informally acting as their king anyway.",
+   "index": 163,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "That's the hole: **the pass shape and the king-mediated review pattern are incompatible.** A pass is gone before any worker reaches its review point. Either the review trigger has to survive abdication, or a reign that spawns workers can't be a pass.",
+   "index": 164,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"SECOND DOCTRINE for the same docs commit - same files you are already editing (skills/king-for-a-day/SKILL.md, references/minion-clause.md, AGENTS.md), so fold it in rather than filing separately. Operator-directed.\n\nPART A - A KING MUST WATCH ITS OWN CONTEXT, AND THE PROBE MUST BE NAMED.\n\nToday the skill tells a king to read a TEAMMATE's 'context: NN% used' and decide handoff, but says nothing about the king's own. I hit this live: asked my usage, I had no introspection, and had to reverse-engineer the probe out of hooks/arm-handoff-precompact.sh:59. That is the behavior-lives-only-in-prose trap - a capability that exists but is not discoverable from the skill that needs it.\n\nWrite the probe into the skill EXPLICITLY, by path a",
+   "index": 165,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== is the owner_pid gate still there? (pitfalls corpus says it never fired once) ===\"\nrg -n \"kill -0|owner_pid\" hooks/arm-handoff-precompact.sh | head -8\necho\necho \"=== what hook event does it register on? ===\"\nrg -n \"PreCompact|SessionStart|Stop\" .claude-plugin/*.json hooks/*.json 2>/dev/null | head -10\nls hooks/*.sh 2>/dev/null | head -20",
+   "index": 166,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== context-observe-hook: what does it do, on what event? ===\"\nsed -n '1,22p' hooks/context-observe-hook.sh\necho \"=== registered where? ===\"\nrg -n \"context-observe|arm-handoff\" hooks/hooks.json | head",
+   "index": 167,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog find \"king context handoff hook\" 2>&1 | head -6; echo \"--- handoff trigger ---\"; fno backlog find \"handoff used_pct trigger context\" 2>&1 | head -6",
+   "index": 168,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog get x-7685 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint(d['id'],d['status'],d.get('priority'),d.get('size'),'| plan:',d.get('plan_path','NONE'))\nprint(d.get('details','')[:1400])\"",
+   "index": 169,
+   "kind": "tool_use"
+  },
+  {
+   "text": "x-7685's details are already sharp, and they name the exact artifact I tripped on: `docs/architecture/target-self-handoff.md:50` still says *\"The LLM never calls it directly.\"* That's why I had to dig it out of a hook. Extending that node rather than filing beside it.",
+   "index": 170,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "ls -la ~/c3po/internal/claude/docs/code/hooks*.md ~/c3po/internal/codex/docs/hooks.md 2>&1",
+   "index": 171,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -nE \"^#{1,3} \" ~/c3po/internal/claude/docs/code/hooks.md 2>&1 | head -40",
+   "index": 172,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "sed -n '26,80p' \"$(ls -t ~/Library/Application\\ Support/rtk/tee/*hooks_md.log | head -1)\" 2>&1",
+   "index": 173,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -nE \"^### \" ~/c3po/internal/claude/docs/code/hooks.md 2>/dev/null | sed -n '10,45p'",
+   "index": 174,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -E \"^### \" ~/c3po/internal/claude/docs/code/hooks.md 2>/dev/null | tail -32 | cat -n",
+   "index": 175,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "grep -E \"^### \" ~/c3po/internal/claude/docs/code/hooks.md > \"$CLAUDE_JOB_DIR/tmp/hookevents.txt\" 2>/dev/null; wc -l < \"$CLAUDE_JOB_DIR/tmp/hookevents.txt\"; tail -32 \"$CLAUDE_JOB_DIR/tmp/hookevents.txt\"",
+   "index": 176,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-7685 --priority p1 --details \"CORRECTED 2026-08-04 after operator review. There are TWO distinct usage axes, both already measured by footnote, both already consumed by automation, and NEITHER visible to the agent. That is the pattern: footnote tells its machinery and never tells the model.\n\nAXIS 1 - SESSION CONTEXT WINDOW. 'How full is my window; should I hand off?' Measured by skills/target/scripts/context-probe.sh, which reads the transcript JSONL and emits used_tokens, window_tokens, used_pct, model. Owned by node x-cbf1 (DONE, PR #726). x-cbf1 fixed the MEASUREMENT and explicitly disclaims fixing the surfacing symptom. After #726 merged, docs/architecture/target-self-handoff.md line 50 still reads 'The LLM never calls it direc",
+   "index": 177,
+   "kind": "tool_use"
+  },
+  {
+   "text": "1. **The live specimen** \u2014 this session, end to end: king asked for its own usage, had no introspection, found the probe only by reading `arm-handoff-precompact.sh:59`, hand-resolved its transcript path, ran the script. Correct number, reachable only by reverse-engineering a hook.",
+   "index": 178,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "The king-mediated review pattern **requires** a live king when the worker reaches review. A pass abdicates at kickoff, before any worker gets there. So \"never abdicate without handing off\" depends on the king seeing its own context in time to hand off \u2014 which makes this node a *prerequisite* for the pattern we just designed, not a convenience.",
+   "index": 179,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents spawn --name think-x-7685 \"/think x-7685\n\nREAD THE NODE FIRST. Its details were rewritten 2026-08-05 with a live specimen, a placement finding, and a king-specific requirement. Everything below is context the node already carries or the operator decided in conversation - do not re-derive it.\n\nOPERATOR HAS ALREADY DECIDED THE SURFACE. Do not re-open it, do not run a comparison of alternatives on it: context usage goes on 'fno whoami'. No new verb. Rationale, so you can defend it rather than relitigate it: whoami is already the prescribed orientation verb (skills/king-for-a-day/SKILL.md tells a king to run it after compaction; skills/using-fno/SKILL.md lists it for 'what state am I in after compaction'), it already prints project/run/mail/harn",
+   "index": 180,
+   "kind": "tool_use"
+  },
+  {
+   "text": "SCOPE CALL (you asked me to choose): Part A (king's own context probe + 40% threshold) and Part B (pass/court incompatibility, crown-handoff duty, recovery-story fix) filed as x-f605, p1, out of this node's AC11-15 scope. I kept the review-request duty + the no-king self-review fallback in the PR be",
+   "index": 181,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== filed nodes ===\"\nfor n in x-f605 x-0322; do fno backlog get $n 2>&1 | python3 -c \"\nimport json,sys\ntry:\n  d=json.load(sys.stdin); print(' ',d['id'],d['status'],d.get('priority'),'|',d['title'][:75])\nexcept: print('  $n NOT FOUND')\"; done\necho \"=== pitfalls count (cap 10) ===\"\ngit fetch origin feature/x-9963 -q 2>/dev/null\ngit show origin/feature/x-9963:AGENTS.md 2>/dev/null | sed -n '/## Pitfalls corpus/,/## Repository/p' | grep -c \"^### \" || echo \"branch not fetched\"",
+   "index": 182,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; git branch -a --list \"*9963*\" 2>&1; echo \"=== commits on branch ===\"; git log --oneline origin/feature/x-9963 2>/dev/null | head -10 || echo \"no remote branch yet (unpushed)\"",
+   "index": 183,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nW=$(git worktree list 2>/dev/null | grep 9963 | awk '{print $1}')\necho \"worktree: $W\"\n[ -n \"$W\" ] && { echo \"=== commits ===\"; git -C \"$W\" log --oneline -8 2>&1; echo \"=== pitfalls entries (cap 10) ===\"; sed -n '/## Pitfalls corpus/,/## Repository/p' \"$W/AGENTS.md\" 2>/dev/null | grep \"^### \" | cat -n; }",
+   "index": 184,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"Verified your report independently before replying: x-f605 and x-0322 both exist and are p1, all 8 commits are on the branch, and the pitfalls entry is present at 5 of 10. Everything you reported is true. Good work, and the scope call was the right one - I would have made the same split.\n\nONE OVER-CLAIM TO FIX IN PROSE, and it is the same error I made an hour ago, just pointed the other way. You wrote: 'the autonomous-consumption question is now answered by king-mediation.'\n\nYour datum answers MORE than you claimed in one respect and LESS in another.\n\nMore: the backgrounded fork genuinely completed and returned - 8 findings, --fix applied, and you verified the tree with git diff --stat rather than trusting the skill's own claim.",
+   "index": 185,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Nine points under the 40% line I just had written into x-f605. I'm not near a wall, but I'm also the largest live instance of the problem that node describes \u2014 three workers, me as their informal king, no successor named. If you want any of them to have a king after this session ends, that's a crown handoff, and it's easier to do now than at 45%.",
+   "index": 186,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== where attended is DEFINED/SET ===\"\nrg -n \"attended\" cli/src/fno/ crates/ --glob '!*test*' 2>/dev/null | rg -i \"=|def |bool|field|attended:\" | head -20",
+   "index": 187,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== python side: who writes attended ===\"\nrg -rn \"attended\" cli/src/fno/ --glob '!*test*' 2>/dev/null | head -20",
+   "index": 188,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; grep -n \"TARGET_UNATTENDED\\|Change D\" cli/src/fno/target_cli.py | head",
+   "index": 189,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Read",
+   "target": "cli/src/fno/target_cli.py",
+   "index": 190,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "env | grep -E \"^(FNO_AGENT_SELF|FNO_BG|TARGET_UNATTENDED|CLAUDE_.*BG)\" 2>&1 || echo \"(none of the attended markers set)\"",
+   "index": 191,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Three rungs, in `cli/src/fno/target_cli.py:1316-1326`:",
+   "index": 192,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "3. **Absent from the manifest \u2192 `true`** (`loopcheck.rs:62,85,128`).",
+   "index": 193,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "It drives three things: budget caps (`budget.attended.*` vs `budget.unattended.*`), backstop count (5 attended / 3 unattended, `loopcheck.rs:3770`), and offer surfacing \u2014 attended gets `[Y/n]` prompts, unattended gets non-blocking lines so a detached session doesn't hang.",
+   "index": 194,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "Filed nodes (out of scope): x-0322 (peer-gate wedge), x-f605 (king doctrine: own-context probe at 40% + pass/court incompatibility). Watching PR #740 CI now.",
+   "index": 195,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ngh pr view 740 --json number,title,isDraft,mergeable,state,statusCheckRollup 2>&1 | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nprint('PR',d['number'],'|',d['title'],'| draft:',d['isDraft'],'| state:',d['state'],'| mergeable:',d['mergeable'])\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nprint('checks:',dict(c))\nfor r in d['statusCheckRollup']:\n    s=r.get('conclusion') or r.get('status')\n    if s not in ('SUCCESS','SKIPPED'): print('  ',r['name'],s)\n\"",
+   "index": 196,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nRUN=$(gh pr checks 740 2>&1 | grep preamble | grep -oE 'runs/[0-9]+/job/[0-9]+' | head -1)\necho \"job: $RUN\"\ngh run view --log-failed --job \"$(echo $RUN | grep -oE '[0-9]+$')\" 2>&1 | tail -25",
+   "index": 197,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"PR #740 verified open, ready-not-draft, 15 checks green. But CI has a FAILURE your preflight did not surface, and it is caused by this diff - not environmental:\n\n  check-preamble-budget: 40574 / 37415 bytes, 3159 over (~790 tok/turn)\n    25100  AGENTS.md\n     7480  skills/using-fno/SKILL.md  [shipped to every consumer]\n     6725  .claude/rules/worktrees.md\n\nThis is the doctrine I told you to encode. AGENTS.md and using-fno are the METERED surfaces - every byte is re-read on every turn of every session on every lane - and I directed additions to both without checking the budget first. So treat the trade decision as shared, not as your defect to absorb quietly.\n\nThe gate names three fixes in preference order. My call on them:\n\n1. ",
+   "index": 198,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== does x-7368 exist? ===\"\nfno backlog get x-7368 2>&1 | head -3\necho \"=== peek <handle> (did it land anyway?) ===\"\nfno agents peek <handle> --lines 6 2>&1 | tail -8",
+   "index": 199,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"URGENT, read before you finish trimming. You found check-preamble-budget yourself - good - and you wrote 'I'll trim aggressively first.' That is the exact risk. Guidance:\n\n1. THE TRADE IS SHARED, NOT YOUR DEFECT. I directed additions to AGENTS.md and using-fno without checking the budget. Do not absorb the cost by mutilating your own entry.\n\n2. DO NOT SHAVE BELOW TEACHING VALUE. A pitfall too compressed to act on is worse than absent. AGENTS.md's own rule: an entry too large for its budget GRADUATES TO A LINT, it does not get shrunk into uselessness. If the mail-probe trap cannot fit while still teaching, say so and we make it a lint instead of a corpus entry.\n\n3. PREFER TRADING AGAINST EXISTING TEXT over cutting yours. If somet",
+   "index": 200,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; fno backlog supersede --help 2>&1 | head -20",
+   "index": 201,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog get x-f605 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d.get('details','')[:2500])\"",
+   "index": 202,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== FOLDED IN FROM x-f605 (operator decision 2026-08-05): PART B, THE REIGN-SHAPE HALF ===\n\nPart A of x-f605 (a king watches its own context, hands off at 40%, probe named explicitly in the skill) is the king-scoped application of AXIS 1 above and is already covered by this node's recommended fix. Part B is a distinct deliverable that travels with it and must not be dropped in the fold.\n\nTHE PASS SHAPE AND KING-MEDIATED REVIEW ARE INCOMPATIBLE. Specimen: the operator's own session 2026-08-05 ran a pass over epic x-d7e4, abdicated at kickoff exactly as skills/king-for-a-day/SK",
+   "index": 203,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"SCOPE CHANGE on x-7685, operator decision. Re-read the node details - I extended them after you started, and there is a new section at the end marked 'FOLDED IN FROM x-f605'.\n\nWHAT CHANGED: node x-f605 has been superseded INTO x-7685. Its Part A (a king watches its own context, hands off at 40 percent, probe named explicitly in the skill) was already in your brief. Its PART B is NEW to your scope and is now an explicit deliverable, not the background rationale I gave you at spawn.\n\nPART B, restated so you do not have to reconstruct it: the pass reign shape and king-mediated review are INCOMPATIBLE. A pass abdicates at kickoff; a worker reaches its review point later and mails a king that is already gone. So the rule to design to",
+   "index": 204,
+   "kind": "tool_use"
+  },
+  {
+   "text": "SECOND: Part B is enforced by hook, not only doctrine. Registry rows carry spawned_by_session (registry.py:234), so the same Stop hook that reads the crown for the context nudge enumerates live children at the same boundary and blocks with the three resolutions named. Skill prose only reaches a sess",
+   "index": 205,
+   "kind": "user_text"
+  },
+  {
+   "text": "ALSO: your Part A asked for the probe named in the skill by path + output shape. Design DECLINES that specific instruction and says why: naming skills/target/scripts/context-probe.sh in king-for-a-day re-encodes the exact bundle-local claude-shaped coupling the placement fix removes. Skill names 'fn",
+   "index": 206,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== _scope_is_subset (claimed cli.py:409) ===\"\nsed -n '400,420p' cli/src/fno/agents/cli.py\necho \"=== one-live-crown gate (claimed cli.py:493) ===\"\nsed -n '488,500p' cli/src/fno/agents/cli.py",
+   "index": 207,
+   "kind": "tool_use"
+  },
+  {
+   "text": "# cli/src/fno/agents/cli.py:408",
+   "index": 208,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "#  docstring: \"a same-scope grant would be a peer crown,",
+   "index": 209,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "#   already refused by the one-live-crown-per-scope rule\"",
+   "index": 210,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "# cli/src/fno/agents/cli.py:494",
+   "index": 211,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno plan validate ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1 | tail -2\nfno backlog get x-7685 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('x-7685 |',d['status'],'| p:',d['priority'],'| size:',d.get('size'),'| plan:',(d.get('plan_path') or 'NONE').split('/')[-1])\"\ngrep -c \"^## \\|^\\*\\*US\\|^\\*\\*AC\" ~/c3po/internal/fno/plans/20260805-agent-context-self-introspection-x-7685.md 2>&1",
+   "index": 212,
+   "kind": "tool_use"
+  },
+  {
+   "text": "1. **Falsified the claim instead of building on it.** I asserted succession existed; it read the code and found two independent refusals. Both gates are correct *for a grant* \u2014 the gap is that succession is a **transfer** and no transfer verb exists. Its fix (`crown --succeed`, atomic, level inherited not +1, gate narrowed to \"any live crown other than the caller's own\") is minimal, and **AC11 pin",
+   "index": 213,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "3. **Moved Part B from doctrine to enforcement.** Registry rows already carry `spawned_by_session`, so the same Stop hook that reads the crown enumerates live children at the same boundary and blocks. Its reasoning is the thing that convinces me: *\"Skill prose only reaches a session that still has the skill loaded; the specimen king was long past that.\"* That specimen is me. Prose in a skill would",
+   "index": 214,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "It also flagged that resolution (3) needs a **structured scope field** on the carveout record (`core.py:80-91` has none) rather than substring-matching a description \u2014 as an open question, not hand-waved.",
+   "index": 215,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ngh pr checks 740 2>&1 | rg -i \"preamble|fail|pending\" | head -6\necho \"=== x-1d48 ===\"; fno backlog get x-1d48 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(' ',d['id'],d['status'],d.get('priority'),'|',d['title'][:70])\" 2>&1\necho \"=== budget headroom vs pitfalls cap ===\"\npython3 -c \"\nused=37359; ceil=37415\nprint(f'headroom: {ceil-used} bytes')\nprint('pitfalls corpus: 5 of 10 entries allowed by check-pitfalls.sh')\nprint('a typical entry ~600-900 bytes -> 0 more entries fit in 56 bytes')\n\"",
+   "index": 216,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog find \"preamble budget pitfalls cap\" 2>&1 | head -4\nfno backlog idea \"Two CI gates disagree about AGENTS.md: the pitfalls cap says 5 slots remain, the byte budget says 0\" --details \"MEASURED 2026-08-05 on PR #740, immediately after a real author hit it.\n\nTHE CONTRADICTION. Two gates govern the same file with incompatible allowances:\n- scripts/ci/check-pitfalls.sh caps the corpus at 10 entries and fails CI on an 11th. AGENTS.md states this cap in its own prose: 'Cap: 10 active entries (context-cost budget).' The corpus currently holds 5, so both the doc and the lint tell an author there is room for 5 more.\n- scripts/ci/check-preamble-budget.sh caps the whole SessionStart preamble at 37415 bytes. After PR #740's trim the preamble sits at 37359",
+   "index": 217,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Three points from my own line. Here's the honest position: I've been the largest live instance of the problem x-7685 describes for most of this session \u2014 three workers, me as their only king, no successor, and no crown-transfer verb even if I wanted one (that's exactly what the worker refuted an hour ago).",
+   "index": 218,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== PRs ===\"\nfor n in 738 739 740; do gh pr view $n --json number,state,mergeable,statusCheckRollup 2>/dev/null | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nbad=[r['name'] for r in d['statusCheckRollup'] if (r.get('conclusion') or r.get('status')) not in ('SUCCESS','SKIPPED')]\nprint(f\\\"  #{d['number']} {d['state']} {d['mergeable']} {dict(c)} {'BAD:'+','.join(bad[:3]) if bad else ''}\\\")\"; done\necho \"=== live workers ===\"\nfno agents top 2>&1 | rg -i \"x-9963|x-7685|x-2388|think\" | head -5\necho \"=== pr-watch ===\"\nfno pr-watch status 2>&1 | head -5",
+   "index": 219,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nJ=$(gh pr checks 740 2>&1 | grep -P \"^smoke\\t\" | grep -oE 'job/[0-9]+' | grep -oE '[0-9]+')\ngh run view --log-failed --job \"$J\" 2>&1 | grep -Ei \"fail|error|expected|not ok\" | head -12",
+   "index": 220,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ngh pr checks 740 2>&1 | grep -i smoke\necho \"=== log tail ===\"\ngh run view --log-failed --job 92433450105 2>&1 | tail -20",
+   "index": 221,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== is test_dispatch_target.py in #740's diff? ===\"\ngh pr diff 740 --name-only 2>&1 | grep -i \"dispatch_target\\|placement\" || echo \"  NOT in diff\"\necho \"=== does it exist on merged main? ===\"\ngit fetch origin main -q 2>&1; git cat-file -e origin/main:cli/src/fno/test_dispatch_target.py 2>&1 && echo \"  exists on main\" || echo \"  NOT on main (new in 740)\"\necho \"=== does the lint fail on main today? ===\"\ngit show origin/main:cli/src/fno/test_dispatch_target.py 2>/dev/null | grep -c 'credentials_source\": \"~/.claude\"' 2>&1",
+   "index": 222,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== live agents (full) ===\"; fno agents top 2>&1 | head -12\necho \"=== node states ===\"\nfor n in x-2388 x-8a12 x-9963 x-7685 x-0eaf x-9ae8 x-5c43 x-0322 x-1d48 x-62e1; do\nfno backlog get $n 2>&1 | python3 -c \"\nimport json,sys\ntry:\n  d=json.load(sys.stdin); print(f\\\"  {d['id']:8} {d['status']:10} {d.get('priority','--'):3} pr={d.get('pr_number') or '-':5} {d['title'][:52]}\\\")\nexcept: pass\"; done",
+   "index": 223,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .; gh pr view 741 --json number,title,state,mergeable,statusCheckRollup 2>&1 | python3 -c \"\nimport json,sys\nfrom collections import Counter\nd=json.load(sys.stdin)\nc=Counter((r.get('conclusion') or r.get('status')) for r in d['statusCheckRollup'])\nbad=[r['name'] for r in d['statusCheckRollup'] if (r.get('conclusion') or r.get('status')) not in ('SUCCESS','SKIPPED')]\nprint(f\\\"#{d['number']} {d['title'][:60]} | {d['state']} {d['mergeable']} | {dict(c)}\\\")\nprint('  not-green:', bad or 'none')\"",
+   "index": 224,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Write",
+   "target": "~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md",
+   "index": 225,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ncat >> ~/c3po/internal/fno/plans/20260801-solo-founder-company-orchestration.md <<'EOF'\n\n### Session handoff 2026-08-05\n\nThe king over this epic abdicated at 38% context after the epic closed (x-2388 merged as PR #738).\nFull state, verified-vs-inherited claims, and four corrections live in\n[20260805-session-handoff-king-x-d7e4.md](20260805-session-handoff-king-x-d7e4.md).\n\n- [ ] PR #741 (x-5c43, the boundary burn-down) is OPEN with `smoke` + `changed-smoke` RED and has no owner #jc \ud83d\udcc5 2026-08-06\n- [ ] PR #741 title says \"9 to 2\": confirm what the two surviving violations are before x-5c43 is marked done #jc \ud83d\udcc5 2026-08-06\n- [ ] File the `<fno_mail>` envelope node (spawn payloads unwrapped, leading-verb constraint, queued-means-human-typing) #jc \ud83d\udcc5 2026-08-",
+   "index": 226,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents spawn --name blueprint-x-9ae8 \"/fno:blueprint ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md\n\nNode x-9ae8 (p1, L, status design). The design is written, validated, and linked - compile it, do not redesign it.\n\nDECIDED, do not reopen: keep the word 'provider' for its correct meaning (model vendor) and rename only the wrong uses to 'harness'. Cut over rather than deprecate - the operator was explicit, and four prior surface-local renames (x-4704, x-2599, x-2966, x-880e) each shipped a correct new name beside a still-working old one and the conflation survived all four. Legacy spellings REFUSE with the correct name in the message; they do not alias. The one legitimate compat window is the FNO_AGENT_PROVIDER ",
+   "index": 227,
+   "kind": "tool_use"
+  },
+  {
+   "text": "BTW, when you use claude subagents, it doesn't affect OUR context. the subagent has its own context too.",
+   "index": 228,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Agent",
+   "target": "agent:blueprint-x-0eaf",
+   "index": 229,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== do I hold a registry crown? ===\"\nfno whoami 2>&1 | rg -i \"crown|scope|level\" || echo \"  no crown line printed\"\necho \"=== any live crown over x-d7e4 or fno? ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nn=0\nfor r in rows:\n    if r.get('crown_scope'): print('  ',r.get('name'),'L'+str(r.get('crown_level')),r.get('crown_scope'),r.get('status'),'grantor:',r.get('crown_grantor')); n+=1\nprint('  (none)' if not n else '')\"",
+   "index": 230,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**No registry crown exists at all** \u2014 mine was conversational only. You said \"you are /fno:king-for-a-day x-d7e4\" and I declared level 0 in my opening line, but nothing was ever stamped via the verb.",
+   "index": 231,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "Two consequences, one good: the whole reign ran on a self-declared crown, which the skill explicitly forbids (\"stamped by a grantor, never self-declared\"). And because no crown row exists, the succession gap doesn't bite \u2014 a successor can be **minted** cleanly even though a live crown can't be **transferred**.",
+   "index": 232,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "Crowning the successor at project scope, since x-d7e4 itself is closed and the remaining work has no containing epic.",
+   "index": 233,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents spawn --name king-fno-platform \"You are crowned king over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator, via the outgoing king of epic x-d7e4 who is abdicating now. State your level, altitude, scope, mission workspace, and mail handle in your opening line.\n\nREAD FIRST, before anything else: ~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md\n\nThat is the outgoing king's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing king got WRONG and why, and three findings that are still unfiled. Read it fully before you touch a node. Its 'What I got wrong' section is not self-flagellation, it is a warning about which inherited asserti",
+   "index": 234,
+   "kind": "tool_use"
+  },
+  {
+   "text": "`--crown` is rejected by the `fno-agents` binary even though the skill documents it \u2014 doc/implementation drift, same class as everything else today. Spawning, then coronating in place via the Python path whose code I actually read.",
+   "index": 235,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents spawn --name king-fno-platform \"You are crowned king over the fno project. Level 0 (VP altitude), scope: fno, grantor: the human operator via the outgoing king of epic x-d7e4, who is abdicating. Your crown is stamped separately by 'fno agents crown' immediately after this spawn - confirm it with 'fno whoami' before acting as king. State your level, altitude, scope and mail handle in your opening line.\n\nREAD FIRST: ~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md\n\nThat is the outgoing king's handoff. It carries what the graph cannot: which claims are VERIFIED versus inherited, four claims the outgoing king got WRONG, and three findings still unfiled. Read it fully before touching a node. Its 'What I got wrong' secti",
+   "index": 236,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents crown king-fno-platform --scope fno --level 0 2>&1 | tail -4\necho \"=== verify stamped ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('crown_scope'): print('  CROWNED:',r.get('name'),'L'+str(r.get('crown_level')),'scope='+str(r.get('crown_scope')),r.get('status'),'grantor='+str(r.get('crown_grantor')))\n\"",
+   "index": 237,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**Crown stamped and verified:**",
+   "index": 238,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "{\"crowned\": \"king-fno-platform\", \"level\": 0, \"scope\": \"fno\", \"grantor\": \"human\"}",
+   "index": 239,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "`king-fno-platform`, `short_id <handle>`, opus, court shape. Recording the two crown findings in the handoff before I stop.",
+   "index": 240,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-session-handoff-king-x-d7e4.md'\ns=open(p).read()\nanchor=\"I asserted the opposite earlier today\"\nadd = \"\"\"### Two further crown findings, measured at abdication\n\n**The outgoing king never held a stamped crown at all.**\n`fno whoami` printed no crown line and `fno agents list` showed zero crowned rows for the entire reign.\nThe crown was conversational - the operator said \"you are /fno:king-for-a-day x-d7e4\" and the session declared level 0 in its opening line - but nothing was ever written by the verb.\nThe skill is explicit that \"a crown is stamped by a grantor, never self-declared\", so the whole reign ran outside its own provenance discipline and nothing detected it.\nThe practical upside",
+   "index": 241,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**Abdicated.** `king-fno-platform` (`<handle>`) holds a real stamped crown \u2014 `{\"level\":0,\"scope\":\"fno\",\"grantor\":\"human\"}` \u2014 which is more than I ever had.",
+   "index": 242,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "## Two findings the abdication itself produced",
+   "index": 243,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "**I never held a stamped crown.** `fno whoami` printed no crown line; `fno agents list` showed zero crowned rows all session. The crown was conversational \u2014 you said it, I declared it in my opening line, nothing was ever written by the verb. The skill says *\"a crown is stamped by a grantor, never self-declared.\"* The entire reign ran outside its own provenance discipline and nothing noticed.",
+   "index": 244,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "The upside is real, though: because no crown row existed, the one-live-crown gate had nothing to match, so the successor **minted** cleanly. Minting works; transfer doesn't. A properly-stamped king would have hit the wall.",
+   "index": 245,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "**`fno agents spawn --crown` is documented but not implemented** \u2014 `fno-agents: unknown flag: --crown`. Spawn-then-coronate worked. Same doc-vs-implementation drift as the succession gap; handed to the new king to file.",
+   "index": 246,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "I also told it what it can't do: hand its own crown on until x-7685's `--succeed` lands. Better it plans around that than discovers it at exit.",
+   "index": 247,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "It's also already the right home for the crown findings, because the worker's design **added `fno agents crown --succeed`** \u2014 so the crown verb is already in its scope, same design doc, likely same PR.",
+   "index": 248,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "One correction to something I implied: the whoami crown line *is* implemented (`crown_label` in `registry.py` is the shared formatter for whoami and `agents list`). It printed nothing because I genuinely had no crown, which is correct behavior. The defect isn't a missing line \u2014 it's that nothing objects to an uncrowned session acting as king.",
+   "index": 249,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\ncur=json.loads(subprocess.run([\"fno\",\"backlog\",\"get\",\"x-7685\"],capture_output=True,text=True).stdout)\nd=cur.get(\"details\",\"\")\nadd = \"\"\"\n\n=== CROWN-PLUMBING FINDINGS, measured 2026-08-05 at an actual abdication ===\n\nFolded here rather than filed beside because this node's design already adds a crown verb (`fno agents crown --succeed`, the succession transfer). Same verb family, same design doc, same PR. Do not file these separately.\n\n1. `fno agents spawn --crown` IS DOCUMENTED AND NOT IMPLEMENTED. skills/king-for-a-day/SKILL.md instructs bestow-at-spawn via `fno agents spawn ... --crown level=N,scope=<scope>`. The fno-agents binary rejects it outright: `fno-agents: unknown flag: --crown`. The working path is sp",
+   "index": 250,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-7685 --size L 2>&1 | tail -1\nfno mail send <handle> \"AMENDMENT to your brief, from the outgoing king. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --crown is documented but unimplemented' drift. I told you to file it; I have instead folded it into x-7685, along with a second crown finding. Reason: x-7685's design already adds a crown verb (fno agents crown --succeed, the succession transfer), so the crown-plumbing work is one PR, not three nodes. Re-read x-7685's details - there is a new section at the end marked 'CROWN-PLUMBING FINDINGS'. x-7685 is now size L and status ready.\n\nThe second finding in that section is the one that should bother you most: AN UNCROWNED SESSION ACTING AS KING IS UNDET",
+   "index": 251,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents peek <handle> --lines 8 2>&1 | tail -10",
+   "index": 252,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno agents peek king-fno-platform --lines 6 2>&1 | tail -8\necho \"=== registry row ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if r.get('name')=='king-fno-platform':\n        print({k:r.get(k) for k in ('name','short_id','harness_session_id','status','crown_level','crown_scope')})\"",
+   "index": 253,
+   "kind": "tool_use"
+  },
+  {
+   "text": "King is **live**, crown stamped (`crown_level: 0, crown_scope: fno`), and hasn't started its first turn yet \u2014 peek shows the seed still unprocessed. That's why the inject had nowhere to land. Re-sending by name.",
+   "index": 254,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send king-fno-platform \"AMENDMENT to your brief, from the outgoing king. Two items, both to prevent duplicate work.\n\n1. DO NOT FILE the 'fno agents spawn --crown is documented but unimplemented' drift. Your brief told you to; I have instead folded it into x-7685 along with a second crown finding. Reason: x-7685's design already adds a crown verb (fno agents crown --succeed, the succession transfer), so crown plumbing is one PR rather than three nodes. Re-read x-7685 - there is a new section at the end marked 'CROWN-PLUMBING FINDINGS'. The node is now size L, status ready.\n\nThe second finding there should bother you most: AN UNCROWNED SESSION ACTING AS KING IS UNDETECTABLE. My entire reign ran with no crowned registry row - fno whoami printed n",
+   "index": 255,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**Crown:** `king-fno-platform`, L0, scope `fno`, grantor human, live and stamped \u2014 verifiable in the registry, unlike mine.",
+   "index": 256,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "**Nodes filed with verified evidence:** x-5c43, x-9ae8, x-0eaf, x-0322, x-1d48, x-62e1, x-fe01 \u2014 plus x-f605 folded into x-7685, which now carries context self-introspection, the king doctrine, and the crown plumbing.",
+   "index": 257,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfor n in x-0eaf x-9ae8; do\nfno backlog get $n 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint(f\\\"{d['id']}: {d['status']:10} size={d.get('size')} plan={(d.get('plan_path') or 'NONE').split('/')[-1]}\\\")\"\ndone\necho \"=== do the plans have compiled waves/tasks? ===\"\nfor f in 20260805-review-coverage-vs-objection-x-0eaf 20260805-four-axis-vocabulary-cutover-x-9ae8; do\np=~/c3po/internal/fno/plans/$f.md\necho \"--- $f\"\ngrep -cE \"^### Task|^## Wave|^- \\[ \\]|^waves:\" \"$p\" 2>/dev/null\ngrep -nE \"^waves:|^execution_mode:|^## Wave\" \"$p\" 2>/dev/null | head -4\ndone",
+   "index": 258,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nsed -n '25,40p' ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md\necho \"  ---- second block at 310 ----\"\nsed -n '310,330p' ~/c3po/internal/fno/plans/20260805-review-coverage-vs-objection-x-0eaf.md",
+   "index": 259,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nsed -n '925,940p' cli/src/fno/config/__init__.py\necho \"=== call sites the design missed ===\"\nrg -n \"github_apps\" cli/src/fno/graph/cli.py cli/src/fno/pr_watch/cli.py cli/src/fno/target_cli.py cli/src/fno/*review_capability* 2>/dev/null | head -6",
+   "index": 260,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Verified exactly. `cli/src/fno/config/__init__.py:925` \u2014 *\"`required_bots` is a legacy alias for `github_apps`; github_apps wins\"* \u2014 and `review_capability.py` is a whole module built on the canonical name that my design never mentions.",
+   "index": 261,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "1. **The alias.** A worker following my design would grep `required_bots`, miss `graph/cli.py:7726`, `pr_watch/cli.py:110`, `review_capability.py`, `target_cli.py:155` \u2014 and land a coverage predicate that misses half the readers. That's precisely the decorative-guard failure the design's own AC8 exists to prevent, smuggled in by my search.",
+   "index": 262,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send king-fno-platform \"DEFECT IN A DESIGN I WROTE, found by the x-0eaf blueprint worker and verified by me. It is now in the compiled plan, but flag it to whoever executes x-0eaf because it changes the denominator of the whole node.\n\nMy x-0eaf design said the coverage predicate must reach 'required_bots' readers and named the Rust loopcheck.rs plus three Python modules. That list is incomplete because I searched the WRONG NAME.\n\nVERIFIED at cli/src/fno/config/__init__.py:925: 'required_bots is a legacy alias for github_apps; github_apps wins.' The two are kept bidirectionally in sync (renamed under x-4baa). The canonical field is github_apps, and it has call sites my design never mentions - cli/src/fno/review_capability.py is an entire module",
+   "index": 263,
+   "kind": "tool_use"
+  },
+  {
+   "text": "**Crown:** `king-fno-platform`, L0, scope `fno`, stamped and verifiable.",
+   "index": 264,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== singular whoami routing ===\"\nsed -n '199,204p' cli/src/fno/cli.py\necho \"=== crown refs in fno/agent/ (singular) ===\"\nrg -c \"crown\" cli/src/fno/agent/cli.py 2>/dev/null || echo \"  ZERO crown references\"\necho \"=== crown refs in fno/agents/whoami.py (plural) ===\"\nrg -n \"crown\" cli/src/fno/agents/whoami.py 2>/dev/null | head -4\necho \"=== live A/B on this session ===\"\nfno whoami 2>&1 | rg -i crown || echo \"  fno whoami: NO crown line\"\nfno agents whoami 2>&1 | rg -i crown || echo \"  fno agents whoami: no crown (this session holds none)\"",
+   "index": 265,
+   "kind": "tool_use"
+  },
+  {
+   "text": "fno whoami        \u2192 fno.agent.cli:whoami_command   ZERO crown references",
+   "index": 266,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "fno agents whoami \u2192 fno/agents/whoami.py:57        crown: Optional[str]  \u2192  \"crown\": null",
+   "index": 267,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "The king is right and I was wrong. Worse than wrong: the \"candidate fix\" I recorded on x-7685 \u2014 *have the skill self-verify its crowned row* \u2014 would have called `fno whoami` and **refused every king that ever ran**. It caught that and added an AC requiring both directions asserted.",
+   "index": 268,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== two sibling packages, one character apart ===\"\nls -d cli/src/fno/agent cli/src/fno/agents 2>&1\necho \"  fno/agent/  files:\"; ls cli/src/fno/agent/ 2>/dev/null | head -5\necho \"  fno/agents/ whoami:\"; ls cli/src/fno/agents/whoami.py 2>/dev/null\necho \"=== do both define whoami? ===\"\nrg -l \"def whoami\" cli/src/fno/agent/ cli/src/fno/agents/ 2>/dev/null",
+   "index": 269,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send king-fno-platform \"All three corrections ACCEPTED. I verified the load-bearing one myself rather than taking it: cli/src/fno/cli.py:201 routes 'whoami' to fno.agent.cli:whoami_command, that module has ZERO crown references, and fno/agents/whoami.py:57 carries crown. Ran both on this session one second apart - 'fno whoami' printed no crown line, 'fno agents whoami' printed \\\"crown\\\": null (correct, I hold none). Your A/B on a CROWNED session is the stronger proof and it settles it.\n\nYou are right that this is my own one-of-N-reachable-paths pitfall occurring inside the verb I used to check for that pitfall. And thank you for catching what it would have cost: the candidate fix I recorded on x-7685 would have called 'fno whoami' and refused ",
+   "index": 270,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\ngit fetch origin main -q 2>&1\necho \"=== baseline on main? ===\"\ngit cat-file -e origin/main:scripts/ci/company-boundary-baseline.txt 2>&1 && echo \"  YES - exists on main\" || echo \"  no\"\necho \"=== when did it land? ===\"\ngit log --oneline -1 origin/main -- scripts/ci/company-boundary-baseline.txt 2>&1\necho \"=== on the x-9963 branch? ===\"\nW=.claude/worktrees/x-9963\nls \"$W/scripts/ci/company-boundary-baseline.txt\" 2>&1 | tail -1\necho \"=== is that branch behind main? ===\"\ngit -C \"$W\" rev-list --count HEAD..origin/main 2>&1",
+   "index": 271,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send <handle> \"FOUND IT, and your inability to locate it is the diagnosis, not a search failure. Good call holding rather than iterating blind.\n\nTHE FILE: scripts/ci/company-boundary-baseline.txt\nWHY YOU CANNOT SEE IT: it does not exist on your branch. It landed in commit <handle> ('fix(company): ratchet known boundary findings') via PR #738, which merged AFTER your branch point. Your worktree is 35 commits behind origin/main. GitHub CI runs against a MERGE of your branch with main, so the check and its baseline are present in the CI commit and absent from your checkout. That is the entire mystery: your grep was correct and the file genuinely is not there.\n\nFIX, in order:\n1. git fetch origin main, then merge or rebase origin/main into feature/",
+   "index": 272,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== agent row ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if '9ae8' in str(r.get('name','')): print({k:r.get(k) for k in ('name','short_id','status','last_message_at')})\"\necho \"=== node + plan state ===\"\nfno backlog get x-9ae8 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print(d['id'],d['status'],'plan:',(d.get('plan_path') or 'NONE').split('/')[-1])\"\ngrep -cE \"^waves:|^## Execution Strategy|^### Task\" ~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md 2>&1\necho \"=== last words ===\"\nfno agents peek blueprint-x-9ae8 --lines 6 2>&1 | tail -8",
+   "index": 273,
+   "kind": "tool_use"
+  },
+  {
+   "text": "| `fno agents spawn --crown` | documented, unimplemented |",
+   "index": 274,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== advertised vs real verb count ===\"\necho \"advertised (fno --help):  $(fno --help 2>&1 | grep -cE '^\\s{2}\\w')\"\necho \"real (fno help --all):    $(fno help --all 2>&1 | grep -cE '^\\s{2}\\w')\"\necho \"=== what menu-caps actually gates ===\"\nrg -n \"menu.cap|MAX_TOP|advertised\" cli/src/fno/lint*.py cli/src/fno/*lint* 2>/dev/null | head -6",
+   "index": 275,
+   "kind": "tool_use"
+  },
+  {
+   "text": "- I concluded \"whoami has no crown line, correctly\" because `fno agents whoami` isn't visible from `fno whoami`",
+   "index": 276,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\np='~/c3po/internal/fno/plans/20260805-four-axis-vocabulary-cutover-x-9ae8.md'\ns=open(p).read()\nanchor=\"`AGENTS.md` already declares these distinct and warns they \\\"share one neighbourhood and must not be confused,\\\"\"\nadd = \"\"\"**The axes are orthogonal but not independent, and this is the root cause rather than a footnote (operator, 2026-08-05).**\nA provider may *create a harness*, may *deliver models*, or may do both:\n\n| Provider | Creates harness | Delivers models |\n|---|---|---|\n| Anthropic | Claude Code | opus, sonnet, haiku |\n| OpenAI | Codex CLI | gpt-5.6-sol |\n| Google | Gemini CLI / Antigravity | gemini family |\n| zai | - | glm-5.2 |\n| deepseek | - | deepseek models |\n\nSo for every provider that ships a harness, the",
+   "index": 277,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno mail send blueprint-x-9ae8 \"OPERATOR REFINEMENT to the x-9ae8 design, added while you compile. Re-read the Problem section - there is a new block just above the AGENTS.md paragraph. It changes what layer 4 IS, so fold it before you finalize waves.\n\nTHE AXES ARE ORTHOGONAL BUT NOT INDEPENDENT. A provider may create a harness, may deliver models, or both: Anthropic creates Claude Code and delivers opus/sonnet; OpenAI creates Codex CLI and delivers gpt-5.6-sol; Google created Gemini CLI/Antigravity and delivers gemini models; zai and deepseek deliver models only and ship no harness.\n\nSo every provider that ships a harness SHARES A COLLOQUIAL NAME with it. 'claude' is a harness whose provider is anthropic, and 'claude' also reads as the vendor in speec",
+   "index": 278,
+   "kind": "tool_use"
+  },
+  {
+   "text": "I also flagged the worker's three partial sweep findings to be written into the compiled plan rather than left in its transcript. It was stopped once already; those would have died with it \u2014 including the one that matters most, `skills/agent/scripts/spawn.sh:476` gating pane identity on `.provider` and **failing closed**, which means layer 4 breaks every pane spawn unless it moves in the same comm",
+   "index": 279,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog find \"consolidate cli verbs surface\" 2>&1 | head -5\necho \"=== measured ===\"\necho \"advertised: $(fno --help 2>&1 | grep -cE '^\\s{2}\\w') | real: $(fno help --all 2>&1 | grep -cE '^\\s{2}\\w')\"",
+   "index": 280,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog get x-71b6 2>&1 | python3 -c \"\nimport json,sys; d=json.load(sys.stdin)\nprint(d['id'],d['status'],'pr:',d.get('pr_number'),'completed:',str(d.get('completed_at'))[:10])\nprint(d.get('details','')[:1600])\"",
+   "index": 281,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog idea \"The fno verb count is ratcheted only where it is advertised: 10 shown, 61 real, and nothing caps the real number\" --details \"MEASURED 2026-08-05: 'fno --help' advertises 10 top-level verbs; 'fno help --all' lists 61. scripts lint menu-caps (cli/src/fno/lint_cli.py:270) enforces <=10 advertised top-level and <=12 per sub-app, and its own docstring states 'New verbs default to hidden'. So the ratchet caps the MENU and nothing caps the KITCHEN.\n\nTHIS IS THE UNFINISHED HALF OF x-71b6 (done, PR #445, 2026-07-16), not a new complaint. That node named the problem correctly ('A new user checking out fno walks into ~60 top-level commands... when a menu is too big, they walk out') and offered TWO remedies: 'plumbing verbs nested under an intern",
+   "index": 282,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-a7f0 --dispatch-verb /fno:think 2>&1 | tail -1\necho \"=== does an eval system exist? ===\"\nls evals/ 2>/dev/null | head -12 || echo \"  no evals/ dir\"\nfno help --all 2>&1 | rg -i \"eval\" | head -4\necho \"=== evals per skill? ===\"\nfind . -path ./node_modules -prune -o -name \"*.eval.*\" -print -o -type d -name \"evals\" -print 2>/dev/null | grep -v worktrees | head -8",
+   "index": 283,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== eval bank contents ===\"\nls evals/bank/ 2>/dev/null | head -15\necho \"=== which skills have evals? ===\"\nls skills/ | while read s; do [ -d \"skills/$s/evals\" ] && echo \"  HAS EVALS: $s\"; done\necho \"=== observer eval (recorded corpus) ===\"\nfno evals --help 2>&1 | head -12",
+   "index": 284,
+   "kind": "tool_use"
+  },
+  {
+   "text": "2. **Chose `pass` shape, then didn't abdicate** \u2014 spawned workers, abdicated at kickoff per the skill, then acted as king for four more hours. Checkable: workers spawned + abdication declared + subsequent rulings issued.",
+   "index": 285,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "3. **Never verified it held a crown** \u2014 ran an entire reign uncrowned. Checkable: any `crown` read in the transcript.",
+   "index": 286,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog find \"eval skill coverage observer\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"king-for-a-day has no evals, and the eval system that would catch its failures has one user out of ~20 skills\" --details \"TWO FINDINGS, filed together because the second explains the first.\n\nFINDING 1 - THE INFRASTRUCTURE EXISTS AND IS BARELY USED. Measured 2026-08-05: three eval surfaces ship today - 'fno evals' (golden-task bank: run/report/graduate/grade), 'fno observer' (skill eval over a RECORDED CORPUS, sweep/replay - i.e. exactly session analysis), and 'fno delivery' (generic delivery evidence). The bank at evals/bank/ holds FOUR tasks total (capability-add-hello-verb, regression-cli-help-smoke, regression-context-pitfalls-reachable, regression-loop-check",
+   "index": 287,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-095d --dispatch-verb /fno:think 2>&1 | tail -1\nfno mail send king-fno-platform \"FINAL HANDOFF ADDENDUM from the outgoing king. Two nodes filed since your brief, both /fno:think-routed, neither started. Then I stop writing.\n\nx-a7f0 (p2, L) - the fno verb count is ratcheted only where it is advertised: 10 shown, 61 real. This is the unfinished half of x-71b6 (done, PR #445), which named the problem correctly, offered 'nest under an internal namespace OR hide from default --help', and shipped the cheap one. It also required a keep/kill/nest triage per verb before any code; the count was ~60 at filing and is 61 now, so no verbs were removed. The missing mechanism is a ratchet on the REAL count - the idiom already runs twice in this rep",
+   "index": 288,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Context 48%. Everything is in the graph, the handoff doc, and `#jc` todos. `king-fno-platform` holds a verified crown and has the full picture. Nothing pending depends on this session.",
+   "index": 289,
+   "kind": "assistant_text"
+  },
+  {
+   "text": "Which used more context? I guess its not a fair eval since we're not comparing the same blueprint.",
+   "index": 290,
+   "kind": "user_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nP=~/.claude/projects/-Users-bb16-code-footnote-footnote\necho \"=== bg session (blueprint-x-9ae8) ===\"\nSID=$(fno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nfor r in rows:\n    if '9ae8' in str(r.get('name','')): print(r.get('harness_session_id'))\")\necho \"session: $SID\"\n[ -f \"$P/$SID.jsonl\" ] && bash skills/target/scripts/context-probe.sh \"$P/$SID.jsonl\" || echo \"  no transcript at expected path\"\necho \"=== subagent transcript? ===\"\nls -t \"$P\" 2>/dev/null | head -5\nfind ~/.claude -name \"*blueprint-x-0eaf*\" 2>/dev/null | head -3 || echo \"  no subagent transcript by name\"",
+   "index": 291,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nSUB=~/.claude/projects/-Users-bb16-code-footnote-footnote/<uuid>/subagents/agent-ablueprint-x-0eaf-cf9dd48c284f3df7.jsonl\necho \"=== subagent (blueprint-x-0eaf) ===\"\nbash skills/target/scripts/context-probe.sh \"$SUB\" 2>&1\necho \"  size: $(du -h \"$SUB\" | cut -f1)\"\necho \"=== bg session (blueprint-x-9ae8) - find its transcript ===\"\nBG=$(find ~/.claude/projects -name \"<handle>*.jsonl\" 2>/dev/null | head -1)\necho \"  found: ${BG:-NONE}\"\n[ -n \"$BG\" ] && { bash skills/target/scripts/context-probe.sh \"$BG\" 2>&1; echo \"  size: $(du -h \"$BG\" | cut -f1)\"; }",
+   "index": 292,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\necho \"=== is the subagent a mesh citizen? ===\"\nfno agents list --json 2>&1 | python3 -c \"\nimport json,sys\nd=json.load(sys.stdin); rows=d.get('agents',d) if isinstance(d,dict) else d\nnames=[r.get('name') for r in rows]\nprint('  blueprint-x-0eaf (subagent) in registry:', 'blueprint-x-0eaf' in names)\nprint('  blueprint-x-9ae8 (bg session) in registry:', 'blueprint-x-9ae8' in names)\"\necho \"=== can it be mailed? ===\"\nfno agents peek blueprint-x-0eaf --lines 1 2>&1 | head -2",
+   "index": 293,
+   "kind": "tool_use"
+  },
+  {
+   "text": "2. **Can't be handed off.** I just crowned a successor. `blueprint-x-9ae8` transferred cleanly \u2014 it's in the registry, the king can `peek` and mail it. `blueprint-x-0eaf` cannot be handed to anyone. It reports to me or to nobody.",
+   "index": 294,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nP=~/.claude/projects/-Users-bb16-code-footnote-footnote\nBG=$P/<uuid>.jsonl\nSUB=$P/<uuid>/subagents/agent-ablueprint-x-0eaf-cf9dd48c284f3df7.jsonl\nfor f in \"$BG:bg-x9ae8\" \"$SUB:subagent-x0eaf\"; do\n  p=\"${f%%:*}\"; n=\"${f##*:}\"\n  echo \"$n: user turns = $(python3 -c \"\nimport json\nc=0\nfor l in open('$p'):\n    try:\n        d=json.loads(l)\n        if d.get('type')=='user' and isinstance(d.get('message',{}).get('content'),str): c+=1\n    except: pass\nprint(c)\")\"\ndone",
+   "index": 295,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,os\nP=os.path.expanduser(\"~/.claude/projects/-Users-bb16-code-footnote-footnote\")\nfiles={\n \"bg  blueprint-x-9ae8\": f\"{P}/<uuid>.jsonl\",\n \"sub blueprint-x-0eaf\": f\"{P}/<uuid>/subagents/agent-ablueprint-x-0eaf-cf9dd48c284f3df7.jsonl\",\n}\nfor name,p in files.items():\n    u=a=0\n    for l in open(p):\n        try: d=json.loads(l)\n        except: continue\n        t=d.get(\"type\")\n        if t==\"user\": u+=1\n        elif t==\"assistant\": a+=1\n    print(f\"{name}: user-role entries={u}  assistant entries={a}\")\nPYEOF",
+   "index": 296,
+   "kind": "tool_use"
+  },
+  {
+   "text": "Everything is handed off: `king-fno-platform` holds a verified crown, the handoff doc is linked from the epic plan and reachable as x-fe01, and the nine nodes filed today all carry their evidence. Nothing pending needs this session alive.",
+   "index": 297,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog find \"harness native subagent registry\" 2>&1 | head -4\necho \"---\"\nfno backlog idea \"fno's agent model does not see harness-native subagents, so two agent systems run side by side and only one is addressable\" --details \"MEASURED 2026-08-05. A blueprint task was run twice by two different mechanisms and the difference was structural, not cosmetic.\n\nThe fno-spawned bg session (blueprint-x-9ae8) is a full mesh citizen: present in the fno agents registry, resolvable by peek, addressable by fno mail, transcript at the project root as a peer (~/.claude/projects/<proj>/<session-id>.jsonl), survivable across its spawner's death, and handoff-able to a successor king.\n\nThe harness-native subagent (blueprint-x-0eaf, launched through the harness Agent t",
+   "index": 298,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog update x-af92 --dispatch-verb /fno:think 2>&1 | tail -1\nfno agents spawn --name think-x-af92 \"/fno:think x-af92\n\nREAD THE NODE FIRST - its details carry today's measurements verbatim, including the exact registry/peek/transcript-path evidence. Do not re-derive them; do verify any you intend to design on.\n\nTHE SEED, in one line: fno models its own agent primitive and is blind to the harness's, so choosing between them is folklore rather than a documented contract.\n\nWHAT IS ALREADY MEASURED, do not re-litigate: an fno-spawned bg session is a mesh citizen (registry row, peek, mail handle, peer-level transcript, survives its spawner, hand-off-able). A harness-native subagent is none of those - not in the registry, 'peer not found' on peek, tran",
+   "index": 299,
+   "kind": "tool_use"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\npython3 - <<'PYEOF'\nimport json,subprocess\nME=\"<uuid>\"\ncands=[\"x-5c43\",\"x-9ae8\",\"x-62e1\",\"x-a7f0\",\"x-095d\",\"x-af92\",\"x-fe01\",\n       \"x-7685\",\"x-0eaf\",\"x-f605\",\"x-0322\",\"x-1d48\"]\nprint(f\"{'id':8} {'created':11} {'mine?':6} {'status':11} {'p':4} title\")\nfor n in cands:\n    r=subprocess.run([\"fno\",\"backlog\",\"get\",n],capture_output=True,text=True)\n    try: d=json.loads(r.stdout)\n    except: continue\n    mine = \"YES\" if d.get(\"source_session_id\")==ME else \"no\"\n    print(f\"{d['id']:8} {str(d.get('created_at'))[:10]:11} {mine:6} {d['status']:11} {d.get('priority','--'):4} {d['title'][:52]}\")\nPYEOF",
+   "index": 300,
+   "kind": "tool_use"
+  },
+  {
+   "text": "- **x-7685** (2026-08-04) \u2014 I extended it three times: the placement finding, the folded-in x-f605 content, and the crown-plumbing findings. It's now `in_progress`.",
+   "index": 301,
+   "kind": "assistant_text"
+  },
+  {
+   "tool": "Bash",
+   "target": "cd .\nfno backlog epic status x-d7e4 2>&1 | head -20\necho \"=== epic node itself ===\"\nfno backlog get x-d7e4 2>&1 | python3 -c \"import json,sys; d=json.load(sys.stdin); print('status:',d['status'],'| blocked_by:',d.get('blocked_by') or 'none','| completed:',d.get('completed_at'))\"",
+   "index": 302,
+   "kind": "tool_use"
+  }
+ ]
+}
