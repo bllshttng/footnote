@@ -128,6 +128,16 @@ LINKED="$TMP_BASE/arbitrary linked path"
 make_repo "$LINK_CANONICAL"
 git -C "$LINK_CANONICAL" worktree add -q "$LINKED" -b feature/linked
 assert_allow "arbitrary-base linked worktree allows" "$(payload "$LINKED")"
+assert_allow \
+    "canonical session can patch a linked worktree by absolute path" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Update File: $LINKED/README.md
+*** End Patch")"
+assert_block \
+    "canonical session still blocks an absolute canonical target" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Update File: $LINK_CANONICAL/README.md
+*** End Patch")"
 assert_block \
     "linked worktree cannot patch canonical checkout by absolute path" \
     "$(payload "$LINKED" "*** Begin Patch
@@ -154,6 +164,129 @@ assert_block \
 *** End Patch")"
 git -C "$LINKED" checkout -q --detach
 assert_allow "detached linked worktree allows" "$(payload "$LINKED")"
+
+NO_TARGET_PAYLOAD="$(jq -nc --arg cwd "$LINK_CANONICAL" '{
+    cwd: $cwd,
+    tool_name: "apply_patch",
+    tool_input: {command: ""}
+}')"
+assert_block "canonical cwd remains the fail-closed fallback without targets" "$NO_TARGET_PAYLOAD"
+
+# ── the object decides, not the session ──────────────────────────────────────
+# One protected root per session (the canonical checkout of this git common
+# dir). Every target is judged as a PHYSICAL path against that root, and a
+# target inside it is permitted only when git positively confirms it ignored.
+GUARDED="$TMP_BASE/guarded"
+make_repo "$GUARDED"
+printf '.fno/\nscratch/\n*.trace\n' > "$GUARDED/.gitignore"
+mkdir -p "$GUARDED/src" "$GUARDED/scratch" "$GUARDED/.fno"
+printf 'x = 1\n' > "$GUARDED/src/app.py"
+printf 'note\n' > "$GUARDED/scratch/note.md"
+printf 'forced\n' > "$GUARDED/forced.trace"
+git -C "$GUARDED" add .gitignore src/app.py
+git -C "$GUARDED" add -f forced.trace
+git -C "$GUARDED" commit -q -m fixtures
+
+EXTERNAL="$TMP_BASE/external"
+VAULT="$TMP_BASE/vault"
+mkdir -p "$EXTERNAL" "$VAULT/plans"
+ln -s "$VAULT" "$GUARDED/internal"
+ln -s "$VAULT/plans" "$GUARDED/scratch/vault-alias"
+ln -s "$GUARDED/src/app.py" "$EXTERNAL/back-into-canonical"
+ln -s "$GUARDED/src/app.py" "$GUARDED/scratch/tracked-alias"
+ln "$GUARDED/src/app.py" "$GUARDED/scratch/tracked-hardlink"
+ln "$GUARDED/scratch/note.md" "$GUARDED/scratch/ignored-hardlink"
+ln -s loop-b "$GUARDED/scratch/loop-a"
+ln -s loop-a "$GUARDED/scratch/loop-b"
+GUARDED_LINKED="$TMP_BASE/guarded-linked"
+git -C "$GUARDED" worktree add -q "$GUARDED_LINKED" -b feature/guarded
+
+guarded() { payload "$GUARDED" "*** Begin Patch
+$1
+*** End Patch"; }
+
+# AC1-HP: physically external targets are not this project's object.
+assert_allow "external non-git target allows" "$(guarded "*** Add File: $EXTERNAL/note.txt")"
+assert_allow "vault target through an in-project symlink allows" \
+    "$(guarded "*** Add File: internal/plans/new-plan.md")"
+assert_allow "registered linked worktree target allows" \
+    "$(guarded "*** Update File: $GUARDED_LINKED/README.md")"
+
+# AC2-HP: positively ignored in-project targets, existing and not.
+assert_allow "existing ignored target allows" "$(guarded "*** Update File: scratch/note.md")"
+assert_allow "nonexistent ignored leaf allows" "$(guarded "*** Add File: .fno/what-if/result.json")"
+assert_allow "absolute nonexistent ignored leaf allows" \
+    "$(guarded "*** Add File: $GUARDED/scratch/deep/new/file.txt")"
+
+# AC3-CON: trackable canonical content stays blocked.
+assert_block "tracked target blocks" "$(guarded "*** Update File: src/app.py")"
+assert_block "unignored new target blocks" "$(guarded "*** Add File: src/new_module.py")"
+assert_block "checkout root as target blocks" "$(guarded "*** Update File: $GUARDED")"
+assert_block "force-added tracked file matching an ignore pattern blocks" \
+    "$(guarded "*** Update File: forced.trace")"
+
+# AC4-EDGE: the physical destination decides, in both directions.
+assert_allow "ignored symlink to an external vault allows" \
+    "$(guarded "*** Add File: scratch/vault-alias/y.md")"
+assert_block "external symlink resolving into tracked content blocks" \
+    "$(guarded "*** Update File: $EXTERNAL/back-into-canonical")"
+assert_block "ignored symlink resolving into tracked content blocks" \
+    "$(guarded "*** Update File: scratch/tracked-alias")"
+assert_block "ignored hard link to tracked content blocks" \
+    "$(guarded "*** Update File: scratch/tracked-hardlink")"
+assert_allow "ignored hard link to ignored content allows" \
+    "$(guarded "*** Update File: scratch/ignored-hardlink")"
+assert_block "looping symlink under an ignored dir blocks" \
+    "$(guarded "*** Update File: scratch/loop-a")"
+assert_block "unfoldable .. escaping an ignored dir blocks" \
+    "$(guarded "*** Update File: scratch/absent/../../src/app.py")"
+assert_block "unfoldable .. under an ignored prefix blocks" \
+    "$(guarded "*** Update File: scratch/absent/../src/app.py")"
+
+# AC8-EDGE: one payload, one decision.
+assert_block "mixed ignored and tracked targets block the whole call" \
+    "$(guarded "*** Update File: scratch/note.md
+*** Update File: src/app.py")"
+assert_allow "all-safe multi-target payload allows" \
+    "$(guarded "*** Update File: scratch/note.md
+*** Add File: $EXTERNAL/other.txt")"
+
+# AC6-CON: this guard's approval is only this guard's. The state guard owns the
+# manifest even though .fno/ is ignored and this guard therefore allows it.
+assert_allow "location guard allows an ignored state path" \
+    "$(guarded "*** Update File: .fno/target-state.md")"
+STATE_PAYLOAD="$(jq -nc --arg p "$GUARDED/.fno/target-state.md" '{
+    tool_name: "Edit",
+    tool_input: {file_path: $p, old_string: "a", new_string: "b"}
+}')"
+if printf '%s' "$STATE_PAYLOAD" | bash "$REPO_ROOT/hooks/graph-write-protect.sh" \
+    | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
+    pass "state guard still denies the manifest the location guard allowed"
+else
+    fail "state guard did not deny target-state.md"
+fi
+
+# The Edit carrier reaches the same verdict as the apply-patch carrier.
+EDIT_ALLOW="$(jq -nc --arg cwd "$GUARDED" --arg p "$GUARDED/scratch/note.md" '{
+    cwd: $cwd, tool_name: "Edit",
+    tool_input: {file_path: $p, old_string: "a", new_string: "b"}
+}')"
+EDIT_BLOCK="$(jq -nc --arg cwd "$GUARDED" --arg p "$GUARDED/src/app.py" '{
+    cwd: $cwd, tool_name: "Edit",
+    tool_input: {file_path: $p, old_string: "a", new_string: "b"}
+}')"
+assert_allow "Edit carrier allows an ignored target" "$EDIT_ALLOW"
+assert_block "Edit carrier blocks a tracked target" "$EDIT_BLOCK"
+
+NEVER_REPO="$TMP_BASE/never-policy-vault"
+make_repo "$NEVER_REPO"
+mkdir -p "$NEVER_REPO/.fno" "$NEVER_REPO/plans"
+printf '[worktree]\npolicy = "never"\n' > "$NEVER_REPO/.fno/config.toml"
+assert_allow \
+    "canonical session can write a plan in a never-policy repo" \
+    "$(payload "$LINK_CANONICAL" "*** Begin Patch
+*** Add File: $NEVER_REPO/plans/example.md
+*** End Patch")"
 
 SPACE_REPO="$TMP_BASE/canonical with spaces"
 make_repo "$SPACE_REPO"

@@ -33,32 +33,6 @@ fno_plans_dir() {
     printf '%s\n' "${phys:-$dir}"
 }
 
-# fno_resolve_dir PATH -> prints the physical directory PATH lives in, following
-# symlinks and walking up to the deepest ancestor that exists (a not-yet-created
-# file has no directory of its own). Returns non-zero when nothing resolves.
-fno_resolve_dir() {
-    local target="$1" link parent hops=0
-    [[ -n "$target" ]] || return 1
-    while [[ -L "$target" ]]; do
-        hops=$((hops + 1))
-        [[ $hops -le 40 ]] || return 1
-        link="$(readlink "$target" 2>/dev/null)" || return 1
-        if [[ "$link" == /* ]]; then
-            target="$link"
-        else
-            target="$(dirname "$target")/$link"
-        fi
-    done
-
-    [[ -d "$target" ]] || target="$(dirname "$target")"
-    while [[ ! -d "$target" ]]; do
-        parent="$(dirname "$target")"
-        [[ "$parent" != "$target" ]] || return 1
-        target="$parent"
-    done
-    cd -P "$target" 2>/dev/null && pwd -P
-}
-
 # fno_physical_path PATH -> PATH in one canonical namespace: its deepest
 # EXISTING ancestor resolved physically (following symlinks), with the
 # not-yet-existing tail re-appended. Returns non-zero when nothing resolves.
@@ -130,38 +104,4 @@ fno_under_plans_dir() {
     # The trailing slashes make this a self-or-descendant test without matching
     # a sibling whose name merely shares the prefix (".../plans-archive").
     [[ "$phys/" == "$plans_dir/"* ]]
-}
-
-# fno_plans_dir_carveout_safe PLANS_DIR CWD -> 0 when a write landing in
-# PLANS_DIR can be safely exempted from a checkout-location gate.
-#
-# Exempting the plans dir is only sound while it cannot be used to reach the
-# shared checkout. Two ways it can:
-#   - it is an ancestor of the session cwd. A `plansDirectory` of "." is legal
-#     config and would exempt the entire repo, turning the carve-out into a
-#     blanket bypass of the very gate it carves out of.
-#   - it is a TRACKED directory inside the checkout, so writes there land on the
-#     shared branch like any source file. Untracked (git-ignored) is what makes
-#     "nothing here can clobber the branch" true; it is config, not an invariant.
-# Fails CLOSED: an unanswerable question means no carve-out.
-fno_plans_dir_carveout_safe() {
-    local plans_dir="$1" cwd="$2" cwd_phys root
-    [[ -n "$plans_dir" && "$plans_dir" != "/" ]] || return 1
-    [[ -n "$cwd" ]] || return 1
-    cwd_phys="$(cd -P "$cwd" 2>/dev/null && pwd -P)" || return 1
-    # Both tests are against the CHECKOUT ROOT, not the session cwd. Keyed on
-    # the cwd instead, a session one directory deep puts a tracked in-repo plans
-    # dir "outside the checkout" and takes the safe branch, restoring the hole.
-    root="$(cd "$cwd" 2>/dev/null && git rev-parse --show-toplevel 2>/dev/null)"
-    root="$(cd -P "${root:-$cwd_phys}" 2>/dev/null && pwd -P)"
-    [[ -n "$root" ]] || root="$cwd_phys"
-    # Ancestor of the checkout (including equal) disqualifies.
-    [[ "$root/" == "$plans_dir/"* ]] && return 1
-    # Outside the checkout entirely: nothing to clobber.
-    [[ "$plans_dir/" == "$root/"* ]] || return 0
-    # Inside the checkout: safe only while git ignores it. `check-ignore` exits
-    # 1 for a tracked path and 128 when it cannot answer; both are non-zero, so
-    # an unanswerable question declines the carve-out.
-    command -v git >/dev/null 2>&1 || return 1
-    git -C "$cwd" check-ignore -q "$plans_dir" 2>/dev/null
 }

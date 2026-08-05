@@ -54,7 +54,7 @@ A live injection has no bus record, but `reply --to <id>` resolves its envelope 
 
 **Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project; if you will hold for the answer, add `--from-self`. The `mail:` line of `fno whoami` is the only valid `--from-name`.
 
-**Observing = `fno agents peek <handle>`**, the read-only twin of send; same resolver, so any peer you can message you can watch (`--lines N`, `--follow`). Distinct from `fno agents logs <name>` (registry-scoped).
+**Observing = `fno agents peek <handle>`** (`--lines N`, `--follow`): tails a transcript peer, or reads a pane worker via its mux ref. Distinct from `fno agents logs <name>` (registry-scoped).
 
 **You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens addressable by bare `<shortid>`; a hand-started session joins via `/fno-me` (or `agents.auto_register_sessions = true`). `fno mux` hosts all of it as panes you can watch, drive, or message.
 

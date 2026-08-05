@@ -164,6 +164,11 @@ mkdir -p "$CANON/src"
 git init -q -b main "$CANON" 2>/dev/null
 git -C "$CANON" -c user.email=t@t -c user.name=t commit -q --allow-empty -m init 2>/dev/null
 CANON_BRANCH="$(git -C "$CANON" rev-parse --abbrev-ref HEAD 2>/dev/null || echo "")"
+# A linked worktree of the SAME repo. The guard protects one root - the canonical
+# worktree of the session's own git common dir - so this is the cwd that is safe
+# to sit in while still being answerable for $CANON's tracked content.
+CANON_WT="$TMP/canon-linked"
+git -C "$CANON" worktree add -q "$CANON_WT" -b feature/linked >/dev/null 2>&1
 
 if [[ "$CANON_BRANCH" != "main" ]]; then
     fail "E: fixture repo is on '${CANON_BRANCH:-unknown}', expected main"
@@ -204,10 +209,17 @@ else
     expect_wp "E7: Update File on canonical source still blocked" block \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"command\":\"*** Begin Patch\\n*** Update File: src/thing.py\\n*** End Patch\"}}"
 
-    # Parsing file_path widened this guard: a write whose TARGET lands in a
-    # canonical checkout is now judged even from a safe cwd. Previously only
-    # apply_patch paths were, so this is new behavior and is pinned here.
-    expect_wp "E8: file_path into a canonical checkout blocked from a safe cwd" block \
+    # Parsing file_path widened this guard: a write whose TARGET lands in the
+    # session's own canonical checkout is judged even from a safe cwd. Only
+    # apply_patch paths were before, so this is pinned here.
+    expect_wp "E8: file_path into this project's canonical checkout blocked from a safe cwd" block \
+      "{\"cwd\":\"$CANON_WT\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}"
+
+    # The deliberate boundary on the other side. The protected root is resolved
+    # from the SESSION's git common dir, so an unrelated project's checkout is
+    # not this guard's object - that project's own hook owns it. Pinned because
+    # it is a real narrowing, not an oversight.
+    expect_wp "E8b: another project's canonical checkout is not this guard's object" approve \
       "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}"
 
     # ── F. the carve-out cannot disable the gate it carves out of ────────────
@@ -251,9 +263,10 @@ else
     expect_wp "F3: git-ignored in-repo plans dir still carves out" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/20260730-p.md\"}}"
 
-    # A non-markdown write into the plans dir gets no carve-out. This is the
-    # documented behavior of the .md gate, not an accident of ordering.
-    expect_wp "F4: non-md write into the plans dir is not carved out" block \
+    # Extension-blind, deliberately. The old `.md` gate existed only to keep a
+    # plans-dir lookup off the hot path; the ignore proof that replaced it asks
+    # git about the target and has no reason to care what it is called.
+    expect_wp "F4: non-md write into an ignored plans dir is allowed" approve \
       "{\"cwd\":\"$CANON\",\"tool_input\":{\"file_path\":\"$CANON/.fno/plans/notes.txt\"}}"
 
     # `/` as a plans dir must never carve out. Belt-and-braces: the explicit
@@ -371,11 +384,11 @@ STUBEOF
     fi
 
     # J1 blocks on the cwd gate alone, so it cannot see whether the PER-TARGET
-    # check survived. From a SAFE cwd only the per-target check can block, so
-    # this is what proves the degraded mode is not weaker than the guard was
-    # before the helper existed - without the dirname fallback, every target
-    # exits 127 and is silently skipped.
-    out=$(printf '%s' "{\"cwd\":\"$TMP/repo\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}" \
+    # check survived. From a SAFE cwd in the same repo only the per-target check
+    # can block, so this is what proves the degraded mode is not weaker than the
+    # guard was before the helper existed - without the physical resolver the
+    # guard cannot see through a symlink, so it must deny, never skip.
+    out=$(printf '%s' "{\"cwd\":\"$CANON_WT\",\"tool_input\":{\"file_path\":\"$CANON/src/thing.py\"}}" \
         | PATH="$FAKE_PATH" bash "$HALF/worktree-write-protect.sh" 2>/dev/null)
     if printf '%s' "$out" | grep -q '"block"'; then
         pass "J2: half-sourced helper keeps the per-target check"
