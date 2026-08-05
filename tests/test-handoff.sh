@@ -353,6 +353,15 @@ case "$subcmd1 $subcmd2" in
     # thing `fno plan rung` exists to delete.
     exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli plan rung "${3:-}"
     ;;
+  context*)
+    # Delegate to the REAL implementation. The context-probe shim resolves to
+    # `fno context`, so a stub that silently no-ops it via the *) catch-all
+    # would hand every pressure scenario an empty reading and let the suite
+    # pass vacuously - the x-f804 hazard through a different door. The probe's
+    # contract IS reading real context, so a stub that fakes a reading tests the
+    # stub. Same precedent and reasoning as `plan rung` above.
+    exec env PYTHONPATH="$FNO_SRC" "$FNO_PYTHON" -m fno.cli "$@"
+    ;;
   *)
     # Any other fno command: succeed silently
     exit 0

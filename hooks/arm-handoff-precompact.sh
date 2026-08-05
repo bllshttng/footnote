@@ -54,11 +54,11 @@ if command -v jq >/dev/null 2>&1; then
   printf '%s' "$LAST_ASSISTANT" | grep -q '<promise>' && exit 0
 fi
 
-# Context pressure via the sanctioned transcript probe. Any nonzero exit or a
-# missing probe -> treat as no pressure -> decline (fail-safe).
-PROBE="$PLUGIN_ROOT/skills/target/scripts/context-probe.sh"
-[[ -f "$PROBE" ]] || exit 0
-PROBE_OUT="$(bash "$PROBE" "$TRANSCRIPT" 2>/dev/null)" || exit 0
+# Context pressure via the single CLI implementation behind `fno context`. Any
+# nonzero exit (incl. `fno` absent) or a missing reading -> no pressure ->
+# decline (fail-safe). This hook already shells `fno config get` below, so the
+# verb is on PATH wherever this hook runs.
+PROBE_OUT="$(fno context --transcript "$TRANSCRIPT" --json 2>/dev/null)" || exit 0
 USED_PCT="$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
 [[ "$USED_PCT" =~ ^[0-9]+$ ]] || exit 0
 
