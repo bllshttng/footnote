@@ -76,7 +76,6 @@ The wrapper validates `script_path.is_file()` before the subprocess so a missing
 | `fno gate set` | `scripts/lib/set-gate.sh` | atomically flip gate bool + emit phase_transition event |
 | `fno pr verify --kind merged\|reviews` | `verify-pr-merged.sh` OR `verify-review-replies.sh` | enum dispatches to the right script |
 | `fno pr rebase` | `scripts/lib/rebase-resolve.sh` | conflict-delegation rebase protocol |
-| `fno event verify-evidence SESSION_ID NONCE EVENTS_FILE ARTIFACT_PATH` | `fno-agents verify-evidence event` (binary; logic folded out of the deleted `verify-event-evidence.sh` in US1) | stop-hook rc=2 fallback for non-Claude providers |
 | `fno phase verify PHASE_NAME [--session-id]` | `phase-verifier.sh::pv_run` (sourceable) | per-phase postcondition verifier |
 | `fno phase kill-check [PLAN_PATH]` | `fno-agents kill-check` (binary; logic folded out of the deleted `kill-criteria.sh` in US1) | plan kill-criteria evaluator |
 | `fno executor resolve [--plan-path] [--task-files] [--explain]` | `parse-locked-executor.sh` then `infer-task-executor.sh` | three-tier executor resolver |

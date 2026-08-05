@@ -21,7 +21,6 @@ _ENV = {"COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"}
         # keeps only kill-check.
         ["pr", "verify", "--help"],
         ["pr", "rebase", "--help"],
-        ["event", "verify-evidence", "--help"],
         ["phase", "kill-check", "--help"],
         ["executor", "resolve", "--help"],
         ["notify", "--help"],
@@ -29,7 +28,6 @@ _ENV = {"COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"}
     ids=[
         "pr-verify",
         "pr-rebase",
-        "event-verify-evidence",
         "phase-kill-check",
         "executor-resolve",
         "notify",
