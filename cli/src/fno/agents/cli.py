@@ -419,6 +419,97 @@ def _scope_is_subset(target_scope: str, grantor_scope: str | None) -> bool:
     return bool(grantor_scope) and target_scope != grantor_scope
 
 
+def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
+    """The ``--succeed`` transfer (US6): move the caller's live crown over
+    ``scope`` onto ``target`` in one atomic registry write.
+
+    A TRANSFER, not a grant. The two gates that refuse a same-scope grant
+    (one-live-crown, not-a-superset) are correct for grants and stay so;
+    succession is the separate primitive an abdicating king needs because it is
+    neither. The caller must hold a live crown over EXACTLY scope (nothing to
+    transfer otherwise); the one-live-crown check narrows to exclude the caller's
+    own row, since the row being vacated cannot be the reason the vacating is
+    refused; the successor must be LIVE, since transferring onto a dead row is
+    the orphaning this feature exists to prevent wearing a receipt; level
+    defaults to the caller's own altitude, not +1, so a successor inherits the
+    rung; and ``crown_grantor`` records the outgoing king so the chain stays
+    externally verifiable.
+    """
+    from fno.agents.registry import load_registry, update_registry
+
+    # crown_level is None means "no crown"; level 0 (VP) is a real crown, so the
+    # `is None` test (not a truthiness test) is what keeps a VP transferable.
+    if (
+        caller_row is None
+        or caller_row.crown_level is None
+        or caller_row.crown_scope != scope
+    ):
+        print(
+            f"refusing --succeed: this session holds no live crown over scope "
+            f"{scope!r} to transfer. Succession moves an EXISTING crown; it does "
+            "not grant a new one. Hold the crown first, or drop --succeed.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    if target.status != "live":
+        print(
+            f"refusing --succeed: successor {target.name!r} is not live "
+            f"(status={target.status!r}). A crown must transfer onto a live row; "
+            "transferring onto a dead row is the orphaning this feature prevents.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=2)
+
+    # Narrowed one-live-crown: a row OTHER than the caller's own (being vacated)
+    # or the successor holding this scope is corrupt state, not a succession.
+    for e in load_registry():
+        if (
+            e.name not in (caller_row.name, target.name)
+            and e.crown_scope == scope
+            and e.status == "live"
+        ):
+            print(
+                f"refusing --succeed: {e.name!r} already holds a live crown over "
+                f"scope {scope!r} (one live crown per scope; the caller's own row "
+                "is excluded as the one being vacated).",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+
+    resolved_level = level if level is not None else caller_row.crown_level
+    grantor = caller_row.session_id or caller_row.name  # the outgoing king
+    caller_name = caller_row.name
+
+    def _transfer(rows: list) -> list:
+        # One pass: vacate the caller and stamp the successor together. Two
+        # writes would open a window where the scope is uncrowned - exactly when
+        # a worker's review mail arrives and resolves to nobody.
+        for r in rows:
+            if r.name == caller_name:
+                r.crown_level = None
+                r.crown_scope = None
+                r.crown_grantor = None
+            elif r.name == target.name:
+                r.crown_level = resolved_level
+                r.crown_scope = scope
+                r.crown_grantor = grantor
+        return rows
+
+    update_registry(_transfer)
+    print(
+        json.dumps(
+            {
+                "succeeded": target.name,
+                "from": caller_name,
+                "level": resolved_level,
+                "scope": scope,
+                "grantor": grantor,
+            }
+        )
+    )
+
+
 @agents_app.command("crown", hidden=True)
 def cmd_crown(
     handle: str = typer.Argument(
@@ -434,7 +525,18 @@ def cmd_crown(
         "--level",
         help=(
             "Ladder altitude 0..2 (VP=0 project, Director=1 epic, IC=2 node). "
-            "Default: the grantor's level+1 (superset-king), else 0."
+            "Default: the grantor's level+1 (superset-king), else 0; under "
+            "--succeed, the caller's own altitude (a successor inherits the rung)."
+        ),
+    ),
+    succeed: bool = typer.Option(
+        False,
+        "--succeed",
+        help=(
+            "Transfer THIS session's crown over --scope to <handle> (succession), "
+            "not grant a new one. The caller must hold a live crown over exactly "
+            "--scope; one atomic write clears the caller and stamps the successor "
+            "at the caller's altitude. Used by an abdicating king."
         ),
     ),
 ) -> None:
@@ -446,6 +548,11 @@ def cmd_crown(
     row), an attended human (a shell with no agent identity in env), or a
     standing config grant (``config.agents.crown_config_grant``, DEFAULT OFF).
     Refuses a self-grant and a second live crown over the same scope.
+
+    ``--succeed`` is a TRANSFER, not a grant: it moves the caller's existing
+    crown over --scope onto <handle> in one atomic write. A same-scope GRANT is
+    refused twice over (one-live-crown + not-a-superset), so succession is the
+    only way an abdicating king hands a crown to a successor over the same scope.
     """
     from fno.agents.registry import (
         AgentResolutionError,
@@ -489,6 +596,10 @@ def cmd_crown(
             file=sys.stderr,
         )
         raise typer.Exit(code=2)
+
+    if succeed:
+        _crown_succeed(target, scope, level, caller_row)
+        return
 
     # Refusal: one live crown per scope.
     for e in load_registry():
