@@ -449,20 +449,46 @@ impl CodexProvider {
 /// lane in codex_ask.rs) so the grant cannot land on one path and miss another.
 /// Empty on any failure: a grant we cannot resolve must never break the spawn.
 pub(crate) fn codex_git_writable_args(cwd: &std::path::Path) -> Vec<String> {
+    match git_common_dir(cwd) {
+        Some(common) => vec!["--add-dir".into(), common],
+        None => vec![],
+    }
+}
+
+/// Mirror of `codex.py::sandbox_config_args_resume`: re-pin a BOUNDED posture
+/// across `codex exec resume`, which takes neither `--sandbox` nor `--add-dir`
+/// and re-resolves the sandbox from config instead of inheriting the
+/// create-time one. `-c` is the only carrier, so it pins both the mode and the
+/// git writable root that `--add-dir` grants on create.
+///
+/// Empty on any failure: a posture we cannot resolve must never break a resume.
+pub(crate) fn codex_sandbox_config_args_resume(cwd: &std::path::Path) -> Vec<String> {
+    let Some(common) = git_common_dir(cwd) else {
+        return vec![];
+    };
+    // TOML string literal: the only characters needing escape here are `\` and `"`.
+    let quoted = common.replace('\\', "\\\\").replace('"', "\\\"");
+    vec![
+        "-c".into(),
+        "sandbox_mode=workspace-write".into(),
+        "-c".into(),
+        format!("sandbox_workspace_write.writable_roots=[\"{quoted}\"]"),
+    ]
+}
+
+/// Absolute git COMMON dir for `cwd`; `None` outside a repo or on any failure.
+fn git_common_dir(cwd: &std::path::Path) -> Option<String> {
     let out = std::process::Command::new("git")
         .arg("-C")
         .arg(cwd)
         .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
-        .output();
-    let Ok(out) = out else { return vec![] };
+        .output()
+        .ok()?;
     if !out.status.success() {
-        return vec![];
+        return None;
     }
     let common = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if common.is_empty() {
-        return vec![];
-    }
-    vec!["--add-dir".into(), common]
+    (!common.is_empty()).then_some(common)
 }
 
 impl Provider for CodexProvider {
@@ -503,6 +529,9 @@ impl Provider for CodexProvider {
             "--skip-git-repo-check".into(),
         ];
         argv.extend(Self::sandbox_resume(ctx.yolo));
+        if !ctx.yolo {
+            argv.extend(codex_sandbox_config_args_resume(&ctx.cwd));
+        }
         argv.push(normalize_codex_command(&ctx.message));
         argv
     }
@@ -1404,6 +1433,40 @@ mod tests {
     fn codex_create_argv_outside_a_repo_is_unchanged() {
         let argv = CodexProvider.create_argv(&create_ctx());
         assert!(!argv.iter().any(|a| a == "--add-dir"));
+    }
+
+    /// The bounded posture does NOT survive `codex exec resume` on its own:
+    /// resume re-reads the sandbox from config instead of inheriting the
+    /// create-time one, and accepts neither `--sandbox` nor `--add-dir`. Both
+    /// halves therefore have to be re-pinned through `-c`.
+    #[test]
+    fn codex_resume_argv_repins_the_bounded_posture() {
+        let dir = tempfile::tempdir().unwrap();
+        std::process::Command::new("git")
+            .args(["init", "-q"])
+            .current_dir(dir.path())
+            .status()
+            .unwrap();
+
+        let ctx = ResumeContext {
+            session_id: "s1".into(),
+            message: "follow up".into(),
+            cwd: dir.path().to_path_buf(),
+            from_name: None,
+            yolo: false,
+        };
+        let argv = CodexProvider.resume_argv(&ctx);
+        assert!(argv.contains(&"sandbox_mode=workspace-write".to_string()));
+        let roots = argv
+            .iter()
+            .find(|a| a.starts_with("sandbox_workspace_write.writable_roots="))
+            .expect("writable_roots override present");
+        let want = std::fs::canonicalize(dir.path().join(".git")).unwrap();
+        assert!(roots.contains(want.to_str().unwrap()), "{roots} vs {want:?}");
+
+        // Full yolo is already unsandboxed: no posture to re-pin.
+        let yolo = ResumeContext { yolo: true, ..ctx };
+        assert!(!CodexProvider.resume_argv(&yolo).iter().any(|a| a == "-c"));
     }
 
     #[test]

@@ -242,7 +242,12 @@ fn build_argv_create_no_resume_subcommand() {
 
 #[test]
 fn build_argv_resume_default_no_sandbox_flag() {
-    let argv = build_argv_resume("sess-uuid-1234", "msg to resume", false);
+    let argv = build_argv_resume(
+        &PathBuf::from("/x"),
+        "sess-uuid-1234",
+        "msg to resume",
+        false,
+    );
     // codex exec resume <session_id> --json --skip-git-repo-check <prompt>
     assert_eq!(argv[0], "codex");
     assert_eq!(argv[1], "exec");
@@ -260,15 +265,48 @@ fn build_argv_resume_default_no_sandbox_flag() {
 
 #[test]
 fn build_argv_resume_yolo_adds_bypass() {
-    let argv = build_argv_resume("s123", "p", true);
+    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", true);
     assert!(argv.contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
 }
 
 #[test]
 fn build_argv_resume_no_cd_flag() {
     // Resume sets cwd via Popen(cwd=...) not -C argv token
-    let argv = build_argv_resume("s123", "p", false);
+    let argv = build_argv_resume(&PathBuf::from("/x"), "s123", "p", false);
     assert!(!argv.contains(&"-C".to_string()));
+}
+
+#[test]
+fn build_argv_resume_repins_the_bounded_posture_in_a_repo() {
+    // Resume re-resolves the sandbox from config instead of inheriting the
+    // create-time posture, and it accepts neither --sandbox nor --add-dir. So
+    // the bounded case must re-pin BOTH halves through -c, or a resumed worker
+    // either loses its sandbox or keeps it without the git grant and cannot
+    // commit.
+    let dir = tempfile::tempdir().unwrap();
+    std::process::Command::new("git")
+        .args(["init", "-q"])
+        .current_dir(dir.path())
+        .status()
+        .unwrap();
+
+    let argv = build_argv_resume(dir.path(), "s123", "p", false);
+    assert!(argv.contains(&"sandbox_mode=workspace-write".to_string()));
+    let roots = argv
+        .iter()
+        .find(|a| a.starts_with("sandbox_workspace_write.writable_roots="))
+        .expect("writable_roots override present");
+    let want = std::fs::canonicalize(dir.path().join(".git")).unwrap();
+    assert!(
+        roots.contains(want.to_str().unwrap()),
+        "{roots} should grant {want:?}"
+    );
+    // Both overrides ride their own -c token.
+    assert_eq!(argv.iter().filter(|a| *a == "-c").count(), 2);
+
+    // Full yolo is already unsandboxed: there is no posture to re-pin.
+    let yolo = build_argv_resume(dir.path(), "s123", "p", true);
+    assert!(!yolo.iter().any(|a| a == "-c"));
 }
 
 // ---------------------------------------------------------------------------

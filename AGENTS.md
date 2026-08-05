@@ -68,9 +68,9 @@ Before concluding "no callers left", verify the search found something it should
 
 codex `workspace-write` marks `<project_root>/.git` read-only, so every `git add` fails on `index.lock` - in a plain repo, and doubly in a linked worktree whose gitdir sits at `<repo>/.git/worktrees/<name>/`, outside the workspace entirely.
 When a commit fails there, read the real worktree's `git log` before concluding anything: a metadata clone under `/tmp` answers `git cat-file` from a DIFFERENT repo, so "Not a valid object name" came back for four commits that had in fact landed, and the worker emitted a STOP for data loss that never happened.
-All four fno codex argv builders now pass `--add-dir <git-common-dir>`, so a surviving failure means an argv fno did not build - a codex subagent, or a hand-run `codex`.
+Every fno codex argv builder now grants the git common dir, but note the resume lane is NOT a create lane: `codex exec resume` takes neither `--sandbox` nor `--add-dir` and re-reads the sandbox from config instead of inheriting the create-time posture, so it re-pins both halves through `-c` - a bounded worker otherwise silently loses either its sandbox or its ability to commit.
 
-- specimens: `cli/src/fno/agents/providers/codex.py` (`git_writable_args`), `cli/src/fno/agents/mux_spawn.py` (pane arm), `crates/fno-agents/src/provider.rs` (`codex_git_writable_args`), `crates/fno-agents/src/codex_ask.rs` (the ask lane, missed by the first sweep), `.codex/agents/*.toml` (`sandbox_mode = "workspace-write"` subagents, still uncovered).
+- specimens: `cli/src/fno/agents/providers/codex.py` (`git_writable_args`, `sandbox_config_args_resume`), `cli/src/fno/agents/mux_spawn.py` (pane arm), `crates/fno-agents/src/provider.rs` (`codex_git_writable_args`, `codex_sandbox_config_args_resume`), `crates/fno-agents/src/codex_ask.rs` (the ask lane, missed by the first sweep), `.codex/agents/*.toml` (`sandbox_mode = "workspace-write"` subagents, still uncovered).
 - graduates-to: a codex-spawn lint that fails a bounded codex argv missing the git grant, plus a first-write probe that refuses the spawn naming the gitdir instead of letting the worker discover it mid-task.
 - added: 2026-08-02
 

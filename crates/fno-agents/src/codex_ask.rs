@@ -174,7 +174,14 @@ pub fn build_argv_create(
 /// Build the resume argv: `codex exec resume <session_id> --json --skip-git-repo-check <sandbox_resume> <full_prompt>`.
 /// `full_prompt` should already have been built via `inject_from_name`.
 /// Resume does NOT use `-C`; the subprocess cwd is pinned via `Command::current_dir`.
-pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec<String> {
+/// `cwd` is still needed to resolve the bounded posture, which resume re-reads
+/// from config rather than inheriting - see `codex_sandbox_config_args_resume`.
+pub fn build_argv_resume(
+    cwd: &Path,
+    session_id: &str,
+    full_prompt: &str,
+    yolo: bool,
+) -> Vec<String> {
     let mut argv = vec![
         "codex".to_string(),
         "exec".to_string(),
@@ -184,6 +191,9 @@ pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec
         "--skip-git-repo-check".to_string(),
     ];
     argv.extend(sandbox_flag_resume(yolo));
+    if !yolo {
+        argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
+    }
     argv.push(full_prompt.to_string());
     argv
 }
@@ -758,7 +768,7 @@ pub fn codex_resume(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
-    let argv = build_argv_resume(session_id, &full_prompt, eff);
+    let argv = build_argv_resume(cwd, session_id, &full_prompt, eff);
     run_codex(&argv, output_path, timeout, false, Some(cwd), None)
 }
 
