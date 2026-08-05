@@ -54,7 +54,7 @@ def _patch_emit_capture(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict
 def _clear_agent_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for k in (
         "FNO_AGENT_SELF",
-        "FNO_AGENT_PROVIDER",
+        "FNO_AGENT_HARNESS",
         "FNO_AGENT_SESSION",
         "MCP_CHANNEL_INBOUND_POKE",
         "CRON_JOB",
@@ -201,7 +201,7 @@ def test_nested_agent_attribution_propagates(
     (tmp_path / "home").mkdir()
     _seed_agent_entry(tmp_path, "child")
     monkeypatch.setenv("FNO_AGENT_SELF", "parent-worker")
-    monkeypatch.setenv("FNO_AGENT_PROVIDER", "codex")
+    monkeypatch.setenv("FNO_AGENT_HARNESS", "codex")
     monkeypatch.setenv("FNO_AGENT_SESSION", "parent-sess-1234")
     captured = _patch_emit_capture(monkeypatch)
 

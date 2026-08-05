@@ -35,6 +35,8 @@ from typing import Optional
 
 import yaml
 
+from fno.harness_identity import harness_from_env
+
 
 # ---------------------------------------------------------------------------
 # EventContext dataclass
@@ -231,7 +233,7 @@ def build_context(
     from_session_id: Optional[str]
     if kind == "nested_agent":
         from_name = os.environ.get("FNO_AGENT_SELF")
-        from_provider = os.environ.get("FNO_AGENT_PROVIDER")
+        from_provider = harness_from_env(os.environ)
         from_session_id = os.environ.get("FNO_AGENT_SESSION")
     elif kind == "target_session":
         # from_name pinned to "target"; from_session_id mirrors the

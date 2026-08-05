@@ -11,7 +11,7 @@ machine-readable pane id off stdout, and writes the registry row with the
 row, and there is never a silent daemon-PTY fallback - AC1-ERR).
 
 The mux server itself sets ``FNO_SESSION``/``FNO_PANE`` in the pane child env
-(crates/fno pty.rs); the mesh identity (``FNO_AGENT_SELF``/``FNO_AGENT_PROVIDER``)
+(crates/fno pty.rs); the mesh identity (``FNO_AGENT_SELF``/``FNO_AGENT_HARNESS``)
 rides an ``env(1)`` wrapper because ``pane run`` carries argv, not env.
 
 Interactive argv per provider mirrors the Rust daemon providers
@@ -872,7 +872,7 @@ def _mesh_env_wrapper(
     # present and future spawn path to remember to unset it.
     pairs = [
         f"FNO_AGENT_SELF={name}",
-        f"FNO_AGENT_PROVIDER={provider}",
+        f"FNO_AGENT_HARNESS={provider}",
         f"FNO_AGENT_ROW_PENDING={name}",
     ]
     unset: list[str] = []

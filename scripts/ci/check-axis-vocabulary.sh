@@ -255,6 +255,31 @@ if os.environ.get("AXIS_SELF_TEST") == "1":
 
 findings, observed = scan(root_arg)
 
+
+def _allowlist_keys(path: Path):
+    """file:line keys allowlisted out of the violation set (correct ambiguous
+    sites, time-boxed compat windows), with a required justification per line."""
+    keys = set()
+    if path.exists():
+        for line in path.read_text(encoding="utf-8").splitlines():
+            s = line.strip()
+            m = re.match(r"allowlist:\s+(.+?):(\d+)\b", s)
+            if m:
+                keys.add(f"{m.group(1)}:{m.group(2)}")
+    return keys
+
+
+def _finding_key(f: str) -> str:
+    m = re.match(r"^(.+?:\d+):", f)
+    return m.group(1) if m else f
+
+
+# Suppress allowlisted sites before any reporting or baseline diff. An allowlist
+# entry with no justification cannot be parsed (the regex requires text after the
+# file:line), so a bare "smuggle it past review" line fails to suppress.
+allowlisted = _allowlist_keys(baseline_path)
+findings = [f for f in findings if _finding_key(f) not in allowlisted]
+
 # Positive control (AC3): the scan must reach real content in BOTH Python and
 # Rust, the two languages carrying the most axis-named bindings. A scan that
 # observes no provider/harness/model tokens in either has not reached content and
@@ -326,7 +351,14 @@ except (OSError, UnicodeError) as exc:
     )
     sys.exit(2)
 
-baseline = [s.strip() for s in raw if s.strip() and not s.lstrip().startswith("#")]
+# Baseline violation entries only. Allowlist lines are metadata consumed by the
+# suppression pass above, not findings to diff: a stable allowlist must not read
+# as drift just because it is not itself a violation.
+baseline = [
+    s.strip()
+    for s in raw
+    if s.strip() and not s.lstrip().startswith("#") and not s.strip().startswith("allowlist:")
+]
 finding_pat = re.compile(
     r"^.+?:\d+: .+?=\"(?:claude|codex|agy|opencode|anthropic|openai|zai|deepseek|google)\" \(.+\)$"
 )

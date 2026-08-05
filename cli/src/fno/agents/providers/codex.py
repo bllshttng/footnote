@@ -525,7 +525,7 @@ def _run_codex(
         spawn_env = dict(os.environ)
         if agent_self is not None:
             spawn_env["FNO_AGENT_SELF"] = agent_self
-            spawn_env["FNO_AGENT_PROVIDER"] = "codex"
+            spawn_env["FNO_AGENT_HARNESS"] = "codex"
         if route_env:
             # Codex-lane routing (x-db50 Item 4): the api key named by the
             # model_provider's env_key. The base_url/model ride the -c config.
