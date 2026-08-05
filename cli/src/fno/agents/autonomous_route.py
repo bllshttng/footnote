@@ -140,7 +140,7 @@ def _select_destination(
         from fno.adapters.providers.dispatch import dispatch_env
         from fno.adapters.providers.loader import load_combos, load_providers
         from fno.adapters.providers.rotation import next_healthy_provider
-        from fno.sigma_dispatch import resolve_dispatch_target
+        from fno.agents.dispatch_target import resolve_dispatch_target
 
         # The active combo via the settings_combo rung (env={} so no TARGET_COMBO
         # pin leaks in; a synthetic agent name has no per-agent pin). A bare active

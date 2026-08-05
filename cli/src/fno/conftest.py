@@ -1,7 +1,7 @@
 """Shared pytest fixtures for tests living under ``cli/src/fno/``.
 
 The tests in ``src/fno/`` package directories (e.g. ``adapters/providers/
-test_loader.py``, ``test_sigma_dispatch.py``) accept a ``repo_root=tmp_path``
+test_loader.py``, ``test_dispatch_target.py``) accept a ``repo_root=tmp_path``
 parameter to isolate their project-local settings. The corresponding global
 candidate ``~/.fno/settings.yaml`` is read directly via ``Path.home()``
 and falls outside ``tmp_path``, so a contributor with their own global

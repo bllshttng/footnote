@@ -258,4 +258,3 @@ harness-local run.
 Resolution and dispatch are owned by the **Cross-Model Review Routing** section in `sigma.md`.
 A resolved provider matching the invoking harness uses `Task()`; a provider on a different harness uses `fno agents spawn --once` so the requested route is actually honored.
 Fallback uses `Task()` on the invoking harness and reports that observed runtime plus a degraded reason instead of retaining the requested provider as if it ran.
-The `dispatch_sigma_subagent()` helper (`cli/src/fno/sigma_dispatch.py`) may still emit the forensic `subagent_spawn` / `subagent_complete` event pair for cross-harness dispatches; it is forensics-only and does not affect the verdict.

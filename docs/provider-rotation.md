@@ -1138,7 +1138,7 @@ fno config accounts combos use <name> [--scope project|global]
 
 ### Resolution priority
 
-When a subagent dispatch needs to pick a provider, `sigma_dispatch.resolve_dispatch_target` walks this chain (highest first):
+When a subagent dispatch needs to pick a provider, `agents.dispatch_target.resolve_dispatch_target` walks this chain (highest first):
 
 1. `config.agents.<name>.provider`  (Spec 3 per-agent pin)
 2. `TARGET_COMBO` env var             (set by `--combo` CLI flag, skill modifier, or megatron manifest)
@@ -1208,7 +1208,7 @@ All paths terminate in setting `TARGET_COMBO=<name>` in the environment of spawn
 - **Empty `providers` list:** `Combo.__post_init__` raises `ValueError`; `load_combos` wraps as `ProviderConfigError`.
 - **Invalid strategy:** raised at construction-time.
 - **Unknown provider id in `--providers`:** rejected before `config.toml` mutation.
-- **Combo deleted mid-dispatch:** `dispatch_with_combo` raises `ComboNotFoundError`; `sigma_dispatch.resolve_dispatch_target` catches its loader equivalent and falls through.
+- **Combo deleted mid-dispatch:** `dispatch_with_combo` raises `ComboNotFoundError`; `agents.dispatch_target.resolve_dispatch_target` catches its loader equivalent and falls through.
 - **All members in cooldown:** `dispatch_with_combo` returns `QueueExhausted(retry_after=...)` with the soonest cooldown-expiry hint.
 - **YAML round-trip via PyYAML loses comments:** documented limitation. Use `fno config accounts combos add/remove` for safe edits, or hand-edit and re-add.
 

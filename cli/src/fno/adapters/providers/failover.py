@@ -440,7 +440,7 @@ class FailoverController:
 def record_success(provider_id: str) -> None:
     """Reset per-provider exponential backoff after a successful call.
 
-    Plan A (ab-6534a78a) public API: callers (sigma_dispatch, the loop
+    Plan A (ab-6534a78a) public API: callers (dispatch_target, the loop
     runner, future cooldown-aware code) invoke this when a provider call
     returns 2xx. Calling this is OPTIONAL today - the runtime_state's
     1h TTL covers stale entries - but RECOMMENDED so the backoff_level
