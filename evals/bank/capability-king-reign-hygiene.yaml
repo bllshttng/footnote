@@ -1,0 +1,52 @@
+# Grades a recorded king-for-a-day reign against the skill's own ordering rules.
+# Grade-only (no prompt): fno evals run skips the worker spawn and grades the
+# checked-in fixture directly. The fixture is a distilled, redacted event slice
+# of one real reign; the checks are ordering properties over it.
+#
+# TIER IS THE WHOLE ADVISORY-OR-BLOCKING KNOB. capability is advisory: only a
+# regression-tier task below 100% raises the exit-4 alarm. Promotion to blocking
+# is `fno evals graduate` (a reviewed edit) after the checks survive a second
+# real reign. No new gate, config key, or tier is invented here.
+#
+# WHY ONLY FOUR CHECKS HAVE A DETECTOR (failure 6 gets none). Failure 6,
+# "designed a capability probe that could only return yes", is judgment, not an
+# ordering property. Delegating that judgment to a headless grading subprocess is
+# forbidden by the active AGENTS.md pitfall "Judgment delegated to a subprocess
+# on a truncated context produces junk", and a mechanical proxy for it would
+# pass vacuously, which is worse than no check because it reports the failure as
+# covered. So failure 6 stays where it already lives: the AGENTS.md pitfalls
+# entry "A capability probe delivered over the mail bus can only ever return
+# yes". This comment is the recorded refusal; the pitfalls entry is the carrier.
+#
+# GENERALIZATION CASES (same root as check 1, not caught by this fixture). Check
+# 1 catches "asserted a code-behavior claim without reading the file." The same
+# root - asserting from a proxy instead of checking the authoritative source -
+# also produced two failures in the reign's successor work that this fixture
+# does not evidence: (a) reporting a PR's CI as "restarting" from a push without
+# checking `mergeable` (a CONFLICTING PR runs no CI), and (b) inferring a worker
+# authored a commit from the commit sitting in that worker's worktree without
+# checking the transcript mtime. A detector for those is the same check applied
+# to state-claim surfaces (the gh mergeable field, the transcript mtime); it is
+# not built here because their claim-before-consult evidence is not in this
+# distilled reign. When a second reign supplies it, check 1 ports directly.
+#
+# THE MORE DANGEROUS SPECIMEN (also not caught by check 1). Check 1 fires only
+# when the code was NOT read before the claim. The harder case is an agent that
+# DID read the code, then asserted a causal mechanism from it without a
+# falsification test: every file:line citation accurate, the conclusion still
+# false, because no competing hypothesis was tried. Reading the source raised
+# confidence without raising correctness. An eval that catches only the no-read
+# version passes an agent doing this. It is not built here because the property
+# is "a causal claim citing read code, with no experiment run to falsify it" -
+# recognizing an experiment mechanically is a different shape than check 1's
+# ordering property, and the known instance lives in a session this fixture does
+# not distill. It is recorded here so the next check author does not mistake
+# check 1 for covering it.
+id: capability-king-reign-hygiene
+tier: capability
+grade:
+  - kind: exit
+    command: "cd cli && uv run pytest tests/unit/test_king_reign_hygiene.py -q"
+    expect: 0
+timeout_minutes: 5
+tags: [king-for-a-day, hygiene, transcript]

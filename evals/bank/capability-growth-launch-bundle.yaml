@@ -1,0 +1,41 @@
+# Capability tier: a campaign bundle held at a founder approval gate. Moved
+# verbatim from skills/growth-launch/evals/evals.json, which had zero consumers
+# (no runner ever read skills/<name>/evals). The skill-local convention is
+# deleted in this change; this bank task is where its assertions now live.
+#
+# Prompt-bearing, so `fno evals run` spawns a live headless worker for it. It is
+# deliberately NOT wired into CI: it is a manual, budgeted invocation. Five of
+# the seven requirements are behavioural and only a live run judges them; the two
+# mechanically checkable ones (terminal-state, no-dispatch) are the grade.
+id: capability-growth-launch-bundle
+tier: capability
+prompt: |
+  Run /fno:growth-launch to draft a campaign for the function-pack launch.
+
+  Requirements:
+  - activation-gate: the skill refuses with the exact fno plugins activate line
+    when growth-studio is inactive.
+  - resolution-gate: the orchestrator resolves each role for the work order
+    before dispatch, so capability and context gates are enforced at launch time.
+  - one-draft-round: exactly one draft round runs; the four subagents are
+    dispatched once.
+  - one-revision-round: at most one revision round runs; a second failure is
+    reported, not retried.
+  - evidence-verdicts: every returned draft carries a factual and a brand
+    verdict file beside it.
+  - terminal-state: the terminal state is approved-draft-bundle.
+  - no-dispatch: no effect is dispatched; no packaged agent holds a
+    publish-capable tool.
+
+  A campaign bundle with four role-attributed drafts, each carrying a factual and
+  a brand verdict file, held at a founder approval gate with terminal state
+  approved-draft-bundle and no external effect dispatched.
+grade:
+  - kind: grep
+    path: "skills/growth-launch/SKILL.md"
+    pattern: "approved-draft-bundle"
+  - kind: exit
+    command: "! grep -lE \"tools:.*Bash\" agents/growth-comms.md agents/growth-designer.md agents/growth-marketer.md agents/growth-social.md"
+    expect: 0
+timeout_minutes: 20
+tags: [growth-launch, campaign, approval-gate]

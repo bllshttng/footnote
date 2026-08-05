@@ -1,0 +1,9 @@
+{
+  "meta": {"reign_date": "synthetic", "skill": "fno:king-for-a-day", "purpose": "AC3-EDGE: a reign that never spawns a worker"},
+  "entries": [
+    {"index": 0, "kind": "tool_use", "tool": "Bash", "target": "fno backlog epic status x-synth"},
+    {"index": 1, "kind": "assistant_text", "text": "Reading the track; nothing to fan out yet."},
+    {"index": 2, "kind": "tool_use", "tool": "Bash", "target": "fno mail send worker-1 \"status check, no new work\""},
+    {"index": 3, "kind": "assistant_text", "text": "Abdicating. Crown expired."}
+  ]
+}
