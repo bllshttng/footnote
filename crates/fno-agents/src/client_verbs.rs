@@ -1272,19 +1272,38 @@ struct ManifestIdentity {
 }
 
 impl ManifestIdentity {
+    /// The session-id fields, in canonical-first precedence.
+    fn session_ids(&self) -> [&str; 3] {
+        [
+            self.harness_session_id.as_str(),
+            self.claude_session_id.as_str(),
+            self.codex_thread_id.as_str(),
+        ]
+    }
+
     /// Does `session_id` equal any harness-session-id the manifest records? The
     /// legacy `claude_session_id` / `codex_thread_id` aliases are kept for one
     /// release, so a pre-rename manifest still matches its session.
     fn matches(&self, session_id: &str) -> bool {
         let sid = session_id.trim();
         !sid.is_empty()
-            && [
-                self.harness_session_id.as_str(),
-                self.claude_session_id.as_str(),
-                self.codex_thread_id.as_str(),
-            ]
-            .iter()
-            .any(|f| !f.is_empty() && f.trim() == sid)
+            && self
+                .session_ids()
+                .iter()
+                .any(|f| !f.is_empty() && f.trim() == sid)
+    }
+
+    /// The id an adopted row is keyed on: canonical `harness_session_id` when
+    /// present, else the legacy alias that carries it. init writes
+    /// `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real manifest can
+    /// record the session under `claude_session_id` alone; keying on the
+    /// canonical field alone would mint a row with an empty session id, empty
+    /// short_id and the name `target-`.
+    fn canonical_session_id(&self) -> &str {
+        self.session_ids()
+            .into_iter()
+            .find(|f| !f.is_empty())
+            .unwrap_or("")
     }
 }
 
@@ -1297,29 +1316,30 @@ fn set_first(slot: &mut String, val: &str) {
 }
 
 /// Scan manifest content (frontmatter AND body) for the session-identity keys.
-/// Lines inside the multi-line `input` quoted scalar are SKIPPED so a `/target`
-/// argument containing `harness: ...` cannot forge an identity field (the same
-/// forgery surface `finalize::parse_manifest_fields` guards for the merge
-/// posture). The manifest is not strict YAML, `fno target init` writes quoted
-/// scalars, so a line scan matches the writer rather than a YAML lib. Kept here
-/// rather than folded into finalize because finalize owns completion/merge
-/// fields and this owns session-identity fields; the scan is a handful of lines
-/// and the two concerns stay decoupled.
+/// Lines inside the multi-line `input` quoted scalar are UNTRUSTED (their keys
+/// never assign) so a `/target` argument containing `harness: ...` cannot forge
+/// an identity field -- the same forgery surface `finalize::parse_manifest_fields`
+/// guards for the merge posture. The manifest is not strict YAML, `fno target
+/// init` writes quoted scalars, so a line scan matches the writer rather than a
+/// YAML lib. Kept here rather than folded into finalize because finalize owns
+/// completion/merge fields and this owns session-identity fields; the scan is a
+/// handful of lines and the two concerns stay decoupled.
+///
+/// The terminator line is itself untrusted but still ADVANCES the scan rather
+/// than being consumed, exactly as finalize does: for an input ending in a lone
+/// backslash the closing quote is ambiguous and the real terminator is the next
+/// `plan_path: "..."` line. Consuming it (an unconditional skip) would leave the
+/// scalar open to EOF and silently drop every identity key below `input:` --
+/// init writes `input` before `harness`/`harness_session_id`/`owner_cwd`, so
+/// adopt would report "no evidence" for a manifest that matches.
 fn parse_manifest_identity(content: &str) -> ManifestIdentity {
     let mut m = ManifestIdentity::default();
     let mut in_input_scalar = false;
     for line in content.lines() {
         let line = line.trim();
-        // A multi-line `input: "..."` spills real newlines; its continuation
-        // lines reach this loop looking like `key: value`. Track the scalar and
-        // skip it so user text can never forge an identity field. init escapes
-        // quotes and not backslashes, so a closing quote with no preceding
-        // backslash is the real terminator (finalize::ends_quoted_scalar).
-        if in_input_scalar {
-            if line.ends_with('"') && !line.trim_end_matches('"').ends_with('\\') {
-                in_input_scalar = false;
-            }
-            continue;
+        let line_untrusted = in_input_scalar;
+        if in_input_scalar && line_closes_quoted_scalar(line) {
+            in_input_scalar = false;
         }
         if line.is_empty() || line.starts_with('#') || line == "---" {
             continue;
@@ -1329,8 +1349,17 @@ fn parse_manifest_identity(content: &str) -> ManifestIdentity {
         };
         let k = k.trim();
         let raw = v.trim();
-        if k == "input" && raw.starts_with('"') && !line_closes_quoted_scalar(raw) {
+        // A multi-line `input: "..."` opens the scalar here. `len >= 2` so a bare
+        // opening quote is not read as its own terminator.
+        if !line_untrusted
+            && k == "input"
+            && raw.starts_with('"')
+            && !(raw.len() >= 2 && line_closes_quoted_scalar(raw))
+        {
             in_input_scalar = true;
+        }
+        if line_untrusted {
+            continue;
         }
         let val = raw.trim_matches(|c| c == '"' || c == '\'');
         match k {
@@ -1400,7 +1429,12 @@ fn git_worktree_paths(cwd: &Path) -> Vec<PathBuf> {
 }
 
 fn paths_eq(a: &Path, b: &Path) -> bool {
-    std::fs::canonicalize(a).ok() == std::fs::canonicalize(b).ok() || a == b
+    // Both-unresolvable must NOT compare equal (`None == None`): two different
+    // stale paths would read as the same directory.
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => a == b,
+    }
 }
 
 /// Find the `.fno/target-state.md` whose session id matches, scanning the cwd's
@@ -1419,8 +1453,15 @@ fn find_manifest_for_session(session_id: &str) -> Option<ManifestIdentity> {
         let Ok(content) = fs::read_to_string(&manifest) else {
             continue;
         };
-        let id = parse_manifest_identity(&content);
+        let mut id = parse_manifest_identity(&content);
         if id.matches(session_id) {
+            // `owner_cwd` is optional in the manifest schema; without it the
+            // minted row has an empty cwd and `resume` refuses ("no recorded
+            // cwd. Run `fno agents rm ...`") on the row it just wrote. The
+            // worktree the manifest was found in IS that cwd.
+            if id.owner_cwd.is_empty() {
+                id.owner_cwd = wt.to_string_lossy().into_owned();
+            }
             return Some(id);
         }
     }
@@ -1456,12 +1497,19 @@ fn synthesized_name(short: &str) -> String {
 /// pid -> `gc_action` Keep).
 fn mint_synthesized_entry(id: &ManifestIdentity, now: &str) -> crate::state::RegistryEntry {
     use crate::state::RegistryEntry;
-    let harness = if id.harness.is_empty() {
-        "claude".to_string()
-    } else {
+    let harness = if !id.harness.is_empty() {
         id.harness.clone()
+    } else if id.harness_session_id.is_empty()
+        && id.claude_session_id.is_empty()
+        && !id.codex_thread_id.is_empty()
+    {
+        // No harness recorded and only the codex alias carries the session:
+        // defaulting to claude would mint an unresumable row.
+        "codex".to_string()
+    } else {
+        "claude".to_string()
     };
-    let session = id.harness_session_id.clone();
+    let session = id.canonical_session_id().to_string();
     let short = derived_short_id(&session);
     let is_claude = harness == "claude";
     RegistryEntry {
@@ -1520,7 +1568,25 @@ fn upsert_synthesized_row(
                 .position(|e| e.harness_session_id.as_deref() == Some(k))
         });
         match idx {
-            Some(i) => reg.entries[i] = entry,
+            Some(i) => {
+                // Adopt knows IDENTITY, never runtime state. A row can already
+                // exist under the canonical id while the operator adopts by a
+                // legacy alias (`resolve_entry_with_heal` misses the alias), so
+                // a wholesale replace would downgrade a live row to Idle and
+                // drop its pid / log_path / mux. Liveness stays with reconcile.
+                let mut merged = entry;
+                let old = &reg.entries[i];
+                merged.name = old.name.clone();
+                merged.created_at = old.created_at.clone();
+                merged.status = old.status;
+                merged.pid = old.pid;
+                merged.pid_start_time = old.pid_start_time;
+                merged.log_path = old.log_path.clone();
+                merged.host_mode = old.host_mode.clone();
+                merged.mux = old.mux.clone();
+                merged.exited_at = old.exited_at.clone();
+                reg.entries[i] = merged;
+            }
             None => reg.entries.push(entry),
         }
     })
@@ -3868,6 +3934,60 @@ mod tests {
     }
 
     #[test]
+    fn parse_manifest_identity_survives_ambiguous_scalar_terminator() {
+        // `/target 'ship it \'` -> init writes an input whose closing quote is
+        // preceded by a lone backslash, so the scalar's real terminator is the
+        // next `plan_path: "..."` line. Consuming that line would leave the
+        // scalar open to EOF and drop every identity key below it (init writes
+        // `input` before harness / harness_session_id / owner_cwd), turning a
+        // matching manifest into "no evidence".
+        let content = "---\n\
+            fno_id: real-run\n\
+            input: \"ship it \\\"\n\
+            plan_path: \"internal/fno/plan.md\"\n\
+            harness: claude\n\
+            harness_session_id: c7dc6218-493a-4299-916a-330ec0b0b055\n\
+            owner_cwd: \"/Users/x/wt\"\n\
+            ---\n";
+        let m = parse_manifest_identity(content);
+        assert_eq!(m.harness, "claude");
+        assert_eq!(m.harness_session_id, "c7dc6218-493a-4299-916a-330ec0b0b055");
+        assert_eq!(m.owner_cwd, "/Users/x/wt");
+        assert!(m.matches("c7dc6218-493a-4299-916a-330ec0b0b055"));
+    }
+
+    #[test]
+    fn mint_uses_legacy_alias_when_canonical_session_is_null() {
+        // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`, so a real
+        // manifest can carry the session under the legacy alias alone. Keying on
+        // the canonical field alone minted an empty session id / short_id and the
+        // name `target-`.
+        let id = ManifestIdentity {
+            harness: "claude".into(),
+            claude_session_id: "c7dc6218-493a-4299-916a-330ec0b0b055".into(),
+            owner_cwd: "/Users/x/wt".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&id, "now");
+        assert_eq!(
+            e.harness_session_id.as_deref(),
+            Some("c7dc6218-493a-4299-916a-330ec0b0b055")
+        );
+        assert_eq!(e.short_id, "c0b0b055");
+        assert_eq!(e.name, "target-c0b0b055");
+
+        // Codex-alias-only manifest with no `harness` must not default to claude.
+        let codex = ManifestIdentity {
+            codex_thread_id: "thread-abcdef12".into(),
+            ..Default::default()
+        };
+        let e = mint_synthesized_entry(&codex, "now");
+        assert_eq!(e.harness.as_deref(), Some("codex"));
+        assert_eq!(e.harness_session_id.as_deref(), Some("thread-abcdef12"));
+        assert_eq!(e.claude_session_uuid, None);
+    }
+
+    #[test]
     fn parse_manifest_identity_single_line_input_does_not_open_scalar() {
         // `input: "x-0358"` closes on the same line; the next real key parses.
         let content = "input: \"x-0358\"\nharness: codex\n";
@@ -3948,6 +4068,39 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].cwd, "/y");
         assert_eq!(rows[0].fno_id.as_deref(), Some("run-1"));
+    }
+
+    #[test]
+    fn upsert_synthesized_row_preserves_live_runtime_state() {
+        // Re-adopting a session that already has a LIVE row (reachable when the
+        // operator adopts by a legacy alias, which resolve_entry_with_heal
+        // misses) must not downgrade it to Idle or drop its pid.
+        let dir = cv_tmpdir();
+        let reg = dir.path().join("registry.json");
+        let id = ManifestIdentity {
+            harness: "codex".into(),
+            harness_session_id: "thread-live".into(),
+            owner_cwd: "/x".into(),
+            ..Default::default()
+        };
+        let mut live = mint_synthesized_entry(&id, "t1");
+        live.status = crate::AgentStatus::Busy;
+        live.pid = Some(4242);
+        live.log_path = Some("/tmp/live.log".into());
+        upsert_synthesized_row(&reg, live).unwrap();
+
+        upsert_synthesized_row(&reg, mint_synthesized_entry(&id, "t2")).unwrap();
+
+        let loaded = crate::state::load_registry(&reg).unwrap();
+        let row = loaded
+            .entries
+            .iter()
+            .find(|r| r.harness_session_id.as_deref() == Some("thread-live"))
+            .expect("row survives");
+        assert_eq!(row.status, crate::AgentStatus::Busy);
+        assert_eq!(row.pid, Some(4242));
+        assert_eq!(row.log_path.as_deref(), Some("/tmp/live.log"));
+        assert_eq!(row.created_at, "t1");
     }
 
     #[test]
