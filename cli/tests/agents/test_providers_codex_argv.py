@@ -12,7 +12,6 @@ Plan ACs covered:
 """
 from __future__ import annotations
 
-import re
 
 from fno.agents.providers import codex as codex_mod
 
@@ -158,13 +157,87 @@ def test_headless_config_full_yolo_resolves_to_bypass(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# git_writable_args — the bounded sandbox cannot write git metadata without it.
+#
+# codex's workspace-write policy marks <project_root>/.git read-only, so a
+# bounded worker cannot take index.lock and every commit fails. In a LINKED
+# worktree the block is doubly hard: the gitdir lives at
+# <repo>/.git/worktrees/<name>/, outside the workspace entirely. One
+# --add-dir on the git COMMON dir covers both, plus the shared objects/ and
+# refs/ a commit also writes.
+# ---------------------------------------------------------------------------
+
+
+def _init_repo(path):
+    import subprocess
+
+    path.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=path, check=True)
+    return path
+
+
+def test_git_writable_args_returns_add_dir_for_plain_repo(tmp_path):
+    """AC1-HP: a plain repo cwd yields --add-dir <repo>/.git.
+
+    Not worktree-specific: the .git read-only carveout blocks a plain repo too.
+    """
+    import pathlib
+
+    repo = _init_repo(tmp_path / "repo")
+    out = codex_mod.git_writable_args(repo)
+
+    assert out[0] == "--add-dir"
+    assert len(out) == 2
+    assert pathlib.Path(out[1]).resolve() == (repo / ".git").resolve()
+
+
+def test_git_writable_args_returns_common_dir_for_linked_worktree(tmp_path):
+    """AC1-HP (the reported case): a linked worktree resolves to the COMMON
+    dir, not its own gitdir - the common dir contains .git/worktrees/<name>/
+    (index.lock) AND the objects/refs a commit writes."""
+    import pathlib
+    import subprocess
+
+    repo = _init_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=repo, check=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(wt), "-b", "feat"],
+        cwd=repo, check=True,
+    )
+    # Precondition: this really is a linked worktree (.git is a FILE).
+    assert (wt / ".git").is_file()
+
+    out = codex_mod.git_writable_args(wt)
+
+    assert out[0] == "--add-dir"
+    assert pathlib.Path(out[1]).resolve() == (repo / ".git").resolve()
+
+
+def test_git_writable_args_empty_outside_a_repo(tmp_path):
+    """AC3-ERR: a non-repo cwd changes no argv and never raises."""
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert codex_mod.git_writable_args(outside) == []
+
+
+def test_git_writable_args_empty_for_missing_path(tmp_path):
+    """AC3-ERR: a cwd that does not exist yet is not a crash."""
+    assert codex_mod.git_writable_args(tmp_path / "nope") == []
+
+
+# ---------------------------------------------------------------------------
 # sandbox_flag_resume (resume path — restricted surface)
 # ---------------------------------------------------------------------------
 
 
 def test_sandbox_flag_resume_default_is_empty():
-    # codex exec resume inherits sandbox from the original session;
-    # without --yolo we emit nothing so the inherited mode applies.
+    # `codex exec resume` takes no --sandbox flag, so the bounded case emits
+    # nothing HERE and re-pins its posture through sandbox_config_args_resume.
     assert codex_mod.sandbox_flag_resume(yolo=False) == []
 
 
@@ -179,6 +252,92 @@ def test_sandbox_flag_resume_never_emits_sandbox_flag():
     # emitted from this helper under any input.
     for yolo in (True, False):
         assert "--sandbox" not in codex_mod.sandbox_flag_resume(yolo)
+
+
+# ---------------------------------------------------------------------------
+# sandbox_config_args_resume — resume does NOT inherit the create-time posture.
+#
+# Measured from a recorded rollout: the create turn ran workspace-write with a
+# managed profile, and the resumed turn of that SAME session ran
+# danger-full-access with the profile disabled, because resume re-read the
+# install's config default. So a bounded worker either loses its sandbox on
+# resume, or keeps it and loses the create-time --add-dir git grant and can no
+# longer commit. `-c` is the only carrier resume accepts for either half.
+# ---------------------------------------------------------------------------
+
+
+def test_sandbox_config_args_resume_pins_mode_and_git_root(tmp_path):
+    import json
+    import pathlib
+
+    repo = _init_repo(tmp_path / "repo")
+    out = codex_mod.sandbox_config_args_resume(repo)
+
+    assert out[0] == "-c"
+    assert out[1] == "sandbox_mode=workspace-write"
+    assert out[2] == "-c"
+    key, _, value = out[3].partition("=")
+    assert key == "sandbox_workspace_write.writable_roots"
+    assert [pathlib.Path(p).resolve() for p in json.loads(value)] == [
+        (repo / ".git").resolve()
+    ]
+
+
+def test_sandbox_config_args_resume_grants_common_dir_for_linked_worktree(tmp_path):
+    """The reported case: the worktree's gitdir lives under the COMMON dir."""
+    import json
+    import pathlib
+    import subprocess
+
+    repo = _init_repo(tmp_path / "repo")
+    subprocess.run(
+        ["git", "-c", "user.email=t@t.t", "-c", "user.name=t",
+         "commit", "-q", "--allow-empty", "-m", "base"],
+        cwd=repo, check=True,
+    )
+    wt = tmp_path / "wt"
+    subprocess.run(
+        ["git", "worktree", "add", "-q", str(wt), "-b", "feat"],
+        cwd=repo, check=True,
+    )
+
+    out = codex_mod.sandbox_config_args_resume(wt)
+    granted = pathlib.Path(json.loads(out[3].partition("=")[2])[0]).resolve()
+
+    assert granted == (repo / ".git").resolve()
+    assert (repo / ".git" / "worktrees" / "wt").is_relative_to(granted)
+
+
+def test_sandbox_config_args_resume_empty_outside_a_repo(tmp_path):
+    """A posture we cannot resolve must never break the resume."""
+    outside = tmp_path / "plain"
+    outside.mkdir()
+    assert codex_mod.sandbox_config_args_resume(outside) == []
+
+
+def test_resume_argv_repins_bounded_posture_but_not_yolo(tmp_path, monkeypatch):
+    """Both resume postures, on the real argv the subprocess would run."""
+    repo = _init_repo(tmp_path / "repo")
+    seen = []
+
+    def fake_run(*, argv, output_path, timeout, expect_session, popen_cwd):
+        seen.append(argv)
+        return None
+
+    monkeypatch.setattr(codex_mod, "_run_codex", fake_run)
+    kwargs = dict(
+        session_id="s1", cwd=repo, prompt="go", from_name="me",
+        output_path=tmp_path / "out.jsonl", headless_yolo=False,
+    )
+    codex_mod.resume(yolo=False, **kwargs)
+    codex_mod.resume(yolo=True, **kwargs)
+
+    bounded, yolo = seen
+    assert "sandbox_mode=workspace-write" in bounded
+    assert any(a.startswith("sandbox_workspace_write.") for a in bounded)
+    # A bypassed resume is already unsandboxed - re-pinning would re-cage it.
+    assert "-c" not in yolo
+    assert "--dangerously-bypass-approvals-and-sandbox" in yolo
 
 
 # ---------------------------------------------------------------------------

@@ -14,12 +14,8 @@ Plan ACs covered:
 from __future__ import annotations
 
 import json
-import os
-import signal
 import subprocess
-import sys
 from pathlib import Path
-from typing import IO
 from unittest.mock import MagicMock
 
 import pytest
@@ -272,6 +268,73 @@ def test_create_argv_shape_pin(tmp_path, fake_popen):
     assert call_args.kwargs["stderr"] == subprocess.STDOUT
     assert call_args.kwargs["text"] is True
     assert call_args.kwargs["bufsize"] == 1
+
+
+def test_create_bounded_argv_grants_git_metadata_write(tmp_path, fake_popen):
+    """AC1-HP: a bounded create() into a git repo carries --add-dir <.git>.
+
+    Without it the sandbox refuses index.lock and every commit the worker
+    makes fails mid-task.
+    """
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    codex_mod.create(
+        cwd=repo,
+        prompt="do this",
+        from_name="orchestrator",
+        yolo=False,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+    )
+
+    argv = fake_popen.call_args.args[0]
+    assert "--add-dir" in argv
+    assert Path(argv[argv.index("--add-dir") + 1]).resolve() == (repo / ".git").resolve()
+    # It is an `exec` flag, so it must follow the subcommand.
+    assert argv.index("exec") < argv.index("--add-dir")
+
+
+def test_create_full_yolo_argv_omits_git_add_dir(tmp_path, fake_popen):
+    """AC2-EDGE: full yolo is already unsandboxed - no grant to make."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    codex_mod.create(
+        cwd=repo,
+        prompt="do this",
+        from_name="orchestrator",
+        yolo=True,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+    )
+
+    argv = fake_popen.call_args.args[0]
+    assert "--add-dir" not in argv
+
+
+def test_create_git_add_dir_composes_with_user_add_dir(tmp_path, fake_popen):
+    """AC-EDGE: --add-dir is repeatable, so the git grant is additive - a
+    caller's own --add-dir survives instead of being clobbered."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+
+    codex_mod.create(
+        cwd=repo,
+        prompt="do this",
+        from_name="orchestrator",
+        yolo=False,
+        output_path=tmp_path / "output.jsonl",
+        headless_yolo=False,
+        add_dir="/some/shared/dir",
+    )
+
+    argv = fake_popen.call_args.args[0]
+    assert argv.count("--add-dir") == 2
+    assert "/some/shared/dir" in argv
 
 
 def test_create_routed_openai_provider_injects_config_and_env(
@@ -600,7 +663,6 @@ def test_create_tee_per_errno_warn_recurs_for_distinct_modes(
             self.closed = True
 
     broken = _BrokenTee()
-    monkeypatch_open = lambda *a, **kw: broken
     # Patch _open_tee to return our broken tee.
     import fno.agents.providers.codex as cm
 

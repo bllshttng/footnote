@@ -162,8 +162,9 @@ def approval_flag(yolo: bool) -> list[str]:
     found``, aborting the spawn before any session id is emitted.
 
     Note: ``codex exec resume`` accepts neither ``--sandbox`` nor
-    ``--ask-for-approval``; resume INHERITS the create-time posture, so neither
-    this nor :func:`sandbox_flag_resume` emits approval tokens on resume.
+    ``--ask-for-approval`` as flags; the bounded posture is restored there via
+    ``-c`` instead (see :func:`sandbox_config_args_resume`), so this emits no
+    approval tokens on resume.
     """
     if yolo:
         return []
@@ -174,12 +175,92 @@ def sandbox_flag_resume(yolo: bool) -> list[str]:
     """Return the argv tokens for codex resume's restricted sandbox surface.
 
     Resume only supports ``--dangerously-bypass-approvals-and-sandbox`` (no
-    ``--sandbox`` flag on the resume subcommand). When ``yolo=False`` the
-    session's original sandbox mode applies, so this returns an empty list.
+    ``--sandbox`` flag on the resume subcommand), so the bounded case emits
+    nothing here and restores its posture through
+    :func:`sandbox_config_args_resume` instead.
     """
     if yolo:
         return ["--dangerously-bypass-approvals-and-sandbox"]
     return []
+
+
+def sandbox_config_args_resume(cwd: Path) -> list[str]:
+    """Return the ``-c`` tokens that re-pin a BOUNDED posture across resume.
+
+    Resume does NOT inherit the create-time sandbox posture: it re-resolves
+    from ``~/.codex/config.toml``. Verified from a recorded rollout whose
+    create turn ran ``workspace-write`` with a managed profile and whose
+    resumed turn ran ``danger-full-access`` with the profile disabled, purely
+    because the install's config default said so. That cuts both ways - on a
+    permissive config a bounded worker silently loses its sandbox on resume,
+    and on a restrictive one it keeps the sandbox but loses the create-time
+    ``--add-dir`` git grant and can no longer commit.
+
+    ``-c`` is the only carrier available here (``codex exec resume`` takes no
+    ``--sandbox`` and no ``--add-dir``), so it must pin BOTH halves: the mode,
+    and the writable root that :func:`git_writable_args` grants on create.
+    Unlike ``--add-dir``, ``writable_roots`` is a whole-value config override
+    rather than a repeatable flag, so it replaces any config-level list.
+
+    Returns ``[]`` outside a repo, or on any git failure - a posture we cannot
+    resolve must never break the resume.
+    """
+    grant = git_writable_config_args(cwd)
+    return ["-c", "sandbox_mode=workspace-write", *grant] if grant else []
+
+
+def git_writable_config_args(cwd: Path) -> list[str]:
+    """The ``-c`` form of :func:`git_writable_args`, for lanes without ``--add-dir``.
+
+    Used on its own by the INTERACTIVE resume lane (``codex resume <id>``),
+    which reopens a TUI whose sandbox mode is the operator's to choose - so it
+    grants the git root without also re-pinning the mode the way
+    :func:`sandbox_config_args_resume` does for the headless lane.
+    """
+    import json
+
+    common = _git_common_dir(cwd)
+    if not common:
+        return []
+    return ["-c", f"sandbox_workspace_write.writable_roots=[{json.dumps(common)}]"]
+
+
+def _git_common_dir(cwd: Path) -> str:
+    """Absolute git COMMON dir for ``cwd``; ``""`` outside a repo or on failure."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def git_writable_args(cwd: Path) -> list[str]:
+    """Return ``--add-dir <git-common-dir>`` so a bounded worker can commit.
+
+    codex's ``workspace-write`` policy marks ``<project_root>/.git`` read-only,
+    so a sandboxed worker cannot take ``index.lock`` and every commit fails
+    mid-task. This is NOT worktree-specific - a plain repo fails the same way -
+    but a LINKED worktree hides it worse, because its gitdir lives at
+    ``<repo>/.git/worktrees/<name>/``, outside the workspace entirely, and the
+    resulting "wrong path" error has been misread as data loss.
+
+    The git COMMON dir covers both shapes in one token: it is ``<repo>/.git``
+    either way, and it contains the per-worktree gitdir alongside the shared
+    ``objects/`` and ``refs/`` a commit also writes. ``--add-dir`` is repeatable
+    and additive, so this composes with a caller's own ``--add-dir`` instead of
+    clobbering it the way ``-c sandbox_workspace_write.writable_roots`` would.
+
+    Returns ``[]`` outside a repo, or on any git failure - a grant we cannot
+    resolve must never break the spawn.
+    """
+    common = _git_common_dir(cwd)
+    return ["--add-dir", common] if common else []
 
 
 def _effective_yolo(yolo: bool, headless_yolo: Optional[bool] = None) -> bool:
@@ -659,6 +740,9 @@ def create(
     # x-b6e2: a user --add-dir grants extra write access on `codex exec`
     # (additive; codex's own cwd rides -C). Empty/None = unchanged argv.
     add_dir_args = ["--add-dir", add_dir] if add_dir else []
+    # The bounded sandbox refuses git metadata writes; grant the git common dir
+    # so the worker can actually commit. Full yolo is already unsandboxed.
+    git_args = [] if eff_yolo else git_writable_args(cwd)
     argv = [
         "codex",
         *config_args,
@@ -667,6 +751,7 @@ def create(
         "-C", str(cwd),
         "--skip-git-repo-check",
         *add_dir_args,
+        *git_args,
         *sandbox_flag(eff_yolo),
         full_prompt,
     ]
@@ -712,14 +797,16 @@ def resume(
         :class:`CodexTimeoutError`: wall-clock exceeded ``timeout``.
     """
     full_prompt = inject_from_name(prompt, from_name)
-    # `codex exec resume` does not accept `--sandbox`; only the dangerous
-    # bypass flag toggles sandbox behavior. Sandbox mode otherwise inherits
-    # from the original session's settings.
+    # `codex exec resume` accepts neither `--sandbox` nor `--add-dir`, and it
+    # re-resolves the posture from config rather than inheriting the
+    # create-time one, so the bounded case re-pins both through `-c`.
+    eff_yolo = _effective_yolo(yolo, headless_yolo)
     argv = [
         "codex", "exec", "resume", session_id,
         "--json",
         "--skip-git-repo-check",
-        *sandbox_flag_resume(_effective_yolo(yolo, headless_yolo)),
+        *sandbox_flag_resume(eff_yolo),
+        *([] if eff_yolo else sandbox_config_args_resume(cwd)),
         full_prompt,
     ]
     return _run_codex(

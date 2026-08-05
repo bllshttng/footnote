@@ -110,7 +110,9 @@ pub fn approval_flag(yolo: bool) -> Vec<String> {
 /// Argv tokens for the sandbox mode on the resume path.
 /// `codex exec resume` only accepts the bypass flag; `--sandbox` is not
 /// honored on resume (verified against codex 0.130.0 --help).
-/// - default: `[]`  (inherits original session sandbox)
+/// - default: `[]` - resume does NOT inherit the create-time sandbox (it
+///   re-reads config), so the bounded posture is re-pinned through `-c` in
+///   [`build_argv_resume`] instead.
 /// - yolo:    `["--dangerously-bypass-approvals-and-sandbox"]`
 pub fn sandbox_flag_resume(yolo: bool) -> Vec<String> {
     if yolo {
@@ -150,6 +152,12 @@ pub fn build_argv_create(
         argv.push("--add-dir".to_string());
         argv.push(d.to_string());
     }
+    // Parity with codex.py::create: the bounded sandbox marks <project_root>/.git
+    // read-only, so grant the git common dir or the worker cannot commit at all.
+    // Additive - `--add-dir` is repeatable, so a caller's own grant survives.
+    if !yolo {
+        argv.extend(crate::provider::codex_git_writable_args(cwd));
+    }
     // x-c772: an explicit --model is forwarded to `codex exec --model <m>`
     // (empty/None = codex default). Exact passthrough, no fuzzy resolution.
     if let Some(m) = model.filter(|m| !m.is_empty()) {
@@ -168,7 +176,14 @@ pub fn build_argv_create(
 /// Build the resume argv: `codex exec resume <session_id> --json --skip-git-repo-check <sandbox_resume> <full_prompt>`.
 /// `full_prompt` should already have been built via `inject_from_name`.
 /// Resume does NOT use `-C`; the subprocess cwd is pinned via `Command::current_dir`.
-pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec<String> {
+/// `cwd` is still needed to resolve the bounded posture, which resume re-reads
+/// from config rather than inheriting - see `codex_sandbox_config_args_resume`.
+pub fn build_argv_resume(
+    cwd: &Path,
+    session_id: &str,
+    full_prompt: &str,
+    yolo: bool,
+) -> Vec<String> {
     let mut argv = vec![
         "codex".to_string(),
         "exec".to_string(),
@@ -178,6 +193,9 @@ pub fn build_argv_resume(session_id: &str, full_prompt: &str, yolo: bool) -> Vec
         "--skip-git-repo-check".to_string(),
     ];
     argv.extend(sandbox_flag_resume(yolo));
+    if !yolo {
+        argv.extend(crate::provider::codex_sandbox_config_args_resume(cwd));
+    }
     argv.push(full_prompt.to_string());
     argv
 }
@@ -752,7 +770,7 @@ pub fn codex_resume(
         yolo,
         crate::agents_config::headless_yolo_enabled("codex", cwd),
     );
-    let argv = build_argv_resume(session_id, &full_prompt, eff);
+    let argv = build_argv_resume(cwd, session_id, &full_prompt, eff);
     run_codex(&argv, output_path, timeout, false, Some(cwd), None)
 }
 

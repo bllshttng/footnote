@@ -64,10 +64,21 @@ def _session_id_for(entry: Any) -> Optional[str]:
     return getattr(entry, field_name, None) if field_name else None
 
 
-def _build_resume_argv(provider: str, session_id: str) -> Optional[list[str]]:
+def _build_resume_argv(
+    provider: str, session_id: str, cwd: Optional[str] = None
+) -> Optional[list[str]]:
     """Provider-specific resume argv. Returns None for unsupported providers."""
     if provider == "codex":
-        return ["codex", "resume", session_id]
+        # A bounded codex cannot write git metadata without an explicit grant,
+        # and in a linked worktree that metadata sits outside the workspace
+        # entirely. `codex resume` takes no --add-dir, so the grant rides -c,
+        # which is global and must precede the subcommand.
+        from pathlib import Path
+
+        from fno.agents.providers.codex import git_writable_config_args
+
+        grant = git_writable_config_args(Path(cwd)) if cwd else []
+        return ["codex", *grant, "resume", session_id]
     if provider == "claude":
         # Spec: reuse fno's attach surface. claude's attach is
         # `claude attach <short_id>`.
@@ -175,7 +186,7 @@ def resume_logic(
     # harnesses because _session_id_for returns None for them). Both
     # are exit 13 — module contract reserves 14 for "CLI not on PATH"
     # to keep wrapper diagnostics unambiguous. Codex P2 round 2.
-    argv = _build_resume_argv(harness or "?", session_id or "")
+    argv = _build_resume_argv(harness or "?", session_id or "", cwd)
     if argv is None:
         return ResumeResult(
             exit_code=13,
