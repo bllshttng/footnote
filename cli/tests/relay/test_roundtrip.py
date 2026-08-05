@@ -424,8 +424,8 @@ def _fake_subprocess(run_fn):
 
 
 def _patch_binary(monkeypatch, path="/bin/fno-agents"):
-    from fno.agents import rust_runtime
-    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: path)
+    from fno import rust_binary
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: path)
 
 
 def test_submit_via_control_reply_confirmed_on_delivered(monkeypatch):
@@ -473,8 +473,8 @@ def test_submit_via_control_reply_unconfirmed_on_subprocess_timeout(monkeypatch)
 
 
 def test_submit_via_control_reply_not_sent_when_binary_absent(monkeypatch):
-    from fno.agents import rust_runtime
-    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    from fno import rust_binary
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     assert rt_mod.submit_via_control_reply("u", "f") == rt_mod.INJECT_NOT_SENT
 
 
