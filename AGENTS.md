@@ -28,7 +28,7 @@ Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or 
 
 **Cap: 10 active entries (context-cost budget).** AGENTS.md is injected at every SessionStart on every harness, so every entry is paid on every session start on every lane. Do not raise it; an entry too large to fit its budget graduates to a lint. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
 
-**Format:** one `###` block each. Imperative trap (1-3 sentences, this IS the budget), `specimens:` as bare file:line / PR refs, `graduates-to:` the lint/guard/refusal that lets it leave, `added:` YYYY-MM-DD. When a `graduates-to:` guard lands, remove the entry in the same PR that adds the guard (the guard is now the carrier, per principle 3's durability ladder).
+**Format:** one `###` block each. Imperative trap (1-3 sentences, this IS the budget), `specimens:` as bare file:line / PR refs, `graduates-to:` the lint/guard/refusal that lets it leave, `added:` YYYY-MM-DD. When a `graduates-to:` guard lands, remove the entry in the same PR that adds the guard (the guard is now the carrier, per principle 3's durability ladder). A TITLE must not name a shipped `fno` verb (the verb's own `--help` is its carrier); a body may cite one as a specimen. `check-pitfalls.sh` rejects a title-named verb, so the constraint is invisible until it fires - write the trap, not the verb, in the title.
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness; a lane that cannot has lost the delivery claim for it: `kdc-delivery-sentinel-1932`.
 
