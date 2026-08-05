@@ -31,17 +31,17 @@ Design: ``internal/fno/design/2026-05-22-fno-pty-supervisor-and-drive.md``
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import IO, TYPE_CHECKING, Callable, Mapping, NoReturn, Optional, Sequence
 
+# The binary lookup itself is stdlib-only and has callers below this layer, so
+# it lives at fno.rust_binary; this module keeps the dispatch/routing half.
+from fno import rust_binary
+
 if TYPE_CHECKING:
     import click
 
-#: Name of the Rust client binary on PATH / in the bundled wheel dir. Windows
-#: appends .exe (the release matrix stages + bundles `fno-agents.exe` there).
-BINARY_NAME = "fno-agents.exe" if os.name == "nt" else "fno-agents"
 #: Env var that selects the runtime. Recognized values: ``rust`` (force the
 #: binary), ``python`` (force Python dispatch); anything else (incl. unset)
 #: means ``auto`` -- the default, which prefers an installed binary per-verb.
@@ -327,93 +327,6 @@ def rust_runtime_enabled() -> bool:
     ``auto`` mode an installed binary also runs, but only for supported verbs.
     """
     return runtime_mode() == "rust"
-
-
-def _bundled_binary() -> Optional[Path]:
-    """The wheel-bundled binary at ``<package>/_bin/fno-agents`` (W6 Wave 3)."""
-    bundled = Path(__file__).resolve().parent.parent / "_bin" / BINARY_NAME
-    return bundled if bundled.is_file() and os.access(bundled, os.X_OK) else None
-
-
-def _sibling_binary() -> Optional[Path]:
-    """The binary installed next to the running launcher (the wheel scripts dir).
-
-    pip installs both the ``fno`` console script and the bundled ``fno-agents``
-    wheel-script into the same bin/ (Scripts/ on Windows). When ``fno`` is invoked
-    by absolute path without that dir on ``PATH`` (common in CI / cron wrappers),
-    ``shutil.which`` misses the binary even though it sits right beside the
-    launcher; this finder catches that case (codex P2 on PR #351).
-    """
-    launcher = sys.argv[0] if sys.argv else ""
-    if not launcher:
-        return None
-    sibling = Path(launcher).resolve().parent / BINARY_NAME
-    return sibling if sibling.is_file() and os.access(sibling, os.X_OK) else None
-
-
-def _path_binary() -> Optional[Path]:
-    """The binary as resolved on ``PATH`` (``cargo install`` / GH release / wheel script)."""
-    found = shutil.which(BINARY_NAME)
-    return Path(found) if found else None
-
-
-def _cargo_dev_binary() -> Optional[Path]:
-    """Dev fallback: a ``cargo build --release`` artifact under the repo tree.
-
-    ``__file__`` is ``cli/src/fno/agents/rust_runtime.py`` so the repo root
-    is ``parents[4]``. Checks both a crate-local ``target/`` and a workspace
-    ``target/`` so it works whether or not a workspace is introduced later.
-    """
-    here = Path(__file__).resolve()
-    try:
-        repo_root = here.parents[4]
-    except IndexError:  # installed shallower than a dev checkout
-        return None
-    # Only meaningful in a development checkout. When the package is installed
-    # into site-packages, parents[4] is some unrelated ancestor; refuse to
-    # traverse it so we never return a coincidental wrong binary.
-    if not (repo_root / "Cargo.toml").exists() and not (repo_root / "crates").is_dir():
-        return None
-    candidates = (
-        repo_root / "crates" / "fno-agents" / "target" / "release" / BINARY_NAME,
-        repo_root / "target" / "release" / BINARY_NAME,
-    )
-    for candidate in candidates:
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate
-    return None
-
-
-def resolve_binary() -> Optional[Path]:
-    """Locate ``fno-agents``: bundled wheel dir -> PATH -> cargo dev target.
-
-    Bundled wins so a ``pip install fno`` wheel is self-contained even when
-    a different (older) ``fno-agents`` happens to be on PATH. The launcher-sibling
-    lookup sits ahead of PATH so an abs-path ``fno`` invocation still resolves the
-    co-installed binary.
-    """
-    for finder in (_bundled_binary, _sibling_binary, _path_binary, _cargo_dev_binary):
-        found = finder()
-        if found is not None:
-            return found
-    return None
-
-
-def resolve_installed_binary() -> Optional[Path]:
-    """Locate an *installed* ``fno-agents`` (bundled wheel dir -> launcher sibling
-    -> PATH), deliberately excluding the cargo dev target.
-
-    The ``auto`` (default) runtime uses this narrower set so a *development*
-    checkout -- where only ``crates/fno-agents/target/release`` exists -- stays on
-    the Python dispatch by default, and the in-process test suite never execs the
-    binary. A dev who wants Rust opts in explicitly with ``FNO_AGENTS_RUNTIME=rust``,
-    which routes through the full :func:`resolve_binary` (cargo dev included).
-    """
-    for finder in (_bundled_binary, _sibling_binary, _path_binary):
-        found = finder()
-        if found is not None:
-            return found
-    return None
 
 
 def _is_pane_substrate_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -816,7 +729,7 @@ def route_to_rust(
     *,
     binary: Optional[Path] = None,
     _exec: Callable[..., None] = os.execv,
-    _resolve: Callable[[], Optional[Path]] = resolve_binary,
+    _resolve: Callable[[], Optional[Path]] = rust_binary.resolve_binary,
     _stderr: Optional[IO[str]] = None,
 ) -> NoReturn:
     """Exec ``fno-agents`` with ``args`` (the verb + everything after ``fno agents``).
@@ -844,7 +757,7 @@ def route_to_rust(
         binary = _resolve()
     if binary is None:
         print(
-            f"fno agents: {RUNTIME_ENV}=rust is set but the '{BINARY_NAME}' binary "
+            f"fno agents: {RUNTIME_ENV}=rust is set but the '{rust_binary.BINARY_NAME}' binary "
             "was not found (looked in the bundled wheel dir, on PATH, and in the "
             "cargo dev target; a file present but not executable is also skipped - "
             "try `chmod +x`). Get it via `pip install fno` (bundled wheel), "
@@ -896,13 +809,13 @@ def _make_rust_only_command(
         if runtime_mode() == "python":
             print(
                 f"fno agents {verb}: no Python implementation -- this verb runs only on "
-                f"the '{BINARY_NAME}' Rust runtime. Unset {RUNTIME_ENV} (auto) with the "
+                f"the '{rust_binary.BINARY_NAME}' Rust runtime. Unset {RUNTIME_ENV} (auto) with the "
                 f"binary installed, or set {RUNTIME_ENV}=rust to use a local cargo build.",
                 file=sys.stderr,
             )
         else:
             print(
-                f"fno agents {verb}: requires the '{BINARY_NAME}' Rust runtime, which was "
+                f"fno agents {verb}: requires the '{rust_binary.BINARY_NAME}' Rust runtime, which was "
                 "not found (bundled wheel dir, launcher sibling, PATH). Get it via "
                 f"`pip install fno` (bundled), `cargo install fno-agents`, or set "
                 f"{RUNTIME_ENV}=rust to use a local `cargo build --release -p fno-agents`.",
@@ -1055,7 +968,7 @@ def make_agents_group_cls() -> type:
                     # create/resume decision and surfaces the unresolvable-create
                     # exit-2 error itself, so there is no provider-conditional
                     # branch anymore.
-                    binary = resolve_installed_binary()
+                    binary = rust_binary.resolve_installed_binary()
                     if binary is not None:
                         _warn_env_scrub_spawn(args)  # Rust exec: Python dispatch never runs
                         route_to_rust(list(args), binary=binary)  # execs
