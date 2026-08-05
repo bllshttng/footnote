@@ -111,11 +111,6 @@ LEGACY_HEX = 8
 # call ``mint_node_id()`` instead; this remains the legacy default prefix.
 ID_PREFIX = LEGACY_PREFIX
 
-# Reserved sibling ID families that are NOT node IDs and must never be chosen as
-# a node prefix: carveouts (``cv-``), follow-ups (``fu-``), and target agent
-# names (``tgt-``). The config validator + setup wizard reject these.
-RESERVED_PREFIXES = frozenset({"cv-", "fu-", "tgt-"})
-
 # Liberal, bounded, config-FREE grammar for a well-formed node id: a lowercase
 # prefix (1-8 chars, letter-led) + '-' + 4-8 hex. Accepts the legacy
 # ``ab-{8hex}`` and any configured ``<prefix>-<4..8hex>``. Config-free on purpose

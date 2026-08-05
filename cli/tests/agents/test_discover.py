@@ -1182,10 +1182,10 @@ def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
     ],
 )
 def test_daemon_probe_failure_or_empty_is_lenient(monkeypatch, completed):
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
     monkeypatch.setattr(
-        rust_runtime, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
     )
     monkeypatch.setattr(discover.subprocess, "run", lambda *a, **kw: completed)
 
@@ -1193,7 +1193,7 @@ def test_daemon_probe_failure_or_empty_is_lenient(monkeypatch, completed):
 
 
 def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
     output = {
         "available": True,
@@ -1205,7 +1205,7 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
         ],
     }
     monkeypatch.setattr(
-        rust_runtime, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
+        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
     )
     monkeypatch.setattr(
         discover.subprocess,

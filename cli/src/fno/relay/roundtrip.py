@@ -752,9 +752,9 @@ def submit_via_control_reply(session_id: str, framed: str) -> str:
     has no ``worker.sock``, so the relay rides the SAME vehicle as ``fno mail send``
     (mirrors :func:`fno.agents.dispatch._mail_inject_claude`) rather than a second
     op:'reply' client."""
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    binary = rust_runtime.resolve_installed_binary()
+    binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return INJECT_NOT_SENT
     try:

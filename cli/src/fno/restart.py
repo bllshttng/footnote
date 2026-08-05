@@ -192,9 +192,9 @@ def restart_command(
     # 1. Agents daemon (safe: PTY workers survive). The primary action - an actual
     # restart FAILURE fails the command so a chained `fno update && fno restart`
     # surfaces it. An absent binary is "nothing to restart", not a failure.
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    binary = rust_runtime.resolve_installed_binary()
+    binary = rust_binary.resolve_installed_binary()
     if binary is None:
         result["daemon"] = "skipped-no-binary"
         say("fno restart: no installed fno-agents binary; skipping daemon restart", err=True)

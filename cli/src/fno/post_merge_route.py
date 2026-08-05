@@ -453,7 +453,7 @@ def _finalize_origin_ledger(
     DoneAwaitingMerge`` is NOT a SHIP_REASON, so finalize runs the always-branch
     ledger row only, never re-running plan-stamp/handoff against the dead origin."""
     try:
-        from fno.agents.rust_runtime import resolve_binary
+        from fno.rust_binary import resolve_binary
 
         binary = resolve_binary()
     except Exception:  # noqa: BLE001 - runtime resolver unavailable

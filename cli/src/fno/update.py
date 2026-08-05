@@ -310,7 +310,7 @@ def _cargo_installed_bin() -> Optional[Path]:
     """Return the path to the cargo-installed fno-agents binary, or None if absent.
 
     Deliberately checks the cargo install location (``$CARGO_HOME/bin``), NOT
-    ``fno.agents.rust_runtime.resolve_installed_binary()``, because a
+    ``fno.rust_binary.resolve_installed_binary()``, because a
     bundled-wheel binary refreshes via pip, not cargo.
     """
     cargo_home = Path(os.environ.get("CARGO_HOME", str(Path.home() / ".cargo")))

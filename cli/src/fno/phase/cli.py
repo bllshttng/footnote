@@ -19,7 +19,7 @@ from typing import Optional
 import typer
 
 from fno._subprocess_util import propagate_returncode
-from fno.agents.rust_runtime import resolve_binary
+from fno.rust_binary import resolve_binary
 from fno.paths import resolve_repo_root
 
 

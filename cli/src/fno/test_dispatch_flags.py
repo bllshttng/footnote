@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import pytest
 
-from fno.agents.provider_resolve import (
+from fno.dispatch_flags import (
     DispatchFlagError,
     infer_invoking_harness,
     reject_empty_model,

@@ -70,7 +70,7 @@ The close signal is a `watch` channel and the pump-completion signal a `oneshot`
 
 ## Gate-hardening
 
-While an operator holds an `interactive`/`step`/`paranoid` window, the operator (not the LLM) authored the bytes flowing into that agent, so gate signals seen during the window are operator-initiated, not LLM authorship (LD3). The detection primitive is `fno.agents.drive_authority`:
+While an operator holds an `interactive`/`step`/`paranoid` window, the operator (not the LLM) authored the bytes flowing into that agent, so gate signals seen during the window are operator-initiated, not LLM authorship (LD3). The detection primitive is `fno.drive_authority`:
 
 - `is_drive_authority_active()` / `active_drive_sessions()` read each agent's `state.json` drive window; watch never counts.
 - `fno agents drive-authority [--json]` exposes it to bash hooks (exit 0 when active).

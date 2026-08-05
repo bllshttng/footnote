@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.rust_runtime import resolve_binary
+from fno.rust_binary import resolve_binary
 from fno.events.verify_child_promise import verify_child_promise
 
 

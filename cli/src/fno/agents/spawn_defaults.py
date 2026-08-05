@@ -540,7 +540,7 @@ def inject_spawn_defaults(
                 _resolved["v"] = cfg_provider
             else:
                 try:
-                    from fno.agents.provider_resolve import resolve_dispatch_provider
+                    from fno.dispatch_flags import resolve_dispatch_provider
 
                     _resolved["v"] = resolve_dispatch_provider(None, env=env)[0]
                 except Exception:
@@ -572,7 +572,7 @@ def inject_spawn_defaults(
         # an explicit --model stays the supported cross-harness override. This
         # never maps a model value to a provider (no catalog); it only scopes an
         # UNqualified default the way the rest of dispatch scopes one.
-        from fno.agents.provider_resolve import resolve_dispatch_provider
+        from fno.dispatch_flags import resolve_dispatch_provider
 
         home = cfg_provider or "claude"
         try:
@@ -607,7 +607,7 @@ def inject_spawn_defaults(
         # else the config provider, else harness inference / builtin claude.
         eff_provider = (explicit_provider or "").strip() or cfg_provider
         if not eff_provider:
-            from fno.agents.provider_resolve import resolve_dispatch_provider
+            from fno.dispatch_flags import resolve_dispatch_provider
 
             # `None` = no explicit provider, so resolve_dispatch_provider does
             # harness inference (env-based via infer_invoking_harness) then the

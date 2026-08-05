@@ -5292,9 +5292,9 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
     durable fallback."""
     import json
 
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    binary = rust_runtime.resolve_installed_binary()
+    binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return False
     try:
@@ -5592,9 +5592,9 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
     (``codex remote-control start``); absent it this is a clean no-op."""
     import json
 
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    binary = rust_runtime.resolve_installed_binary()
+    binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return False
     try:

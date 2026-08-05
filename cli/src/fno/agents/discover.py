@@ -133,9 +133,9 @@ def _discover_from_codex_daemon() -> list[dict]:
     unavailable daemon, incompatible response, or timeout contributes no rows;
     recent rollout and registry discovery remain available.
     """
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    binary = rust_runtime.resolve_installed_binary()
+    binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return []
     try:

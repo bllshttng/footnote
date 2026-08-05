@@ -17,8 +17,8 @@ The walker journals each loop event as
 ``unit_id`` IS the backlog node id, so the streak keys on ``data.unit_id`` (the
 design assumed ``graph_node_id``; the real field is ``unit_id`` - the design's
 Domain Pitfall flagged exactly this). The flat agents-emitter envelope
-(``{...,"kind":...}``) is also accepted so the ``node_undeferred`` reset
-boundary can be emitted via ``fno.agents.events.emit``.
+(``{...,"kind":...}``) is also accepted; it is the shape
+``emit_undefer_boundary`` writes for the ``node_undeferred`` reset boundary.
 
 Failure / reset classification:
 
@@ -63,6 +63,47 @@ def events_path() -> Path:
     from fno import paths
 
     return paths.state_dir() / "events.jsonl"
+
+
+def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
+    """Append a ``node_undeferred`` reset boundary for ``node_id``.
+
+    Writes the flat envelope ``_classify`` already accepts, to the same log
+    ``read_events`` consumes, so the reset writer and the streak reader cannot
+    drift apart. Lives here rather than borrowing ``fno.agents.events.emit``:
+    that would make the graph package depend on the agents runtime for what is
+    one appended line, and the log is graph-owned.
+
+    Best-effort, like the emitter it replaced. A failed write only means the
+    node keeps its pre-undefer streak; it must never break the undefer itself.
+    It does warn to stderr, as ``agents.events.emit`` did: a reset boundary that
+    silently never lands leaves the node one maintain pass from being re-deferred
+    on stale failure history, and a wholly silent drop makes that untraceable.
+    """
+    import sys
+    from datetime import datetime, timezone
+
+    # The path resolution is inside the try, not just the write: events_path()
+    # reads settings, and a malformed settings.yaml must not break an undefer.
+    target: Optional[Path] = None
+    try:
+        target = path if path is not None else events_path()
+        record = {
+            "unit_id": node_id,
+            "ts": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "kind": _UNDEFER_TYPE,
+        }
+        target.parent.mkdir(parents=True, exist_ok=True)
+        # A single JSONL record is well under PIPE_BUF (4096), so an 'a'-mode
+        # write is atomic and interleaves at line boundaries with the walker.
+        with open(target, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, separators=(",", ":")) + "\n")
+    except Exception as exc:  # noqa: BLE001 - never break the undefer
+        print(
+            f"fno backlog: warning: {_UNDEFER_TYPE} boundary for {node_id} "
+            f"to {target or '<unresolved>'}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _default_event_paths() -> list[Path]:

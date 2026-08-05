@@ -186,10 +186,25 @@ echo "$out" | grep -q \
 echo "== checked-in baseline matches shipped findings while strict stays red =="
 out="$(bash "$CHECK" --strict "$REPO_ROOT" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "repository strict audit stays red" || fail "strict audit exit $rc: $out"
-[[ "$(echo "$out" | grep -c '^  cli/.*L[0-9].* -> L[0-9]')" -eq 8 ]] \
-    && ok "strict audit retains eight violations" || fail "strict finding count changed: $out"
-echo "$out" | grep -q 'layer cycle: L0 platform -> L1 core -> L0 platform' \
-    && ok "strict audit retains the cycle" || fail "repository cycle missing: $out"
+# Counts come from the baseline file, not a literal: a burndown PR should not
+# have to edit this test, and a hardcoded number silently rots into a rubber
+# stamp once it stops matching reality. Sourcing both from the baseline also
+# catches the case the literal never could -- strict and baseline disagreeing.
+expected_violations="$(grep -c '^cli/.*L[0-9].* -> L[0-9]' "$REPO_BASELINE")"
+actual_violations="$(echo "$out" | grep -c '^  cli/.*L[0-9].* -> L[0-9]')"
+[[ "$actual_violations" -eq "$expected_violations" ]] \
+    && ok "strict audit reports the $expected_violations baselined violations" \
+    || fail "strict reports $actual_violations, baseline holds $expected_violations: $out"
+expected_cycle="$(grep '^layer cycle: ' "$REPO_BASELINE" || true)"
+if [[ -n "$expected_cycle" ]]; then
+    echo "$out" | grep -q "  $expected_cycle" \
+        && ok "strict audit retains the baselined cycle" \
+        || fail "expected '$expected_cycle' in strict output: $out"
+else
+    echo "$out" | grep -q 'layer cycle: ' \
+        && fail "baseline holds no cycle but strict reports one: $out" \
+        || ok "no cycle in baseline, none in strict"
+fi
 out="$(bash "$CHECK" --baseline --baseline-file "$REPO_BASELINE" "$REPO_ROOT" 2>&1)"; rc=$?
 [[ $rc -eq 0 ]] && ok "repository baseline gate exits zero" || fail "repository baseline failed: $out"
 

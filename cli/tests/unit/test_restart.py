@@ -14,9 +14,9 @@ runner = CliRunner()
 
 
 def _fake_daemon_binary(monkeypatch, path: str = "/cargo/bin/fno-agents") -> None:
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: Path(path))
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path(path))
 
 
 def _record_run(calls: list) -> object:
@@ -138,9 +138,9 @@ def test_restart_json_summary(monkeypatch) -> None:
 
 
 def test_restart_no_daemon_binary_is_non_fatal(monkeypatch) -> None:
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(restart, "_mux_sessions", lambda: None)
 
     result = runner.invoke(app, ["restart"])
@@ -151,9 +151,9 @@ def test_restart_no_daemon_binary_is_non_fatal(monkeypatch) -> None:
 def test_restart_mux_json_nothing_running_completes(monkeypatch) -> None:
     """AC (x-2896): no daemon + no mux server -> `--mux --json` completes with a
     JSON summary saying nothing was running - the 2026-07-03 hang scenario."""
-    from fno.agents import rust_runtime
+    from fno import rust_binary
 
-    monkeypatch.setattr(rust_runtime, "resolve_installed_binary", lambda: None)
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: None)
     monkeypatch.setattr(restart, "_mux_sessions", lambda: [])
 
     result = runner.invoke(app, ["restart", "--mux", "--json"])

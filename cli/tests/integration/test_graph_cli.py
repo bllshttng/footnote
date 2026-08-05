@@ -493,7 +493,7 @@ def test_done_clears_queued_state(tmp_graph):
 
 def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
     """cv-9def52a7: `done` during a drive window emits backlog_done_operator_initiated."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     captured: dict = {}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: True)
@@ -511,7 +511,7 @@ def test_done_audit_tags_operator_when_driving(tmp_graph, monkeypatch):
 
 def test_done_no_audit_tag_when_not_driving(tmp_graph, monkeypatch):
     """No drive window -> done does not emit the operator-initiated tag."""
-    from fno.agents import drive_authority as da
+    from fno import drive_authority as da
 
     calls = {"n": 0}
     monkeypatch.setattr(da, "is_drive_authority_active", lambda *a, **k: False)

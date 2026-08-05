@@ -1,7 +1,7 @@
 """Unit tests for `fno phase kill-check` wrapper.
 
 kill-criteria.sh was folded into the fno-agents binary (US1, ab-58645f63); the
-wrapper now resolves the binary via fno.agents.rust_runtime.resolve_binary and
+wrapper now resolves the binary via fno.rust_binary.resolve_binary and
 invokes `fno-agents kill-check <plan_path>`. The binary's own behavior is proven
 byte-parity with the former bash by crates/fno-agents/tests/kill_criteria_parity.rs.
 

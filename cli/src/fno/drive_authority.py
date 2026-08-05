@@ -18,6 +18,10 @@ Stop-hook / PreToolUse consumption seam: call ``fno agents drive-authority``
 (exit 0 when active) or import ``is_drive_authority_active``. The full
 operator-authority matrix enforcement + its integration test land in Wave 8
 (design Open Question #10); this module is the shared detection foundation.
+
+Lives at the platform layer rather than under ``fno.agents``: it is a read-only
+state-file reader whose only dependency is ``fno.paths``, and its consumers sit
+below the runtime (``fno backlog done``, ``fno done``, the stop-hook seam).
 """
 from __future__ import annotations
 
