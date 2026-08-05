@@ -593,14 +593,14 @@ def test_batch_defer_mixed_done_and_idea(tmp_graph, tmp_path):
 
 def test_batch_undefer_clears_all_and_emits_per_node(tmp_graph, tmp_path, monkeypatch):
     """AC2-HP: undefer of N deferred nodes clears all and emits N events."""
-    import fno.agents.events as ev
+    import fno.graph.failure as failure
 
     ids = [_seed_with_plan(tmp_path, f"Undefer {n}") for n in range(3)]
     _invoke("backlog", "defer", *ids, "--reason", "stale")
 
     emitted: list[str] = []
     monkeypatch.setattr(
-        ev, "emit", lambda *a, **k: emitted.append(k.get("unit_id")) or None
+        failure, "emit_undefer_boundary", lambda nid, *a, **k: emitted.append(nid) or None
     )
 
     r = _invoke("backlog", "undefer", *ids)
@@ -619,7 +619,7 @@ def test_batch_undefer_clears_all_and_emits_per_node(tmp_graph, tmp_path, monkey
 
 def test_batch_undefer_warns_for_non_deferred(tmp_graph, tmp_path, monkeypatch):
     """undefer of a batch where some ids were not deferred warns and emits only for those that were."""
-    import fno.agents.events as ev
+    import fno.graph.failure as failure
 
     deferred = _seed_with_plan(tmp_path, "Was Deferred")
     fresh = _seed_with_plan(tmp_path, "Was Fresh")
@@ -627,7 +627,7 @@ def test_batch_undefer_warns_for_non_deferred(tmp_graph, tmp_path, monkeypatch):
 
     emitted: list[str] = []
     monkeypatch.setattr(
-        ev, "emit", lambda *a, **k: emitted.append(k.get("unit_id")) or None
+        failure, "emit_undefer_boundary", lambda nid, *a, **k: emitted.append(nid) or None
     )
 
     r = _invoke("backlog", "undefer", deferred, fresh)
