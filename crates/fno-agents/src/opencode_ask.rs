@@ -163,7 +163,7 @@ fn run_opencode(
     cmd.stderr(Stdio::piped());
     cmd.current_dir(cwd);
     cmd.env("FNO_AGENT_SELF", agent_self);
-    cmd.env("FNO_AGENT_PROVIDER", "opencode");
+    cmd.env("FNO_AGENT_HARNESS", "opencode");
     // Own process group so SIGTERM/SIGKILL/SIGINT reach opencode's subshells.
     unsafe {
         cmd.pre_exec(|| {

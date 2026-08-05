@@ -46,7 +46,7 @@ class TestResolveSelf:
     def test_env_tier_resolves_name_and_enriches(self):
         reg = [_claude()]
         result = whoami_mod.resolve_self(
-            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_PROVIDER": "claude"},
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
             registry=reg,
         )
         assert result.registered is True
@@ -137,7 +137,7 @@ class TestResolveSelf:
             raise RuntimeError("claude shellout failed")
 
         result = whoami_mod.resolve_self(
-            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_PROVIDER": "claude"},
+            env={"FNO_AGENT_SELF": "spawn-x-301a-whoami", "FNO_AGENT_HARNESS": "claude"},
             registry=[_claude()],
             live_status_fn=_boom,
         )
@@ -155,7 +155,7 @@ class TestWhoamiCLI:
         use_tmpdir(monkeypatch, tmp_path)
         write_registry([_claude()])
         monkeypatch.setenv("FNO_AGENT_SELF", "spawn-x-301a-whoami")
-        monkeypatch.setenv("FNO_AGENT_PROVIDER", "claude")
+        monkeypatch.setenv("FNO_AGENT_HARNESS", "claude")
         result = runner.invoke(agents_app, ["whoami"])
         assert result.exit_code == 0, result.stdout + result.stderr
         # JSON is emitted under CliRunner (non-TTY); assert on the parsed shape.
@@ -209,7 +209,7 @@ class TestWhoamiCLI:
         use_tmpdir(monkeypatch, tmp_path)
         write_registry([_claude()])
         monkeypatch.setenv("FNO_AGENT_SELF", "spawn-x-301a-whoami")
-        monkeypatch.setenv("FNO_AGENT_PROVIDER", "claude")
+        monkeypatch.setenv("FNO_AGENT_HARNESS", "claude")
         from fno.agents.providers import claude as claude_mod
 
         monkeypatch.setattr(

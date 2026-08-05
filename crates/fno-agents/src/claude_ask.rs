@@ -1187,7 +1187,7 @@ pub fn bg_create(
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
     cmd.env("FNO_AGENT_SELF", name);
-    cmd.env("FNO_AGENT_PROVIDER", "claude");
+    cmd.env("FNO_AGENT_HARNESS", "claude");
     for (k, v) in extra_env {
         cmd.env(k, v);
     }
@@ -2172,7 +2172,7 @@ pub fn dispatch_claude_headless(
     cmd.args(&argv[1..]);
     cmd.current_dir(cwd);
     cmd.env("FNO_AGENT_SELF", name);
-    cmd.env("FNO_AGENT_PROVIDER", "claude");
+    cmd.env("FNO_AGENT_HARNESS", "claude");
     cmd.env("FNO_AGENT_FROM", from_name);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

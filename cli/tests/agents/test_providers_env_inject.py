@@ -4,7 +4,7 @@ Task 2.2 from 2026-05-22-fno-agents-observability.md.
 
 Each provider's create() path must inject:
 - FNO_AGENT_SELF=<agent name>
-- FNO_AGENT_PROVIDER=<provider name>
+- FNO_AGENT_HARNESS=<provider name>
 
 into the spawned subprocess's environment so nested `fno agents ask`
 calls from inside that agent attribute back to this parent via the
@@ -53,7 +53,7 @@ def test_claude_bg_create_injects_agent_env(
     env = captured["env"]
     assert env is not None, "expected env kwarg to subprocess.run"
     assert env["FNO_AGENT_SELF"] == "alpha"
-    assert env["FNO_AGENT_PROVIDER"] == "claude"
+    assert env["FNO_AGENT_HARNESS"] == "claude"
     # Parent env must be preserved (sample check on PATH)
     assert "PATH" in env, "spawn env should inherit parent PATH"
 
@@ -94,7 +94,7 @@ def test_codex_create_threads_agent_self_to_run_codex(
     env = captured["env"]
     assert env is not None
     assert env["FNO_AGENT_SELF"] == "beta"
-    assert env["FNO_AGENT_PROVIDER"] == "codex"
+    assert env["FNO_AGENT_HARNESS"] == "codex"
     assert "PATH" in env
 
 
@@ -162,3 +162,34 @@ def test_env_session_intentionally_absent_on_create(
     env = captured["env"]
     assert "FNO_AGENT_SELF" in env
     assert "FNO_AGENT_SESSION" not in env
+
+
+def test_harness_from_env_prefers_new_name(monkeypatch):
+    """FNO_AGENT_HARNESS wins, and no compat warning is emitted when it is set."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "_HARNESS_ENV_WARNED", False)
+    assert hi.harness_from_env({"FNO_AGENT_HARNESS": "claude"}) == "claude"
+
+
+def test_harness_from_env_legacy_window_warns_once(monkeypatch, capsys):
+    """AC8: a worker carrying only the pre-cutover FNO_AGENT_PROVIDER resolves,
+    uses the value, and emits exactly one stderr line naming FNO_AGENT_HARNESS."""
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "_HARNESS_ENV_WARNED", False)
+    env = {"FNO_AGENT_PROVIDER": "codex"}
+    assert hi.harness_from_env(env) == "codex"
+    err1 = capsys.readouterr().err
+    assert "FNO_AGENT_PROVIDER is the pre-cutover name for FNO_AGENT_HARNESS" in err1
+    # A second resolution in the same process stays quiet (warn fires once).
+    assert hi.harness_from_env(env) == "codex"
+    err2 = capsys.readouterr().err
+    assert err2 == ""
+
+
+def test_harness_from_env_absent_is_none(monkeypatch):
+    import fno.harness_identity as hi
+
+    monkeypatch.setattr(hi, "_HARNESS_ENV_WARNED", False)
+    assert hi.harness_from_env({}) is None

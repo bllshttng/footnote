@@ -653,7 +653,7 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     tail = run_call[run_call.index("--") + 1 :]
     assert tail[0] == "env"
     assert "FNO_AGENT_SELF=peer" in tail
-    assert "FNO_AGENT_PROVIDER=claude" in tail
+    assert "FNO_AGENT_HARNESS=claude" in tail
     assert "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" in tail
     # The provider argv is interactive claude with the pinned session id.
     claude_at = tail.index("claude")
