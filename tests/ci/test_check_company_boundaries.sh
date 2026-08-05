@@ -186,8 +186,8 @@ echo "$out" | grep -q \
 echo "== checked-in baseline matches shipped findings while strict stays red =="
 out="$(bash "$CHECK" --strict "$REPO_ROOT" 2>&1)"; rc=$?
 [[ $rc -eq 1 ]] && ok "repository strict audit stays red" || fail "strict audit exit $rc: $out"
-[[ "$(echo "$out" | grep -c '^  cli/.*L[0-9].* -> L[0-9]')" -eq 9 ]] \
-    && ok "strict audit retains nine violations" || fail "strict finding count changed: $out"
+[[ "$(echo "$out" | grep -c '^  cli/.*L[0-9].* -> L[0-9]')" -eq 8 ]] \
+    && ok "strict audit retains eight violations" || fail "strict finding count changed: $out"
 echo "$out" | grep -q 'layer cycle: L0 platform -> L1 core -> L0 platform' \
     && ok "strict audit retains the cycle" || fail "repository cycle missing: $out"
 out="$(bash "$CHECK" --baseline --baseline-file "$REPO_BASELINE" "$REPO_ROOT" 2>&1)"; rc=$?

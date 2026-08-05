@@ -2,7 +2,6 @@
 # Each entry is exact: importing file and line, layer pair, and import statement.
 # Remove an entry only in the same PR that removes the corresponding dependency.
 cli/src/fno/config/__init__.py:318: L0 platform -> L1 core / from fno.graph._constants import RESERVED_PREFIXES
-cli/src/fno/events/cli.py:539: L0 platform -> L5 runtime / from fno.agents.rust_runtime import resolve_binary
 cli/src/fno/events/cli.py:110: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:142: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
 cli/src/fno/graph/cli.py:4128: L1 core -> L5 runtime / from fno.agents.provider_resolve import (
