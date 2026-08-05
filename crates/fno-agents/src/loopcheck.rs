@@ -2660,6 +2660,296 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
     }
 }
 
+// ── review coverage (x-0eaf) ──────────────────────────────────────────────────
+//
+// The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
+// all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
+// about reviews computed entirely from what did NOT happen: nobody is still
+// owed, no finding is outstanding, no reviewer is unattested. A quota refusal is
+// dropped from `missing_bots` (PR #214) and reads as a pass; on a config with no
+// required bots, nothing can object, so `reviewed` is true on zero reviews.
+//
+// Coverage is the missing predicate: did anyone actually review? It is a
+// first-class value reported everywhere, never folded back into the objection
+// boolean (collapsing it back undoes this node).
+//
+// Producer axis, not producer string. Two review producers share the display
+// name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
+// can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
+// by the App's quota). They are told apart by `CoverageProducer`, never by the
+// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
+// claude `/code-review`, shares the `LocalAttestation` axis.
+
+/// The channel a review verdict came from. Two producers that share a name (the
+/// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
+/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageProducer {
+    /// A GitHub App bot that posts review objects via the reviews API. Can
+    /// refuse on quota (the `usage_markers` / `body_is_usage_limit` path).
+    GithubApp,
+    /// A local reviewer that leaves NO GitHub object and instead emits a
+    /// head-pinned `review_attestation` event (`emit-attestation.sh`). Never
+    /// rate-limited by any App's quota: `/code-review`, the codex CLI, sigma.
+    LocalAttestation,
+}
+
+/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
+/// is derived from observed evidence, unlike the old boolean of the same name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageVerdict {
+    /// Posted a review object (any non-empty state), or a head-pinned `pass`
+    /// attestation. The only verdict that counts toward coverage.
+    Reviewed,
+    /// Responded and declined to review. Quota exhaustion is the first known
+    /// shape (detected by `body_is_usage_limit`). Positive evidence a reviewer
+    /// exists and will not help - exactly what a nudge or lane failover needs.
+    Refused,
+    /// Responded with a failure / unparseable payload.
+    Errored,
+    /// A configured reviewer that produced no response.
+    Absent,
+}
+
+/// A first-class coverage value, separate from the objection predicate. Never
+/// 0-on-error: a failed read is `Unknown`, which behaves as 0 for the autonomous
+/// refusal (fail closed) and is reported as "unknown" in the receipt (fail
+/// honest). Collapsing an API error into 0 produces false refusals; collapsing
+/// it into a count reproduces the bug.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coverage {
+    /// `n` reviewers reviewed (excludes human approvals until the operator says
+    /// otherwise). `Covered(0)` is a real, known zero - distinct from `Unknown`.
+    Covered(usize),
+    Unknown,
+}
+
+impl Coverage {
+    /// `true` iff at least one non-human review was observed. `Unknown` is
+    /// false: the autonomous path treats unknown as not-covered (fail closed).
+    pub fn is_covered(&self) -> bool {
+        matches!(self, Coverage::Covered(n) if *n > 0)
+    }
+}
+
+/// One reviewer's classification, for the `review_coverage` event and receipts.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewerVerdict {
+    pub producer: CoverageProducer,
+    pub name: String,
+    pub verdict: CoverageVerdict,
+    /// A human GitHub approval (state `APPROVED`, non-bot author). Computed but
+    /// EXCLUDED from the coverage count: whether it should count is the
+    /// operator's call (lean: exclude; a solo self-approval is self-cert).
+    /// One predicate flip in `CoverageReport::coverage_count` includes it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub human_approval: bool,
+}
+
+/// The coverage over a PR plus the per-reviewer verdicts that produced it.
+#[derive(Debug, Clone)]
+pub struct CoverageReport {
+    pub coverage: Coverage,
+    pub verdicts: Vec<ReviewerVerdict>,
+}
+
+impl CoverageReport {
+    /// Count of `reviewed` verdicts, excluding human approvals. This is the one
+    /// place that decides whether a human GitHub approval counts; flip the
+    /// `!v.human_approval` guard to include them (the operator's deferred call).
+    pub fn coverage_count(&self) -> Option<usize> {
+        match &self.coverage {
+            Coverage::Unknown => None,
+            Coverage::Covered(_) => Some(
+                self.verdicts
+                    .iter()
+                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .count(),
+            ),
+        }
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+/// Distinct local reviewers whose LATEST head-pinned attestation is `pass`
+/// (events.jsonl is append-ordered; a later `fail` revokes, a later `pass`
+/// restores - mirrors `unattested_reviewers_scan`'s retraction handling). Pure:
+/// scans text, no IO. Presence-based: counts any reviewer regardless of the
+/// configured `reviewers` list, so a worker-run `/code-review` counts even when
+/// `reviewers: []`.
+fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<String> {
+    let mut latest_at_head: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // An event with no head_sha is not head-pinned evidence and is skipped
+        // outright (defaulting it to "" would match a caller whose own head is
+        // "", turning unpinned data into coverage - codex P1 on the attestation
+        // gate, same class of lie this node deletes).
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head != head_sha {
+            continue;
+        }
+        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+        latest_at_head.insert(r.trim_start_matches('/').to_string(), is_pass);
+    }
+    let mut out: Vec<String> = latest_at_head
+        .into_iter()
+        .filter(|(_, pass)| *pass)
+        .map(|(r, _)| r)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Classify one configured GitHub-App login from observed reviews + comments.
+/// A review object with any non-empty state == reviewed (matches
+/// `compute_review_info`'s pass definition); a usage-limit comment and no review
+/// object == refused; otherwise absent.
+fn classify_github_login(login: &str, reviews: &[Value], comments: &[Value]) -> (CoverageVerdict, bool) {
+    let posted_review = reviews.iter().any(|r| {
+        let author = r
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        login_matches_bot(author, login)
+            && r.get("state")
+                .and_then(|v| v.as_str())
+                .map_or(false, |s| !s.is_empty())
+    });
+    if posted_review {
+        // `human_approval` stays false on the configured app axis: a configured
+        // github_app login is a bot. Human approvals are scanned separately.
+        return (CoverageVerdict::Reviewed, false);
+    }
+    let refused = comments.iter().any(|c| {
+        let author = c
+            .pointer("/author/login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        login_matches_bot(author, login)
+            && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+    });
+    if refused {
+        return (CoverageVerdict::Refused, false);
+    }
+    (CoverageVerdict::Absent, false)
+}
+
+/// Whether an author login is a bot (configured app, known profile, or `[bot]`).
+/// Used to separate a human GitHub approval from an app review on the same axis.
+fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
+    author.ends_with("[bot]")
+        || BOT_PROFILES.iter().any(|p| author.contains(p.login))
+        || github_app_logins.iter().any(|l| login_matches_bot(author, l))
+}
+
+/// Classify every reviewer response and compute coverage. Pure: takes the
+/// already-fetched GitHub review/comment arrays, the events.jsonl text, the
+/// current HEAD, and the configured GitHub-App logins; performs no IO, so it is
+/// unit-testable in isolation. A failed GitHub read (`github_read_ok = false`)
+/// makes coverage `Unknown` UNLESS the local axis carries a head-pinned pass:
+/// positive local evidence survives a bot outage, because the local lane is
+/// never rate-limited by the bot's quota (the PR #214 failure in a new hat,
+/// which this node exists to escape). (x-0eaf)
+pub fn classify_coverage(
+    reviews: &[Value],
+    comments: &[Value],
+    events_text: &str,
+    head_sha: &str,
+    github_app_logins: &[String],
+    github_read_ok: bool,
+) -> CoverageReport {
+    let local_passes = local_head_pinned_passes(events_text, head_sha);
+    let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
+
+    // github_app axis: one verdict per unique configured login. Dedup so a
+    // reviewer named in two lists (required + optional) is one verdict, not two
+    // units of coverage (Failure Modes).
+    if github_read_ok {
+        let mut seen: Vec<String> = Vec::new();
+        for login in github_app_logins {
+            let login = login.trim();
+            if login.is_empty() || seen.iter().any(|s| s == login) {
+                continue;
+            }
+            seen.push(login.to_string());
+            let (verdict, human) = classify_github_login(login, reviews, comments);
+            verdicts.push(ReviewerVerdict {
+                producer: CoverageProducer::GithubApp,
+                name: login.to_string(),
+                verdict,
+                human_approval: human,
+            });
+        }
+        // Human GitHub approvals: non-bot authors with state APPROVED, not a
+        // configured app. Recorded as `reviewed` with `human_approval: true` so
+        // they are visible but excluded from the count until the operator
+        // decides (lean: exclude). Computed here so the answer is a one-line
+        // flip, not a redesign.
+        let mut seen_human: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in reviews {
+            let author = r
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if author.is_empty() || author_is_bot(author, github_app_logins) || seen_human.contains(author) {
+                continue;
+            }
+            if r.get("state").and_then(|v| v.as_str()) == Some("APPROVED") {
+                seen_human.insert(author.to_string());
+                verdicts.push(ReviewerVerdict {
+                    producer: CoverageProducer::GithubApp,
+                    name: author.to_string(),
+                    verdict: CoverageVerdict::Reviewed,
+                    human_approval: true,
+                });
+            }
+        }
+    }
+
+    // local_attestation axis: one `reviewed` per distinct head-pinned pass.
+    for name in &local_passes {
+        verdicts.push(ReviewerVerdict {
+            producer: CoverageProducer::LocalAttestation,
+            name: name.clone(),
+            verdict: CoverageVerdict::Reviewed,
+            human_approval: false,
+        });
+    }
+
+    // Unknown only when the GitHub read failed AND there is no confirmed local
+    // review. A head-pinned local pass is positive evidence that trumps a bot
+    // outage, so coverage is Known(local) in that case, not Unknown.
+    let coverage = if !github_read_ok && local_passes.is_empty() {
+        Coverage::Unknown
+    } else {
+        Coverage::Covered(
+            verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .count(),
+        )
+    };
+
+    CoverageReport { coverage, verdicts }
+}
+
 // ── inline findings (Read 4, step 2 / US2) ────────────────────────────────────
 
 /// A blocking inline finding: a root review comment (in_reply_to_id == null)

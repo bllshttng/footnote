@@ -4820,3 +4820,233 @@ fn nudge_awaiting_defers_the_backstop() {
         d3.termination_reason
     );
 }
+
+// ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
+
+use fno_agents::loopcheck::{
+    classify_coverage, Coverage, CoverageProducer, CoverageVerdict,
+};
+
+const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
+
+fn gh_review(author: &str, state: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": author}, "state": state, "submittedAt": "2026-08-05T10:00:00Z"})
+}
+
+fn gh_comment(author: &str, body: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": author}, "body": body, "createdAt": "2026-08-05T10:00:00Z"})
+}
+
+fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
+    serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict}
+    })
+    .to_string()
+}
+
+/// AC1-HP: only bot output is the usage-limit refusal -> coverage 0, refused.
+#[test]
+fn coverage_classify_quota_refusal_is_zero_coverage_refused() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "You have reached your Codex usage limits for code reviews.",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    let bot = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(bot.producer, CoverageProducer::GithubApp);
+    assert_eq!(bot.verdict, CoverageVerdict::Refused);
+}
+
+/// AC11-HP: one genuine review, no blocking findings -> coverage 1.
+#[test]
+fn coverage_classify_real_review_counts() {
+    let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
+    let rep = classify_coverage(
+        &reviews,
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// Boundary: zero configured reviewers and no evidence -> Covered(0), not an
+/// error and not vacuous success.
+#[test]
+fn coverage_classify_zero_configured_is_covered_zero() {
+    let rep = classify_coverage(&[], &[], "", COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// AC5-ERR: reviews API failed, no local attestation -> Unknown.
+#[test]
+fn coverage_classify_github_read_failure_is_unknown_without_local() {
+    let rep = classify_coverage(
+        &[],
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        false,
+    );
+    assert_eq!(rep.coverage, Coverage::Unknown);
+    assert_eq!(rep.coverage_count(), None);
+}
+
+/// Operator ruling + producer-axis correction: a head-pinned local attestation
+/// makes coverage Known even when the github read failed. A bot quota outage
+/// cannot wedge the autonomous path while a local lane reviewed.
+#[test]
+fn coverage_classify_local_pass_survives_github_outage() {
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        false,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.name, "code-review");
+}
+
+/// The producer-axis consequence (operator correction): a bot terminal-refused
+/// does NOT imply zero coverage, because the local lane is a separate producer
+/// over a separate channel with separate limits.
+#[test]
+fn coverage_classify_bot_refused_plus_local_is_covered() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "You have reached your Codex usage limits for code reviews.",
+    )];
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        &events,
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(
+        rep.verdicts
+            .iter()
+            .filter(|v| v.verdict == CoverageVerdict::Refused)
+            .count(),
+        1
+    );
+}
+
+/// AC10-INV: a configured bot with an unrecognized comment (no review object,
+/// no usage marker) is absent, never reviewed - keeps gemini's empty
+/// usage_markers from rebuilding the bug for the second bot.
+#[test]
+fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
+    let comments = vec![gh_comment("gemini-code-assist[bot]", "something unrecognized")];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["gemini-code-assist".to_string()],
+        true,
+    );
+    let g = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "gemini-code-assist")
+        .unwrap();
+    assert_eq!(g.verdict, CoverageVerdict::Absent);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// The hedge: a human GitHub APPROVAL is recorded (human_approval: true) but
+/// excluded from the count. Lean: exclude; one predicate flip includes it.
+#[test]
+fn coverage_classify_human_approval_excluded() {
+    let reviews = vec![gh_review("jason", "APPROVED")];
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &[], true);
+    let human = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "jason")
+        .unwrap();
+    assert!(human.human_approval);
+    assert_eq!(human.verdict, CoverageVerdict::Reviewed);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    assert_eq!(rep.coverage_count(), Some(0));
+}
+
+/// Boundary: a reviewer named in two lists is one verdict, not two units.
+#[test]
+fn coverage_classify_duplicate_login_one_verdict() {
+    let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
+    let logins = vec![
+        "chatgpt-codex-connector".to_string(),
+        "chatgpt-codex-connector".to_string(),
+    ];
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &logins, true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(
+        rep.verdicts
+            .iter()
+            .filter(|v| v.name == "chatgpt-codex-connector")
+            .count(),
+        1
+    );
+}
+
+/// AC7-CON: a later pass at head supersedes an earlier fail (no cached refused).
+#[test]
+fn coverage_classify_local_fail_then_pass_latest_wins() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line("code-review", COV_HEAD, "fail"),
+        attestation_line("code-review", COV_HEAD, "pass"),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// A later fail at head revokes an earlier pass.
+#[test]
+fn coverage_classify_local_pass_then_fail_revokes() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line("code-review", COV_HEAD, "pass"),
+        attestation_line("code-review", COV_HEAD, "fail"),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// A pass on a prior head does not count after a new commit lands (head-pinning).
+#[test]
+fn coverage_classify_stale_head_does_not_count() {
+    let old_head = "0000000000000000000000000000000000000000";
+    let events = attestation_line("code-review", old_head, "pass");
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
