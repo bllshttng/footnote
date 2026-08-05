@@ -16,7 +16,7 @@ The map declares roughly a third of the Python modules under `cli/src/fno/`.
 Every run prints the live figure, so read it there rather than trusting a number in this document:
 
 ```
-check-company-boundaries: map covers 152 of 431 modules (35%); 279 unmapped modules are not scanned
+check-company-boundaries: map covers 153 of 431 modules (35%); 278 unmapped modules are not scanned
 ```
 
 `fno.backlog`, `fno.harness_identity`, `fno.mail`, `fno.done` and `fno.target_cli` are among the unmapped, and `layer_for` returns `None` for an unmapped module, so the scan skips those edges entirely.
@@ -27,15 +27,21 @@ The three modules moved to the platform layer during the burndown below are name
 
 ### Findings retired, and the two that remain
 
-Seven of the original nine prohibited imports were misplaced leaf utilities, and moving each one removed a real edge:
+Seven of the original nine prohibited imports were misplaced leaf utilities, and four of the five moves below removed a real edge:
 
 | Was | Now | Why it could move |
 |---|---|---|
 | `fno.graph._constants.RESERVED_PREFIXES` read by `fno.config` | owned by `fno.config` | a three-element frozenset whose only reader was the importing validator |
 | `fno.agents.events.emit` called by `fno backlog undefer` / `unsupersede` | `fno.graph.failure.emit_undefer_boundary` | the log is graph-owned and `fno.graph.failure` already reads it; the agents emitter was serving as a bare append-a-JSON-line helper |
-| `fno.agents.provider_resolve` | `fno.dispatch_flags` | stdlib plus the harness-marker table, with seven callers spanning every layer |
+| `fno.agents.provider_resolve` | `fno.dispatch_flags` | seven callers spanning every layer; the only remaining dependency is the harness-marker table, and see the caveat below |
 | `fno.agents.drive_authority` | `fno.drive_authority` | a read-only `state.json` reader whose only dependency is `fno.paths` |
 | `fno.agents.rust_runtime.resolve_binary` | `fno.rust_binary` | a stdlib-only filesystem lookup; `rust_runtime` keeps the dispatch half and depends downward on it |
+
+Applying this document's own test to the third row: `fno.dispatch_flags` is the one move that did not remove the dependency, only the direct spelling of it.
+It imports `fno.harness_identity`, which builds `LEGACY_HANDLE_RE` at import time from `fno.agents.harness_map.known_harnesses()`, so `import fno.dispatch_flags` still pulls in `fno.agents`.
+The check stays green on it purely because `fno.harness_identity` is unmapped; declaring that module would surface the edge rather than create it.
+Closing it means making the regex lazy or moving the harness-name table below the runtime, neither of which fits a mechanical relocation.
+`fno.drive_authority`, `fno.rust_binary`, `fno.config` and `fno.graph.failure` were each verified to import no `fno.agents` module, eagerly or lazily.
 
 None of the moves left a re-export shim at the old path.
 A shim would keep the upward import spelling available and hide the move from the next reader.

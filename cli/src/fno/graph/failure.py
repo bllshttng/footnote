@@ -76,11 +76,16 @@ def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
 
     Best-effort, like the emitter it replaced. A failed write only means the
     node keeps its pre-undefer streak; it must never break the undefer itself.
+    It does warn to stderr, as ``agents.events.emit`` did: a reset boundary that
+    silently never lands leaves the node one maintain pass from being re-deferred
+    on stale failure history, and a wholly silent drop makes that untraceable.
     """
+    import sys
     from datetime import datetime, timezone
 
     # The path resolution is inside the try, not just the write: events_path()
     # reads settings, and a malformed settings.yaml must not break an undefer.
+    target: Optional[Path] = None
     try:
         target = path if path is not None else events_path()
         record = {
@@ -93,8 +98,12 @@ def emit_undefer_boundary(node_id: str, path: Optional[Path] = None) -> None:
         # write is atomic and interleaves at line boundaries with the walker.
         with open(target, "a", encoding="utf-8") as fh:
             fh.write(json.dumps(record, separators=(",", ":")) + "\n")
-    except Exception:
-        pass
+    except Exception as exc:  # noqa: BLE001 - never break the undefer
+        print(
+            f"fno backlog: warning: {_UNDEFER_TYPE} boundary for {node_id} "
+            f"to {target or '<unresolved>'}: {exc}",
+            file=sys.stderr,
+        )
 
 
 def _default_event_paths() -> list[Path]:

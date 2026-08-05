@@ -758,10 +758,12 @@ def route_to_rust(
     if binary is None:
         print(
             f"fno agents: {RUNTIME_ENV}=rust is set but the '{rust_binary.BINARY_NAME}' binary "
-            "was not found (looked in the bundled wheel dir, on PATH, and in the "
-            "cargo dev target; a file present but not executable is also skipped - "
-            "try `chmod +x`). Get it via `pip install fno` (bundled wheel), "
-            "`cargo install fno-agents`, or `cargo build --release -p fno-agents`.",
+            f"was not found (looked at ${rust_binary.BINARY_ENV}, in the bundled "
+            "wheel dir, beside the launcher, on PATH, and in the cargo dev target; "
+            "a file present but not executable is also skipped - try `chmod +x`). "
+            "Get it via `pip install fno` (bundled wheel), `cargo install fno-agents`, "
+            f"or `cargo build --release -p fno-agents` plus "
+            f"`export {rust_binary.BINARY_ENV}=<path>`.",
             file=err,
         )
         raise SystemExit(BIN_NOT_FOUND_EXIT)
@@ -816,9 +818,11 @@ def _make_rust_only_command(
         else:
             print(
                 f"fno agents {verb}: requires the '{rust_binary.BINARY_NAME}' Rust runtime, which was "
-                "not found (bundled wheel dir, launcher sibling, PATH). Get it via "
+                "not found (bundled wheel dir, launcher sibling, PATH -- the default "
+                f"lookup deliberately ignores ${rust_binary.BINARY_ENV}). Get it via "
                 f"`pip install fno` (bundled), `cargo install fno-agents`, or set "
-                f"{RUNTIME_ENV}=rust to use a local `cargo build --release -p fno-agents`.",
+                f"{RUNTIME_ENV}=rust (which does honor ${rust_binary.BINARY_ENV}) to use "
+                "a local `cargo build --release -p fno-agents`.",
                 file=sys.stderr,
             )
         raise SystemExit(BIN_NOT_FOUND_EXIT)

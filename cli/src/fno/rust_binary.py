@@ -2,9 +2,9 @@
 
 Pure filesystem lookup: stdlib only, no ``fno`` imports at all, which is why it
 sits at the platform layer rather than under ``fno.agents``. Its callers span
-every layer (``fno event verify-evidence``, ``fno phase``, ``fno doctor``,
-``fno update``, the agents runtime), and the ones below the runtime were paying
-an upward import for what is four ``os.access`` checks.
+every layer (``fno phase kill-check``, ``fno doctor``, ``fno restart``, the
+post-merge ledger finalizer, the relay, the agents runtime), and the ones below
+the runtime were paying an upward import for what is four ``os.access`` checks.
 
 Resolution order, widest first:
 
@@ -27,8 +27,11 @@ from typing import Optional
 BINARY_NAME = "fno-agents.exe" if os.name == "nt" else "fno-agents"
 
 #: Operator override. The shell shims (scripts/run-target-loop.sh, the stop
-#: hooks) have always honored this, and both Python callers' "binary not found"
-#: messages tell the operator to set it, so the Python resolver honors it too.
+#: hooks) have always honored this, so the Python resolver honors it too rather
+#: than making the same export mean two different things depending on which half
+#: of the toolchain reads it. Both "binary not found" messages in
+#: ``fno.agents.rust_runtime`` name it, so the remedy is discoverable from the
+#: failure itself.
 BINARY_ENV = "FNO_AGENTS_BIN"
 
 

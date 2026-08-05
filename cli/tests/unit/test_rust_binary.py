@@ -16,7 +16,6 @@ import os
 import stat
 from pathlib import Path
 
-import fno
 from fno import rust_binary
 
 
@@ -199,8 +198,3 @@ def test_path_binary_uses_which(monkeypatch, tmp_path) -> None:
     target = _make_exe(tmp_path / rust_binary.BINARY_NAME)
     monkeypatch.setattr(rust_binary.shutil, "which", lambda name: str(target) if name == rust_binary.BINARY_NAME else None)
     assert rust_binary._path_binary() == target
-
-
-# --------------------------------------------------------------------------- #
-# route_to_rust: argv forwarding + missing-binary error
-# --------------------------------------------------------------------------- #

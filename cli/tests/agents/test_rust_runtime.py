@@ -91,7 +91,9 @@ def test_runtime_mode_auto_when_unset(monkeypatch) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# resolve_installed_binary: bundled -> sibling -> PATH, NEVER cargo dev
+# route_to_rust: pre-resolved binary skips _resolve (auto happy path).
+# The binary-locator tests these headers used to introduce moved with the
+# locator itself, to cli/tests/unit/test_rust_binary.py.
 # --------------------------------------------------------------------------- #
 
 def test_route_uses_preresolved_binary(monkeypatch, tmp_path) -> None:
@@ -115,7 +117,7 @@ def test_route_uses_preresolved_binary(monkeypatch, tmp_path) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# resolve_binary resolution order: bundled -> PATH -> cargo dev
+# route_to_rust: argv forwarding + missing-binary error
 # --------------------------------------------------------------------------- #
 
 def test_route_forwards_verb_and_args(monkeypatch, tmp_path) -> None:
