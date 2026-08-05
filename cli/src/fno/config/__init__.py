@@ -75,6 +75,13 @@ _PATH_MAX = 4096
 # Shell glob characters to reject in path values
 _GLOB_CHARS = frozenset("*?[")
 
+# Reserved sibling ID families that are NOT node IDs and must never be chosen as
+# a node prefix: carveouts (``cv-``), follow-ups (``fu-``), and target agent
+# names (``tgt-``). The BacklogBlock validator below and the setup wizard reject
+# them. Defined here, not in fno.graph, because the validator is the only reader
+# and config must not depend upward on the graph package.
+RESERVED_PREFIXES = frozenset({"cv-", "fu-", "tgt-"})
+
 
 def _check_no_glob(value: str, field_name: str) -> None:
     """Raise ValueError if value contains shell glob characters."""
@@ -307,15 +314,6 @@ class BacklogBlock(BaseModel):
         if v is None:
             return None
         import re as _re
-
-        # Function-local, NOT top-level: a top-level `from fno.graph._constants`
-        # makes `import fno.config` eagerly load the graph package (its __init__
-        # imports store, which freezes `read_graph`'s GRAPH_JSON default) while
-        # config is only partially initialized, so store's config lookup fails and
-        # silently falls back to ~/.fno, ignoring a configured paths.graph_json.
-        # The config<->graph cycle is already broken on the graph side (it imports
-        # the fno.config_io leaf), so this edge can stay lazy with no cycle.
-        from fno.graph._constants import RESERVED_PREFIXES
 
         raw = v.strip().lower()
         if not _re.fullmatch(r"[a-z][a-z0-9]{0,6}-?", raw):
