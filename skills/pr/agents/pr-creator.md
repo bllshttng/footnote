@@ -1,7 +1,6 @@
 ---
 name: pr-creator
 description: 'Mechanical PR creation worker dispatched by /pr create. Pushes the branch, generates a PR description from the commits, opens the PR via gh. Spawned with minimal fresh context (not fork). Returns RESULT: SUCCESS with the PR number + URL, or RESULT: FAILED with the error.'
-model: haiku
 tools:
 - Read
 - Write
@@ -13,7 +12,7 @@ tools:
 
 Create a PR using `gh` CLI.
 
-**Model routing:** When spawned as a subagent (e.g., from target Phase 6), use `model: "haiku"` on the Agent call. Do NOT use `context: fork` - forking passes the parent's full context (potentially 300K+ tokens) into Haiku's 200K window, causing failures. Instead, spawn a fresh agent with only the gathered context from Step 1 below.
+**Model routing:** This worker runs on the declared `pr-create` role, resolved through `config.model_routing` (`config.model_routing.roles.pr-create`). An explicit configured route wins; with no route configured it runs on the invoking harness's primary model - no tier or model literal is hardcoded. Declare the role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override so the resolved route selects the model). Do NOT use `context: fork` - forking passes the parent's full context into the worker; instead spawn a fresh agent with only the gathered context from Step 1 below.
 
 ## Process
 
@@ -316,7 +315,7 @@ gh pr view --json number,url
 ```
 
 **Flow:**
-1. `/pr create` runs as fresh Haiku agent with targeted context (branch, commits, plan summary)
+1. `/pr create` runs as a fresh, role-routed `pr-create` worker with targeted context (branch, commits, plan summary)
 2. `/pr check` polls for external review and processes feedback
 3. Human reviewer merges
 

@@ -193,8 +193,9 @@ def resolve_spawn_route(
 # these need no resolution-path change; they exist so `fno route ls` can render
 # a lane that has no config line yet (an unconfigured `build` row) instead of
 # hiding it. `build` is the sanctioned delivery lane for /target bg + blueprint
-# autolaunch; unconfigured it fails safe to the primary Anthropic model.
-KNOWN_LANE_ROLES = ("build",)
+# autolaunch; `pr-create` is the PR-creation worker (/pr create). Unconfigured
+# either fails safe to the primary Anthropic model - no hardcoded tier.
+KNOWN_LANE_ROLES = ("build", "pr-create")
 
 #: Claude tier aliases: the names Claude Code resolves through
 #: ``ANTHROPIC_DEFAULT_<TIER>_MODEL``. ``fable`` is one of them and is a live

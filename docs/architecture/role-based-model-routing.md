@@ -92,6 +92,18 @@ fno route set build zai/glm-5.2[1m]        # atomic config write; effect: next s
 
 For a one-off "just this node on GLM" without flipping the lane default, `dispatch-node.sh <node> --route provider/model` (or `fno agents spawn --route ...`) forwards an explicit route. Unlike the role lane, an explicit `--route` **fails closed**: an unknown provider, non-anthropic protocol, or missing key refuses the spawn (you asked for GLM by name; billing Anthropic instead would violate intent). `--route` wins over a configured `build` lane on the same spawn.
 
+## The `pr-create` lane
+
+`/pr create` dispatches its worker on the `pr-create` role, not a hardcoded model tier. The role used to be a `model: haiku` literal baked into the agent; it now flows from `config.model_routing` so a Codex session opens its PR on its own model and an operator can route the cheap mechanical worker to a secondary provider without forking the skill.
+
+`pr-create` is **opt-in by config presence**, exactly like `build`: it ships unconfigured and routes nothing (fail-safe `None`, so the worker runs on the invoking harness's primary model - no model literal in the skill). Writing the roles line IS the consent:
+
+```bash
+fno route set pr-create zai/glm-4.5-air      # atomic config write; effect: next /pr create
+```
+
+The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` override) at the spawn boundary, so the fail-safe makes the role a no-op until the lane is configured. The worker keeps its fresh, minimal context - branch, base, a one-line summary, and merge posture only - regardless of which model the role resolved to, because the small-context property is what makes the worker cheap, not the tier name.
+
 ## `fno route` - legibility + on-the-fly switching
 
 Four verbs over the same machinery (`model_routing.py` stays the single source of the env-var contract):
