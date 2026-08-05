@@ -134,6 +134,34 @@ PROTECTED_ROOT="$(cd -P "$_root" 2>/dev/null && pwd -P)"
 # An unsafe target only matters while the root is actually protected.
 _unsafe_target() { _block_if_canonical "$PROTECTED_ROOT"; _approve; }
 
+# The inode question is relevant only for existing multiply linked files. Keep
+# the normal ignored-path fast path cheap, then compare the rare case against
+# every tracked path without losing NUL-delimited filenames.
+_link_count() {
+    local count
+    count="$(stat -c '%h' "$1" 2>/dev/null)" \
+        || count="$(stat -f '%l' "$1" 2>/dev/null)" \
+        || return 1
+    case "$count" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    printf '%s\n' "$count"
+}
+
+_shares_inode_with_tracked() {
+    local phys="$1" statuses
+    git -C "$PROTECTED_ROOT" ls-files -z --cached 2>/dev/null | (
+        local tracked found=1
+        while IFS= read -r -d '' tracked; do
+            [[ "$PROTECTED_ROOT/$tracked" -ef "$phys" ]] && found=0
+        done
+        exit "$found"
+    )
+    statuses=("${PIPESTATUS[@]}")
+    [[ ${statuses[0]} -eq 0 ]] || return 2
+    return "${statuses[1]}"
+}
+
 # _target_safe PHYSICAL_PATH -> 0 when this write cannot change protected content.
 #
 # Containment is decided on the PHYSICAL path, so an `internal/` symlink out to
@@ -158,7 +186,14 @@ _target_safe() {
         *) return 0 ;;
     esac
     [[ "$phys" != "$PROTECTED_ROOT" ]] || return 1
-    git -C "$PROTECTED_ROOT" check-ignore -q -- "$phys" 2>/dev/null
+    git -C "$PROTECTED_ROOT" check-ignore -q -- "$phys" 2>/dev/null || return 1
+    [[ -f "$phys" ]] || return 0
+    local links alias_status
+    links="$(_link_count "$phys")" || return 1
+    (( links > 1 )) || return 0
+    _shares_inode_with_tracked "$phys"
+    alias_status=$?
+    [[ $alias_status -eq 1 ]]
 }
 
 # One blocked target denies the whole call: safe siblings cannot launder an

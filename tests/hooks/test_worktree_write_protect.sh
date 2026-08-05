@@ -194,6 +194,8 @@ ln -s "$VAULT" "$GUARDED/internal"
 ln -s "$VAULT/plans" "$GUARDED/scratch/vault-alias"
 ln -s "$GUARDED/src/app.py" "$EXTERNAL/back-into-canonical"
 ln -s "$GUARDED/src/app.py" "$GUARDED/scratch/tracked-alias"
+ln "$GUARDED/src/app.py" "$GUARDED/scratch/tracked-hardlink"
+ln "$GUARDED/scratch/note.md" "$GUARDED/scratch/ignored-hardlink"
 ln -s loop-b "$GUARDED/scratch/loop-a"
 ln -s loop-a "$GUARDED/scratch/loop-b"
 GUARDED_LINKED="$TMP_BASE/guarded-linked"
@@ -230,6 +232,10 @@ assert_block "external symlink resolving into tracked content blocks" \
     "$(guarded "*** Update File: $EXTERNAL/back-into-canonical")"
 assert_block "ignored symlink resolving into tracked content blocks" \
     "$(guarded "*** Update File: scratch/tracked-alias")"
+assert_block "ignored hard link to tracked content blocks" \
+    "$(guarded "*** Update File: scratch/tracked-hardlink")"
+assert_allow "ignored hard link to ignored content allows" \
+    "$(guarded "*** Update File: scratch/ignored-hardlink")"
 assert_block "looping symlink under an ignored dir blocks" \
     "$(guarded "*** Update File: scratch/loop-a")"
 assert_block "unfoldable .. escaping an ignored dir blocks" \
