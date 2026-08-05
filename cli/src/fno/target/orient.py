@@ -330,6 +330,48 @@ def _optional_bots(project_root: Path) -> List[str]:
     return list(load_settings_for_repo(project_root).review.optional_apps)
 
 
+# The peers-derived requirement is synthesized by loop-check
+# (`resolved_local_peer_reviewers_for_author`), not named in `reviewers`, so it
+# has no descriptor in `_RESOLVABLE_REVIEWERS` and its producer lives here.
+_LOCAL_PEER_PRODUCER = "/fno:review peer --attest"
+
+
+def _local_review_gates(project_root: Path) -> List[str]:
+    """Local-attestation gates loop-check holds the loop on, `name -> producer`.
+
+    Two sources, both invisible to `_required_bots`: `config.review.reviewers`
+    names them directly, and identity-free `config.review.peers` collapse into
+    ONE composite `peer` requirement. No GitHub reviewer ever posts either -- a
+    head-pinned `review_attestation` is the only evidence -- so a session that
+    is not told they exist ships, promises, and then blocks on an attestation
+    nothing in its plan produced (x-0322). Naming the producer alongside the
+    gate is the point: the gate alone is a puzzle.
+
+    Deliberately config-only, with no `detect_session()` call: the one case
+    where the printed producer would not clear the gate -- every identity-free
+    peer sharing the author's model family -- is already refused up front by
+    `fno target init` (`local_peers_refusal_message`), so buying it here would
+    cost env-dependent output for a state a real run cannot be in.
+    """
+    from fno.config import load_settings_for_repo, resolvable_reviewers
+
+    review = load_settings_for_repo(project_root).review
+    known = resolvable_reviewers(review.reviewer_registry)
+    gates: List[str] = []
+    for name in review.reviewers or []:
+        descriptor = known.get(str(name))
+        gates.append(f"{name} -> {descriptor.invocation}" if descriptor else str(name))
+    # A shared `peer_identity` puts every peer back on the posted-review login
+    # carrier, and a per-entry `identity` does the same for that entry; only an
+    # identity-free entry contributes to the local composite gate.
+    if not review.peer_identity and any(
+        not (isinstance(peer, dict) and peer.get("identity"))
+        for peer in (review.peers or [])
+    ):
+        gates.append(f"peer -> {_LOCAL_PEER_PRODUCER}")
+    return gates
+
+
 def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) -> str:
     raw = manifest_raw or {}
 
@@ -343,10 +385,18 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     try:
         bots = _required_bots(project_root)
         optional = _optional_bots(project_root)
+        local = _local_review_gates(project_root)
     except Exception:  # noqa: BLE001 - degrade to the no-gate default
-        bots, optional = [], []
-    bots_str = ", ".join(bots) if bots else "none (PR + CI only)"
+        bots, optional, local = [], [], []
+    if bots:
+        bots_str = ", ".join(bots)
+    else:
+        # "PR + CI only" is false whenever a local gate is armed; say which
+        # half is empty instead of announcing a gate that does not exist.
+        bots_str = "no App bot" if local else "none (PR + CI only)"
     line = f"PR + CI green + reviewed by [{bots_str}]"
+    if local:
+        line += f" + local attestation [{'; '.join(local)}]"
     if optional:
         line += f" (optional if present: [{', '.join(optional)}])"
     if _is("attended", "false"):
