@@ -61,6 +61,22 @@ def _stable_fno_py_cmd(monkeypatch):
     monkeypatch.setattr(_subprocess_util, "fno_py_cmd", lambda: ["fno-py"])
 
 
+@pytest.fixture(autouse=True)
+def _neutral_host_harness(monkeypatch):
+    """Keep synthetic session markers independent of the pytest host harness.
+
+    Identity tests set their own Claude, Codex, or Gemini markers.  A real
+    harness ancestor belongs to the test runner rather than the synthetic
+    session, so letting the process-tree prover observe it makes local results
+    depend on which harness launched pytest.  Tests of proven ownership pin the
+    resolver explicitly after this fixture runs.
+    """
+    monkeypatch.setattr(
+        "fno.claims.session_pid.resolve_session_harness",
+        lambda from_pid=None: None,
+    )
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation (ab-2f78b48e)
 # ---------------------------------------------------------------------------
@@ -122,6 +138,15 @@ os.environ["FNO_E2E"] = "1"
 from fno.harness_identity import scrub_ambient_identity  # noqa: E402
 
 for _ambient_key in ("FNO_NODE", "FNO_SLUG", "FNO_PLAN"):
+    os.environ.pop(_ambient_key, None)
+# Same local-red != CI-red hazard as the config ceiling below, one layer up.
+# `resolve_plugin_script` takes CLAUDE_PLUGIN_ROOT as authoritative, so a suite
+# run from inside a live Claude session resolves the DEVELOPER's checkout as the
+# plugin payload - a hermetic fixture that builds its own source tree and passes
+# it via FNO_REPO_ROOT is then silently overruled and compares against the wrong
+# tree. CI exports neither var, so the failure only ever appears locally. Tests
+# that exercise root resolution set what they need via monkeypatch.setenv.
+for _ambient_key in ("CLAUDE_PLUGIN_ROOT", "CODEX_PLUGIN_ROOT"):
     os.environ.pop(_ambient_key, None)
 scrub_ambient_identity()
 

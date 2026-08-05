@@ -22,6 +22,24 @@ unset CLAUDE_CODE_SESSION_ID CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID 
 export HOME="$TMP_DIR/fake-home"
 mkdir -p "$HOME/.fno"
 
+# Recovery is the subject here, not process-tree identity proof.  Smoke puts a
+# real fno on PATH, whose resolver correctly rejects plugin-root hints as proof
+# of session ownership; a bare run historically had no fno and fell back to
+# those hints.  Pin the resolver boundary so both environments exercise the
+# same recovery path and each case declares the harness it expects.
+FAKE_BIN="$TMP_DIR/fake-bin"
+mkdir -p "$FAKE_BIN"
+cat > "$FAKE_BIN/fno" <<'EOF'
+#!/usr/bin/env bash
+if [[ "${1:-} ${2:-}" == "target resolve-owned-identity" ]]; then
+  printf 'HARNESS=%s\nSESSION_ID=fixture-session\nDISPOSITION=proven\nCOLLISION=\n' \
+    "${FNO_TEST_HARNESS:-}"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$FAKE_BIN/fno"
+
 run_recovery_case() {
   local case_name="$1"
   local fixture_content="$2"
@@ -32,7 +50,9 @@ run_recovery_case() {
 
   (
     cd "$case_dir"
-    CODEX_PLUGIN_ROOT="$case_dir" TARGET_START=1 bash "$ROOT_DIR/hooks/helpers/init-target-state.sh" >/dev/null
+    PATH="$FAKE_BIN:$PATH" FNO_TEST_HARNESS=codex FNO_TARGET_INIT_GATED=1 \
+      CODEX_PLUGIN_ROOT="$case_dir" TARGET_START=1 \
+      bash "$ROOT_DIR/hooks/helpers/init-target-state.sh" >/dev/null
   )
 
   if ! ls "$case_dir/.fno"/target-state.corrupt.*.md >/dev/null 2>&1; then
@@ -62,7 +82,9 @@ mkdir -p "$GEMINI_CASE_DIR/.fno"
 
 (
   cd "$GEMINI_CASE_DIR"
-  GEMINI_PROJECT_DIR="$GEMINI_CASE_DIR" TARGET_START=1 bash "$ROOT_DIR/hooks/helpers/init-target-state.sh" >/dev/null
+  PATH="$FAKE_BIN:$PATH" FNO_TEST_HARNESS=gemini FNO_TARGET_INIT_GATED=1 \
+    GEMINI_PROJECT_DIR="$GEMINI_CASE_DIR" TARGET_START=1 \
+    bash "$ROOT_DIR/hooks/helpers/init-target-state.sh" >/dev/null
 )
 
 grep -q '^harness: gemini' "$GEMINI_CASE_DIR/.fno/target-state.md"

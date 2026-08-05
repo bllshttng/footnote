@@ -141,23 +141,40 @@ def test_codex_hooks_use_supported_event_names_and_existing_commands() -> None:
         pytest.fail("codex-hooks.json references missing files:\n  " + "\n  ".join(failures))
 
 
-def test_codex_hooks_block_canonical_edit_tools() -> None:
-    data = json.loads(CODEX_HOOKS_JSON.read_text(encoding="utf-8"))
-    registrations = data["hooks"]["PreToolUse"]
-    worktree_guard = [
+@pytest.mark.parametrize(
+    ("config_path", "root_var"),
+    [(HOOKS_JSON, "CLAUDE_PLUGIN_ROOT"), (CODEX_HOOKS_JSON, "PLUGIN_ROOT")],
+)
+def test_write_guard_is_registered_once_per_harness(
+    config_path: Path, root_var: str
+) -> None:
+    """One location policy, reachable from both harnesses.
+
+    A guard wired on only one manifest reads as protection and ships green
+    while the other harness writes to canonical unchecked. Exactly one, so a
+    second registration cannot double-judge a payload or hide a divergent
+    classifier behind the same matcher.
+    """
+    data = json.loads(config_path.read_text(encoding="utf-8"))
+    command = "bash ${%s}/hooks/worktree-write-protect.sh" % root_var
+    registrations = [
         registration
-        for registration in registrations
+        for registration in data["hooks"]["PreToolUse"]
         if registration.get("matcher") == "Edit|Write"
-        and any(
-            hook.get("command")
-            == "bash ${PLUGIN_ROOT}/hooks/worktree-write-protect.sh"
-            for hook in registration.get("hooks", [])
-        )
+        and any(hook.get("command") == command for hook in registration.get("hooks", []))
     ]
-    assert len(worktree_guard) == 1, (
-        "Codex apply_patch exposes Edit and Write matcher aliases; exactly one "
-        "PreToolUse registration must route them through the worktree guard"
+    assert len(registrations) == 1, (
+        f"{config_path.name} must route Edit and Write through the worktree "
+        f"guard exactly once (found {len(registrations)})"
     )
+
+    others = [
+        hook.get("command", "")
+        for registration in data["hooks"]["PreToolUse"]
+        for hook in registration.get("hooks", [])
+        if "worktree-write-protect.sh" in hook.get("command", "")
+    ]
+    assert len(others) == 1, f"{config_path.name} registers a second location classifier"
 
 
 def test_hook_configs_do_not_register_harness_ownership_guard() -> None:
