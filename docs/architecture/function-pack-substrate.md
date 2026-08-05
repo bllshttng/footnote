@@ -131,6 +131,8 @@ pack id and function-name literals in code (excluding docstrings), failing
 loudly with file:line when one appears. The scan carries a positive control so
 an empty result is never trusted.
 
+The broader module-layer map, pack-projection rule, and extraction threshold are recorded in [Company Boundaries](company-boundaries.md).
+
 ## Scope of the first pack
 
 The growth-studio pack ships four roles (marketing, communications, design,
@@ -155,7 +157,7 @@ packaged role is projected into the plugin layer only on activation, and
 lifetimes: build time bundles, activation permits, run time scopes. `fno bundle
 check` reports the bundles fresh with no drift.
 
-Support, sales, and operations packs are later waves and are out of scope here.
+The company-conformance pack adds internal support, sales, and recurring-operations scenarios, not products or independent consumers; full function packs remain out of scope here.
 
 ## Boundary model (recorded design stance)
 
@@ -179,4 +181,3 @@ The role resolver's candidate sort assumes one context reference per
 identifier, so an unreadable observation carries no `content_digest`
 (`None`) without a sort clash; the catalog producer guarantees that
 one-per-identifier invariant.
-
