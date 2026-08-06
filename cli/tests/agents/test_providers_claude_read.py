@@ -27,6 +27,52 @@ def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
 # --- claude_agents_json() ---------------------------------------------------
 
 
+def test_claude_agents_json_accepts_the_current_claude_row_shape(monkeypatch):
+    """Regression: the parser read ``short_id``/``status``, but claude emits
+    ``id``/``state``. Every row was dropped, so the live_status enrichment
+    returned {} on EVERY call while this file's other tests stayed green on
+    fabricated old-shape fixtures - a test suite pinning a shape production
+    never produces.
+
+    This payload is copied verbatim from real ``claude agents --json`` output
+    (keys and lowercase state values as observed), so it fails if the parser
+    stops handling what the binary actually emits."""
+    payload = {
+        "agents": [
+            {
+                "id": "907fc8c5",
+                "sessionId": "907fc8c5-137e-44ff-95a0-f02b038ffefe",
+                "name": "king-crown-agents",
+                "state": "working",
+                "kind": "background",
+                "cwd": "/repo",
+                "startedAt": 1786023667738,
+            },
+            {
+                "id": "baf9409a",
+                "sessionId": "baf9409a-2af5-444a-846c-059e8fa2f758",
+                "name": "tgt-let-s-think-about-wh",
+                "state": "blocked",
+                "kind": "background",
+            },
+        ]
+    }
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {
+        "907fc8c5": {"live_status": "working"},
+        "baf9409a": {"live_status": "blocked"},
+    }
+    # No row is dropped and no vocabulary-drift warning fires: "working" and
+    # "blocked" are real values the current binary emits, not drift.
+    assert warnings == [], warnings
+
+
 def test_claude_agents_json_success_returns_short_id_map(monkeypatch):
     payload = {
         "agents": [
