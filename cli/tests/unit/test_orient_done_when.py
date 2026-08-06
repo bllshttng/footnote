@@ -158,3 +158,35 @@ def test_advisory_run_is_unchanged(repo):
     assert _done_when_line({"no_ship": "true"}, root) == (
         "advisory: written + eval-green (no PR)"
     )
+
+
+def test_distinct_logins_are_not_prefix_deduped(repo):
+    # Once an entry carries a producer suffix, deduping on the formatted string
+    # drops a login whose name is a prefix of one already present. loop-check
+    # requires both, so omitting either is the wedge this file closes.
+    root = repo(
+        "[review]\n"
+        'peers = [{provider="codex", identity="bot-extra"}, '
+        '{provider="gemini", identity="bot"}]\n'
+    )
+    line = _done_when_line({}, root)
+    assert "bot-extra (post:" in line, line
+    assert "bot (post: /fno:review peer <pr#> gemini --post)" in line, line
+
+
+def test_no_external_suppresses_every_login_gate(repo):
+    # loop-check skips ALL GitHub-login reads under no_external, so announcing
+    # an App bot or an identity-backed peer post sends the session to satisfy a
+    # review nothing waits on. Local attestations survive: reviewers_ok is
+    # computed independently of that skip.
+    root = repo(
+        "[review]\n"
+        'github_apps = ["chatgpt-codex-connector"]\n'
+        'optional_apps = ["some-optional-bot"]\n'
+        'peers = ["codex"]\n'
+    )
+    line = _done_when_line({"no_external": "true"}, root)
+    assert "chatgpt-codex-connector" not in line, line
+    assert "some-optional-bot" not in line, line
+    assert "none (--no-external skips every login gate)" in line, line
+    assert "peer -> /fno:review peer codex --attest" in line, line

@@ -356,15 +356,23 @@ def _required_bots(review: Any) -> List[str]:
 
     The effective default matches the Rust loop-check: absent == [] == no review
     gate (PR + CI only), not the old ["chatgpt-codex-connector"].
+
+    Dedup is on the RAW login, never on the formatted entry: once an entry
+    carries a producer suffix, a prefix test drops a distinct login whose name
+    is a prefix of one already present (`bot` behind `bot-extra`), silently
+    omitting a gate loop-check enforces.
     """
-    logins: List[str] = list(review.github_apps) if review.github_apps else []
+    apps: List[str] = list(review.github_apps) if review.github_apps else []
+    seen = set(apps)
+    rendered: List[str] = list(apps)
     for peer in review.peers or []:
         login = _peer_entry_identity(peer, review.peer_identity)
-        if not login or any(entry.startswith(login) for entry in logins):
+        if not login or login in seen:
             continue
+        seen.add(login)
         provider = _peer_provider(peer) or "<provider>"
-        logins.append(f"{login} (post: /fno:review peer <pr#> {provider} --post)")
-    return logins
+        rendered.append(f"{login} (post: /fno:review peer <pr#> {provider} --post)")
+    return rendered
 
 
 def _optional_bots(review: Any) -> List[str]:
@@ -493,8 +501,19 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
         # the same lie the rest of this function exists to stop.
         line = "unknown (config.review unreadable) | resolve: fno config doctor"
     else:
+        # `no_external` skips loop-check's GitHub-login reads entirely
+        # (`login_skipped = no_external || !login_gate_active`), so EVERY login
+        # gate - App bots, optional apps, and identity-backed peer posts - stops
+        # being enforced for this session. Announcing them anyway sends the
+        # session off to satisfy reviews nothing is waiting on. Local
+        # attestations are unaffected: `reviewers_ok` is computed independently
+        # of that skip, which is why they stay on the line.
+        if _is("no_external", "true"):
+            bots, optional = [], []
         if bots:
             bots_str = ", ".join(bots)
+        elif _is("no_external", "true"):
+            bots_str = "none (--no-external skips every login gate)"
         else:
             # "PR + CI only" is false whenever a local gate is armed; say which
             # half is empty instead of announcing a gate that does not exist.
