@@ -76,12 +76,13 @@ def enabled(monkeypatch, tmp_path):
     # or contend with a real in-flight merge.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
     # x-0eaf: default to a covered review so existing merge-behavior tests
-    # proceed past the coverage guard. Guard-specific tests override
-    # _review_coverage_for_pr (and _pr_head_oid for the staleness case).
+    # proceed past the coverage guard. No head_sha -> covered_head is empty, so
+    # the --match-head-commit pin (and the head-pin tests' own verified_head)
+    # are undisturbed; the pin is exercised by its own test below.
     monkeypatch.setattr(
         _merge,
         "_review_coverage_for_pr",
-        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "pin"},
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
     )
 
 
@@ -925,3 +926,26 @@ def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
+    """x-0eaf: the covered head pins the --auto merge so a racing push cannot
+    queue an unreviewed head via GitHub's auto-merge."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
+    )
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", "coveredSHA"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    _merge.run_merge(["42"], cwd=str(tmp_path))
+    auto_cmd = fake.merge_cmds[0]
+    assert "--auto" in auto_cmd, "expected the --auto attempt first"
+    i = auto_cmd.index("--match-head-commit")
+    assert auto_cmd[i + 1] == "coveredSHA"

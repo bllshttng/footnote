@@ -9,7 +9,10 @@ set -euo pipefail
 
 # Raised from 37326 by 89 bytes for delivery_completion DoneDelivery terminal
 # documentation and activation logic in AGENTS.md.
-CEILING_BYTES=37415
+# Raised from 37415 by 45 bytes for the DoneUnreviewed terminal in the
+# ship-vocabulary line (the auto-loaded preamble must name every public
+# TerminationReason); the four-axis preamble addition left only ~8 bytes headroom.
+CEILING_BYTES=37460
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 JSON_MODE=0
