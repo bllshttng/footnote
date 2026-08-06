@@ -3,21 +3,14 @@
 //! eliminate-don't-vendor leg).
 //!
 //! Three sub-functions are exposed via a leading sub-token:
-//!   - `verify-evidence event SID NONCE EVENTS ARTIFACT`
 //!   - `verify-evidence child-promise SID NONCE [EVENTS]`
 //!   - `verify-evidence has-nonclaude ARTIFACT [SETTINGS]`
+//!   - `verify-evidence receipt CANDIDATE_SHA CANONICAL_EVENTS [MIRROR_EVENTS...]`
 //!
 //! Each reproduces the bash exit-code contract, stdout diagnostic `kind`
 //! strings, and stderr soft-warnings byte-for-byte. The bash script stays
 //! in-tree as the parity oracle (differential tests in
 //! `tests/verify_evidence_parity.rs`).
-//!
-//! Diagnostic vocabulary (event sub-verb, rc=1, one stdout line):
-//!   agent_mismatch:<agent>
-//!   subagent_spawn_missing:<agent>
-//!   subagent_complete_missing:<agent>
-//!   subagent_pair_count_mismatch:<agent>:expected=N:got=M
-//!   subagent_orchestrator_skipped:<agent>
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -75,175 +68,6 @@ fn clean_name(raw: &str) -> String {
     raw.chars()
         .filter(|&c| c != '"' && c != '\'' && c != ' ')
         .collect()
-}
-
-// ── verify_event_evidence ─────────────────────────────────────────────────────
-
-/// Outcome of one event verification, carrying the rc, optional stdout
-/// diagnostic, and any soft stderr warnings (for outcome=error/timeout).
-struct EventResult {
-    code: i32,
-    stdout: String,
-    stderr: String,
-}
-
-/// `verify_event_evidence SESSION_ID NONCE EVENTS_FILE ARTIFACT_PATH`.
-fn verify_event_evidence(
-    session_id: &str,
-    nonce: &str,
-    events_file: &Path,
-    artifact: &Path,
-) -> EventResult {
-    let mut res = EventResult {
-        code: 0,
-        stdout: String::new(),
-        stderr: String::new(),
-    };
-
-    // rc=2: events.jsonl absent or unreadable.
-    // The bash tests `[[ ! -f ]] || [[ ! -r ]]`. We approximate readability by
-    // attempting to read; a missing/unreadable file -> rc=2.
-    let events_content = match std::fs::read_to_string(events_file) {
-        Ok(c) => c,
-        Err(_) => {
-            res.code = 2;
-            return res;
-        }
-    };
-
-    // Parse agents_dispatched; absent/empty -> rc=0 (gate passes vacuously).
-    let declared = match parse_agents_dispatched(artifact) {
-        Some(v) if !v.is_empty() => v,
-        // raw_names empty -> `return 0`; OR zero declared after cleaning ->
-        // `return 0`. A missing artifact also yields no names -> 0.
-        _ => return res,
-    };
-
-    let lines: Vec<&str> = events_content.lines().collect();
-
-    // ── Forgery check: any spawn event (this session+nonce) with an
-    // agent_name NOT in declared -> agent_mismatch:<agent>, rc=1.
-    for line in &lines {
-        if !line.contains("\"type\":\"subagent_spawn\"") {
-            continue;
-        }
-        if !line.contains(&format!("\"session_id\":\"{session_id}\"")) {
-            continue;
-        }
-        if !line.contains(&format!("\"nonce\":\"{nonce}\"")) {
-            continue;
-        }
-        let spawn_agent = extract_agent_name(line);
-        if !declared.iter().any(|d| d == &spawn_agent) {
-            res.stdout = format!("agent_mismatch:{spawn_agent}\n");
-            res.code = 1;
-            return res;
-        }
-    }
-
-    // ── Build unique agents + expected counts (order-preserving).
-    let mut unique: Vec<(String, usize)> = Vec::new();
-    for agent in &declared {
-        if let Some(entry) = unique.iter_mut().find(|(n, _)| n == agent) {
-            entry.1 += 1;
-        } else {
-            unique.push((agent.clone(), 1));
-        }
-    }
-
-    for (agent, expected) in &unique {
-        // Count spawn events for this agent (session+nonce+agent_name).
-        let spawn_count = lines
-            .iter()
-            .filter(|line| {
-                line.contains("\"type\":\"subagent_spawn\"")
-                    && line.contains(&format!("\"session_id\":\"{session_id}\""))
-                    && line.contains(&format!("\"nonce\":\"{nonce}\""))
-                    && line.contains(&format!("\"agent_name\":\"{agent}\""))
-            })
-            .count();
-
-        if spawn_count == 0 {
-            res.stdout = format!("subagent_spawn_missing:{agent}\n");
-            res.code = 1;
-            return res;
-        }
-
-        // Count complete events; orchestrator_skipped -> rc=1; soft-warn on
-        // error/timeout.
-        let mut complete_count = 0usize;
-        for line in &lines {
-            if !line.contains("\"type\":\"subagent_complete\"") {
-                continue;
-            }
-            if !line.contains(&format!("\"session_id\":\"{session_id}\"")) {
-                continue;
-            }
-            if !line.contains(&format!("\"nonce\":\"{nonce}\"")) {
-                continue;
-            }
-            if !line.contains(&format!("\"agent_name\":\"{agent}\"")) {
-                continue;
-            }
-
-            if line.contains("\"outcome\":\"orchestrator_skipped\"") {
-                res.stdout = format!("subagent_orchestrator_skipped:{agent}\n");
-                res.code = 1;
-                return res;
-            }
-
-            // Soft-warn (NOT rc=1) on error/timeout. The bash uses an
-            // if/elif, so error takes precedence over timeout on a line that
-            // (pathologically) carries both.
-            if line.contains("\"outcome\":\"error\"") {
-                res.stderr.push_str(&format!(
-                    "target: WARNING: subagent {agent} exited with outcome=error; downstream review may be incomplete\n"
-                ));
-            } else if line.contains("\"outcome\":\"timeout\"") {
-                res.stderr.push_str(&format!(
-                    "target: WARNING: subagent {agent} exited with outcome=timeout; downstream review may be incomplete\n"
-                ));
-            }
-
-            complete_count += 1;
-        }
-
-        if complete_count == 0 {
-            res.stdout = format!("subagent_complete_missing:{agent}\n");
-            res.code = 1;
-            return res;
-        }
-
-        if complete_count != *expected {
-            res.stdout = format!(
-                "subagent_pair_count_mismatch:{agent}:expected={expected}:got={complete_count}\n"
-            );
-            res.code = 1;
-            return res;
-        }
-    }
-
-    // All agents verified -> rc=0.
-    res
-}
-
-/// Extract `agent_name` from an event line. Mirrors:
-///   grep -oE '"agent_name":"[^"]+"' | head -1 | sed 's/^"agent_name":"//; s/"$//'
-/// Returns "" when absent (the bash `_spawn_agent` would be empty, which then
-/// fails the declared-set membership and triggers agent_mismatch:).
-fn extract_agent_name(line: &str) -> String {
-    let needle = "\"agent_name\":\"";
-    let Some(start) = line.find(needle) else {
-        return String::new();
-    };
-    let after = &line[start + needle.len()..];
-    // `[^"]+` then the closing `"`.
-    match after.find('"') {
-        Some(end) if end > 0 => after[..end].to_string(),
-        // `[^"]+` requires at least one char; an empty value doesn't match the
-        // grep -oE pattern at all, so head -1 yields nothing -> "".
-        _ => String::new(),
-    }
 }
 
 // ── verify_child_promise ──────────────────────────────────────────────────────
@@ -1143,27 +967,13 @@ fn run(args: &[String]) -> (i32, String, String) {
         return (
             2,
             String::new(),
-            "verify-evidence: missing subcommand (event|child-promise|has-nonclaude|receipt)\n"
+            "verify-evidence: missing subcommand (child-promise|has-nonclaude|receipt)\n"
                 .to_string(),
         );
     };
     let rest = &args[1..];
 
     match sub {
-        "event" => {
-            // event SID NONCE EVENTS ARTIFACT
-            if rest.len() < 4 {
-                return (
-                    2,
-                    String::new(),
-                    "verify-evidence event: requires SESSION_ID NONCE EVENTS_FILE ARTIFACT_PATH\n"
-                        .to_string(),
-                );
-            }
-            let r =
-                verify_event_evidence(&rest[0], &rest[1], Path::new(&rest[2]), Path::new(&rest[3]));
-            (r.code, r.stdout, r.stderr)
-        }
         "child-promise" => {
             // child-promise SID NONCE [EVENTS]
             if rest.len() < 2 {
@@ -1281,13 +1091,6 @@ mod tests {
         assert_eq!(clean_name(" \"foo\" "), "foo");
         assert_eq!(clean_name("'bar'"), "bar");
         assert_eq!(clean_name("baz"), "baz");
-    }
-
-    #[test]
-    fn extract_agent_name_basic() {
-        let line = r#"{"type":"subagent_spawn","agent_name":"code-reviewer","session_id":"s"}"#;
-        assert_eq!(extract_agent_name(line), "code-reviewer");
-        assert_eq!(extract_agent_name("{}"), "");
     }
 
     #[test]

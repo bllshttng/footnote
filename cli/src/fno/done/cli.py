@@ -702,7 +702,7 @@ def done_command(
     # `collision_state["detected"]` is needed here. Best-effort: a write failure
     # warns to stderr inside the helper and never breaks `fno done`.
     try:
-        from fno.agents.drive_authority import (
+        from fno.drive_authority import (
             emit_operator_initiated,
             is_drive_authority_active,
         )

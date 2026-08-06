@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from fno.agents.drive_authority import (
+from fno.drive_authority import (
     active_drive_sessions,
     is_drive_authority_active,
 )
@@ -93,7 +93,7 @@ def test_unknown_mode_does_not_open_authority(tmp_path: Path) -> None:
 
 
 def test_emit_operator_initiated_envelope_and_data(tmp_path: Path) -> None:
-    from fno.agents.drive_authority import emit_operator_initiated
+    from fno.drive_authority import emit_operator_initiated
 
     events = tmp_path / ".fno" / "events.jsonl"
     emit_operator_initiated(
@@ -112,7 +112,7 @@ def test_emit_operator_initiated_envelope_and_data(tmp_path: Path) -> None:
 
 
 def test_emit_operator_initiated_appends(tmp_path: Path) -> None:
-    from fno.agents.drive_authority import emit_operator_initiated
+    from fno.drive_authority import emit_operator_initiated
 
     events = tmp_path / ".fno" / "events.jsonl"
     emit_operator_initiated("gate_set_operator_initiated", events_path=events, gate="quality_check_passed")
@@ -125,7 +125,7 @@ def test_emit_operator_initiated_appends(tmp_path: Path) -> None:
 
 
 def test_emit_operator_initiated_swallows_write_errors(tmp_path: Path, capsys) -> None:
-    from fno.agents.drive_authority import emit_operator_initiated
+    from fno.drive_authority import emit_operator_initiated
 
     # Point at a path whose parent cannot be created (a file occupies it) so the
     # OSError path is exercised; the call must not raise.

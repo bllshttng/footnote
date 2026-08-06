@@ -104,7 +104,7 @@ You rarely type these by hand - hooks and drivers do - but they live under `fno 
 | `loop-check` | stop hook | The in-session stop/allow decision from external truth (PR, CI, review bots, budget). |
 | `finalize` | loop-check terminal-allow | Idempotent ledger record + ship-time plan stamp. |
 | `kill-check` | loop | Evaluate a plan's `kill_criteria`. |
-| `verify-evidence` | gates | Verify subagent/child-promise event evidence. |
+| `verify-evidence` | gates | Verify child-promise event evidence and non-Claude agent presence. |
 | `report` | any harness's hooks | Inside-leg state push (working/blocked/done + reason) that powers the sideline badges. |
 | `spawn-guard` | dispatch scripts | Shared bg-dispatch claim guard (node-claim probe + dispatch reservation). |
 | `drive-authority` | mux/daemon | Drive-authority arbitration for owned panes. |

@@ -1,13 +1,14 @@
 # Known company-boundary findings held by the CI ratchet.
 # Each entry is exact: importing file and line, layer pair, and import statement.
 # Remove an entry only in the same PR that removes the corresponding dependency.
-cli/src/fno/config/__init__.py:318: L0 platform -> L1 core / from fno.graph._constants import RESERVED_PREFIXES
-cli/src/fno/events/cli.py:539: L0 platform -> L5 runtime / from fno.agents.rust_runtime import resolve_binary
+#
+# Both survivors are the same finding: the `fno event emit` envelope builder
+# resolves the sending session's identity and its spawn lineage out of the
+# agents runtime. Unlike the entries retired alongside them, neither callee can
+# move down -- self_stamp imports fno.claims.session_pid (L1 core), and
+# agents.registry IS the agents registry. They keep the platform -> runtime leg
+# alive, which is why the cycle below is still listed.
+# See docs/architecture/company-boundaries.md.
 cli/src/fno/events/cli.py:110: L0 platform -> L5 runtime / from fno.agents.self_stamp import resolve_self_model
 cli/src/fno/events/cli.py:142: L0 platform -> L5 runtime / from fno.agents.registry import HARNESS_SESSION_ID_FIELDS, load_registry
-cli/src/fno/graph/cli.py:4128: L1 core -> L5 runtime / from fno.agents.provider_resolve import (
-cli/src/fno/graph/cli.py:7232: L1 core -> L5 runtime / from fno.agents.provider_resolve import (
-cli/src/fno/graph/cli.py:7059: L1 core -> L5 runtime / from fno.agents.drive_authority import (
-cli/src/fno/graph/cli.py:9944: L1 core -> L5 runtime / from fno.agents.events import emit as _emit_event
-cli/src/fno/graph/cli.py:6213: L1 core -> L5 runtime / from fno.agents.events import emit as _emit_event
-layer cycle: L0 platform -> L1 core -> L0 platform
+layer cycle: L0 platform -> L5 runtime -> L0 platform

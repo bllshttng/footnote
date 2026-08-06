@@ -161,7 +161,7 @@ def _seed_state(agents: Path, short_id: str, *, drive_active: bool, mode: str, s
 @requires_rust
 @pytest.mark.parametrize("json_flag", [True, False])
 def test_drive_authority_parity(tmp_path, json_flag) -> None:
-    from fno.agents.drive_authority import active_drive_sessions
+    from fno.drive_authority import active_drive_sessions
 
     agents = tmp_path / "agents"
     _seed_state(agents, "wkI", drive_active=True, mode="interactive", sid="d-1")

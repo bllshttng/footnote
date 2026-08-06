@@ -128,3 +128,23 @@ def test_seed_bank_loads() -> None:
     tiers = {t.tier for t in tasks}
     assert "capability" in tiers and "regression" in tiers
     assert any("ci-flake" in t.tags for t in tasks)
+
+
+def test_seed_bank_new_eval_tasks_load() -> None:
+    """The king-reign-hygiene and growth-launch-bundle tasks load at capability
+    tier. A malformed YAML in either surfaces here, not at run time; this is also
+    the load proof for the growth-launch assertions moved out of the deleted
+    skill-local evals directory."""
+    repo_root = Path(__file__).resolve().parents[3]
+    seed = repo_root / "evals" / "bank"
+    if not seed.is_dir():
+        pytest.skip("seed bank not present in this checkout")
+    by_id = {t.id: t for t in bank.discover_bank(seed)}
+    king = by_id.get("capability-king-reign-hygiene")
+    assert king is not None, "king-reign-hygiene task missing from bank"
+    assert king.tier == "capability"
+    assert king.prompt is None  # grade-only; no live worker spawn
+    growth = by_id.get("capability-growth-launch-bundle")
+    assert growth is not None, "growth-launch-bundle task missing from bank"
+    assert growth.tier == "capability"
+    assert growth.prompt  # prompt-bearing; the seven requirements live in it

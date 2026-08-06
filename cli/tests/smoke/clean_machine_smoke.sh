@@ -91,7 +91,7 @@ done
 # `--help` proves the lazy in-package module shipped and imports: a missing
 # module surfaces as a non-zero exit here, not silently. The REGRESSION grep is
 # NOT applied to --help output - help text legitimately documents the script a
-# verb replaced (e.g. event verify-evidence), which is not a runtime failure.
+# verb replaced (e.g. phase kill-check), which is not a runtime failure.
 check_help() {  # name + argv: must exit 0
   local name="$1"; shift
   run_capture "$@"
@@ -104,7 +104,6 @@ check_help() {  # name + argv: must exit 0
 check_help plan "$FNO" plan stamp --help
 check_help executor "$FNO" executor resolve --help
 check_help phase-kill-check "$FNO" phase kill-check --help
-check_help event-verify-evidence "$FNO" event verify-evidence --help
 check_help cost "$FNO" cost --help
 
 # A real run: notify must fail (or succeed) on its own merits - on a headless

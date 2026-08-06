@@ -903,7 +903,7 @@ def cmd_spawn(
     squad = squad if squad is not None else squad_compat
 
     from fno.agents.dispatch import DispatchAskError, SpawnResult, dispatch_spawn
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,
@@ -2430,7 +2430,7 @@ def cmd_drive_authority(
     """
     import json as _json
 
-    from fno.agents.drive_authority import active_drive_sessions
+    from fno.drive_authority import active_drive_sessions
 
     sessions = active_drive_sessions()
     if json_out:

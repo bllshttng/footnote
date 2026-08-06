@@ -1,0 +1,33 @@
+name: axis-vocabulary
+
+# check-axis-vocabulary.sh enforces the four-axis vocabulary
+# (harness / provider / model / effort / account): no identifier, dict/JSON key,
+# or env var named for one axis may hold a literal from another. The definitions
+# live in docs/architecture/four-axis-vocabulary.md. This workflow runs on EVERY
+# push and pull request with no `paths:` filter on purpose: the guard scans
+# Python, Rust, shell, and markdown, so a path filter would itself be the
+# one-of-N-reachable-paths defect the guard exists to prevent.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: axis-vocabulary-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check-axis-vocabulary:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Axis vocabulary ratchet + self-test
+        run: |
+          bash scripts/ci/check-axis-vocabulary.sh --self-test
+          bash scripts/ci/check-axis-vocabulary.sh

@@ -1,6 +1,6 @@
 ---
 name: pr
-description: "Drive a PR through its lifecycle. Routes to create (open a PR via a Haiku worker), check (poll for external review and implement it), or merged (the post-merge ritual). Use when: 'create pr', 'open pr', 'submit pr', 'check pr', 'get review', 'post merge', 'process the merged PR'."
+description: "Drive a PR through its lifecycle. Routes to create (open a PR via a routed pr-create worker), check (poll for external review and implement it), or merged (the post-merge ritual). Use when: 'create pr', 'open pr', 'submit pr', 'check pr', 'get review', 'post merge', 'process the merged PR'."
 argument-hint: "<create|check|merged>  (create: opens a PR; check: [PR#]; merged: [PR#])  - a mode is required, there is no default"
 requires:
   binaries:
@@ -15,7 +15,7 @@ requires:
 
 | Mode | What runs | Where it runs |
 |------|-----------|---------------|
-| `create` | open a PR: push the branch, generate a description from the commits, create the PR | a **Haiku** worker (the router stays in the main context) |
+| `create` | open a PR: push the branch, generate a description from the commits, create the PR | a **pr-create** role worker (the router stays in the main context) |
 | `check` | poll for external review, implement findings, reply per-thread | the router's own main context |
 | `merged` | the post-merge ritual: close the backlog node, harvest retro items, file follow-ups | the router's own main context |
 
@@ -31,12 +31,12 @@ Parse the first argument token:
 
   ```
   /pr needs a mode. valid modes:
-    create       open a PR for the current branch (runs a Haiku worker)
+    create       open a PR for the current branch (runs a routed pr-create worker)
     check        poll for external review on a PR and implement it
     merged       run the post-merge ritual for a merged PR
   ```
 
-- **`create`** -> mode is `create`. Print `running create (PR via Haiku worker)`. The remaining tokens are create's own arguments. Go to "Step 2".
+- **`create`** -> mode is `create`. Print `running create (PR via pr-create worker)`. The remaining tokens are create's own arguments. Go to "Step 2".
 - **`check`** -> mode is `check`. Print `running check (poll for review)`. The remaining tokens are check's arguments (`[PR#]`). Go to "Step 3".
 - **`merged`** -> mode is `merged`. Print `running merged (post-merge ritual)`. The remaining tokens are merged's arguments (`[PR#] [autonomous]`); pass them through - a dispatched run appends `autonomous` so the ritual takes every no-prompt branch. Go to "Step 4".
 - **`merge`** -> ambiguous: one word off `merged`, and on the opposite side of the merge event. Do NOT guess. Print and stop with a non-zero result:
@@ -56,7 +56,7 @@ Parse the first argument token:
 
   and stop with a non-zero result. This is the locked router contract: an unknown or empty mode never silently falls through to an action.
 
-## Step 2: create mode (open a PR via a Haiku worker)
+## Step 2: create mode (open a PR via the pr-create role worker)
 
 ### 2a. Nothing-to-PR guard (before any dispatch)
 
@@ -114,18 +114,18 @@ if [ "$policy_required" = "true" ]; then
 fi
 ```
 
-### 2b. Dispatch the Haiku PR worker (the router stays in main context)
+### 2b. Dispatch the pr-create role worker (the router stays in main context)
 
-Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the Task/Agent tool. The heavy PR-description generation runs in Haiku's cheap, fresh context; the router never does it inline - that is the whole cost property:
+Announce the dispatch, then dispatch the bundled **pr-creator** subagent via the Task/Agent tool. The heavy PR-description generation runs in a cheap, fresh context on the `pr-create` role's model; the router never does it inline - that is the whole cost property:
 
-> State to the user: `dispatching the Haiku PR worker (pr-creator)`.
+> State to the user: `dispatching the pr-create worker (pr-creator)`.
 
 Dispatch with the Task/Agent tool:
 
-- subagent type: **pr-creator** (the bundled Haiku agent at `agents/pr-creator.md`). On a runtime that resolves subagents by name, use that name; otherwise dispatch a general worker with the `agents/pr-creator.md` prompt and `model: "haiku"`.
-- Pass ONLY the gathered context the worker needs - the current branch, the base branch, a one-line summary of the change, and the no-merge / auto-merge posture. Do NOT pass the full session transcript: Haiku's window is small and a fork would blow it.
+- subagent type: **pr-creator** (the bundled agent at `agents/pr-creator.md`). Declare the `pr-create` role at the spawn boundary (`fno agents spawn --role pr-create`, or omit any `model:` override) so the model is resolved through `config.model_routing.roles.pr-create`; unconfigured, it runs on the invoking harness's primary model. No tier or model literal is hardcoded. On a runtime that resolves subagents by name, use that name; otherwise dispatch a general worker with the `agents/pr-creator.md` prompt and the same role declaration.
+- Pass ONLY the gathered context the worker needs - the current branch, the base branch, a one-line summary of the change, and the no-merge / auto-merge posture. Do NOT pass the full session transcript: the worker's context is small and a fork would blow it.
 
-`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `agents/pr-creator.md` is the same flow rewritten as the Haiku subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
+`references/create.md` is the canonical create flow (the bundled copy of the standalone create-pr skill); `agents/pr-creator.md` is the same flow rewritten as the pr-create role subagent. The router dispatches the agent via the Task/Agent tool - it never reaches a create skill through a runtime skill call.
 
 ### 2c. Parse the worker's RESULT line (no false success)
 
@@ -146,4 +146,4 @@ Load [merged.md](references/merged.md) and execute it in full, in this context. 
 
 ## Multi-CLI
 
-Claude-Code primary. All three modes need `fno`, `gh`, and `git`. The create worker additionally needs the Task/Agent dispatch surface and a Haiku-capable provider; check needs the review bots configured in settings; merged needs the project's `config.post_merge.parking_lot_path`. If a dependency is missing, the mode fails loud and reports it - it never fakes a PR, a review, or a ritual.
+Claude-Code primary. All three modes need `fno`, `gh`, and `git`. The create worker additionally needs the Task/Agent dispatch surface and a provider for the configured `pr-create` route (or the invoking harness's primary model when unconfigured); check needs the review bots configured in settings; merged needs the project's `config.post_merge.parking_lot_path`. If a dependency is missing, the mode fails loud and reports it - it never fakes a PR, a review, or a ritual.

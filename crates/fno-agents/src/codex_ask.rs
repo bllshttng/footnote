@@ -453,7 +453,7 @@ fn run_codex(
     // Set agent env vars when we know who we are (create path with agent_self).
     if let Some(name) = agent_self {
         cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_PROVIDER", "codex");
+        cmd.env("FNO_AGENT_HARNESS", "codex");
     }
 
     // Put the child in its own process group so SIGTERM/SIGKILL propagate

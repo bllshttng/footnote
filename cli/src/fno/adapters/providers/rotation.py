@@ -34,7 +34,7 @@ _VALID_STRATEGIES = ("fallback", "round_robin")
 class ComboNotFoundError(ProviderConfigError):
     """Raised when a referenced combo does not exist at dispatch time.
 
-    Distinct from generic ProviderConfigError so callers (sigma_dispatch,
+    Distinct from generic ProviderConfigError so callers (dispatch_target,
     CLI commands) can catch it and fall through to the no-combo path
     without swallowing other config-shape errors.
     """
@@ -217,7 +217,7 @@ def dispatch_with_combo(
 
     1. Resolve combo via ``load_combos()``; raise ``ComboNotFoundError`` if
        missing - callers may catch this and fall through to the no-combo
-       single-provider path (sigma_dispatch does exactly this).
+       single-provider path (dispatch_target does exactly this).
     2. Compute the rotated provider order via ``get_rotated_providers``.
     3. For each provider in order: re-check ``is_in_cooldown`` AT EACH STEP
        (no upfront snapshot - covers AC3.3 mid-iteration cooldown expiry).

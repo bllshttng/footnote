@@ -52,7 +52,6 @@ MAPPINGS = [
     (r"\bbash (?:\./)?scripts/lib/emit-gate-transition\.sh\b", "fno gate transition"),
     (r"\bbash (?:\./)?scripts/lib/verify-pr-merged\.sh\b", "fno pr verify --kind merged"),
     (r"\bbash (?:\./)?scripts/lib/verify-review-replies\.sh\b", "fno pr verify --kind reviews"),
-    (r"\bbash (?:\./)?scripts/lib/verify-event-evidence\.sh\b", "fno event verify-evidence"),
     (r"\bbash (?:\./)?scripts/lib/phase-verifier\.sh\b", "fno phase verify"),
     (r"\bbash (?:\./)?scripts/lib/kill-criteria\.sh\b", "fno phase kill-check"),
     (r"\bbash (?:\./)?scripts/lib/infer-task-executor\.sh\b", "fno executor resolve"),

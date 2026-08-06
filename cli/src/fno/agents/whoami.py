@@ -2,7 +2,7 @@
 
 A mesh-spawned worker has no clean way to learn its OWN registered name —
 the derived-name peers use to address it via ``fno mail send <name>``. The
-spawn path injects ``FNO_AGENT_SELF`` / ``FNO_AGENT_PROVIDER`` (and, on
+spawn path injects ``FNO_AGENT_SELF`` / ``FNO_AGENT_HARNESS`` (and, on
 follow-up paths, ``FNO_AGENT_SESSION``) into every spawned agent's env
 (see :mod:`fno.agents.context`), but nothing surfaces that identity back.
 
@@ -26,6 +26,7 @@ from collections.abc import Mapping
 from typing import Callable, Optional
 
 from fno.agents.registry import AgentEntry
+from fno.harness_identity import harness_from_env
 
 # Exit code for "ran fine, but you are not a registered mesh agent". Distinct
 # from Typer's 2 (usage/arg error) and the conventional 1 so a caller can
@@ -186,7 +187,7 @@ def resolve_self(
         registry = []
 
     self_name = _nonempty(env.get("FNO_AGENT_SELF"))
-    env_provider = _nonempty(env.get("FNO_AGENT_PROVIDER"))
+    env_provider = _nonempty(harness_from_env(env))
     env_session = _nonempty(env.get("FNO_AGENT_SESSION"))
 
     row: Optional[AgentEntry] = None

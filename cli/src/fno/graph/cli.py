@@ -4125,7 +4125,7 @@ def cmd_dispatch_lanes(
     receipt per lane (``status`` dispatched | skipped). ``max_lanes < 2`` spawns
     nothing (sequential: use ``fno backlog advance`` / ``next``).
     """
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,
@@ -6209,16 +6209,9 @@ def cmd_undefer(
             # Best-effort - a failed emit only means the node keeps its pre-undefer
             # streak, never a crash in undefer. Per node: the boundary is keyed on
             # data.unit_id, so N nodes that were actually deferred emit N events.
-            try:
-                from fno.agents.events import emit as _emit_event
-                from fno.graph.failure import events_path as _events_path
+            from fno.graph.failure import emit_undefer_boundary
 
-                # Write to the SAME log the streak reader consumes (the walker's
-                # $HOME/.fno mirror), not agents.events' state_dir default, so
-                # reader and emitter agree even under a customized config.state_dir.
-                _emit_event("node_undeferred", path=_events_path(), unit_id=tid)
-            except Exception:
-                pass
+            emit_undefer_boundary(tid)
         else:
             typer.echo(f"warning: {tid} was not deferred", err=True)
         typer.echo(f"Undeferred {tid}")
@@ -7056,7 +7049,7 @@ def cmd_done(
     # action during a drive window, but audit-tag it so the trail attributes
     # the completion to the operator rather than the LLM. Best-effort.
     try:
-        from fno.agents.drive_authority import (
+        from fno.drive_authority import (
             emit_operator_initiated,
             is_drive_authority_active,
         )
@@ -7229,7 +7222,7 @@ def cmd_advance(
     across all projects. Idempotent; respects config.parallel.max_lanes per
     project + ``--max`` overall. ``--stop`` deactivates instead.
     """
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,
@@ -9940,13 +9933,9 @@ def cmd_unsupersede(
         # human-recovered one: a superseded node is often auto-deferred first, so
         # without this the next maintain pass could re-defer it from stale
         # failure history without a single fresh failure. Best-effort, like undefer.
-        try:
-            from fno.agents.events import emit as _emit_event
-            from fno.graph.failure import events_path as _events_path
+        from fno.graph.failure import emit_undefer_boundary
 
-            _emit_event("node_undeferred", path=_events_path(), unit_id=canonical_id_box[0])
-        except Exception:
-            pass
+        emit_undefer_boundary(canonical_id_box[0])
     typer.echo(f"Unsuperseded {node_id}")
     # Force the revived node's plan status off terminal `superseded` (the
     # forward-only projector refuses to leave a terminal): without this the

@@ -393,7 +393,7 @@ fn run_agy(
     cmd.current_dir(popen_cwd);
     if let Some(name) = agent_self {
         cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_PROVIDER", "agy");
+        cmd.env("FNO_AGENT_HARNESS", "agy");
     }
     // Own process group so SIGTERM/SIGKILL/SIGINT reach agy's subshells.
     unsafe {

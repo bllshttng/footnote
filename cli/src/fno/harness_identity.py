@@ -8,6 +8,40 @@ from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional
 
 
+# --- FNO_AGENT_HARNESS env resolution (with pre-cutover compat window) -------
+# Spawn injects FNO_AGENT_HARNESS (the CLI binary). A worker spawned before the
+# FNO_AGENT_PROVIDER -> FNO_AGENT_HARNESS rename carries the old name in an
+# process can rewrite, so the read side accepts it for one release and warns.
+# The warning fires at most once per process so a dispatch that resolves context
+# and then whoami does not print it twice. The window is time-boxed: it is
+# removed when no in-flight worker can carry the old variable.
+_HARNESS_ENV_WARNED = False
+
+
+def harness_from_env(env: "Mapping[str, str]", *, warn: bool = True) -> "Optional[str]":
+    """Resolve the ambient harness from the process environment.
+
+    Prefers ``FNO_AGENT_HARNESS``; falls back to the pre-cutover
+    ``FNO_AGENT_PROVIDER``. Returns the non-empty value or ``None``. On fallback
+    writes one stderr line naming the current variable (``warn=True``, at most
+    once per process).
+    """
+    global _HARNESS_ENV_WARNED
+    val = env.get("FNO_AGENT_HARNESS")
+    if val:
+        return val
+    legacy = env.get("FNO_AGENT_PROVIDER")
+    if legacy and warn and not _HARNESS_ENV_WARNED:
+        import sys
+        sys.stderr.write(
+            "FNO_AGENT_PROVIDER is the pre-cutover name for FNO_AGENT_HARNESS; "
+            "this worker predates the rename. New spawns set FNO_AGENT_HARNESS.\n"
+        )
+        sys.stderr.flush()
+        _HARNESS_ENV_WARNED = True
+    return legacy or None
+
+
 # Highest precedence first. Callers that need ambiguity detection may inspect
 # the same marker facts without duplicating names or harness mappings.
 HARNESS_SESSION_MARKERS: tuple[tuple[str, str], ...] = (

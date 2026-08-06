@@ -24,25 +24,25 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked `.claude/rules/` file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this inlined body but does not receive linked rule bodies, which auto-discover on Claude only. This is also the delivery target for the memory pass's lesson-candidate dual-emit, replacing the private-memory drain that codex cannot read and worktree workers never receive.
+Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked `.claude/rules/` file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this inlined body but does not receive linked rule bodies, which auto-discover on Claude only.
 
 **Cap: 10 active entries (context-cost budget).** AGENTS.md is injected at every SessionStart on every harness, so every entry is paid on every session start on every lane. Do not raise it; an entry too large to fit its budget graduates to a lint. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
 
 **Format:** one `###` block each. Imperative trap (1-3 sentences, this IS the budget), `specimens:` as bare file:line / PR refs, `graduates-to:` the lint/guard/refusal that lets it leave, `added:` YYYY-MM-DD. When a `graduates-to:` guard lands, remove the entry in the same PR that adds the guard (the guard is now the carrier, per principle 3's durability ladder).
 
-AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness; a lane that cannot has lost the delivery claim for it: `kdc-delivery-sentinel-1932`.
+AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness: `kdc-delivery-sentinel-1932`.
 
 ### A guard placed on one of N reachable paths is decorative
 
 Before trusting a guard, enumerate every path a caller can reach (in-process test, exec'd binary, skill layer, direct CLI, spawned worker); a guard on only one reads as protection and ships green while the other paths stay broken. Behavior that lives only in skill prose is the same defect, since a direct CLI call or a non-Claude worker skips the skill layer and the rule never runs. A test can be one too: asserting two paths emit the same enum variant pins the tag, not the destination.
 
-- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` isolation protects in-process tests; the exec'd binary is `cfg(not(test))` and writes the live squads file, 124 orphaned squads with no surviving origin), `cli/tests/unit/test_pr_ritual.py` (`_bare()` constructs `Ritual` bypassing `__init__`, so the one wrong line shipped non-functional and green, PR #575 fixed by #577), `skills/agent/scripts/normalize.sh` (`--yolo` and slash-verb translation skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` row-menu/drag parity test (variant-only; agreed on the tag, disagreed on `target`), `hooks/arm-handoff-precompact.sh` (gated on `kill -0 owner_pid`, a pid dead ~1s after init, so it exited before the probe on 100% of real fires and never armed once; its test fabricated `owner_pid: $$` and stayed green the whole time).
+- specimens: `crates/fno/src/squad_store.rs:36` (`#[cfg(test)]` hid a path only the exec'd binary took), `cli/tests/unit/test_pr_ritual.py` (`_bare()` bypassed `__init__`; PR #575/#577), `skills/agent/scripts/normalize.sh` (`--yolo` skipped by a direct `fno agents spawn`), `crates/fno/src/client.rs` (parity test pinned the tag, not the target), `hooks/arm-handoff-precompact.sh` (gated on a pid dead ~1s after init; its test fabricated `owner_pid: $$`).
 - graduates-to: the path-uniqueness lint that treats N reachable implementations of one operation as a CI failure, not a review catch; and one failing an equivalence assertion that ignores the payload.
 - added: 2026-07-23
 
 ### Orienter output, claim snapshots, and liveness probes have all lied
 
-Receipt lines, manifest snapshots, process argv, and liveness probes have each lied about a live session; only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` while a plan is bound, `node=already-claimed` while the claim is free, and `base=origin/main` while the branch is stale. Verify the load-bearing lines against source: `fno backlog get <id>` for status and plan, `fno claim status node:<id>` for the holder, `git fetch origin main && git rev-list --count HEAD..origin/main` for the real base (skip the fetch and a stale ref answers 0), and the transcript mtime for liveness.
+Receipt lines, manifest snapshots, process argv, and liveness probes have each lied about a live session; only the live lockfile and the transcript stayed truthful. `fno target start` can print `plan: none` while a plan is bound or `base=origin/main` while the branch is stale. Verify load-bearing lines against source: `fno backlog get <id>` (status/plan), `fno claim status node:<id>` (holder), `git fetch origin main && git rev-list --count HEAD..origin/main` (real base - skip the fetch and a stale ref answers 0), transcript mtime (liveness).
 
 - specimens: `skills/target/SKILL.md` "Gotchas" (the receipt-can-lie cluster; manifest claim fields are an init-time snapshot, not ownership truth).
 - graduates-to: the receipt-truth contract (init first-fills `plan_path`, prints the live claim holder, verifies the base) and transcript-keyed liveness.
@@ -58,25 +58,33 @@ A subprocess seeing only a tail of structured signals makes wrong calls with ful
 
 ### An empty search result is a claim, and `rg` globs silently over-exclude
 
-Before concluding "no callers left", verify the search found something it should have. A ripgrep `--glob '!target/**'` is unanchored and matches at ANY depth, so it also excludes `skills/target/` - the most-referenced skill dir in this repo. Truncated match lists ("43 matches in 9 files", ~20 shown) read as complete and are not. Cross-check a load-bearing sweep with `grep -rn` over explicit trees, and confirm a known-present hit appears before trusting an empty result.
+Before concluding "no callers left", verify the search found something it should have. A ripgrep `--glob '!target/**'` is unanchored and matches at ANY depth, so it also excludes `skills/target/`. Truncated match lists ("43 matches in 9 files") read as complete. Cross-check a load-bearing sweep with `grep -rn` over explicit trees, and confirm a known-present hit appears before trusting an empty result.
 
 - specimens: `skills/target/references/pre-promise.md:125` and `usage-detail.md:82` (two live `fno providers` callers that survived every `rg` sweep of a rename that removed the verb, caught only by an external reviewer).
 - graduates-to: a sweep helper that anchors its excludes (`!/target/**`) and fails when a search returns zero hits without a positive control.
 - added: 2026-07-27
+
+### A capability probe delivered over the mail bus can only ever return yes
+
+`fno mail send` injects as user-shaped text, indistinguishable from operator typing, so a "can the agent do X unprompted?" probe delivered by mail tests the USER-TRIGGERED path and cannot fail. A success read as proof of autonomous capability is the receipt-can-lie shape - a snapshot that a call was accepted, not that an agent could make it unaided. The valid test is a run with no user-shaped prompt in the transcript.
+
+- specimens: this session 2026-08-05 - a `/code-review` probe mailed to a worker succeeded and was read as proof of self-invocation; the mail was the user-shaped trigger.
+- graduates-to: a probe that distinguishes user-shaped injection from an autonomous tool call, or a lint flagging a capability claim evidenced only by a mail probe.
+- added: 2026-08-05
 
 ## Repository
 
 ```
 footnote/
 ├── .claude-plugin/   # Plugin manifest
-├── skills/           # Skills; advertised set in skills/using-fno/SKILL.md
-├── agents/           # Subagents (target, code-reviewer, sigma-review specialists)
+├── skills/           # Skills (advertised set in using-fno)
+├── agents/           # Subagents (target, code-reviewer, sigma-review)
 ├── commands/         # Slash commands
 ├── hooks/            # Stop hooks, session-start, context monitor
-├── scripts/          # Validation, metrics, orchestration, codemap, diagnostics
-├── cli/              # The `fno` CLI (Python + uv) and its tests
-├── crates/           # Rust runtime (fno-agents: loop-check, finalize, loop run)
-└── internal ->       # Symlink to the Obsidian vault (plans/docs; not git-tracked)
+├── scripts/          # Validation, metrics, orchestration, diagnostics
+├── cli/              # `fno` CLI (Python + uv) + tests
+├── crates/           # Rust runtime (fno-agents)
+└── internal ->       # Obsidian vault symlink (plans/docs; not git-tracked)
 ```
 
 ### Conventions
@@ -99,7 +107,7 @@ Five advertised verbs: `/fno:target`, `/fno:think`, `/fno:review`, `/fno:pr`, `/
 | `/fno:blueprint <doc-path>` | Mutate a design doc in place; `quick "..."` for a flat single-file plan |
 | `/fno:do` | Execute a plan: `flat` (default) or `waves` |
 | `/fno:think` \| `/fno:review` \| `/fno:fix` \| `/fno:tdd` \| `/fno:triage` \| `/fno:setup` | Design / review / fix-loop / TDD / spec-ordering / config wizard |
-| `/fno:pr create` \| `check` \| `merged` | Open PR (Haiku worker) / poll+implement external review / post-merge ritual |
+| `/fno:pr create` \| `check` \| `merged` | Open PR (pr-create role worker) / poll+implement external review / post-merge ritual |
 | `/fno:growth-launch "<objective>"` | Growth-studio pack: four-role campaign bundle held at a founder approval gate |
 
 Surface evolution: `/fno:blueprint` mutates the design doc in place ([lean-blueprint](docs/architecture/lean-blueprint.md)); an approved native Plan-Mode plan is picked up by the next bare `/fno:target` ([target-plan-mode-integration](docs/architecture/target-plan-mode-integration.md)).
@@ -112,7 +120,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 - **Lifecycle:** `intake -> triage -> ready/next -> done`. Side states: `blocked`, `deferred` (`defer`/`undefer`), `superseded`.
 - **Priority:** `p0`..`p3` (default `p2`); orthogonal to `--size S|M|L`.
 - **Editing:** `fno backlog update <id>` in place (`--details`, `--domain`, `--size`, `--priority`, ...). Never recreate via `idea` (dupes).
-- **Board == work order:** non-Done cards share the walker suffix `(rank_band, live-epic child, in-progress epic, epic priority, epic created_at, child priority, orphan_last, created_at)`; project lane is a board-only display prefix; `rank <id> --top` floats a card and makes it run next; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
+- **Board == work order:** non-Done cards share a rank suffix (live-epic children before epics, then priority, then created_at); project lane is a board-only display prefix; `rank <id> --top` floats a card and makes it run next; `_kanban_column` is the sole column authority. [backlog-board-ordering](docs/architecture/backlog-board-ordering.md).
 - **Hygiene:** `fno backlog groom` (daily pass), `triage health [--check]`, `maintain [--apply]`, `reconcile` (auto-fires on SessionStart), `advance` (merge-triggered auto-continue, opt-in).
 
 ## Execution & looping
@@ -144,11 +152,11 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Ship vocabulary
 
-`/ship` is the deliverable umbrella (`/ship pr` = `/pr`; `/ship doc` ships a research brief). The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneAdvisory` (doc written + eval-green), and explicitly activated function-agnostic `DoneDelivery` (complete current evidence). `fno pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
+`/ship` is the deliverable umbrella (`/ship pr` = `/pr`; `/ship doc` ships a research brief). The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
 
 ### Plan completion stamp
 
-At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) - inline-list syntax only. `in_review` = first PR created; `done` = all expected ships. [plan-completion-stamp](docs/architecture/plan-completion-stamp.md).
+At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) - inline-list syntax only. `in_review` = first PR created; `done` = all expected ships.
 
 ### Multi-repo features
 
@@ -171,14 +179,15 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno claim`** - the single work-claim primitive; atomic lockfiles under `.fno/claims/`. `fno target init` already claims the node - never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
+- **`fno mail` - king-mediated native review.** `fno mail send` injects as user-shaped text, so a worker that cannot self-invoke its harness's native review verb (claude `/code-review`, codex `/review`) can mail its king; the king's reply triggers the verb in the worker's own harness. No live king -> advisory self-review. [coordination](docs/architecture/coordination.md).
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.
 - **`fno doctor`** - detects stale deployed `fno` vs source; `--fix` delegates to `fno update`. Compares against merged source only. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
-- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: **harness** (the CLI binary, `--harness/-H`), **provider** (the model vendor, `--provider/-P`, `config.model_routing.providers`), **model** (`--model/-m`), and **account** (a named working instance of a harness, `config.accounts.records`). `opencode` is a legal harness AND a legal provider, so never infer the axis from a value. [provider-rotation](docs/provider-rotation.md) · [cross-model-review](docs/architecture/cross-model-review.md) · [role-based routing](docs/architecture/role-based-model-routing.md).
+- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: harness (the binary, `-H`), provider (the model vendor, `-P`), model (`-m`), account (`--account`). `opencode` is legally both a harness and a provider, so never infer the axis from a value. Definitions and the allowlist procedure live in [docs/architecture/four-axis-vocabulary.md](docs/architecture/four-axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`. [provider-rotation](docs/provider-rotation.md).
 - **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app).
 - **Control-plane LOC ratchet** - positive executable-LOC delta across control-plane paths fails CI unless the PR body has a `loc-exception:` line AND a matching trajectory entry. [loc-ratchet](docs/architecture/loc-ratchet.md).
-- **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`. [auto-post-merge-ritual](docs/architecture/auto-post-merge-ritual.md).
+- **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`.
 - **Target self-handoff** - a `/target` session can hand the do phase to a fresh-context successor; generation-capped. [target-self-handoff](docs/architecture/target-self-handoff.md).
 - **Self-improvement** - autocorrect (git-post-commit + verifier + `/insights` -> monthly review); two memory-pass checkpoints; stuck terminals write postmortems. [memory-system](docs/architecture/memory-system.md).
 

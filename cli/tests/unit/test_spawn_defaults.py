@@ -192,7 +192,7 @@ def test_ac2_hp_codex_spawn_does_not_inherit_claude_model():
 def test_ac5_fr_provider_resolution_failure_degrades_open(monkeypatch):
     # If resolve_dispatch_provider raises, the model default must degrade to
     # injecting nothing rather than aborting the spawn.
-    import fno.agents.provider_resolve as pr
+    import fno.dispatch_flags as pr
 
     def _boom(*_a, **_k):
         raise RuntimeError("resolution exploded")

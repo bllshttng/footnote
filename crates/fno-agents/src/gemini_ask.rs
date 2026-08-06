@@ -395,7 +395,7 @@ fn run_gemini(
     }
     if let Some(name) = agent_self {
         cmd.env("FNO_AGENT_SELF", name);
-        cmd.env("FNO_AGENT_PROVIDER", "gemini");
+        cmd.env("FNO_AGENT_HARNESS", "gemini");
     }
     // Own process group so SIGTERM/SIGKILL/SIGINT reach gemini's subshells.
     unsafe {

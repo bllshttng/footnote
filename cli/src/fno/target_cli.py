@@ -1191,7 +1191,7 @@ def init(
     # resolved only when given, so an absent pin lets the spawn path infer the
     # harness at dispatch time rather than freezing it here.
     from fno._flag_aliases import refuse_retired_provider
-    from fno.agents.provider_resolve import (
+    from fno.dispatch_flags import (
         DispatchFlagError,
         reject_empty_model,
         resolve_dispatch_provider,

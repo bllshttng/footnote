@@ -498,7 +498,7 @@ def bg_create(
     # SESSION gracefully via caller_kind=nested_agent + from_session_id=None.
     spawn_env = dict(os.environ)
     spawn_env["FNO_AGENT_SELF"] = name
-    spawn_env["FNO_AGENT_PROVIDER"] = "claude"
+    spawn_env["FNO_AGENT_HARNESS"] = "claude"
 
     # Role-based model routing (x-d2fe). An auxiliary role with a configured
     # provider key merges ANTHROPIC_BASE_URL/AUTH_TOKEN + the model env vars so

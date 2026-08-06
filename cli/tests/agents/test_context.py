@@ -72,7 +72,7 @@ def _clear_caller_env(monkeypatch) -> None:
     """Strip every env var the caller-kind tree reads."""
     for k in (
         "FNO_AGENT_SELF",
-        "FNO_AGENT_PROVIDER",
+        "FNO_AGENT_HARNESS",
         "FNO_AGENT_SESSION",
         "MCP_CHANNEL_INBOUND_POKE",
         "CRON_JOB",
@@ -279,7 +279,7 @@ def test_build_context_nested_agent_from_env(monkeypatch) -> None:
 
     _clear_caller_env(monkeypatch)
     monkeypatch.setenv("FNO_AGENT_SELF", "parent-agent")
-    monkeypatch.setenv("FNO_AGENT_PROVIDER", "claude")
+    monkeypatch.setenv("FNO_AGENT_HARNESS", "claude")
     monkeypatch.setenv("FNO_AGENT_SESSION", "session-xyz")
     ctx = build_context(to_name="child", to_provider="codex")
     assert ctx.caller_kind == "nested_agent"

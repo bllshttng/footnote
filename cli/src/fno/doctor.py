@@ -408,7 +408,7 @@ def _rust_report() -> dict[str, Optional[str]]:
     """
     binary: Optional[Path] = None
     try:
-        from fno.agents.rust_runtime import resolve_installed_binary
+        from fno.rust_binary import resolve_installed_binary
 
         binary = resolve_installed_binary()
     except Exception:
