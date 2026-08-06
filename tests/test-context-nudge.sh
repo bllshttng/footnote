@@ -13,6 +13,8 @@
 #   AC16 both checks fire in one output; orphan resolution does not suppress ctx
 #   AC17 every-session nudge: uncrowned past the general trigger blocks + emits
 #        session_context_nudge; below the general trigger does not
+#   AC18 latch holds across CWD: the per-session latch lives in the global state
+#        dir, so a cwd move between fires does not re-nudge within a band
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -194,6 +196,23 @@ write_transcript "$SBX/t.jsonl" 500000     # past trigger AND has orphans
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC16: ctx reason present" "$OUT" 'king handoff trigger'
 assert_contains "AC16: orphan reason present" "$OUT" 'cannot be a pure pass'
+
+# === AC18: latch holds across CWD (global state dir, not CWD-relative) ========
+# The latch is per-session state (transcript + band) and lives in the global
+# state dir, so a session whose cwd moves between fires (canonical <-> worktree,
+# or a cwd with no .fno) must not re-nudge within the same band. Pre-fix the
+# CWD-relative latch made the second fire block (or never latch at all from a
+# cwd with no .fno).
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry yes no
+write_transcript "$SBX/t.jsonl" 500000   # 50%, band 5
+cd "$SBX"                                 # cwd with a .fno
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC18: first fire (cwd with .fno) blocks" "$OUT" '"decision":"block"'
+mkdir -p "$SBX/no-fno-cwd"; cd "$SBX/no-fno-cwd"   # cwd with NO .fno of its own
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_absent "AC18: second fire (different cwd) is latched, no re-block" "$OUT" '"decision":"block"'
+cd "$SBX"                                 # restore for any trailing steps
 
 echo ""
 echo "================================"

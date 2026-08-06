@@ -50,7 +50,6 @@ HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
 
-FNO_DIR="${FNO_DIR:-.fno}"
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 
 emit_event() {
@@ -178,8 +177,17 @@ BAND="0"
 if [[ -n "$USED_PCT" ]]; then
     BAND=$(( USED_PCT / 10 ))
 fi
-CTX_LATCH="${FNO_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
-ORPHAN_LATCH="${FNO_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
+# Latches are PER-SESSION state (keyed on transcript basename + band, which is
+# already collision-free across sessions), so they live in the GLOBAL state dir,
+# not a CWD-relative .fno. A CWD-relative latch splits across checkouts: a
+# session whose cwd moves between the canonical tree and a worktree (or fires
+# from a cwd with no .fno) gets a fresh namespace and re-nudges within the same
+# band, defeating the once-per-band anti-nag. Worst case a worktree worker's
+# latch vanishes when the worktree archives. Global + transcript-keyed closes it.
+LATCH_DIR="${HOME}/.fno"
+mkdir -p "$LATCH_DIR" 2>/dev/null || true
+CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
+ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
 
 REASON=""
 
