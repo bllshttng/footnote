@@ -106,6 +106,61 @@ def _read_state_field(state_file: str, field: str) -> str:
     return ""
 
 
+def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
+    """The latest ``review_coverage`` event data for ``pr_number``, or None.
+
+    loop-check emits one every gate eval (x-0eaf). Python consumes it rather
+    than recomputing coverage (Ownership: Rust computes, Python reads). A
+    missing or corrupt log degrades to None, which the caller treats as Unknown
+    and refuses - never a pass.
+    """
+    try:
+        from fno.events.log import read_events
+    except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
+        return None
+    from pathlib import Path
+
+    events_path = Path(_repo_state_dir(repo)) / "events.jsonl"
+    try:
+        events = read_events(events_path)
+    except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
+        return None
+    latest = None
+    for ev in events:
+        if ev.get("type") != "review_coverage":
+            continue
+        data = ev.get("data") or {}
+        try:
+            if int(data.get("pr", -1)) == pr_number:
+                latest = data
+        except (TypeError, ValueError):
+            continue
+    return latest
+
+
+def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
+    """The PR's current ``headRefOid`` for a staleness check, or None."""
+    if shutil.which("gh") is None:
+        return None
+    res = _gh(["pr", "view", str(pr_number), "--json", "headRefOid"], repo)
+    if not res.ok:
+        return None
+    try:
+        oid = str(json.loads(res.stdout).get("headRefOid", "")).strip()
+    except (ValueError, TypeError):
+        return None
+    return oid or None
+
+
+def _coverage_refused_reason(cov: Optional[dict]) -> str:
+    """Why a coverage guard refused, for the blocked receipt line."""
+    if cov is None:
+        return "no review_coverage event (no gate evaluated this PR)"
+    if cov.get("coverage") != "covered":
+        return f"coverage {cov.get('coverage')}"
+    return f"0 reviewed (covered count={cov.get('reviewed_count')})"
+
+
 # ---------------------------------------------------------------------------
 # Post-merge side-effects (best-effort; never change the merge outcome)
 # ---------------------------------------------------------------------------
@@ -760,6 +815,38 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     if shutil.which("gh") is None:
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
+
+    # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
+    # nothing reviewed. Consume the review_coverage event loop-check emits
+    # (Ownership: Rust computes, Python reads); missing/stale/zero/unknown
+    # refuses (fail closed). Runs only when auto_merge is enabled (step 1), so a
+    # manual `gh pr merge` on a non-auto-merge repo is untouched - the
+    # discriminator is auto_merge.enabled, not attendance. After the gh check so
+    # a missing gh still reports its own exit 127.
+    cov = _review_coverage_for_pr(pr_number, repo)
+    covered = (
+        cov is not None
+        and cov.get("coverage") == "covered"
+        and int(cov.get("reviewed_count") or 0) > 0
+    )
+    if covered:
+        # Staleness: the event pins a head; if the PR head moved after the gate
+        # eval, the coverage no longer describes what would merge. Best-effort:
+        # a head-fetch failure does not itself block (the event is from the
+        # current autonomous flow), but a confirmed mismatch refuses.
+        head = _pr_head_oid(pr_number, repo)
+        ev_head = cov.get("head_sha")
+        if head and ev_head and head != ev_head:
+            covered = False
+    if not covered:
+        _emit(
+            pr_number,
+            "blocked",
+            f"unreviewed merge refused: {_coverage_refused_reason(cov)}",
+            "none",
+            err=True,
+        )
+        return 2
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
