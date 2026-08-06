@@ -373,18 +373,46 @@ def _required_bots(review: Any) -> List[str]:
     names the producer, and names the condition, instead of asserting a
     clearability it has no evidence for.
     """
-    rendered: List[str] = list(review.github_apps) if review.github_apps else []
-    seen = set(rendered)
+    from fno.review.provider_resolution import DISPATCHABLE_PROVIDERS
+
+    apps: List[str] = list(review.github_apps) if review.github_apps else []
+    # Aggregate providers PER LOGIN before rendering. First-seen-wins dropped
+    # information twice: a peer identity colliding with a `github_apps` login
+    # was skipped entirely, so its producer and condition vanished and the
+    # entry read as an App that posts itself; and under a shared
+    # `peer_identity` only the first provider survived, so a config whose
+    # second entry is the only drivable one advertised the undrivable first.
+    by_login: Dict[str, List[str]] = {}
     for peer in review.peers or []:
         login = _peer_entry_identity(peer, review.peer_identity)
-        if not login or login in seen:
+        if not login:
             continue
-        seen.add(login)
-        provider = _peer_provider(peer) or "<provider>"
+        provider = _peer_provider(peer)
+        if provider:
+            by_login.setdefault(login, [])
+            if provider not in by_login[login]:
+                by_login[login].append(provider)
+        else:
+            by_login.setdefault(login, [])
+
+    def _post_clause(providers: List[str]) -> str:
+        # Same drivability rule as the identity-free producer: a name
+        # `/review peer` cannot drive is not a producer, and printing one as
+        # `--post` is the wedge with the other carrier's label on it.
+        drivable = [p for p in providers if p.lower() in DISPATCHABLE_PROVIDERS]
+        if not drivable:
+            named = ", ".join(providers) if providers else "<provider>"
+            return f"no /fno:review peer runner for [{named}]"
+        target = drivable[0] if len(drivable) == 1 else f"<{'|'.join(drivable)}>"
+        return f"post: /fno:review peer <pr#> {target} --post; cross-model only"
+
+    rendered: List[str] = []
+    for app in apps:
         rendered.append(
-            f"{login} (post: /fno:review peer <pr#> {provider} --post; "
-            f"cross-model only)"
+            f"{app} ({_post_clause(by_login.pop(app))})" if app in by_login else app
         )
+    for login, providers in by_login.items():
+        rendered.append(f"{login} ({_post_clause(providers)})")
     return rendered
 
 
@@ -461,6 +489,17 @@ def _local_review_gates(review: Any) -> List[str]:
         producer = descriptor.invocation
         if str(name) not in builtin:
             producer = f"{producer}, then {_EMIT_ATTESTATION} {name}"
+        # What the rung ASSERTS travels with it. loop-check's own block reason
+        # marks a self-cert `[self-cert: asserts no review evidence]`, and an
+        # `invocation` reviewer attests only that its skill ran - footnote never
+        # reads its output. Printing every rung as an undifferentiated "local
+        # attestation" makes `declare` look like `sigma`, which is the trust
+        # spectrum collapsing in the one line whose job is to show the gate.
+        asserts = str(getattr(descriptor, "asserts", "") or "")
+        if asserts == "self-cert":
+            producer += " [self-cert: asserts no review evidence]"
+        elif asserts == "invocation":
+            producer += " [asserts invocation only: output is not read]"
         gates.append(f"{name} -> {producer}")
     # Only an identity-free entry contributes to the local composite gate; an
     # entry with its own `identity` (or any entry under a shared peer_identity)
