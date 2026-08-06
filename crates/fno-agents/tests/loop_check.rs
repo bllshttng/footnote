@@ -1491,9 +1491,9 @@ exit 1
     ]);
 
     assert_eq!(d.decision, "allow");
-    // x-0eaf: no review lane configured (settings is [ci] only), so nothing
-    // reviewed -> DoneUnreviewed, not the old silent DonePRGreen.
-    assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
+    // x-0eaf: no review lane configured (settings is [ci] only) -> DonePRGreen
+    // (the boundary fix: a stock install still completes nodes).
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 }
 
 /// x-2e20: a hosted workflow revokes declared no-CI before its first check exists.
@@ -2626,10 +2626,10 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
         "declared no-review repo must complete (not block) on PR+CI alone: {}",
         d.message
     );
-    // x-0eaf: nothing reviewed (no review lane, no attestation), so the terminal
-    // is DoneUnreviewed, not the old silent DonePRGreen - but the session still
-    // completes (allow) and the skip is still recorded below.
-    assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
+    // x-0eaf: no review lane configured -> zero coverage is the configured
+    // state, not a defect -> DonePRGreen (the boundary fix; a stock install
+    // still completes nodes).
+    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // AC3-UI: the skip is recorded in the loop_check event.
     let events = fs::read_to_string(cwd.join(".fno/events.jsonl")).unwrap_or_default();
@@ -2963,9 +2963,9 @@ fn ac3_fr_restoring_required_bots_reenforces() {
         "--events",
         events_path.to_str().unwrap(),
     ]);
-    // x-0eaf: required_bots [] means no review happened -> DoneUnreviewed (the
-    // session still completes; fire 2 is what tests re-enforcement).
-    assert_eq!(d1.termination_reason.as_deref(), Some("DoneUnreviewed"));
+    // x-0eaf: required_bots [] means no review lane -> DonePRGreen (the boundary
+    // fix; fire 2 is what tests re-enforcement with a lane restored).
+    assert_eq!(d1.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // Fire 2: operator restores the list -> gate enforces again immediately.
     let restored_settings = cwd.join("restored-config.toml");
@@ -5264,10 +5264,12 @@ fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
     ]);
 
     assert_eq!(d.decision, "allow");
+    // x-0eaf boundary: no review lane -> DonePRGreen even with auto_merge consent
+    // (zero coverage is the configured state, not a defect).
     assert_eq!(
         d.termination_reason.as_deref(),
-        Some("DoneUnreviewed"),
-        "auto_merge consent must not override zero coverage: {}",
+        Some("DonePRGreen"),
+        "no-lane config + auto_merge: {}",
         d.message
     );
 }
