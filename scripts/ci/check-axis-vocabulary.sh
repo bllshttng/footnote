@@ -100,6 +100,7 @@ python3 - "$ROOT" "$MODE" "$BASELINE_FILE" <<'PY'
 import os
 import re
 import sys
+from collections import Counter
 from pathlib import Path
 
 root_arg = Path(sys.argv[1]).resolve()
@@ -268,6 +269,9 @@ findings, observed = scan(root_arg)
 # malformed -> exit 2). A bare `allowlist: file:line` with no justification therefore
 # fails in both modes - it can never silently absorb a finding.
 _ALLOWLIST_RE = re.compile(r"^allowlist:\s+(.+?):(\d+)\s+(\S.*)$")
+# The `:<line>:` between an entry's path and its binding. Stripped to compare
+# entries by identity rather than by position; see _identity below.
+_LINE_IN_ENTRY = re.compile(r"^(.+?):\d+: ")
 
 
 def _allowlist_keys(path: Path):
@@ -387,8 +391,31 @@ if malformed or len(baseline) != len(set(baseline)) or len(allowlist_lines) != l
     sys.exit(2)
 
 current = list(findings)
-new_or_changed = sorted(set(current) - set(baseline))
-resolved = sorted(set(baseline) - set(current))
+
+
+def _identity(entry: str) -> str:
+    """An entry's identity WITHOUT its line number.
+
+    The baseline still records `path:line:` because a human chasing a finding
+    needs somewhere to look. Comparing on it was the bug: an edit anywhere
+    ABOVE a baselined violation renumbers it, and a pure renumbering read as
+    one resolved entry plus one new violation. That turned main red twice in
+    four hours on days nobody touched the vocabulary at all - once from a
+    two-line config refactor, once from a merge that shifted 22 daemon.rs
+    entries at a stroke. The violation is the NAME-holds-the-wrong-AXIS
+    binding, not the row it happens to sit on, so identity drops the line.
+
+    Counted rather than set-compared, so N identical bindings in one file
+    still require N baseline entries: adding a sixth `legacy_provider="codex"`
+    to a file that already has five is a new violation and must fail.
+    """
+    return _LINE_IN_ENTRY.sub(r"\1: ", entry, count=1)
+
+
+cur_counts = Counter(_identity(e) for e in current)
+base_counts = Counter(_identity(e) for e in baseline)
+new_or_changed = sorted((cur_counts - base_counts).elements())
+resolved = sorted((base_counts - cur_counts).elements())
 if new_or_changed or resolved:
     print("check-axis-vocabulary: baseline drift:", file=sys.stderr)
     for e in new_or_changed:
