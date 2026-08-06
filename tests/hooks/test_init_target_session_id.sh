@@ -237,6 +237,16 @@ STATE_D="${TMP_D}/.fno/target-state.md"
 [[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
 
 SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+# Precondition for the orphan-run fix: the init must have resolved with NO
+# ambient harness ancestor visible, else the cx tag below fails for an
+# environmental reason, not a regression. Reparenting to PID 1 is the
+# macOS/CI-docker behaviour; on Linux a subreaper (systemd user session,
+# some container inits) can adopt the orphan and the verb's walk may still
+# find an ancestor. Asserting the resolved harness here turns a future ubuntu
+# red into a diagnosis instead of a mystery.
+HARNESS_D=$(grep '^harness:' "$STATE_D" | sed 's/^harness:[[:space:]]*//' | tr -d '\r')
+[[ "$HARNESS_D" == "codex" ]] \
+  || fail "(d): orphaned init resolved harness='${HARNESS_D}' (expected codex) - an ambient harness ancestor was visible despite reparenting to PID 1. On Linux a subreaper can adopt the orphan instead of PID 1; if this fires on ubuntu, suspect process reparenting first, not codex resolution."
 CODEX_THREAD_ID_D=$(grep '^codex_thread_id:' "$STATE_D" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
 echo "$SESSION_ID_D" | grep -qE '^[0-9]{8}T[0-9]{6}Z-cx[0-9]+-[0-9a-f]{6}$' \
   || fail "(d): expected unique cx-tagged target session_id, got '${SESSION_ID_D}'"
