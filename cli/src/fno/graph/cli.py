@@ -9443,7 +9443,7 @@ def cmd_new(
         sugg = suggest_domain(domain, entries)
         if sugg.confidence == "fuzzy" and sugg.match != domain:
             typer.echo(
-                f"fno new: did you mean --domain {sugg.match}? "
+                f"fno backlog new: did you mean --domain {sugg.match}? "
                 f"Pass --domain {sugg.match} or add --force-domain to keep {domain!r}.",
                 err=True,
             )
@@ -9529,7 +9529,7 @@ def cmd_new(
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    # Filing-time dedup net (plan x-6ac7): `fno new` is a reachable plan-less
+    # Filing-time dedup net (plan x-6ac7): `fno backlog new` is a reachable plan-less
     # birth path with its own mutator, so it gets the same post-write warn as
     # idea/add/intake (codex P2). Non-fatal; this verb's stdout is the bare id,
     # not JSON, so the stderr receipt cannot corrupt a machine-readable payload.

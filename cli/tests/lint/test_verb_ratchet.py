@@ -147,6 +147,25 @@ def test_fail_closed_when_rust_advertises_unknown_verb(monkeypatch):
         vr.enumerate_rust_leaves()
 
 
+def test_fail_closed_when_rust_drops_an_advertised_verb(monkeypatch):
+    # Reverse check: a non-hidden constant verb that vanishes from the usage
+    # (Rust match arm + usage line both removed, constant left stale) must fail
+    # closed - the guard-on-one-of-N-paths gap the module warns about.
+    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
+    usage = KNOWN_USAGE.replace(
+        "fno mux serve --web [--session <name>] [--bind <addr>] [--port <n>] | ", ""
+    )
+    monkeypatch.setattr(
+        vr.subprocess, "run",
+        _fake_run({
+            "version": (0, '{"git_rev":"abc","package":"0.3.1"}', ""),
+            "mux": (2, "", usage),
+        }),
+    )
+    with pytest.raises(vr.VerbRatchetError, match="no longer shows"):
+        vr.enumerate_rust_leaves()
+
+
 def test_fail_closed_on_subprocess_timeout(monkeypatch):
     # A hung Rust front raises TimeoutExpired; it must surface as a NAMED
     # fail-closed error, not an uncaught traceback (AC4: named error).

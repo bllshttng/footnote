@@ -32,6 +32,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
+from fno.paths import resolve_repo_root
+
 
 class VerbRatchetError(Exception):
     """Raised when the surface cannot be enumerated truthfully (fail-closed)."""
@@ -75,8 +77,10 @@ RUST_FRONT_VERBS: tuple[str, ...] = (
     "version",
 )
 
-# The verbs the Rust usage string omits; everything else in RUST_FRONT_VERBS is
-# expected to appear in `fno mux --help`, so a drift there is caught at lint time.
+# Verbs the Rust usage string omits by design; everything else in
+# RUST_FRONT_VERBS must appear in `fno mux --help`, and `enumerate_rust_leaves`
+# checks BOTH directions so a Rust verb added to or dropped from the help string
+# without a matching edit here (or in RUST_FRONT_VERBS) fails the ratchet.
 _RUST_USAGE_HIDDEN = frozenset(
     {
         "mux layout get",
@@ -90,14 +94,10 @@ _RUST_USAGE_HIDDEN = frozenset(
 
 
 def _repo_root() -> Path:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        raise VerbRatchetError("verb-ratchet: git rev-parse failed; run from inside the repo")
-    return Path(result.stdout.strip())
+    # Reuse the canonical cached, FNO_REPO_ROOT-aware resolver rather than a
+    # third divergent git rev-parse (lint_cli.py already has one duplicate;
+    # fno.paths.resolve_repo_root is the single source).
+    return resolve_repo_root()
 
 
 def baseline_path(repo_root: Optional[Path] = None) -> Path:
@@ -132,11 +132,16 @@ def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
 def enumerate_python_leaves() -> list[str]:
     """Every leaf verb the fno-py registry exposes, visible and hidden.
 
-    Mirrors the introspection ``fno lint menu-caps`` uses (deduped by import
-    target so a true alias like ``graph`` -> ``backlog`` is counted once) but
-    recurses to leaves instead of stopping at group names, and includes hidden
-    commands. An entry whose module will not import is a HARD failure here, not
-    the skip menu-caps does: a verb must not leave the baseline by breaking.
+    Mirrors the introspection ``fno lint menu-caps`` uses but recurses to leaves
+    instead of stopping at group names, and includes hidden commands. An entry
+    whose module will not import is a HARD failure here, not the skip menu-caps
+    does: a verb must not leave the baseline by breaking.
+
+    Dedup is by import target ONLY for Typer groups, where two names sharing one
+    app would otherwise double-emit the whole subtree (the former ``graph`` ->
+    ``backlog`` alias shape). A single command that shares its import target
+    with another name (``update`` / ``upgrade``) is two distinct invocable verbs
+    and both appear.
     """
     import importlib
 
@@ -148,12 +153,9 @@ def enumerate_python_leaves() -> list[str]:
 
     leaves: list[str] = list(_EAGER_COMMAND_HELP)  # help, cost, review (inline)
 
-    seen_targets: set[str] = set()
+    seen_groups: set[str] = set()
     for name, entry in LAZY_SUBCOMMANDS.items():
         import_path = entry[0]
-        if import_path in seen_targets:
-            continue
-        seen_targets.add(import_path)
         module_path, _, attr = import_path.rpartition(":")
         try:
             module = importlib.import_module(module_path)
@@ -171,6 +173,11 @@ def enumerate_python_leaves() -> list[str]:
                 f"{import_path}; the named attribute is missing."
             )
         if isinstance(obj, typer.Typer):
+            # Two names bound to the same Typer app are a true alias pair; the
+            # subtree is emitted once under the first name.
+            if import_path in seen_groups:
+                continue
+            seen_groups.add(import_path)
             cmd = typer.main.get_command(obj)
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
@@ -264,7 +271,8 @@ def enumerate_rust_leaves() -> list[str]:
             f"exited {version.returncode}: {version.stderr.strip()[:200]}"
         )
     try:
-        rev = json.loads(version.stdout).get("git_rev")
+        parsed = json.loads(version.stdout)
+        rev = parsed.get("git_rev") if isinstance(parsed, dict) else None
     except (ValueError, TypeError):
         rev = None
     if not rev:
@@ -290,6 +298,20 @@ def enumerate_rust_leaves() -> list[str]:
             "RUST_FRONT_VERBS in lint_verb_ratchet.py: "
             + ", ".join(unknown)
             + ". Add them to RUST_FRONT_VERBS and regenerate the baseline."
+        )
+    # Reverse check: every non-hidden constant verb must still be advertised.
+    # Without it, a maintainer who drops a Rust match arm + its usage line but
+    # leaves the verb in RUST_FRONT_VERBS gets a green ratchet over a dead entry,
+    # the guard-on-one-of-N-paths shape this module exists to catch. _RUST_USAGE_HIDDEN
+    # are the verbs the usage string omits by design, so they are exempt.
+    dropped = sorted((set(RUST_FRONT_VERBS) - _RUST_USAGE_HIDDEN) - advertised)
+    if dropped:
+        raise VerbRatchetError(
+            "verb-ratchet: RUST_FRONT_VERBS lists advertised verb(s) the Rust "
+            "front no longer shows in `fno mux --help`: "
+            + ", ".join(dropped)
+            + ". Remove them from RUST_FRONT_VERBS (or add to _RUST_USAGE_HIDDEN "
+            "if newly hidden) and regenerate the baseline."
         )
     return sorted(set(RUST_FRONT_VERBS))
 
@@ -355,7 +377,9 @@ def check() -> CheckReport:
         parts.append("    and add a PR-body line:  verb-exception: <rationale>")
     if removed:
         parts.append("  Removed (in the baseline, not the code): " + ", ".join(removed))
-        parts.append("    Regenerate with `fno lint verb-ratchet --update` and commit the baseline.")
+        parts.append(
+            "    Regenerate with `fno lint verb-ratchet --update` and commit the baseline."
+        )
     parts.append("  If two PRs each add a verb, both edit this file; the merge conflict is")
     parts.append("  the intended review moment, not tooling noise.")
     return CheckReport(ok=False, message="\n".join(parts))

@@ -354,6 +354,7 @@ think dispatch
 think inspect
 tokens
 update
+upgrade
 version
 wake clear
 wake drop

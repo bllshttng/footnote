@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Scenario A: ETL project sends a heads-up to web project.
-# Exercises: fno mail send -> triage -> fno new (with provenance) -> fno mail ack
+# Exercises: fno mail send -> triage -> fno backlog new (with provenance) -> fno mail ack
 # Also verifies: idempotent triage (crash-recovery) and typo-recipient detection.
 #
 # Bash 3.2 compatible (macOS default). No mapfile, no associative arrays,
@@ -150,8 +150,8 @@ echo "OK: triage returned action=create_node title='$TITLE' priority=$PRI"
 
 # 3c: create node with provenance
 echo ""
-echo "--- Step 3c: create graph node via fno new ---"
-NEW_OUT=$(cd "$WEB_DIR" && run_fno new "$TITLE" \
+echo "--- Step 3c: create graph node via fno backlog new ---"
+NEW_OUT=$(cd "$WEB_DIR" && run_fno backlog new "$TITLE" \
     --project acme-web \
     --priority "$PRI" \
     --source-kind from_inbox \
@@ -161,7 +161,7 @@ echo "$NEW_OUT"
 
 AB_ID=$(echo "$NEW_OUT" | grep -oE 'ab-[0-9a-f]+')
 if [ -z "$AB_ID" ]; then
-    echo "FAIL: could not capture ab-id from fno new output"
+    echo "FAIL: could not capture ab-id from fno backlog new output"
     exit 1
 fi
 echo "Captured AB_ID=$AB_ID"
@@ -260,7 +260,7 @@ PRI2=$(echo "$TRIAGE2" | python3 -c "import json,sys; print(json.load(sys.stdin)
 # Create node
 echo ""
 echo "--- CR: create node (no ack - simulating crash) ---"
-NEW_OUT2=$(cd "$WEB_DIR" && run_fno new "$TITLE2" \
+NEW_OUT2=$(cd "$WEB_DIR" && run_fno backlog new "$TITLE2" \
     --project acme-web \
     --priority "$PRI2" \
     --source-kind from_inbox \
