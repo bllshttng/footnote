@@ -39,7 +39,7 @@ The `<<'CLAUSE'` delimiter is quoted, so no backtick, `$`, or quote inside expan
 - **`--from-self`** - stamps the teammate's reply handle so the answer comes back addressable. Without it a reply has no return address.
 - **Delivery doctrine** - this is the piece that drifted. A report is only delivered when the receipt reads `delivered (hosted)` / `delivered (woken)`; anything else (`queued (durable)`, a `--to-project` anycast, a `[live-miss]`) is voicemail nobody checks. The teammate `peek`s the king first (a `queued (durable)` can mean a live inject whose confirmation timed out, so a blind resend duplicates the report), then re-resolves and re-sends rather than trusting the queue. This is the doctrine shipped in the epic's own PR but not practiced until it was written down.
 - **`context: NN% used`** - the teammate's own context fraction. It feeds the king's handoff decision at a phase boundary: at or above `config.target.handoff.used_pct_trigger` (default 50) the king spawns a fresh-context successor instead of reusing the session. A report without this field forces the king to probe for it, so it is not optional.
-- **The four behaviors** are the two-sided half of the court contract: the king's monitoring duties are worthless if the teammate does not know its own. Report, ask, message-peers, escalate - stated in the payload, every spawn.
+- **The five behaviors** are the two-sided half of the court contract: the king's monitoring duties are worthless if the teammate does not know its own. Report, ask, ask-for-review, message-peers, escalate - stated in the payload, every spawn. Answering the review half is [a king duty with its own procedure](review.md).
 
 ## Reporting is push
 

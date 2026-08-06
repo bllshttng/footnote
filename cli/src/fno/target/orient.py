@@ -310,24 +310,265 @@ def _tests_line(project_root: Path) -> str:
     return " | ".join(cmds)
 
 
-def _required_bots(project_root: Path) -> List[str]:
+def _peer_entry_identity(peer: object, shared: Optional[str]) -> Optional[str]:
+    """The login one `config.review.peers` entry posts under, or None.
+
+    Mirrors loop-check's rule (`resolved_required_bots_for_author`): a per-entry
+    `identity` wins, else the shared `config.review.peer_identity`. BOTH are read
+    for truthiness, not presence: loop-check tests `is_some()` only AFTER its
+    parser has dropped an empty string to `None`
+    (`scalar_string(v).filter(|s| !s.is_empty())`, loopcheck.rs), so
+    `peer_identity = ""` is an UNSET carrier over there and the identity-free
+    local `peer` gate is live. Reading it as configured here would announce
+    `none (PR + CI only)` for an armed gate -- the exact wedge this file closes.
+    `resolve_local_peers` and `fno pr`'s reviewer read already agree.
+    """
+    if isinstance(peer, dict):
+        own = peer.get("identity")
+        if own:
+            return str(own)
+    return shared or None
+
+
+def _peer_provider(peer: object) -> str:
+    """The provider name of a `config.review.peers` entry (scalar or mapping)."""
+    if isinstance(peer, dict):
+        return str(peer.get("provider") or "").strip()
+    return str(peer).strip()
+
+
+def _required_bots(review: Any) -> List[str]:
     """The must-have-reviewed login list: None/[] -> no gate (cv-6537099f).
 
-    Reads config.review.github_apps (the legacy required_bots aliases it). The
-    effective default matches the Rust loop-check: absent == [] == no review
+    `config.review.github_apps` (the legacy required_bots aliases it) UNION the
+    posting identity of every identity-BACKED peer, which is exactly what
+    loop-check's `resolved_required_bots_for_author` requires. Reading only the
+    first half announced `none (PR + CI only)` for a repo whose `peer_identity`
+    gate was live -- the same wedge the local-attestation half of this file
+    closes, left open on the sibling carrier.
+
+    A peer-contributed login carries its producer, because it is NOT an App bot
+    that posts on its own: nothing appears under `peer_identity` unless the
+    session runs `/review peer <pr#> <provider> --post`. Rendered bare beside
+    `chatgpt-codex-connector` it reads as self-posting, and the session waits
+    for a review that never arrives - the wedge this file exists to close,
+    wearing the other carrier's clothes.
+
+    The effective default matches the Rust loop-check: absent == [] == no review
     gate (PR + CI only), not the old ["chatgpt-codex-connector"].
+
+    Dedup is on the RAW login, never on the formatted entry: once an entry
+    carries a producer suffix, a prefix test drops a distinct login whose name
+    is a prefix of one already present (`bot` behind `bot-extra`), silently
+    omitting a gate loop-check enforces.
+
+    The `cross-model only` clause is the honest form of a claim this file cannot
+    verify. When the peer's model family matches the author's, loop-check swaps
+    the login for an unmatchable sentinel (`apply_same_model_guard`), so a review
+    posted under it can never clear the gate - and `fno target init` does not
+    refuse that case, because `resolve_local_peers` skips identity-backed
+    entries. Deciding WHICH login is affected needs the author harness, the
+    session dependency this file declines. So the line narrows its claim to what
+    config alone supports rather than computing the answer: it names the login,
+    names the producer, and names the condition, instead of asserting a
+    clearability it has no evidence for.
     """
-    from fno.config import load_settings_for_repo
+    from fno.review.provider_resolution import DISPATCHABLE_PROVIDERS
 
-    bots = load_settings_for_repo(project_root).review.github_apps
-    return list(bots) if bots else []
+    apps: List[str] = list(review.github_apps) if review.github_apps else []
+    # Aggregate providers PER LOGIN before rendering. First-seen-wins dropped
+    # information twice: a peer identity colliding with a `github_apps` login
+    # was skipped entirely, so its producer and condition vanished and the
+    # entry read as an App that posts itself; and under a shared
+    # `peer_identity` only the first provider survived, so a config whose
+    # second entry is the only drivable one advertised the undrivable first.
+    # The carrier SOURCE travels with the login, not just its providers.
+    # `--post` posts under the SHARED `config.review.peer_identity` and reads its
+    # PAT from `peer_token_env`; it cannot select a per-entry `identity`
+    # (peer.md preconditions). So a per-entry login has no posting runner at all,
+    # and printing `--post` for it advertises a command whose helper stops on a
+    # missing precondition - the same unrunnable-producer wedge, one carrier over.
+    shared = review.peer_identity or None
+    by_login: Dict[str, List[str]] = {}
+    per_entry: set[str] = set()
+    for peer in review.peers or []:
+        login = _peer_entry_identity(peer, review.peer_identity)
+        if not login:
+            continue
+        by_login.setdefault(login, [])
+        if login != shared:
+            per_entry.add(login)
+        provider = _peer_provider(peer)
+        if provider and provider not in by_login[login]:
+            by_login[login].append(provider)
+
+    def _post_clause(login: str, providers: List[str]) -> str:
+        if login in per_entry:
+            return (
+                "no --post runner: per-entry identity cannot be posted under | "
+                "resolve: set config.review.peer_identity + peer_token_env, or "
+                "drop the per-entry identity to use the local peer gate"
+            )
+        # Same drivability rule as the identity-free producer: a name
+        # `/review peer` cannot drive is not a producer, and printing one as
+        # `--post` is the wedge with the other carrier's label on it.
+        drivable = [p for p in providers if p.lower() in DISPATCHABLE_PROVIDERS]
+        if not drivable:
+            named = ", ".join(providers) if providers else "<provider>"
+            return f"no /fno:review peer runner for [{named}]"
+        # NEVER `<a|b>`: the peer arg parser matches a known provider name, so an
+        # alternation is discarded and the provider falls back to codex - which
+        # can refuse a gate a configured gemini would have cleared. Same reason
+        # the local-attestation branch prints a placeholder plus the set.
+        if len(drivable) == 1:
+            return (
+                f"post: /fno:review peer <pr#> {drivable[0]} --post; "
+                f"cross-model only"
+            )
+        return (
+            f"post: /fno:review peer <pr#> <provider> --post; cross-model only, "
+            f"configured: {', '.join(drivable)}"
+        )
+
+    rendered: List[str] = []
+    for app in apps:
+        rendered.append(
+            f"{app} ({_post_clause(app, by_login.pop(app))})" if app in by_login else app
+        )
+    for login, providers in by_login.items():
+        rendered.append(f"{login} ({_post_clause(login, providers)})")
+    return rendered
 
 
-def _optional_bots(project_root: Path) -> List[str]:
+def _optional_bots(review: Any) -> List[str]:
     """Honored-if-present reviewer logins (config.review.optional_apps)."""
-    from fno.config import load_settings_for_repo
+    return list(review.optional_apps)
 
-    return list(load_settings_for_repo(project_root).review.optional_apps)
+
+# The peers-derived requirement is synthesized by loop-check
+# (`resolved_local_peer_reviewers_for_author`), not named in `reviewers`, so it
+# has no descriptor in `_RESOLVABLE_REVIEWERS` and its producer lives here.
+# The provider is NOT optional in the printed form: `/review peer` defaults a
+# missing provider to `codex` and then REFUSES a provider matching the invoking
+# harness, so a bare producer is unrunnable on a codex-authored session whose
+# only peer is something else.
+#
+# With ONE runnable provider we name it and the command is pasteable. With
+# several we must NOT print `<a|b>`: `/review peer` resolves its provider by
+# matching a known name, so an alternation is discarded as unrecognized and the
+# provider silently falls back to `codex` -- a command that looks pasteable and
+# is not. Print a visible placeholder plus the configured set instead, so the
+# reader picks rather than pastes.
+#
+# A name `/review peer` cannot DRIVE (`opencode`, `hermes`) hits that same
+# fallback, so it is filtered out of the printed set rather than offered: the
+# config is legal and arms the composite gate, but pasting the name reviews on
+# codex instead, and on a codex-authored session that fallback is then refused
+# as same-model and the gate never clears. Drivability is STATIC (the review
+# runners in `provider_resolution`), so unlike model-family ELIGIBILITY it costs
+# no author harness -- that second gap is the one the docstring below records
+# for the identity-backed carrier, and it stays open here.
+_EMIT_ATTESTATION = "bash skills/review/scripts/emit-attestation.sh"
+
+
+def _local_review_gates(review: Any) -> List[str]:
+    """Local-attestation gates loop-check holds the loop on, `name -> producer`.
+
+    Two sources, both invisible to `_required_bots`: `config.review.reviewers`
+    names them directly, and identity-free `config.review.peers` collapse into
+    ONE composite `peer` requirement. No GitHub reviewer ever posts either -- a
+    head-pinned `review_attestation` is the only evidence -- so a session that
+    is not told they exist ships, promises, and then blocks on an attestation
+    nothing in its plan produced (x-0322). Naming the producer alongside the
+    gate is the point: the gate alone is a puzzle.
+
+    Deliberately config-only, with no `detect_session()` call: the one case
+    where the printed producer would not clear the gate -- every identity-free
+    peer sharing the author's model family -- is already refused up front by
+    `fno target init` (`local_peers_refusal_message`), so buying it here would
+    cost env-dependent output for a state a real run cannot be in.
+
+    That argument covers the identity-FREE half only. The identity-BACKED
+    same-model case is handled in `_required_bots` by narrowing the claim rather
+    than computing it: the login is printed with a `cross-model only` condition
+    instead of as unconditionally clearable, which costs no author harness and
+    stops the line asserting something it cannot check.
+    """
+    from fno.config import resolvable_reviewers
+    from fno.review.provider_resolution import DISPATCHABLE_PROVIDERS
+
+    known = resolvable_reviewers(review.reviewer_registry)
+    # Built-ins carry their own emit (sigma/declare auto-emit on a clean pass;
+    # code-review bakes the helper into its invocation string). A project-
+    # registered reviewer does not, so its printed producer must append the emit
+    # or a session that follows it verbatim reviews and still leaves the gate
+    # unmet -- the exact failure this line exists to prevent.
+    builtin = resolvable_reviewers()
+    gates: List[str] = []
+    for name in review.reviewers or []:
+        descriptor = known.get(str(name))
+        if descriptor is None:
+            gates.append(str(name))
+            continue
+        producer = descriptor.invocation
+        if str(name) not in builtin:
+            producer = f"{producer}, then {_EMIT_ATTESTATION} {name}"
+        # What the rung ASSERTS travels with it. loop-check's own block reason
+        # marks a self-cert `[self-cert: asserts no review evidence]`, and an
+        # `invocation` reviewer attests only that its skill ran - footnote never
+        # reads its output. Printing every rung as an undifferentiated "local
+        # attestation" makes `declare` look like `sigma`, which is the trust
+        # spectrum collapsing in the one line whose job is to show the gate.
+        asserts = str(getattr(descriptor, "asserts", "") or "")
+        if asserts == "self-cert":
+            producer += " [self-cert: asserts no review evidence]"
+        elif asserts == "invocation":
+            producer += " [asserts invocation only: output is not read]"
+        gates.append(f"{name} -> {producer}")
+    # Only an identity-free entry contributes to the local composite gate; an
+    # entry with its own `identity` (or any entry under a shared peer_identity)
+    # is a posted-review login and is counted by `_required_bots` instead.
+    # A provider-less entry is not a gate: loop-check's parser drops an entry
+    # with an empty provider and no identity outright (`value_as_peers`), so
+    # printing one would announce a gate nothing holds AND a command with no
+    # provider to run.
+    named = [
+        provider
+        for peer in (review.peers or [])
+        if _peer_entry_identity(peer, review.peer_identity) is None
+        and (provider := _peer_provider(peer))
+    ]
+    if named:
+        unique = list(dict.fromkeys(named))
+        runnable = [p for p in unique if p.lower() in DISPATCHABLE_PROVIDERS]
+        # `cross-model only` for the same reason the identity-backed carrier
+        # carries it: `/review peer` refuses a provider matching the invoking
+        # harness, and WHICH provider that is needs the author harness this file
+        # declines to resolve. Drivability is static and filtered above;
+        # eligibility is not, so it is stated as a condition rather than
+        # asserted away. Without it, a codex-authored session whose only
+        # drivable peer is codex reads a pasteable command that refuses.
+        if len(runnable) == 1:
+            gates.append(
+                f"peer -> /fno:review peer {runnable[0]} --attest "
+                f"(cross-model only)"
+            )
+        elif runnable:
+            gates.append(
+                f"peer -> /fno:review peer <provider> --attest "
+                f"(cross-model only, configured: {', '.join(runnable)})"
+            )
+        else:
+            # The gate is armed and nothing configured can clear it. Announcing
+            # a producer here would be the wedge in its loudest form: a command
+            # that runs, reviews on the wrong model, and still leaves the gate
+            # to be discovered after the promise.
+            gates.append(
+                f"peer -> no /fno:review peer runner for "
+                f"[{', '.join(unique)}] | resolve: configure a codex or "
+                f"gemini peer"
+            )
+    return gates
 
 
 def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) -> str:
@@ -341,14 +582,53 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     if _is("no_ship", "true") or _is("advisory", "true"):
         return "advisory: written + eval-green (no PR)"
     try:
-        bots = _required_bots(project_root)
-        optional = _optional_bots(project_root)
-    except Exception:  # noqa: BLE001 - degrade to the no-gate default
-        bots, optional = [], []
-    bots_str = ", ".join(bots) if bots else "none (PR + CI only)"
-    line = f"PR + CI green + reviewed by [{bots_str}]"
-    if optional:
-        line += f" (optional if present: [{', '.join(optional)}])"
+        # ONE settings load for all three readers. `load_settings_for_repo` is
+        # documented uncached and calls `_ensure_migrated`, which can WRITE, and
+        # this line runs on `fno target start`, `fno target status`, and init -
+        # so a per-reader load paid three full parse+validate passes, and three
+        # chances to migrate, every time the orienter rendered.
+        from fno.config import load_settings_for_repo
+
+        review = load_settings_for_repo(project_root).review
+        bots = _required_bots(review)
+        optional = _optional_bots(review)
+        local = _local_review_gates(review)
+    except Exception:  # noqa: BLE001 - report unknown, never assert no-gate
+        # NOT "none (PR + CI only)": loop-check reads the same keys out of the
+        # same file and holds whatever gate they declare, so a config this side
+        # cannot parse leaves the gate UNKNOWN, not absent. A reviewers typo
+        # raises here and still gates over there - announcing no gate would be
+        # the same lie the rest of this function exists to stop. The PR + CI
+        # half stays on the line because it holds unconditionally: only the
+        # REVIEW half is unknown, and dropping the prefix would understate the
+        # gate in the other direction.
+        line = (
+            "PR + CI green + reviewed by [unknown (config.review unreadable) "
+            "| resolve: fno config doctor]"
+        )
+    else:
+        # `no_external` skips loop-check's GitHub-login reads entirely
+        # (`login_skipped = no_external || !login_gate_active`), so EVERY login
+        # gate - App bots, optional apps, and identity-backed peer posts - stops
+        # being enforced for this session. Announcing them anyway sends the
+        # session off to satisfy reviews nothing is waiting on. Local
+        # attestations are unaffected: `reviewers_ok` is computed independently
+        # of that skip, which is why they stay on the line.
+        if _is("no_external", "true"):
+            bots, optional = [], []
+        if bots:
+            bots_str = ", ".join(bots)
+        elif _is("no_external", "true"):
+            bots_str = "none (--no-external skips every login gate)"
+        else:
+            # "PR + CI only" is false whenever a local gate is armed; say which
+            # half is empty instead of announcing a gate that does not exist.
+            bots_str = "no App bot" if local else "none (PR + CI only)"
+        line = f"PR + CI green + reviewed by [{bots_str}]"
+        if local:
+            line += f" + local attestation [{'; '.join(local)}]"
+        if optional:
+            line += f" (optional if present: [{', '.join(optional)}])"
     if _is("attended", "false"):
         line += "; bg -> hand off the merge"
     return line
