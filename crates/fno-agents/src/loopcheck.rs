@@ -4036,6 +4036,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
     }
     let optional_bots = resolved_optional_bots(&settings);
     let nudge_configs = resolved_nudge_configs(&settings);
+    // x-0eaf: DoneUnreviewed applies only when a review lane is configured. A
+    // stock install (no required_bots, no optional_apps, no reviewers, no peers)
+    // has opted out of review, so zero coverage is its configured state, not a
+    // defect - those green PRs still reach DonePRGreen (coverage 0 is reported
+    // in the receipt). Without this boundary every out-of-the-box fire is
+    // DoneUnreviewed (not a ship reason), so the node never closes.
+    let review_lane_configured =
+        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -4778,7 +4786,10 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
-                    if pr_info.state != PrState::Merged && !pr_info.coverage.coverage.is_covered() {
+                    if review_lane_configured
+                        && pr_info.state != PrState::Merged
+                        && !pr_info.coverage.coverage.is_covered()
+                    {
                         let cov_line = coverage_receipt_line(&pr_info.coverage);
                         let done_msg = format!(
                             "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
