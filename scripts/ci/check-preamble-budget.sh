@@ -1,9 +1,13 @@
 #!/usr/bin/env bash
 # check-preamble-budget.sh - CI gate for footnote-owned SessionStart markdown.
 #
-# Run: bash scripts/ci/check-preamble-budget.sh [--quiet] [repo-root]
+# Run: bash scripts/ci/check-preamble-budget.sh [--quiet] [--json] [repo-root]
+#       bash scripts/ci/check-preamble-budget.sh --injections <N> [repo-root]
 # Default root is the current directory. Exits 0 at or below the byte ceiling
 # and exits 1 when discovery fails or the measured preamble exceeds it.
+# --injections <N> adds a directional per-session cost report (each file's bytes
+# times N) on top of the single-copy gate; it never changes the exit code, since
+# the per-session injection count is session-length-driven, not a constant.
 
 set -euo pipefail
 
@@ -15,6 +19,24 @@ QUIET=0
 JSON_MODE=0
 REPO_ROOT="."
 REPO_ROOT_SET=0
+INJECTIONS=1
+
+# Pre-extract --injections <N> (a value option) before the flag loop.
+FILTERED=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --injections)
+      [[ $# -ge 2 ]] || { echo "check-preamble-budget: --injections requires an integer" >&2; exit 1; }
+      INJECTIONS="$2"
+      shift 2
+      ;;
+    *)
+      FILTERED+=("$1")
+      shift
+      ;;
+  esac
+done
+set -- ${FILTERED[@]+"${FILTERED[@]}"}
 
 for arg in "$@"; do
   case "$arg" in
@@ -46,6 +68,11 @@ fi
 
 if [[ ! "$CEILING_BYTES" =~ ^[0-9]+$ ]]; then
   echo "check-preamble-budget: CEILING_BYTES must be a non-negative integer" >&2
+  exit 1
+fi
+
+if [[ ! "$INJECTIONS" =~ ^[0-9]+$ ]] || (( INJECTIONS < 1 )); then
+  echo "check-preamble-budget: --injections must be a positive integer" >&2
   exit 1
 fi
 
@@ -147,6 +174,19 @@ else
     [[ "$relative" == "skills/using-fno/SKILL.md" ]] && marker="  [shipped to every consumer]"
     printf '  %8d  %s%s\n' "$bytes" "$relative" "$marker"
   done < <(printf '%s' "$RECORDS" | LC_ALL=C sort -rn -k1,1)
+
+  if (( INJECTIONS > 1 )); then
+    echo
+    echo "  per-injection (directional, count=${INJECTIONS}): a harness re-injects"
+    echo "  the preamble on every world-state refresh and compaction, so the real"
+    echo "  per-session cost scales with the count. Re-measure it per session; it"
+    echo "  is session-length-driven, not a constant. Gate ceiling stays single-copy."
+    while IFS=$'\t' read -r bytes relative; do
+      [[ -z "$relative" ]] && continue
+      printf '  %8d  %s\n' "$(( bytes * INJECTIONS ))" "$relative"
+    done < <(printf '%s' "$RECORDS" | LC_ALL=C sort -rn -k1,1)
+    printf '  %8d  total at %d injections\n' "$(( TOTAL_BYTES * INJECTIONS ))" "$INJECTIONS"
+  fi
 fi
 
 if (( TOTAL_BYTES <= CEILING_BYTES )); then
