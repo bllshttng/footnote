@@ -58,6 +58,8 @@
 {"expect":"valid","reason":"termination Budget with axis","event":{"ts":"2026-06-05T09:05:00Z","type":"termination","source":"hook","data":{"session_id":"s1","reason":"Budget","axis":"cost","message":"cost cap exceeded"}}}
 {"expect":"invalid","reason":"termination missing message","event":{"ts":"2026-06-05T09:05:00Z","type":"termination","source":"hook","data":{"session_id":"s1","reason":"Aborted"}}}
 {"expect":"valid","reason":"loop_check_gh_error happy path","event":{"ts":"2026-06-05T09:06:00Z","type":"loop_check_gh_error","source":"hook","data":{"session_id":"s1","read":"pr_checks","stderr_tail":"connect: network is unreachable"}}}
+{"expect":"valid","reason":"loop_check_config first-fire cap record (default)","event":{"ts":"2026-06-05T09:00:00Z","type":"loop_check_config","source":"hook","data":{"session_id":"s1","block_cap":9,"block_cap_source":"default"}}}
+{"expect":"valid","reason":"loop_check_config first-fire cap record (operator override)","event":{"ts":"2026-06-05T09:00:00Z","type":"loop_check_config","source":"hook","data":{"session_id":"s1","block_cap":50,"block_cap_source":"env"}}}
 {"expect":"valid","reason":"loop_advisory_mode happy path","event":{"ts":"2026-06-05T09:07:00Z","type":"loop_advisory_mode","source":"hook","data":{"session_id":"s1","attended":true}}}
 {"expect":"valid","reason":"loop_check_binary_missing happy path","event":{"ts":"2026-06-05T09:08:00Z","type":"loop_check_binary_missing","source":"hook","data":{"session_id":"s1"}}}
 {"expect":"valid","reason":"loop_check_legacy_manifest happy path","event":{"ts":"2026-06-05T09:09:00Z","type":"loop_check_legacy_manifest","source":"hook","data":{"session_id":"s1","status":"COMPLETE"}}}
