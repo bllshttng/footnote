@@ -150,6 +150,24 @@ def test_validate_missing_data_field() -> None:
         validate(event)
 
 
+def test_validate_review_attestation_records_actor() -> None:
+    # session_id + harness carry the attesting ACTOR so an author
+    # self-attestation is joinable to the head it reviewed, not actorless.
+    event = {
+        "ts": "2026-07-25T05:16:13Z",
+        "type": "review_attestation",
+        "source": "target",
+        "data": {
+            "reviewer": "sigma",
+            "head_sha": "a1d8b8d4",
+            "verdict": "pass",
+            "session_id": "20260806T225503Z-cl84104-d4f619",
+            "harness": "claude",
+        },
+    }
+    assert validate(event) is None
+
+
 # -- AC4-EDGE: size cap --
 
 def test_validate_data_size_cap() -> None:

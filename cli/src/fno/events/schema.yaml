@@ -208,7 +208,10 @@ event_types:
           description: "pass satisfies the gate entry; fail (or an absent attestation) holds it (fail closed)."
         session_id:
           type: string
-          description: "Emitting session id (optional; observability)."
+          description: "The session that emitted the attestation - the attesting ACTOR. With head_sha this is the authorship join (did the attester author the reviewed head), so an author self-attestation is traceable rather than indistinguishable from an independent review."
+        harness:
+          type: string
+          description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
     consumers: [fno-agents loop-check]
 
   - name: review_finding
