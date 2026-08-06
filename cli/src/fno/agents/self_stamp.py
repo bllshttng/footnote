@@ -72,7 +72,12 @@ def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:
     return "unknown"
 
 
-def _complete_lines(path: Path, max_bytes: Optional[int]) -> Optional[list[bytes]]:
+def _complete_lines(
+    path: Path,
+    max_bytes: Optional[int],
+    *,
+    drop_unterminated_tail: bool = True,
+) -> Optional[list[bytes]]:
     try:
         with open(path, "rb") as fh:
             fh.seek(0, 2)
@@ -94,7 +99,14 @@ def _complete_lines(path: Path, max_bytes: Optional[int]) -> Optional[list[bytes
             boundary = data.find(b"\n")
             data = data[boundary + 1 :] if boundary >= 0 else b""
 
-    if data and not data.endswith(b"\n"):
+    # A trailing record without a terminal \n is dropped by default: model
+    # resolution treats it as an un-committed write (codex rollout's "wait for
+    # newline" contract). The context probe passes drop_unterminated_tail=False -
+    # dropping a complete-but-unterminated assistant record would make it report
+    # the second-to-last turn's usage (silently stale; in arm-handoff that
+    # suppresses a needed handoff). There, each record is json.loads-validated,
+    # so a genuinely partial trailing line is skipped by the parser, not here.
+    if drop_unterminated_tail and data and not data.endswith(b"\n"):
         boundary = data.rfind(b"\n")
         data = data[: boundary + 1] if boundary >= 0 else b""
     return data.splitlines()

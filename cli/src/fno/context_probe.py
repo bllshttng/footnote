@@ -75,7 +75,7 @@ def _last_usage(path: Path) -> Optional[tuple[str, int, int, int]]:
     except OSError:
         return None
     for max_bytes in (_TAIL_BYTES, _EXPANDED_TAIL_BYTES, None):
-        lines = _complete_lines(path, max_bytes)
+        lines = _complete_lines(path, max_bytes, drop_unterminated_tail=False)
         if lines is None:
             return None
         for raw in reversed(lines):
