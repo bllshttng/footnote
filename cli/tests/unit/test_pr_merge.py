@@ -612,6 +612,39 @@ def test_review_lane_configured_matches_loopcheck_gate(
     assert _merge._review_lane_configured(str(tmp_path)) is expected
 
 
+def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
+    monkeypatch, tmp_path
+):
+    """A lane declared at the project root is still seen from a subdirectory.
+
+    load_settings_for_repo reads ``<arg>/.fno/`` with NO upward walk, so passing
+    the raw invocation directory made ``fno pr merge`` run from ``cli/`` report
+    "no lane" - which short-circuits ``covered`` to True and lets an unreviewed
+    PR merge. The guard was decorative on that path.
+
+    The parametrized test above cannot catch this: it monkeypatches
+    load_settings_for_repo, so it pins the predicate while stubbing out the path
+    resolution the bug lives in. This one uses the REAL loader against real
+    files, and isolates the global layer via FNO_GLOBAL_SETTINGS_PATH
+    (``/dev/null`` is the documented disable hook) - without that the
+    developer's own ~/.fno lane leaks in and masks the failure entirely.
+    """
+    import subprocess
+
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / "sub").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    # The lane exists ONLY at the project root.
+    (repo / ".fno" / "config.toml").write_text(
+        '[review]\ngithub_apps = ["chatgpt-codex-connector"]\n'
+    )
+
+    assert _merge._review_lane_configured(str(repo)) is True
+    assert _merge._review_lane_configured(str(repo / "sub")) is True
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
