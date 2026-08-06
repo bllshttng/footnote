@@ -253,9 +253,11 @@ def _rows_by_name():
 
 
 def test_crown_human_grant_is_the_default(tmp_path: Path, monkeypatch) -> None:
-    # A shell with no agent identity in env is an attended human (level 0).
+    # A shell with no agent identity in env is an attended human. --level bypasses
+    # scope derivation (x-7685: a scope that resolves to nothing is now refused,
+    # not defaulted to 0); this test is about the grantor class, not the level.
     _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "0"], self_env=None)
     assert r.exit_code == 0, r.output
     row = _rows_by_name()["worker"]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (0, "epic-x", "human")
@@ -276,7 +278,7 @@ def test_crown_config_grant_when_knob_on(tmp_path: Path, monkeypatch) -> None:
     _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
     stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=True))
     monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
     assert r.exit_code == 0, r.output
     assert _rows_by_name()["worker"].crown_grantor == "config-grant"
 

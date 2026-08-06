@@ -189,6 +189,7 @@ auto_launch_on_blueprint = false
 enabled = true
 # Context-used %% that triggers a wave-boundary handoff.
 used_pct_trigger = 50
+king_used_pct_trigger = 40
 # Max handoff generations before refusing further delegation.
 generation_cap = 4
 
