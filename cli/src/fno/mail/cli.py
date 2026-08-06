@@ -156,7 +156,7 @@ def _read_body(body: Optional[str], body_file: Optional[Path]) -> str:
 
 def _cap_env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
-    if raw in (None, ""):
+    if raw is None:
         return default
     try:
         return int(raw)
