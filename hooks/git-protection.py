@@ -644,12 +644,32 @@ def _split_lines_outside_quotes(command):
     still judged as two command positions. An unterminated quote never closes,
     so the rest stays one line and shlex still raises - the deny-leaning
     direction, unchanged.
+
+    Quoting rules do NOT apply inside a heredoc BODY: the shell reads raw lines
+    until the terminator, so one apostrophe in prose (`this doesn't apply`) must
+    not open a quote that swallows the terminator's newline. Without this the
+    heredoc never terminates, the fail-closed path re-judges the body, and shlex
+    raises on that same apostrophe - the exact false refusal this function
+    exists to remove, re-entering through the heredoc door.
     """
     lines, buf = [], []
     quote = None
+    hd_delim, hd_dash = None, False
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
+        if hd_delim is not None:
+            if ch == "\n":
+                line = "".join(buf)
+                lines.append(line)
+                buf = []
+                term = line.lstrip("\t") if hd_dash else line
+                if term == hd_delim:
+                    hd_delim, hd_dash = None, False
+            else:
+                buf.append(ch)
+            i += 1
+            continue
         if quote:
             # Inside double quotes a backslash escapes the next char; inside
             # single quotes nothing escapes (same rule as _find_heredoc_opener).
@@ -672,8 +692,12 @@ def _split_lines_outside_quotes(command):
             i += 2
             continue
         if ch == "\n":
-            lines.append("".join(buf))
+            line = "".join(buf)
+            lines.append(line)
             buf = []
+            opener = _find_heredoc_opener(line)
+            if opener is not None:
+                hd_delim, hd_dash = opener
             i += 1
             continue
         buf.append(ch)
@@ -682,7 +706,48 @@ def _split_lines_outside_quotes(command):
     return lines
 
 
-def _command_segments(command):
+def _substitution_bodies(line):
+    """Return the body of each `$( ... )` the shell will EXECUTE on `line`.
+
+    A `$(` reached inside DOUBLE quotes still runs its body as commands, so the
+    quote-aware line split above keeps `"$(<newline>gh pr merge 1)"` as one
+    token and the gate never sees a merge segment. The bodies are re-segmented
+    (recursively) so a real invocation cannot hide behind an interpolation.
+
+    Single-quoted regions are skipped - no expansion happens there. Backticks
+    are deliberately NOT treated as substitution: markdown code spans in PR and
+    mail prose use them constantly, and that prose is what the quoting rules
+    here exist to protect.
+    """
+    out = []
+    i, n, quote = 0, len(line), None
+    while i < n:
+        ch = line[i]
+        if quote == "'":
+            quote = None if ch == "'" else quote
+            i += 1
+            continue
+        if quote == '"' and ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "$" and i + 1 < n and line[i + 1] == "(":
+            depth, j = 1, i + 2
+            while j < n and depth:
+                depth += (line[j] == "(") - (line[j] == ")")
+                j += 1
+            if depth == 0:  # unbalanced `$(` falls through to normal scanning
+                out.append(line[i + 2:j - 1])
+                i = j
+                continue
+        if quote is None and ch in ("'", '"'):
+            quote = ch
+        elif ch == quote:
+            quote = None
+        i += 1
+    return out
+
+
+def _command_segments(command, _depth=0):
     """Split a shell command into command-position segments (lists of tokens).
 
     Collapses backslash line-continuations, then walks physical lines with
@@ -724,6 +789,9 @@ def _command_segments(command):
             continue  # body is content either way; never a command position
         if line.strip():
             segments.extend(_segments_one_line(line))
+            if _depth < 3:  # ponytail: 3 is plenty; deeper nesting is not real
+                for body in _substitution_bodies(line):
+                    segments.extend(_command_segments(body, _depth + 1))
         opener = _find_heredoc_opener(line)
         if opener is not None:
             # Body begins on the NEXT physical line; this opener line has

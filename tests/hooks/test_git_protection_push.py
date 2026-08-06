@@ -12,6 +12,11 @@ main. The fix returns early once an explicit, non-protected destination is
 parsed. get_current_branch is monkeypatched to "main" to simulate that cwd.
 """
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -20,6 +25,18 @@ HOOK_PATH = REPO_ROOT / "hooks" / "git-protection.py"
 _spec = importlib.util.spec_from_file_location("git_protection", HOOK_PATH)
 git_protection = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(git_protection)
+
+
+def _run_hook(command):
+    """Drive the real hook end to end and return its decision dict ({} on
+    allow-by-silence). HOME/FNO_HOME are sandboxed so a host opt-out marker or
+    approval flag can never turn a deny into a pass."""
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "HOME": tmp, "FNO_HOME": str(Path(tmp) / ".fno")}
+        proc = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,
+                              capture_output=True, text=True, env=env, cwd=tmp)
+    return json.loads(proc.stdout).get("hookSpecificOutput", {}) if proc.stdout.strip() else {}
 
 
 def _on_main(monkeypatched_branch="main"):
@@ -281,10 +298,51 @@ def test_unbalanced_quote_fallback_is_deny_leaning_for_git():
     # is fail-OPEN: an unterminated quote in a command not literally beginning
     # with `git` dropped the push gate entirely, while the merge gate on the
     # same input still fired via its regex-anywhere fallback. Both fallbacks
-    # must lean the same way. This asserts the predicate, not main()'s wiring.
-    import re as _re
-    assert _re.search(r'\bgit\b', 'echo "intro\ngit push origin main')
-    assert not 'echo "intro\ngit push origin main'.startswith('git')
+    # must lean the same way. Drives the real hook end to end - asserting the
+    # predicate in isolation would pass even if main() reverted to startswith.
+    out = _run_hook('echo "intro\ngit push origin main')
+    assert out.get("permissionDecision") == "deny", out
+
+
+# --- heredoc BODIES are raw text, not quoted shell ---------------------------
+# Quote tracking must PAUSE inside a heredoc body: one apostrophe in prose
+# otherwise opens a quote that swallows the terminator's newline, the heredoc
+# never terminates, and the fail-closed re-judge hands shlex the same
+# apostrophe - the false refusal above, re-entering through the heredoc door.
+
+
+def test_apostrophe_in_heredoc_body_does_not_swallow_the_terminator():
+    cmd = "cat <<EOF\nthis doesn't apply cleanly\nEOF\necho after"
+    assert git_protection._command_segments(cmd) == [
+        ["cat", "<<", "EOF"], ["echo", "after"]]
+
+
+def test_apostrophe_in_heredoc_body_still_hides_no_real_command():
+    # The body exemption is unchanged: with no EOF terminator the body is
+    # re-judged, and the apostrophe then raises out of shlex into the
+    # deny-leaning whole-command fallback. Either route must end in a deny.
+    out = _run_hook("cat <<EOF\nit doesn't matter\ngit push origin main")
+    assert out.get("permissionDecision") == "deny", out
+
+
+# --- `$( ... )` bodies are COMMANDS, even inside double quotes ---------------
+# A `$(` reached inside double quotes still runs its body, so the quote-aware
+# split above kept `"$(<newline>gh pr merge 1)"` as one token and the gate saw
+# no merge segment at all. Before the split it was caught only by accident, via
+# the ValueError fallback. Bodies are now re-segmented recursively.
+
+
+def test_multiline_substitution_hiding_a_merge_is_caught():
+    assert _merge_segment('X="$(gh pr merge 1 --auto\n)"') is not None
+
+
+def test_singleline_substitution_hiding_a_push_is_caught():
+    assert _git_segments('echo "$(git push origin main)"')
+
+
+def test_substitution_inside_single_quotes_is_not_executed():
+    # No expansion in single quotes, so this really is inert prose.
+    assert _git_segments('fno mail send x \'see "$(git push origin main)"\'') == []
 
 
 if __name__ == "__main__":
