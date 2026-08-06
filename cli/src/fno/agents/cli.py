@@ -679,9 +679,17 @@ def cmd_crown(
         _crown_succeed(target, scope, level, caller_row)
         return
 
-    # Refusal: one live crown per scope.
+    # Refusal: one live crown per scope. Active = NOT in the terminal set: a
+    # king that is "busy"/"idle"/"restarting" still holds its crown, so a literal
+    # "live" check here would let a second grant mint over a busy king's scope
+    # (the same P1 shape _TERMINAL_STATUSES was introduced for in --succeed +
+    # the orphan check). Same set, same invariant.
     for e in load_registry():
-        if e.name != target.name and e.crown_scope == scope and e.status == "live":
+        if (
+            e.name != target.name
+            and e.crown_scope == scope
+            and e.status not in _TERMINAL_STATUSES
+        ):
             print(
                 f"refusing: {e.name!r} already holds a live crown over scope "
                 f"{scope!r} (one live crown per scope)",

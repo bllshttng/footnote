@@ -298,6 +298,18 @@ def test_crown_refuses_second_live_crown_over_one_scope(tmp_path: Path, monkeypa
     assert "one live crown per scope" in r.output.lower()
 
 
+def test_crown_refuses_second_crown_when_holder_is_busy(tmp_path: Path, monkeypatch) -> None:
+    # A busy/idle king still holds its crown: the one-live-crown refusal must
+    # treat every non-terminal status as active, not just literal "live" (the
+    # P1 shape _TERMINAL_STATUSES was introduced for in --succeed + the orphan
+    # check; the grant path shares the invariant, so it shares the set).
+    existing = _entry("king1", short_id="bbbb2222", crown_level=1, crown_scope="epic-x", status="busy")
+    _seed(monkeypatch, tmp_path, [existing, _entry("worker", short_id="cccc3333")])
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    assert r.exit_code == 2
+    assert "one live crown per scope" in r.output.lower()
+
+
 def test_crown_refuses_unattended_agent_without_superset_or_config(tmp_path: Path, monkeypatch) -> None:
     _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
     stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=False))
