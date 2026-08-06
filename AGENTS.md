@@ -8,7 +8,7 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. Two live cases: "shortest diff" loses to principle 4 (fix what you find, in this PR), and tool-branded comments (`// ponytail:`) are barred by the comment principle.
 
-Lead with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Durable records (nodes, docs, plans) are read once; relay surfaces (mail, PR bodies) are re-read every turn, so keep them short: bullets over prose, cap a list at 5, state the number, and put detail in a node rather than the relay. `fno mail send` caps body length for this reason. Full ruleset in [docs/output-style.md](docs/output-style.md).
+Lead responses with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Full ruleset and exceptions live in [docs/output-style.md](docs/output-style.md), kept out of the auto-loaded preamble.
 
 ## Working principles
 
