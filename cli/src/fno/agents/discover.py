@@ -988,7 +988,7 @@ def _discover_from_projects(
 
 
 # --------------------------------------------------------------------------
-# Harness-native subagents (sidechain 'limbs') — read-only visibility (x-af92)
+# Harness-native subagents (sidechain 'limbs') - read-only visibility (x-af92)
 # --------------------------------------------------------------------------
 # A harness-native subagent (Claude's Agent tool; codex/agy/opencode task
 # primitives) is a nested conversation inside its PARENT session's process.
@@ -998,7 +998,7 @@ def _discover_from_projects(
 # ``census()`` or ``discover_live_sessions``, because a subagent has no mail
 # transport and listing it among addressable sessions would imply
 # addressability the substrate does not support. Full addressability is
-# rejected by design — see docs/architecture/coordination.md.
+# rejected by design - see docs/architecture/coordination.md.
 #
 # claude-only: the ``<enc-cwd>/<session-id>/subagents/agent-*.jsonl`` layout is
 # claude's. codex/agy/opencode task primitives have their own on-disk shapes,
@@ -1091,7 +1091,7 @@ def discover_subagents(
     contribution with at most one warning and never raises: a vanished file is
     skipped, a malformed first record is skipped, an unreadable projects root
     yields zero rows plus one warning (AC5-EDGE). An absent store is silent
-    zero, not a warning (AC7-EDGE — that is the claude-only-scope case).
+    zero, not a warning (AC7-EDGE - that is the claude-only-scope case).
     """
     root = projects_dir or default_projects_dir()
     live_threshold = (
