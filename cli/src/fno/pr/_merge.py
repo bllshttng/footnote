@@ -11,7 +11,12 @@ caller-facing contract verbatim:
   cleanup result in its own field, never fused into ``outcome``. A merge that
   lands never reports ``failed``.
 - Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
-  (auto_merge disabled), 127 gh not installed.
+  (auto_merge disabled) or held, 127 gh not installed.
+  ``held`` is the retry-later outcome and is never a failure claim: the merge was
+  not attempted (lock contention, stale base, unreconciled stub-manifest) or its
+  result could not be read back. In particular, when ``gh pr view`` itself fails
+  the merge state is UNKNOWN, so the receipt says held rather than asserting a
+  ``failed`` the caller would act on.
 - The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
   CI-green / external-review / stub-manifest guards) and the worktree
   server-side-recovery fallback are preserved. The who-may-merge gate
@@ -1046,6 +1051,26 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
+
+    # Merge state never became readable: `gh pr view` itself failed, so we cannot
+    # tell a landed merge from a failed one. Reporting `failed` here would assert
+    # merge truth we do not have - the same defect as the phrasing match this
+    # guard replaced, one level up - and an autonomous caller keying on `outcome`
+    # would retry a merge that may already have landed. Report `held` (exit 2,
+    # the established retry-later signal) so the uncertainty stays IN the receipt
+    # instead of being flattened into a false negative. A retry whose view read
+    # succeeds then reports the truth either way.
+    if not view.ok:
+        _emit(
+            pr_number,
+            "held",
+            "merge state unreadable (gh pr view failed: "
+            f"{(view.stderr or '').splitlines()[0][:120] if view.stderr.strip() else 'no error output'}); "
+            "cannot confirm whether the merge landed - retry",
+            strategy,
+            err=False,
+        )
+        return 2
 
     # Unrecovered failure: classify and report.
     reason = first_line

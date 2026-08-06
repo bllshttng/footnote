@@ -28,8 +28,10 @@ class FakeRun:
         api_ok: bool = False,
         toplevel: str | None = None,
         behind_by: int = 0,
+        view_fails: bool = False,
     ) -> None:
         self.gh_merge = gh_merge or Result(0, "", "")
+        self.view_fails = view_fails
         self.merged_at = merged_at
         self.view_url = view_url
         self.api_ok = api_ok
@@ -50,6 +52,8 @@ class FakeRun:
                 return self.gh_merge
             if cmd[1:3] == ["pr", "view"]:
                 if "mergedAt" in cmd:
+                    if self.view_fails:
+                        return Result(1, "", "gh: could not reach api.github.com")
                     return Result(0, self.merged_at + "\n", "")
                 if "baseRefName,headRefName" in cmd:
                     return Result(
@@ -341,6 +345,44 @@ def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, c
     assert obj["outcome"] == "merged"
     assert obj["cleanup"] == "failed"
     assert "cleanup failed" in obj["reason"]
+
+
+def test_unreadable_merge_state_holds_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """The landed-merge guard depends on reading the PR's merged state. When that
+    read ITSELF fails, the merge state is unknown - not "not merged". Reporting
+    `failed` there asserts merge truth we do not have, and an autonomous caller
+    keying on `outcome` retries a merge that may already have landed. The guard
+    reports `held` (exit 2, retry-later) so the uncertainty stays in the receipt."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "failed to delete remote branch: remote: error: internal"),
+        view_fails=True,
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert obj["outcome"] != "failed"
+    assert "unreadable" in obj["reason"]
+    # The gh error is surfaced, not swallowed - the receipt names why it is unknown.
+    assert "api.github.com" in obj["reason"]
+
+
+def test_readable_not_merged_still_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """Control for the guard above: a READABLE state that says not-merged must
+    still report failed. The held path is strictly for an unreadable state, so a
+    genuine merge failure is never softened into a retry."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "Pull request is not mergeable"),
+        merged_at="null",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 1
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "failed"
 
 
 # ---- post-merge followups ----
