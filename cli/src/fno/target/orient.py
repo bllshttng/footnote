@@ -373,9 +373,8 @@ def _required_bots(review: Any) -> List[str]:
     names the producer, and names the condition, instead of asserting a
     clearability it has no evidence for.
     """
-    apps: List[str] = list(review.github_apps) if review.github_apps else []
-    seen = set(apps)
-    rendered: List[str] = list(apps)
+    rendered: List[str] = list(review.github_apps) if review.github_apps else []
+    seen = set(rendered)
     for peer in review.peers or []:
         login = _peer_entry_identity(peer, review.peer_identity)
         if not login or login in seen:
@@ -402,17 +401,21 @@ def _optional_bots(review: Any) -> List[str]:
 # harness, so a bare producer is unrunnable on a codex-authored session whose
 # only peer is something else.
 #
-# With ONE configured provider we name it and the command is runnable. With
+# With ONE runnable provider we name it and the command is pasteable. With
 # several we must NOT print `<a|b>`: `/review peer` resolves its provider by
 # matching a known name, so an alternation is discarded as unrecognized and the
 # provider silently falls back to `codex` -- a command that looks pasteable and
 # is not. Print a visible placeholder plus the configured set instead, so the
 # reader picks rather than pastes.
 #
-# Neither form filters for ELIGIBILITY (a same-model provider, or one
-# `/review peer` cannot drive at all). That needs the author harness, the
-# session dependency this file declines; it is the same gap the docstring below
-# records for the identity-backed carrier, and it closes with that one.
+# A name `/review peer` cannot DRIVE (`opencode`, `hermes`) hits that same
+# fallback, so it is filtered out of the printed set rather than offered: the
+# config is legal and arms the composite gate, but pasting the name reviews on
+# codex instead, and on a codex-authored session that fallback is then refused
+# as same-model and the gate never clears. Drivability is STATIC (the review
+# runners in `provider_resolution`), so unlike model-family ELIGIBILITY it costs
+# no author harness -- that second gap is the one the docstring below records
+# for the identity-backed carrier, and it stays open here.
 _EMIT_ATTESTATION = "bash skills/review/scripts/emit-attestation.sh"
 
 
@@ -440,6 +443,7 @@ def _local_review_gates(review: Any) -> List[str]:
     stops the line asserting something it cannot check.
     """
     from fno.config import resolvable_reviewers
+    from fno.review.provider_resolution import DISPATCHABLE_PROVIDERS
 
     known = resolvable_reviewers(review.reviewer_registry)
     # Built-ins carry their own emit (sigma/declare auto-emit on a clean pass;
@@ -473,12 +477,23 @@ def _local_review_gates(review: Any) -> List[str]:
     ]
     if named:
         unique = list(dict.fromkeys(named))
-        if len(unique) == 1:
-            gates.append(f"peer -> /fno:review peer {unique[0]} --attest")
-        else:
+        runnable = [p for p in unique if p.lower() in DISPATCHABLE_PROVIDERS]
+        if len(runnable) == 1:
+            gates.append(f"peer -> /fno:review peer {runnable[0]} --attest")
+        elif runnable:
             gates.append(
                 f"peer -> /fno:review peer <provider> --attest "
-                f"(configured: {', '.join(unique)})"
+                f"(configured: {', '.join(runnable)})"
+            )
+        else:
+            # The gate is armed and nothing configured can clear it. Announcing
+            # a producer here would be the wedge in its loudest form: a command
+            # that runs, reviews on the wrong model, and still leaves the gate
+            # to be discovered after the promise.
+            gates.append(
+                f"peer -> no /fno:review peer runner for "
+                f"[{', '.join(unique)}] | resolve: configure a codex or "
+                f"gemini peer"
             )
     return gates
 

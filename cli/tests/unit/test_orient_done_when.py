@@ -40,11 +40,11 @@ def test_no_gate_config_still_reads_pr_and_ci_only(repo):
 
 
 def test_identity_free_peers_announce_the_local_peer_gate_and_its_producer(repo):
+    # `opencode` arms the gate but `/review peer` cannot drive it, so it is not
+    # offered as a choice - naming the one peer that runs is the whole point.
     root = repo('[review]\npeers = ["codex", "opencode"]\n')
     line = _done_when_line({}, root)
-    assert (
-        "peer -> /fno:review peer <provider> --attest (configured: codex, opencode)"
-    ) in line, line
+    assert "peer -> /fno:review peer codex --attest" in line, line
     # The old string is the lie: it told the session there was nothing to run.
     assert "none (PR + CI only)" not in line, line
 
@@ -112,11 +112,24 @@ def test_local_peer_producer_names_the_configured_provider(repo):
 
 
 def test_multiple_free_peers_offer_the_choice(repo):
-    root = repo('[review]\npeers = ["codex", "opencode"]\n')
+    root = repo('[review]\npeers = ["codex", "gemini"]\n')
     line = _done_when_line({}, root)
     assert (
-        "peer -> /fno:review peer <provider> --attest (configured: codex, opencode)"
+        "peer -> /fno:review peer <provider> --attest (configured: codex, gemini)"
     ) in line, line
+
+
+def test_undrivable_only_peers_name_the_missing_runner_not_a_producer(repo):
+    # loop-check arms the composite `peer` gate on any identity-free entry, but
+    # `/review peer` matches its provider by name: `opencode` is discarded and
+    # the provider silently falls back to codex. Printing it as a producer is
+    # the wedge in its loudest form - a command that runs and reviews on a model
+    # nobody configured, or is refused outright on a codex-authored session.
+    root = repo('[review]\npeers = ["opencode"]\n')
+    line = _done_when_line({}, root)
+    assert "no /fno:review peer runner for [opencode]" in line, line
+    assert "/fno:review peer opencode --attest" not in line, line
+    assert "none (PR + CI only)" not in line, line
 
 
 def test_registry_reviewer_producer_appends_the_emit_step(repo):

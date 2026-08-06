@@ -3,7 +3,8 @@
 The minion clause tells a teammate to mail you for a code review and stop.
 This is the other half of that exchange: what you mail back, in the teammate's own harness vocabulary, and what it must do when the verb refuses.
 
-Load it when any of these lands in your inbox: a done report (`RESULT: resolved`, which the minion clause makes a review request), a `RESULT: blocked`, or a bare "I need a review on <branch-or-PR>".
+Load it when any of these lands in your inbox: a done report (`RESULT: resolved`), a `RESULT: blocked`, or a bare "I need a review on <branch-or-PR>".
+The canonical clause has the teammate send the report and the review request as two separate mails, so do NOT wait for the second one: treat the done report itself as the review request, or a worker that reported and stopped waits forever on an order you were holding for a mail it never sent.
 
 Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|blocked|failed>` ([minion-clause.md](minion-clause.md)) - not the `SUCCESS`/`DONE_WITH_CONCERNS` set from the execution-agent return contract in `AGENTS.md`. Two vocabularies share the `RESULT:` prefix, and a king matching on the wrong one never fires on a report its own spawn payload produced.
 
@@ -15,7 +16,7 @@ A harness-native review verb is user-triggered: the session that wrote the diff 
 Two consequences fall straight out of that, and both are load-bearing:
 
 - **Serve the verb, never run it.** Ordering the review is your job; running it in your own session reviews the wrong tree. Do not fan out a sigma panel the worker never configured, and do not review the diff yourself as a substitute.
-- **A capability probe sent this way can only ever answer yes.** Mailing "can you run X unprompted?" tests the user-triggered path by construction. See the pitfalls corpus entry of the same name in `AGENTS.md`; it is the trap this exact mechanism sets.
+- **A capability probe sent this way can only ever answer yes.** Mailing "can you run X unprompted?" tests the user-triggered path by construction. See the pitfalls corpus entry "A capability probe delivered over the mail bus can only ever return yes" in `AGENTS.md`; it is the trap this exact mechanism sets.
 
 ## The verb, per harness
 
