@@ -1105,12 +1105,36 @@ _SHORT_ID_KEYS = ("short_id", "id")
 _STATUS_KEYS = ("status", "state")
 
 
-def _first_key(row: dict, keys: tuple[str, ...]):
-    """Value of the first present, non-None key. Schema-alias resolution."""
-    for key in keys:
-        if row.get(key) is not None:
-            return row.get(key)
-    return None
+def _alias_value(row: dict, keys: tuple[str, ...], valid) -> tuple[Any, Optional[str]]:
+    """Resolve one field across its schema aliases. Returns (value, warning).
+
+    Each alias is validated INDEPENDENTLY and only valid values are considered,
+    so a malformed value under one spelling cannot mask a good value under
+    another. Taking the first merely-present key would let a row carrying a
+    junk ``short_id`` alongside a valid ``id`` resolve to the junk and be
+    dropped - the same silent-drop shape this aliasing exists to prevent.
+
+    When two aliases both hold valid but DIFFERENT values there is no way to
+    tell which the producer meant, so the first (oldest-spelling) value is
+    returned with a warning rather than a silent pick.
+    """
+    found = [(key, row.get(key)) for key in keys if valid(row.get(key))]
+    if not found:
+        return None, None
+    value = found[0][1]
+    distinct = {v for _, v in found}
+    if len(distinct) > 1:
+        pairs = ", ".join(f"{k}={v!r}" for k, v in found)
+        return value, f"conflicting values across aliases ({pairs}); used {value!r}"
+    return value, None
+
+
+def _valid_short_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _valid_status(value: Any) -> bool:
+    return value is not None
 
 
 def claude_agents_json(
@@ -1215,14 +1239,18 @@ def claude_agents_json(
         if not isinstance(row, dict):
             warnings.append(f"claude agents --json row {index} is not an object; skipped")
             continue
-        short_id = _first_key(row, _SHORT_ID_KEYS)
-        if not isinstance(short_id, str) or not short_id:
+        short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
+        if short_id is None:
             warnings.append(
-                f"claude agents --json row {index} has none of "
-                f"{list(_SHORT_ID_KEYS)}; skipped"
+                f"claude agents --json row {index} has no usable short id "
+                f"under any of {list(_SHORT_ID_KEYS)}; skipped"
             )
             continue
-        live_status = _first_key(row, _STATUS_KEYS)
+        if id_warning:
+            warnings.append(f"claude agents --json row {index} short id {id_warning}")
+        live_status, status_warning = _alias_value(row, _STATUS_KEYS, _valid_status)
+        if status_warning:
+            warnings.append(f"claude agents --json row {index} status {status_warning}")
         if live_status is not None and live_status not in KNOWN_LIVE_STATUSES:
             warnings.append(
                 f"claude agents --json row {index} has unrecognized status="

@@ -73,6 +73,50 @@ def test_claude_agents_json_accepts_the_current_claude_row_shape(monkeypatch):
     assert warnings == [], warnings
 
 
+def test_claude_agents_json_malformed_alias_does_not_mask_a_valid_one(monkeypatch):
+    """Each alias is validated independently. A row carrying a junk `short_id`
+    alongside a valid `id` must resolve to the `id` and survive; taking the
+    first merely-PRESENT key would resolve to the junk and drop the row - the
+    same silent-drop the aliasing exists to prevent."""
+    payload = {
+        "agents": [
+            {"short_id": 12345, "id": "907fc8c5", "state": "working"},
+            {"short_id": "", "id": "baf9409a", "status": None, "state": "blocked"},
+        ]
+    }
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {
+        "907fc8c5": {"live_status": "working"},
+        "baf9409a": {"live_status": "blocked"},
+    }
+    assert warnings == [], warnings
+
+
+def test_claude_agents_json_conflicting_aliases_warn_rather_than_pick_silently(monkeypatch):
+    """Two aliases both valid but DIFFERENT: there is no way to tell which the
+    producer meant, so the pick is reported. Silently choosing one is the
+    receipt-cannot-express-the-truth shape; the row still resolves so a
+    conflict never costs the enrichment."""
+    payload = {"agents": [{"short_id": "aaaaaaaa", "id": "bbbbbbbb", "state": "working"}]}
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {"aaaaaaaa": {"live_status": "working"}}
+    assert len(warnings) == 1, warnings
+    assert "conflicting values across aliases" in warnings[0]
+    assert "aaaaaaaa" in warnings[0] and "bbbbbbbb" in warnings[0]
+
+
 def test_claude_agents_json_success_returns_short_id_map(monkeypatch):
     payload = {
         "agents": [
