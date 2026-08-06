@@ -42,7 +42,9 @@ def test_no_gate_config_still_reads_pr_and_ci_only(repo):
 def test_identity_free_peers_announce_the_local_peer_gate_and_its_producer(repo):
     root = repo('[review]\npeers = ["codex", "opencode"]\n')
     line = _done_when_line({}, root)
-    assert "peer -> /fno:review peer <codex|opencode> --attest" in line, line
+    assert (
+        "peer -> /fno:review peer <provider> --attest (configured: codex, opencode)"
+    ) in line, line
     # The old string is the lie: it told the session there was nothing to run.
     assert "none (PR + CI only)" not in line, line
 
@@ -56,7 +58,7 @@ def test_peer_identity_keeps_peers_on_the_github_login_carrier(repo):
     root = repo('[review]\npeers = ["codex"]\npeer_identity = "fno-peer-bot"\n')
     line = _done_when_line({}, root)
     assert "peer ->" not in line, line
-    assert "reviewed by [fno-peer-bot]" in line, line
+    assert "reviewed by [fno-peer-bot (post: /fno:review peer <pr#> codex --post)]" in line, line
 
 
 def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
@@ -67,7 +69,7 @@ def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
         '[review]\npeers = [{provider="codex", identity="bot-x"}, "gemini"]\n'
     )
     line = _done_when_line({}, root)
-    assert "reviewed by [bot-x]" in line, line
+    assert "reviewed by [bot-x (post: /fno:review peer <pr#> codex --post)]" in line, line
     assert "peer -> /fno:review peer gemini --attest" in line, line
 
 
@@ -112,7 +114,9 @@ def test_local_peer_producer_names_the_configured_provider(repo):
 def test_multiple_free_peers_offer_the_choice(repo):
     root = repo('[review]\npeers = ["codex", "opencode"]\n')
     line = _done_when_line({}, root)
-    assert "peer -> /fno:review peer <codex|opencode> --attest" in line, line
+    assert (
+        "peer -> /fno:review peer <provider> --attest (configured: codex, opencode)"
+    ) in line, line
 
 
 def test_registry_reviewer_producer_appends_the_emit_step(repo):

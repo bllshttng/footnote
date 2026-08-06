@@ -337,7 +337,7 @@ def _peer_provider(peer: object) -> str:
     return str(peer).strip()
 
 
-def _required_bots(project_root: Path) -> List[str]:
+def _required_bots(review: Any) -> List[str]:
     """The must-have-reviewed login list: None/[] -> no gate (cv-6537099f).
 
     `config.review.github_apps` (the legacy required_bots aliases it) UNION the
@@ -347,25 +347,29 @@ def _required_bots(project_root: Path) -> List[str]:
     gate was live -- the same wedge the local-attestation half of this file
     closes, left open on the sibling carrier.
 
+    A peer-contributed login carries its producer, because it is NOT an App bot
+    that posts on its own: nothing appears under `peer_identity` unless the
+    session runs `/review peer <pr#> <provider> --post`. Rendered bare beside
+    `chatgpt-codex-connector` it reads as self-posting, and the session waits
+    for a review that never arrives - the wedge this file exists to close,
+    wearing the other carrier's clothes.
+
     The effective default matches the Rust loop-check: absent == [] == no review
     gate (PR + CI only), not the old ["chatgpt-codex-connector"].
     """
-    from fno.config import load_settings_for_repo
-
-    review = load_settings_for_repo(project_root).review
     logins: List[str] = list(review.github_apps) if review.github_apps else []
     for peer in review.peers or []:
         login = _peer_entry_identity(peer, review.peer_identity)
-        if login and login not in logins:
-            logins.append(login)
+        if not login or any(entry.startswith(login) for entry in logins):
+            continue
+        provider = _peer_provider(peer) or "<provider>"
+        logins.append(f"{login} (post: /fno:review peer <pr#> {provider} --post)")
     return logins
 
 
-def _optional_bots(project_root: Path) -> List[str]:
+def _optional_bots(review: Any) -> List[str]:
     """Honored-if-present reviewer logins (config.review.optional_apps)."""
-    from fno.config import load_settings_for_repo
-
-    return list(load_settings_for_repo(project_root).review.optional_apps)
+    return list(review.optional_apps)
 
 
 # The peers-derived requirement is synthesized by loop-check
@@ -374,12 +378,23 @@ def _optional_bots(project_root: Path) -> List[str]:
 # The provider is NOT optional in the printed form: `/review peer` defaults a
 # missing provider to `codex` and then REFUSES a provider matching the invoking
 # harness, so a bare producer is unrunnable on a codex-authored session whose
-# only peer is something else. Naming the configured providers keeps the printed
-# command runnable without this file having to resolve the session's harness.
+# only peer is something else.
+#
+# With ONE configured provider we name it and the command is runnable. With
+# several we must NOT print `<a|b>`: `/review peer` resolves its provider by
+# matching a known name, so an alternation is discarded as unrecognized and the
+# provider silently falls back to `codex` -- a command that looks pasteable and
+# is not. Print a visible placeholder plus the configured set instead, so the
+# reader picks rather than pastes.
+#
+# Neither form filters for ELIGIBILITY (a same-model provider, or one
+# `/review peer` cannot drive at all). That needs the author harness, the
+# session dependency this file declines; it is the same gap the docstring below
+# records for the identity-backed carrier, and it closes with that one.
 _EMIT_ATTESTATION = "bash skills/review/scripts/emit-attestation.sh"
 
 
-def _local_review_gates(project_root: Path) -> List[str]:
+def _local_review_gates(review: Any) -> List[str]:
     """Local-attestation gates loop-check holds the loop on, `name -> producer`.
 
     Two sources, both invisible to `_required_bots`: `config.review.reviewers`
@@ -404,9 +419,8 @@ def _local_review_gates(project_root: Path) -> List[str]:
     Stated rather than silently carried, so the next reader inherits a known
     limit instead of a claim that is broader than its evidence.
     """
-    from fno.config import load_settings_for_repo, resolvable_reviewers
+    from fno.config import resolvable_reviewers
 
-    review = load_settings_for_repo(project_root).review
     known = resolvable_reviewers(review.reviewer_registry)
     # Built-ins carry their own emit (sigma/declare auto-emit on a clean pass;
     # code-review bakes the helper into its invocation string). A project-
@@ -438,9 +452,14 @@ def _local_review_gates(project_root: Path) -> List[str]:
         and (provider := _peer_provider(peer))
     ]
     if named:
-        choice = "|".join(dict.fromkeys(named))
-        target = f" <{choice}>" if len(set(named)) > 1 else f" {choice}"
-        gates.append(f"peer -> /fno:review peer{target} --attest")
+        unique = list(dict.fromkeys(named))
+        if len(unique) == 1:
+            gates.append(f"peer -> /fno:review peer {unique[0]} --attest")
+        else:
+            gates.append(
+                f"peer -> /fno:review peer <provider> --attest "
+                f"(configured: {', '.join(unique)})"
+            )
     return gates
 
 
@@ -455,9 +474,17 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
     if _is("no_ship", "true") or _is("advisory", "true"):
         return "advisory: written + eval-green (no PR)"
     try:
-        bots = _required_bots(project_root)
-        optional = _optional_bots(project_root)
-        local = _local_review_gates(project_root)
+        # ONE settings load for all three readers. `load_settings_for_repo` is
+        # documented uncached and calls `_ensure_migrated`, which can WRITE, and
+        # this line runs on `fno target start`, `fno target status`, and init -
+        # so a per-reader load paid three full parse+validate passes, and three
+        # chances to migrate, every time the orienter rendered.
+        from fno.config import load_settings_for_repo
+
+        review = load_settings_for_repo(project_root).review
+        bots = _required_bots(review)
+        optional = _optional_bots(review)
+        local = _local_review_gates(review)
     except Exception:  # noqa: BLE001 - report unknown, never assert no-gate
         # NOT "none (PR + CI only)": loop-check reads the same keys out of the
         # same file and holds whatever gate they declare, so a config this side

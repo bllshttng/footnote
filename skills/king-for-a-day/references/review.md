@@ -3,7 +3,9 @@
 The minion clause tells a teammate to mail you for a code review and stop.
 This is the other half of that exchange: what you mail back, in the teammate's own harness vocabulary, and what it must do when the verb refuses.
 
-Load it when any of these lands in your inbox: a done report (`RESULT: SUCCESS` / `DONE_WITH_CONCERNS`, which the minion clause makes a review request), a `RESULT: BLOCKED`, or a bare "I need a review on <branch-or-PR>".
+Load it when any of these lands in your inbox: a done report (`RESULT: resolved`, which the minion clause makes a review request), a `RESULT: blocked`, or a bare "I need a review on <branch-or-PR>".
+
+Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|blocked|failed>` ([minion-clause.md](minion-clause.md)) - not the `SUCCESS`/`DONE_WITH_CONCERNS` set from the execution-agent return contract in `AGENTS.md`. Two vocabularies share the `RESULT:` prefix, and a king matching on the wrong one never fires on a report its own spawn payload produced.
 
 ## Why the king serves the verb at all
 
