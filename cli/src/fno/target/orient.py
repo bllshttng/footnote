@@ -310,17 +310,52 @@ def _tests_line(project_root: Path) -> str:
     return " | ".join(cmds)
 
 
+def _peer_entry_identity(peer: object, shared: Optional[str]) -> Optional[str]:
+    """The login one `config.review.peers` entry posts under, or None.
+
+    Mirrors loop-check's rule (`resolved_required_bots_for_author`): a per-entry
+    `identity` wins, else the shared `config.review.peer_identity`. `shared` is
+    read for PRESENCE, not truthiness, because Rust tests `is_some()` -- an
+    explicit `peer_identity = ""` is a configured (if useless) login there, and
+    treating it as unset here would announce a local gate loop-check does not
+    require.
+    """
+    if isinstance(peer, dict):
+        own = peer.get("identity")
+        if own:
+            return str(own)
+    return shared
+
+
+def _peer_provider(peer: object) -> str:
+    """The provider name of a `config.review.peers` entry (scalar or mapping)."""
+    if isinstance(peer, dict):
+        return str(peer.get("provider") or "").strip()
+    return str(peer).strip()
+
+
 def _required_bots(project_root: Path) -> List[str]:
     """The must-have-reviewed login list: None/[] -> no gate (cv-6537099f).
 
-    Reads config.review.github_apps (the legacy required_bots aliases it). The
-    effective default matches the Rust loop-check: absent == [] == no review
+    `config.review.github_apps` (the legacy required_bots aliases it) UNION the
+    posting identity of every identity-BACKED peer, which is exactly what
+    loop-check's `resolved_required_bots_for_author` requires. Reading only the
+    first half announced `none (PR + CI only)` for a repo whose `peer_identity`
+    gate was live -- the same wedge the local-attestation half of this file
+    closes, left open on the sibling carrier.
+
+    The effective default matches the Rust loop-check: absent == [] == no review
     gate (PR + CI only), not the old ["chatgpt-codex-connector"].
     """
     from fno.config import load_settings_for_repo
 
-    bots = load_settings_for_repo(project_root).review.github_apps
-    return list(bots) if bots else []
+    review = load_settings_for_repo(project_root).review
+    logins: List[str] = list(review.github_apps) if review.github_apps else []
+    for peer in review.peers or []:
+        login = _peer_entry_identity(peer, review.peer_identity)
+        if login and login not in logins:
+            logins.append(login)
+    return logins
 
 
 def _optional_bots(project_root: Path) -> List[str]:
@@ -333,7 +368,12 @@ def _optional_bots(project_root: Path) -> List[str]:
 # The peers-derived requirement is synthesized by loop-check
 # (`resolved_local_peer_reviewers_for_author`), not named in `reviewers`, so it
 # has no descriptor in `_RESOLVABLE_REVIEWERS` and its producer lives here.
-_LOCAL_PEER_PRODUCER = "/fno:review peer --attest"
+# The provider is NOT optional in the printed form: `/review peer` defaults a
+# missing provider to `codex` and then REFUSES a provider matching the invoking
+# harness, so a bare producer is unrunnable on a codex-authored session whose
+# only peer is something else. Naming the configured providers keeps the printed
+# command runnable without this file having to resolve the session's harness.
+_EMIT_ATTESTATION = "bash skills/review/scripts/emit-attestation.sh"
 
 
 def _local_review_gates(project_root: Path) -> List[str]:
@@ -357,18 +397,35 @@ def _local_review_gates(project_root: Path) -> List[str]:
 
     review = load_settings_for_repo(project_root).review
     known = resolvable_reviewers(review.reviewer_registry)
+    # Built-ins carry their own emit (sigma/declare auto-emit on a clean pass;
+    # code-review bakes the helper into its invocation string). A project-
+    # registered reviewer does not, so its printed producer must append the emit
+    # or a session that follows it verbatim reviews and still leaves the gate
+    # unmet -- the exact failure this line exists to prevent.
+    builtin = resolvable_reviewers()
     gates: List[str] = []
     for name in review.reviewers or []:
         descriptor = known.get(str(name))
-        gates.append(f"{name} -> {descriptor.invocation}" if descriptor else str(name))
-    # A shared `peer_identity` puts every peer back on the posted-review login
-    # carrier, and a per-entry `identity` does the same for that entry; only an
-    # identity-free entry contributes to the local composite gate.
-    if not review.peer_identity and any(
-        not (isinstance(peer, dict) and peer.get("identity"))
+        if descriptor is None:
+            gates.append(str(name))
+            continue
+        producer = descriptor.invocation
+        if str(name) not in builtin:
+            producer = f"{producer}, then {_EMIT_ATTESTATION} {name}"
+        gates.append(f"{name} -> {producer}")
+    # Only an identity-free entry contributes to the local composite gate; an
+    # entry with its own `identity` (or any entry under a shared peer_identity)
+    # is a posted-review login and is counted by `_required_bots` instead.
+    local_providers = [
+        _peer_provider(peer)
         for peer in (review.peers or [])
-    ):
-        gates.append(f"peer -> {_LOCAL_PEER_PRODUCER}")
+        if _peer_entry_identity(peer, review.peer_identity) is None
+    ]
+    if local_providers:
+        named = [p for p in local_providers if p]
+        choice = "|".join(dict.fromkeys(named))
+        target = f" <{choice}>" if len(set(named)) > 1 else (f" {choice}" if named else "")
+        gates.append(f"peer -> /fno:review peer{target} --attest")
     return gates
 
 
