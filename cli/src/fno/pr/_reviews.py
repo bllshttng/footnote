@@ -96,7 +96,20 @@ def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
 
         from fno.events.log import read_events
 
-        events_path = (Path(cwd) if cwd else Path.cwd()) / ".fno" / "events.jsonl"
+        # Resolve git top-level so coverage is found from a subdirectory.
+        base = Path(cwd) if cwd else Path.cwd()
+        try:
+            import subprocess
+
+            root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, cwd=str(base), timeout=5,
+            ).stdout.strip()
+            if root:
+                base = Path(root)
+        except Exception:
+            pass
+        events_path = base / ".fno" / "events.jsonl"
         events = read_events(events_path)
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
