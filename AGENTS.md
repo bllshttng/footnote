@@ -179,7 +179,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 ## CLI subsystems (summary + doc)
 
 - **`fno claim`** - the single work-claim primitive; atomic lockfiles under `.fno/claims/`. `fno target init` already claims the node - never `fno claim acquire` manually. [coordination](docs/architecture/coordination.md).
-- **`fno mail` - king-mediated native review.** `fno mail send` injects as user-shaped text, so a worker that cannot self-invoke its harness's native review verb (claude `/code-review`, codex `/review`) can mail its king; the king's reply triggers the verb in the worker's own harness. No live king -> advisory self-review. [coordination](docs/architecture/coordination.md).
+- **`fno mail` - king-mediated native review.** A worker self-invokes the native review verb (claude `/code-review`, codex `/review`) via the Skill tool first; `fno mail send` is the fallback when that is refused - it injects as user-shaped text, and the king's reply triggers the verb. No live king -> advisory self-review. [review lanes](docs/architecture/review-lanes.md).
 - **`fno whoami` / `fno status`** - read-only self-introspection; run when confused after compaction.
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.

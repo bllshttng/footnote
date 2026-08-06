@@ -15,7 +15,7 @@ Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|bl
 
 ## Why the king serves the verb at all
 
-A harness-native review verb is user-triggered: the session that wrote the diff cannot launch it for itself.
+A harness-native review verb can be self-invoked via the Skill tool but is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so a mailed order is the reliable trigger.
 `fno mail send` injects as user-shaped text in the recipient's pane, so **your reply is the user invocation**, and the review runs in the teammate's OWN harness against the tree it actually built.
 
 Two consequences fall straight out of that, and both are load-bearing:
@@ -119,7 +119,7 @@ Beyond that, stop. The framing of the order is a live candidate - a bare verb as
 
 Three rules follow:
 
-- **A worker cannot self-serve this.** If a teammate decides on its own that it should review, the call refuses. It must mail you and wait. That is not ceremony; it is the only path that works.
+- **Mail is the most reliable path.** A teammate that decides on its own to review is often refused (cause unknown); self-invocation has worked for some workers too, so it is not impossible, just less reliable than a mailed order. It mails you and waits. That is not ceremony; it is the path that most reliably works.
 - **Retry is legitimate, but do not expect much.** An identical retry has been observed to succeed after a refusal once. Two identical retries with no order present were refused both times.
 - **A refusal is never an impossibility claim.** That inference has been drawn from real observations and retracted at least four times in a single day. After a few attempts, the teammate reports the refusal string verbatim and stops - it does NOT substitute a subagent or a Bash approximation, which the refusal text forbids by name.
 
