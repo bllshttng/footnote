@@ -988,6 +988,169 @@ def _discover_from_projects(
 
 
 # --------------------------------------------------------------------------
+# Harness-native subagents (sidechain 'limbs') — read-only visibility (x-af92)
+# --------------------------------------------------------------------------
+# A harness-native subagent (Claude's Agent tool; codex/agy/opencode task
+# primitives) is a nested conversation inside its PARENT session's process.
+# It has no pid, no roster entry, no registry row, and no mail handle, so the
+# pid- and registry-keyed census above structurally cannot see it. This reader
+# keys on ``agentId`` instead and is DISPLAY-ONLY: it is never wired into
+# ``census()`` or ``discover_live_sessions``, because a subagent has no mail
+# transport and listing it among addressable sessions would imply
+# addressability the substrate does not support. Full addressability is
+# rejected by design — see docs/architecture/coordination.md.
+#
+# claude-only: the ``<enc-cwd>/<session-id>/subagents/agent-*.jsonl`` layout is
+# claude's. codex/agy/opencode task primitives have their own on-disk shapes,
+# unmeasured here; a future harness reader slots into this seam. A host whose
+# projects store has no ``subagents/`` dirs contributes zero rows silently.
+
+#: A sidechain transcript counts as ``active`` when its mtime is within this
+#: window. mtime cannot prove a binary live/dead state (a thinking subagent has
+#: a stale mtime; a parent that dies mid-fan-out leaves children frozen), so
+#: the verdict is stated against this threshold and the age is rendered, never
+#: presented as a confident alive/dead. Env-overridable, positive only.
+SUBAGENT_LIVE_SECONDS_ENV = "FNO_SUBAGENT_LIVE_SECONDS"
+_DEFAULT_SUBAGENT_LIVE_SECONDS = 600.0
+#: Bound the mtime scan so a host with thousands of historical sidechain
+#: transcripts does not stat+open all of them. Files older than this are pruned
+#: before their first line is read; rows age out of the view entirely past it.
+_SUBAGENT_SCAN_WINDOW_S = 2 * 3600
+
+
+def _subagent_live_seconds() -> float:
+    """Active-verdict liveness window (env-overridable, positive only)."""
+    raw = os.environ.get(SUBAGENT_LIVE_SECONDS_ENV)
+    if raw:
+        try:
+            v = float(raw)
+        except ValueError:
+            v = 0.0
+        if v > 0:
+            return v
+    return _DEFAULT_SUBAGENT_LIVE_SECONDS
+
+
+@dataclass
+class DiscoveredSubagent:
+    """One harness-native subagent surfaced read-only (x-af92).
+
+    Keyed on ``agentId`` (the transcript's first-record field and the filename
+    stem), never a pid: a subagent has no process of its own. ``parent_session_id``
+    names the spawner so an operator can trace a fanned-out row back to its
+    origin. ``age_seconds`` is the honest liveness signal (transcript mtime);
+    ``verdict`` is derived from it against a stated threshold, because mtime
+    alone cannot support a confident live/dead call.
+    """
+
+    agent_id: str
+    parent_session_id: str
+    cwd: str
+    git_branch: Optional[str]
+    transcript_path: str
+    age_seconds: float
+    verdict: str  # "active" within the live threshold, else "idle"
+
+
+def _read_subagent_first(path: Path) -> Optional[dict]:
+    """First JSON record of a sidechain transcript, or None. Never raises.
+
+    A truncated, mid-write, or non-JSON first line is skipped, matching every
+    other transcript reader in this module (AC5-EDGE).
+    """
+    try:
+        with open(path, encoding="utf-8") as fh:
+            first = fh.readline()
+    except OSError:
+        return None
+    try:
+        rec = json.loads(first)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return rec if isinstance(rec, dict) else None
+
+
+def discover_subagents(
+    *,
+    projects_dir: Optional[Path] = None,
+    live_within_seconds: Optional[float] = None,
+    scan_window_seconds: Optional[float] = None,
+    now: Optional[float] = None,
+) -> tuple[list[DiscoveredSubagent], list[str]]:
+    """Enumerate harness-native subagents (sidechain 'limbs'), read-only.
+
+    Globs ``<projects>/<enc-cwd>/<session-id>/subagents/agent-*.jsonl``, prunes
+    by transcript mtime to the scan window (so a store with thousands of
+    historical sidechains is not stat+opened in full), then reads each
+    survivor's first record for ``agentId`` + the parent ``sessionId`` + ``cwd``
+    + ``gitBranch``. ``agentId`` also falls back to the filename stem, and the
+    parent session id to the directory two levels up, so a record missing a
+    field still resolves.
+
+    Returns ``(rows, warnings)``. Any read failure degrades to zero
+    contribution with at most one warning and never raises: a vanished file is
+    skipped, a malformed first record is skipped, an unreadable projects root
+    yields zero rows plus one warning (AC5-EDGE). An absent store is silent
+    zero, not a warning (AC7-EDGE — that is the claude-only-scope case).
+    """
+    root = projects_dir or default_projects_dir()
+    live_threshold = (
+        live_within_seconds
+        if live_within_seconds is not None
+        else _subagent_live_seconds()
+    )
+    reference = now if now is not None else time.time()
+    scan_cutoff = reference - (scan_window_seconds or _SUBAGENT_SCAN_WINDOW_S)
+
+    warnings: list[str] = []
+    recent: list[tuple[float, Path]] = []
+    try:
+        for path in root.glob("*/*/subagents/agent-*.jsonl"):
+            try:
+                mt = path.stat().st_mtime
+            except OSError:
+                continue  # vanished mid-scan: skip, never abort the sweep
+            if mt >= scan_cutoff:
+                recent.append((mt, path))
+    except OSError as exc:
+        warnings.append(f"subagents: projects store unreadable ({exc}); no rows")
+        return [], warnings
+
+    rows: list[DiscoveredSubagent] = []
+    seen: set[str] = set()
+    for mt, path in sorted(recent, key=lambda t: t[0], reverse=True):
+        rec = _read_subagent_first(path)
+        if rec is None:
+            continue  # malformed/truncated first record: skip, do not abort
+        agent_id = str(rec.get("agentId") or "")
+        if not agent_id:
+            # The filename carries the id too (agent-<id>.jsonl).
+            stem = path.name[: -len(".jsonl")]
+            if stem.startswith("agent-"):
+                agent_id = stem[len("agent-") :]
+        if not agent_id or agent_id in seen:
+            continue
+        parent = str(rec.get("sessionId") or "")
+        if not parent:
+            parent = path.parent.parent.name  # the <session-id> dir
+        branch = rec.get("gitBranch")
+        seen.add(agent_id)
+        age = max(0.0, reference - mt)
+        rows.append(
+            DiscoveredSubagent(
+                agent_id=agent_id,
+                parent_session_id=parent,
+                cwd=str(rec.get("cwd") or ""),
+                git_branch=str(branch) if branch else None,
+                transcript_path=str(path),
+                age_seconds=age,
+                verdict=("active" if age <= live_threshold else "idle"),
+            )
+        )
+    return rows, warnings
+
+
+# --------------------------------------------------------------------------
 # Project resolution (cwd -> settings project, worktree-aware)
 # --------------------------------------------------------------------------
 
