@@ -9,6 +9,7 @@ test_python_validator.py and the parity corpus.
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -48,9 +49,10 @@ def test_attestation_records_session_and_harness(tmp_path: Path) -> None:
         "harness: claude\n"
     )
     repo = _temp_git_repo(tmp_path, manifest)
+    env = {**os.environ, "FNO": "fno-py"}
     r = subprocess.run(
         ["bash", str(_SCRIPT), "sigma", "pass"],
-        cwd=repo, capture_output=True, text=True,
+        cwd=repo, env=env, capture_output=True, text=True,
     )
     assert r.returncode == 0, r.stderr
     ev = _last_event(repo)

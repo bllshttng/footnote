@@ -47,6 +47,8 @@ fi
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
   '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness}')"
-fno event emit -t review_attestation -s target -d "$data"
+# FNO overrides the binary (defaults to the mux); tests point it at fno-py,
+# which is on PATH in the uv test env where the mux is not installed.
+"${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
 echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown}" >&2
