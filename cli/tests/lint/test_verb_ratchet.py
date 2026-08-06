@@ -135,8 +135,7 @@ def test_fail_closed_when_stale_front_lacks_mux(monkeypatch):
 
 def test_fail_closed_when_rust_advertises_unknown_verb(monkeypatch):
     monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
-    usage = KNOWN_USAGE.replace("mux workspace prune", "mux workspace prune")
-    usage = usage.replace("mux block pipe", "mux frobnicate flag")  # new advertised verb
+    usage = KNOWN_USAGE.replace("mux block pipe", "mux frobnicate flag")  # new advertised verb
     monkeypatch.setattr(
         vr.subprocess, "run",
         _fake_run({
@@ -145,6 +144,28 @@ def test_fail_closed_when_rust_advertises_unknown_verb(monkeypatch):
         }),
     )
     with pytest.raises(vr.VerbRatchetError, match="not listed in RUST_FRONT_VERBS"):
+        vr.enumerate_rust_leaves()
+
+
+def test_fail_closed_on_subprocess_timeout(monkeypatch):
+    # A hung Rust front raises TimeoutExpired; it must surface as a NAMED
+    # fail-closed error, not an uncaught traceback (AC4: named error).
+    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
+
+    def raise_timeout(argv, *a, **k):
+        raise vr.subprocess.TimeoutExpired(cmd=argv, timeout=20)
+
+    monkeypatch.setattr(vr.subprocess, "run", raise_timeout)
+    with pytest.raises(vr.VerbRatchetError, match="unreachable"):
+        vr.enumerate_rust_leaves()
+
+
+def test_fail_closed_on_missing_executable(monkeypatch):
+    # The binary vanished between `which` and exec -> FileNotFoundError ->
+    # named fail-closed, not a traceback.
+    monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
+    monkeypatch.setattr(vr.subprocess, "run", lambda *a, **k: (_ for _ in ()).throw(FileNotFoundError(2, "gone")))
+    with pytest.raises(vr.VerbRatchetError, match="unreachable"):
         vr.enumerate_rust_leaves()
 
 

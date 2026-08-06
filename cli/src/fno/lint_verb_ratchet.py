@@ -221,6 +221,27 @@ def _parse_mux_usage(usage: str) -> list[str]:
     return sorted(set(leaves))
 
 
+def _run_front(binary: Path, args: list[str]):
+    """Run the Rust front, converting reachability failures to VerbRatchetError.
+
+    A timeout (hung front), a missing executable (vanished between ``which`` and
+    exec), or any OS-level spawn failure is a fail-closed reachability break, not
+    a traceback: AC4 wants a named error, and the caller must not write a baseline.
+    """
+    try:
+        return subprocess.run(
+            [str(binary), *args],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError, OSError) as exc:
+        raise VerbRatchetError(
+            f"verb-ratchet: Rust front unreachable - `fno {' '.join(args)}` "
+            f"failed: {exc.__class__.__name__}: {exc}"
+        ) from exc
+
+
 def enumerate_rust_leaves() -> list[str]:
     """The Rust front's leaf verbs, reaching the binary to fail closed.
 
@@ -236,12 +257,7 @@ def enumerate_rust_leaves() -> list[str]:
             "baseline: that would repeat the defect it exists to fix (the help "
             "surface omitting mux). Install the Rust front, or run where it is."
         )
-    version = subprocess.run(
-        [str(binary), "version", "--json"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
+    version = _run_front(binary, ["version", "--json"])
     if version.returncode != 0:
         raise VerbRatchetError(
             f"verb-ratchet: Rust front unreachable - `fno version --json` "
@@ -258,12 +274,7 @@ def enumerate_rust_leaves() -> list[str]:
             "verb-ratchet: `fno version --json` returned no git_rev; the `fno` "
             f"on PATH is not the Rust front. Output: {version.stdout.strip()[:200]}"
         )
-    mux = subprocess.run(
-        [str(binary), "mux", "--help"],
-        capture_output=True,
-        text=True,
-        timeout=20,
-    )
+    mux = _run_front(binary, ["mux", "--help"])
     # MuxUsage prints the usage to stderr and exits 2; that is the happy path.
     usage = (mux.stdout + mux.stderr).strip()
     if "mux pane" not in usage:
