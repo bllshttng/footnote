@@ -194,7 +194,7 @@ event_types:
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
     sources: [target, subagent, hook, test]
     data:
-      required: [reviewer, head_sha, verdict]
+      required: [reviewer, head_sha, verdict, session_id]
       properties:
         reviewer:
           type: string
@@ -208,7 +208,10 @@ event_types:
           description: "pass satisfies the gate entry; fail (or an absent attestation) holds it (fail closed)."
         session_id:
           type: string
-          description: "Emitting session id (optional; observability)."
+          description: "The session that emitted the attestation - the attesting ACTOR. With head_sha this is the authorship join (did the attester author the reviewed head), so an author self-attestation is traceable rather than indistinguishable from an independent review."
+        harness:
+          type: string
+          description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
     consumers: [fno-agents loop-check]
 
   - name: review_finding

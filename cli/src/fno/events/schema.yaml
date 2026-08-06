@@ -194,7 +194,7 @@ event_types:
     description: "A local reviewer (sigma | code-review | declare) completed a head-pinned review pass. loop-check reads this as gate evidence for a config.review.reviewers entry (x-e703, Phase 2): the entry is satisfied when reviewer matches, head_sha == current HEAD, and verdict == pass. Head-pinning is mandatory - a pass on an old commit must not count after new commits land."
     sources: [target, subagent, hook, test]
     data:
-      required: [reviewer, head_sha, verdict]
+      required: [reviewer, head_sha, verdict, session_id]
       properties:
         reviewer:
           type: string
