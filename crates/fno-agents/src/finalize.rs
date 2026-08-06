@@ -1916,6 +1916,50 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
 /// whether `--auto` is passed at all (false meaning "merge now, do not wait");
 /// here `--auto` IS the operation and `loop-check` has already verified green,
 /// so honoring it would let a config value turn arming into a no-op.
+/// The head_sha from the latest covered review_coverage event (matching the
+/// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
+fn covered_head_from_event(cwd: &Path) -> Option<String> {
+    let path = cwd.join(".fno").join("events.jsonl");
+    let content = fs::read_to_string(&path).ok()?;
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let mut latest: Option<String> = None;
+    for line in content.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
+            continue;
+        }
+        if val.pointer("/data/coverage").and_then(|v| v.as_str()) != Some("covered") {
+            continue;
+        }
+        if val
+            .pointer("/data/reviewed_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            <= 0
+        {
+            continue;
+        }
+        let ev_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !head.is_empty() && ev_head != head {
+            continue;
+        }
+        latest = Some(ev_head.to_string());
+    }
+    latest.filter(|s| !s.is_empty())
+}
+
 fn arm_auto_merge(cwd: &Path) -> bool {
     let Some((number, _url)) = gh_pr_ref(cwd) else {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
@@ -1931,6 +1975,12 @@ fn arm_auto_merge(cwd: &Path) -> bool {
     ];
     if crate::agents_config::auto_merge_delete_branch(cwd) {
         args.push("--delete-branch".to_string());
+    }
+    // x-0eaf P1 (codex round 3): pin the arm to the covered head so a racing
+    // remote push cannot land an unreviewed head via GitHub's --auto queue.
+    if let Some(sha) = covered_head_from_event(cwd) {
+        args.push("--match-head-commit".to_string());
+        args.push(sha);
     }
     // The strategy is named in every failure line below: a repo that forbids the
     // configured merge method fails here exactly like stale auth or an
