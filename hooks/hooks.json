@@ -144,16 +144,6 @@
         ]
       }
     ],
-    "PostCompact": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject --entry post_compact -- ${CLAUDE_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
-          }
-        ]
-      }
-    ],
     "WorktreeCreate": [
       {
         "hooks": [
@@ -261,6 +251,15 @@
           {
             "type": "command",
             "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id groom-self-heal-session-start --expected using-fno,inject-project-vision,setup-nudge-session-start,frontdoor-nudge-session-start,inject-fno-agent-whoami,worktree-peers-session-start,cache-keepalive-inject,register-session-start,inject-mail-drain-session-start,reconcile-session-start,attest-model,eval-sweep-session-start,groom-self-heal-session-start -- ${CLAUDE_PLUGIN_ROOT}/hooks/groom-self-heal-session-start.sh"
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "${CLAUDE_PLUGIN_ROOT}/hooks/context-observe-hook.sh --source-id target-postcompact-reinject --expected target-postcompact-reinject --entry post_compact -- ${CLAUDE_PLUGIN_ROOT}/hooks/target-postcompact-reinject.sh"
           }
         ]
       }

@@ -1,42 +1,62 @@
 #!/usr/bin/env bash
-# PostCompact hook: re-inject plan goal + current phase into context.
-# The output envelope is harness-specific because Codex rejects additionalContext.
+# Re-inject plan goal + current phase after a context compaction.
+#
+# Carrier (the load-bearing decision, verified against the harness reference):
+# on Claude this rides SessionStart with source=="compact", the only
+# post-compaction event that injects into MODEL context. PostCompact on Claude
+# has no decision control - its output goes to stderr / the user only, never
+# the model - so no payload shape can deliver context through it. SessionStart
+# injects via hookSpecificOutput.additionalContext, which is why this script is
+# registered under SessionStart(matcher="compact") in hooks.json, not PostCompact.
+# On Codex the same script still runs as a PostCompact hook: the event has no
+# "source" field, so SOURCE below is empty and the systemMessage carrier is used.
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
 FNO_DIR=".fno"
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
+GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
+
+# Read the hook event. SessionStart carries a "source" field; "compact" is the
+# value the harness sets after a compaction. PostCompact (Codex) has no such
+# field, so SOURCE is empty there.
+INPUT="$(cat 2>/dev/null || true)"
+SOURCE="$(printf '%s' "$INPUT" | python3 -c '
+import json, sys
+try:
+    print(json.load(sys.stdin).get("source") or "")
+except Exception:
+    print("")
+' 2>/dev/null || true)"
+
+# Defensive gate: on SessionStart, reinject only for compaction. The matcher
+# ("compact") already enforces this at registration; this check keeps the script
+# correct independent of registration and makes the gate testable directly. An
+# empty SOURCE (PostCompact on Codex) passes through unchanged.
+if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
+    exit 0
+fi
+
+emit_context() {
+    local context="$1"
+    python3 -c "
+import json, sys
+source, context = sys.argv[1:3]
+if source == 'compact':
+    payload = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
+else:
+    payload = {'systemMessage': context}
+print(json.dumps(payload))
+" "$SOURCE" "$context" 2>/dev/null
+}
 
 # Guard (c) re-surface: if a handoff was armed pre-compaction (by
 # arm-handoff-precompact.sh), nudge the agent to run it at the next wave
 # boundary. Computed BEFORE the reinject gate below because the armed marker is
 # self-gated (the arm hook already checked liveness + pressure) and
 # session-scoped, so it must surface even when target_is_active is false.
-GUARD_LIB="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}/scripts/lib/target-guard.sh"
 HANDOFF_NUDGE=""
-emit_context() {
-    local platform="${FNO_PLATFORM:-}"
-    if [[ -z "$platform" && -n "${CLAUDE_PLUGIN_ROOT:-}" ]]; then
-        platform="claude"
-    fi
-    python3 -c "
-import json, sys
-platform, context = sys.argv[1:3]
-if platform == 'claude':
-    payload = {
-        'hookSpecificOutput': {
-            'hookEventName': 'PostCompact',
-            'additionalContext': context,
-        }
-    }
-else:
-    payload = {'systemMessage': context}
-print(json.dumps(payload))
-" "$platform" "$1" 2>/dev/null
-}
-
-# Compute the armed-handoff nudge (if any) and apply the reinject gate in one
-# guard-lib block - the goal reminder only fires for a live session, but an
-# armed nudge surfaces regardless.
 if [[ -f "$GUARD_LIB" ]]; then
     # shellcheck source=../scripts/lib/target-guard.sh
     source "$GUARD_LIB"
@@ -92,7 +112,6 @@ for live phase + completion state (git HEAD, PR/CI, review)."
 
 ${HANDOFF_NUDGE}"
 
-# Emit only fields accepted by the active harness's PostCompact schema.
 emit_context "$CONTEXT"
 
 exit 0
