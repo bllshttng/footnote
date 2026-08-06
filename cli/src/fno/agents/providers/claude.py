@@ -1122,8 +1122,10 @@ def _alias_value(row: dict, keys: tuple[str, ...], valid) -> tuple[Any, Optional
     if not found:
         return None, None
     value = found[0][1]
-    distinct = {v for _, v in found}
-    if len(distinct) > 1:
+    # Compared by equality, not via a set: a status alias is accepted as any
+    # non-None JSON value, and hashing a dict/list one would raise TypeError
+    # out of a function contracted to be best-effort.
+    if any(other != value for _, other in found[1:]):
         pairs = ", ".join(f"{k}={v!r}" for k, v in found)
         return value, f"conflicting values across aliases ({pairs}); used {value!r}"
     return value, None
@@ -1251,7 +1253,12 @@ def claude_agents_json(
         live_status, status_warning = _alias_value(row, _STATUS_KEYS, _valid_status)
         if status_warning:
             warnings.append(f"claude agents --json row {index} status {status_warning}")
-        if live_status is not None and live_status not in KNOWN_LIVE_STATUSES:
+        # The isinstance guard short-circuits before the frozenset lookup: a
+        # non-string status (dict/list under drift) is itself unrecognized, and
+        # hashing it here would raise TypeError out of a best-effort probe.
+        if live_status is not None and (
+            not isinstance(live_status, str) or live_status not in KNOWN_LIVE_STATUSES
+        ):
             warnings.append(
                 f"claude agents --json row {index} has unrecognized status="
                 f"{live_status!r} (expected one of {sorted(KNOWN_LIVE_STATUSES)}); "

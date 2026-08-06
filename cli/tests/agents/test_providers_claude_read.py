@@ -117,6 +117,24 @@ def test_claude_agents_json_conflicting_aliases_warn_rather_than_pick_silently(m
     assert "aaaaaaaa" in warnings[0] and "bbbbbbbb" in warnings[0]
 
 
+def test_claude_agents_json_unhashable_status_does_not_raise(monkeypatch):
+    """A status alias is accepted as any non-None JSON value, so a dict or list
+    one reaches the conflict check. Comparing aliases through a set would raise
+    TypeError out of a best-effort probe that read.py deliberately does not
+    wrap, crashing `fno agents ls` on drifted output."""
+    payload = {"agents": [{"id": "907fc8c5", "status": {"phase": "run"}, "state": "working"}]}
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {"907fc8c5": {"live_status": {"phase": "run"}}}
+    assert any("conflicting values across aliases" in w for w in warnings), warnings
+    assert any("unrecognized status=" in w for w in warnings), warnings
+
+
 def test_claude_agents_json_success_returns_short_id_map(monkeypatch):
     payload = {
         "agents": [

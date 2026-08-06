@@ -5,8 +5,10 @@ Locked Decision 5 — list and logs never mutate the registry, never flip
 mutations belong to dedicated write verbs (stop, rm, future reconcile).
 
 Locked Decision 6 — rendered ``status`` (registry status corrected read-only
-by family-1 truth) and ``live_status`` (claude's supervisor view, ``Working |
-Needs input | Idle | null``) are separate axes. Both appear in the JSON shape.
+by family-1 truth) and ``live_status`` (claude's supervisor view, Title-case
+``Working | Needs input | Idle`` on older claude builds, lowercase ``working |
+blocked | idle | done`` on current ones, or ``null``) are separate axes. Both
+appear in the JSON shape.
 """
 from __future__ import annotations
 
@@ -145,7 +147,10 @@ def list_agents(
             live_status = (live_map.get(entry.short_id) or {}).get(
                 "live_status"
             )
-        if live_status in (None, "Idle"):
+        # Case-insensitive: current claude emits lowercase "idle", older
+        # builds "Idle". Matching only the Title-case spelling silently
+        # disables this fill against every current binary.
+        if live_status is None or str(live_status).lower() == "idle":
             node_id = truth_status.parse_node_id(entry.name)
             if node_id is not None:
                 truth = truth_status.resolve_truth_status(
