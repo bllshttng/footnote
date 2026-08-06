@@ -261,6 +261,21 @@ def test_unterminated_quote_hiding_a_push_still_fails_closed():
     raise AssertionError("unterminated quote must raise, not parse as safe")
 
 
+def test_heredoc_inside_command_substitution_body_is_not_a_command():
+    # `gh pr create --body "$(cat <<'BODY' ... BODY )"` opens the heredoc INSIDE
+    # a double-quoted $( ), and _find_heredoc_opener deliberately treats a quoted
+    # `<<` as data - so the body never earns the heredoc exemption and its lines
+    # were judged as commands. This shape blocked this fix's own pull request.
+    cmd = (
+        'gh pr create --title "t" --body "$(cat <<\'BODY\'\n'
+        "| real `gh pr merge` | deny |\n"
+        "prose mentioning gh pr merge\n"
+        "BODY\n"
+        ')"'
+    )
+    assert _merge_segment(cmd) is None
+
+
 def test_unbalanced_quote_fallback_is_deny_leaning_for_git():
     # The ValueError fallback in main() used `command.startswith("git")`, which
     # is fail-OPEN: an unterminated quote in a command not literally beginning
