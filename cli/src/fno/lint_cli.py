@@ -345,7 +345,7 @@ def verb_ratchet(
         help="Regenerate scripts/ci/verb-baseline.txt from the live surface.",
     ),
 ) -> None:
-    """Ratchet the REAL verb count (x-a7f0, the unfinished half of x-71b6).
+    """Ratchet the REAL verb count.
 
     ``menu-caps`` caps what ``fno --help`` ADVERTISES; this caps what EXISTS.
     Fails when the live surface and ``scripts/ci/verb-baseline.txt`` disagree,

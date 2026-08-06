@@ -1,4 +1,4 @@
-# Known verb surface held by the CI ratchet (x-a7f0, the unfinished half of x-71b6).
+# Known verb surface held by the CI ratchet.
 # Every invocable leaf verb, one per line, sorted: the fno-py registry (visible
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.

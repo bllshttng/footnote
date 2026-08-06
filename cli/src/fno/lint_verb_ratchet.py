@@ -1,5 +1,5 @@
 """Verb-surface ratchet: hold the REAL verb count down against a checked-in
-baseline (x-a7f0, the unfinished half of x-71b6).
+baseline.
 
 ``fno lint menu-caps`` caps what ``fno --help`` ADVERTISES. It does not cap what
 EXISTS, so the real surface grew to hundreds of leaves while the menu stayed at
@@ -327,7 +327,7 @@ def enumerate_all_leaves() -> list[str]:
 
 
 _HEADER = """\
-# Known verb surface held by the CI ratchet (x-a7f0, the unfinished half of x-71b6).
+# Known verb surface held by the CI ratchet.
 # Every invocable leaf verb, one per line, sorted: the fno-py registry (visible
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.
