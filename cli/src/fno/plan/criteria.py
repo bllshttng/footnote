@@ -69,8 +69,13 @@ class Criterion:
 # AC identifier tokens
 # ---------------------------------------------------------------------------
 
-_AC_TYPED_RE = r"AC\d+-[A-Z]+"  # AC1-HP, AC12-EDGE
-_AC_BARE_RE = r"AC\d+"  # AC1, AC7
+# An optional lowercase letter suffix on the number allows a sub-criterion
+# spelling like AC3b / AC3b-HP (x-cdc5): without it, a letter-suffixed bold
+# label matched NEITHER regex and compiled to nothing - silently dropped from
+# the contract, no error. The suffix is lowercase to stay distinct from the
+# uppercase -TYPE kind suffix. AC3 and AC3-HP still match ([a-z]* is empty).
+_AC_TYPED_RE = r"AC\d+[a-z]*-[A-Z]+"  # AC1-HP, AC12-EDGE, AC3b-HP
+_AC_BARE_RE = r"AC\d+[a-z]*"  # AC1, AC7, AC3b
 _AC_ANY_RE = rf"(?:{_AC_TYPED_RE}|{_AC_BARE_RE})"
 
 # A leading AC token on a label / heading / list item / table cell. The
