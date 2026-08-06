@@ -143,3 +143,20 @@ Delivery failures observed in the field include a `reply --to <id>` that printed
 
 When a send will not land, write the order to a file and mail the path.
 Reading it off disk is the fallback that works.
+
+## When a lane cannot be satisfied, only restated
+
+The `peer` lane gates on a machine verdict: `consume-peer-verdict.sh` emits a passing attestation only for a record declaring zero blocking findings. So a peer that keeps flagging the same point holds the gate shut, however the author responds.
+
+That is usually correct and is the whole point of a fail-closed gate. It has one failure mode worth recognising, because it does not look like a failure while it is happening.
+
+**A gate can assert on computation rather than on honesty.** Some limitations are not defects to be fixed but facts about where the code sits: a config-only renderer cannot resolve which peer is the author's own model, because that needs the session's harness. The honest response is to state the condition - name it, say why it cannot be decided here - and a reviewer that will not accept "I do not know, and here is why I cannot know from here" leaves exactly one way to clear the gate: take the dependency the file was designed to avoid. The reviewer is then pushing an architecture change through a review lane, which is not what a review lane is for.
+
+Five consecutive peer passes on one PR each found something real, and one point survived every round: a stated-not-computed limitation the peer would not accept. Five real findings is not diminishing returns and is not a reason to stop. But the surviving point stopped being evidence about the diff and became evidence about the gate.
+
+So, as a king: **count the restatements, not the rounds.** A finding restated a third time against a correctly-narrowed claim is a design signal, not a review outcome. Rule on it rather than ordering another pass. There are exactly two honest rulings, and neither is a quiet attestation:
+
+- **Authorize the dependency**, as its own PR. Never folded into the one under review - a PR five rounds deep and green on everything else is the worst place to land an architecture change.
+- **Rule the expectation unsatisfiable from that file**, ship with the lane OPENLY unmet, and put the reasoning in the PR body.
+
+An unmet gate with a stated reason is honest. A gate cleared by a claim nobody could verify is the thing every rule in this file exists to prevent.
