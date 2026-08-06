@@ -7,7 +7,6 @@ import os
 import pytest
 from typer.testing import CliRunner
 
-from fno.agents import spawn_gate
 from fno.agents.registry import AgentEntry
 
 
