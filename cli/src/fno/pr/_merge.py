@@ -885,6 +885,12 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         )
         return 2
 
+    # The covered head pins the merge so a racing push after the coverage check
+    # cannot land an unreviewed head via `--auto`'s queue (x-0eaf TOCTOU). The
+    # staleness check above already refused a current mismatch; this makes gh
+    # itself refuse if the head moves between here and the merge.
+    covered_head = (cov.get("head_sha") or "") if cov else ""
+
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
     # PR whose head is behind its base is held for `fno pr rebase` first, so a
@@ -914,7 +920,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                     err=False,
                 )
                 return 2
-        return _do_merge(pr_number, auto_merge, repo)
+        return _do_merge(pr_number, auto_merge, repo, covered_head)
 
 
 #: gh's refusal when a repo has not enabled the auto-merge feature. `--auto` is
@@ -965,7 +971,7 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
-def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
+def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
     strategy = auto_merge.merge_strategy
@@ -974,6 +980,11 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         cmd.append("--delete-branch")
     if auto_merge.require_checks_pass:
         cmd.append("--auto")
+    # x-0eaf: pin the merge to the covered head so a racing push cannot land an
+    # unreviewed commit - including via `--auto`'s queue, which otherwise merges
+    # whatever head is latest when checks pass. gh refuses if the head moved.
+    if covered_head:
+        cmd += ["--match-head-commit", covered_head]
     # Set only on the no-auto fallback below, where THIS process is the one
     # vouching for the checks. The worktree recovery path reads it so its
     # server-side merge is pinned to the same SHA the verdict came from.
@@ -1049,7 +1060,8 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         # possibly red) commit. Server-side required-check rules would cover this
         # too, but require_checks_pass exists precisely for repos without them.
         cmd_now = [arg for arg in cmd if arg != "--auto"]
-        cmd_now += ["--match-head-commit", verified_head]
+        if "--match-head-commit" not in cmd_now:
+            cmd_now += ["--match-head-commit", verified_head]
         try:
             res = _gh(cmd_now, repo)
         except ToolMissing:

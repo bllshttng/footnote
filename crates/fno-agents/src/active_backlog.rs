@@ -303,6 +303,20 @@ fn map_outcome(
         return DrainOutcome::Dispatched { node };
     }
 
+    // DoneUnreviewed (x-0eaf): green but nothing reviewed. A SUCCESSFUL dispatch
+    // for the daemon - the node closes later at a human merge or the reconcile
+    // path, exactly like DoneAwaitingMerge. Keep it out of the cross-tick
+    // circuit breaker so an unreviewed-but-green terminal does not auto-defer
+    // the node as if it had failed.
+    if matches!(last.evidence.reason, TerminationReason::DoneUnreviewed) {
+        breaker.record_success(&node);
+        let _ = journal.append(
+            "active_backlog_dispatched",
+            json!({"node_id": node, "termination": "DoneUnreviewed", "awaiting_review": true}),
+        );
+        return DrainOutcome::Dispatched { node };
+    }
+
     match &last.close {
         CloseOutcome::Closed => {
             breaker.record_success(&node);

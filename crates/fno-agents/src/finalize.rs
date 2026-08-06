@@ -1758,10 +1758,13 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
 /// Return why configured optional-review evidence forbids native auto-merge,
 /// or `None` when arming may proceed.
 ///
-/// This is deliberately an authorization check, not a completion gate. A
-/// missing or usage-limited optional App still lets finalization complete and
-/// leaves the green PR available for a human merge; it only prevents GitHub
-/// from merging without the review coverage the operator configured.
+/// This is called only on a `DonePRGreen` terminal, which (x-0eaf) already
+/// requires coverage > 0 across both producer axes. Review coverage is therefore
+/// the loop-check gate's authority, not this function's: a quota-refused or
+/// silent optional App no longer withholds native auto-merge when a local lane
+/// covered the diff (that recreates the very wedge this node exists to escape).
+/// What remains is a fail-closed read check - a transient gh/parse failure
+/// refuses to arm rather than merge on unread evidence.
 fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let optional_apps = crate::agents_config::review_optional_apps(cwd);
     if optional_apps.is_empty() {
@@ -1794,46 +1797,13 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
             return Some("optional-review-read-failed".to_string());
         }
     };
-    let Some(reviews) = payload.get("reviews").and_then(Value::as_array) else {
+    if payload.get("reviews").and_then(Value::as_array).is_none()
+        || payload.get("comments").and_then(Value::as_array).is_none()
+    {
         return Some("optional-review-read-failed".to_string());
-    };
-    let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
-        return Some("optional-review-read-failed".to_string());
-    };
-
-    for app in optional_apps {
-        let reviewed = reviews.iter().any(|review| {
-            let login = review
-                .pointer("/author/login")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let state = review.get("state").and_then(Value::as_str).unwrap_or("");
-            !state.is_empty() && crate::loopcheck::login_matches_bot(login, &app)
-        });
-        if reviewed {
-            continue;
-        }
-
-        let usage_limited = comments.iter().any(|comment| {
-            let login = comment
-                .pointer("/author/login")
-                .and_then(Value::as_str)
-                .unwrap_or("");
-            let body = comment
-                .get("body")
-                .and_then(Value::as_str)
-                .unwrap_or("")
-                .to_lowercase();
-            crate::loopcheck::login_matches_bot(login, &app)
-                && crate::loopcheck::body_is_usage_limit(&body)
-        });
-        if usage_limited {
-            return Some(format!("optional-review-usage-limited:{app}"));
-        }
-
-        return Some(format!("optional-review-outstanding:{app}"));
     }
-
+    // x-0eaf: coverage (DidPRGreen requires > 0) is the authority; a quota-refused
+    // or absent optional App does not withhold when a local lane covered.
     None
 }
 

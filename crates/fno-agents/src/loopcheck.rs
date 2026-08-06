@@ -1743,9 +1743,9 @@ fn read_pr_info(
         )
     };
 
-    // Emit coverage every gate eval so the Python readers (`fno pr merge`,
-    // `fno pr status`) and audit see one coherent, fresh number rather than
-    // recomputing it (the design's Ownership rule: loopcheck computes, Python
+    // Emit coverage every gate eval so the Python readers (the merge primitive
+    // and the polling command) and audit see one coherent, fresh number rather
+    // than recomputing it (the Ownership rule: loopcheck computes, Python
     // reads). Skipped for the no-PR early returns above.
     if number > 0 {
         append_loop_event(
@@ -6870,6 +6870,10 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: vec![],
+            },
         };
         let reason = build_block_reason(&pr, "abc", true);
         assert!(
@@ -6946,6 +6950,10 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: vec![],
+            },
         }
     }
 
