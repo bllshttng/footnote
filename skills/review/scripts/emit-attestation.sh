@@ -25,11 +25,30 @@ head_sha="$(git rev-parse HEAD 2>/dev/null)" || {
   exit 1
 }
 
+# Record the attesting ACTOR alongside what was certified (x-27c5): without a
+# session, an author attesting its own diff is indistinguishable from an
+# independent reviewer, which clears config.review.reviewers with no trace.
+# session_id + head_sha is the authorship join. Read from the live session
+# manifest with the same grep the stop hook uses
+# (hooks/target-stop-hook.sh). Both stay empty when no manifest is bound; the
+# emit chokepoint then rejects an actorless attestation rather than lie.
+repo_root="$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")"
+session_id=""; harness=""
+if [[ -f "$repo_root/.fno/target-state.md" ]]; then
+  session_id=$(grep '^session_id:' "$repo_root/.fno/target-state.md" \
+    | head -1 | sed 's/^session_id:[[:space:]]*//' | tr -d '[:space:]' || true)
+  harness=$(grep '^harness:' "$repo_root/.fno/target-state.md" \
+    | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
+fi
+
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno event emit then validates envelope + required
 # fields + the verdict enum before writing.
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict}')"
-fno event emit -t review_attestation -s target -d "$data"
+  --arg session_id "$session_id" --arg harness "$harness" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness}')"
+# FNO overrides the binary (defaults to the mux); tests point it at fno-py,
+# which is on PATH in the uv test env where the mux is not installed.
+"${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown}" >&2
