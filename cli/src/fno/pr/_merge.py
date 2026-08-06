@@ -233,7 +233,15 @@ def _review_lane_configured(repo: str) -> bool:
 
         from fno.config import load_settings_for_repo
 
-        r = load_settings_for_repo(Path(repo)).review
+        # Resolve the git toplevel first: load_settings_for_repo reads
+        # <arg>/.fno/ with NO upward walk, so a merge invoked from a
+        # subdirectory would see only the global layer, report "no lane", and
+        # short-circuit the coverage guard - letting an unreviewed PR merge.
+        # _repo_state_dir already does rev-parse --show-toplevel with a cwd
+        # fallback, and the manifest and events reads in this file resolve the
+        # root the same way.
+        root = Path(_repo_state_dir(repo)).parent
+        r = load_settings_for_repo(root).review
         if r.required_bots or r.optional_apps or r.reviewers:
             return True
         if r.peer_identity:
