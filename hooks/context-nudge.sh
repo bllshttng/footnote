@@ -1,0 +1,240 @@
+#!/usr/bin/env bash
+# hooks/context-nudge.sh - Stop hook: one context probe for EVERY session, one
+# crown-only orphan check. Used to be king-only (king-context-nudge.sh); the
+# context nudge generalizes to every session because the probe already ran for
+# every session and was discarded at the old crown gate.
+#
+# EVERY session gets the CONTEXT check (a): past the context trigger, block once
+# per 10% band. The trigger is crown-shaped: a crowned king hands off EARLIER
+# (king_used_pct_trigger, default 40) than any other session (used_pct_trigger,
+# default 50), because a king's degradation propagates into every ruling it
+# issues and every worker it routes, and the handoff itself costs context.
+#
+# A CROWNED king additionally gets the ORPHAN check (b): did it spawn workers
+# that are still live with no resolution recorded? A reign that spawns workers
+# cannot be a pure pass: abdicating now leaves them nobody to mail at review.
+# Check (b) is crown-only; only check (a) generalizes.
+#
+# Both BLOCK (the only Stop output documented to reach the model on Claude and
+# Codex; an allow's systemMessage is informational-only / lost on Codex) and
+# emit an event (session_context_nudge / king_context_nudge / king_orphan_block)
+# so `fno event audit` can prove the hook actually fired in a real session. That
+# arming proof is the one question its predecessor (arm-handoff-precompact.sh,
+# gated on a pid dead ~1s after init) could never answer.
+#
+# The context check does NOT depend on the registry. The probe (`fno context`)
+# is the only truthful pressure source: it counts tokens from the transcript and
+# owns its denominator. The registry is BEST-EFFORT here, used only to pick the
+# king trigger + king message and to run the orphan check. A missing row or an
+# unreadable registry is treated as non-crowned, which still nudges only on REAL
+# transcript pressure, so a registry problem can never produce a false handoff.
+# This is why context pressure has ONE measurement path; a second-hand percentage
+# whose denominator we cannot see was deleted from context-monitor.js for cause.
+#
+# EVERY error path exits 0 with no block output. A non-zero Stop hook is not an
+# allow, and a probe/registry problem must never start blocking every session's
+# turn end. The check degrades toward silence, never toward a false handoff. The
+# same fail-safe direction as the probe: unreadable -> no pressure.
+#
+# What it must NOT gate on (the arm-handoff lesson, AC9): no pid-liveness probe
+# (a pid can only prove life, never death, and the init wrapper pid died ~1s
+# after init), no read of the target manifest (a king pass has none, so keying
+# on one would deliver this to zero kings), no reconstructed session identity.
+# Every signal here is either handed to the hook in its payload (transcript_path,
+# session_id) or read from live external state (the registry, the carveout
+# ledger, config) at fire time.
+set -uo pipefail
+
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/with-timeout.sh
+source "$PLUGIN_ROOT/scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+
+FNO_DIR="${FNO_DIR:-.fno}"
+REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
+
+emit_event() {
+    # Append to both project + global logs (no jq; safe interpolation). Same
+    # shape target-stop-hook's emit_event_both uses.
+    local etype="$1" data="$2" ts line
+    ts=$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null)
+    line="{\"ts\":\"${ts}\",\"type\":\"${etype}\",\"source\":\"hook\",\"data\":${data}}"
+    mkdir -p "${REPO_ROOT}/.fno" "${HOME}/.fno" 2>/dev/null || true
+    echo "$line" >> "${REPO_ROOT}/.fno/events.jsonl" 2>/dev/null || true
+    echo "$line" >> "${HOME}/.fno/events.jsonl" 2>/dev/null || true
+}
+
+# ── 1. Read stdin: transcript_path + session_id from the Stop payload ─────────
+# These are the two identifiers the hook is HANDED. It reconstructs nothing.
+HOOK_INPUT=$(cat)
+TRANSCRIPT=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"transcript_path"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+SESSION_ID=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
+[[ -z "$SESSION_ID" ]] && SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
+
+# No transcript handed to us -> not a real fire. The context check needs it; an
+# orphan-only fire on a payload with no transcript_path would fire on synthetic
+# input. Exit 0.
+[[ -z "$TRANSCRIPT" || ! -f "$TRANSCRIPT" ]] && exit 0
+# transcript basename is the one identifier the hook is HANDED rather than
+# reconstructs, so latches key on it: two sessions sharing a symlinked .fno
+# never consume each other's latch (same fix target-stop-hook applied).
+TBASE="$(basename "$TRANSCRIPT" .jsonl 2>/dev/null || echo "$TRANSCRIPT")"
+
+# ── 2. Both triggers from config (general 50, king 40). ───────────────────────
+GENERAL_TRIGGER="50"
+KING_TRIGGER="40"
+if command -v fno >/dev/null 2>&1; then
+    _t=$(with_timeout 3 fno config get target.handoff.used_pct_trigger 2>/dev/null || true)
+    case "$_t" in
+        ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 50
+        *) GENERAL_TRIGGER="$_t" ;;
+    esac
+    _t=$(with_timeout 3 fno config get target.handoff.king_used_pct_trigger 2>/dev/null || true)
+    case "$_t" in
+        ''|*[!0-9]*) ;;          # unreadable / non-numeric -> keep default 40
+        *) KING_TRIGGER="$_t" ;;
+    esac
+fi
+
+# ── 3. Context reading (one probe). Unreadable -> no pressure. ────────────────
+USED_PCT=""
+USED_TOKENS=""
+WINDOW_TOKENS=""
+if command -v fno >/dev/null 2>&1 && command -v jq >/dev/null 2>&1; then
+    PROBE_OUT=$(with_timeout 5 fno context --transcript "$TRANSCRIPT" --json 2>/dev/null || true)
+    # jq, not sed: BSD sed (macOS) does not support `[0-9]\+` in basic regex, and
+    # the hook already requires jq for the registry read below.
+    _p=$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // empty' 2>/dev/null)
+    case "$_p" in
+        ''|*[!0-9]*) ;;          # unreadable -> USED_PCT stays empty (no pressure)
+        *) USED_PCT="$_p"
+           USED_TOKENS=$(printf '%s' "$PROBE_OUT" | jq -r '.used_tokens // empty' 2>/dev/null)
+           WINDOW_TOKENS=$(printf '%s' "$PROBE_OUT" | jq -r '.window_tokens // empty' 2>/dev/null) ;;
+    esac
+fi
+
+# ── 4. Registry read (BEST-EFFORT): crown + live children. ────────────────────
+# `fno agents registry-json` is a daemon-free file read (load_registry), NOT
+# `fno agents list` (which is Rust-routed and lazy-starts the daemon for
+# live-status enrichment - a Stop hook must never stall on a daemon start).
+# Emits structured crown_level/crown_scope/spawned_by_session per row.
+#
+# BEST-EFFORT: a missing/unreadable registry or a session with no row is treated
+# as non-crowned. The context check still fires at the general trigger on REAL
+# pressure; the orphan check (crown-only) is skipped. The registry refines WHICH
+# trigger and message apply; it is never the source of pressure truth.
+CROWN_LEVEL=""
+CROWN_SCOPE=""
+ORPHANS=""
+ORPHAN_COUNT=0
+if command -v fno >/dev/null 2>&1; then
+    AGENTS_JSON=$(with_timeout 5 fno agents registry-json 2>/dev/null || true)
+    if printf '%s' "$AGENTS_JSON" | jq -e '.agents' >/dev/null 2>&1; then
+        # This session's row (by session_id). No row -> non-crowned (not an exit).
+        MY_ROW=$(printf '%s' "$AGENTS_JSON" | jq -c --arg sid "$SESSION_ID" \
+            '.agents[] | select(.session_id == $sid or .harness_session_id == $sid)' 2>/dev/null | head -1)
+        if [[ -n "$MY_ROW" ]]; then
+            CROWN_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)
+            CROWN_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
+        fi
+        # Active children this session spawned (only acted on for a king below).
+        # Active = NOT in the terminal set (exited/orphaned/failed/permanent_dead);
+        # covers spawning, ready, idle, busy, live, restarting - all are workers
+        # that may still need their king at review. Uses explicit inequalities
+        # (not jq IN(), which is jq 1.7+ and absent on CI's ubuntu jq 1.6 - the
+        # P1 fix's first attempt used IN() and failed silently on Linux).
+        ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+            [.agents[] | select(
+                .spawned_by_session == $sid
+                and (.status // "exited") != "exited"
+                and (.status // "exited") != "orphaned"
+                and (.status // "exited") != "failed"
+                and (.status // "exited") != "permanent_dead"
+            )] | map(.name) | join(", ")' \
+            2>/dev/null)
+        ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
+    fi
+fi
+
+# Crowned -> king trigger (40) + king posture; every other session -> general
+# trigger (50). The crown determination is best-effort (above); a registry miss
+# means the general trigger, never a skipped nudge on real pressure.
+IS_KING=0
+EFFECTIVE_TRIGGER="$GENERAL_TRIGGER"
+if [[ -n "$CROWN_LEVEL" ]]; then
+    IS_KING=1
+    EFFECTIVE_TRIGGER="$KING_TRIGGER"
+fi
+
+# ── 5. Band index (shared by both latches). No reading -> band "0" so the ─────
+# orphan check can still latch once; the context check is skipped without a reading.
+BAND="0"
+if [[ -n "$USED_PCT" ]]; then
+    BAND=$(( USED_PCT / 10 ))
+fi
+CTX_LATCH="${FNO_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
+ORPHAN_LATCH="${FNO_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
+
+REASON=""
+
+# ── 6. Check (a): context pressure (EVERY session). ──────────────────────────
+if [[ -n "$USED_PCT" && "$USED_PCT" -ge "$EFFECTIVE_TRIGGER" && ! -f "$CTX_LATCH" ]]; then
+    touch "$CTX_LATCH" 2>/dev/null || true
+    if [[ "$IS_KING" -eq 1 ]]; then
+        emit_event "king_context_nudge" \
+            "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. Next: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints."
+    else
+        emit_event "session_context_nudge" \
+            "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now (/compact) to reset: your session id, mail handle, and claims all survive a compact, and a /target session's PreCompact handoff arms automatically on the next compact. Or wrap up the current task so the next turn is not running on stale context."
+    fi
+fi
+
+# ── 7. Check (b): orphaned live children (CROWN-ONLY; latches INDEPENDENTLY). ─
+if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
+    # Resolution 3: a carveout carrying THIS scope (structured field, not free
+    # text) means the king stated the orphaning and fell back to advisory
+    # self-review. Scope match is the discriminator, or any carveout silences it.
+    RESOLVED=0
+    if command -v fno >/dev/null 2>&1; then
+        CARVEOUTS=$(with_timeout 3 fno carveout list --json 2>/dev/null || true)
+        # carveout list --json emits JSONL (one object per line), so stream-filter
+        # rather than map (which needs an array). Structured .scope field match,
+        # Only a RECENT carveout (last 24h) counts: a historical one from a
+        # previous reign must not permanently suppress orphan warnings for later
+        # reigns over the same scope. ISO-8601 UTC strings compare lexicographically.
+        _cutoff=$(date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '')
+        if [[ -n "$_cutoff" ]]; then
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" --arg c "$_cutoff" \
+                'select(.scope == $s and (.ts // "0") >= $c)' 2>/dev/null | grep -c . || true)
+        else
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" \
+                'select(.scope == $s)' 2>/dev/null | grep -c . || true)
+        fi
+        [[ "$_hit" =~ ^[0-9]+$ && "$_hit" -gt 0 ]] && RESOLVED=1
+    fi
+    if [[ "$RESOLVED" -eq 0 ]]; then
+        touch "$ORPHAN_LATCH" 2>/dev/null || true
+        emit_event "king_orphan_block" \
+            "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
+        ORPHAN_REASON="You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown over with 'fno agents crown <handle> --scope ${CROWN_SCOPE} --succeed'; (3) record that these workers are review-orphaned with 'fno carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
+        if [[ -n "$REASON" ]]; then
+            REASON="${REASON}  ||  ${ORPHAN_REASON}"
+        else
+            REASON="$ORPHAN_REASON"
+        fi
+    fi
+fi
+
+# ── 8. Emit one block decision if either check fired; else allow (exit 0). ────
+if [[ -n "$REASON" ]]; then
+    # block is the only Stop output that reaches the model on all harnesses.
+    jq -nc --arg r "$REASON" '{decision:"block", reason:$r}' 2>/dev/null \
+        || printf '{"decision":"block","reason":%s}\n' "$(jq -naR --arg r "$REASON" '$r' 2>/dev/null || printf '"%s"' "$REASON")"
+    exit 0
+fi
+exit 0

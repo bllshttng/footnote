@@ -1,19 +1,22 @@
 #!/usr/bin/env bash
-# test-king-context-nudge.sh - king Stop hook: one crown read, two checks (x-7685).
+# test-context-nudge.sh - Stop hook: context nudge for EVERY session + crown-only
+# orphan check.
 #
 # Drives the REAL hook against the REAL worktree fno (PATH wrapper, like
 # test-handoff's FNO_PYTHON discovery) with isolated state, a REAL fixture
 # transcript the probe reads, and a real-shape Claude Stop payload. Covers:
-#   AC5  real fire path -> decision:block whose reason carries the measured pct
-#   AC7  negative controls (uncrowned, below trigger, same-band latch, next band)
+#   AC5  crowned real fire path -> decision:block whose reason carries the pct
+#   AC7  negative controls (below trigger, same-band latch, next band)
 #   AC9  no kill -0 / owner_pid / target-state read in the hook
 #   AC14 orphan block names both workers + the three resolutions
 #   AC15 a carveout carrying the scope suppresses the orphan block (field match)
 #   AC16 both checks fire in one output; orphan resolution does not suppress ctx
+#   AC17 every-session nudge: uncrowned past the general trigger blocks + emits
+#        session_context_nudge; below the general trigger does not
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK="$REPO_ROOT/hooks/king-context-nudge.sh"
+HOOK="$REPO_ROOT/hooks/context-nudge.sh"
 SCOPE="x-test-epic"
 KING_SID="king-test-session-id"
 
@@ -22,7 +25,7 @@ fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
 bad()  { echo "FAIL: $1"; fail=$((fail+1)); }
 assert_contains() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (needle='$3' not in output)"; }
-assert_absent()   { [[ "$2" != *"$3"* ]] && ok "$1" || bad "$1 (unexpected '$3')"; }
+assert_absent()   { [[ "$2" != *"$3"* ]] && ok "$1" || bad "$1"; }
 assert_eq()       { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (expected='$3' actual='$2')"; }
 
 # --- FNO_PYTHON discovery (mirror test-handoff.sh): an interpreter that can ---
@@ -90,7 +93,7 @@ write_transcript() {  # write_transcript <path> <input_tokens>
   jq -nc --argjson t "$2" '{type:"assistant",message:{model:"claude-sonnet-4-6",usage:{input_tokens:$t,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$1"
 }
 
-# Build a real-shape Stop payload pointing at a sandbox transcript + the king.
+# Build a real-shape Stop payload pointing at a sandbox transcript + the session.
 payload() {  # payload <transcript-path>
   jq -nc --arg t "$1" --arg s "$KING_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:false}'
@@ -123,7 +126,7 @@ run_hook "$(payload "$SBX/t.jsonl")"
 assert_absent "AC7: second fire same band is latched" "$OUT" '"decision":"block"'
 
 # crowned but BELOW trigger -> exit 0, no block, no output
-rm -f "$SBX/.fno"/.king-nudge-* 2>/dev/null
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
 write_transcript "$SBX/low.jsonl" 300000   # 30% < 40
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_eq     "AC7: below trigger exits 0" "$RC" "0"
@@ -134,16 +137,29 @@ write_transcript "$SBX/t.jsonl" 600000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC7: next band blocks again" "$OUT" '60% used'
 
-# uncrowned -> exit 0, no block (clear latches + registry first)
-rm -f "$SBX/.fno"/.king-nudge-* 2>/dev/null
+# === AC17: every-session context nudge (uncrowned) ============================
+# The probe ran for every session at the old crown gate and was discarded; now
+# an uncrowned session past the GENERAL trigger (50) blocks with its own message
+# + session_context_nudge event. Clear latches + registry first.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
 write_registry no no
-write_transcript "$SBX/t.jsonl" 500000
+write_transcript "$SBX/t.jsonl" 500000   # 50% >= general trigger 50
 run_hook "$(payload "$SBX/t.jsonl")"
-assert_eq     "AC7: uncrowned exits 0" "$RC" "0"
-assert_absent "AC7: uncrowned no block" "$OUT" '"decision":"block"'
+assert_eq     "AC17: uncrowned past trigger exits 0" "$RC" "0"
+assert_contains "AC17: uncrowned decision block" "$OUT" '"decision":"block"'
+assert_contains "AC17: reason carries measured 50%" "$OUT" '50% used'
+assert_contains "AC17: reason names the general trigger" "$OUT" 'session handoff trigger (50%)'
+events_has session_context_nudge && ok "AC17: session_context_nudge event emitted" || bad "AC17: no session_context_nudge event"
+
+# uncrowned BELOW the general trigger -> exit 0, no block
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/low.jsonl" 300000   # 30% < 50
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_eq     "AC17: uncrowned below trigger exits 0" "$RC" "0"
+assert_absent "AC17: uncrowned below trigger no block" "$OUT" '"decision":"block"'
 
 # === AC14: orphan block names both workers + the three resolutions ============
-rm -f "$SBX/.fno"/.king-nudge-* 2>/dev/null
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
 write_registry yes yes                       # crowned king + 2 live children
 write_transcript "$SBX/low.jsonl" 300000     # below trigger -> isolate orphan check
 run_hook "$(payload "$SBX/low.jsonl")"
@@ -156,21 +172,21 @@ assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
 events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || bad "AC14: no king_orphan_block event"
 
 # === AC15: a carveout carrying the scope suppresses the orphan block ==========
-rm -f "$SBX/.fno"/.king-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
-rm -f "$SBX/.fno"/.king-nudge-orphan-* 2>/dev/null
+rm -f "$SBX/.fno"/.context-nudge-ctx-* 2>/dev/null      # keep ctx latch; clear orphan latch
+rm -f "$SBX/.fno"/.context-nudge-orphan-* 2>/dev/null
 fno carveout add -k deferred --scope "$SCOPE" "workers review-orphaned; advisory self-review" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "AC15: carveout suppresses orphan block" "$OUT" 'cannot be a pure pass'
 
 # a carveout for a DIFFERENT scope does NOT suppress
-rm -f "$SBX/.fno"/.king-nudge-orphan-* 2>/dev/null
+rm -f "$SBX/.fno"/.context-nudge-orphan-* 2>/dev/null
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true   # drop the matching-scope carveout from above
 fno carveout add -k deferred --scope "other-scope" "unrelated" >/dev/null 2>&1
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_contains "AC15: wrong-scope carveout does not suppress" "$OUT" 'cannot be a pure pass'
 
 # === AC16: both checks fire in one output; orphan resolved does not kill ctx ===
-rm -f "$SBX/.fno"/.king-nudge-* 2>/dev/null
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
 # remove the matching carveout so orphans are unresolved again; keep king + children
 fno carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by truncating)
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true
