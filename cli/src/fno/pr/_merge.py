@@ -835,7 +835,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         # a head-fetch failure does not itself block (the event is from the
         # current autonomous flow), but a confirmed mismatch refuses.
         head = _pr_head_oid(pr_number, repo)
-        ev_head = cov.get("head_sha")
+        ev_head = cov.get("head_sha") if cov else None
         if head and ev_head and head != ev_head:
             covered = False
     if not covered:

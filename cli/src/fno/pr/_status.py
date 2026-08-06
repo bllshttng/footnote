@@ -197,7 +197,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
     # review read above. Read from the review_coverage event so a human and the
     # loop see one number (Ownership: Rust computes, Python reads).
     try:
-        coverage = read_review_coverage(pr, cwd)
+        coverage = read_review_coverage(int(pr), cwd)
     except Exception:
         coverage = {"coverage": "unknown", "reviewed_count": None}
 
