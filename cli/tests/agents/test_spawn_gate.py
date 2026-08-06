@@ -169,6 +169,50 @@ class TestCensus:
         )
         assert spawn_gate.census().count == 1
 
+    def test_subagent_source_is_outside_slot_arithmetic(self, tmp_path, monkeypatch):
+        """AC6-INV (x-af92): the sidechain discovery source never feeds census().
+
+        census() counts only live registry rows + headless slot claims;
+        subagents live in the projects transcript store, which census does not
+        read. This pins both halves: census() never calls the sidechain reader,
+        and sidechain transcripts on disk do not move slot_count, so a
+        display-only visibility feature can never alter spawn admission.
+        """
+        monkeypatch.setattr(
+            "fno.agents.registry.load_registry",
+            lambda: [_row("w1", status="busy", pid=ALIVE, short_id="aaaa0000")],
+        )
+        # Sidechain transcripts present in the projects store census never reads.
+        sdir = tmp_path / "projects" / "-c" / "p-1-2-3-4-5" / "subagents"
+        sdir.mkdir(parents=True)
+        (sdir / "agent-dead0000000001.jsonl").write_text(
+            json.dumps(
+                {
+                    "isSidechain": True,
+                    "agentId": "dead0000000001",
+                    "sessionId": "p-1-2-3-4-5",
+                    "type": "user",
+                }
+            )
+            + "\n"
+        )
+        monkeypatch.setenv("FNO_CLAUDE_PROJECTS_DIR", str(tmp_path / "projects"))
+
+        # If a future change wires the sidechain reader into census(), this fires.
+        def _fail_if_called(*a, **k):
+            raise AssertionError(
+                "census() must not call discover_subagents; the sidechain "
+                "source is display-only (x-af92 AC6-INV)"
+            )
+
+        monkeypatch.setattr(
+            "fno.agents.discover.discover_subagents", _fail_if_called
+        )
+
+        c = spawn_gate.census()
+        assert c.slot_count == 1  # the one live registry row; nothing from sidechains
+        assert not any("dead0000000001" in (w.name or "") for w in c.workers)
+
 
 class TestRamFloor:
     def test_disabled_floor_never_fires(self, monkeypatch):
