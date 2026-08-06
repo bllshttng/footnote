@@ -58,6 +58,14 @@ The review runs on the session's current model unless `review_model` is set in `
 
 Source: codex `slash_command.rs` (the in-session verb) and `exec/src/cli.rs` (the non-interactive one).
 
+### opencode
+
+**There is no review verb.** Measured twice independently on 1.14.50: 22 commands, none of them `review`. The nearest thing is `opencode run "<prompt>"`, which is a general prompt runner, not a review lane.
+
+This is a UX defect, not a gating one, and the distinction matters because the two get conflated. `resolved_local_peer_reviewers_for_author` returns a SINGLE composite `peer` entry, not one per configured peer, so **any one** peer pass clears the whole gate. A repo with `peers = ["codex", "opencode"]` is perfectly clearable through codex.
+
+What actually goes wrong: a teammate handed `opencode` as its peer has no verb to run and nothing telling it to pick the other one. Name the peer you mean, rather than letting a worker choose from a list where one entry is a dead end.
+
 ## What you mail
 
 Name the verb, name the diff, and state the two rules that keep the answer honest:
@@ -74,13 +82,21 @@ Verify each finding against source before accepting it. The reviewer is advisory
 
 ## When the verb refuses
 
-The invocation has been reported to hit a `disable-model-invocation` refusal intermittently: one teammate was refused on attempts one and two, and a byte-identical third attempt launched.
-Another session reported it launching on the first attempt with no refusal at all.
+The invocation can hit a `disable-model-invocation` refusal. The strongest evidence about when comes from a paired control: the same mail body, in the same format, minutes apart, to two sessions differing only in model lane.
 
-**The cause of that variance is unknown.** Do not offer one, and do not let a refusal become an impossibility claim - that inference has been drawn and retracted repeatedly, always from a real observation and always wrong.
+| session lane | outcome |
+|---|---|
+| claude model | fired on attempt one |
+| zai / glm-routed | refused twice |
 
-So: **retry is legitimate.** An identical retry has been observed to succeed after a refusal.
-After a few attempts, the teammate reports the refusal string verbatim and stops.
+So **the session's model lane is the leading candidate, not the mail envelope and not the verb's position in the message body** - both of which were ruled decisive at various points and neither of which survived the control.
+
+Treat that as the best current explanation, not a settled cause. It does not account for everything: one teammate on an unrecorded lane was refused twice and launched on a byte-identical third attempt, and nobody captured which lane it was on.
+
+Two rules follow, and they do not depend on the cause being settled:
+
+- **Retry is legitimate.** An identical retry has been observed to succeed after a refusal.
+- **A refusal is never an impossibility claim.** That inference has been drawn from real observations and retracted at least four times in a single day. After a few attempts, the teammate reports the refusal string verbatim and stops.
 
 ## A substitute is never silent
 
