@@ -161,6 +161,24 @@ def _coverage_refused_reason(cov: Optional[dict]) -> str:
     return f"0 reviewed (covered count={cov.get('reviewed_count')})"
 
 
+def _review_lane_configured(repo: str) -> bool:
+    """Whether any review lane (required/optional/reviewers/peers) is configured.
+
+    Fail-closed (True) on config error: a misread config must not bypass the
+    coverage guard. (x-0eaf boundary: a stock install with no lane opted out of
+    review, so the guard does not apply.)
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        r = load_settings_for_repo(Path(repo)).review
+        return bool(r.required_bots or r.optional_apps or r.reviewers or r.external_reviewers)
+    except Exception:
+        return True
+
+
 # ---------------------------------------------------------------------------
 # Post-merge side-effects (best-effort; never change the merge outcome)
 # ---------------------------------------------------------------------------
@@ -822,14 +840,18 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # refuses (fail closed). Runs only when auto_merge is enabled (step 1), so a
     # manual `gh pr merge` on a non-auto-merge repo is untouched - the
     # discriminator is auto_merge.enabled, not attendance. After the gh check so
-    # a missing gh still reports its own exit 127.
+    # a missing gh still reports its own exit 127. Skipped when no review lane is
+    # configured (x-0eaf boundary: a stock install opted out of review).
     cov = _review_coverage_for_pr(pr_number, repo)
     covered = (
-        cov is not None
-        and cov.get("coverage") == "covered"
-        and int(cov.get("reviewed_count") or 0) > 0
+        not _review_lane_configured(repo)
+        or (
+            cov is not None
+            and cov.get("coverage") == "covered"
+            and int(cov.get("reviewed_count") or 0) > 0
+        )
     )
-    if covered:
+    if covered and cov is not None:
         # Staleness: the event pins a head; if the PR head moved after the gate
         # eval, the coverage no longer describes what would merge. Best-effort:
         # a head-fetch failure does not itself block (the event is from the

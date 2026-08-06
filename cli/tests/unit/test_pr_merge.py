@@ -84,6 +84,7 @@ def enabled(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
     )
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
 
 
 def _last_json(capsys, *, stream="out") -> dict:
