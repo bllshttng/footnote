@@ -103,6 +103,27 @@ def test_bundle_lint_passes_for_current_state():
     assert "self-contained" in result.stdout
 
 
+def test_bundle_check_emits_terminal_verdict_line(monkeypatch):
+    """x-6a8e: ``fno bundle check`` prints a terminal verdict line from the same
+    code path that sets the exit code, so ``fno bundle check | tail`` cannot mask
+    a drift failure behind the pipe's exit. The verdict is the LAST line and
+    greppable; the exit code is preserved and is no longer the only signal."""
+    import fno.bundle.cli as bc
+
+    # FAIL path: underlying freshness script reports drift (rc=1).
+    monkeypatch.setattr(bc, "_forward", lambda verb, args: 1)
+    result = runner.invoke(app, ["bundle", "check"])
+    assert result.exit_code == 1
+    lines = result.stdout.strip().splitlines()
+    assert lines[-1] == "fno bundle check: FAIL (rc=1)", result.stdout
+
+    # PASS path: rc=0.
+    monkeypatch.setattr(bc, "_forward", lambda verb, args: 0)
+    result = runner.invoke(app, ["bundle", "check"])
+    assert result.exit_code == 0
+    assert result.stdout.strip().splitlines()[-1] == "fno bundle check: PASS"
+
+
 def test_bundle_missing_canonical_script_reports_diagnostic(tmp_path, monkeypatch):
     """When the canonical script can't be found (broken install), the
     wrapper exits 2 with an actionable diagnostic, not a Python traceback."""

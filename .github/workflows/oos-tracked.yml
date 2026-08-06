@@ -44,3 +44,9 @@ jobs:
 
       - name: Run oos-tracked test harness
         run: bash tests/ci/test_oos_tracked.sh
+
+      # The gate above reds an uncited item; this one pins the PR-create flow
+      # that produces the body, so a failed filing cannot mint a carveout to
+      # make the item cited. Both shipped instruction paths are checked.
+      - name: PR-create out-of-scope tracking contract
+        run: bash tests/skills/test_pr_oos_tracking_contract.sh

@@ -87,6 +87,8 @@ The rationale must be non-empty on the same line. The `edited` workflow trigger 
 
 `delta:` must equal the computed delta exactly. The CI failure output states the computed number: "computed delta: +N". If a review push later changes the delta, update the single ledger line to the new number and the gate re-passes.
 
+Compute the delta locally as the LAST edit before pushing, then commit the trajectory entry in the same push. The gate reads the trajectory at committed HEAD (`git show HEAD:<rel>`), so an uncommitted `delta:` edit is invisible to it: a local re-run will keep printing the old number and CI will keep failing on the mismatch until the edit lands as a commit. The working local invocation is `BASE_REF=main bash scripts/ci/loc-ratchet.sh` redirected to a file (a bare call fails "no base ref"; `BASE_REF=origin/main` fails as `origin/origin/main`); read the computed `delta:` off that, set the entry, commit, push once. Declaring the delta before the last code change guarantees a mismatch.
+
 Known limitation: two exception PRs racing on the trajectory tail produce a git merge conflict. The second author resolves it by keeping both entries; the gate re-validates on the synchronize run.
 
 ## Trajectory file semantics

@@ -11,9 +11,9 @@
 // second-hand percentage whose denominator we could not see or validate, which
 // is how it produced 200K-window numbers on a 1M-context model.
 //
-// Context pressure has ONE measurement path now:
-// skills/target/scripts/context-probe.sh, which counts tokens from the
-// transcript itself and owns its own denominator.
+// Context pressure has ONE measurement path now: `fno context` (the CLI
+// implementation that the skill-local shim delegates to), which counts tokens
+// from the transcript itself and owns its own denominator.
 
 const fs = require('fs')
 const os = require('os')
@@ -65,16 +65,13 @@ function probeCost(sessionId) {
   }
 }
 
-// Actual running model from the transcript via the sanctioned probe. Reused
-// instead of an fno cost call so the drift check honors AC6 (no cost call when
-// the cap is unset). null on any failure.
+// Actual running model from the transcript via the single CLI implementation.
+// Reused instead of an fno cost call so the drift check honors AC6 (no cost
+// call when the cap is unset). null on any failure.
 function probeModel(transcriptPath) {
   if (!transcriptPath) return null
-  const root = process.env.CLAUDE_PLUGIN_ROOT || path.join(__dirname, '..')
-  const probe = path.join(root, 'skills', 'target', 'scripts', 'context-probe.sh')
-  if (!fs.existsSync(probe)) return null
   try {
-    const out = execFileSync('bash', [probe, transcriptPath], {
+    const out = execFileSync('fno', ['context', '--transcript', transcriptPath, '--json'], {
       encoding: 'utf8',
       timeout: 8000,
       stdio: ['ignore', 'pipe', 'ignore'],

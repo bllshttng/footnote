@@ -91,6 +91,21 @@ class TestLegacyBold:
         assert [c.code for c in criteria] == ["AC1-HP"]
         assert criteria[0].text == "Real behavior."
 
+    def test_letter_suffixed_code_compiles_not_dropped(self) -> None:
+        # A letter-suffixed number (AC3b, AC3b-HP) is a valid sub-criterion
+        # spelling. It used to match neither AC regex and compile to nothing -
+        # silently dropped from the contract with no error - so a design could
+        # lose an acceptance criterion between /think and /do. It now compiles,
+        # and a typed AC3b-HP does not collide with a sibling AC3-HP.
+        body = (
+            "**AC3-HP:** Base criterion.\n\n"
+            "**AC3b-HP:** Sub-criterion requiring the four-language self-test.\n\n"
+            "**AC7a:** A bare letter-suffixed criterion.\n"
+        )
+        criteria = compile_criteria(body)
+        assert [c.code for c in criteria] == ["AC3-HP", "AC3b-HP", "AC7a"]
+        assert [c.kind for c in criteria] == ["HP", "HP", "GENERAL"]
+
 
 # ---------------------------------------------------------------------------
 # AC9-UX + AC2-HP: numbered items, synthesized identifiers, determinism

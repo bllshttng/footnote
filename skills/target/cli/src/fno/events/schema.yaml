@@ -3296,6 +3296,48 @@ event_types:
           type: array
     consumers: [fno-agents loop-check, finalize handoff]
 
+  - name: king_context_nudge
+    description: "Emitted by hooks/king-context-nudge.sh (Stop) when a crowned session ends a turn past king_used_pct_trigger. The arming proof the hook's predecessor (arm-handoff-precompact.sh, gated on a pid dead ~1s after init) could never produce: `fno event audit` answers whether the nudge ever fired in a real reign."
+    sources: [hook]
+    data:
+      required: [used_pct, trigger, crown_level, crown_scope]
+      properties:
+        used_pct:
+          type: integer
+          description: "Measured context-window usage percent at the turn boundary."
+        trigger:
+          type: integer
+          description: "config.target.handoff.king_used_pct_trigger (default 40)."
+        crown_level:
+          type: integer
+          description: "The king's crown altitude (0 VP, 1 Director, 2 IC)."
+        crown_scope:
+          type: string
+          description: "The scope the crown rules over (project/epic/node id)."
+        session_id:
+          type: string
+          description: "The crowned session's id."
+    consumers: [operator]
+
+  - name: king_orphan_block
+    description: "Emitted by hooks/king-context-nudge.sh (Stop) when a crowned session ends a turn with workers it spawned still live and no resolution recorded. Names the workers and the three legal resolutions; a carveout carrying the scope (structured field) satisfies it and stops the block."
+    sources: [hook]
+    data:
+      required: [crown_level, crown_scope, workers, count]
+      properties:
+        crown_level:
+          type: integer
+        crown_scope:
+          type: string
+        workers:
+          type: string
+          description: "Comma-separated names of the live spawned workers."
+        count:
+          type: integer
+        session_id:
+          type: string
+    consumers: [operator]
+
 # Size cap per Failure Modes (Boundaries): the system rejects events whose
 # data payload exceeds 64KB. Validators enforce this at validate() time.
 limits:

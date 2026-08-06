@@ -55,6 +55,8 @@ This is orthogonal to the crown and equally load-bearing.
 A king who crowns a subordinate and then stays alive to watch it has made itself a permanent monarch, which is the shape this design exists to prevent.
 Fan out, record what you fanned out, exit.
 If a crowned session dies, the next one sees it in the graph and re-crowns; that is the recovery path, not a regency.
+It restores planning continuity, not review triggering: it assumes a next king arrives, and a worker blocked on a review trigger waits indefinitely if none does.
+So do not let a spawning reign depend on a successor materializing - hand off before you exit ([What a pass is not](#what-a-pass-is-not)).
 
 **Crown kings on a frontier model at high effort.**
 A pass makes judgment calls (which wave, what to park, what to supersede) and those are the calls not to cheap out on.
@@ -104,6 +106,7 @@ The crown model above is unchanged. What changes is *tenure*: the crown has two 
 1. The crowning brief names monitoring, answering questions, or running a team -> **court**.
 2. The crown is bestowed autonomously (daemon, cron, another king) with no monitoring language -> **pass**.
 3. Ambiguous human crowning -> ask in your first reply; if unattended, default to **pass** - the shape that completes with nobody awake to carry it.
+4. You will spawn workers who mail you back (minions that reach a review point and need their king to trigger it) -> **not pass**. A pure pass abdicates at kickoff, before any worker gets to review, so it orphans every worker it spawned. Pick court, or name a successor and hand off before you exit (`fno agents crown <handle> --scope <scope> --succeed`). Resolve this at kickoff, when it is cheap - not at abdication, when the workers are already live. See [What a pass is not](#what-a-pass-is-not).
 
 **What court actually costs.**
 Not idle tokens.
@@ -178,6 +181,8 @@ Prefer `peek` first: attaching is a drive action, and a king that starts driving
 **Orient yourself after a compaction.**
 `fno whoami` (project, fleet, walker, session, your mail handle) · `fno status` (gate satisfaction + events tail).
 Run these instead of grepping state files.
+`fno whoami` also prints your own context line - `context: NN% used (X of Y tokens)` - and your crown, so after a compaction you read both your window pressure and your authority from the one verb you are already told to run.
+Check it at boundaries (after a compaction, after reconciling a report, before arming a wait), never on a timer; the king Stop hook nudges you past your trigger regardless, so a hand-rolled poll only burns cache.
 
 ## Run it in this order
 
@@ -350,6 +355,8 @@ fno mail send <teammate-handle> "Ruling: <approve/revise summary>. Cross-node: s
 
 The one reason to mint a new session is **context pressure**. Every teammate report carries `context: NN% used`. At a phase boundary, if `NN >= config.target.handoff.used_pct_trigger` (default 50), hand off instead of reusing: spawn a fresh successor into the mission workspace with an explicit `--split`, carrying the phase artifact and the minion clause with a generation suffix (`node-x-b3a8-g2`), and close the predecessor pane only after the successor's session is live (spawn receipt returned and the session header printed, not merely a pane ack). A teammate is a mux pane, so close it with `fno mux pane kill <session>:<pane_id>` (the `mux` ref is in `fno agents list --json`) - `fno agents stop` refuses a mux row, whose `short_id` is deliberately empty. This reuses the target-self-handoff generation cap (default 4); at the cap, refuse a fifth generation, emit `<help reason="handoff-chain-exhausted">`, and continue in-session. Below the threshold reuse is mandatory. If the probe is unreadable and no self-report arrived, degrade toward reuse - spawning is the expensive, continuity-losing branch.
 
+**The king's own threshold is lower than a teammate's.** You hand yourself off at `config.target.handoff.king_used_pct_trigger` (default 40), deliberately below the teammate trigger of 50. A teammate's degradation costs one node; yours propagates into every ruling you issue and every worker you route, and the handoff itself costs context, so a king that waits until it is degraded is too degraded to hand off well. The config validator refuses a king trigger at or above the teammate trigger and prints the rationale, so the 40 cannot be quietly normalized to 50. A king Stop hook blocks you past the trigger and tells you your exact usage; do not wait for it - read `fno whoami` at a boundary and hand off first.
+
 ### Monitor: report first, sweep as backstop
 
 - **Primary signal is the teammate's report mail** (push). It wakes you the turn it lands. The minion clause is what makes this work: a teammate projects its own boundaries - a question, a block, a PR opened, a review verdict, merge readiness - so you are woken by events rather than hunting for them.
@@ -410,6 +417,7 @@ The crown expires when the wave completes - every teammate unit reconciled, the 
 These bound the **pass** shape - the abdicate-at-kickoff reign. Court explicitly lifts the first and fourth for the duration of one wave (it monitors, and it answers), but never the rest, and never the *driver* line.
 
 - **Not a supervisor (pass only).** A pass narrows what the daemon may select and abdicates; it never stays to watch. Court monitors by contract, but only its own wave, and it still adds no second dispatch path - it encodes and lets the hands run.
+- **Not a shape for a reign that spawns workers.** A pure pass abdicates at kickoff, before any worker reaches its review point, so a reign that spawns workers cannot be a pure pass: it leaves every worker it spawned with nobody to mail for a review trigger. If you will spawn workers, pick court, or hand the crown to a successor before you exit (`fno agents crown <handle> --scope <scope> --succeed`); if you deliberately exit review-orphaned, state it with a carveout (`fno carveout add -k deferred --scope <scope> ...`) so the workers fall back to advisory self-review as a recorded decision, not a silent consequence. A Stop hook blocks you at the boundary until you pick one.
 - **Not self-appointed.** Being handed an epic to work on is not a tag. If nobody granted you orchestrator authority with a level and a scope, you are a worker on that epic, and spawning subordinates is out of bounds.
 - **Not a groomer.** Grooming is the daily reversible pass (defer + reason, rank, report). A king promotes and wires. Grooming may quarantine; only humans and grooming supersede.
 - **Not a driver (both shapes).** You may `peek` at anything, and a court king mails rulings - but neither shape attaches and steers a worker's pane. Driving means burning frontier tokens on work a builder already owns, and a human at the wheel of a session outranks the crown: peek before you send, and never inject a ruling into a session a human is actively driving.

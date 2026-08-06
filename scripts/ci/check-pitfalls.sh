@@ -142,13 +142,59 @@ PY
   done <<< "$STALE_REPORT"
 fi
 
+# Byte-budget awareness (x-62e1): the entry-count cap and the preamble byte
+# ceiling measure the same SessionStart context cost in different units, and
+# only the byte ceiling binds against the real budget. An entry that passes the
+# count cap can still blow the byte ceiling, so the count alone advertised
+# capacity that did not exist. Reuse the canonical measurement
+# (check-preamble-budget) so the two gates share one file set and ceiling, then
+# report the byte-bound remaining capacity and refuse when the preamble is over
+# the ceiling - the failure then lands in this gate, the one a pitfalls edit
+# works in, not only in check-preamble-budget.
+PRE_SPARE=""
+PRE_FIT=""
+PREAMBLE_BUDGET_SH="$(dirname "${BASH_SOURCE[0]}")/check-preamble-budget.sh"
+if [[ -f "$PREAMBLE_BUDGET_SH" ]]; then
+  PRE_QUIET="$(bash "$PREAMBLE_BUDGET_SH" --quiet 2>/dev/null || true)"
+  if [[ "$PRE_QUIET" =~ preamble:\ ([0-9]+)\ /\ ([0-9]+)\ B ]]; then
+    PRE_TOTAL="${BASH_REMATCH[1]}"
+    PRE_CEIL="${BASH_REMATCH[2]}"
+    PRE_SPARE=$((PRE_CEIL - PRE_TOTAL))
+    # Floor for one formatted entry (heading + 1-3 sentence trap + specimens +
+    # graduates-to + added). Real entries run 600-900 B; the floor is the
+    # smallest that still satisfies the format, so "N fit" never overstates -
+    # the message names the 400-B floor so the assumption is explicit.
+    if (( PRE_SPARE >= 0 )); then
+      PRE_FIT=$(( PRE_SPARE / 400 ))
+    else
+      PRE_FIT=0
+    fi
+  fi
+fi
+
+if [[ -n "$PRE_SPARE" && $PRE_SPARE -lt 0 ]]; then
+  {
+    echo "check-pitfalls: ${ENTRY_COUNT}/${MAX_ENTRIES} entries, but the preamble is $((-PRE_SPARE)) B over the byte ceiling."
+    echo "  The count cap is not the binding constraint here: the SessionStart preamble"
+    echo "  byte budget (check-preamble-budget.sh) is. Corpus growth or unrelated"
+    echo "  AGENTS.md growth pushed it over."
+    echo "  Fix: cut bytes from AGENTS.md or another preamble file, or raise"
+    echo "  CEILING_BYTES in scripts/ci/check-preamble-budget.sh in this PR with"
+    echo "  the reason in the PR body."
+  } >&2
+  exit 1
+fi
+
+CAP_SUFFIX=""
+[[ -n "$PRE_FIT" ]] && CAP_SUFFIX="; ${PRE_SPARE} B preamble headroom (~${PRE_FIT} more fit at the 400-B floor)"
+
 if [[ $VIOLATIONS -eq 0 ]]; then
-  echo "check-pitfalls: ${ENTRY_COUNT}/${MAX_ENTRIES} entries, all valid"
+  echo "check-pitfalls: ${ENTRY_COUNT}/${MAX_ENTRIES} entries, all valid${CAP_SUFFIX}"
   exit 0
 fi
 
 {
-  echo "check-pitfalls: ${VIOLATIONS} violation(s) in '${SECTION_HEADER}'"
+  echo "check-pitfalls: ${VIOLATIONS} violation(s) in '${SECTION_HEADER}'${CAP_SUFFIX}"
   echo
   printf '%s' "$REPORT"
   echo

@@ -361,6 +361,12 @@ def cmd_watch(
 # overflow it and poison the shared store).
 _MAX_CROWN_LEVEL = 2
 
+# Terminal (non-active) registry statuses: a worker in any OTHER state
+# (spawning/ready/idle/busy/live/restarting) is active and may still need its
+# king. Used by the crown transfer + the orphan check so they do not miss a
+# worker that is "busy" or "idle" (only checking literal "live" was a codex P1).
+_TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
+
 
 def _parse_crown(spec: str) -> tuple[int, str]:
     """Parse a ``--crown 'level=N,scope=X'`` spec into (level, scope); exit 2 on
@@ -419,6 +425,162 @@ def _scope_is_subset(target_scope: str, grantor_scope: str | None) -> bool:
     return bool(grantor_scope) and target_scope != grantor_scope
 
 
+def _derive_crown_level_from_scope(scope: str) -> int | None:
+    """The ladder altitude is a FACT ABOUT THE SCOPE, not an operator input
+    (US10): a project is a VP (0), an epic is a Director (1), any other backlog
+    node is an IC (2). Returns the derived level, or None when the scope
+    resolves to neither a graph entry nor a known project.
+
+    None is the refusal signal: the prior behavior fell through to level 0 for
+    ANY scope, so `fno agents crown bob --scope banana` minted a VP over a scope
+    nobody could find. A scope that resolves to nothing is a typo, and stamping
+    VP-over-a-typo is worse than exiting 2. An explicit ``--level`` bypasses
+    this entirely (it sets resolved_level before this runs), as does a
+    superset-king grant (which uses the grantor's level + 1); this only fires
+    for a human or config grant with no --level.
+    """
+    from fno import paths
+    from fno.graph.store import read_graph
+
+    # Resolve the path dynamically: read_graph()'s default arg is frozen at
+    # import time, so it would ignore a redirected state_dir (tests, overrides).
+    entry = next(
+        (e for e in read_graph(paths.graph_json())
+         if isinstance(e, dict) and e.get("id") == scope),
+        None,
+    )
+    if entry is not None:
+        return 1 if entry.get("type") == "epic" else 2
+    try:
+        from fno.projects.resolve import resolve_project_name
+
+        resolve_project_name(scope)
+        return 0
+    except Exception:
+        return None
+
+
+def _caller_row_by_session():
+    """The calling session's registry row resolved by harness session id, or None.
+
+    `FNO_AGENT_SELF` identifies a SPAWNED agent. A hand-started agent (a king
+    session joined via /fno-me, not spawned) carries no `FNO_AGENT_SELF` and
+    would otherwise be indistinguishable from an attended human - so a crown it
+    grants would be stamped `grantor="human"`, weakening the provenance the
+    crown exists to provide. The registry is the crown's source of truth for who
+    is an agent, so resolve the row by harness session id the same way
+    `fno agents whoami` does (session-fallback). Returns None for a shell with no
+    row; the residual attended-human-vs-unregistered-agent ambiguity is recorded
+    in x-7685 rather than invented away.
+    """
+    from fno.agents.registry import load_registry
+    from fno.agents.whoami import _find_by_session
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.session_id or not ident.harness:
+        return None
+    try:
+        return _find_by_session(load_registry(), ident.session_id, ident.harness)
+    except Exception:
+        return None
+
+
+def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
+    """The ``--succeed`` transfer (US6): move the caller's live crown over
+    ``scope`` onto ``target`` in one atomic registry write.
+
+    A TRANSFER, not a grant. The two gates that refuse a same-scope grant
+    (one-live-crown, not-a-superset) are correct for grants and stay so;
+    succession is the separate primitive an abdicating king needs because it is
+    neither. The caller must hold a live crown over EXACTLY scope (nothing to
+    transfer otherwise); the one-live-crown check narrows to exclude the caller's
+    own row, since the row being vacated cannot be the reason the vacating is
+    refused; the successor must be LIVE, since transferring onto a dead row is
+    the orphaning this feature exists to prevent wearing a receipt; level
+    defaults to the caller's own altitude, not +1, so a successor inherits the
+    rung; and ``crown_grantor`` records the outgoing king so the chain stays
+    externally verifiable.
+    """
+    from fno.agents.registry import update_registry
+
+    caller_name = caller_row.name if caller_row else None
+    target_name = target.name
+    err: list[str | None] = [None]  # closure: validation failure message
+    out: list[dict | None] = [None]  # closure: receipt on success
+
+    def _transfer(rows: list) -> list:
+        # Re-resolve caller + target from the LOCKED rows, not the stale snapshots
+        # passed in: a concurrent --succeed could have changed them between the
+        # pre-read and this write. The validation that decides whether to mutate
+        # runs HERE under the registry lock, so two concurrent transfers serialize
+        # and cannot create duplicate crowns or transfer onto a reaped row.
+        live_caller = (
+            next((r for r in rows if r.name == caller_name), None)
+            if caller_name else None
+        )
+        live_target = next((r for r in rows if r.name == target_name), None)
+        # crown_level is None means "no crown"; level 0 (VP) is a real crown, so
+        # the `is None` test (not truthiness) keeps a VP transferable.
+        if live_caller is None or live_caller.crown_level is None or live_caller.crown_scope != scope:
+            err[0] = (
+                f"refusing --succeed: this session holds no live crown over scope "
+                f"{scope!r} to transfer. Succession moves an EXISTING crown; it "
+                "does not grant a new one. Hold the crown first, or drop --succeed."
+            )
+            return rows  # unchanged
+        if live_target is None or live_target.status in _TERMINAL_STATUSES:
+            status = live_target.status if live_target else "absent"
+            err[0] = (
+                f"refusing --succeed: successor {target_name!r} is not active "
+                f"(status={status!r}). A crown must transfer onto an active row; "
+                "transferring onto a terminal row is the orphaning this feature prevents."
+            )
+            return rows
+        # Narrowed one-live-crown: a row OTHER than the caller's own (being
+        # vacated) or the successor holding this scope is corrupt state.
+        for r in rows:
+            if (
+                r.name not in (caller_name, target_name)
+                and r.crown_scope == scope
+                and r.status not in _TERMINAL_STATUSES
+            ):
+                err[0] = (
+                    f"refusing --succeed: {r.name!r} already holds a live crown "
+                    f"over scope {scope!r} (one live crown per scope; the caller's "
+                    "own row is excluded as the one being vacated)."
+                )
+                return rows
+        # Validated under the lock: vacate caller + stamp successor in one pass.
+        # Two writes would open a window where the scope is uncrowned - exactly
+        # when a worker's review mail arrives and resolves to nobody.
+        resolved_level = level if level is not None else live_caller.crown_level
+        grantor = live_caller.session_id or live_caller.name
+        for r in rows:
+            if r.name == caller_name:
+                r.crown_level = None
+                r.crown_scope = None
+                r.crown_grantor = None
+            elif r.name == target_name:
+                r.crown_level = resolved_level
+                r.crown_scope = scope
+                r.crown_grantor = grantor
+        out[0] = {
+            "succeeded": target_name,
+            "from": caller_name,
+            "level": resolved_level,
+            "scope": scope,
+            "grantor": grantor,
+        }
+        return rows
+
+    update_registry(_transfer)
+    if err[0]:
+        print(err[0], file=sys.stderr)
+        raise typer.Exit(code=2)
+    print(json.dumps(out[0]))
+
+
 @agents_app.command("crown", hidden=True)
 def cmd_crown(
     handle: str = typer.Argument(
@@ -434,7 +596,18 @@ def cmd_crown(
         "--level",
         help=(
             "Ladder altitude 0..2 (VP=0 project, Director=1 epic, IC=2 node). "
-            "Default: the grantor's level+1 (superset-king), else 0."
+            "Default: the grantor's level+1 (superset-king), else 0; under "
+            "--succeed, the caller's own altitude (a successor inherits the rung)."
+        ),
+    ),
+    succeed: bool = typer.Option(
+        False,
+        "--succeed",
+        help=(
+            "Transfer THIS session's crown over --scope to <handle> (succession), "
+            "not grant a new one. The caller must hold a live crown over exactly "
+            "--scope; one atomic write clears the caller and stamps the successor "
+            "at the caller's altitude. Used by an abdicating king."
         ),
     ),
 ) -> None:
@@ -446,6 +619,11 @@ def cmd_crown(
     row), an attended human (a shell with no agent identity in env), or a
     standing config grant (``config.agents.crown_config_grant``, DEFAULT OFF).
     Refuses a self-grant and a second live crown over the same scope.
+
+    ``--succeed`` is a TRANSFER, not a grant: it moves the caller's existing
+    crown over --scope onto <handle> in one atomic write. A same-scope GRANT is
+    refused twice over (one-live-crown + not-a-superset), so succession is the
+    only way an abdicating king hands a crown to a successor over the same scope.
     """
     from fno.agents.registry import (
         AgentResolutionError,
@@ -472,8 +650,13 @@ def cmd_crown(
         print(f"no agent for handle {handle!r}: {exc}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF, a human
-    # shell does not. That absence IS the attended-human signal.
+    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF; a
+    # hand-started agent (a king session joined via /fno-me, not spawned) does
+    # NOT, so FNO_AGENT_SELF alone would misclassify it as an attended human and
+    # stamp the wrong grantor. The registry is the crown's source of truth for
+    # who is an agent, so fall back to a session-id lookup (the same
+    # session-fallback `fno agents whoami` uses). Only a shell with no row reads
+    # as an attended human.
     caller_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     caller_row = None
     if caller_self:
@@ -481,6 +664,8 @@ def cmd_crown(
             caller_row = resolve_agent(caller_self).entry
         except AgentResolutionError:
             caller_row = None
+    if caller_row is None:
+        caller_row = _caller_row_by_session()
 
     # Refusal: never self-declared - a session cannot crown its own row.
     if caller_row is not None and caller_row.name == target.name:
@@ -490,9 +675,21 @@ def cmd_crown(
         )
         raise typer.Exit(code=2)
 
-    # Refusal: one live crown per scope.
+    if succeed:
+        _crown_succeed(target, scope, level, caller_row)
+        return
+
+    # Refusal: one live crown per scope. Active = NOT in the terminal set: a
+    # king that is "busy"/"idle"/"restarting" still holds its crown, so a literal
+    # "live" check here would let a second grant mint over a busy king's scope
+    # (the same P1 shape _TERMINAL_STATUSES was introduced for in --succeed +
+    # the orphan check). Same set, same invariant.
     for e in load_registry():
-        if e.name != target.name and e.crown_scope == scope and e.status == "live":
+        if (
+            e.name != target.name
+            and e.crown_scope == scope
+            and e.status not in _TERMINAL_STATUSES
+        ):
             print(
                 f"refusing: {e.name!r} already holds a live crown over scope "
                 f"{scope!r} (one live crown per scope)",
@@ -509,8 +706,13 @@ def cmd_crown(
             resolved_level = (caller_row.crown_level or 0) + 1
     elif load_settings().agents.crown_config_grant:
         grantor = "config-grant"
+    elif not caller_self and caller_row is not None:
+        # A hand-started agent (no FNO_AGENT_SELF, row via session-fallback) with
+        # no superset crown still grants; stamp ITS identity, not "human". A
+        # SPAWNED agent (caller_self set) with no crown hits the else-refuse below.
+        grantor = caller_row.session_id or caller_row.name
     elif not caller_self:
-        grantor = "human"  # an attended human shell (no agent identity)
+        grantor = "human"  # an attended human shell (no registry row, no agent identity)
     else:
         print(
             f"refusing: this session holds no superset crown over {scope!r}, is "
@@ -520,7 +722,19 @@ def cmd_crown(
         )
         raise typer.Exit(code=2)
     if resolved_level is None:
-        resolved_level = 0
+        # No explicit --level and not a superset-king grant: the altitude is a
+        # fact about the scope (project=0, epic=1, node=2), not a default 0.
+        resolved_level = _derive_crown_level_from_scope(scope)
+        if resolved_level is None:
+            print(
+                f"refusing: --scope {scope!r} resolves to neither a backlog node "
+                "nor a known project, so it is likely a typo. A crown needs a real "
+                "scope; this path would otherwise stamp level 0 over a scope nobody "
+                "can find. Pass a project name (->0), an epic id (->1), a node id "
+                "(->2), or set --level explicitly to bypass scope derivation.",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
     if resolved_level > _MAX_CROWN_LEVEL:
         print(
             f"refusing: derived crown level {resolved_level} exceeds the ceiling "
@@ -1991,6 +2205,35 @@ def cmd_discovered_json(
     except Exception:  # noqa: BLE001 — fail-open: empty lane, never crash list
         pass
     sys.stdout.write(_json.dumps(out))
+
+
+@agents_app.command("registry-json", hidden=True)
+def cmd_registry_json() -> None:
+    """Internal: emit registry rows DAEMON-FREE.
+
+    Hooks (king-context-nudge.sh) need the stored crown + spawn-edge fields
+    without the live-status enrichment that ``fno agents list`` lazy-starts the
+    daemon for. Output is ``{"agents": [...]}`` with name / session ids /
+    status / crown fields / spawned_by_session per row - a file read via
+    load_registry, no daemon, so a Stop hook never stalls on a daemon start.
+    """
+    import json as _json
+
+    from fno.agents.registry import load_registry
+
+    rows = [
+        {
+            "name": e.name,
+            "session_id": e.session_id,
+            "harness_session_id": e.harness_session_id,
+            "status": e.status,
+            "crown_level": e.crown_level,
+            "crown_scope": e.crown_scope,
+            "spawned_by_session": e.spawned_by_session,
+        }
+        for e in load_registry()
+    ]
+    sys.stdout.write(_json.dumps({"agents": rows}))
 
 
 #: `heal-token` exit codes. 13 mirrors the lifecycle verbs' not-found code; the
