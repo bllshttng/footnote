@@ -409,8 +409,15 @@ def _bounded_remediation(
         )
         return 1
 
-    # gh pr merge exited non-zero.
-    if "already used by worktree" in gh_stderr:
+    # gh pr merge exited non-zero. Match BOTH git phrasings for a worktree
+    # holding the branch: the checkout-refused error ("'X' is already used by
+    # worktree") and the post-merge delete error ("cannot delete branch 'X' used
+    # by worktree"). The delete case fires AFTER the merge landed, so if the PR
+    # is MERGED here we must record it and return 0 - otherwise the /target gate
+    # that calls verify sees a failure, leaves the merge unrecorded in
+    # target-state.md, and re-verifies forever (the same defect the merge
+    # primitive fixes; "used by worktree" is the shared substring of both).
+    if "used by worktree" in gh_stderr:
         pr_json = _fetch_pr_state(pr_number, cwd)
         if (pr_json or {}).get("state") == "MERGED":
             merged_at = (pr_json or {}).get("mergedAt") or ""

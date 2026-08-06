@@ -9,7 +9,7 @@ caller-facing contract verbatim:
   cleanup failure (local branch delete, worktree prune, sync) can never retract
   a landed merge, so it is reported as ``outcome=merged, cleanup=failed`` - the
   cleanup result in its own field, never fused into ``outcome``. A merge that
-  lands never reports ``failed`` (x-e539).
+  lands never reports ``failed``.
 - Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
   (auto_merge disabled), 127 gh not installed.
 - The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
@@ -73,6 +73,14 @@ def _emit(
     its own field, so a cosmetic cleanup failure can never read as a failed
     merge. Absent means no cleanup step is being reported, never an ambiguous
     silent success.
+
+    Known over-report (documented, not narrowed): on an autonomous retry of an
+    already-merged PR, ``gh pr merge`` exits non-zero ("already merged") and the
+    landed-merge guard reports ``cleanup=failed`` even though no cleanup step ran
+    - the merge was a no-op. The discriminator for that retry shape is not
+    reliably in the error text, so the guard fails toward visibility rather than
+    inventing one; a caller keying on ``cleanup`` should read it as "the merge
+    call did not exit cleanly" there, not strictly "a cleanup step failed."
     """
     obj = {
         "pr": pr,
@@ -969,14 +977,18 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             return 0
         first_line = output.splitlines()[0][:200] if output.strip() else ""
 
-    # Matches BOTH git phrasings for a worktree holding the branch:
-    #   checkout error -> "fatal: 'X' is already used by worktree at /p"
-    #     (gh refused to start; the branch is checked out elsewhere)
-    #   delete error   -> "cannot delete branch 'X' used by worktree at /p"
-    #     (--delete-branch after a landed merge; the recurring false-`failed`,
-    #     x-e539). "used by worktree" is the shared substring; "already checked
-    #     out" covers the older git checkout phrasing.
-    if re.search(r"used by worktree|already checked out", output, re.IGNORECASE):
+    # The checkout-refused phrasing: gh refused to start because the branch is
+    # checked out in another worktree ("'X' is already used by worktree", or the
+    # older "already checked out"). This block re-reads merged state and, if the
+    # merge has not landed, merges server-side via the API (no local checkout).
+    #
+    # The delete phrasing ("cannot delete branch 'X' used by worktree") is
+    # deliberately NOT matched here: it fires AFTER the merge landed, so it
+    # belongs to the post-merge-cleanup-failure fallthrough below, which reports
+    # outcome=merged with cleanup=failed (the step ran and failed - it was not
+    # skipped). Matching it here would route a landed merge through this block's
+    # "skipped" message and drop the cleanup signal.
+    if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
         # (a) Server-side merge already landed -> cosmetic local failure.
         merged_at = ""
         view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
@@ -1029,11 +1041,11 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
     # `gh pr merge --delete-branch` returns non-zero whenever a POST-merge step
     # fails after a successful server-side merge - a worktree holding the branch
     # (handled by the recovery block above), a remote-branch delete, a local
-    # sync, any followup. A merge that landed must never read as `failed`
-    # (x-e539): a caller keying off `outcome` would retry a landed merge or wedge
-    # a finished pipeline on a cosmetic cleanup failure. Re-read the merged
-    # state; if it landed, report merged with the cleanup failure in its own
-    # field - visible, honest, never swallowed, never the merge's outcome.
+    # sync, any followup. A merge that landed must never read as `failed`: a
+    # caller keying off `outcome` would retry a landed merge or wedge a finished
+    # pipeline on a cosmetic cleanup failure. Re-read the merged state; if it
+    # landed, report merged with the cleanup failure in its own field - visible,
+    # honest, never swallowed, never the merge's outcome.
     view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
     if view.ok:
         landed = view.stdout.strip()

@@ -196,6 +196,32 @@ def test_bounded_remediation_honors_delete_branch(tmp_path, monkeypatch, delete_
     assert ("--delete-branch" in merge_cmd) is delete_branch, merge_cmd
 
 
+def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on, monkeypatch, capsys):
+    """The worktree-recovery branch must catch git's DELETE phrasing, not only the
+    checkout phrasing. ``gh pr merge --delete-branch`` lands the merge then fails
+    the local delete because a worktree holds the branch; the PR is MERGED, so
+    verify must record it and return 0. Matching only ``already used by worktree``
+    (checkout) left this case to fall through to ``merge_attempt_failed``,
+    unrecorded - so the /target gate that calls verify re-verified forever (the
+    same defect on the sibling path)."""
+    sf = _state_file(tmp_path)
+    fake = FakeGH(
+        toplevel=str(tmp_path),
+        pr_states=[{"state": "OPEN"}, {"state": "MERGED", "mergedAt": "2026-08-06T05:54:59Z"}],
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete local branch feature/x-beb7: failed to run git: "
+            "error: cannot delete branch 'feature/x-beb7' used by worktree at "
+            "'/repo/.claude/worktrees/x-beb7'",
+        ),
+    )
+    monkeypatch.setattr(_verify, "run", fake)
+    rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
+    assert rc == 0
+    assert "verify-pr-merged" in capsys.readouterr().out
+
+
 def test_unknown_state_degrades_open(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "WEIRD"}])

@@ -268,14 +268,15 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     assert api_calls and "PUT" in api_calls[0]
 
 
-def test_worktree_branch_delete_failure_reports_merged_x_e539(enabled, monkeypatch, capsys, tmp_path):
-    """x-e539 primary specimen (PR #742). ``gh pr merge --delete-branch`` exits
-    non-zero when the post-merge local branch delete fails because a worktree
-    holds the branch, even though the server-side merge landed. git's delete
-    error ("cannot delete branch ... used by worktree") is a different phrasing
-    than the checkout error the recovery block was written for, so it used to
-    miss the regex and fall through to outcome=failed. A landed merge must
-    report merged."""
+def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, capsys, tmp_path):
+    """Primary specimen (PR #742). ``gh pr merge --delete-branch`` exits non-zero
+    when the post-merge local branch delete fails because a worktree holds the
+    branch, even though the server-side merge landed. git's delete error
+    ("cannot delete branch ... used by worktree") is NOT the checkout-refused
+    phrasing the recovery block matches, so it falls through to the post-merge
+    guard: outcome=merged with cleanup=failed and the error visible in reason
+    (the step ran and failed - it was not skipped). A landed merge must report
+    merged, and the cleanup failure must stay visible."""
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(
@@ -292,15 +293,17 @@ def test_worktree_branch_delete_failure_reports_merged_x_e539(enabled, monkeypat
     assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
     obj = _last_json(capsys)
     assert obj["outcome"] == "merged"
-    assert "server-side" in obj["reason"]
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+    assert "cannot delete branch" in obj["reason"]
 
 
-def test_post_merge_cleanup_failure_never_reports_failed_x_e539(enabled, monkeypatch, capsys, tmp_path):
-    """x-e539 general invariant. A post-merge cleanup failure whose error is NOT
-    the worktree phrasing (here a remote branch delete) must still not report
-    failed when the merge landed. The fallthrough re-reads mergedAt and, because
-    the merge landed, reports merged with cleanup=failed - the cleanup result
-    visible in its own field, never swallowed, never the merge's outcome."""
+def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """General invariant. A post-merge cleanup failure whose error is NOT the
+    worktree phrasing (here a remote branch delete) must still not report failed
+    when the merge landed. The fallthrough re-reads mergedAt and, because the
+    merge landed, reports merged with cleanup=failed - the cleanup result visible
+    in its own field, never swallowed, never the merge's outcome."""
     (tmp_path / ".fno").mkdir()
     fake = FakeRun(
         gh_merge=Result(
