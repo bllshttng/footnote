@@ -251,6 +251,11 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "read_optional_review_state",
         lambda pr, cwd: {"optional_reviews": [], "optional_reviews_unresolved": 0},
     )
+    monkeypatch.setattr(
+        _status,
+        "read_review_coverage",
+        lambda pr, cwd: {"coverage": "covered", "reviewed_count": 2},
+    )
     code = _status.run_status("42")
     assert code == 0
     import json
@@ -265,8 +270,30 @@ def test_run_status_emits_json_and_code(monkeypatch, capsys):
         "checks": {"total": 1, "pass": 1, "fail": 0, "pending": 0},
         "optional_reviews": [],
         "optional_reviews_unresolved": 0,
+        "review_coverage": {"coverage": "covered", "reviewed_count": 2},
         "ready": True,
     }
+
+
+def test_read_review_coverage_from_events(tmp_path):
+    """x-0eaf: read_review_coverage consumes the latest review_coverage event
+    for the PR from the project events log; no event -> unknown (fail-open)."""
+    import json
+
+    from fno.pr._reviews import read_review_coverage
+
+    events = tmp_path / ".fno" / "events.jsonl"
+    events.parent.mkdir(parents=True)
+    events.write_text(
+        json.dumps(
+            {"type": "review_coverage", "data": {"pr": 7, "coverage": "covered", "reviewed_count": 1, "head_sha": "a"}}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    assert read_review_coverage(7, cwd=str(tmp_path)) == {"coverage": "covered", "reviewed_count": 1}
+    # A different PR -> no event -> unknown sentinel.
+    assert read_review_coverage(99, cwd=str(tmp_path)) == {"coverage": "unknown", "reviewed_count": None}
 
 
 def test_run_status_fetch_failure_is_error(monkeypatch, capsys):
