@@ -44,7 +44,7 @@ def test_identity_free_peers_announce_the_local_peer_gate_and_its_producer(repo)
     # offered as a choice - naming the one peer that runs is the whole point.
     root = repo('[review]\npeers = ["codex", "opencode"]\n')
     line = _done_when_line({}, root)
-    assert "peer -> /fno:review peer codex --attest" in line, line
+    assert "peer -> /fno:review peer codex --attest (cross-model only)" in line, line
     # The old string is the lie: it told the session there was nothing to run.
     assert "none (PR + CI only)" not in line, line
 
@@ -70,7 +70,7 @@ def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
     )
     line = _done_when_line({}, root)
     assert "reviewed by [bot-x (post: /fno:review peer <pr#> codex --post; cross-model only)]" in line, line
-    assert "peer -> /fno:review peer gemini --attest" in line, line
+    assert "peer -> /fno:review peer gemini --attest (cross-model only)" in line, line
 
 
 def test_empty_peer_identity_is_absent_not_configured(repo):
@@ -80,7 +80,7 @@ def test_empty_peer_identity_is_absent_not_configured(repo):
     # armed gate - the wedge this whole file exists to close.
     root = repo('[review]\npeers = ["codex"]\npeer_identity = ""\n')
     line = _done_when_line({}, root)
-    assert "peer -> /fno:review peer codex --attest" in line, line
+    assert "peer -> /fno:review peer codex --attest (cross-model only)" in line, line
     assert "none (PR + CI only)" not in line, line
 
 
@@ -108,14 +108,14 @@ def test_local_peer_producer_names_the_configured_provider(repo):
     # matching the invoking harness, so a bare producer is unrunnable on a
     # codex-authored session whose only peer is gemini.
     root = repo('[review]\npeers = ["gemini"]\n')
-    assert "peer -> /fno:review peer gemini --attest" in _done_when_line({}, root)
+    assert "peer -> /fno:review peer gemini --attest (cross-model only)" in _done_when_line({}, root)
 
 
 def test_multiple_free_peers_offer_the_choice(repo):
     root = repo('[review]\npeers = ["codex", "gemini"]\n')
     line = _done_when_line({}, root)
     assert (
-        "peer -> /fno:review peer <provider> --attest (configured: codex, gemini)"
+        "peer -> /fno:review peer <provider> --attest (cross-model only, configured: codex, gemini)"
     ) in line, line
 
 
@@ -163,7 +163,7 @@ def test_app_bots_and_local_gates_compose(repo):
     )
     line = _done_when_line({}, root)
     assert "chatgpt-codex-connector" in line, line
-    assert "peer -> /fno:review peer codex --attest" in line, line
+    assert "peer -> /fno:review peer codex --attest (cross-model only)" in line, line
 
 
 def test_advisory_run_is_unchanged(repo):
@@ -202,7 +202,7 @@ def test_no_external_suppresses_every_login_gate(repo):
     assert "chatgpt-codex-connector" not in line, line
     assert "some-optional-bot" not in line, line
     assert "none (--no-external skips every login gate)" in line, line
-    assert "peer -> /fno:review peer codex --attest" in line, line
+    assert "peer -> /fno:review peer codex --attest (cross-model only)" in line, line
 
 
 def test_identity_backed_login_states_the_cross_model_condition(repo):

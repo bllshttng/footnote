@@ -478,12 +478,22 @@ def _local_review_gates(review: Any) -> List[str]:
     if named:
         unique = list(dict.fromkeys(named))
         runnable = [p for p in unique if p.lower() in DISPATCHABLE_PROVIDERS]
+        # `cross-model only` for the same reason the identity-backed carrier
+        # carries it: `/review peer` refuses a provider matching the invoking
+        # harness, and WHICH provider that is needs the author harness this file
+        # declines to resolve. Drivability is static and filtered above;
+        # eligibility is not, so it is stated as a condition rather than
+        # asserted away. Without it, a codex-authored session whose only
+        # drivable peer is codex reads a pasteable command that refuses.
         if len(runnable) == 1:
-            gates.append(f"peer -> /fno:review peer {runnable[0]} --attest")
+            gates.append(
+                f"peer -> /fno:review peer {runnable[0]} --attest "
+                f"(cross-model only)"
+            )
         elif runnable:
             gates.append(
                 f"peer -> /fno:review peer <provider> --attest "
-                f"(configured: {', '.join(runnable)})"
+                f"(cross-model only, configured: {', '.join(runnable)})"
             )
         else:
             # The gate is armed and nothing configured can clear it. Announcing

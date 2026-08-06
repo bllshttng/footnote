@@ -3,8 +3,11 @@
 The minion clause tells a teammate to mail you for a code review and stop.
 This is the other half of that exchange: what you mail back, in the teammate's own harness vocabulary, and what it must do when the verb refuses.
 
-Load it when any of these lands in your inbox: a done report (`RESULT: resolved`), a `RESULT: blocked`, or a bare "I need a review on <branch-or-PR>".
-The canonical clause has the teammate send the report and the review request as two separate mails, so do NOT wait for the second one: treat the done report itself as the review request, or a worker that reported and stopped waits forever on an order you were holding for a mail it never sent.
+Load it when a `RESULT: resolved` report or a bare "I need a review on <branch-or-PR>" lands in your inbox.
+
+**A `RESULT: resolved` report IS the review request.** The canonical clause has the teammate send the report and the request as two separate mails, so do not wait for the second one - a worker that reported and stopped will wait forever on an order you were holding for a mail it never sent.
+
+**A `RESULT: blocked` or `RESULT: failed` report is NOT.** That work is unfinished by the teammate's own account, and ordering a review of it spends a review pass on a diff its author already says is not done. Those reports want an answer to the blocker, or a decision. Review them only when the teammate explicitly asks.
 
 Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|blocked|failed>` ([minion-clause.md](minion-clause.md)) - not the `SUCCESS`/`DONE_WITH_CONCERNS` set from the execution-agent return contract in `AGENTS.md`. Two vocabularies share the `RESULT:` prefix, and a king matching on the wrong one never fires on a report its own spawn payload produced.
 
