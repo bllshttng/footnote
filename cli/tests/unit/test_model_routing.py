@@ -604,7 +604,7 @@ def test_provider_without_haiku_override_keeps_role_model_on_haiku() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Item 2: carry the [1m] 1M-context compact window automatically
+# Item 2: inject the [1m] auto-compact backstop window
 # ---------------------------------------------------------------------------
 
 
@@ -615,7 +615,10 @@ def test_one_m_suffix_injects_compact_window() -> None:
         env={"ZAI_API_KEY": "k"},
     )
     assert route is not None
-    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "1000000"
+    # 800000, not 1000000: the [1m] variant already selects the 1M context, so a
+    # 1M threshold is a no-op (no compaction before the ceiling). 800000 is the
+    # ~80% backstop above the ~40% king handoff nudge.
+    assert route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "800000"
 
 
 def test_non_one_m_model_injects_no_compact_window() -> None:

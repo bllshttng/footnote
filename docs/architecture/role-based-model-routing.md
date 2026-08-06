@@ -125,11 +125,12 @@ A routed GLM worker wants a couple of env tweaks, carried by `extra_env` (config
 config:
   model_routing:
     roles:
-      build: "zai/glm-5.2[1m]"          # [1m] = 1M-context; auto-injects CLAUDE_CODE_AUTO_COMPACT_WINDOW
+      build: "zai/glm-5.2[1m]"          # [1m] = 1M-context; auto-injects the 800k auto-compact backstop
     extra_env:
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "1000000"
       API_TIMEOUT_MS: "3000000"
 ```
+
+A `[1m]` worker auto-injects `CLAUDE_CODE_AUTO_COMPACT_WINDOW=800000` as the compaction backstop. The `[1m]` variant already selects the 1M context; this var is the compaction threshold (how full the window gets before compaction), capped at the model window, so a value of `1000000` is a no-op (no compaction before the ceiling). The king handoff nudge fires at ~40%; 800000 (~80%) is the backstop above it. Override it via `extra_env` only to tune the backstop - setting `1000000` re-removes it.
 
 The built-in `zai` provider already routes the background (haiku) tier to the cheaper `glm-4.5-air`, so opus/sonnet run `glm-5.2` while judgment-light background traffic stays cheap on the same provider.
 

@@ -34,9 +34,13 @@ background traffic runs cheap on the SAME secondary provider; opus/sonnet stay
 on the role model. A provider with no ``haiku_model`` keeps the role model on
 every tier. Operators can further differentiate any tier via ``extra_env``.
 
-A routed model name carrying the ``[1m]`` suffix (1M-context) also gets
-``CLAUDE_CODE_AUTO_COMPACT_WINDOW=1000000`` injected, or the 1M window is
-silently lost; an explicit ``extra_env`` value wins.
+A routed model name carrying the ``[1m]`` suffix also gets an
+``CLAUDE_CODE_AUTO_COMPACT_WINDOW`` backstop injected. The ``[1m]`` variant
+already selects the 1M context; this var is the compaction THRESHOLD (how full
+the window gets before Claude Code compacts), capped at the model's window, so
+it cannot extend anything. It takes precedence over ``/autocompact``,
+``--autocompact``, and the saved setting, so the injected value is what the
+worker runs with; an explicit ``extra_env`` value still wins.
 
 Two non-negotiable invariants:
 
@@ -84,6 +88,18 @@ DEFAULT_SECONDARY_MODEL = "glm-5.2"
 # stay on the role model. Kept in lockstep with the schema default
 # (drift-guarded by test_config_defaults_match_module_constants).
 DEFAULT_ZAI_HAIKU_MODEL = "glm-4.5-air"
+
+# Auto-compact threshold injected on [1m]-routed workers. It is the
+# compaction THRESHOLD, not a window selector: the [1m] variant already selects
+# the 1M context, Claude Code caps the threshold at the model window, and a
+# threshold of 1000000 (the old value) is identical to setting nothing, i.e. no
+# compaction before the ceiling. The king handoff nudge fires at ~40%
+# (target.handoff.king_used_pct_trigger) so the agent prepares (finishes its
+# unit, writes the survival brief, decides compact vs handoff); this 80%
+# threshold is the BACKSTOP that catches a worker that ignored it, could not
+# act, or was mid-loop. 800k leaves ~200k runway for the compaction request
+# itself (a bare /compact at the limit fails "Context limit reached").
+ONE_M_AUTO_COMPACT_WINDOW = "800000"
 
 # Where a key lands when the operator keeps secrets out of the shell env; the
 # built-in fallback keeps env-file keys working for the zero-config zai lane
@@ -602,11 +618,13 @@ def _route_for_target(
     haiku_model = provider.get("haiku_model")
     if haiku_model:
         route["ANTHROPIC_DEFAULT_HAIKU_MODEL"] = haiku_model
-    # Item 2: a routed model carrying the [1m] suffix needs the 1M-context
-    # compact window or it silently loses the window. Injected before extra_env
-    # so an explicit extra_env value still wins.
+    # Item 2: a [1m]-routed worker gets an auto-compact backstop. The [1m]
+    # variant selects the 1M context; this threshold (capped at the model
+    # window, and precedence over /autocompact/--autocompact/setting) is the
+    # backstop above the king nudge. Injected before extra_env so an explicit
+    # extra_env value still wins.
     if model.endswith("[1m]"):
-        route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = "1000000"
+        route["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] = ONE_M_AUTO_COMPACT_WINDOW
     # extra_env (timeouts, flags, per-tier model overrides) merged last so an
     # operator can differentiate tiers or tune the routed worker.
     for k, v in (getattr(block, "extra_env", None) or {}).items():
