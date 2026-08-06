@@ -566,6 +566,52 @@ def test_stale_base_ignored_when_no_lanes(enabled, monkeypatch, capsys, tmp_path
     assert not any(len(c) > 2 and c[1] == "api" and "/compare/" in c[2] for c in fake.calls)
 
 
+def _point_lane_read_at(monkeypatch, **fields):
+    # _review_lane_configured imports load_settings_for_repo at call time, so
+    # patching the module attribute is seen by the local import.
+    from types import SimpleNamespace
+
+    import fno.config as cfg
+
+    review_fields = dict(
+        required_bots=None,
+        optional_apps=None,
+        reviewers=None,
+        peers=[],
+        peer_identity=None,
+    )
+    review_fields.update(fields)
+    review = SimpleNamespace(**review_fields)
+    monkeypatch.setattr(
+        cfg, "load_settings_for_repo", lambda _path: SimpleNamespace(review=review)
+    )
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        # Stock install: no lane, so the coverage guard does not apply.
+        (dict(), False),
+        # peers present but peer_identity set: peers post under the shared
+        # login, not a distinct local lane. Rust agrees (loopcheck.rs:2492).
+        (dict(peers=["codex"], peer_identity="fno-peer-bot"), False),
+        # Every peer carries its own identity: GitHub logins, not a local lane.
+        (dict(peers=[{"provider": "openai", "identity": "codex-bot"}]), False),
+        # An identity-free peer (bare string) is a local-attestation lane.
+        (dict(peers=["codex"]), True),
+        # An identity-free peer (dict without identity) is a local-attestation lane.
+        (dict(peers=[{"provider": "openai"}]), True),
+        # An explicit reviewer lane.
+        (dict(reviewers=["code-review"]), True),
+    ],
+)
+def test_review_lane_configured_matches_loopcheck_gate(
+    monkeypatch, fields, expected, tmp_path
+):
+    _point_lane_read_at(monkeypatch, **fields)
+    assert _merge._review_lane_configured(str(tmp_path)) is expected
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
