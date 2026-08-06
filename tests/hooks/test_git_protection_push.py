@@ -12,6 +12,11 @@ main. The fix returns early once an explicit, non-protected destination is
 parsed. get_current_branch is monkeypatched to "main" to simulate that cwd.
 """
 import importlib.util
+import json
+import os
+import subprocess
+import sys
+import tempfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -20,6 +25,18 @@ HOOK_PATH = REPO_ROOT / "hooks" / "git-protection.py"
 _spec = importlib.util.spec_from_file_location("git_protection", HOOK_PATH)
 git_protection = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(git_protection)
+
+
+def _run_hook(command):
+    """Drive the real hook end to end and return its decision dict ({} on
+    allow-by-silence). HOME/FNO_HOME are sandboxed so a host opt-out marker or
+    approval flag can never turn a deny into a pass."""
+    payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
+    with tempfile.TemporaryDirectory() as tmp:
+        env = {**os.environ, "HOME": tmp, "FNO_HOME": str(Path(tmp) / ".fno")}
+        proc = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,
+                              capture_output=True, text=True, env=env, cwd=tmp)
+    return json.loads(proc.stdout).get("hookSpecificOutput", {}) if proc.stdout.strip() else {}
 
 
 def _on_main(monkeypatched_branch="main"):
@@ -211,6 +228,121 @@ def test_heredoc_opener_after_shell_comment_is_ignored():
     # `# <<EOF` is a comment, not an opener; the shell executes the following
     # push, so it must be judged as a real command, not hidden as heredoc body.
     assert _git_segments("echo ok # <<EOF\ngit push --force origin main\nEOF")
+
+
+# --- multi-line QUOTED arguments are content, not command positions ----------
+# A newline inside an open quote is part of one argument, so splitting on it
+# handed shlex a fragment with an unbalanced quote; that raises, and the caller
+# falls back to a whole-command regex that matches the phrase anywhere. Any
+# message whose BODY quoted a guarded invocation was refused - including a
+# worker's review report ABOUT merge behaviour (observed live 2026-08-06).
+
+
+def test_multiline_quoted_body_mentioning_merge_is_not_a_command():
+    assert _merge_segment(
+        'fno mail send x "line one\ngh pr merge --auto is the bug\nline three"') is None
+
+
+def test_multiline_quoted_body_mentioning_push_is_not_a_command():
+    assert _git_segments(
+        'fno mail send x "intro\ngit push --force origin main is blocked\nend"') == []
+
+
+def test_multiline_single_quoted_body_is_not_a_command():
+    assert _git_segments(
+        "fno mail send x 'intro\ngit push origin main\nend'") == []
+
+
+def test_escaped_quote_inside_multiline_body_does_not_end_the_quote():
+    # The \" is data; the argument stays open, so the push line is still content.
+    assert _git_segments(
+        'fno mail send x "he said \\"hi\\"\ngit push origin main\nend"') == []
+
+
+def test_real_push_on_next_line_outside_quotes_still_caught():
+    # An UNQUOTED newline still splits, so a genuine two-liner is still judged.
+    assert _git_segments('echo "safe prose"\ngit push origin main')
+
+
+def test_real_push_after_closed_quote_same_line_still_caught():
+    assert _git_segments('echo "prose about git push"; git push origin main')
+
+
+def test_unterminated_quote_hiding_a_push_still_fails_closed():
+    # The quote never closes, so the whole command stays one line and shlex
+    # raises - the caller's deny-leaning whole-command fallback, unchanged.
+    try:
+        git_protection._command_segments('echo "intro\ngit push origin main')
+    except ValueError:
+        return
+    raise AssertionError("unterminated quote must raise, not parse as safe")
+
+
+def test_heredoc_inside_command_substitution_body_is_not_a_command():
+    # `gh pr create --body "$(cat <<'BODY' ... BODY )"` opens the heredoc INSIDE
+    # a double-quoted $( ), and _find_heredoc_opener deliberately treats a quoted
+    # `<<` as data - so the body never earns the heredoc exemption and its lines
+    # were judged as commands. This shape blocked this fix's own pull request.
+    cmd = (
+        'gh pr create --title "t" --body "$(cat <<\'BODY\'\n'
+        "| real `gh pr merge` | deny |\n"
+        "prose mentioning gh pr merge\n"
+        "BODY\n"
+        ')"'
+    )
+    assert _merge_segment(cmd) is None
+
+
+def test_unbalanced_quote_fallback_is_deny_leaning_for_git():
+    # The ValueError fallback in main() used `command.startswith("git")`, which
+    # is fail-OPEN: an unterminated quote in a command not literally beginning
+    # with `git` dropped the push gate entirely, while the merge gate on the
+    # same input still fired via its regex-anywhere fallback. Both fallbacks
+    # must lean the same way. Drives the real hook end to end - asserting the
+    # predicate in isolation would pass even if main() reverted to startswith.
+    out = _run_hook('echo "intro\ngit push origin main')
+    assert out.get("permissionDecision") == "deny", out
+
+
+# --- heredoc BODIES are raw text, not quoted shell ---------------------------
+# Quote tracking must PAUSE inside a heredoc body: one apostrophe in prose
+# otherwise opens a quote that swallows the terminator's newline, the heredoc
+# never terminates, and the fail-closed re-judge hands shlex the same
+# apostrophe - the false refusal above, re-entering through the heredoc door.
+
+
+def test_apostrophe_in_heredoc_body_does_not_swallow_the_terminator():
+    cmd = "cat <<EOF\nthis doesn't apply cleanly\nEOF\necho after"
+    assert git_protection._command_segments(cmd) == [
+        ["cat", "<<", "EOF"], ["echo", "after"]]
+
+
+def test_apostrophe_in_heredoc_body_still_hides_no_real_command():
+    # The body exemption is unchanged: with no EOF terminator the body is
+    # re-judged, and the apostrophe then raises out of shlex into the
+    # deny-leaning whole-command fallback. Either route must end in a deny.
+    out = _run_hook("cat <<EOF\nit doesn't matter\ngit push origin main")
+    assert out.get("permissionDecision") == "deny", out
+
+
+# --- `$( ... )` bodies are COMMANDS, even inside double quotes ---------------
+# A `$(` reached inside double quotes still runs its body, so the quote-aware
+# split above kept `"$(<newline>gh pr merge 1)"` as one token and the gate saw
+# no merge segment at all. Before the split it was caught only by accident, via
+# the ValueError fallback. Bodies are now re-segmented recursively.
+
+
+def test_multiline_substitution_hiding_a_merge_is_caught():
+    assert _merge_segment('X="$(gh pr merge 1 --auto\n)"') is not None
+
+
+def test_singleline_substitution_hiding_a_push_is_caught():
+    assert _git_segments('echo "$(git push origin main)"')
+
+
+def test_substitution_inside_single_quotes_is_not_executed():
+    # No expansion in single quotes, so this really is inert prose.
+    assert _git_segments('fno mail send x \'see "$(git push origin main)"\'') == []
 
 
 if __name__ == "__main__":
