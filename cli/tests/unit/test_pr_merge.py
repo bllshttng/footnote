@@ -79,6 +79,14 @@ def enabled(monkeypatch, tmp_path):
     # probe) to a tmp claims root so tests never touch the repo's .fno/claims
     # or contend with a real in-flight merge.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    # x-0eaf: default to a covered review so existing merge-behavior tests
+    # proceed past the coverage guard. Guard-specific tests override
+    # _review_coverage_for_pr (and _pr_head_oid for the staleness case).
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "pin"},
+    )
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -977,3 +985,60 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     assert seen == [], seen
+
+
+# ---- coverage guard (x-0eaf) ----
+
+
+def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
+    """No review_coverage event -> Unknown -> the sanctioned merge refuses."""
+    monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo: None)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert "unreviewed" in obj["reason"]
+
+
+def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "unknown", "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
+    """Coverage pinned a head that no longer matches the PR head -> stale -> refuse."""
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"},
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
