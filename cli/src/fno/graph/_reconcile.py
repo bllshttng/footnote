@@ -1123,9 +1123,10 @@ def _emit_zero_coverage_escape(record: "MergeDriftRecord", events_path: Path) ->
         except (TypeError, ValueError):
             pass
     count = cov.get("reviewed_count", 0)
+    count_str = str(count) if count is not None else "unknown"
     detail = (
         f"merged with {cov.get('coverage')} review coverage "
-        f"({count} reviewed) - nothing reviewed this diff"
+        f"({count_str} reviewed) - nothing reviewed this diff"
     )
     _emit_gate_escape(
         _GATE_ESCAPE_REASON_COVERAGE,

@@ -28,7 +28,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
-from typing import Iterator, List, Literal, Optional, Sequence
+from typing import Any, Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
@@ -169,12 +169,27 @@ def _safe_int(val, default=0):
         return default
 
 
+def _peer_is_identity_free(entry: Any) -> bool:
+    """A peer counts as a local-attestation lane only if it has no posting identity."""
+    if isinstance(entry, str):
+        return True
+    return isinstance(entry, dict) and not entry.get("identity")
+
+
 def _review_lane_configured(repo: str) -> bool:
-    """Whether any review lane (required/optional/reviewers/peers) is configured.
+    """Whether any review lane (required/optional/reviewers/local-peers) is configured.
 
     Fail-closed (True) on config error: a misread config must not bypass the
     coverage guard. (x-0eaf boundary: a stock install with no lane opted out of
     review, so the guard does not apply.)
+
+    Peers form a local lane only via identity-free entries. A shared
+    peer_identity, or a per-peer identity, means the review posts as a GitHub
+    login already matched by the bot sets, not a distinct local lane. This
+    mirrors resolved_local_peer_reviewers_for_author in loopcheck.rs so the
+    merge gate and the loop-check gate agree on whether a lane exists for one
+    PR - otherwise the loop ships DonePRGreen (no lane) while merge refuses as
+    unreviewed (lane), wedging the pipeline on the same config.
     """
     try:
         from pathlib import Path
@@ -182,7 +197,11 @@ def _review_lane_configured(repo: str) -> bool:
         from fno.config import load_settings_for_repo
 
         r = load_settings_for_repo(Path(repo)).review
-        return bool(r.required_bots or r.optional_apps or r.reviewers or r.peers)
+        if r.required_bots or r.optional_apps or r.reviewers:
+            return True
+        if r.peer_identity:
+            return False
+        return any(_peer_is_identity_free(p) for p in (r.peers or []))
     except Exception:
         return True
 
@@ -850,16 +869,19 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # discriminator is auto_merge.enabled, not attendance. After the gh check so
     # a missing gh still reports its own exit 127. Skipped when no review lane is
     # configured (x-0eaf boundary: a stock install opted out of review).
+    # Cache the lane check: it loads config from disk, and three reads below
+    # would re-parse the same TOML three times.
+    review_lane = _review_lane_configured(repo)
     cov = _review_coverage_for_pr(pr_number, repo)
     covered = (
-        not _review_lane_configured(repo)
+        not review_lane
         or (
             cov is not None
             and cov.get("coverage") == "covered"
             and _safe_int(cov.get("reviewed_count"), 0) > 0
         )
     )
-    if covered and cov is not None and _review_lane_configured(repo):
+    if covered and cov is not None and review_lane:
         # Staleness: the event pins a head; if the PR head moved after the gate
         # eval, the coverage no longer describes what would merge. Best-effort:
         # a head-fetch failure does not itself block (the event is from the
@@ -882,7 +904,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # cannot land an unreviewed head via `--auto`'s queue (x-0eaf TOCTOU). The
     # staleness check above already refused a current mismatch; this makes gh
     # itself refuse if the head moves between here and the merge.
-    covered_head = (cov.get("head_sha") or "") if cov and _review_lane_configured(repo) else ""
+    covered_head = (cov.get("head_sha") or "") if cov and review_lane else ""
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
