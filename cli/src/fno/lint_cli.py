@@ -123,18 +123,14 @@ def _visible_command_names(group: click.Group) -> list[str]:
 
 
 def _repo_root() -> Path:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        typer.echo(
-            "fno lint: git rev-parse failed; run from inside the repo",
-            err=True,
-        )
-        raise typer.Exit(2)
-    return Path(result.stdout.strip())
+    # The canonical cached, FNO_REPO_ROOT-aware resolver. This used to be a
+    # third bare git-rev-parse copy (flock-pattern and shellout-drift already
+    # call resolve_repo_root directly); the duplicate drifted without the env
+    # hook and the worktree fallback, so spawn-paths/provider-stderr-merge got
+    # different answers from their siblings. One resolver, same answer.
+    from fno.paths import resolve_repo_root
+
+    return resolve_repo_root()
 
 
 @app.command("flock-pattern")
