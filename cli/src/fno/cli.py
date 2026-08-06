@@ -329,13 +329,43 @@ def _check_migration() -> None:
 # App definition
 # ---------------------------------------------------------------------------
 
+
+class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):
+    """Root group; appends the honest verb-count line to `fno --help`.
+
+    The curated menu is small on purpose (menu-caps). Without a count it reads
+    as the whole surface, so a reader (human or agent) concludes a missing verb
+    does not exist and works around its absence. This line states how many
+    top-level verbs really exist and where the rest are. The count is read from
+    the registry at render time - lazy entries resolve to a hidden-aware stub
+    with no module import, so `fno --help` stays fast and works from a bare
+    install. The leaf count lives in scripts/ci/verb-baseline.txt (and the
+    `fno lint verb-ratchet` output) for anyone who wants the full surface.
+    """
+
+    def format_help(self, ctx: click.Context, formatter: click.HelpFormatter) -> None:
+        super().format_help(ctx, formatter)
+        names = self.list_commands(ctx)
+        visible = 0
+        for n in names:
+            cmd = self.get_command(ctx, n)
+            if cmd is not None and not getattr(cmd, "hidden", False):
+                visible += 1
+        formatter.write_paragraph()
+        formatter.write_text(
+            f"Showing {visible} of {len(names)} top-level verbs, plus the Rust "
+            f"front's `mux` and `version`. Hidden verbs are invocable: run "
+            f"`fno help --all` for every command, `fno mux` for pane control."
+        )
+
+
 app = typer.Typer(
     name="fno",
     help="CLI for the footnote autonomous delivery pipeline",
     no_args_is_help=True,
     invoke_without_command=True,
     add_completion=False,
-    cls=make_lazy_group_cls(LAZY_SUBCOMMANDS),
+    cls=_HonestMenuGroup,
     # Both of these keep `typer.rich_utils` off the error path. typer defers that
     # import to exception time in TWO places -- `typer.main.except_hook` (gated by
     # pretty_exceptions_enable) and the ClickException arm of `typer.core._main`
@@ -444,10 +474,12 @@ def _render_full_menu() -> str:
         rows[name] = entry[1] if isinstance(entry, tuple) and len(entry) >= 2 else ""
     width = max(len(n) for n in rows)
     lines = [
-        "fno full top-level surface - every top-level command, including hidden.",
+        "fno-py full top-level surface - every fno-py command, including hidden.",
         "The curated menu is `fno --help`; hidden commands are invocable, just not advertised.",
         "For a group's own verbs (hidden included) run `fno help <group> --all` "
         "(e.g. `fno help agents --all`), or `fno <group> --help` for its menu.",
+        "Also: the Rust front (`fno` binary) owns `mux` and `version`, which live "
+        "outside this listing - run `fno mux` / `fno mux --help` for pane control.",
         "",
         "Commands:",
     ]
