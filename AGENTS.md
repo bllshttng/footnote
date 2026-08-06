@@ -129,7 +129,7 @@ Day-to-day usage (create/edit/columns/lifecycle/roadmap) is in [docs/backlog-usa
 
 **Looping.**
 - *In-session:* `hooks/target-stop-hook.sh` shims `fno-agents loop-check`, which decides stop/allow from external truth only: `<promise>` intent, done() reads (PR exists, CI green, every `config.review.required_bots` bot reviewed with no unaddressed blocking finding), any plan-declared `done_probes`, a backstop fingerprint, and budget. Terminal-allow invokes `fno-agents finalize` (idempotent).
-- *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
+- *Cross-session:* `fno-agents loop run` drives `--driver target`, stopping on a `TerminationReason` (DonePRGreen, DoneUnreviewed, DoneAdvisory, DoneDelivery, NoWork, Budget, NoProgress, Interrupted). [unified-loop](docs/architecture/unified-loop.md).
 - Signal distress without stopping: `<help reason="..." evidence="...">...</help>`. Cancel: `touch .fno/.target-cancelled` or `TARGET_CANCEL=1`. Subprocess agents return `RESULT: BLOCKED` on stdout.
 - Shared iteration protocol: do ONE thing -> verify mechanically -> keep or discard -> repeat ([iteration-loop](skills/target/references/iteration-loop.md)).
 
@@ -152,7 +152,7 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Ship vocabulary
 
-`/ship` is the deliverable umbrella (`/ship pr` = `/pr`; `/ship doc` ships a research brief). The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
+`/ship` is the deliverable umbrella (`/ship pr` = `/pr`; `/ship doc` ships a research brief). The **ship phase** is the `/target` step that creates the PR; the **ship gate** stamps plan frontmatter. Loop finish lines: `DonePRGreen` (PR + CI + reviewed), `DoneUnreviewed` (green but zero review coverage - terminal, never merges, never a ship reason), `DoneAdvisory` (doc + eval-green), `DoneDelivery` (current evidence). `fno pr merge` is the merge primitive. [skills/ship/SKILL.md](skills/ship/SKILL.md).
 
 ### Plan completion stamp
 
