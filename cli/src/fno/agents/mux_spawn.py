@@ -1568,9 +1568,10 @@ def dispatch_spawn_pane(
 
         stored_session_uuid: Optional[str] = None
         row_status: AgentStatus = "live"
+        crown_declined = False
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
             # candidate (the second pane's session may not exist yet when both
@@ -1581,6 +1582,19 @@ def dispatch_spawn_pane(
                 r.harness_session_id == session_uuid for r in rows
             )
             stored_session_uuid = None if claimed else session_uuid
+            # One-live-crown guard (x-7685): if another non-terminal row already
+            # holds this scope, decline the crown and spawn uncrowned. Same lock,
+            # same rows, same idiom as the claim check above. spawn --crown was
+            # made reachable by the _is_crown_bearing_spawn routing fix; without
+            # this guard it stamps a duplicate crown. A worker without a crown is
+            # recoverable; a duplicate crown over one scope is not.
+            if crown_level is not None and crown_scope:
+                _terminal = {"exited", "orphaned", "failed", "permanent_dead"}
+                if any(r.crown_scope == crown_scope and r.status not in _terminal for r in rows):
+                    crown_level = None
+                    crown_scope = None
+                    crown_grantor_val = None
+                    crown_declined = True
             # A pane with no identified session is created but not addressable.
             # Keep that transition explicit instead of calling it live - for the
             # happy-hosted claude route as much as for codex, where an id-less
@@ -1617,7 +1631,15 @@ def dispatch_spawn_pane(
         try:
             if provider == "claude":
                 route_settings_path = route_settings_path_for(route_env)
+            _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
+            if crown_declined and _declined_scope:
+                import sys
+                print(
+                    f"spawn: crown declined (scope {_declined_scope!r} already held "
+                    "by a live row); spawned uncrowned. The worker launched without a crown.",
+                    file=sys.stderr,
+                )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
             reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
             if reaped:

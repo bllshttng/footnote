@@ -337,3 +337,35 @@ def test_crown_refuses_unknown_handle(tmp_path: Path, monkeypatch) -> None:
     r = _crown(monkeypatch, ["ghost", "--scope", "epic-x"], self_env=None)
     assert r.exit_code == 2
     assert "no agent" in r.output.lower()
+
+
+def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkeypatch) -> None:
+    """A second crown-bearing spawn at an already-occupied scope spawns UNCROWNED,
+    not a duplicate crown. The one-live-crown guard inside _append (mux_spawn.py)
+    declines the crown atomically, under the registry write lock, so two racing
+    spawns cannot both stamp."""
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    # Pre-seed an existing crowned row over scope "epic-x"
+    write_registry([AgentEntry(
+        name="incumbent", harness="claude", cwd="/w", log_path="",
+        short_id="inc", status="live",
+        crown_level=1, crown_scope="epic-x", crown_grantor="human",
+    )])
+    # Spawn a new worker with --crown level=1,scope=epic-x (same scope)
+    _spawn_crowned(
+        monkeypatch, tmp_path,
+        grantor_env="parent-sess-xyz",
+        crown_level=1, crown_scope="epic-x",
+    )
+    rows = load_registry()
+    new = next(r for r in rows if r.name == "king-epic")
+    # The worker launched (exists in the registry) but WITHOUT a crown
+    assert new.crown_level is None
+    assert new.crown_scope is None
+    assert new.crown_grantor is None
+    # The incumbent's crown is untouched
+    inc = next(r for r in rows if r.name == "incumbent")
+    assert inc.crown_level == 1
+    assert inc.crown_scope == "epic-x"
