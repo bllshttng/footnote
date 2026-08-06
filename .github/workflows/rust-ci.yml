@@ -24,7 +24,10 @@ on:
       - scripts/ci/check-registry-schema-parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
+      - scripts/ci/check-review-app-parity.sh
       - cli/src/fno/config/__init__.py
+      - cli/src/fno/pr/_reviews.py
+      - cli/src/fno/review_capability.py
       - .github/workflows/rust-ci.yml
   pull_request:
     paths:
@@ -35,7 +38,10 @@ on:
       - scripts/ci/check-registry-schema-parity.sh
       - scripts/ci/check-proto-version-bump.sh
       - scripts/ci/check-reviewer-descriptor-parity.sh
+      - scripts/ci/check-review-app-parity.sh
       - cli/src/fno/config/__init__.py
+      - cli/src/fno/pr/_reviews.py
+      - cli/src/fno/review_capability.py
       - .github/workflows/rust-ci.yml
 
 jobs:
@@ -182,6 +188,16 @@ jobs:
         # registry would not fire - this leg is what catches it. Pure text
         # extraction; no binary needed.
         run: bash scripts/ci/check-reviewer-descriptor-parity.sh
+
+      - name: Review app login + marker parity check (x-0eaf)
+        # The review-App login set is declared three times (Rust BOT_PROFILES,
+        # Python _OPTIONAL_BOTS, Python _KNOWN_REVIEW_APP_LOGINS); the Rust
+        # profiles also carry the usage_markers the refusal classifier reads.
+        # A login on one side only is an App one path honors and another cannot
+        # explain; a profile without an explicit usage_markers is an undecided
+        # refusal shape (AC10 - "no marker matched" must never read as "did not
+        # refuse"). Pure text extraction; no binary needed.
+        run: bash scripts/ci/check-review-app-parity.sh
 
       - name: Registry schema parity check (ab-0baecaed)
         # Cross-language schema_version lockstep: catches a Rust-only bump of
