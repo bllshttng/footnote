@@ -17,6 +17,18 @@ REINJECT="$REPO_ROOT/hooks/target-postcompact-reinject.sh"
 [[ -f "$ARM" ]] || { echo "FAIL: arm hook not found at $ARM" >&2; exit 1; }
 export CLAUDE_PLUGIN_ROOT="$REPO_ROOT"
 
+# Discover a Python that can import fno.cli (for the stub's context delegation).
+# arm-handoff was repointed to `fno context` (x-7685); the stub must delegate it
+# to the real implementation, or the probe silently fails and the hook never arms.
+FNO_PYTHON=""
+for _cand in "$REPO_ROOT/cli/.venv/bin/python" "$(command -v python3 || true)"; do
+  [ -n "$_cand" ] && [ -x "$_cand" ] || continue
+  if PYTHONPATH="$REPO_ROOT/cli/src" "$_cand" -c 'import fno.cli' >/dev/null 2>&1; then
+    FNO_PYTHON="$_cand"; break
+  fi
+done
+export FNO_PYTHON
+
 PASS=0
 FAIL=0
 SKIP=0
@@ -49,6 +61,13 @@ setup_claim_backend() {  # $1 = the key that should read live
 #!/usr/bin/env bash
 # Minimal stand-in for \`fno claim status <key> -J\`. Any key other than the one
 # live fixture reads free, which is what a never-acquired claim really returns.
+# Delegate \`fno context\` to the real implementation (x-7685 repointed
+# arm-handoff to fno context; a stub that exits 1 on it makes the probe
+# unreachable and the hook never arms - the same shape as test-handoff.sh's
+# context delegation).
+if [ "\$1" = "context" ] && [ -n "$FNO_PYTHON" ]; then
+  exec "$FNO_PYTHON" -m fno.cli "\$@"
+fi
 [ "\$1" = "claim" ] && [ "\$2" = "status" ] || exit 1
 if [ "\$3" = "$live_key" ]; then
   printf '{"key": "%s", "state": "live", "holder": "target-session:stub"}\\n' "\$3"

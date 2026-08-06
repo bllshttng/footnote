@@ -207,6 +207,11 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Session gate satisfaction + bounded events tail + inconsistencies.",
         {"hidden": True},
     ),
+    "context": (
+        "fno.context_probe:context_command",
+        "Context-window usage for this session or a given transcript (hook door).",
+        {"hidden": True},
+    ),
     "doctor": (
         "fno.doctor:doctor_command",
         "Diagnose installed-vs-source fno skew (network-free).",

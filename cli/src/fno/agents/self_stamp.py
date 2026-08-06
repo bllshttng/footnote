@@ -72,7 +72,12 @@ def resolve_self_model(env: Optional[Mapping[str, str]] = None) -> str:
     return "unknown"
 
 
-def _complete_lines(path: Path, max_bytes: Optional[int]) -> Optional[list[bytes]]:
+def _complete_lines(
+    path: Path,
+    max_bytes: Optional[int],
+    *,
+    drop_unterminated_tail: bool = True,
+) -> Optional[list[bytes]]:
     try:
         with open(path, "rb") as fh:
             fh.seek(0, 2)
@@ -94,7 +99,14 @@ def _complete_lines(path: Path, max_bytes: Optional[int]) -> Optional[list[bytes
             boundary = data.find(b"\n")
             data = data[boundary + 1 :] if boundary >= 0 else b""
 
-    if data and not data.endswith(b"\n"):
+    # A trailing record without a terminal \n is dropped by default: model
+    # resolution treats it as an un-committed write (codex rollout's "wait for
+    # newline" contract). The context probe passes drop_unterminated_tail=False -
+    # dropping a complete-but-unterminated assistant record would make it report
+    # the second-to-last turn's usage (silently stale; in arm-handoff that
+    # suppresses a needed handoff). There, each record is json.loads-validated,
+    # so a genuinely partial trailing line is skipped by the parser, not here.
+    if drop_unterminated_tail and data and not data.endswith(b"\n"):
         boundary = data.rfind(b"\n")
         data = data[: boundary + 1] if boundary >= 0 else b""
     return data.splitlines()
@@ -146,24 +158,41 @@ def _codex_record_model(record: object) -> Optional[str]:
     return model if isinstance(model, str) and model else None
 
 
-def _claude_model(session_id: str) -> Optional[str]:
-    from fno.agents.discover import default_projects_dir
+def resolve_own_transcript(session_id: str, harness: str) -> Optional[Path]:
+    """This session's own transcript jsonl, harness-aware, or None.
 
-    # The transcript is named <session_id>.jsonl under a cwd-encoded dir; glob by
-    # id so this is cwd-encoding-agnostic. FNO_CLAUDE_PROJECTS_DIR seams the dir.
-    for path in default_projects_dir().glob(f"*/{session_id}.jsonl"):
-        model = _last_model(path, _claude_record_model)
-        if model:
-            return model
+    The single locator shared by the model resolver (`resolve_self_model`) and
+    the context probe (`fno.context_probe`), so the FNO_CLAUDE_PROJECTS_DIR /
+    FNO_CODEX_SESSIONS_DIR seams live in one place rather than being
+    reimplemented per caller. A session owns one transcript, so the first match
+    wins. None - when the id/harness is blank or no transcript is found - is a
+    floor every caller treats as "unknown" / "unreadable", never a fault.
+    """
+    if not session_id or not harness:
+        return None
+    if harness == "claude":
+        from fno.agents.discover import default_projects_dir
+
+        # Named <session_id>.jsonl under a cwd-encoded dir; glob by id so this
+        # is cwd-encoding-agnostic. FNO_CLAUDE_PROJECTS_DIR seams the dir.
+        for path in default_projects_dir().glob(f"*/{session_id}.jsonl"):
+            return path
+        return None
+    if harness == "codex":
+        from fno.agents.discover import default_codex_sessions_dir
+
+        # The rollout filename embeds the session id; FNO_CODEX_SESSIONS_DIR seams it.
+        for path in default_codex_sessions_dir().rglob(f"*{session_id}*.jsonl"):
+            return path
+        return None
     return None
+
+
+def _claude_model(session_id: str) -> Optional[str]:
+    path = resolve_own_transcript(session_id, "claude")
+    return _last_model(path, _claude_record_model) if path else None
 
 
 def _codex_model(session_id: str) -> Optional[str]:
-    from fno.agents.discover import default_codex_sessions_dir
-
-    # The rollout filename embeds the session id; FNO_CODEX_SESSIONS_DIR seams it.
-    for path in default_codex_sessions_dir().rglob(f"*{session_id}*.jsonl"):
-        model = _last_model(path, _codex_record_model)
-        if model:
-            return model
-    return None
+    path = resolve_own_transcript(session_id, "codex")
+    return _last_model(path, _codex_record_model) if path else None

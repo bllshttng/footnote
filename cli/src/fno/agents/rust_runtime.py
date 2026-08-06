@@ -225,6 +225,11 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # Read-only, pure Python (fno.agents.session_truth reads the transcript via
     # peek); no Rust client port, so it must never auto-route to the daemon.
     "truth",
+    # x-7685: daemon-free registry read for hooks (`fno agents registry-json`).
+    # Pure Python (load_registry, a file read) - deliberately NOT the Rust-routed
+    # `fno agents list`, which lazy-starts the daemon a Stop hook must never wait
+    # on. No Rust client port, so it must never auto-route to the daemon.
+    "registry-json",
 })
 
 #: Verbs the ``auto`` (default) runtime routes to Rust: the Rust client verbs
@@ -389,6 +394,24 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
         return False
     return any(
         a == "--role" or a.startswith("--role=") for a in _args_before_argv(args)
+    )
+
+
+def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
+    """True for a ``spawn`` carrying ``--crown`` (bestow-at-spawn).
+
+    ``--crown level=N,scope=X`` is implemented only in the Python spawn path
+    (``cmd_spawn`` -> ``_parse_crown`` stamps the crown onto the spawned row).
+    The Rust client does not parse ``--crown``, so a ``spawn ... --crown ...``
+    that auto-routed to the binary would exit with ``unknown flag: --crown`` -
+    the documented grammar reachable only from the path the default route never
+    reaches. Same shape and reason as ``--role`` above. Detected here so the call
+    falls through to the Python runtime that owns the implementation.
+    """
+    if verb != "spawn":
+        return False
+    return any(
+        a == "--crown" or a.startswith("--crown=") for a in _args_before_argv(args)
     )
 
 
@@ -955,6 +978,7 @@ def make_agents_group_cls() -> type:
                 # parser has no --resume flag, and Python owns the revival.
                 py_spawn = (
                     _is_role_bearing_spawn(verb, args)
+                    or _is_crown_bearing_spawn(verb, args)
                     or _is_monitor_bearing_spawn(verb, args)
                     or _is_route_bearing_spawn(verb, args)
                     or _is_pane_substrate_spawn(verb, args)

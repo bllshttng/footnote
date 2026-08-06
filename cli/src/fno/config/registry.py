@@ -202,6 +202,7 @@ FIELD_META: dict[str, Meta] = {
     ),
     "target.handoff.enabled": Meta("advanced", "Enable target self-handoff at pipeline boundaries."),
     "target.handoff.used_pct_trigger": Meta("never", "Context-used %% that triggers a wave-boundary handoff."),
+    "target.handoff.king_used_pct_trigger": Meta("advanced", "Context-used %% that triggers a king handoff (below used_pct_trigger)."),
     "target.handoff.generation_cap": Meta("never", "Max handoff generations before refusing further delegation."),
     "target.blast.enabled": Meta("never", "Enable blast-radius routing."),
     "target.blast.downgrade": Meta("never", "Allow token-saving downgrades in blast routing."),

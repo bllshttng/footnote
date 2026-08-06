@@ -90,6 +90,12 @@ class Carveout:
     need: Optional[str]
     description: str
     truncated: bool
+    # Optional crown scope this carve-out discharges (e.g. an epic id). The king
+    # orphan check (hooks/king-context-nudge.sh) reads this FIELD rather than
+    # grepping `description` free text, so rewording a sentence cannot silently
+    # silence it. Optional + last so existing records and retro-triage parse
+    # unchanged (a missing key reads as None).
+    scope: Optional[str] = None
 
 
 def _utc_now_iso() -> str:
@@ -168,6 +174,7 @@ def add_carveout(
     description: str,
     need: Optional[str] = None,
     priority: Optional[str] = None,
+    scope: Optional[str] = None,
     cap: int = DESCRIPTION_CAP,
     storage_root: Optional[Path] = None,
 ) -> Tuple[Carveout, bool]:
@@ -203,6 +210,7 @@ def add_carveout(
         need=need,
         description=desc,
         truncated=truncated,
+        scope=scope,
     )
 
     from fno.paths import project_log

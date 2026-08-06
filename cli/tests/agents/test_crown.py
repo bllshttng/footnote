@@ -253,9 +253,11 @@ def _rows_by_name():
 
 
 def test_crown_human_grant_is_the_default(tmp_path: Path, monkeypatch) -> None:
-    # A shell with no agent identity in env is an attended human (level 0).
+    # A shell with no agent identity in env is an attended human. --level bypasses
+    # scope derivation (x-7685: a scope that resolves to nothing is now refused,
+    # not defaulted to 0); this test is about the grantor class, not the level.
     _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "0"], self_env=None)
     assert r.exit_code == 0, r.output
     row = _rows_by_name()["worker"]
     assert (row.crown_level, row.crown_scope, row.crown_grantor) == (0, "epic-x", "human")
@@ -276,7 +278,7 @@ def test_crown_config_grant_when_knob_on(tmp_path: Path, monkeypatch) -> None:
     _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
     stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=True))
     monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
     assert r.exit_code == 0, r.output
     assert _rows_by_name()["worker"].crown_grantor == "config-grant"
 
@@ -296,11 +298,25 @@ def test_crown_refuses_second_live_crown_over_one_scope(tmp_path: Path, monkeypa
     assert "one live crown per scope" in r.output.lower()
 
 
+def test_crown_refuses_second_crown_when_holder_is_busy(tmp_path: Path, monkeypatch) -> None:
+    # A busy/idle king still holds its crown: the one-live-crown refusal must
+    # treat every non-terminal status as active, not just literal "live" (the
+    # P1 shape _TERMINAL_STATUSES was introduced for in --succeed + the orphan
+    # check; the grant path shares the invariant, so it shares the set).
+    existing = _entry("king1", short_id="bbbb2222", crown_level=1, crown_scope="epic-x", status="busy")
+    _seed(monkeypatch, tmp_path, [existing, _entry("worker", short_id="cccc3333")])
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
+    assert r.exit_code == 2
+    assert "one live crown per scope" in r.output.lower()
+
+
 def test_crown_refuses_unattended_agent_without_superset_or_config(tmp_path: Path, monkeypatch) -> None:
     _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
     stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=False))
     monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    # --level bypasses scope derivation (x-7685) so the test reaches the actual
+    # authorization refusal it targets: agent with no superset crown, no config grant.
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
     assert r.exit_code == 2
     assert "superset" in r.output.lower() or "config" in r.output.lower()
 
@@ -321,3 +337,35 @@ def test_crown_refuses_unknown_handle(tmp_path: Path, monkeypatch) -> None:
     r = _crown(monkeypatch, ["ghost", "--scope", "epic-x"], self_env=None)
     assert r.exit_code == 2
     assert "no agent" in r.output.lower()
+
+
+def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkeypatch) -> None:
+    """A second crown-bearing spawn at an already-occupied scope spawns UNCROWNED,
+    not a duplicate crown. The one-live-crown guard inside _append (mux_spawn.py)
+    declines the crown atomically, under the registry write lock, so two racing
+    spawns cannot both stamp."""
+    from fno.agents.registry import AgentEntry, load_registry, write_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    # Pre-seed an existing crowned row over scope "epic-x"
+    write_registry([AgentEntry(
+        name="incumbent", harness="claude", cwd="/w", log_path="",
+        short_id="inc", status="live",
+        crown_level=1, crown_scope="epic-x", crown_grantor="human",
+    )])
+    # Spawn a new worker with --crown level=1,scope=epic-x (same scope)
+    _spawn_crowned(
+        monkeypatch, tmp_path,
+        grantor_env="parent-sess-xyz",
+        crown_level=1, crown_scope="epic-x",
+    )
+    rows = load_registry()
+    new = next(r for r in rows if r.name == "king-epic")
+    # The worker launched (exists in the registry) but WITHOUT a crown
+    assert new.crown_level is None
+    assert new.crown_scope is None
+    assert new.crown_grantor is None
+    # The incumbent's crown is untouched
+    inc = next(r for r in rows if r.name == "incumbent")
+    assert inc.crown_level == 1
+    assert inc.crown_scope == "epic-x"

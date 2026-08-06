@@ -122,6 +122,25 @@ check_eq "Multiple lines: last wins (used_tokens=10000)" "10000" "$(printf '%s' 
 check_eq "Multiple lines: used_pct=1 (10000/1000000)" "1" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
 
 # ---------------------------------------------------------------------------
+# Multiple assistant lines, NO trailing newline -> LAST one still wins.
+# Heredocs and printf-'...\n' always terminate the final line; only shell
+# command substitution strips a trailing newline, so this shape is invisible to
+# every other fixture. A _complete_lines trim once dropped the unterminated
+# final record and made the probe report the second-to-last turn - silently
+# stale, and in the arm-handoff hook that suppressed a needed handoff.
+# ---------------------------------------------------------------------------
+FIXTURE_MULTI_NONL="$TMPDIR_FIXTURES/transcript_multi_nonl.jsonl"
+printf '%s\n%s' \
+  '{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":150000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}' \
+  '{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":10000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[]}}' \
+  > "$FIXTURE_MULTI_NONL"
+
+run_probe "$FIXTURE_MULTI_NONL"
+check_exit "No-trailing-newline exits 0" "0" "$probe_exit"
+check_eq "No-trailing-newline: last wins (used_tokens=10000)" "10000" "$(printf '%s' "$output" | jq -r '.used_tokens' 2>/dev/null)"
+check_eq "No-trailing-newline: used_pct=1" "1" "$(printf '%s' "$output" | jq -r '.used_pct' 2>/dev/null)"
+
+# ---------------------------------------------------------------------------
 # Missing file -> exit 3, no JSON
 # ---------------------------------------------------------------------------
 run_probe "$TMPDIR_FIXTURES/nonexistent.jsonl"

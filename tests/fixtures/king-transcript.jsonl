@@ -1,0 +1,2 @@
+{"type":"user","message":{"role":"user","content":"rule the wave"}}
+{"type":"assistant","message":{"role":"assistant","model":"claude-sonnet-4-6","usage":{"input_tokens":500000,"cache_creation_input_tokens":0,"cache_read_input_tokens":0},"content":[{"type":"text","text":"ruling"}]}}

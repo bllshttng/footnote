@@ -258,11 +258,25 @@ def whoami_command(
     mail, harness_sid = _mail_handle()
     agent_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     mail_unread = _mail_unread_count(mail, agent_self, harness_sid, state.project_root)
+    # Context pressure from the same transcript the model line resolves. Probed
+    # once here and reused in both render branches so the file is not tailed
+    # twice. None (fresh session, no assistant usage row yet, unreadable store)
+    # omits the line entirely: whoami is the confused-agent recovery verb and
+    # must never gain a failure mode, and a fresh SessionStart stays byte-for-byte
+    # unchanged (the inject block carries a real number exactly on a post-compaction
+    # resume, where re-orientation matters).
+    from fno.context_probe import probe_context
+
+    context_reading = probe_context()
     if opts.json_output:
         payload = _ctx_to_jsonable(state)
         payload["mail_handle"] = mail
         payload["harness_session_id"] = harness_sid
         payload["model"] = _session_model()
+        if context_reading is not None:
+            payload["context_used_pct"] = context_reading.used_pct
+            payload["context_used_tokens"] = context_reading.used_tokens
+            payload["context_window_tokens"] = context_reading.window_tokens
         if mail_unread:
             payload["mail_unread"] = mail_unread
         typer.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -306,6 +320,12 @@ def whoami_command(
     model = _session_model()
     if model:
         typer.echo(f"model:    {model}")
+    if context_reading is not None:
+        typer.echo(
+            f"context:  {context_reading.used_pct}% used "
+            f"({context_reading.used_tokens:,} of "
+            f"{context_reading.window_tokens:,} tokens)"
+        )
     # x-301a: opportunistic mesh-name pointer. `fno whoami` reports operating
     # CONTEXT and does not otherwise surface the registered mesh name; when this
     # process IS a mesh worker (the spawn path injected FNO_AGENT_SELF), echo it
