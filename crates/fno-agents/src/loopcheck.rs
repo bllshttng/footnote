@@ -2802,6 +2802,14 @@ pub enum CoverageVerdict {
 /// refusal (fail closed) and is reported as "unknown" in the receipt (fail
 /// honest). Collapsing an API error into 0 produces false refusals; collapsing
 /// it into a count reproduces the bug.
+///
+/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
+/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
+/// the caller handles by block-retry (fail-safe: the session retries, it does
+/// not green or merge). The variant, its receipt, schema enum, and tests exist
+/// so that softening the error path to terminate (rather than block) is a
+/// one-line change, not a redesign. Do not delete it as dead code without
+/// understanding this.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Coverage {
     /// `n` reviewers reviewed (excludes human approvals until the operator says

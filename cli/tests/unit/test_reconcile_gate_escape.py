@@ -178,6 +178,15 @@ def test_placeholder_pr_number_no_emit_no_fetch(tmp_path):
 
 
 # ---- zero-coverage escape (x-0eaf) ----
+#
+# CAVEAT (x-0eaf finding 3): these tests pass events_path EXPLICITLY (the same
+# path loop-check writes to). In the DEFAULT worktree workflow, loop-check writes
+# review_coverage to the SESSION worktree's .fno/events.jsonl while reconcile
+# reads the CANONICAL (repo-root) events.jsonl - they are separate files (the
+# worktree events.jsonl is NOT symlinked). So the zero-coverage escape does NOT
+# fire in the default workflow until loop-check emits review_coverage to both
+# logs. These tests stay green because they inject the path; they do NOT cover
+# the default worktree workflow. That plumbing is a follow-up.
 
 
 def _write_event(cwd: Path, ev: dict) -> None:
