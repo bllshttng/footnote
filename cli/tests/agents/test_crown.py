@@ -302,7 +302,9 @@ def test_crown_refuses_unattended_agent_without_superset_or_config(tmp_path: Pat
     _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
     stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=False))
     monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="bot")
+    # --level bypasses scope derivation (x-7685) so the test reaches the actual
+    # authorization refusal it targets: agent with no superset crown, no config grant.
+    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
     assert r.exit_code == 2
     assert "superset" in r.output.lower() or "config" in r.output.lower()
 

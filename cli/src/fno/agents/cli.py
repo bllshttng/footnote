@@ -688,9 +688,10 @@ def cmd_crown(
             resolved_level = (caller_row.crown_level or 0) + 1
     elif load_settings().agents.crown_config_grant:
         grantor = "config-grant"
-    elif caller_row is not None:
-        # A registered agent with no superset crown (e.g. a hand-started king
-        # over an unrelated scope) still grants; stamp ITS identity, not "human".
+    elif not caller_self and caller_row is not None:
+        # A hand-started agent (no FNO_AGENT_SELF, row via session-fallback) with
+        # no superset crown still grants; stamp ITS identity, not "human". A
+        # SPAWNED agent (caller_self set) with no crown hits the else-refuse below.
         grantor = caller_row.session_id or caller_row.name
     elif not caller_self:
         grantor = "human"  # an attended human shell (no registry row, no agent identity)
