@@ -69,7 +69,7 @@ def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
         '[review]\npeers = [{provider="codex", identity="bot-x"}, "gemini"]\n'
     )
     line = _done_when_line({}, root)
-    assert "reviewed by [bot-x (post: /fno:review peer <pr#> codex --post; cross-model only)]" in line, line
+    assert "reviewed by [bot-x (no --post runner" in line, line
     assert "peer -> /fno:review peer gemini --attest (cross-model only)" in line, line
 
 
@@ -183,8 +183,8 @@ def test_distinct_logins_are_not_prefix_deduped(repo):
         '{provider="gemini", identity="bot"}]\n'
     )
     line = _done_when_line({}, root)
-    assert "bot-extra (post:" in line, line  # both logins survive dedup
-    assert "bot (post: /fno:review peer <pr#> gemini --post; cross-model only)" in line, line
+    assert "bot-extra (" in line, line  # both logins survive dedup
+    assert "bot (no --post runner" in line, line
 
 
 def test_no_external_suppresses_every_login_gate(repo):
@@ -223,7 +223,7 @@ def test_peer_identity_colliding_with_an_app_login_keeps_its_producer(repo):
         'peers = [{provider="codex", identity="shared-bot"}]\n'
     )
     line = _done_when_line({}, root)
-    assert "shared-bot (post: /fno:review peer <pr#> codex --post" in line, line
+    assert "shared-bot (no --post runner" in line, line
 
 
 def test_shared_identity_names_a_drivable_provider_not_the_first(repo):
@@ -239,7 +239,9 @@ def test_shared_identity_names_a_drivable_provider_not_the_first(repo):
 
 def test_identity_backed_undrivable_provider_names_the_missing_runner(repo):
     # The --post carrier gets the same drivability rule as the local producer.
-    root = repo('[review]\npeers = [{provider="opencode", identity="oc-bot"}]\n')
+    root = repo(
+        '[review]\npeers = ["opencode"]\npeer_identity = "oc-bot"\n'
+    )
     line = _done_when_line({}, root)
     assert "oc-bot (no /fno:review peer runner for [opencode])" in line, line
 
@@ -249,3 +251,27 @@ def test_self_cert_rung_is_marked_as_such(repo):
     # collapses the trust spectrum in the one line meant to show the gate.
     root = repo('[review]\nreviewers = ["declare"]\n')
     assert "[self-cert: asserts no review evidence]" in _done_when_line({}, root)
+
+
+def test_per_entry_identity_has_no_post_runner(repo):
+    # --post posts under the SHARED peer_identity and reads its PAT from
+    # peer_token_env; it cannot select a per-entry identity (peer.md
+    # preconditions), so advertising --post for one names a command whose
+    # helper stops before posting.
+    root = repo('[review]\npeers = [{provider="codex", identity="bot-x"}]\n')
+    line = _done_when_line({}, root)
+    assert "no --post runner" in line, line
+    assert "--post;" not in line, line
+
+
+def test_post_carrier_never_prints_an_alternation(repo):
+    # The peer arg parser matches a known provider name, so <a|b> is discarded
+    # and the provider falls back to codex - which can refuse a gate the
+    # configured gemini would have cleared.
+    root = repo(
+        '[review]\npeers = ["codex", "gemini"]\npeer_identity = "fno-peer-bot"\n'
+    )
+    line = _done_when_line({}, root)
+    assert "<codex|gemini>" not in line, line
+    assert "<provider> --post" in line, line
+    assert "configured: codex, gemini" in line, line

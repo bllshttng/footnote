@@ -382,20 +382,33 @@ def _required_bots(review: Any) -> List[str]:
     # entry read as an App that posts itself; and under a shared
     # `peer_identity` only the first provider survived, so a config whose
     # second entry is the only drivable one advertised the undrivable first.
+    # The carrier SOURCE travels with the login, not just its providers.
+    # `--post` posts under the SHARED `config.review.peer_identity` and reads its
+    # PAT from `peer_token_env`; it cannot select a per-entry `identity`
+    # (peer.md preconditions). So a per-entry login has no posting runner at all,
+    # and printing `--post` for it advertises a command whose helper stops on a
+    # missing precondition - the same unrunnable-producer wedge, one carrier over.
+    shared = review.peer_identity or None
     by_login: Dict[str, List[str]] = {}
+    per_entry: set[str] = set()
     for peer in review.peers or []:
         login = _peer_entry_identity(peer, review.peer_identity)
         if not login:
             continue
+        by_login.setdefault(login, [])
+        if login != shared:
+            per_entry.add(login)
         provider = _peer_provider(peer)
-        if provider:
-            by_login.setdefault(login, [])
-            if provider not in by_login[login]:
-                by_login[login].append(provider)
-        else:
-            by_login.setdefault(login, [])
+        if provider and provider not in by_login[login]:
+            by_login[login].append(provider)
 
-    def _post_clause(providers: List[str]) -> str:
+    def _post_clause(login: str, providers: List[str]) -> str:
+        if login in per_entry:
+            return (
+                "no --post runner: per-entry identity cannot be posted under | "
+                "resolve: set config.review.peer_identity + peer_token_env, or "
+                "drop the per-entry identity to use the local peer gate"
+            )
         # Same drivability rule as the identity-free producer: a name
         # `/review peer` cannot drive is not a producer, and printing one as
         # `--post` is the wedge with the other carrier's label on it.
@@ -403,16 +416,27 @@ def _required_bots(review: Any) -> List[str]:
         if not drivable:
             named = ", ".join(providers) if providers else "<provider>"
             return f"no /fno:review peer runner for [{named}]"
-        target = drivable[0] if len(drivable) == 1 else f"<{'|'.join(drivable)}>"
-        return f"post: /fno:review peer <pr#> {target} --post; cross-model only"
+        # NEVER `<a|b>`: the peer arg parser matches a known provider name, so an
+        # alternation is discarded and the provider falls back to codex - which
+        # can refuse a gate a configured gemini would have cleared. Same reason
+        # the local-attestation branch prints a placeholder plus the set.
+        if len(drivable) == 1:
+            return (
+                f"post: /fno:review peer <pr#> {drivable[0]} --post; "
+                f"cross-model only"
+            )
+        return (
+            f"post: /fno:review peer <pr#> <provider> --post; cross-model only, "
+            f"configured: {', '.join(drivable)}"
+        )
 
     rendered: List[str] = []
     for app in apps:
         rendered.append(
-            f"{app} ({_post_clause(by_login.pop(app))})" if app in by_login else app
+            f"{app} ({_post_clause(app, by_login.pop(app))})" if app in by_login else app
         )
     for login, providers in by_login.items():
-        rendered.append(f"{login} ({_post_clause(providers)})")
+        rendered.append(f"{login} ({_post_clause(login, providers)})")
     return rendered
 
 
