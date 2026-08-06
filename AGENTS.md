@@ -8,7 +8,7 @@ Project context for AI agents (Claude Code, Gemini CLI, Codex CLI). Canonical so
 
 Generic per-machine coding skills (ponytail, karpathy-guidelines, similar) are advisory here; this file's principles win. Two live cases: "shortest diff" loses to principle 4 (fix what you find, in this PR), and tool-branded comments (`// ponytail:`) are barred by the comment principle.
 
-Lead responses with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Full ruleset and exceptions live in [docs/output-style.md](docs/output-style.md), kept out of the auto-loaded preamble.
+Lead with the next action, number multi-step work, give concrete time estimates, and drop preamble, recaps, and closers. Durable records (nodes, docs, plans) are read once; relay surfaces (mail, PR bodies) are re-read every turn, so keep them short: bullets over prose, cap a list at 5, state the number, and put detail in a node rather than the relay. `fno mail send` caps body length for this reason. Full ruleset in [docs/output-style.md](docs/output-style.md).
 
 ## Working principles
 
@@ -24,11 +24,11 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 ## Pitfalls corpus (capped)
 
-Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked `.claude/rules/` file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this inlined body but does not receive linked rule bodies, which auto-discover on Claude only.
+Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked rule file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this body but not linked rule bodies, which auto-discover on Claude only.
 
-**Cap: 10 active entries (context-cost budget).** AGENTS.md is injected at every SessionStart on every harness, so every entry is paid on every session start on every lane. Do not raise it; an entry too large to fit its budget graduates to a lint. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
+**Cap: 10 entries (context-cost budget).** Every entry is paid on every session start on every lane; do not raise it, and graduate an over-large one to a lint instead. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
 
-**Format:** one `###` block each. Imperative trap (1-3 sentences, this IS the budget), `specimens:` as bare file:line / PR refs, `graduates-to:` the lint/guard/refusal that lets it leave, `added:` YYYY-MM-DD. When a `graduates-to:` guard lands, remove the entry in the same PR that adds the guard (the guard is now the carrier, per principle 3's durability ladder).
+**Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line / PR refs, `graduates-to:` the guard that lets it leave, `added:` YYYY-MM-DD. When that guard lands, remove the entry in the same PR.
 
 AC9 delivery sentinel, echoed verbatim by a fresh worker with no file read to prove this corpus reached its harness: `kdc-delivery-sentinel-1932`.
 
