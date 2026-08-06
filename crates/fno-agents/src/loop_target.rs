@@ -220,6 +220,10 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         // DonePlanned: a plan-only thread finished cleanly. Not a delivery, but a
         // clean stop (exit 0); the reason string distinguishes it from a ship.
         | TerminationReason::DonePlanned
+        // DoneUnreviewed (x-0eaf): green but nothing reviewed. A clean stop like
+        // the other Done* terminals - the reason string (not the exit code) is
+        // what a wrapper reads to see it declined the autonomous merge.
+        | TerminationReason::DoneUnreviewed
         | TerminationReason::NoWork => 0,
         TerminationReason::Budget | TerminationReason::NoProgress | TerminationReason::Aborted => 1,
         TerminationReason::Interrupted => 130,
