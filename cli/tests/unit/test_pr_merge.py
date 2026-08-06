@@ -298,6 +298,27 @@ def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, cap
     assert "cannot delete branch" in obj["reason"]
 
 
+def test_base_branch_held_by_worktree_reports_merged_with_cleanup(enabled, monkeypatch, capsys, tmp_path):
+    """The base-branch-checkout failure is also a post-merge cleanup failure, not
+    a 'skipped' step: gh merges server-side, then cannot switch to main because
+    the canonical worktree holds it ('main is already used by worktree'). The
+    always-re-read guard reports merged + cleanup=failed with the error visible,
+    whatever git's phrasing - this is the checkout-phrasing sibling of the delete
+    specimen, and both must surface the cleanup result."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "fatal: 'main' is already used by worktree at '/repo'"),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+
+
 def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
     """General invariant. A post-merge cleanup failure whose error is NOT the
     worktree phrasing (here a remote branch delete) must still not report failed

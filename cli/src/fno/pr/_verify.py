@@ -409,21 +409,21 @@ def _bounded_remediation(
         )
         return 1
 
-    # gh pr merge exited non-zero. Match BOTH git phrasings for a worktree
-    # holding the branch: the checkout-refused error ("'X' is already used by
-    # worktree") and the post-merge delete error ("cannot delete branch 'X' used
-    # by worktree"). The delete case fires AFTER the merge landed, so if the PR
-    # is MERGED here we must record it and return 0 - otherwise the /target gate
+    # gh pr merge exited non-zero. ALWAYS re-read the PR state before reporting
+    # failure: gh exits non-zero whenever a POST-merge step fails (local branch
+    # delete, base-branch checkout, remote delete) after a successful server-side
+    # merge, and the error phrasing varies across git versions and failure points
+    # (the checkout-refused and delete phrasings differ; older git says "checked
+    # out at"). Matching phrasings ages badly; the durable signal is the PR's
+    # state. If it MERGED, record it and return 0 - otherwise the /target gate
     # that calls verify sees a failure, leaves the merge unrecorded in
-    # target-state.md, and re-verifies forever (the same defect the merge
-    # primitive fixes; "used by worktree" is the shared substring of both).
-    if "used by worktree" in gh_stderr:
-        pr_json = _fetch_pr_state(pr_number, cwd)
-        if (pr_json or {}).get("state") == "MERGED":
-            merged_at = (pr_json or {}).get("mergedAt") or ""
-            _record_merge(state_file, pr_number, merged_at)
-            sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
-            return 0
+    # target-state.md, and re-verifies forever.
+    pr_json = _fetch_pr_state(pr_number, cwd)
+    if (pr_json or {}).get("state") == "MERGED":
+        merged_at = (pr_json or {}).get("mergedAt") or ""
+        _record_merge(state_file, pr_number, merged_at)
+        sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
+        return 0
     lowered = gh_stderr.lower()
     if any(
         tok in lowered
