@@ -139,3 +139,28 @@ def test_superset_king_grant_uses_grantor_level_plus_one(tmp_path, monkeypatch):
     result = _crown("--scope", _EPIC)  # no --level
     assert result.exit_code == 0, result.stdout + result.stderr
     assert _level() == 2  # grantor_level(1) + 1, not the epic-derived 1
+
+
+def test_hand_started_agent_grantor_is_its_identity_not_human(tmp_path, monkeypatch):
+    # A hand-started agent (a king joined via /fno-me: registry row, NO
+    # FNO_AGENT_SELF) grants -> stamp ITS identity, not "human". The registry is
+    # the discriminator (resolve_harness_identity -> session-fallback), so a
+    # crown records truthful provenance regardless of how the session started.
+    from fno.agents.registry import load_registry
+
+    use_tmpdir(monkeypatch, tmp_path)
+    _seed_graph(tmp_path)
+    _seed_settings(monkeypatch, tmp_path)
+    king = AgentEntry(
+        name="king", harness="claude", cwd="/tmp", log_path="/tmp/k.log",
+        short_id="kingshort", harness_session_id="king-sid",
+    )  # registered agent, NO crown
+    write_registry([king, _entry(_TARGET)])
+    for var in ("FNO_AGENT_SELF", "CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "king-sid")  # hand-started = this session
+    result = _crown("--scope", _PROJ, "--level", "1")  # grant; --level bypasses derivation
+    assert result.exit_code == 0, result.stdout + result.stderr
+    target_row = next(e for e in load_registry() if e.name == _TARGET)
+    assert target_row.crown_grantor == "kingshort"  # claude session_id -> short_id
+    assert target_row.crown_grantor != "human"

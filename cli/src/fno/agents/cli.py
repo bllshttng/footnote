@@ -454,6 +454,32 @@ def _derive_crown_level_from_scope(scope: str) -> int | None:
         return None
 
 
+def _caller_row_by_session():
+    """The calling session's registry row resolved by harness session id, or None.
+
+    `FNO_AGENT_SELF` identifies a SPAWNED agent. A hand-started agent (a king
+    session joined via /fno-me, not spawned) carries no `FNO_AGENT_SELF` and
+    would otherwise be indistinguishable from an attended human - so a crown it
+    grants would be stamped `grantor="human"`, weakening the provenance the
+    crown exists to provide. The registry is the crown's source of truth for who
+    is an agent, so resolve the row by harness session id the same way
+    `fno agents whoami` does (session-fallback). Returns None for a shell with no
+    row; the residual attended-human-vs-unregistered-agent ambiguity is recorded
+    in x-7685 rather than invented away.
+    """
+    from fno.agents.registry import load_registry
+    from fno.agents.whoami import _find_by_session
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.session_id or not ident.harness:
+        return None
+    try:
+        return _find_by_session(load_registry(), ident.session_id, ident.harness)
+    except Exception:
+        return None
+
+
 def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
     """The ``--succeed`` transfer (US6): move the caller's live crown over
     ``scope`` onto ``target`` in one atomic registry write.
@@ -614,8 +640,13 @@ def cmd_crown(
         print(f"no agent for handle {handle!r}: {exc}", file=sys.stderr)
         raise typer.Exit(code=2)
 
-    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF, a human
-    # shell does not. That absence IS the attended-human signal.
+    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF; a
+    # hand-started agent (a king session joined via /fno-me, not spawned) does
+    # NOT, so FNO_AGENT_SELF alone would misclassify it as an attended human and
+    # stamp the wrong grantor. The registry is the crown's source of truth for
+    # who is an agent, so fall back to a session-id lookup (the same
+    # session-fallback `fno agents whoami` uses). Only a shell with no row reads
+    # as an attended human.
     caller_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
     caller_row = None
     if caller_self:
@@ -623,6 +654,8 @@ def cmd_crown(
             caller_row = resolve_agent(caller_self).entry
         except AgentResolutionError:
             caller_row = None
+    if caller_row is None:
+        caller_row = _caller_row_by_session()
 
     # Refusal: never self-declared - a session cannot crown its own row.
     if caller_row is not None and caller_row.name == target.name:
@@ -655,8 +688,12 @@ def cmd_crown(
             resolved_level = (caller_row.crown_level or 0) + 1
     elif load_settings().agents.crown_config_grant:
         grantor = "config-grant"
+    elif caller_row is not None:
+        # A registered agent with no superset crown (e.g. a hand-started king
+        # over an unrelated scope) still grants; stamp ITS identity, not "human".
+        grantor = caller_row.session_id or caller_row.name
     elif not caller_self:
-        grantor = "human"  # an attended human shell (no agent identity)
+        grantor = "human"  # an attended human shell (no registry row, no agent identity)
     else:
         print(
             f"refusing: this session holds no superset crown over {scope!r}, is "

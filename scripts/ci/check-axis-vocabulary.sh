@@ -400,6 +400,18 @@ if new_or_changed or resolved:
         "new or changed violations are prohibited.",
         file=sys.stderr,
     )
+    print(
+        "Line-pinned-baseline note: the baseline keys violations by file:line, so "
+        "ANY PR that inserts lines above a baselined violation inherits a drift "
+        "here even when it changes no axis binding - the violation moved, it did "
+        "not change. That is renumbering, not a new finding; regenerate the "
+        "baseline in the same PR (--write-baseline, preserving allowlist entries "
+        "by hand if regeneration drops them). The drift is invisible until CI "
+        "runs, so a merge that shifts baselined lines turns main red on the NEXT "
+        "PR, not its own - keep this baseline regenerated alongside line-moving "
+        "changes, not deferred.",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 if current:
