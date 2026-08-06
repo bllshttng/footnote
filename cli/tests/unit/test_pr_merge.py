@@ -941,6 +941,7 @@ def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
     )
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", "coveredSHA"), toplevel=str(tmp_path)
     )

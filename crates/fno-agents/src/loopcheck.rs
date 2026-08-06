@@ -1547,7 +1547,7 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage = classify_coverage(&[], &[], &events_text, head_sha, &[], true);
+        let coverage = classify_coverage(&[], &[], &events_text, head_sha, &[], false);
         (
             "none".to_string(),
             reviewers_ok,
@@ -2980,7 +2980,7 @@ pub fn classify_coverage(
         let mut seen: Vec<String> = Vec::new();
         for login in github_app_logins {
             let login = login.trim();
-            if login.is_empty() || seen.iter().any(|s| s == login) {
+            if login.is_empty() || seen.iter().any(|s| logins_correspond(s, login)) {
                 continue;
             }
             seen.push(login.to_string());
@@ -4808,6 +4808,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                 "review_skipped": pr_info.review_skipped,
                                 "unaddressed_blocking": pr_info.unaddressed_findings.len(),
                                 "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha),
+                                "done_probes": probe_results,
                                 "fp_read_failed": fp_read_failed,
                             }),
                         );

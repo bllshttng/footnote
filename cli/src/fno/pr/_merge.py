@@ -161,6 +161,14 @@ def _coverage_refused_reason(cov: Optional[dict]) -> str:
     return f"0 reviewed (covered count={cov.get('reviewed_count')})"
 
 
+def _safe_int(val, default=0):
+    """int() that returns default on ValueError/TypeError (finding 7)."""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
 def _review_lane_configured(repo: str) -> bool:
     """Whether any review lane (required/optional/reviewers/peers) is configured.
 
@@ -848,7 +856,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         or (
             cov is not None
             and cov.get("coverage") == "covered"
-            and int(cov.get("reviewed_count") or 0) > 0
+            and _safe_int(cov.get("reviewed_count"), 0) > 0
         )
     )
     if covered and cov is not None and _review_lane_configured(repo):
@@ -874,7 +882,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # cannot land an unreviewed head via `--auto`'s queue (x-0eaf TOCTOU). The
     # staleness check above already refused a current mismatch; this makes gh
     # itself refuse if the head moves between here and the merge.
-    covered_head = (cov.get("head_sha") or "") if cov else ""
+    covered_head = (cov.get("head_sha") or "") if cov and _review_lane_configured(repo) else ""
 
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
