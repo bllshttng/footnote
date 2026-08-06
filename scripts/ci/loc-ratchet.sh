@@ -723,7 +723,7 @@ fi
 # Validate declared delta matches computed delta (exact match required).
 # F11: use printf '%s' to avoid backslash mangling in the reason text.
 if [[ "$DECLARED_DELTA" != "$DELTA" ]]; then
-    fail_exception "Trajectory delta mismatch: entry declares delta=${DECLARED_DELTA} but computed delta is ${DELTA}. Update the entry's delta: field to ${DELTA}."
+    fail_exception "Trajectory delta mismatch: entry declares delta=${DECLARED_DELTA} but computed delta is ${DELTA}. Update the entry's delta: field to ${DELTA}. The trajectory is read at committed HEAD (git show HEAD:<rel>), so that edit must be committed before this check agrees with the computed delta."
 fi
 
 # ── Both factors satisfied: PASS with warning ─────────────────────────────────
