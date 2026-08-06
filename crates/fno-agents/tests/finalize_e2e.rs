@@ -1238,6 +1238,30 @@ fn finalize_usage_limit_comment_is_not_clean_optional_review() {
 }
 
 #[test]
+fn finalize_arms_when_coverage_satisfied_despite_usage_limited_optional() {
+    // x-0eaf: a covered review_coverage event (a local lane reviewed) overrides
+    // the usage-limited optional-app withhold, so a quota-dead bot cannot wedge
+    // the autonomous merge when a local lane covered the diff.
+    let env = setup("S-optional-limited-covered", false);
+    set_posture(&env, "S-optional-limited-covered", true);
+    configure_optional_codex(&env);
+    let covered = "{\"ts\":\"2026-08-05T12:00:00Z\",\"type\":\"review_coverage\",\
+\"source\":\"hook\",\"data\":{\"pr\":358,\"coverage\":\"covered\",\
+\"reviewed_count\":1,\"head_sha\":\"abc\"}}\n";
+    fs::write(&env.events, covered).unwrap();
+    let out = run_finalize_shimmed(&env, "DonePRGreen", GH_OPTIONAL_USAGE_LIMITED);
+    assert!(out.status.success());
+    assert!(
+        calls(&env).contains("gh pr merge 358 --auto --merge"),
+        "covered event must override the usage-limited optional withhold: {}",
+        calls(&env)
+    );
+    let event = finalized_event(&env, "S-optional-limited-covered");
+    assert_eq!(event.pointer("/data/auto_merge_armed"), Some(&true.into()));
+    assert!(event.pointer("/data/auto_merge_blocked_reason").is_none());
+}
+
+#[test]
 fn finalize_completed_review_wins_over_stale_usage_limit_comment() {
     let env = setup("S-optional-recovered", false);
     set_posture(&env, "S-optional-recovered", true);
