@@ -55,10 +55,21 @@ if command -v jq >/dev/null 2>&1; then
 fi
 
 # Context pressure via the single CLI implementation behind `fno context`. Any
-# nonzero exit (incl. `fno` absent) or a missing reading -> no pressure ->
-# decline (fail-safe). This hook already shells `fno config get` below, so the
-# verb is on PATH wherever this hook runs.
-PROBE_OUT="$(fno context --transcript "$TRANSCRIPT" --json 2>/dev/null)" || exit 0
+# nonzero exit (incl. no CLI on PATH) or a missing reading -> no pressure ->
+# decline (fail-safe). `context` is a Python verb: reach it through fno-py
+# (the Python CLI) and fall back to the fno mux. A bare `fno context` dies
+# where no mux is installed, or where a freshly installed mux forwards to a
+# published wheel that predates the verb; either way this probe would be
+# silently inert. The shim (skills/target/scripts/context-probe.sh) resolves
+# the same door - keep them in step.
+if command -v fno-py >/dev/null 2>&1; then
+  _ctx_door=fno-py
+elif command -v fno >/dev/null 2>&1; then
+  _ctx_door=fno
+else
+  exit 0   # no CLI on PATH -> fail-safe (no pressure)
+fi
+PROBE_OUT="$("$_ctx_door" context --transcript "$TRANSCRIPT" --json 2>/dev/null)" || exit 0
 USED_PCT="$(printf '%s' "$PROBE_OUT" | jq -r '.used_pct // 0' 2>/dev/null || echo 0)"
 [[ "$USED_PCT" =~ ^[0-9]+$ ]] || exit 0
 
