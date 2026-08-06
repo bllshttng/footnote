@@ -3,10 +3,20 @@
 Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
 
-- Stdout: one JSON line ``{pr, outcome, reason, strategy}`` on
+- Stdout: one JSON line ``{pr, outcome, reason, strategy[, cleanup]}`` on
   merged/queued/skipped; failures print the same JSON shape to STDERR.
+  ``outcome`` is merge truth only: whether the PR landed on main. A post-merge
+  cleanup failure (local branch delete, worktree prune, sync) can never retract
+  a landed merge, so it is reported as ``outcome=merged, cleanup=failed`` - the
+  cleanup result in its own field, never fused into ``outcome``. A merge that
+  lands never reports ``failed``.
 - Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
-  (auto_merge disabled), 127 gh not installed.
+  (auto_merge disabled) or held, 127 gh not installed.
+  ``held`` is the retry-later outcome and is never a failure claim: the merge was
+  not attempted (lock contention, stale base, unreconciled stub-manifest) or its
+  result could not be read back. In particular, when ``gh pr view`` itself fails
+  the merge state is UNKNOWN, so the receipt says held rather than asserting a
+  ``failed`` the caller would act on.
 - The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
   CI-green / external-review / stub-manifest guards) and the worktree
   server-side-recovery fallback are preserved. The who-may-merge gate
@@ -50,14 +60,41 @@ _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
 
-def _emit(pr: int, outcome: str, reason: str, strategy: str, *, err: bool) -> None:
-    """Print the JSON line. ``err`` routes to stderr (failure cases)."""
+def _emit(
+    pr: int,
+    outcome: str,
+    reason: str,
+    strategy: str,
+    *,
+    err: bool,
+    cleanup: str = "",
+) -> None:
+    """Print the JSON line. ``err`` routes to stderr (failure cases).
+
+    ``cleanup`` is emitted only when a post-merge step ran and must be surfaced
+    separately from the merge outcome. A merge that lands while a post-merge
+    cleanup step fails reports ``outcome=merged, cleanup=failed``: the merge
+    truth lives in ``outcome`` (the field callers key on), the cleanup result in
+    its own field, so a cosmetic cleanup failure can never read as a failed
+    merge. Absent means no cleanup step is being reported, never an ambiguous
+    silent success.
+
+    Known over-report (documented, not narrowed): on an autonomous retry of an
+    already-merged PR, ``gh pr merge`` exits non-zero ("already merged") and the
+    landed-merge guard reports ``cleanup=failed`` even though no cleanup step ran
+    - the merge was a no-op. The discriminator for that retry shape is not
+    reliably in the error text, so the guard fails toward visibility rather than
+    inventing one; a caller keying on ``cleanup`` should read it as "the merge
+    call did not exit cleanly" there, not strictly "a cleanup step failed."
+    """
     obj = {
         "pr": pr,
         "outcome": outcome,
         "reason": reason,
         "strategy": strategy,
     }
+    if cleanup:
+        obj["cleanup"] = cleanup
     line = json.dumps(obj, separators=(",", ":")) + "\n"
     (sys.stderr if err else sys.stdout).write(line)
     (sys.stderr if err else sys.stdout).flush()
@@ -945,25 +982,46 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             return 0
         first_line = output.splitlines()[0][:200] if output.strip() else ""
 
-    if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
-        # (a) Server-side merge already landed -> cosmetic local failure.
-        merged_at = ""
-        view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
-        if view.ok:
-            merged_at = view.stdout.strip()
-        if merged_at and merged_at != "null":
+    # ALWAYS re-read the merge state before reporting failure. `gh pr merge
+    # --delete-branch` exits non-zero whenever a POST-merge step fails after a
+    # successful server-side merge - the local branch delete (worktree-held), the
+    # base-branch checkout (main held by the canonical worktree in a worktree-first
+    # repo), a remote delete, a sync - and the error phrasing varies across git
+    # versions and failure points. Matching phrasings ages badly; the durable
+    # signal is the PR's merged state. If it landed, report merged with the
+    # cleanup failure in its own field - never failed. An autonomous caller keying
+    # off `outcome` then gets merge truth regardless of what post-merge cleanup did.
+    view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
+    if view.ok:
+        landed = view.stdout.strip()
+        if landed and landed != "null":
             _git(["fetch", "origin"], repo)
             _emit(
                 pr_number,
                 "merged",
-                "merged server-side; local post-merge step skipped in worktree",
+                f"merged server-side; post-merge cleanup failed: {first_line}",
                 strategy,
                 err=False,
+                cleanup="failed",
             )
+            # Arm the post-merge sentinels: the merge landed, so retro/triage and
+            # the memory-pass fire as on a clean merge. On a rare autonomous retry
+            # against an already-merged PR this re-arms them (sentinel churn, not
+            # corruption - graph writes are idempotent); the "already merged"
+            # discriminator is not reliably in the error text, so the guard does
+            # not try to suppress it. This is a deliberate behavior (arm for the
+            # landed merge), not a cosmetic side effect.
             _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
-        # (b) Not merged yet -> merge SERVER-SIDE via the API (no local checkout).
+
+    # The merge did NOT land. gh can refuse before merging when the branch is
+    # checked out in another worktree (the checkout-refused phrasing "is already
+    # used by worktree" / "already checked out"); recover via the server-side API
+    # so a worktree-held branch still merges. Landed cases already returned above,
+    # so reaching here means not-merged - this is the API fallback, not a recovery
+    # for a post-merge cleanup failure.
+    if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
         # Carry the head pin when we have one. Reaching here from the no-auto
         # fallback means THIS process vouched for the checks at a specific SHA,
         # and this API call would otherwise merge whatever the head is now -
@@ -993,6 +1051,26 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)
             return 0
+
+    # Merge state never became readable: `gh pr view` itself failed, so we cannot
+    # tell a landed merge from a failed one. Reporting `failed` here would assert
+    # merge truth we do not have - the same defect as the phrasing match this
+    # guard replaced, one level up - and an autonomous caller keying on `outcome`
+    # would retry a merge that may already have landed. Report `held` (exit 2,
+    # the established retry-later signal) so the uncertainty stays IN the receipt
+    # instead of being flattened into a false negative. A retry whose view read
+    # succeeds then reports the truth either way.
+    if not view.ok:
+        _emit(
+            pr_number,
+            "held",
+            "merge state unreadable (gh pr view failed: "
+            f"{(view.stderr or '').splitlines()[0][:120] if view.stderr.strip() else 'no error output'}); "
+            "cannot confirm whether the merge landed - retry",
+            strategy,
+            err=False,
+        )
+        return 2
 
     # Unrecovered failure: classify and report.
     reason = first_line

@@ -28,8 +28,10 @@ class FakeRun:
         api_ok: bool = False,
         toplevel: str | None = None,
         behind_by: int = 0,
+        view_fails: bool = False,
     ) -> None:
         self.gh_merge = gh_merge or Result(0, "", "")
+        self.view_fails = view_fails
         self.merged_at = merged_at
         self.view_url = view_url
         self.api_ok = api_ok
@@ -50,6 +52,8 @@ class FakeRun:
                 return self.gh_merge
             if cmd[1:3] == ["pr", "view"]:
                 if "mergedAt" in cmd:
+                    if self.view_fails:
+                        return Result(1, "", "gh: could not reach api.github.com")
                     return Result(0, self.merged_at + "\n", "")
                 if "baseRefName,headRefName" in cmd:
                     return Result(
@@ -266,6 +270,119 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     # The API path uses a literal that does NOT contain "gh pr merge".
     api_calls = [c for c in fake.calls if c[:2] == ["gh", "api"]]
     assert api_calls and "PUT" in api_calls[0]
+
+
+def test_worktree_branch_delete_failure_reports_merged(enabled, monkeypatch, capsys, tmp_path):
+    """Primary specimen (PR #742). ``gh pr merge --delete-branch`` exits non-zero
+    when the post-merge local branch delete fails because a worktree holds the
+    branch, even though the server-side merge landed. git's delete error
+    ("cannot delete branch ... used by worktree") is NOT the checkout-refused
+    phrasing the recovery block matches, so it falls through to the post-merge
+    guard: outcome=merged with cleanup=failed and the error visible in reason
+    (the step ran and failed - it was not skipped). A landed merge must report
+    merged, and the cleanup failure must stay visible."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete local branch feature/x-beb7: failed to run git: "
+            "error: cannot delete branch 'feature/x-beb7' used by worktree at "
+            "'/repo/.claude/worktrees/x-beb7'",
+        ),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+    assert "cannot delete branch" in obj["reason"]
+
+
+def test_base_branch_held_by_worktree_reports_merged_with_cleanup(enabled, monkeypatch, capsys, tmp_path):
+    """The base-branch-checkout failure is also a post-merge cleanup failure, not
+    a 'skipped' step: gh merges server-side, then cannot switch to main because
+    the canonical worktree holds it ('main is already used by worktree'). The
+    always-re-read guard reports merged + cleanup=failed with the error visible,
+    whatever git's phrasing - this is the checkout-phrasing sibling of the delete
+    specimen, and both must surface the cleanup result."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "fatal: 'main' is already used by worktree at '/repo'"),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+
+
+def test_post_merge_cleanup_failure_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """General invariant. A post-merge cleanup failure whose error is NOT the
+    worktree phrasing (here a remote branch delete) must still not report failed
+    when the merge landed. The fallthrough re-reads mergedAt and, because the
+    merge landed, reports merged with cleanup=failed - the cleanup result visible
+    in its own field, never swallowed, never the merge's outcome."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete remote branch: remote: error: internal",
+        ),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+
+
+def test_unreadable_merge_state_holds_never_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """The landed-merge guard depends on reading the PR's merged state. When that
+    read ITSELF fails, the merge state is unknown - not "not merged". Reporting
+    `failed` there asserts merge truth we do not have, and an autonomous caller
+    keying on `outcome` retries a merge that may already have landed. The guard
+    reports `held` (exit 2, retry-later) so the uncertainty stays in the receipt."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "failed to delete remote branch: remote: error: internal"),
+        view_fails=True,
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "held"
+    assert obj["outcome"] != "failed"
+    assert "unreadable" in obj["reason"]
+    # The gh error is surfaced, not swallowed - the receipt names why it is unknown.
+    assert "api.github.com" in obj["reason"]
+
+
+def test_readable_not_merged_still_reports_failed(enabled, monkeypatch, capsys, tmp_path):
+    """Control for the guard above: a READABLE state that says not-merged must
+    still report failed. The held path is strictly for an unreadable state, so a
+    genuine merge failure is never softened into a retry."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(1, "", "Pull request is not mergeable"),
+        merged_at="null",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 1
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "failed"
 
 
 # ---- post-merge followups ----

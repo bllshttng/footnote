@@ -102,3 +102,9 @@ cli/.venv/
 
 # Coverage runs land here; never a commit candidate
 .coverage
+
+# Scratch diffs staged by /review peer for a sandboxed model to read locally.
+# Untracked they are one `git add -A` from a 100KB+ junk commit, and they block
+# archive-worktree on an otherwise-clean merged tree.
+peer-review.tmp.diff
+peer-review.diff

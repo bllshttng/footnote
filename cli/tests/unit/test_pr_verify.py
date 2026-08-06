@@ -46,6 +46,11 @@ class FakeGH:
             return Result(0, self.toplevel + "\n", "")
         if cmd[:3] == ["gh", "pr", "view"] and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" in cmd:
             nxt = self.pr_states.pop(0) if self.pr_states else {}
+            # A None entry means "this read fails" - the gh call itself errors, so
+            # _fetch_pr_state returns None and the state is UNKNOWN, distinct from a
+            # readable state that is simply not MERGED.
+            if nxt is None:
+                return Result(1, "", "gh: could not reach api.github.com")
             return Result(0, json.dumps(nxt), "")
         if cmd[:3] == ["gh", "pr", "merge"]:
             return self.gh_merge
@@ -194,6 +199,53 @@ def test_bounded_remediation_honors_delete_branch(tmp_path, monkeypatch, delete_
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None) == 0
     merge_cmd = [c for c in fake.calls if c[:3] == ["gh", "pr", "merge"]][0]
     assert ("--delete-branch" in merge_cmd) is delete_branch, merge_cmd
+
+
+def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on, monkeypatch, capsys):
+    """The worktree-recovery branch must catch git's DELETE phrasing, not only the
+    checkout phrasing. ``gh pr merge --delete-branch`` lands the merge then fails
+    the local delete because a worktree holds the branch; the PR is MERGED, so
+    verify must record it and return 0. Matching only ``already used by worktree``
+    (checkout) left this case to fall through to ``merge_attempt_failed``,
+    unrecorded - so the /target gate that calls verify re-verified forever (the
+    same defect on the sibling path)."""
+    sf = _state_file(tmp_path)
+    fake = FakeGH(
+        toplevel=str(tmp_path),
+        pr_states=[{"state": "OPEN"}, {"state": "MERGED", "mergedAt": "2026-08-06T05:54:59Z"}],
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete local branch feature/x-beb7: failed to run git: "
+            "error: cannot delete branch 'feature/x-beb7' used by worktree at "
+            "'/repo/.claude/worktrees/x-beb7'",
+        ),
+    )
+    monkeypatch.setattr(_verify, "run", fake)
+    rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
+    assert rc == 0
+    assert "verify-pr-merged" in capsys.readouterr().out
+
+
+def test_unreadable_state_after_merge_error_is_substrate_failure(tmp_path, gh_on, monkeypatch, capsys):
+    """Sibling of the _merge.py guard. The always-re-read fix depends on the
+    re-read succeeding; when `_fetch_pr_state` returns None the merge state is
+    UNKNOWN, not "not merged". The `(pr_json or {})` idiom flattens those two
+    apart-cases together, so an unreadable state would report merge_attempt_failed
+    and the /target gate would treat a possibly-landed merge as broken. Report the
+    substrate failure (exit 2) instead, so the caller retries the read."""
+    sf = _state_file(tmp_path)
+    fake = FakeGH(
+        toplevel=str(tmp_path),
+        pr_states=[{"state": "OPEN"}, None],
+        gh_merge=Result(1, "", "failed to delete remote branch: remote: error: internal"),
+    )
+    monkeypatch.setattr(_verify, "run", fake)
+    rc = _verify.run_verify_merged("42", sf, cwd=str(tmp_path), sleep_fn=lambda s: None)
+    assert rc == 2
+    out = capsys.readouterr().out
+    assert "merge_state_unreadable" in out
+    assert "merge_attempt_failed" not in out
 
 
 def test_unknown_state_degrades_open(tmp_path, gh_on, monkeypatch):

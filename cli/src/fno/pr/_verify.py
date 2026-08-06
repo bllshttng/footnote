@@ -409,14 +409,38 @@ def _bounded_remediation(
         )
         return 1
 
-    # gh pr merge exited non-zero.
-    if "already used by worktree" in gh_stderr:
-        pr_json = _fetch_pr_state(pr_number, cwd)
-        if (pr_json or {}).get("state") == "MERGED":
-            merged_at = (pr_json or {}).get("mergedAt") or ""
-            _record_merge(state_file, pr_number, merged_at)
-            sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
-            return 0
+    # gh pr merge exited non-zero. ALWAYS re-read the PR state before reporting
+    # failure: gh exits non-zero whenever a POST-merge step fails (local branch
+    # delete, base-branch checkout, remote delete) after a successful server-side
+    # merge, and the error phrasing varies across git versions and failure points
+    # (the checkout-refused and delete phrasings differ; older git says "checked
+    # out at"). Matching phrasings ages badly; the durable signal is the PR's
+    # state. If it MERGED, record it and return 0 - otherwise the /target gate
+    # that calls verify sees a failure, leaves the merge unrecorded in
+    # target-state.md, and re-verifies forever.
+    pr_json = _fetch_pr_state(pr_number, cwd)
+    if (pr_json or {}).get("state") == "MERGED":
+        merged_at = (pr_json or {}).get("mergedAt") or ""
+        _record_merge(state_file, pr_number, merged_at)
+        sys.stdout.write(f"verify-pr-merged: PR #{pr_number} MERGED at {merged_at}\n")
+        return 0
+    # The re-read itself failed (`_fetch_pr_state` returns None on a gh error or
+    # unparseable output), so the merge state is UNKNOWN, not "not merged". The
+    # `(pr_json or {})` idiom above flattens those two apart-cases together;
+    # reporting merge_attempt_failed on an unreadable state asserts a failure we
+    # cannot see, and the /target gate then treats a possibly-landed merge as
+    # broken. Report the substrate failure (exit 2) so the caller retries the
+    # read instead of acting on a guess. Mirrors the same guard in _merge.py.
+    if pr_json is None:
+        _emit_audit(
+            repo_root, state_file, pr_number, "merge_state_unreadable",
+            {"stderr": gh_stderr.splitlines()[0] if gh_stderr.strip() else ""},
+        )
+        sys.stdout.write(
+            f"merge_state_unreadable: could not read PR #{pr_number} state after "
+            "gh pr merge exited non-zero; cannot confirm whether the merge landed\n"
+        )
+        return 2
     lowered = gh_stderr.lower()
     if any(
         tok in lowered
