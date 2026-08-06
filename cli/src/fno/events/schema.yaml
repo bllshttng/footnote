@@ -2882,7 +2882,7 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [dead-bot, flake, stale-base, wedge, spawn-cap, other]
+          enum: [dead-bot, zero-coverage, flake, stale-base, wedge, spawn-cap, other]
           description: "Which intervention. Small, summable enum; fail-closed on unknown so a typo is loud, not a silent 'other'."
         pr:
           type: integer
