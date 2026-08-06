@@ -361,6 +361,12 @@ def cmd_watch(
 # overflow it and poison the shared store).
 _MAX_CROWN_LEVEL = 2
 
+# Terminal (non-active) registry statuses: a worker in any OTHER state
+# (spawning/ready/idle/busy/live/restarting) is active and may still need its
+# king. Used by the crown transfer + the orphan check so they do not miss a
+# worker that is "busy" or "idle" (only checking literal "live" was a codex P1).
+_TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
+
 
 def _parse_crown(spec: str) -> tuple[int, str]:
     """Parse a ``--crown 'level=N,scope=X'`` spec into (level, scope); exit 2 on
@@ -496,79 +502,83 @@ def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
     rung; and ``crown_grantor`` records the outgoing king so the chain stays
     externally verifiable.
     """
-    from fno.agents.registry import load_registry, update_registry
+    from fno.agents.registry import update_registry
 
-    # crown_level is None means "no crown"; level 0 (VP) is a real crown, so the
-    # `is None` test (not a truthiness test) is what keeps a VP transferable.
-    if (
-        caller_row is None
-        or caller_row.crown_level is None
-        or caller_row.crown_scope != scope
-    ):
-        print(
-            f"refusing --succeed: this session holds no live crown over scope "
-            f"{scope!r} to transfer. Succession moves an EXISTING crown; it does "
-            "not grant a new one. Hold the crown first, or drop --succeed.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    if target.status != "live":
-        print(
-            f"refusing --succeed: successor {target.name!r} is not live "
-            f"(status={target.status!r}). A crown must transfer onto a live row; "
-            "transferring onto a dead row is the orphaning this feature prevents.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    # Narrowed one-live-crown: a row OTHER than the caller's own (being vacated)
-    # or the successor holding this scope is corrupt state, not a succession.
-    for e in load_registry():
-        if (
-            e.name not in (caller_row.name, target.name)
-            and e.crown_scope == scope
-            and e.status == "live"
-        ):
-            print(
-                f"refusing --succeed: {e.name!r} already holds a live crown over "
-                f"scope {scope!r} (one live crown per scope; the caller's own row "
-                "is excluded as the one being vacated).",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-
-    resolved_level = level if level is not None else caller_row.crown_level
-    grantor = caller_row.session_id or caller_row.name  # the outgoing king
-    caller_name = caller_row.name
+    caller_name = caller_row.name if caller_row else None
+    target_name = target.name
+    err: list[str | None] = [None]  # closure: validation failure message
+    out: list[dict | None] = [None]  # closure: receipt on success
 
     def _transfer(rows: list) -> list:
-        # One pass: vacate the caller and stamp the successor together. Two
-        # writes would open a window where the scope is uncrowned - exactly when
-        # a worker's review mail arrives and resolves to nobody.
+        # Re-resolve caller + target from the LOCKED rows, not the stale snapshots
+        # passed in: a concurrent --succeed could have changed them between the
+        # pre-read and this write. The validation that decides whether to mutate
+        # runs HERE under the registry lock, so two concurrent transfers serialize
+        # and cannot create duplicate crowns or transfer onto a reaped row.
+        live_caller = (
+            next((r for r in rows if r.name == caller_name), None)
+            if caller_name else None
+        )
+        live_target = next((r for r in rows if r.name == target_name), None)
+        # crown_level is None means "no crown"; level 0 (VP) is a real crown, so
+        # the `is None` test (not truthiness) keeps a VP transferable.
+        if live_caller is None or live_caller.crown_level is None or live_caller.crown_scope != scope:
+            err[0] = (
+                f"refusing --succeed: this session holds no live crown over scope "
+                f"{scope!r} to transfer. Succession moves an EXISTING crown; it "
+                "does not grant a new one. Hold the crown first, or drop --succeed."
+            )
+            return rows  # unchanged
+        if live_target is None or live_target.status in _TERMINAL_STATUSES:
+            status = live_target.status if live_target else "absent"
+            err[0] = (
+                f"refusing --succeed: successor {target_name!r} is not active "
+                f"(status={status!r}). A crown must transfer onto an active row; "
+                "transferring onto a terminal row is the orphaning this feature prevents."
+            )
+            return rows
+        # Narrowed one-live-crown: a row OTHER than the caller's own (being
+        # vacated) or the successor holding this scope is corrupt state.
+        for r in rows:
+            if (
+                r.name not in (caller_name, target_name)
+                and r.crown_scope == scope
+                and r.status not in _TERMINAL_STATUSES
+            ):
+                err[0] = (
+                    f"refusing --succeed: {r.name!r} already holds a live crown "
+                    f"over scope {scope!r} (one live crown per scope; the caller's "
+                    "own row is excluded as the one being vacated)."
+                )
+                return rows
+        # Validated under the lock: vacate caller + stamp successor in one pass.
+        # Two writes would open a window where the scope is uncrowned - exactly
+        # when a worker's review mail arrives and resolves to nobody.
+        resolved_level = level if level is not None else live_caller.crown_level
+        grantor = live_caller.session_id or live_caller.name
         for r in rows:
             if r.name == caller_name:
                 r.crown_level = None
                 r.crown_scope = None
                 r.crown_grantor = None
-            elif r.name == target.name:
+            elif r.name == target_name:
                 r.crown_level = resolved_level
                 r.crown_scope = scope
                 r.crown_grantor = grantor
+        out[0] = {
+            "succeeded": target_name,
+            "from": caller_name,
+            "level": resolved_level,
+            "scope": scope,
+            "grantor": grantor,
+        }
         return rows
 
     update_registry(_transfer)
-    print(
-        json.dumps(
-            {
-                "succeeded": target.name,
-                "from": caller_name,
-                "level": resolved_level,
-                "scope": scope,
-                "grantor": grantor,
-            }
-        )
-    )
+    if err[0]:
+        print(err[0], file=sys.stderr)
+        raise typer.Exit(code=2)
+    print(json.dumps(out[0]))
 
 
 @agents_app.command("crown", hidden=True)

@@ -86,7 +86,9 @@ def _last_usage(path: Path) -> Optional[tuple[str, int, int, int]]:
             if not isinstance(record, dict) or record.get("type") != "assistant":
                 continue
             message = record.get("message")
-            usage = message.get("usage") if isinstance(message, dict) else None
+            if not isinstance(message, dict):
+                continue
+            usage = message.get("usage")
             if not isinstance(usage, dict):
                 continue
             model = message.get("model")

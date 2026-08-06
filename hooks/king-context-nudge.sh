@@ -120,9 +120,11 @@ CROWN_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)
 [[ -z "$CROWN_LEVEL" ]] && exit 0     # no crown -> neither check applies
 CROWN_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
 
-# Live children this king spawned.
+# Active children this king spawned. Active = NOT in the terminal set
+# (exited/orphaned/failed/permanent_dead); covers spawning, ready, idle, busy,
+# live, restarting - all are workers that may still need their king at review.
 ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$KING_SESSION_ID" \
-    '[.agents[] | select(.spawned_by_session == $sid and .status == "live")] | map(.name) | join(", ")' \
+    '[.agents[] | select(.spawned_by_session == $sid and ((.status // "exited") | IN("exited";"orphaned";"failed";"permanent_dead") | not))] | map(.name) | join(", ")' \
     2>/dev/null)
 ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
 
@@ -155,9 +157,18 @@ if [[ "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         CARVEOUTS=$(with_timeout 3 fno carveout list --json 2>/dev/null || true)
         # carveout list --json emits JSONL (one object per line), so stream-filter
         # rather than map (which needs an array). Structured .scope field match,
-        # never a description substring.
-        _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" \
-            'select(.scope == $s)' 2>/dev/null | grep -c . || true)
+        # Only a RECENT carveout (last 24h) counts: a historical one from a
+        # previous reign must not permanently suppress orphan warnings for later
+        # reigns over the same scope. ISO-8601 UTC strings compare lexicographically.
+        _cutoff=$(date -u -v-24H '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null \
+            || date -u -d '24 hours ago' '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || echo '')
+        if [[ -n "$_cutoff" ]]; then
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" --arg c "$_cutoff" \
+                'select(.scope == $s and (.ts // "0") >= $c)' 2>/dev/null | grep -c . || true)
+        else
+            _hit=$(printf '%s' "$CARVEOUTS" | jq --arg s "$CROWN_SCOPE" \
+                'select(.scope == $s)' 2>/dev/null | grep -c . || true)
+        fi
         [[ "$_hit" =~ ^[0-9]+$ && "$_hit" -gt 0 ]] && RESOLVED=1
     fi
     if [[ "$RESOLVED" -eq 0 ]]; then

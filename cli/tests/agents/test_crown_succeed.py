@@ -139,7 +139,7 @@ def test_succeed_refuses_dead_successor_and_leaves_caller_intact(tmp_path, monke
     monkeypatch.setenv("FNO_AGENT_SELF", _CALLER)
     result = _crown(_SUCC, "--scope", _SCOPE, "--succeed")
     assert result.exit_code == 2
-    assert "not live" in result.stderr
+    assert "not active" in result.stderr
     # The post-state is the point: a refusal must not have vacated the caller.
     caller = _row(_CALLER)
     assert caller.crown_level == 1
