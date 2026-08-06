@@ -1844,6 +1844,24 @@ event_types:
           description: "Last few lines of gh stderr, or empty string if unavailable."
     consumers: [operator]
 
+  - name: loop_check_config
+    description: "Emitted once on the first loop-check fire of a session, recording the resolved CLAUDE_CODE_STOP_HOOK_BLOCK_CAP so a run force-ended by the harness override (blocks meeting the cap, then silence) is distinguishable from a budget end (a terminal budget decision)."
+    sources: [hook]
+    data:
+      required: [session_id, block_cap, block_cap_source]
+      properties:
+        session_id:
+          type: string
+          description: "Target session identifier."
+        block_cap:
+          type: integer
+          description: "The resolved consecutive Stop-hook block cap (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP; Claude Code default 9)."
+        block_cap_source:
+          type: string
+          enum: [env, default]
+          description: "Whether block_cap came from the environment (operator override) or the harness default."
+    consumers: [operator]
+
   - name: loop_check_watch_idle
     description: "Emitted when a loop-check fire idles a session non-terminally on a verified async wait after the agent declared a <watching> tag (x-e2c8). The claim lease was extended to cover the watch window; the session parks until its harness-tracked watcher fires. On codex this event doubles as the daemon's watch registration."
     sources: [hook]
