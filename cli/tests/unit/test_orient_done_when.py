@@ -71,11 +71,34 @@ def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
     assert "peer -> /fno:review peer gemini --attest" in line, line
 
 
-def test_empty_peer_identity_is_configured_not_absent(repo):
-    # Rust tests `peer_identity.is_some()`, so an explicit "" suppresses the
-    # local composite there. Python truthiness would announce it instead.
+def test_empty_peer_identity_is_absent_not_configured(repo):
+    # loop-check's parser drops an empty peer_identity to None BEFORE the
+    # `is_some()` test, so "" leaves the identity-free local gate live. Reading
+    # "" as a configured login here would print "none (PR + CI only)" for an
+    # armed gate - the wedge this whole file exists to close.
     root = repo('[review]\npeers = ["codex"]\npeer_identity = ""\n')
-    assert "peer ->" not in _done_when_line({}, root)
+    line = _done_when_line({}, root)
+    assert "peer -> /fno:review peer codex --attest" in line, line
+    assert "none (PR + CI only)" not in line, line
+
+
+def test_provider_less_peer_arms_nothing(repo):
+    # loop-check's `value_as_peers` drops an entry with no provider and no
+    # identity, so it holds no gate; printing one would also print a producer
+    # command with no provider to run.
+    root = repo('[review]\npeers = [""]\n')
+    assert _done_when_line({}, root) == (
+        "PR + CI green + reviewed by [none (PR + CI only)]"
+    )
+
+
+def test_unreadable_review_config_reads_unknown_not_no_gate(repo):
+    # A reviewers typo raises out of the Python validator but still declares a
+    # gate loop-check will hold. "none (PR + CI only)" would be the same lie.
+    root = repo('[review]\nreviewers = ["sigmaa"]\n')
+    assert _done_when_line({}, root) == (
+        "unknown (config.review unreadable) | resolve: fno config doctor"
+    )
 
 
 def test_local_peer_producer_names_the_configured_provider(repo):

@@ -3,7 +3,7 @@
 The minion clause tells a teammate to mail you for a code review and stop.
 This is the other half of that exchange: what you mail back, in the teammate's own harness vocabulary, and what it must do when the verb refuses.
 
-Load it when a `RESULT: blocked` or a bare "I need a review on <branch-or-PR>" lands in your inbox.
+Load it when any of these lands in your inbox: a done report (`RESULT: SUCCESS` / `DONE_WITH_CONCERNS`, which the minion clause makes a review request), a `RESULT: BLOCKED`, or a bare "I need a review on <branch-or-PR>".
 
 ## Why the king serves the verb at all
 

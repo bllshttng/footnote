@@ -314,17 +314,20 @@ def _peer_entry_identity(peer: object, shared: Optional[str]) -> Optional[str]:
     """The login one `config.review.peers` entry posts under, or None.
 
     Mirrors loop-check's rule (`resolved_required_bots_for_author`): a per-entry
-    `identity` wins, else the shared `config.review.peer_identity`. `shared` is
-    read for PRESENCE, not truthiness, because Rust tests `is_some()` -- an
-    explicit `peer_identity = ""` is a configured (if useless) login there, and
-    treating it as unset here would announce a local gate loop-check does not
-    require.
+    `identity` wins, else the shared `config.review.peer_identity`. BOTH are read
+    for truthiness, not presence: loop-check tests `is_some()` only AFTER its
+    parser has dropped an empty string to `None`
+    (`scalar_string(v).filter(|s| !s.is_empty())`, loopcheck.rs), so
+    `peer_identity = ""` is an UNSET carrier over there and the identity-free
+    local `peer` gate is live. Reading it as configured here would announce
+    `none (PR + CI only)` for an armed gate -- the exact wedge this file closes.
+    `resolve_local_peers` and `fno pr`'s reviewer read already agree.
     """
     if isinstance(peer, dict):
         own = peer.get("identity")
         if own:
             return str(own)
-    return shared
+    return shared or None
 
 
 def _peer_provider(peer: object) -> str:
@@ -392,6 +395,14 @@ def _local_review_gates(project_root: Path) -> List[str]:
     peer sharing the author's model family -- is already refused up front by
     `fno target init` (`local_peers_refusal_message`), so buying it here would
     cost env-dependent output for a state a real run cannot be in.
+
+    That argument covers the identity-FREE half only, and the gap is known: for
+    an identity-BACKED same-model peer, loop-check swaps the login for an
+    unmatchable sentinel while `_required_bots` still prints it as clearable,
+    and `fno target init` does not refuse that case. Closing it needs the author
+    harness, which is the session dependency this file declines to take on.
+    Stated rather than silently carried, so the next reader inherits a known
+    limit instead of a claim that is broader than its evidence.
     """
     from fno.config import load_settings_for_repo, resolvable_reviewers
 
@@ -416,15 +427,19 @@ def _local_review_gates(project_root: Path) -> List[str]:
     # Only an identity-free entry contributes to the local composite gate; an
     # entry with its own `identity` (or any entry under a shared peer_identity)
     # is a posted-review login and is counted by `_required_bots` instead.
-    local_providers = [
-        _peer_provider(peer)
+    # A provider-less entry is not a gate: loop-check's parser drops an entry
+    # with an empty provider and no identity outright (`value_as_peers`), so
+    # printing one would announce a gate nothing holds AND a command with no
+    # provider to run.
+    named = [
+        provider
         for peer in (review.peers or [])
         if _peer_entry_identity(peer, review.peer_identity) is None
+        and (provider := _peer_provider(peer))
     ]
-    if local_providers:
-        named = [p for p in local_providers if p]
+    if named:
         choice = "|".join(dict.fromkeys(named))
-        target = f" <{choice}>" if len(set(named)) > 1 else (f" {choice}" if named else "")
+        target = f" <{choice}>" if len(set(named)) > 1 else f" {choice}"
         gates.append(f"peer -> /fno:review peer{target} --attest")
     return gates
 
@@ -443,19 +458,25 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
         bots = _required_bots(project_root)
         optional = _optional_bots(project_root)
         local = _local_review_gates(project_root)
-    except Exception:  # noqa: BLE001 - degrade to the no-gate default
-        bots, optional, local = [], [], []
-    if bots:
-        bots_str = ", ".join(bots)
+    except Exception:  # noqa: BLE001 - report unknown, never assert no-gate
+        # NOT "none (PR + CI only)": loop-check reads the same keys out of the
+        # same file and holds whatever gate they declare, so a config this side
+        # cannot parse leaves the gate UNKNOWN, not absent. A reviewers typo
+        # raises here and still gates over there - announcing no gate would be
+        # the same lie the rest of this function exists to stop.
+        line = "unknown (config.review unreadable) | resolve: fno config doctor"
     else:
-        # "PR + CI only" is false whenever a local gate is armed; say which
-        # half is empty instead of announcing a gate that does not exist.
-        bots_str = "no App bot" if local else "none (PR + CI only)"
-    line = f"PR + CI green + reviewed by [{bots_str}]"
-    if local:
-        line += f" + local attestation [{'; '.join(local)}]"
-    if optional:
-        line += f" (optional if present: [{', '.join(optional)}])"
+        if bots:
+            bots_str = ", ".join(bots)
+        else:
+            # "PR + CI only" is false whenever a local gate is armed; say which
+            # half is empty instead of announcing a gate that does not exist.
+            bots_str = "no App bot" if local else "none (PR + CI only)"
+        line = f"PR + CI green + reviewed by [{bots_str}]"
+        if local:
+            line += f" + local attestation [{'; '.join(local)}]"
+        if optional:
+            line += f" (optional if present: [{', '.join(optional)}])"
     if _is("attended", "false"):
         line += "; bg -> hand off the merge"
     return line
