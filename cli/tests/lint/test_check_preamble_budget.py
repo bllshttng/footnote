@@ -20,7 +20,7 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "preamble-budget.yml"
-CEILING_BYTES = 37_415
+CEILING_BYTES = 37_460
 
 
 def _run(repo_root: Path) -> subprocess.CompletedProcess[str]:

@@ -267,6 +267,15 @@ fn payload_promise_reaches_done_pr_green() {
     let fx = fixture_with_manifest(
         "---\nsession_id: sess-payload-code\ncreated_at: 2026-06-05T00:00:00Z\nattended: true\n---\n",
     );
+    // x-0eaf: seed a local review attestation so the coverage gate sees review
+    // (the empty test config fetches no GitHub reviews; without this the green
+    // PR is DoneUnreviewed, not DonePRGreen).
+    fs::write(
+        &fx.events,
+        "{\"type\":\"review_attestation\",\"data\":{\"reviewer\":\"code-review\",\
+\"head_sha\":\"deadbeefdeadbeefdeadbeefdeadbeef00000001\",\"verdict\":\"pass\"}}\n",
+    )
+    .unwrap();
     let payload = serde_json::json!({
         "transcript_path": fx.transcript.to_str().unwrap(),
         "last_assistant_message": "<promise>MISSION COMPLETE: shipped</promise>"
