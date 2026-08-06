@@ -1844,7 +1844,7 @@ event_types:
           description: "Target session identifier."
         reason:
           type: string
-          enum: [DonePRGreen, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          enum: [DonePRGreen, DoneUnreviewed, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
           description: "TerminationReason enum value."
         axis:
           type: string
