@@ -3,8 +3,13 @@
 Skill-agnostic PR merge wrapper. Shells to ``gh``/``git`` and preserves the
 caller-facing contract verbatim:
 
-- Stdout: one JSON line ``{pr, outcome, reason, strategy}`` on
+- Stdout: one JSON line ``{pr, outcome, reason, strategy[, cleanup]}`` on
   merged/queued/skipped; failures print the same JSON shape to STDERR.
+  ``outcome`` is merge truth only: whether the PR landed on main. A post-merge
+  cleanup failure (local branch delete, worktree prune, sync) can never retract
+  a landed merge, so it is reported as ``outcome=merged, cleanup=failed`` - the
+  cleanup result in its own field, never fused into ``outcome``. A merge that
+  lands never reports ``failed`` (x-e539).
 - Exit codes: 0 merged|queued, 1 failed (incl. bad args), 2 skipped
   (auto_merge disabled), 127 gh not installed.
 - The footnote-canonical merge guard (config.auto_merge ``enabled`` + the
@@ -50,14 +55,33 @@ _MERGE_LOCK_WAIT_S = 120
 _MERGE_LOCK_POLL_S = 5
 
 
-def _emit(pr: int, outcome: str, reason: str, strategy: str, *, err: bool) -> None:
-    """Print the JSON line. ``err`` routes to stderr (failure cases)."""
+def _emit(
+    pr: int,
+    outcome: str,
+    reason: str,
+    strategy: str,
+    *,
+    err: bool,
+    cleanup: str = "",
+) -> None:
+    """Print the JSON line. ``err`` routes to stderr (failure cases).
+
+    ``cleanup`` is emitted only when a post-merge step ran and must be surfaced
+    separately from the merge outcome. A merge that lands while a post-merge
+    cleanup step fails reports ``outcome=merged, cleanup=failed``: the merge
+    truth lives in ``outcome`` (the field callers key on), the cleanup result in
+    its own field, so a cosmetic cleanup failure can never read as a failed
+    merge. Absent means no cleanup step is being reported, never an ambiguous
+    silent success.
+    """
     obj = {
         "pr": pr,
         "outcome": outcome,
         "reason": reason,
         "strategy": strategy,
     }
+    if cleanup:
+        obj["cleanup"] = cleanup
     line = json.dumps(obj, separators=(",", ":")) + "\n"
     (sys.stderr if err else sys.stdout).write(line)
     (sys.stderr if err else sys.stdout).flush()
@@ -945,7 +969,14 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
             return 0
         first_line = output.splitlines()[0][:200] if output.strip() else ""
 
-    if re.search(r"is already used by worktree|already checked out", output, re.IGNORECASE):
+    # Matches BOTH git phrasings for a worktree holding the branch:
+    #   checkout error -> "fatal: 'X' is already used by worktree at /p"
+    #     (gh refused to start; the branch is checked out elsewhere)
+    #   delete error   -> "cannot delete branch 'X' used by worktree at /p"
+    #     (--delete-branch after a landed merge; the recurring false-`failed`,
+    #     x-e539). "used by worktree" is the shared substring; "already checked
+    #     out" covers the older git checkout phrasing.
+    if re.search(r"used by worktree|already checked out", output, re.IGNORECASE):
         # (a) Server-side merge already landed -> cosmetic local failure.
         merged_at = ""
         view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
@@ -989,6 +1020,32 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
                 "merged server-side (worktree fallback)",
                 strategy,
                 err=False,
+            )
+            _on_confirmed_merge(pr_number, repo)
+            _run_post_merge_followups(pr_number, strategy, repo)
+            return 0
+
+    # Before reporting `failed`, confirm the merge did not actually land.
+    # `gh pr merge --delete-branch` returns non-zero whenever a POST-merge step
+    # fails after a successful server-side merge - a worktree holding the branch
+    # (handled by the recovery block above), a remote-branch delete, a local
+    # sync, any followup. A merge that landed must never read as `failed`
+    # (x-e539): a caller keying off `outcome` would retry a landed merge or wedge
+    # a finished pipeline on a cosmetic cleanup failure. Re-read the merged
+    # state; if it landed, report merged with the cleanup failure in its own
+    # field - visible, honest, never swallowed, never the merge's outcome.
+    view = _gh(["pr", "view", str(pr_number), "--json", "mergedAt", "-q", ".mergedAt"], repo)
+    if view.ok:
+        landed = view.stdout.strip()
+        if landed and landed != "null":
+            _git(["fetch", "origin"], repo)
+            _emit(
+                pr_number,
+                "merged",
+                f"merged server-side; post-merge cleanup failed: {first_line}",
+                strategy,
+                err=False,
+                cleanup="failed",
             )
             _on_confirmed_merge(pr_number, repo)
             _run_post_merge_followups(pr_number, strategy, repo)

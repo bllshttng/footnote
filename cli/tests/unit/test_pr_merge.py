@@ -268,6 +268,57 @@ def test_worktree_recovery_api_fallback(enabled, monkeypatch, capsys, tmp_path):
     assert api_calls and "PUT" in api_calls[0]
 
 
+def test_worktree_branch_delete_failure_reports_merged_x_e539(enabled, monkeypatch, capsys, tmp_path):
+    """x-e539 primary specimen (PR #742). ``gh pr merge --delete-branch`` exits
+    non-zero when the post-merge local branch delete fails because a worktree
+    holds the branch, even though the server-side merge landed. git's delete
+    error ("cannot delete branch ... used by worktree") is a different phrasing
+    than the checkout error the recovery block was written for, so it used to
+    miss the regex and fall through to outcome=failed. A landed merge must
+    report merged."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete local branch feature/x-beb7: failed to run git: "
+            "error: cannot delete branch 'feature/x-beb7' used by worktree at "
+            "'/repo/.claude/worktrees/x-beb7'",
+        ),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert "server-side" in obj["reason"]
+
+
+def test_post_merge_cleanup_failure_never_reports_failed_x_e539(enabled, monkeypatch, capsys, tmp_path):
+    """x-e539 general invariant. A post-merge cleanup failure whose error is NOT
+    the worktree phrasing (here a remote branch delete) must still not report
+    failed when the merge landed. The fallthrough re-reads mergedAt and, because
+    the merge landed, reports merged with cleanup=failed - the cleanup result
+    visible in its own field, never swallowed, never the merge's outcome."""
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(
+        gh_merge=Result(
+            1,
+            "",
+            "failed to delete remote branch: remote: error: internal",
+        ),
+        merged_at="2026-08-06T05:54:59Z",
+        toplevel=str(tmp_path),
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    assert _merge.run_merge(["742"], cwd=str(tmp_path)) == 0
+    obj = _last_json(capsys)
+    assert obj["outcome"] == "merged"
+    assert obj["cleanup"] == "failed"
+    assert "cleanup failed" in obj["reason"]
+
+
 # ---- post-merge followups ----
 
 
