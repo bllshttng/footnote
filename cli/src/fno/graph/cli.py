@@ -26,8 +26,7 @@ from fno.harness_identity import resolve_harness_identity
 
 cli = typer.Typer(name="graph", help="Feature graph management", no_args_is_help=True)
 
-# Nested triage sub-app: `fno backlog triage <verb>` (or the deprecated
-# `fno graph triage <verb>` alias since backlog and graph share the same app).
+# Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
 
 cli.add_typer(_triage_cli, name="triage")
@@ -35,8 +34,7 @@ cli.add_typer(_triage_cli, name="triage")
 # Nested capture sub-app: `fno backlog capture <verb>`. The capture tier below
 # idea nodes (markdown fu-* items, NOT graph nodes). Distinct from
 # `fno mail` (cross-project messaging). `fno backlog inbox` is kept as a
-# hidden deprecated alias (same Typer app, byte-identical behavior), mirroring
-# the top-level `fno graph` -> `fno backlog` precedent.
+# hidden deprecated alias (same Typer app, byte-identical behavior).
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
@@ -9363,7 +9361,7 @@ def cmd_find(
             matched.extend(hits)
 
     if not matched:
-        typer.echo(f"fno find: no matches for {query!r}", err=True)
+        typer.echo(f"fno backlog find: no matches for {query!r}", err=True)
         raise typer.Exit(code=1)
 
     if json_output:

@@ -149,9 +149,9 @@ def test_heads_up_create_node_marks_read(inbox_root, repo_root, monkeypatch):
             self.stderr = stderr
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:3] == ["fno-py", "new", "--help"]:
+        if cmd[:4] == ["fno-py", "backlog", "new", "--help"]:
             return _FakeRun(stdout="--source-inbox-thread\n")
-        if cmd[:2] == ["fno-py", "new"]:
+        if cmd[:3] == ["fno-py", "backlog", "new"]:
             return _FakeRun(stdout="created node ab-abc123\n")
         raise AssertionError(f"unexpected subprocess: {cmd}")
 

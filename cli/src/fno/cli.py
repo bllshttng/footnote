@@ -59,7 +59,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         {"hidden": True},
     ),
     "backlog": ("fno.graph.cli:cli", "Feature graph management"),
-    "graph": ("fno.graph.cli:cli", "Feature graph management", {"hidden": True}),
     "runtime": ("fno.runtime.cli:cli", "manage runtime workers and worktrees", {"hidden": True}),
     "worker": ("fno.worker.cli:cli", "manage delivery worker phases", {"hidden": True}),
     "event": ("fno.events.cli:cli", "emit and audit events", {"hidden": True}),
@@ -217,7 +216,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
         "Diagnose installed-vs-source fno skew (network-free).",
     ),
     "done": ("fno.done.cli:done_command", "Mark a backlog node as done.", {"hidden": True}),
-    "find": ("fno.graph.cli:cmd_find", "Fuzzy search across graph entries.", {"hidden": True}),
     "research": (
         "fno.research:research_command",
         "Retrieve + store: ddgs backbone -> self-fetch -> sources.jsonl.",
@@ -226,11 +224,6 @@ LAZY_SUBCOMMANDS: dict[str, tuple[str, str] | tuple[str, str, dict[str, Any]]] =
     "scoreboard": (
         "fno.scoreboard.cli:scoreboard_command",
         "Read-only telemetry: stop-cause, spend, autonomy, survival, coverage.",
-        {"hidden": True},
-    ),
-    "new": (
-        "fno.graph.cli:cmd_new",
-        "Create a new graph entry without a plan file.",
         {"hidden": True},
     ),
     "test": (

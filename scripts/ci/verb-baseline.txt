@@ -196,7 +196,6 @@ event emit
 event gate-escape
 event push-parent
 executor
-find
 help
 lint flock-pattern
 lint menu-caps
@@ -251,7 +250,6 @@ mux tab ls
 mux tab rename
 mux where
 mux workspace prune
-new
 notify
 observer replay
 observer sweep

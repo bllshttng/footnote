@@ -353,14 +353,14 @@ def _fyi_dismiss(repo_root: Path, h: ThreadHandle) -> DrainResult:
 
 
 def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
-    """Run ``fno new`` with thread-aware provenance flags. Returns the new node id.
+    """Run ``fno backlog new`` with thread-aware provenance flags. Returns the new node id.
 
     We pass both ``--source-inbox-msg`` (root msg-id) and ``--source-inbox-thread``
     (thread file path) when supported, so legacy graph queries that look up by
     msg-id keep working while new queries can resolve back to the full thread.
     """
     args = [
-        *_subprocess_util.fno_py_cmd(), "new",
+        *_subprocess_util.fno_py_cmd(), "backlog", "new",
         plan.title,
         "--priority", plan.priority,
         "--source-kind", "from_inbox",
@@ -369,10 +369,10 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
         "--force-domain",
     ]
     # Best-effort: append thread path when the graph CLI supports the flag.
-    # `fno new --help` is cheap; failing the probe only loses provenance breadth.
+    # `fno backlog new --help` is cheap; failing the probe only loses provenance breadth.
     try:
         help_out = subprocess.run(
-            [*_subprocess_util.fno_py_cmd(), "new", "--help"],
+            [*_subprocess_util.fno_py_cmd(), "backlog", "new", "--help"],
             capture_output=True, text=True, check=False, cwd=repo_root,
             timeout=5,
         )
@@ -383,11 +383,11 @@ def _create_graph_node_from_plan(repo_root: Path, h: ThreadHandle, plan) -> str:
 
     result = subprocess.run(args, capture_output=True, text=True, check=True, cwd=repo_root)
     # Liberal node-id extraction (legacy ab- or any configured prefix/width)
-    # over the trusted `fno new` stdout, which prints the new id last.
+    # over the trusted `fno backlog new` stdout, which prints the new id last.
     candidates = extract_node_ids(result.stdout)
     if not candidates:
         raise RuntimeError(
-            f"fno new did not return a node-id token: stdout={result.stdout!r}"
+            f"fno backlog new did not return a node-id token: stdout={result.stdout!r}"
         )
     return candidates[-1]
 
