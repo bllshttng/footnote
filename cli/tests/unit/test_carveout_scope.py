@@ -1,6 +1,6 @@
 """Tests for the carveout `scope` field (x-7685, US8/AC15 prerequisite).
 
-The king orphan check (hooks/king-context-nudge.sh) must match a carved-out
+The king orphan check (hooks/context-nudge.sh) must match a carved-out
 orphaning by STRUCTURED scope, not by grepping `description` free text (a
 reworded sentence would silently silence it). So the Carveout record carries an
 optional `scope`, written via `fno carveout add --scope`, and the field is the

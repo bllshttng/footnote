@@ -2211,7 +2211,7 @@ def cmd_discovered_json(
 def cmd_registry_json() -> None:
     """Internal: emit registry rows DAEMON-FREE.
 
-    Hooks (king-context-nudge.sh) need the stored crown + spawn-edge fields
+    Hooks (context-nudge.sh) need the stored crown + spawn-edge fields
     without the live-status enrichment that ``fno agents list`` lazy-starts the
     daemon for. Output is ``{"agents": [...]}`` with name / session ids /
     status / crown fields / spawned_by_session per row - a file read via
