@@ -76,17 +76,27 @@ What actually goes wrong: a teammate handed `opencode` as its peer has no verb t
 
 ## What you mail
 
-Name the verb, name the diff, and state the two rules that keep the answer honest:
+Send this shape. It is not a style preference: every observed firing used it, and the two attempts that were self-initiated rather than ordered were both refused.
 
 ```
 fno mail send <worker-handle> "REVIEW GRANTED for <branch-or-PR>. Invoke this in your session, as a command, against your diff:
 
-  /code-review
+    /code-review <level> [--fix]
 
-Invoke it for real. If it refuses, retry; if it still refuses, report the LITERAL refusal string and STOP. Do not substitute another reviewer, a subagent, or a Bash approximation.
+INVOKE IT FOR REAL. Type the verb. Do not substitute fno:code-reviewer, /fno:review, or a Bash approximation.
+
+If it refuses, retry; if it still refuses, report the LITERAL refusal string and STOP.
 
 Verify each finding against source before accepting it. The reviewer is advisory, not authoritative - push back with a file:line argument where you disagree."
 ```
+
+Three details in that template are load-bearing, so do not smooth them out:
+
+- **The verb sits alone on its own indented line.** Nothing before it on the line, nothing after.
+- **"INVOKE IT FOR REAL. Type the verb."** A bare verb as the entire message body has been observed failing where this framing fired. That is one observation each way, so it is a lead rather than a mechanism - but it costs nothing to keep and the shape with it has never failed.
+- **Name the substitutes.** `fno:code-reviewer`, `/fno:review`, a Bash approximation - these exactly, not "do not substitute another reviewer". The refusal text forbids these by name, a worker DID quietly take one of them and report success, and a generic prohibition leaves the worker deciding what counts as a substitute.
+
+Pick `<level>` from the diff (`low|medium|high|xhigh|max`), never `ultra`. Add `--fix` only when the worker can commit to that branch: an auto-applied fix from the wrong worktree writes into the wrong tree.
 
 ## When the verb refuses
 
