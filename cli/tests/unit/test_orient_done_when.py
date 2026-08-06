@@ -58,7 +58,7 @@ def test_peer_identity_keeps_peers_on_the_github_login_carrier(repo):
     root = repo('[review]\npeers = ["codex"]\npeer_identity = "fno-peer-bot"\n')
     line = _done_when_line({}, root)
     assert "peer ->" not in line, line
-    assert "reviewed by [fno-peer-bot (post: /fno:review peer <pr#> codex --post)]" in line, line
+    assert "reviewed by [fno-peer-bot (post: /fno:review peer <pr#> codex --post; cross-model only)]" in line, line
 
 
 def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
@@ -69,7 +69,7 @@ def test_per_entry_identity_is_a_login_while_a_free_sibling_stays_local(repo):
         '[review]\npeers = [{provider="codex", identity="bot-x"}, "gemini"]\n'
     )
     line = _done_when_line({}, root)
-    assert "reviewed by [bot-x (post: /fno:review peer <pr#> codex --post)]" in line, line
+    assert "reviewed by [bot-x (post: /fno:review peer <pr#> codex --post; cross-model only)]" in line, line
     assert "peer -> /fno:review peer gemini --attest" in line, line
 
 
@@ -170,8 +170,8 @@ def test_distinct_logins_are_not_prefix_deduped(repo):
         '{provider="gemini", identity="bot"}]\n'
     )
     line = _done_when_line({}, root)
-    assert "bot-extra (post:" in line, line
-    assert "bot (post: /fno:review peer <pr#> gemini --post)" in line, line
+    assert "bot-extra (post:" in line, line  # both logins survive dedup
+    assert "bot (post: /fno:review peer <pr#> gemini --post; cross-model only)" in line, line
 
 
 def test_no_external_suppresses_every_login_gate(repo):
@@ -190,3 +190,12 @@ def test_no_external_suppresses_every_login_gate(repo):
     assert "some-optional-bot" not in line, line
     assert "none (--no-external skips every login gate)" in line, line
     assert "peer -> /fno:review peer codex --attest" in line, line
+
+
+def test_identity_backed_login_states_the_cross_model_condition(repo):
+    # loop-check swaps a same-model peer login for an unmatchable sentinel, and
+    # init does not refuse that case. Deciding WHICH login is affected needs the
+    # author harness this file declines, so the line states the condition rather
+    # than asserting a clearability it cannot verify.
+    root = repo('[review]\npeers = ["codex"]\npeer_identity = "fno-peer-bot"\n')
+    assert "cross-model only" in _done_when_line({}, root)

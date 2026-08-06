@@ -361,6 +361,17 @@ def _required_bots(review: Any) -> List[str]:
     carries a producer suffix, a prefix test drops a distinct login whose name
     is a prefix of one already present (`bot` behind `bot-extra`), silently
     omitting a gate loop-check enforces.
+
+    The `cross-model only` clause is the honest form of a claim this file cannot
+    verify. When the peer's model family matches the author's, loop-check swaps
+    the login for an unmatchable sentinel (`apply_same_model_guard`), so a review
+    posted under it can never clear the gate - and `fno target init` does not
+    refuse that case, because `resolve_local_peers` skips identity-backed
+    entries. Deciding WHICH login is affected needs the author harness, the
+    session dependency this file declines. So the line narrows its claim to what
+    config alone supports rather than computing the answer: it names the login,
+    names the producer, and names the condition, instead of asserting a
+    clearability it has no evidence for.
     """
     apps: List[str] = list(review.github_apps) if review.github_apps else []
     seen = set(apps)
@@ -371,7 +382,10 @@ def _required_bots(review: Any) -> List[str]:
             continue
         seen.add(login)
         provider = _peer_provider(peer) or "<provider>"
-        rendered.append(f"{login} (post: /fno:review peer <pr#> {provider} --post)")
+        rendered.append(
+            f"{login} (post: /fno:review peer <pr#> {provider} --post; "
+            f"cross-model only)"
+        )
     return rendered
 
 
@@ -419,13 +433,11 @@ def _local_review_gates(review: Any) -> List[str]:
     `fno target init` (`local_peers_refusal_message`), so buying it here would
     cost env-dependent output for a state a real run cannot be in.
 
-    That argument covers the identity-FREE half only, and the gap is known: for
-    an identity-BACKED same-model peer, loop-check swaps the login for an
-    unmatchable sentinel while `_required_bots` still prints it as clearable,
-    and `fno target init` does not refuse that case. Closing it needs the author
-    harness, which is the session dependency this file declines to take on.
-    Stated rather than silently carried, so the next reader inherits a known
-    limit instead of a claim that is broader than its evidence.
+    That argument covers the identity-FREE half only. The identity-BACKED
+    same-model case is handled in `_required_bots` by narrowing the claim rather
+    than computing it: the login is printed with a `cross-model only` condition
+    instead of as unconditionally clearable, which costs no author harness and
+    stops the line asserting something it cannot check.
     """
     from fno.config import resolvable_reviewers
 
