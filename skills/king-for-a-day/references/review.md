@@ -84,21 +84,24 @@ Verify each finding against source before accepting it. The reviewer is advisory
 
 ## When the verb refuses
 
-The invocation can hit a `disable-model-invocation` refusal. The strongest evidence about when comes from a paired control: the same mail body, in the same format, minutes apart, to two sessions differing only in model lane.
+The invocation can hit a `disable-model-invocation` refusal. The discriminator is **whether a user-shaped directive naming the verb is present in the session** - which is exactly what a mailed order is, and exactly what a worker's own decision to review is not.
 
-| session lane | outcome |
+The cleanest control came from one session, one model lane, one afternoon:
+
+| what preceded the call | outcome |
 |---|---|
-| claude model | fired on attempt one |
-| zai / glm-routed | refused twice |
+| a mailed order carrying `/code-review` | fired, 5 of 5 |
+| the session deciding on its own to review | refused, 2 of 2 |
 
-So **the session's model lane is the leading candidate, not the mail envelope and not the verb's position in the message body** - both of which were ruled decisive at various points and neither of which survived the control.
+Same session, same harness, same model, minutes apart. That is why the king serves the verb: the mail IS the invocation, and without it there is nothing for the session to act on.
 
-Treat that as the best current explanation, not a settled cause. It does not account for everything: one teammate on an unrecorded lane was refused twice and launched on a byte-identical third attempt, and nobody captured which lane it was on.
+An earlier reading blamed the session's model lane, on a paired control where a claude-lane session fired and a zai/glm-routed one refused. Do not carry that: it does not survive the table above, where one claude-lane session both fired and refused depending only on whether an order preceded the call. The glm-lane refusal remains **unexplained** - it had a mailed order and still refused, so something else is in play there. Record that as unknown rather than reaching for a third theory; four have already been built on real observations and retracted.
 
-Two rules follow, and they do not depend on the cause being settled:
+Three rules follow:
 
-- **Retry is legitimate.** An identical retry has been observed to succeed after a refusal.
-- **A refusal is never an impossibility claim.** That inference has been drawn from real observations and retracted at least four times in a single day. After a few attempts, the teammate reports the refusal string verbatim and stops.
+- **A worker cannot self-serve this.** If a teammate decides on its own that it should review, the call refuses. It must mail you and wait. That is not ceremony; it is the only path that works.
+- **Retry is legitimate, but do not expect much.** An identical retry has been observed to succeed after a refusal once. Two identical retries with no order present were refused both times.
+- **A refusal is never an impossibility claim.** That inference has been drawn from real observations and retracted at least four times in a single day. After a few attempts, the teammate reports the refusal string verbatim and stops - it does NOT substitute a subagent or a Bash approximation, which the refusal text forbids by name.
 
 ## A substitute is never silent
 
