@@ -1770,9 +1770,12 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     if optional_apps.is_empty() {
         return None;
     }
-    if coverage_satisfied_in_latest_event(cwd) {
-        return None;
-    }
+    // x-0eaf finding 1 (retraction): coverage bypasses ONLY the REFUSED case
+    // (quota-limited), NOT the ABSENT case. An absent optional App (nothing
+    // posted) must keep withholding, because unaddressed_findings is empty
+    // (built from POSTED comments only) and cannot wait for a review that does
+    // not exist yet.
+    let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
     let output = match Command::new("gh")
         .args(["pr", "view", "--json", "reviews,comments"])
@@ -1834,6 +1837,12 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
                 && crate::loopcheck::body_is_usage_limit(&body)
         });
         if usage_limited {
+            // x-0eaf finding 1 (retraction): a REFUSED optional App bypasses
+            // the withhold ONLY when coverage is satisfied (a local lane
+            // reviewed). Without coverage, the refused bot still withholds.
+            if coverage_satisfied {
+                continue;
+            }
             return Some(format!("optional-review-usage-limited:{app}"));
         }
 
