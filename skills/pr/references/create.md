@@ -183,13 +183,8 @@ For each item line under that heading, in order:
      ```bash
      NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
      ```
-     If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to step 3 (fallback), then step 4 (warn) - never append an empty ` - tracked as `.
-3. **Fall back** if `fno backlog idea` exits non-zero (lock contention, missing CLI) OR returned no usable id above:
-   ```bash
-   CV_ID=$(fno carveout add --kind deferred "<item>")
-   # append ` - tracked as $CV_ID` (a cv- id satisfies the same gate grammar)
-   ```
-4. **Degrade loud, not silent.** If BOTH verbs fail, leave the item untracked, print a `warn:` line naming it, and continue. The CI gate is the backstop and will red the check for a human. NEVER write an `oos-ok:` waiver to route around a tooling failure - a waiver asserts "nothing to track", a judgment a tooling error cannot establish; that call is a human's, never the worker's.
+     If `NEW_ID` matches the tracked-ref grammar (`<prefix>-<hex>`), rewrite the item line so it ends ` - tracked as $NEW_ID`. If it is empty or malformed, treat this as a filing failure and drop to step 3 - never append an empty ` - tracked as `.
+3. **Degrade loud, not silent.** If `fno backlog idea` exits non-zero (lock contention, missing CLI) OR returned no usable id above, leave the item untracked, print a `warn:` line naming it and stating that no tracking object was created, and continue. Do NOT mint a carveout to repair the citation: `fno carveout add` records an operator's deliberate decision to defer substantial work, so filing one because a command failed mutates graph state purely to make prose pass validation. The CI gate is the backstop and will red the check for a human, who fixes the work inline, cuts the line, or creates and cites tracking deliberately. NEVER write an `oos-ok:` waiver to route around a tooling failure - a waiver asserts "nothing to track", a judgment a tooling error cannot establish; that call is a human's, never the worker's.
 
 **Idempotent by construction:** step 1 skips any item that already carries a tracked reference, so a re-run over a body whose items already read `- tracked as <id>` files nothing.
 
