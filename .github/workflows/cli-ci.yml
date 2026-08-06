@@ -212,6 +212,15 @@ jobs:
         # pyproject, no global fno-py in a fresh checkout); uv auto-syncs.
         run: uv run --project cli fno-py test smoke
 
+      # Static dead-import guard (x-ac5f): a module move down a layer can leave
+      # test-only callers on the old `from fno.agents import moved` path that
+      # fail at collection. changed-smoke selects tests from changed files and a
+      # module move does not change the importing test, so the fast gate ran
+      # green on exactly the broken files. This lint catches the whole class
+      # independent of test selection (and faster than full collection).
+      - name: Dead import paths (module-move guard)
+        run: bash scripts/ci/check-import-paths.sh
+
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
     runs-on: ubuntu-latest

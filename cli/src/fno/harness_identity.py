@@ -7,6 +7,8 @@ import re
 from dataclasses import dataclass, field
 from typing import Callable, Mapping, Optional
 
+from fno.harness_names import KNOWN_HARNESSES
+
 
 # --- FNO_AGENT_HARNESS env resolution (with pre-cutover compat window) -------
 # Spawn injects FNO_AGENT_HARNESS (the CLI binary). A worker spawned before the
@@ -160,11 +162,16 @@ def session_handle_tier(token: str, session_id: str) -> Optional[int]:
 # stops covering a harness the moment one is added, which is the same drift that
 # produced the two-conventions mess this address change exists to end.
 def _legacy_handle_re() -> "re.Pattern[str]":
-    from fno.agents.harness_map import known_harnesses
-
-    return re.compile(rf"^(?:{'|'.join(known_harnesses())})-[0-9a-fA-F]{{6,}}$")
+    return re.compile(rf"^(?:{'|'.join(KNOWN_HARNESSES)})-[0-9a-fA-F]{{6,}}$")
 
 
+# Built eagerly from the canonical harness-name list (fno.harness_names) rather
+# than the capability table: this module is platform-layer and must not reach
+# into the runtime for the name set (x-cec8). The name list is the source of
+# truth and the capability table asserts against it, so a new harness is covered
+# here the moment it lands there - the same anti-drift property the old
+# derivation (names read FROM fno.agents.harness_map) had, with the dependency
+# direction inverted so no fno.agents import is needed at all.
 LEGACY_HANDLE_RE = _legacy_handle_re()
 
 

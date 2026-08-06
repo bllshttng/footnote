@@ -5,14 +5,16 @@ every layer: the backlog CLI, target, mail, provenance and the agents CLI all
 validate the same two flags. Parking it in the runtime package forced core
 callers into an upward import for what is pure flag validation.
 
-One residual upward edge survives that move and is NOT removed by it:
-``fno.harness_identity`` builds ``LEGACY_HANDLE_RE`` at import time from
-``fno.agents.harness_map.known_harnesses()``, so importing this module still
-eagerly imports ``fno.agents``. The boundary check does not report it only
-because ``fno.harness_identity`` is unmapped (see the map-coverage section of
-``docs/architecture/company-boundaries.md``). Closing it means making that
-regex lazy or moving the harness-name table below the runtime; until then this
-module is platform-layer by placement, not yet by dependency.
+The residual upward edge this module used to carry is closed (x-cec8):
+``fno.harness_identity`` built ``LEGACY_HANDLE_RE`` at import time from
+``fno.agents.harness_map.known_harnesses()``, so importing it eagerly imported
+``fno.agents``. The harness-name set now lives at this layer
+(``fno.harness_names``), so ``fno.harness_identity`` builds the regex from L0
+data with no runtime import; ``fno.harness_identity`` and ``fno.harness_names``
+are both declared in the boundary map at this layer, so the (absent) edge is
+visible to the check rather than hiding in an unmapped blind spot. The runtime
+capability table (``fno.agents.harness_map``) asserts its keys stay in sync with
+the name list, preserving the single-source-of-truth property.
 
 ``resolve_dispatch_provider`` centralizes one precedence so every dispatch verb
 defaults the provider the same way:

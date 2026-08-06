@@ -81,6 +81,20 @@ def _forward(verb: str, extra_args: List[str]) -> int:
     return result.returncode
 
 
+def _verdict(verb: str, rc: int) -> None:
+    """Terminal verdict line (x-6a8e).
+
+    The same code path that sets the exit code also emits a greppable last line
+    on stdout, so ``fno bundle <verb> | tail`` cannot mask a drift/lint failure
+    behind the pipe's exit code. An agent piping to bound output reads the
+    verdict in the content; the exit code is no longer the only signal. Mirrors
+    the ``PASS``/``FAIL`` line ``fno test`` already prints.
+    """
+    outcome = "PASS" if rc == 0 else "FAIL"
+    suffix = "" if rc == 0 else f" (rc={rc})"
+    typer.echo(f"fno bundle {verb}: {outcome}{suffix}")
+
+
 @bundle_app.callback()
 def _default(ctx: typer.Context) -> None:
     """When no subcommand is given, regenerate per-skill bundles from
@@ -104,6 +118,7 @@ def _default(ctx: typer.Context) -> None:
 )
 def check(ctx: typer.Context) -> None:
     rc = _forward("check", list(ctx.args))
+    _verdict("check", rc)
     raise typer.Exit(code=rc)
 
 
@@ -119,4 +134,5 @@ def check(ctx: typer.Context) -> None:
 )
 def lint(ctx: typer.Context) -> None:
     rc = _forward("lint", list(ctx.args))
+    _verdict("lint", rc)
     raise typer.Exit(code=rc)

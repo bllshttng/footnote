@@ -137,6 +137,8 @@ LAYERS = (
             # dependency in place.
             "fno.dispatch_flags",
             "fno.drive_authority",
+            "fno.harness_identity",
+            "fno.harness_names",
             "fno.rust_binary",
         ),
     ),
