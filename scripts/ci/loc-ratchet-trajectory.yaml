@@ -718,5 +718,5 @@ entries:
   - date: 2026-08-05
     pr: 746
     branch: feature/x-7685
-    delta: 183
+    delta: 194
     reason: 'King context-pressure + orphan Stop hook (x-7685 task 4.1): +183 in hooks/king-context-nudge.sh. A crowned king ending a turn past king_used_pct_trigger, or with live workers it spawned and no resolution recorded, is blocked once per 10-point band with a reason naming usage / the three legal resolutions, and emits king_context_nudge / king_orphan_block - the arming proof the arm-handoff predecessor (gated on a pid dead ~1s after init, never once armed) could never produce. Every error path exits 0: a registry or probe problem must never block every crowned session turn end, and the check degrades toward silence. No pid probe and no target-manifest read (a king pass has no manifest, so the target Stop chain early-exit would deliver this to zero kings). The hook reads the registry via a new daemon-free verb fno agents registry-json (load_registry, a file read) rather than fno agents list (Rust-routed, lazy-starts the daemon). Cannot fold into target-stop-hook.sh (it exits 0 without a manifest) or key on the manifest; the two independent banded latches (context by pct/10, orphan by pct/10, plus the carveout-scope resolution gate) and the dual event types are why it is 183 lines and not ~80.'

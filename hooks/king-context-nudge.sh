@@ -123,8 +123,17 @@ CROWN_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
 # Active children this king spawned. Active = NOT in the terminal set
 # (exited/orphaned/failed/permanent_dead); covers spawning, ready, idle, busy,
 # live, restarting - all are workers that may still need their king at review.
-ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$KING_SESSION_ID" \
-    '[.agents[] | select(.spawned_by_session == $sid and ((.status // "exited") | IN("exited";"orphaned";"failed";"permanent_dead") | not))] | map(.name) | join(", ")' \
+# Uses explicit inequalities (not jq IN(), which is jq 1.7+ and absent on CI's
+# ubuntu jq 1.6 - the P1 fix's first attempt used IN() and failed silently on
+# Linux while passing on macOS, a platform-difference trap).
+ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$KING_SESSION_ID" '
+    [.agents[] | select(
+        .spawned_by_session == $sid
+        and (.status // "exited") != "exited"
+        and (.status // "exited") != "orphaned"
+        and (.status // "exited") != "failed"
+        and (.status // "exited") != "permanent_dead"
+    )] | map(.name) | join(", ")' \
     2>/dev/null)
 ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
 
