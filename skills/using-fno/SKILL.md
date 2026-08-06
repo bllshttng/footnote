@@ -54,6 +54,15 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as panes you can watch, drive, or message.
 
+**Two spawn primitives, one contract.** `fno agents spawn` makes a *citizen* - roster-listed, `peek`-able, mail-addressable, survives its spawner.
+Your harness's native subagent (Claude's Agent tool, codex/agy task primitives) makes a *limb* - a nested conversation inside your own process with no registry row, no mail handle, and no life of its own.
+Spawn for citizens, harness subagent for limbs.
+The limb is genuinely the better tool for one-shot work you consume in your next turn: no spawn latency, no worktree setup, and the result lands back in a context that already holds the problem.
+Reach for `fno agents spawn` when the work must outlive its spawner, be observed or driven by a third party, be handed to a successor, hold a node claim, or join king-mediated review.
+Neither primitive is always correct.
+A limb has no input to inject mail into, so it cannot be made addressable - `fno agents top --subagents` makes harness subagents *observable* only, never *addressable*.
+Long form, including why full addressability is rejected: [docs/architecture/coordination.md](docs/architecture/coordination.md).
+
 **Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane - so a worker that cannot self-invoke its harness's native review verb can ask its king, whose reply triggers the verb in the worker's own harness (no live king -> advisory self-review; see AGENTS.md). The same property means a capability probe sent over mail can only test the user-triggered path, never autonomous action.
 
 **Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.
