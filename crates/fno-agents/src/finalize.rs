@@ -1852,14 +1852,34 @@ fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
     let Ok(content) = fs::read_to_string(&path) else {
         return false;
     };
+    // Pin to the current HEAD: a coverage event for a prior commit doesn't
+    // describe what finalize is about to arm. (x-0eaf finding 2.)
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
     let mut latest: Option<Value> = None;
     for line in content.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
             continue;
         };
-        if val.get("type").and_then(|v| v.as_str()) == Some("review_coverage") {
-            latest = Some(val);
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
+            continue;
         }
+        if !head.is_empty() {
+            let ev_head = val
+                .pointer("/data/head_sha")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if ev_head != head {
+                continue;
+            }
+        }
+        latest = Some(val);
     }
     match latest {
         Some(v) => {

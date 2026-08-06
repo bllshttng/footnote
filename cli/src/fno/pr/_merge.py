@@ -1099,8 +1099,12 @@ def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> 
             "-f",
             f"merge_method={strategy}",
         ]
-        if verified_head:
-            api_args += ["-f", f"sha={verified_head}"]
+        # x-0eaf finding 6: prefer the covered head (reviewed) over the
+        # checks-verdict head; they are usually the same SHA but the covered
+        # head is the one that was actually reviewed.
+        pin = covered_head or verified_head
+        if pin:
+            api_args += ["-f", f"sha={pin}"]
         api = _gh(api_args, repo)
         if api.ok:
             _git(["fetch", "origin"], repo)
