@@ -51,6 +51,18 @@ All test scripts follow the same convention:
 - Print pass/fail status for each assertion
 - Can be run standalone from the repo root
 
+### Smoke runner coverage (the two-test-trees trap)
+
+`fno test smoke` is the one-command gate, but it has two layers and a gap that a verb-surface change falls straight through.
+
+- A pytest step (unit + integration under `cli/tests/`).
+- Auto-included shell steps from `_SMOKE_HARNESS_GLOBS` in `cli/src/fno/test_cmd.py`: root `tests/*.sh`, `tests/{hooks,lib,target,skills,events,lint}/*.sh`, `scripts/tests/*.sh`, and `skills/*/tests/*.sh`.
+- The pytest step is fail-fast: while it is red, the shell steps never run.
+
+Two shell trees are NOT in the smoke globs and never run unless invoked directly: `cli/tests/smoke/*.sh` and `cli/tests/scenarios/*.sh`. These call verbs (`fno backlog new`, `fno mail send`, and friends) that the pytest suite does not exercise.
+
+When you kill, rename, or nest a CLI verb, run the shell layer explicitly: `bash cli/tests/smoke/*.sh`, `bash cli/tests/scenarios/*.sh`, and root `tests/*.sh`. A green `fno test smoke` after a verb-surface change is not proof the shell layer still resolves, especially if the pytest step was red and fail-fast stopped before the shell steps. This bit a kill-verbs PR that passed 12525 pytest cases while two shell tests still invoked the removed verbs.
+
 ### Validation Scripts
 
 Three validation scripts enforce structural and process rules:
