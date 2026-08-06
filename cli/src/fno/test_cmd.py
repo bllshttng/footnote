@@ -358,6 +358,7 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
     ("Repo-root shell-out drift guard (clone-only allowlist)", "cli", "uv run fno-py lint shellout-drift"),
     ("Spawn-shape lint (single-line argv guard)", "cli", "uv run fno-py lint spawn-paths"),
     ("In-N-Out menu-cap ratchet", "cli", "uv run fno-py lint menu-caps"),
+    ("Verb-surface ratchet (real count, both binaries)", "cli", "uv run fno-py lint verb-ratchet"),
     ("Schema parity self-test", ".", "bash scripts/tests/check-event-schema-parity-selftest.sh"),
     ("Schema parity check (Python side)", ".", "bash scripts/check-event-schema-parity.sh"),
     ("Registry schema parity selftest", ".", "bash scripts/ci/check-registry-schema-parity.sh --selftest"),

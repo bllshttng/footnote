@@ -1,0 +1,375 @@
+# Known verb surface held by the CI ratchet (x-a7f0, the unfinished half of x-71b6).
+# Every invocable leaf verb, one per line, sorted: the fno-py registry (visible
+# AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
+# Remove or add a line only in the same PR that removes or adds the verb.
+#
+# To regenerate after an intentional change: `fno lint verb-ratchet --update`,
+# then commit this file in that PR. A deliberate addition carries a PR-body line:
+#   verb-exception: <rationale>
+# (mirrors `loc-exception:` so contributors learn one idiom, not two).
+# Two PRs that each add a verb both edit this file; the merge conflict is the
+# intended review moment, not tooling noise.
+agents adopt
+agents ask
+agents attach
+agents crown
+agents digest
+agents discovered-json
+agents drive-authority
+agents finalize
+agents gate
+agents heal-token
+agents kill-check
+agents list
+agents logs
+agents loop
+agents loop-check
+agents mcp send
+agents name
+agents needs
+agents nudge-peek
+agents peek
+agents ping
+agents push-channel
+agents reap
+agents reconcile
+agents register
+agents register-channel
+agents registry-json
+agents report
+agents restart
+agents resume
+agents rm
+agents spawn
+agents spawn-guard
+agents status
+agents stop
+agents subscribe
+agents top
+agents trace
+agents truth
+agents unregister-channel
+agents verify-evidence
+agents wait
+agents watch
+agents whoami
+annotate add
+annotate list
+annotate resolve
+approvals decide
+approvals ls
+approvals show
+backlog add
+backlog advance
+backlog archive
+backlog backfill-slugs
+backlog bases
+backlog batch abandon
+backlog batch close
+backlog batch join
+backlog batch metrics
+backlog batch open
+backlog batch policy
+backlog batch prepare
+backlog batch ship
+backlog batch ship-closeable
+backlog batch status
+backlog briefs
+backlog capture add
+backlog capture archive
+backlog capture capture-pass
+backlog capture dismiss
+backlog capture empty-pass
+backlog capture list
+backlog capture promote
+backlog capture scan
+backlog capture tidy
+backlog collisions check
+backlog cost
+backlog decompose
+backlog defer
+backlog dispatch-lanes
+backlog done
+backlog epic status
+backlog exec-graph
+backlog find
+backlog get
+backlog groom
+backlog idea
+backlog inbox add
+backlog inbox archive
+backlog inbox capture-pass
+backlog inbox dismiss
+backlog inbox empty-pass
+backlog inbox list
+backlog inbox promote
+backlog inbox scan
+backlog inbox tidy
+backlog intake
+backlog lane-fill
+backlog lanes
+backlog maintain
+backlog new
+backlog next
+backlog note
+backlog pick
+backlog project-root
+backlog provenance
+backlog queue
+backlog queued
+backlog rank
+backlog ready
+backlog reconcile
+backlog reconcile-findings
+backlog rehash
+backlog relatedness build
+backlog relatedness get
+backlog release
+backlog remove
+backlog reprioritize
+backlog roadmap
+backlog schedule
+backlog session add
+backlog status
+backlog supersede
+backlog tree
+backlog triage apply
+backlog triage consistency
+backlog triage context
+backlog triage health
+backlog triage pile
+backlog triage projects
+backlog triage propose
+backlog triage rank
+backlog triage trend
+backlog triage validate
+backlog unclaim
+backlog undefer
+backlog unqueue
+backlog unsupersede
+backlog update
+backlog validate
+backlog view
+bundle check
+bundle lint
+carveout add
+carveout list
+carveout resolve
+claim acquire
+claim force-release
+claim incarnation-fence
+claim lane-acquire
+claim lane-count
+claim lane-release
+claim list
+claim refresh
+claim release
+claim session-pid
+claim status
+codemap
+company join
+company propose
+company show
+company topology
+config accounts
+config active-backlog
+config doctor
+config get
+config rm
+config schema
+config set
+config status-sinks
+config unset
+context
+cost
+delivery
+dispatch one
+dispatch resolve
+doctor
+done
+evals grade
+evals graduate
+evals report
+evals run
+event audit
+event emit
+event gate-escape
+event push-parent
+executor
+find
+help
+lint flock-pattern
+lint menu-caps
+lint provider-stderr-merge
+lint shellout-drift
+lint spawn-paths
+lint stale-skill-refs
+lint verb-ratchet
+log activity
+log milestone
+log user-note
+log warning
+loops ls
+loops pause-all
+loops resume-all
+loops status
+mail ack
+mail drain
+mail drain-self
+mail lint
+mail list
+mail migrate-bus
+mail notify-self
+mail rebuild-render
+mail reply
+mail send
+mail status
+mail triage
+mail unread
+mail view
+mcp send
+mux attach
+mux block pipe
+mux doctor
+mux kill-server
+mux layout get
+mux ls
+mux pane claim
+mux pane kill
+mux pane ls
+mux pane read
+mux pane release
+mux pane run
+mux pane send
+mux pane wait
+mux serve
+mux server
+mux shell-init
+mux tab create
+mux tab join
+mux tab ls
+mux tab rename
+mux where
+mux workspace prune
+new
+notify
+observer replay
+observer sweep
+paths emit-shell
+paths shell-stub
+paths verify
+phase
+plan brief
+plan folder-audit
+plan graduate
+plan migrate-keys
+plan path
+plan reconcile-status
+plan rung
+plan set-expected
+plan stamp
+plan sync
+plan validate
+plugins activate
+plugins deactivate
+plugins inspect
+plugins ls
+plugins verify
+pr base-check
+pr evidence-check
+pr evidence-required
+pr global-receipt-events-path
+pr logs
+pr merge
+pr next-receipt-generation
+pr rebase
+pr ritual
+pr status
+pr sync-canonical
+pr verify
+pr-watch heal
+pr-watch install
+pr-watch refresh
+pr-watch status
+pr-watch tick
+pr-watch uninstall
+reality-check gh
+reality-check notion
+reality-check sheets
+research
+restart
+resume receipt show
+resume receipt validate
+resume receipt version
+resume receipt write
+retro drain-postmortems
+retro run
+review
+roles context
+roles ls
+roles resolve
+roles show
+route env
+route ls
+route set
+route unset
+runtime probe
+runtime reap-dead-workers
+runtime register-worker
+runtime worktree
+scoreboard
+setup cli-hooks
+setup cli-hooks-codex
+setup codex-plugin
+setup migrate-config
+setup migrate-paths
+setup plan
+setup post-merge
+setup wizard
+skill-diff reconcile
+skill-diff tick
+state archive
+state init
+state list-fields
+state path
+state set
+state show
+state validate
+status
+status-fanout
+stub-manifest check-pr
+stub-manifest reconcile-finalize
+stub-manifest reconcile-validate
+stub-manifest validate
+stub-manifest write
+target blast-check
+target check-contained
+target check-review-gate
+target init
+target resolve-model
+target resolve-owned-identity
+target resume-bind
+target start
+target status
+test
+think dispatch
+think inspect
+tokens
+update
+version
+wake clear
+wake drop
+wake list
+whoami
+worker blueprint
+worker external
+worker reconcile
+worker review
+worker ship
+worktree archive
+worktree cleanup
+worktree ensure
+worktree overlap-record
+worktree overlaps
+worktree policy
+worktree status

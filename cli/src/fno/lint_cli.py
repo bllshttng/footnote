@@ -337,6 +337,46 @@ def menu_caps() -> None:
     typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
 
 
+@app.command("verb-ratchet")
+def verb_ratchet(
+    update: bool = typer.Option(
+        False,
+        "--update",
+        help="Regenerate scripts/ci/verb-baseline.txt from the live surface.",
+    ),
+) -> None:
+    """Ratchet the REAL verb count (x-a7f0, the unfinished half of x-71b6).
+
+    ``menu-caps`` caps what ``fno --help`` ADVERTISES; this caps what EXISTS.
+    Fails when the live surface and ``scripts/ci/verb-baseline.txt`` disagree,
+    naming the added or removed verbs. Covers BOTH binaries (the fno-py
+    registry and the Rust front's mux + version surface) and fails closed with
+    a named error - writing no baseline - when the Rust front cannot be reached,
+    so the ratchet can never pass by reporting only half the surface. ``--update``
+    regenerates the baseline after an intentional change.
+    """
+    from fno import lint_verb_ratchet as vr
+
+    if update:
+        try:
+            leaves = vr.enumerate_all_leaves()
+        except vr.VerbRatchetError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1)
+        path = vr.baseline_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(vr.generate(leaves), encoding="utf-8")
+        typer.echo(f"verb-ratchet: regenerated {path.name} ({len(leaves)} leaves)")
+        return
+    try:
+        report = vr.check()
+    except vr.VerbRatchetError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(report.message, err=not report.ok)
+    raise typer.Exit(0 if report.ok else 1)
+
+
 @app.command("stale-skill-refs")
 def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
