@@ -4910,7 +4910,10 @@ fn nudge_awaiting_defers_the_backstop() {
 
 // ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
 
-use fno_agents::loopcheck::{classify_coverage, Coverage, CoverageProducer, CoverageVerdict};
+use fno_agents::loopcheck::{
+    classify_coverage, coverage_receipt_line, Coverage, CoverageProducer, CoverageReport,
+    CoverageVerdict,
+};
 
 const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
 
@@ -5343,5 +5346,63 @@ fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
         Some("DoneUnreviewed"),
         "auto_merge consent must not override zero coverage: {}",
         d.message
+    );
+}
+
+// ── coverage receipt line (x-0eaf task 3.1) ──────────────────────────────────
+
+#[test]
+fn coverage_receipt_covered_names_reviewers() {
+    let rep = classify_coverage(
+        &[serde_json::json!({"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED"})],
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
+    assert!(line.contains("chatgpt-codex-connector"), "{line}");
+}
+
+#[test]
+fn coverage_receipt_zero_names_refused_and_absent() {
+    let comments = vec![serde_json::json!({
+        "author": {"login": "chatgpt-codex-connector[bot]"},
+        "body": "You have reached your Codex usage limits for code reviews."
+    })];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &[
+            "chatgpt-codex-connector".to_string(),
+            "gemini-code-assist".to_string(),
+        ],
+        true,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("0 reviewed"), "{line}");
+    assert!(line.contains("1 refused"), "{line}");
+    assert!(line.contains("chatgpt-codex-connector"), "{line}");
+    assert!(line.contains("Nothing reviewed this diff"), "{line}");
+}
+
+#[test]
+fn coverage_receipt_unknown_says_unknown() {
+    let rep = CoverageReport {
+        coverage: Coverage::Unknown,
+        verdicts: vec![],
+    };
+    let line = coverage_receipt_line(&rep);
+    assert!(
+        line.contains("unknown"),
+        "unknown must say unknown, not a number: {line}"
+    );
+    assert!(
+        !line.contains("reviewed:"),
+        "unknown must not present a count: {line}"
     );
 }

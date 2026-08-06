@@ -3093,7 +3093,7 @@ fn coverage_event_data(pr: i64, rep: &CoverageReport, head_sha: &str) -> serde_j
 /// One-line coverage summary for the terminal message and receipts (x-0eaf
 /// task 3.1). Printed from the coverage value at print time, never from a
 /// remembered gate verdict (receipts have lied before).
-fn coverage_receipt_line(rep: &CoverageReport) -> String {
+pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
     match &rep.coverage {
         Coverage::Unknown => "review coverage: unknown (review read failed)".to_string(),
         Coverage::Covered(n) => {
