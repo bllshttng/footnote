@@ -80,9 +80,10 @@ for surface in "${SURFACES[@]}"; do
     fail "$label: oos-ok waiver prohibition missing"
   fi
 
-  # A removed step leaves dangling cross-references behind if the list is not
-  # renumbered with it.
-  if [[ "$section" == *"(fallback)"* ]]; then
+  # A removed step leaves dangling cross-references behind if the surrounding
+  # prose is not updated with it. There is no fallback step, so the word should
+  # not appear at all.
+  if [[ "$section" == *fallback* ]]; then
     fail "$label: dangling reference to the removed fallback step"
   else
     pass "$label: no dangling fallback cross-reference"
@@ -123,6 +124,16 @@ if [[ -f "$GATE" ]]; then
     pass "uncited line reds the gate (the recovery path the flow relies on)"
   else
     fail "uncited line did not red the gate (exit $got)"
+  fi
+
+  # With the fallback gone, the gate's help text is the only thing telling the
+  # author what to do - so it must name the recoveries that do NOT mint an
+  # object, not just the three that make the check pass by filing or waiving.
+  help="$(PR_BODY=$'## Out of scope\n- Migration cleanup' bash "$GATE" 2>&1 >/dev/null)"
+  if [[ "$help" == *"do the work"* && "$help" == *"or cut it"* ]]; then
+    pass "gate recovery names inline-fix and removal, not only filing"
+  else
+    fail "gate recovery omits the inline-fix / removal options"
   fi
 else
   fail "gate not found at $GATE"

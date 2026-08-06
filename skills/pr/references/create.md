@@ -179,7 +179,7 @@ For each item line under that heading, in order:
      fi
      ```
    - a genuine **nice-to-have / future feature**: the same command with `-p p3` (and drop `-t task`).
-   - Extract the id from the JSON receipt and **validate it before appending** - a command can exit 0 yet print an empty/unparsable receipt, and appending a blank id leaves the line untracked while skipping the fallback below:
+   - Extract the id from the JSON receipt and **validate it before appending** - a command can exit 0 yet print an empty/unparsable receipt, and appending a blank id leaves the line untracked while reading as cited:
      ```bash
      NEW_ID=$(printf '%s' "$RECEIPT" | grep -o '"id": *"[^"]*"' | head -1 | sed -E 's/.*"id": *"([^"]*)".*/\1/')
      ```
