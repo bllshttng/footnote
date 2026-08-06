@@ -154,7 +154,7 @@ crates/fno-agents/src/codex_inject.rs:1
 crates/fno-agents/src/daemon.rs:130
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4
-crates/fno-agents/src/finalize.rs:33
+crates/fno-agents/src/finalize.rs:34
 crates/fno-agents/src/gc.rs:14
 crates/fno-agents/src/gemini_ask.rs:4
 crates/fno-agents/src/kill_criteria.rs:8
