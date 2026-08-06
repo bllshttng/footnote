@@ -1,15 +1,26 @@
 """``fno agents top`` (x-c5cc): every live worker process with RSS.
 
 One table over the SAME union the spawn gate counts (imported from
-``spawn_gate.census`` — never duplicated), so the debugging surface and the
+``spawn_gate.census`` - never duplicated), so the debugging surface and the
 enforcement surface can never disagree. Python-only by design (LD8): RSS via
 psutil, no daemon involvement, kept out of the Rust client verb list.
+
+With ``--subagents`` (x-af92), appends a read-only section listing
+harness-native subagents (sidechain 'limbs') that the pid/registry census
+cannot see. That section is display-only: it never feeds the spawn gate's
+slot count, and a subagent has no mail handle, so it is observable but not
+addressable. See docs/architecture/coordination.md.
 """
 from __future__ import annotations
 
 import json
 from typing import Optional
 
+from fno.agents.discover import (
+    _SUBAGENT_SCAN_WINDOW_S,
+    _subagent_live_seconds,
+    discover_subagents,
+)
 from fno.agents.spawn_gate import LiveWorker, census
 
 
@@ -58,15 +69,90 @@ def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
     return rows
 
 
-def render_top(as_json: bool = False) -> str:
-    """Render the union table (or its JSON mirror — same rows, LD: parity)."""
+def _fmt_age(seconds: float) -> str:
+    """Compact floored age: 45s / 12m / 3h."""
+    s = int(seconds)
+    if s < 60:
+        return f"{s}s"
+    if s < 3600:
+        return f"{s // 60}m"
+    return f"{s // 3600}h"
+
+
+def _subagent_section() -> dict:
+    """Read-only sidechain rows for the --subagents section (x-af92).
+
+    Returns the rendered rows, any scan warning, and the live threshold so the
+    caller can state the threshold in its header. Carrying the threshold out
+    keeps the verdict definition next to the verdict rather than re-derived.
+    """
+    found, warnings = discover_subagents()
+    rows = [
+        {
+            "agent_id": s.agent_id,
+            "parent": s.parent_session_id[:8],
+            "branch": s.git_branch or "",
+            "age": _fmt_age(s.age_seconds),
+            "verdict": s.verdict,
+            "cwd": s.cwd or "",
+        }
+        for s in found
+    ]
+    return {
+        "rows": rows,
+        "warnings": warnings,
+        "live_threshold": int(_subagent_live_seconds()),
+        "scan_window_h": int(_SUBAGENT_SCAN_WINDOW_S // 3600),
+    }
+
+
+def _render_subagent_lines(section: dict) -> list[str]:
+    """The human-readable sidechain block, scope-stated even when empty."""
+    rows = section["rows"]
+    threshold = section["live_threshold"]
+    window_h = section["scan_window_h"]
+    out = [
+        f"subagents (claude only; active = mtime within {threshold}s; "
+        f"older rows age out after {window_h}h)"
+    ]
+    out.append(
+        f"{'AGENT':<16} {'PARENT':<9} {'BRANCH':<12} {'AGE':>5} {'VERDICT':<8} CWD"
+    )
+    if not rows:
+        # AC7-EDGE: report the claude-only scope, not an empty list that reads
+        # as "none running" - a non-claude host has no measured layout here.
+        out.append(
+            "none in the scan window (claude only; "
+            "codex/opencode/agy task layouts not measured)"
+        )
+        return out
+    for r in rows:
+        out.append(
+            f"{r['agent_id']:<16} {r['parent']:<9} {r['branch'] or '-':<12} "
+            f"{r['age']:>5} {r['verdict']:<8} {r['cwd'] or '-'}"
+        )
+    return out
+
+
+def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
+    """Render the union table (or its JSON mirror - same rows, LD: parity).
+
+    ``include_subagents`` appends a read-only sidechain section (x-af92); in
+    JSON it adds a ``subagents`` key and folds the scan warnings in.
+    """
     c = census()
     rows = _rows(c.workers, _crown_map())
+    subagents = _subagent_section() if include_subagents else None
     if as_json:
-        return json.dumps(
-            {"workers": rows, "slot_claims": c.slot_claims, "warnings": c.warnings},
-            indent=2,
-        )
+        payload: dict = {
+            "workers": rows,
+            "slot_claims": c.slot_claims,
+            "warnings": list(c.warnings),
+        }
+        if subagents is not None:
+            payload["subagents"] = subagents["rows"]
+            payload["warnings"] = c.warnings + subagents["warnings"]
+        return json.dumps(payload, indent=2)
 
     out: list[str] = []
     out.extend(c.warnings)
@@ -84,4 +170,8 @@ def render_top(as_json: bool = False) -> str:
         )
     if c.slot_claims:
         out.append(f"(+{c.slot_claims} queued headless slot claim(s))")
+    if subagents is not None:
+        out.append("")
+        out.extend(subagents["warnings"])
+        out.extend(_render_subagent_lines(subagents))
     return "\n".join(out)
