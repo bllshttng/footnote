@@ -31,6 +31,8 @@ from __future__ import annotations
 
 from typing import Mapping, Optional
 
+from fno.harness_names import KNOWN_HARNESSES
+
 # Bump when a capability KEY is added/removed or a value's meaning changes, so a
 # consumer can assert the shape it was written against.
 MAP_VERSION = 6  # autonomous_pane + route_on_pane capabilities
@@ -163,6 +165,16 @@ _HARNESS_CAPS: dict[str, dict] = {
     },
 }
 
+# Anti-drift: the capability table's keys must agree with the canonical name
+# list (fno.harness_names), which platform-layer code reads without reaching into
+# this runtime module (x-cec8). Adding a harness is one coupled change: the name
+# lands in KNOWN_HARNESSES and a capability dict lands here, or this import fails
+# loudly. Keeps the single-source-of-truth property the old derivation had.
+assert set(_HARNESS_CAPS) == set(KNOWN_HARNESSES), (
+    "harness capability table keys diverge from fno.harness_names.KNOWN_HARNESSES; "
+    "add the harness in both places"
+)
+
 
 def normalize_command(command: str, harness: str) -> str:
     """Translate a claude-syntax footnote slash command to ``harness``'s native
@@ -228,7 +240,7 @@ class DispatchResolveError(ValueError):
 
 def known_harnesses() -> list[str]:
     """Sorted harness names the map knows (the loud-error candidate list)."""
-    return sorted(_HARNESS_CAPS)
+    return sorted(KNOWN_HARNESSES)
 
 
 def capabilities(harness: str) -> dict:

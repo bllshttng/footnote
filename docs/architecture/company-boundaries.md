@@ -37,11 +37,11 @@ Seven of the original nine prohibited imports were misplaced leaf utilities, and
 | `fno.agents.drive_authority` | `fno.drive_authority` | a read-only `state.json` reader whose only dependency is `fno.paths` |
 | `fno.agents.rust_runtime.resolve_binary` | `fno.rust_binary` | a stdlib-only filesystem lookup; `rust_runtime` keeps the dispatch half and depends downward on it |
 
-Applying this document's own test to the third row: `fno.dispatch_flags` is the one move that did not remove the dependency, only the direct spelling of it.
-It imports `fno.harness_identity`, which builds `LEGACY_HANDLE_RE` at import time from `fno.agents.harness_map.known_harnesses()`, so `import fno.dispatch_flags` still pulls in `fno.agents`.
-The check stays green on it purely because `fno.harness_identity` is unmapped; declaring that module would surface the edge rather than create it.
-Closing it means making the regex lazy or moving the harness-name table below the runtime, neither of which fits a mechanical relocation.
-`fno.drive_authority`, `fno.rust_binary`, `fno.config` and `fno.graph.failure` were each verified to import no `fno.agents` module, eagerly or lazily.
+Applying this document's own test to the third row: `fno.dispatch_flags` was the one move that did not remove the dependency, only the direct spelling of it.
+It imported `fno.harness_identity`, which built `LEGACY_HANDLE_RE` at import time from `fno.agents.harness_map.known_harnesses()`, so `import fno.dispatch_flags` pulled in `fno.agents`.
+That edge is now closed (x-cec8): the harness-name set lives at L0 (`fno.harness_names`), so `fno.harness_identity` builds the regex from L0 data with no runtime import, and both `fno.harness_identity` and `fno.harness_names` are declared in the boundary map so the now-absent edge is visible rather than hidden in an unmapped blind spot.
+The runtime capability table (`fno.agents.harness_map`) asserts its keys stay in sync with the name list, so adding a harness stays a single coupled change.
+`fno.drive_authority`, `fno.rust_binary`, `fno.config` and `fno.graph.failure` were each verified to import no `fno.agents` module, eagerly or lazily; `fno.harness_identity` now joins that list.
 
 None of the moves left a re-export shim at the old path.
 A shim would keep the upward import spelling available and hide the move from the next reader.
