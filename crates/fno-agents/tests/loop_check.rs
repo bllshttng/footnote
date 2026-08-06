@@ -5127,3 +5127,26 @@ fn coverage_classify_stale_head_does_not_count() {
     let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
+
+/// The classifier is NAME-AGNOSTIC on the local axis: it counts a head-pinned
+/// pass for ANY reviewer name, not only built-ins or configured entries. This
+/// pins the load-bearing property that `emit-attestation.sh`'s "reviewer name
+/// is NOT an allowlist" comment asserts on the producer side - so a future
+/// allowlist added either here or there cannot silently stop `/code-review`
+/// (or a future local lane like the codex CLI, attesting as "codex") from
+/// counting under `reviewers: []`. A comment in a sibling script is not a guard.
+#[test]
+fn coverage_classify_local_pass_unconfigured_name_counts() {
+    // "codex" here is the LOCAL CLI lane (local_attestation axis), deliberately
+    // the same display name as the github_app bot - the producer axis field is
+    // what keeps them distinct, and an unconfigured name still counts.
+    let events = attestation_line("codex", COV_HEAD, "pass");
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.name, "codex");
+}
