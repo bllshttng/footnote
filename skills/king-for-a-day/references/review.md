@@ -84,18 +84,22 @@ Verify each finding against source before accepting it. The reviewer is advisory
 
 ## When the verb refuses
 
-The invocation can hit a `disable-model-invocation` refusal. The discriminator is **whether a user-shaped directive naming the verb is present in the session** - which is exactly what a mailed order is, and exactly what a worker's own decision to review is not.
+The invocation can hit a `disable-model-invocation` refusal. **What distinguishes a firing attempt from a refused one is not known.** Here is the whole evidence base, because every compact explanation offered so far has been retracted.
 
-The cleanest control came from one session, one model lane, one afternoon:
+A mailed order appears **necessary**. One session, one lane, one afternoon:
 
 | what preceded the call | outcome |
 |---|---|
 | a mailed order carrying `/code-review` | fired, 5 of 5 |
 | the session deciding on its own to review | refused, 2 of 2 |
 
-Same session, same harness, same model, minutes apart. That is why the king serves the verb: the mail IS the invocation, and without it there is nothing for the session to act on.
+Same session, same harness, same model, minutes apart. That is the argument for the king serving the verb: a worker that decides on its own to review gets nothing.
 
-An earlier reading blamed the session's model lane, on a paired control where a claude-lane session fired and a zai/glm-routed one refused. Do not carry that: it does not survive the table above, where one claude-lane session both fired and refused depending only on whether an order preceded the call. The glm-lane refusal remains **unexplained** - it had a mailed order and still refused, so something else is in play there. Record that as unknown rather than reaching for a third theory; four have already been built on real observations and retracted.
+It is **not sufficient**, and do not write it up as though it were: a different session was refused twice *with* an order in hand.
+
+The model lane is **not** the variable, though it was ruled so twice. A glm-5.2 worker ran `/code-review` to completion and produced a P1 with a file:line that landed as a real fix. A rejection cannot produce that. So no lane is structurally barred, and a king must not tell a worker its model disqualifies it.
+
+Beyond that, stop. The framing of the order is a live candidate - a bare verb as the entire message body failed where an explicit "invoke this as a command, for real" fired - but that is one observation each and it is offered here as a lead, not a mechanism. Four explanations have been built on real observations today and all four were retracted. A fifth is not what anyone needs.
 
 Three rules follow:
 
