@@ -2028,7 +2028,10 @@ fn arm_auto_merge(cwd: &Path) -> bool {
 /// ship authors no branch commits, so reusing that constant here would stamp
 /// every doc ship. The two sets disagree on purpose.
 fn is_do_stamp_terminal(reason: &str) -> bool {
-    matches!(reason, "DonePRGreen" | "DoneAwaitingMerge")
+    matches!(
+        reason,
+        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed"
+    )
 }
 
 /// Guarded `do` lifecycle stamp (x-0469). `/do` Step 1.5 is the earlier truthful
