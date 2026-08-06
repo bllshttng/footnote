@@ -629,6 +629,59 @@ def _parse_heredoc_at(line, j):
     return m.group(0), dash
 
 
+def _split_lines_outside_quotes(command):
+    """Split `command` on newlines that lie OUTSIDE any quoted region.
+
+    A newline inside an open quote is part of ONE argument, not a command
+    boundary: `fno mail send x "...\\n...\\n..."`, a `-m` commit body, a
+    `--details` string. Splitting there hands the next fragment to shlex with an
+    unbalanced quote, which raises, and the caller then falls back to matching
+    the guarded phrase ANYWHERE in the whole command - so any message whose BODY
+    quoted a guarded invocation was refused, including a worker's review report
+    about merge behaviour (observed live 2026-08-06).
+
+    A newline OUTSIDE quotes still splits, so `git status\\ngh pr merge 1` is
+    still judged as two command positions. An unterminated quote never closes,
+    so the rest stays one line and shlex still raises - the deny-leaning
+    direction, unchanged.
+    """
+    lines, buf = [], []
+    quote = None
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if quote:
+            # Inside double quotes a backslash escapes the next char; inside
+            # single quotes nothing escapes (same rule as _find_heredoc_opener).
+            if ch == "\\" and quote == '"' and i + 1 < n:
+                buf.append(command[i:i + 2])
+                i += 2
+                continue
+            if ch == quote:
+                quote = None
+            buf.append(ch)
+            i += 1
+            continue
+        if ch in ("'", '"'):
+            quote = ch
+            buf.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            buf.append(command[i:i + 2])  # escaped char outside quotes
+            i += 2
+            continue
+        if ch == "\n":
+            lines.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(ch)
+        i += 1
+    lines.append("".join(buf))
+    return lines
+
+
 def _command_segments(command):
     """Split a shell command into command-position segments (lists of tokens).
 
@@ -656,7 +709,7 @@ def _command_segments(command):
     # review, PR #227). Removed (not spaced) to match shell semantics, so a
     # mid-token continuation like `git pu\<newline>sh` rejoins to `git push`.
     command = re.sub(r'\\\r?\n', '', command)
-    lines = command.split("\n")
+    lines = _split_lines_outside_quotes(command)
     segments = []
     heredoc_delim = None  # terminator to seek; None when not inside a body
     heredoc_dash = False
@@ -984,7 +1037,13 @@ def main():
     if segments is not None:
         git_segs = _find_git_segments(segments)
     else:
-        git_segs = [command] if command.startswith('git') else []
+        # Deny-leaning, matching the merge fallback above: on unbalanced quotes
+        # we cannot tell command position from prose, so ANY `git` in the string
+        # hands the whole command to the gate. `startswith` was fail-OPEN - an
+        # unterminated quote in a command not literally beginning with `git`
+        # (`echo "oops<newline>git push origin main`) dropped the push gate
+        # entirely, while the merge gate above still fired on the same input.
+        git_segs = [command] if re.search(r'\bgit\b', command) else []
     if not git_segs:
         sys.exit(0)
 

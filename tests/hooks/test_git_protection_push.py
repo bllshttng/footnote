@@ -213,6 +213,65 @@ def test_heredoc_opener_after_shell_comment_is_ignored():
     assert _git_segments("echo ok # <<EOF\ngit push --force origin main\nEOF")
 
 
+# --- multi-line QUOTED arguments are content, not command positions ----------
+# A newline inside an open quote is part of one argument, so splitting on it
+# handed shlex a fragment with an unbalanced quote; that raises, and the caller
+# falls back to a whole-command regex that matches the phrase anywhere. Any
+# message whose BODY quoted a guarded invocation was refused - including a
+# worker's review report ABOUT merge behaviour (observed live 2026-08-06).
+
+
+def test_multiline_quoted_body_mentioning_merge_is_not_a_command():
+    assert _merge_segment(
+        'fno mail send x "line one\ngh pr merge --auto is the bug\nline three"') is None
+
+
+def test_multiline_quoted_body_mentioning_push_is_not_a_command():
+    assert _git_segments(
+        'fno mail send x "intro\ngit push --force origin main is blocked\nend"') == []
+
+
+def test_multiline_single_quoted_body_is_not_a_command():
+    assert _git_segments(
+        "fno mail send x 'intro\ngit push origin main\nend'") == []
+
+
+def test_escaped_quote_inside_multiline_body_does_not_end_the_quote():
+    # The \" is data; the argument stays open, so the push line is still content.
+    assert _git_segments(
+        'fno mail send x "he said \\"hi\\"\ngit push origin main\nend"') == []
+
+
+def test_real_push_on_next_line_outside_quotes_still_caught():
+    # An UNQUOTED newline still splits, so a genuine two-liner is still judged.
+    assert _git_segments('echo "safe prose"\ngit push origin main')
+
+
+def test_real_push_after_closed_quote_same_line_still_caught():
+    assert _git_segments('echo "prose about git push"; git push origin main')
+
+
+def test_unterminated_quote_hiding_a_push_still_fails_closed():
+    # The quote never closes, so the whole command stays one line and shlex
+    # raises - the caller's deny-leaning whole-command fallback, unchanged.
+    try:
+        git_protection._command_segments('echo "intro\ngit push origin main')
+    except ValueError:
+        return
+    raise AssertionError("unterminated quote must raise, not parse as safe")
+
+
+def test_unbalanced_quote_fallback_is_deny_leaning_for_git():
+    # The ValueError fallback in main() used `command.startswith("git")`, which
+    # is fail-OPEN: an unterminated quote in a command not literally beginning
+    # with `git` dropped the push gate entirely, while the merge gate on the
+    # same input still fired via its regex-anywhere fallback. Both fallbacks
+    # must lean the same way. This asserts the predicate, not main()'s wiring.
+    import re as _re
+    assert _re.search(r'\bgit\b', 'echo "intro\ngit push origin main')
+    assert not 'echo "intro\ngit push origin main'.startswith('git')
+
+
 if __name__ == "__main__":
     for _name, _fn in sorted(globals().items()):
         if _name.startswith("test_") and callable(_fn):
