@@ -97,9 +97,12 @@ def test_provider_less_peer_arms_nothing(repo):
 def test_unreadable_review_config_reads_unknown_not_no_gate(repo):
     # A reviewers typo raises out of the Python validator but still declares a
     # gate loop-check will hold. "none (PR + CI only)" would be the same lie.
+    # Only the REVIEW half is unknown: PR + CI green holds whatever the config
+    # says, so dropping it would understate the gate in the other direction.
     root = repo('[review]\nreviewers = ["sigmaa"]\n')
     assert _done_when_line({}, root) == (
-        "unknown (config.review unreadable) | resolve: fno config doctor"
+        "PR + CI green + reviewed by [unknown (config.review unreadable) "
+        "| resolve: fno config doctor]"
     )
 
 

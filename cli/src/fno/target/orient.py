@@ -598,8 +598,14 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
         # same file and holds whatever gate they declare, so a config this side
         # cannot parse leaves the gate UNKNOWN, not absent. A reviewers typo
         # raises here and still gates over there - announcing no gate would be
-        # the same lie the rest of this function exists to stop.
-        line = "unknown (config.review unreadable) | resolve: fno config doctor"
+        # the same lie the rest of this function exists to stop. The PR + CI
+        # half stays on the line because it holds unconditionally: only the
+        # REVIEW half is unknown, and dropping the prefix would understate the
+        # gate in the other direction.
+        line = (
+            "PR + CI green + reviewed by [unknown (config.review unreadable) "
+            "| resolve: fno config doctor]"
+        )
     else:
         # `no_external` skips loop-check's GitHub-login reads entirely
         # (`login_skipped = no_external || !login_gate_active`), so EVERY login
