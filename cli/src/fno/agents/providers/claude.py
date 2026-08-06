@@ -86,6 +86,28 @@ _STDOUT_HEAD_LIMIT = 200
 # "_subprocess_run", fake)`` works.
 _subprocess_run = subprocess.run
 
+# Claude Code force-ends a turn after N consecutive Stop-hook blocks (default
+# 9). fno's loop blocks repeatedly by design, so on the unraised harness a
+# sustained block-and-retry - the US4 gh-read-error arm during a GitHub outage,
+# or any loop that needs >9 fires to reach done() - is truncated at 9, before
+# fno's own NoProgress fingerprint backstop or budget ceiling can bind. We raise
+# it for fno-spawned workers. 50 is ~5.5x the default, comfortably above the
+# NoProgress backstop (3 unattended / 5 attended), and finite so a genuinely
+# wedged rapid-block loop still dies quickly instead of running until budget
+# exhausts. Attended sessions (the operator's own claude) are not fno-spawned,
+# so they keep the harness default unless the operator sets the var themselves.
+CLAUDE_CODE_STOP_HOOK_BLOCK_CAP_DEFAULT = "50"
+CLAUDE_CODE_STOP_HOOK_BLOCK_CAP_ENV = "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"
+
+
+def claude_stop_hook_block_cap() -> str:
+    """The Stop-hook block cap to inject for a fno-spawned claude worker.
+
+    Honors an explicit operator setting in the environment; otherwise returns
+    the fno default. Both spawn substrates (pane and bg) read this so the value
+    lives in one place."""
+    return os.environ.get(CLAUDE_CODE_STOP_HOOK_BLOCK_CAP_ENV) or CLAUDE_CODE_STOP_HOOK_BLOCK_CAP_DEFAULT
+
 
 class ProviderParseError(RuntimeError):
     """Raised when claude --bg stdout does not match the short-id contract.
@@ -499,6 +521,10 @@ def bg_create(
     spawn_env = dict(os.environ)
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
+    # Raise the harness Stop-hook block cap so fno's repeated-block loop is not
+    # force-ended at the default 9 (x-1680). Non-auth spawn env reaches the bg
+    # session process the same way FNO_AGENT_SELF above does.
+    spawn_env["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] = claude_stop_hook_block_cap()
 
     # Role-based model routing (x-d2fe). An auxiliary role with a configured
     # provider key merges ANTHROPIC_BASE_URL/AUTH_TOKEN + the model env vars so

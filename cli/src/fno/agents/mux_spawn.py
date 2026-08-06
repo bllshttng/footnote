@@ -892,6 +892,12 @@ def _mesh_env_wrapper(
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")
+        # Raise the harness Stop-hook block cap so fno's repeated-block loop is
+        # not force-ended at the default 9 (x-1680). The helper honors an
+        # operator-set value, so an explicit env wins over the fno default.
+        from fno.agents.providers.claude import claude_stop_hook_block_cap
+
+        pairs.append(f"CLAUDE_CODE_STOP_HOOK_BLOCK_CAP={claude_stop_hook_block_cap()}")
     # Per-spawn account overlay (x-d012): profile (CLAUDE_CONFIG_DIR) + the
     # account's own login. SCRUB inherited auth vars (env -u) so an ambient
     # ANTHROPIC_API_KEY/CLAUDE_CODE_OAUTH_TOKEN can't override the account's
