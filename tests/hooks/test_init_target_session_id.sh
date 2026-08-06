@@ -198,7 +198,7 @@ pass "(c): init stderr free of command-substitution errors"
 # under a live harness session (e.g. this test run from inside claude) it would
 # prove THAT harness and override the CODEX_THREAD_ID marker - the documented
 # design at init-target-state.sh:924-927 ("a claude session carrying a foreign
-# CODEX_THREAD_ID resolved to PROVIDER=claude, so its session_id reads cl,
+# CODEX_THREAD_ID resolves to claude as the owned provider, so its session_id reads cl,
 # never cx"). Reparenting to init gives the verb no harness ancestor - the same
 # condition a CI runner runs under - so detect_provider honors CODEX_THREAD_ID
 # -> codex -> cx, deterministically, regardless of who launched the test. A test
