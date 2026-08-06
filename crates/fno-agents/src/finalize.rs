@@ -1758,16 +1758,19 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
 /// Return why configured optional-review evidence forbids native auto-merge,
 /// or `None` when arming may proceed.
 ///
-/// This is called only on a `DonePRGreen` terminal, which (x-0eaf) already
-/// requires coverage > 0 across both producer axes. Review coverage is therefore
-/// the loop-check gate's authority, not this function's: a quota-refused or
-/// silent optional App no longer withholds native auto-merge when a local lane
-/// covered the diff (that recreates the very wedge this node exists to escape).
-/// What remains is a fail-closed read check - a transient gh/parse failure
-/// refuses to arm rather than merge on unread evidence.
+/// x-0eaf: coverage is the authority. When loop-check emitted a covered
+/// `review_coverage` event, a local lane reviewed the diff and a quota-refused
+/// or silent optional App no longer withholds (that recreates the wedge this
+/// node exists to escape). Without such an event (e.g. finalize run with no
+/// prior loop-check fire), the per-app check below is the fallback: a missing
+/// or usage-limited optional App still withholds so GitHub does not merge
+/// without the review coverage the operator configured.
 fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let optional_apps = crate::agents_config::review_optional_apps(cwd);
     if optional_apps.is_empty() {
+        return None;
+    }
+    if coverage_satisfied_in_latest_event(cwd) {
         return None;
     }
 
@@ -1797,14 +1800,76 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
             return Some("optional-review-read-failed".to_string());
         }
     };
-    if payload.get("reviews").and_then(Value::as_array).is_none()
-        || payload.get("comments").and_then(Value::as_array).is_none()
-    {
+    let Some(reviews) = payload.get("reviews").and_then(Value::as_array) else {
         return Some("optional-review-read-failed".to_string());
+    };
+    let Some(comments) = payload.get("comments").and_then(Value::as_array) else {
+        return Some("optional-review-read-failed".to_string());
+    };
+
+    for app in optional_apps {
+        let reviewed = reviews.iter().any(|review| {
+            let login = review
+                .pointer("/author/login")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let state = review.get("state").and_then(Value::as_str).unwrap_or("");
+            !state.is_empty() && crate::loopcheck::login_matches_bot(login, &app)
+        });
+        if reviewed {
+            continue;
+        }
+
+        let usage_limited = comments.iter().any(|comment| {
+            let login = comment
+                .pointer("/author/login")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            let body = comment
+                .get("body")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_lowercase();
+            crate::loopcheck::login_matches_bot(login, &app)
+                && crate::loopcheck::body_is_usage_limit(&body)
+        });
+        if usage_limited {
+            return Some(format!("optional-review-usage-limited:{app}"));
+        }
+
+        return Some(format!("optional-review-outstanding:{app}"));
     }
-    // x-0eaf: coverage (DidPRGreen requires > 0) is the authority; a quota-refused
-    // or absent optional App does not withhold when a local lane covered.
+
     None
+}
+
+/// Whether the latest `review_coverage` event in the project log reports
+/// coverage satisfied (covered, count > 0). Used to defer the optional-app
+/// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
+/// (fall back to the per-app check).
+fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
+    let path = cwd.join(".fno").join("events.jsonl");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return false;
+    };
+    let mut latest: Option<Value> = None;
+    for line in content.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) == Some("review_coverage") {
+            latest = Some(val);
+        }
+    }
+    match latest {
+        Some(v) => {
+            v.pointer("/data/coverage").and_then(Value::as_str) == Some("covered")
+                && v.pointer("/data/reviewed_count")
+                    .and_then(Value::as_i64)
+                    .map_or(false, |n| n > 0)
+        }
+        None => false,
+    }
 }
 
 /// Arm GitHub's native auto-merge for the branch's open PR. Returns whether it
