@@ -174,7 +174,7 @@ def _review_lane_configured(repo: str) -> bool:
         from fno.config import load_settings_for_repo
 
         r = load_settings_for_repo(Path(repo)).review
-        return bool(r.required_bots or r.optional_apps or r.reviewers or r.external_reviewers)
+        return bool(r.required_bots or r.optional_apps or r.reviewers or r.peers)
     except Exception:
         return True
 
@@ -851,7 +851,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             and int(cov.get("reviewed_count") or 0) > 0
         )
     )
-    if covered and cov is not None:
+    if covered and cov is not None and _review_lane_configured(repo):
         # Staleness: the event pins a head; if the PR head moved after the gate
         # eval, the coverage no longer describes what would merge. Best-effort:
         # a head-fetch failure does not itself block (the event is from the

@@ -215,7 +215,7 @@ event_types:
     description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the count of `reviewed` verdicts across two producer axes - github_app review objects and local_attestation head-pinned passes - and is distinct from the objection predicate (a quota refusal is not a pass, and silence is not coverage). Computed at read time from observed evidence, never cached. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
     sources: [target, hook]
     data:
-      required: [pr, coverage, verdicts]
+      required: [pr, coverage, verdicts, head_sha]
       properties:
         pr:
           type: integer
