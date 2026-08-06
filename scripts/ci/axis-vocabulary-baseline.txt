@@ -843,14 +843,15 @@ tests/skills/test_agent_receipt.sh:445: provider="codex" (provider-named binding
 tests/skills/test_agent_receipt.sh:458: provider="codex" (provider-named binding holds a harness literal)
 tests/skills/test_agent_receipt.sh:552: provider="codex" (provider-named binding holds a harness literal)
 tests/test-bg-dispatch.sh:141: provider="claude" (provider-named binding holds a harness literal)
-tests/test-handoff.sh:1110: provider="claude" (provider-named binding holds a harness literal)
-tests/test-handoff.sh:1138: provider="claude" (provider-named binding holds a harness literal)
-tests/test-handoff.sh:1169: provider="claude" (provider-named binding holds a harness literal)
-tests/test-handoff.sh:1196: provider="claude" (provider-named binding holds a harness literal)
-tests/test-handoff.sh:1219: provider="claude" (provider-named binding holds a harness literal)
+tests/test-handoff.sh:1119: provider="claude" (provider-named binding holds a harness literal)
+tests/test-handoff.sh:1147: provider="claude" (provider-named binding holds a harness literal)
+tests/test-handoff.sh:1178: provider="claude" (provider-named binding holds a harness literal)
+tests/test-handoff.sh:1205: provider="claude" (provider-named binding holds a harness literal)
+tests/test-handoff.sh:1228: provider="claude" (provider-named binding holds a harness literal)
 tests/test-handoff.sh:240: provider="claude" (provider-named binding holds a harness literal)
 tests/test-target-state-recovery.sh:69: provider="codex" (provider-named binding holds a harness literal)
 tests/test_register_task.py:280: provider="claude" (provider-named binding holds a harness literal)
 tests/test_register_task.py:288: provider="claude" (provider-named binding holds a harness literal)
+
 
 allowlist: cli/tests/agents/test_providers_env_inject.py:181 tests the AC8 pre-cutover compat window; the legacy FNO_AGENT_PROVIDER name is the point of the fixture, not a conflation.
