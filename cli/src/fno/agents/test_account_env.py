@@ -194,3 +194,21 @@ def test_mesh_env_wrapper_scrubs_and_pins(tmp_path: Path) -> None:
     for var in SCRUB_AUTH_VARS:
         assert f"-u {var}" in joined
     assert "CLAUDE_CONFIG_DIR=/x/.claude-alt" in argv
+
+
+def test_mesh_env_wrapper_sets_block_cap(monkeypatch) -> None:
+    """The pane seam raises the claude Stop-hook block cap, honoring override (x-1680)."""
+    from fno.agents.mux_spawn import _mesh_env_wrapper
+
+    monkeypatch.delenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", raising=False)
+    argv = _mesh_env_wrapper("w1", "claude", None, ["claude", "hi"])
+    assert "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=50" in argv
+
+    # An explicit operator value wins over the fno default.
+    monkeypatch.setenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "99")
+    argv = _mesh_env_wrapper("w2", "claude", None, ["claude", "hi"])
+    assert "CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=99" in argv
+
+    # Non-claude providers are not touched.
+    argv = _mesh_env_wrapper("w3", "codex", None, ["codex", "hi"])
+    assert not any(str(a).startswith("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP=") for a in argv)

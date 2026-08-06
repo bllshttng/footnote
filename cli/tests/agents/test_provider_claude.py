@@ -270,6 +270,44 @@ def test_bg_create_argv_shape_small_message(tmp_path: Path, monkeypatch) -> None
     assert captured["input"] is None  # argv path, not stdin
 
 
+def test_claude_stop_hook_block_cap_default_and_override(monkeypatch) -> None:
+    """The cap defaults to 50 and honors an operator-set env value (x-1680)."""
+    from fno.agents.providers import claude as claude_mod
+
+    monkeypatch.delenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", raising=False)
+    assert claude_mod.claude_stop_hook_block_cap() == "50"
+    monkeypatch.setenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "99")
+    assert claude_mod.claude_stop_hook_block_cap() == "99"
+
+
+def test_bg_create_sets_stop_hook_block_cap(tmp_path: Path, monkeypatch) -> None:
+    """bg spawn_env carries the raised Stop-hook block cap, honoring override (x-1680)."""
+    from fno.agents.providers import claude as claude_mod
+
+    captured: dict[str, object] = {}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["env"] = kwargs.get("env")
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backgrounded · 7c5dcf5d · demo\n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", fake_run)
+    monkeypatch.delenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", raising=False)
+
+    cwd = tmp_path / "workdir"
+    cwd.mkdir()
+    claude_mod.bg_create(name="demo", message="hi", cwd=cwd, timeout=5)
+    assert captured["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] == "50"
+
+    # An explicit operator value wins over the fno default.
+    monkeypatch.setenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", "99")
+    claude_mod.bg_create(name="demo2", message="hi", cwd=cwd, timeout=5)
+    assert captured["env"]["CLAUDE_CODE_STOP_HOOK_BLOCK_CAP"] == "99"
+
+
 def test_bg_create_argv_shape_overflow_message(
     tmp_path: Path, monkeypatch
 ) -> None:

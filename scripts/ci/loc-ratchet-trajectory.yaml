@@ -28,6 +28,11 @@ baseline:
   note: "pre-step-1 main; the collapse must end below this number"
 
 entries:
+  - date: 2026-08-06
+    pr: null
+    branch: feature/x-1680
+    delta: 29
+    reason: 'Claude Code Stop-hook block cap (x-1680): the +29 in-glob delta is all in crates/fno-agents/src/loopcheck.rs and is two load-bearing pieces. (1) A first-fire loop_check_config emit records the resolved CLAUDE_CODE_STOP_HOOK_BLOCK_CAP so a run force-ended by the harness override - blocks whose running consecutive count meets the cap, then silence - is distinguishable from a budget end (a terminal budget decision); during the 2026-08-06 GitHub Actions outage two healthy workers were truncated at the harness default of 9 and the override was indistinguishable from a budget end in telemetry. (2) The corrected sole-ceiling comment: the prior comment claimed budget was the sole ceiling during a sustained outage, false on the default harness where the 9-block cap binds first; the rewrite names the harness cap as the second, earlier ceiling so the next reader does not design against a ceiling that does not bind. The actual fix - raising CLAUDE_CODE_STOP_HOOK_BLOCK_CAP to 50 for fno-spawned claude workers (pane and bg, honoring an operator-set value) - lives in cli/src/fno/agents/providers/claude.py and mux_spawn.py, both OFF the manifest glob, as is every test. No new gate, terminal, loop, or merge authority: loop-check keeps its existing block/allow decisions; this is read-only telemetry plus an environment injection at spawn.'
   - date: 2026-08-04
     pr: null
     branch: feature/x-edf5

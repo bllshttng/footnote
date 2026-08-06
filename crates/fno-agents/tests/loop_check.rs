@@ -1180,6 +1180,83 @@ fn streak_window_secs_is_emitted_on_every_loop_check_event() {
     );
 }
 
+/// x-1680: the resolved Stop-hook block cap is recorded exactly once, on the
+/// first fire of a session, so a run ended by the harness override (blocks
+/// whose running count meets the cap, then silence) is distinguishable from a
+/// budget end (a terminal budget decision).
+#[test]
+fn loop_check_config_emitted_once_at_first_fire() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd);
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let events_path = cwd.join(".fno/events.jsonl");
+
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-cap", "2026-06-05T00:00:00Z", false),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_empty()).unwrap();
+
+    let mock = MockBins::no_pr();
+    let args = [
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+        "--events",
+        events_path.to_str().unwrap(),
+    ];
+
+    fire(&args);
+    fire(&args);
+
+    let content = fs::read_to_string(&events_path).unwrap();
+    let mut config: Vec<serde_json::Value> = Vec::new();
+    for line in content.lines() {
+        let Ok(v): serde_json::Result<serde_json::Value> = serde_json::from_str(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) == Some("loop_check_config") {
+            config.push(v);
+        }
+    }
+    assert_eq!(
+        config.len(),
+        1,
+        "loop_check_config must fire exactly once (first fire), got {}",
+        config.len()
+    );
+    let cap = config[0]
+        .pointer("/data/block_cap")
+        .and_then(|c| c.as_i64())
+        .expect("loop_check_config missing block_cap");
+    assert!(cap >= 1, "block_cap must be a positive integer, got {cap}");
+    let source = config[0]
+        .pointer("/data/block_cap_source")
+        .and_then(|s| s.as_str())
+        .expect("loop_check_config missing block_cap_source");
+    assert!(
+        matches!(source, "env" | "default"),
+        "block_cap_source must be env|default, got {source}"
+    );
+    // The default branch (env unset) must report the harness default of 9.
+    if source == "default" {
+        assert_eq!(cap, 9, "default block_cap must be the harness default 9");
+    }
+}
+
 /// AC2-HP: N=3 consecutive identical fingerprints (unattended) -> NoProgress.
 #[test]
 fn ac2_hp_fingerprint_backstop_no_progress() {

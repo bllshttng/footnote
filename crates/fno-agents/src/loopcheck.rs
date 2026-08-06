@@ -3872,6 +3872,26 @@ pub fn decide(args: &[String]) -> (i32, String) {
     };
 
     let this_fire = prior_fires + 1;
+    // The harness caps consecutive Stop-hook blocks at
+    // CLAUDE_CODE_STOP_HOOK_BLOCK_CAP (Claude Code default 9) and force-ends the
+    // turn once it binds (x-1680). Record the resolved cap on the first fire of
+    // a session so a run ended by the harness override (last events are blocks
+    // whose running consecutive count meets the cap, then silence) is
+    // distinguishable from one ended by budget (a terminal budget decision).
+    let (block_cap, block_cap_source) = match std::env::var("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP") {
+        Ok(v) => (v.trim().parse::<u64>().unwrap_or(9), "env"),
+        Err(_) => (9, "default"),
+    };
+    if prior_fires == 0 {
+        emit(
+            "loop_check_config",
+            serde_json::json!({
+                "session_id": session_id,
+                "block_cap": block_cap,
+                "block_cap_source": block_cap_source,
+            }),
+        );
+    }
     // consecutive_unchanged counts prior identical fires; adding this fire.
     // US4: a gh-errored fire is itself transparent - the count holds at its
     // prior value instead of advancing (AC4-HP).
@@ -4659,9 +4679,18 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // with the backstop tripped - a healthy session must not be
                 // killed because GitHub blipped. The fire blocks-and-retries
                 // and is recorded fp_read_failed=true, keeping it transparent
-                // to the streak. Budget remains the sole ceiling during a
-                // sustained outage (AC4-EDGE; budget is checked before any
-                // gh read, so the outage never makes a session immortal).
+                // to the streak. Budget is NOT the sole ceiling during a
+                // sustained outage: on Claude Code the harness itself caps
+                // consecutive Stop-hook blocks (CLAUDE_CODE_STOP_HOOK_BLOCK_CAP,
+                // default 9) and force-ends the turn once it binds - which on
+                // the unraised harness happens long before budget, exactly the
+                // x-1680 truncation. fno raises the cap for spawned workers
+                // (see _mesh_env_wrapper / the bg spawn_env), so its own
+                // NoProgress/budget terminals bind first in normal operation;
+                // but during a pure gh-read outage the (raised, finite) cap is
+                // still the binding ceiling, not budget. AC4-EDGE holds only in
+                // the sense that budget is checked before any gh read, so a gh
+                // outage alone never makes a session immortal from fno's side.
                 emit(
                     "loop_check_gh_error",
                     serde_json::json!({
