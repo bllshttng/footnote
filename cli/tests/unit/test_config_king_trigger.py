@@ -53,3 +53,21 @@ def test_king_just_below_teammate_accepted():
     # The boundary is strict-<, so king = teammate - 1 is the tightest accept.
     block = HandoffBlock(used_pct_trigger=50, king_used_pct_trigger=49)
     assert block.king_used_pct_trigger == 49
+
+
+def test_defaulted_king_does_not_invalidate_low_teammate():
+    # (b): a DEFAULT king (40) must not silently invalidate an explicit low
+    # used_pct_trigger. The user never wrote king_used_pct_trigger, so the
+    # cross-field rule does not fire.
+    block = HandoffBlock(used_pct_trigger=1)
+    assert block.king_used_pct_trigger == 40
+    assert block.used_pct_trigger == 1
+
+
+def test_explicit_king_above_teammate_still_refused():
+    # The rule still fires when king is EXPLICITLY set (prevents normalizing 40
+    # up to 50, the failure mode the validator exists for).
+    with pytest.raises(ValidationError):
+        HandoffBlock(used_pct_trigger=1, king_used_pct_trigger=1)
+    with pytest.raises(ValidationError):
+        HandoffBlock(used_pct_trigger=50, king_used_pct_trigger=50)
