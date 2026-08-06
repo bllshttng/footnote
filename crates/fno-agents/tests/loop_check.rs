@@ -5223,3 +5223,48 @@ fn done_unreviewed_independent_of_attended_field() {
         d.message
     );
 }
+
+/// x-0eaf AC2-CON: with auto_merge approved (autonomous consent) and zero
+/// coverage, the terminal is DoneUnreviewed, not DonePRGreen - so finalize will
+/// not arm auto-merge and the autonomous path refuses to merge unreviewed code.
+/// The discriminator is coverage; auto_merge consent does not override it.
+#[test]
+fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let settings = cwd.join(".fno/config.toml");
+    fs::write(&settings, "[review]\nrequired_bots = []\n").unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-auto\ncreated_at: 2026-06-05T00:00:00Z\nattended: false\nauto_merge_approved: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DoneUnreviewed"),
+        "auto_merge consent must not override zero coverage: {}",
+        d.message
+    );
+}

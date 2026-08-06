@@ -836,9 +836,16 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // approved" are the same silence, and the event's `auto_merge_armed: false`
     // cannot tell them apart either.
     if approved && !should_arm_auto_merge(&reason, approved) {
-        eprintln!(
-            "finalize: auto-merge approved but {reason} is not an arming terminal; not armed"
-        );
+        // x-0eaf: name the coverage reason when the autonomous path is declined.
+        // The generic "not an arming terminal" hides WHY behind a vocabulary
+        // term; an operator who armed auto-merge and sees it not fire needs to
+        // learn the diff was unreviewed, not decode a terminal name.
+        let why = if reason == "DoneUnreviewed" {
+            "the PR is unreviewed (coverage 0); review the diff then re-run, or merge by hand"
+        } else {
+            "not an arming terminal"
+        };
+        eprintln!("finalize: auto-merge approved but {reason}: {why}; not armed");
     }
 
     // ── emit terminal event ────────────────────────────────────────────────
