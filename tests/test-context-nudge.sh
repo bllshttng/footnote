@@ -25,7 +25,7 @@ fail=0
 ok()   { echo "PASS: $1"; pass=$((pass+1)); }
 bad()  { echo "FAIL: $1"; fail=$((fail+1)); }
 assert_contains() { [[ "$2" == *"$3"* ]] && ok "$1" || bad "$1 (needle='$3' not in output)"; }
-assert_absent()   { [[ "$2" != *"$3"* ]] && ok "$1" || bad "$1"; }
+assert_absent()   { [[ "$2" != *"$3"* ]] && ok "$1" || bad "$1 (unexpected '$3')"; }
 assert_eq()       { [[ "$2" == "$3" ]] && ok "$1" || bad "$1 (expected='$3' actual='$2')"; }
 
 # --- FNO_PYTHON discovery (mirror test-handoff.sh): an interpreter that can ---

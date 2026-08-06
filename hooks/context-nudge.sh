@@ -139,22 +139,26 @@ if command -v fno >/dev/null 2>&1; then
             CROWN_LEVEL=$(printf '%s' "$MY_ROW" | jq -r '.crown_level // empty' 2>/dev/null)
             CROWN_SCOPE=$(printf '%s' "$MY_ROW" | jq -r '.crown_scope // empty' 2>/dev/null)
         fi
-        # Active children this session spawned (only acted on for a king below).
+        # Active children this session spawned. Computed ONLY when crowned: the
+        # orphan check below is crown-only, so scanning the registry for children
+        # on every non-king Stop (the common case) is wasted work on a hot path.
         # Active = NOT in the terminal set (exited/orphaned/failed/permanent_dead);
         # covers spawning, ready, idle, busy, live, restarting - all are workers
         # that may still need their king at review. Uses explicit inequalities
         # (not jq IN(), which is jq 1.7+ and absent on CI's ubuntu jq 1.6 - the
         # P1 fix's first attempt used IN() and failed silently on Linux).
-        ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
-            [.agents[] | select(
-                .spawned_by_session == $sid
-                and (.status // "exited") != "exited"
-                and (.status // "exited") != "orphaned"
-                and (.status // "exited") != "failed"
-                and (.status // "exited") != "permanent_dead"
-            )] | map(.name) | join(", ")' \
-            2>/dev/null)
-        ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
+        if [[ -n "$CROWN_LEVEL" ]]; then
+            ORPHANS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg sid "$SESSION_ID" '
+                [.agents[] | select(
+                    .spawned_by_session == $sid
+                    and (.status // "exited") != "exited"
+                    and (.status // "exited") != "orphaned"
+                    and (.status // "exited") != "failed"
+                    and (.status // "exited") != "permanent_dead"
+                )] | map(.name) | join(", ")' \
+                2>/dev/null)
+            ORPHAN_COUNT=$(printf '%s' "$ORPHANS" | wc -w | tr -d ' ')
+        fi
     fi
 fi
 
