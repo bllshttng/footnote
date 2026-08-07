@@ -37,6 +37,19 @@ pub enum TerminationReason {
     /// marks the node done - a human merge then the out-of-band-merge reconcile
     /// path closes it, and DonePRGreen always wins when observable.
     DoneAwaitingMerge,
+    /// A PR is green, mergeable, and nothing objected - but nothing reviewed it
+    /// either (coverage 0 or Unknown). The old gate named this state
+    /// `DonePRGreen` because its three conjuncts all ask "did anyone object"
+    /// and none asks "did anyone review" (x-0eaf). Terminal on the first
+    /// evaluation (no loop iteration spent waiting - that is what keeps the
+    /// PR #214 wedge from returning), and deliberately NOT a ship reason (out
+    /// of finalize.SHIP_REASONS -> no plan stamp/graduate), shaped exactly like
+    /// `DoneAwaitingMerge`: never merges, never marks the node done. The
+    /// autonomous merge is refused structurally because `should_arm_auto_merge`
+    /// arms only on `DonePRGreen`; a human (or out-of-band) merge then the
+    /// reconcile path closes it. The discriminator is coverage, NOT the
+    /// `attended` manifest field (x-be78: that field lies for spawned workers).
+    DoneUnreviewed,
     /// A plan-only thread reached the plan boundary cleanly (manifest `planned`
     /// flag + a promise). It produced planning output, not a delivery, so it is
     /// terminal but deliberately NOT a ship reason (out of finalize.SHIP_REASONS
@@ -1026,6 +1039,13 @@ struct PrInfo {
     /// not silently dropped. Not exhaustive by construction: a write torn
     /// before that token cannot be recognized at all.
     malformed_attestations: usize,
+    /// Review coverage: did anyone actually review, distinct from `reviewed`
+    /// (did anyone object). Computed at read time from observed evidence
+    /// across two producer axes (github_app review objects; local_attestation
+    /// head-pinned passes). Terminal selection consumes this: a run that would
+    /// report `DonePRGreen` at coverage 0/Unknown reports `DoneUnreviewed`
+    /// instead (x-0eaf). Never cached, never inferred from `reviewed`.
+    coverage: CoverageReport,
 }
 
 /// The non-interactive invocation that satisfies each local reviewer, mirroring
@@ -1382,6 +1402,10 @@ fn read_pr_info(
                 review_skipped: false,
                 unattested_reviewers: Vec::new(),
                 malformed_attestations: 0,
+                coverage: CoverageReport {
+                    coverage: Coverage::Covered(0),
+                    verdicts: Vec::new(),
+                },
             });
         }
         return Err(("pr_view".to_string(), stderr_tail(&pr_view_out.stderr)));
@@ -1439,6 +1463,10 @@ fn read_pr_info(
             review_skipped: true,
             unattested_reviewers: Vec::new(),
             malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: Vec::new(),
+            },
         });
     }
 
@@ -1498,179 +1526,234 @@ fn read_pr_info(
     let (unattested, malformed_attestations) =
         unattested_reviewers_scan(events_path, reviewers, head_sha);
     let reviewers_ok = unattested.is_empty();
-    let (latest_review_ts, reviewed, missing_bots, bot_nudges, usage_limited, unaddressed_findings) =
-        if login_skipped {
-            // No GitHub logins to poll (nothing configured, or no_external): skip
-            // the gh review reads entirely (fewer calls + no spurious gh-error
-            // block). The local attestation gate still applies - reviewers_ok is
-            // true when unconfigured, so a login-only or no-gate config is
-            // unaffected.
-            (
-                "none".to_string(),
-                reviewers_ok,
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-                Vec::new(),
-            )
-        } else {
-            // Read 3: top-level reviews + issue comments
-            let reviews_out = Command::new(gh_bin)
-                .args(["pr", "view", "--json", "reviews,comments"])
+    // Coverage reads the same events.jsonl as the attestation scan (its local
+    // axis) plus the GitHub review arrays (its github_app axis). Read once;
+    // a missing file is empty (the local axis then contributes nothing, which
+    // is correct - no evidence of a local review).
+    let events_text = std::fs::read_to_string(events_path).unwrap_or_default();
+    let (
+        latest_review_ts,
+        reviewed,
+        missing_bots,
+        bot_nudges,
+        usage_limited,
+        unaddressed_findings,
+        coverage,
+    ) = if login_skipped {
+        // No GitHub logins to poll (nothing configured, or no_external): skip
+        // the gh review reads entirely (fewer calls + no spurious gh-error
+        // block). The local attestation gate still applies - reviewers_ok is
+        // true when unconfigured, so a login-only or no-gate config is
+        // unaffected. Coverage's github axis is empty here (no logins read),
+        // so coverage is the local axis alone - which is exactly how a
+        // worker-run /code-review counts even on a no-required-bots config.
+        let coverage = classify_coverage(&[], &[], &events_text, head_sha, &[], false);
+        (
+            "none".to_string(),
+            reviewers_ok,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            coverage,
+        )
+    } else {
+        // Read 3: top-level reviews + issue comments
+        let reviews_out = Command::new(gh_bin)
+            .args(["pr", "view", "--json", "reviews,comments"])
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
+
+        if !reviews_out.status.success() {
+            return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
+        }
+
+        let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
+            .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
+
+        // PRESENCE is required-only: an optional login's absence must never
+        // create a missing_bot (never wait for it). FINDINGS honor the union:
+        // an optional login's blocking P1 still holds the gate ("honor if
+        // present"). A dedup keeps a login that is in both lists counted once.
+        let info = compute_review_info(&reviews_json, required_bots);
+        // Per-missing-bot nudge classification (x-b167), computed AFTER the
+        // usage-limit retain (which happened inside compute_review_info) so
+        // the two give-up paths never compose (AC6): a usage_limited bot is
+        // already out of missing_bots and is never classified here. Derived
+        // from the same issue-comment list, fresh every fire.
+        let now = Utc::now();
+        let review_comments = reviews_json
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let bot_nudges: Vec<BotNudge> = info
+            .missing_bots
+            .iter()
+            .map(|bot| {
+                classify_bot_nudge(
+                    bot,
+                    review_comments,
+                    nudge_config_for(nudge_configs, bot),
+                    now,
+                )
+            })
+            .collect();
+        // The "empty bot_nudges = not classified = status quo" contract that
+        // async_wait_class and build_block_reason rely on holds only because
+        // this is an all-or-nothing map: bot_nudges is either empty or 1:1
+        // with missing_bots. A future partial classification would silently
+        // mis-idle, so pin the invariant here rather than let it drift.
+        debug_assert_eq!(bot_nudges.len(), info.missing_bots.len());
+        let mut findings_bots: Vec<String> = required_bots.to_vec();
+        for b in optional_bots {
+            if !findings_bots.iter().any(|x| x == b) {
+                findings_bots.push(b.clone());
+            }
+        }
+
+        // Read 4: inline review comments (NEW in step 2). Codex's P1s land on
+        // the /pulls/N/comments REST endpoint, which `gh pr view --json
+        // comments` does NOT return (verified on PR #447). --paginate may
+        // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
+        let comments_out = Command::new(gh_bin)
+            .args([
+                "api",
+                &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
+                "--paginate",
+            ])
+            .current_dir(cwd)
+            .output()
+            .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
+
+        if !comments_out.status.success() {
+            return Err((
+                "pulls_comments".to_string(),
+                stderr_tail(&comments_out.stderr),
+            ));
+        }
+
+        let mut inline_comments: Vec<Value> = Vec::new();
+        for page in serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
+        {
+            let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
+            match page.as_array() {
+                Some(arr) => inline_comments.extend(arr.iter().cloned()),
+                None => return Err(("pulls_comments_parse".to_string(), String::new())),
+            }
+        }
+
+        // Commit timestamps feed the commit-after arm of "addressed". Only
+        // fetched when a blocking candidate could exist (cheap pre-scan).
+        let has_blocking_candidate = inline_comments.iter().any(|c| {
+            c.get("in_reply_to_id").and_then(|v| v.as_i64()).is_none()
+                && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or("")).is_some()
+        });
+        let commit_dates: Vec<String> = if has_blocking_candidate {
+            let commits_out = Command::new(gh_bin)
+                .args(["pr", "view", "--json", "commits"])
                 .current_dir(cwd)
                 .output()
-                .map_err(|e| ("pr_reviews".to_string(), e.to_string()))?;
-
-            if !reviews_out.status.success() {
-                return Err(("pr_reviews".to_string(), stderr_tail(&reviews_out.stderr)));
+                .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
+            if !commits_out.status.success() {
+                return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
             }
-
-            let reviews_json: Value = serde_json::from_slice(&reviews_out.stdout)
-                .map_err(|_| ("pr_reviews_parse".to_string(), String::new()))?;
-
-            // PRESENCE is required-only: an optional login's absence must never
-            // create a missing_bot (never wait for it). FINDINGS honor the union:
-            // an optional login's blocking P1 still holds the gate ("honor if
-            // present"). A dedup keeps a login that is in both lists counted once.
-            let info = compute_review_info(&reviews_json, required_bots);
-            // Per-missing-bot nudge classification (x-b167), computed AFTER the
-            // usage-limit retain (which happened inside compute_review_info) so
-            // the two give-up paths never compose (AC6): a usage_limited bot is
-            // already out of missing_bots and is never classified here. Derived
-            // from the same issue-comment list, fresh every fire.
-            let now = Utc::now();
-            let review_comments = reviews_json
-                .get("comments")
+            let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
+                .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
+            commits_json
+                .get("commits")
                 .and_then(|v| v.as_array())
-                .map(|v| v.as_slice())
-                .unwrap_or(&[]);
-            let bot_nudges: Vec<BotNudge> = info
-                .missing_bots
-                .iter()
-                .map(|bot| {
-                    classify_bot_nudge(
-                        bot,
-                        review_comments,
-                        nudge_config_for(nudge_configs, bot),
-                        now,
-                    )
+                .map(|arr| {
+                    arr.iter()
+                        .filter_map(|c| {
+                            c.get("committedDate")
+                                .and_then(|v| v.as_str())
+                                .map(|s| s.to_string())
+                        })
+                        .collect()
                 })
-                .collect();
-            // The "empty bot_nudges = not classified = status quo" contract that
-            // async_wait_class and build_block_reason rely on holds only because
-            // this is an all-or-nothing map: bot_nudges is either empty or 1:1
-            // with missing_bots. A future partial classification would silently
-            // mis-idle, so pin the invariant here rather than let it drift.
-            debug_assert_eq!(bot_nudges.len(), info.missing_bots.len());
-            let mut findings_bots: Vec<String> = required_bots.to_vec();
-            for b in optional_bots {
-                if !findings_bots.iter().any(|x| x == b) {
-                    findings_bots.push(b.clone());
-                }
-            }
-
-            // Read 4: inline review comments (NEW in step 2). Codex's P1s land on
-            // the /pulls/N/comments REST endpoint, which `gh pr view --json
-            // comments` does NOT return (verified on PR #447). --paginate may
-            // emit CONCATENATED JSON arrays (one per page), so parse as a stream.
-            let comments_out = Command::new(gh_bin)
-                .args([
-                    "api",
-                    &format!("repos/{{owner}}/{{repo}}/pulls/{number}/comments"),
-                    "--paginate",
-                ])
-                .current_dir(cwd)
-                .output()
-                .map_err(|e| ("pulls_comments".to_string(), e.to_string()))?;
-
-            if !comments_out.status.success() {
-                return Err((
-                    "pulls_comments".to_string(),
-                    stderr_tail(&comments_out.stderr),
-                ));
-            }
-
-            let mut inline_comments: Vec<Value> = Vec::new();
-            for page in
-                serde_json::Deserializer::from_slice(&comments_out.stdout).into_iter::<Value>()
-            {
-                let page = page.map_err(|_| ("pulls_comments_parse".to_string(), String::new()))?;
-                match page.as_array() {
-                    Some(arr) => inline_comments.extend(arr.iter().cloned()),
-                    None => return Err(("pulls_comments_parse".to_string(), String::new())),
-                }
-            }
-
-            // Commit timestamps feed the commit-after arm of "addressed". Only
-            // fetched when a blocking candidate could exist (cheap pre-scan).
-            let has_blocking_candidate = inline_comments.iter().any(|c| {
-                c.get("in_reply_to_id").and_then(|v| v.as_i64()).is_none()
-                    && blocking_severity(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
-                        .is_some()
-            });
-            let commit_dates: Vec<String> = if has_blocking_candidate {
-                let commits_out = Command::new(gh_bin)
-                    .args(["pr", "view", "--json", "commits"])
-                    .current_dir(cwd)
-                    .output()
-                    .map_err(|e| ("pr_commits".to_string(), e.to_string()))?;
-                if !commits_out.status.success() {
-                    return Err(("pr_commits".to_string(), stderr_tail(&commits_out.stderr)));
-                }
-                let commits_json: Value = serde_json::from_slice(&commits_out.stdout)
-                    .map_err(|_| ("pr_commits_parse".to_string(), String::new()))?;
-                commits_json
-                    .get("commits")
-                    .and_then(|v| v.as_array())
-                    .map(|arr| {
-                        arr.iter()
-                            .filter_map(|c| {
-                                c.get("committedDate")
-                                    .and_then(|v| v.as_str())
-                                    .map(|s| s.to_string())
-                            })
-                            .collect()
-                    })
-                    .unwrap_or_default()
-            } else {
-                Vec::new()
-            };
-
-            let (inline_ts, unaddressed) = compute_unaddressed_findings(
-                &inline_comments,
-                &commit_dates,
-                &findings_bots,
-                external_reviewers,
-            );
-
-            // Read 4's newest comment timestamp joins the activity timestamp so
-            // inline-only review traffic advances the fingerprint (closes the
-            // false-NoProgress hole).
-            let activity_ts = max_ts(&info.latest_ts, &inline_ts);
-            // x-e703: the login gate AND the local-attestation reviewers gate must
-            // both clear. reviewers is usually empty (vacuously true) so this is a
-            // no-op for login-only configs.
-            let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
-            // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
-            // proceeded without a required bot (AC1-UI). append_loop_event, not
-            // Branch-B emit: these are target-stream events (see the doc comment on
-            // append_loop_event), deliberately unregistered in KNOWN_EVENT_KINDS.
-            if !info.usage_limited.is_empty() {
-                append_loop_event(
-                    events_path,
-                    "review_gate_bot_usage_limited",
-                    serde_json::json!({"pr": number, "bots": info.usage_limited.clone()}),
-                );
-            }
-            (
-                activity_ts,
-                reviewed,
-                info.missing_bots,
-                bot_nudges,
-                info.usage_limited,
-                unaddressed,
-            )
+                .unwrap_or_default()
+        } else {
+            Vec::new()
         };
+
+        let (inline_ts, unaddressed) = compute_unaddressed_findings(
+            &inline_comments,
+            &commit_dates,
+            &findings_bots,
+            external_reviewers,
+        );
+
+        // Read 4's newest comment timestamp joins the activity timestamp so
+        // inline-only review traffic advances the fingerprint (closes the
+        // false-NoProgress hole).
+        let activity_ts = max_ts(&info.latest_ts, &inline_ts);
+        // x-e703: the login gate AND the local-attestation reviewers gate must
+        // both clear. reviewers is usually empty (vacuously true) so this is a
+        // no-op for login-only configs.
+        let reviewed = info.all_required_passed() && unaddressed.is_empty() && reviewers_ok;
+        // (a) Record the rate-limit drop so a post-hoc audit sees why the gate
+        // proceeded without a required bot (AC1-UI). append_loop_event, not
+        // Branch-B emit: these are target-stream events (see the doc comment on
+        // append_loop_event), deliberately unregistered in KNOWN_EVENT_KINDS.
+        if !info.usage_limited.is_empty() {
+            append_loop_event(
+                events_path,
+                "review_gate_bot_usage_limited",
+                serde_json::json!({"pr": number, "bots": info.usage_limited.clone()}),
+            );
+        }
+        // Coverage's github_app axis: configured required + optional logins
+        // (external_reviewers are local-attestation peers, not github
+        // posters). Dedup so a login in both lists is one verdict.
+        let reviews_arr: &[Value] = reviews_json
+            .get("reviews")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let comments_arr: &[Value] = reviews_json
+            .get("comments")
+            .and_then(|v| v.as_array())
+            .map(|v| v.as_slice())
+            .unwrap_or(&[]);
+        let mut gh_logins: Vec<String> = required_bots.to_vec();
+        for b in optional_bots {
+            if !gh_logins.iter().any(|x| x == b) {
+                gh_logins.push(b.clone());
+            }
+        }
+        // github_read_ok is true here: a failed gh read returned Err above.
+        let coverage = classify_coverage(
+            reviews_arr,
+            comments_arr,
+            &events_text,
+            head_sha,
+            &gh_logins,
+            true,
+        );
+        (
+            activity_ts,
+            reviewed,
+            info.missing_bots,
+            bot_nudges,
+            info.usage_limited,
+            unaddressed,
+            coverage,
+        )
+    };
+
+    // Emit coverage every gate eval so the Python readers (the merge primitive
+    // and the polling command) and audit see one coherent, fresh number rather
+    // than recomputing it (the Ownership rule: loopcheck computes, Python
+    // reads). Skipped for the no-PR early returns above.
+    if number > 0 {
+        append_loop_event(
+            events_path,
+            "review_coverage",
+            coverage_event_data(number, &coverage, head_sha),
+        );
+    }
 
     Ok(PrInfo {
         state,
@@ -1692,6 +1775,7 @@ fn read_pr_info(
         review_skipped: login_skipped && reviewers.is_empty(),
         unattested_reviewers: unattested,
         malformed_attestations,
+        coverage,
     })
 }
 
@@ -2660,6 +2744,407 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
     }
 }
 
+// ── review coverage (x-0eaf) ──────────────────────────────────────────────────
+//
+// The old gate's `reviewed` boolean (loopcheck.rs `let reviewed =
+// all_required_passed() && unaddressed.is_empty() && reviewers_ok`) was a claim
+// about reviews computed entirely from what did NOT happen: nobody is still
+// owed, no finding is outstanding, no reviewer is unattested. A quota refusal is
+// dropped from `missing_bots` (PR #214) and reads as a pass; on a config with no
+// required bots, nothing can object, so `reviewed` is true on zero reviews.
+//
+// Coverage is the missing predicate: did anyone actually review? It is a
+// first-class value reported everywhere, never folded back into the objection
+// boolean (collapsing it back undoes this node).
+//
+// Producer axis, not producer string. Two review producers share the display
+// name "codex": the `chatgpt-codex-connector` GitHub App (posts review objects,
+// can refuse on quota) and the local `codex` CLI (posts none, never rate-limited
+// by the App's quota). They are told apart by `CoverageProducer`, never by the
+// reviewer string (x-9ae8's one-word-two-entities disease). A third local lane,
+// claude `/code-review`, shares the `LocalAttestation` axis.
+
+/// The channel a review verdict came from. Two producers that share a name (the
+/// `chatgpt-codex-connector` App vs the local `codex` CLI) are distinguished by
+/// this axis, never by the reviewer string alone (x-9ae8, x-0eaf).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageProducer {
+    /// A GitHub App bot that posts review objects via the reviews API. Can
+    /// refuse on quota (the `usage_markers` / `body_is_usage_limit` path).
+    GithubApp,
+    /// A local reviewer that leaves NO GitHub object and instead emits a
+    /// head-pinned `review_attestation` event (`emit-attestation.sh`). Never
+    /// rate-limited by any App's quota: `/code-review`, the codex CLI, sigma.
+    LocalAttestation,
+}
+
+/// One verdict for one reviewer over one producer axis (x-0eaf). `reviewed` here
+/// is derived from observed evidence, unlike the old boolean of the same name.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoverageVerdict {
+    /// Posted a review object (any non-empty state), or a head-pinned `pass`
+    /// attestation. The only verdict that counts toward coverage.
+    Reviewed,
+    /// Responded and declined to review. Quota exhaustion is the first known
+    /// shape (detected by `body_is_usage_limit`). Positive evidence a reviewer
+    /// exists and will not help - exactly what a nudge or lane failover needs.
+    Refused,
+    /// Responded with a failure / unparseable payload.
+    Errored,
+    /// A configured reviewer that produced no response.
+    Absent,
+}
+
+/// A first-class coverage value, separate from the objection predicate. Never
+/// 0-on-error: a failed read is `Unknown`, which behaves as 0 for the autonomous
+/// refusal (fail closed) and is reported as "unknown" in the receipt (fail
+/// honest). Collapsing an API error into 0 produces false refusals; collapsing
+/// it into a count reproduces the bug.
+///
+/// NOTE (x-0eaf finding 4): `Unknown` is not currently reachable in production.
+/// When the GitHub reviews API call fails, `read_pr_info` returns `Err`, which
+/// the caller handles by block-retry (fail-safe: the session retries, it does
+/// not green or merge). The variant, its receipt, schema enum, and tests exist
+/// so that softening the error path to terminate (rather than block) is a
+/// one-line change, not a redesign. Do not delete it as dead code without
+/// understanding this.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Coverage {
+    /// `n` reviewers reviewed (excludes human approvals until the operator says
+    /// otherwise). `Covered(0)` is a real, known zero - distinct from `Unknown`.
+    Covered(usize),
+    Unknown,
+}
+
+impl Coverage {
+    /// `true` iff at least one non-human review was observed. `Unknown` is
+    /// false: the autonomous path treats unknown as not-covered (fail closed).
+    pub fn is_covered(&self) -> bool {
+        matches!(self, Coverage::Covered(n) if *n > 0)
+    }
+}
+
+/// One reviewer's classification, for the `review_coverage` event and receipts.
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewerVerdict {
+    pub producer: CoverageProducer,
+    pub name: String,
+    pub verdict: CoverageVerdict,
+    /// A human GitHub approval (state `APPROVED`, non-bot author). Computed but
+    /// EXCLUDED from the coverage count: whether it should count is the
+    /// operator's call (lean: exclude; a solo self-approval is self-cert).
+    /// One predicate flip in `CoverageReport::coverage_count` includes it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub human_approval: bool,
+}
+
+/// The coverage over a PR plus the per-reviewer verdicts that produced it.
+#[derive(Debug, Clone)]
+pub struct CoverageReport {
+    pub coverage: Coverage,
+    pub verdicts: Vec<ReviewerVerdict>,
+}
+
+impl CoverageReport {
+    /// Count of `reviewed` verdicts, excluding human approvals. This is the one
+    /// place that decides whether a human GitHub approval counts; flip the
+    /// `!v.human_approval` guard to include them (the operator's deferred call).
+    pub fn coverage_count(&self) -> Option<usize> {
+        match &self.coverage {
+            Coverage::Unknown => None,
+            Coverage::Covered(_) => Some(
+                self.verdicts
+                    .iter()
+                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .count(),
+            ),
+        }
+    }
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+/// Distinct local reviewers whose LATEST head-pinned attestation is `pass`
+/// (events.jsonl is append-ordered; a later `fail` revokes, a later `pass`
+/// restores - mirrors `unattested_reviewers_scan`'s retraction handling). Pure:
+/// scans text, no IO. Presence-based: counts any reviewer regardless of the
+/// configured `reviewers` list, so a worker-run `/code-review` counts even when
+/// `reviewers: []`.
+fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<String> {
+    let mut latest_at_head: std::collections::HashMap<String, bool> =
+        std::collections::HashMap::new();
+    for line in events_text.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_attestation") {
+            continue;
+        }
+        let Some(r) = val.pointer("/data/reviewer").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        // An event with no head_sha is not head-pinned evidence and is skipped
+        // outright (defaulting it to "" would match a caller whose own head is
+        // "", turning unpinned data into coverage - codex P1 on the attestation
+        // gate, same class of lie this node deletes).
+        let Some(line_head) = val.pointer("/data/head_sha").and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if line_head != head_sha {
+            continue;
+        }
+        let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
+        latest_at_head.insert(r.trim_start_matches('/').to_string(), is_pass);
+    }
+    let mut out: Vec<String> = latest_at_head
+        .into_iter()
+        .filter(|(_, pass)| *pass)
+        .map(|(r, _)| r)
+        .collect();
+    out.sort();
+    out
+}
+
+/// Whether an author login is a KNOWN review App (a BOT_PROFILES login or a
+/// configured github_app). A present review from such an App counts toward
+/// coverage; a random `[bot]` suffix alone does not (it may be a non-review
+/// automation).
+fn author_is_known_bot(author: &str, github_app_logins: &[String]) -> bool {
+    BOT_PROFILES.iter().any(|p| author.contains(p.login))
+        || github_app_logins
+            .iter()
+            .any(|l| login_matches_bot(author, l))
+}
+
+/// Whether an author login is a bot of any kind (known App, or any `[bot]`).
+/// Used to separate a human GitHub approval from an app review on the same axis.
+fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
+    author.ends_with("[bot]") || author_is_known_bot(author, github_app_logins)
+}
+
+/// Classify every reviewer response and compute coverage. Pure: takes the
+/// already-fetched GitHub review/comment arrays, the events.jsonl text, the
+/// current HEAD, and the configured GitHub-App logins; performs no IO, so it is
+/// unit-testable in isolation. A failed GitHub read (`github_read_ok = false`)
+/// makes coverage `Unknown` UNLESS the local axis carries a head-pinned pass:
+/// positive local evidence survives a bot outage, because the local lane is
+/// never rate-limited by the bot's quota (the PR #214 failure in a new hat,
+/// which this node exists to escape). (x-0eaf)
+pub fn classify_coverage(
+    reviews: &[Value],
+    comments: &[Value],
+    events_text: &str,
+    head_sha: &str,
+    github_app_logins: &[String],
+    github_read_ok: bool,
+) -> CoverageReport {
+    let local_passes = local_head_pinned_passes(events_text, head_sha);
+    let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
+
+    if github_read_ok {
+        // (1) Collect distinct KNOWN review-App authors that posted a review
+        // object. A present review counts whether or not the App is in the
+        // configured required/optional list - "did anyone review" must not
+        // hinge on the operator having pre-listed the bot that happened to
+        // review (chatgpt-codex-connector reviewing on a default
+        // no-required-bots config still counts). A known App is a BOT_PROFILES
+        // login or a configured github_app; a bare `[bot]` suffix is not.
+        let mut reviewed_authors: Vec<String> = Vec::new();
+        for r in reviews {
+            let author = r
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if author.is_empty() || !author_is_known_bot(author, github_app_logins) {
+                continue;
+            }
+            let state = r.get("state").and_then(|v| v.as_str()).unwrap_or("");
+            if state.is_empty() {
+                continue;
+            }
+            if !reviewed_authors
+                .iter()
+                .any(|a| logins_correspond(a, author))
+            {
+                reviewed_authors.push(author.to_string());
+            }
+        }
+        // (2) One verdict per unique configured login: reviewed if a
+        // corresponding author posted, else refused on a usage-limit comment,
+        // else absent. Dedup so a login in two lists is one verdict, not two
+        // units of coverage (Failure Modes).
+        let mut seen: Vec<String> = Vec::new();
+        for login in github_app_logins {
+            let login = login.trim();
+            if login.is_empty() || seen.iter().any(|s| logins_correspond(s, login)) {
+                continue;
+            }
+            seen.push(login.to_string());
+            let reviewed = reviewed_authors.iter().any(|a| logins_correspond(a, login));
+            let verdict = if reviewed {
+                CoverageVerdict::Reviewed
+            } else {
+                let refused = comments.iter().any(|c| {
+                    let ca = c
+                        .pointer("/author/login")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("");
+                    logins_correspond(ca, login)
+                        && body_is_usage_limit(c.get("body").and_then(|v| v.as_str()).unwrap_or(""))
+                });
+                if refused {
+                    CoverageVerdict::Refused
+                } else {
+                    CoverageVerdict::Absent
+                }
+            };
+            verdicts.push(ReviewerVerdict {
+                producer: CoverageProducer::GithubApp,
+                name: login.to_string(),
+                verdict,
+                human_approval: false,
+            });
+        }
+        // (3) Known-App reviewers NOT in the configured list still count
+        // (reviewed), so coverage reflects the review that actually happened.
+        for author in &reviewed_authors {
+            if !seen.iter().any(|s| logins_correspond(author, s)) {
+                verdicts.push(ReviewerVerdict {
+                    producer: CoverageProducer::GithubApp,
+                    name: author.clone(),
+                    verdict: CoverageVerdict::Reviewed,
+                    human_approval: false,
+                });
+            }
+        }
+        // (4) Human GitHub approvals: non-bot authors with state APPROVED.
+        // Recorded as `reviewed` with `human_approval: true` so they are
+        // visible but excluded from the count until the operator decides (lean:
+        // exclude). Computed here so the answer is a one-line flip, not a
+        // redesign.
+        let mut seen_human: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for r in reviews {
+            let author = r
+                .pointer("/author/login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if author.is_empty()
+                || author_is_bot(author, github_app_logins)
+                || seen_human.contains(author)
+            {
+                continue;
+            }
+            if r.get("state").and_then(|v| v.as_str()) == Some("APPROVED") {
+                seen_human.insert(author.to_string());
+                verdicts.push(ReviewerVerdict {
+                    producer: CoverageProducer::GithubApp,
+                    name: author.to_string(),
+                    verdict: CoverageVerdict::Reviewed,
+                    human_approval: true,
+                });
+            }
+        }
+    }
+
+    // local_attestation axis: one `reviewed` per distinct head-pinned pass.
+    for name in &local_passes {
+        verdicts.push(ReviewerVerdict {
+            producer: CoverageProducer::LocalAttestation,
+            name: name.clone(),
+            verdict: CoverageVerdict::Reviewed,
+            human_approval: false,
+        });
+    }
+
+    // Unknown only when the GitHub read failed AND there is no confirmed local
+    // review. A head-pinned local pass is positive evidence that trumps a bot
+    // outage, so coverage is Known(local) in that case, not Unknown.
+    let coverage = if !github_read_ok && local_passes.is_empty() {
+        Coverage::Unknown
+    } else {
+        Coverage::Covered(
+            verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .count(),
+        )
+    };
+
+    CoverageReport { coverage, verdicts }
+}
+
+/// Build the `review_coverage` event payload. The per-reviewer verdicts
+/// serialize via their serde derives (producer/verdict snake_cased);
+/// `reviewed_count` is included only when coverage is `Covered` (omitted, not
+/// null, when Unknown, matching the schema).
+fn coverage_event_data(pr: i64, rep: &CoverageReport, head_sha: &str) -> serde_json::Value {
+    let coverage_str = match &rep.coverage {
+        Coverage::Unknown => "unknown",
+        Coverage::Covered(_) => "covered",
+    };
+    let mut data = serde_json::json!({
+        "pr": pr,
+        "coverage": coverage_str,
+        "verdicts": &rep.verdicts,
+        "head_sha": head_sha,
+    });
+    if let Coverage::Covered(n) = &rep.coverage {
+        data["reviewed_count"] = serde_json::json!(n);
+    }
+    data
+}
+
+/// One-line coverage summary for the terminal message and receipts (x-0eaf
+/// task 3.1). Printed from the coverage value at print time, never from a
+/// remembered gate verdict (receipts have lied before).
+pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
+    match &rep.coverage {
+        Coverage::Unknown => "review coverage: unknown (review read failed)".to_string(),
+        Coverage::Covered(n) => {
+            let reviewed_names: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                .map(|v| v.name.as_str())
+                .collect();
+            if *n > 0 {
+                return format!(
+                    "review coverage: {} reviewed ({})",
+                    n,
+                    reviewed_names.join(", ")
+                );
+            }
+            let refused: Vec<&str> = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Refused)
+                .map(|v| v.name.as_str())
+                .collect();
+            let errored = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Errored)
+                .count();
+            let absent = rep
+                .verdicts
+                .iter()
+                .filter(|v| v.verdict == CoverageVerdict::Absent)
+                .count();
+            format!(
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. Nothing reviewed this diff.",
+                refused.len(),
+                refused.join(", "),
+                errored,
+                absent
+            )
+        }
+    }
+}
+
 // ── inline findings (Read 4, step 2 / US2) ────────────────────────────────────
 
 /// A blocking inline finding: a root review comment (in_reply_to_id == null)
@@ -3559,6 +4044,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
     }
     let optional_bots = resolved_optional_bots(&settings);
     let nudge_configs = resolved_nudge_configs(&settings);
+    // x-0eaf: DoneUnreviewed applies only when a review lane is configured. A
+    // stock install (no required_bots, no optional_apps, no reviewers, no peers)
+    // has opted out of review, so zero coverage is its configured state, not a
+    // defect - those green PRs still reach DonePRGreen (coverage 0 is reported
+    // in the receipt). Without this boundary every out-of-the-box fire is
+    // DoneUnreviewed (not a ship reason), so the node never closes.
+    let review_lane_configured =
+        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -4289,6 +4782,67 @@ pub fn decide(args: &[String]) -> (i32, String) {
 
                 let (reviewed, probes_passed) = (pr_info.reviewed, probe_block.is_none());
                 if pr_passes(pr_open, ci_ok, reviewed, head_shipped, probes_passed) {
+                    // Coverage gate (x-0eaf): the three pr_passes conjuncts all ask
+                    // "did anyone object"; coverage asks "did anyone review". A
+                    // passing PR nothing reviewed terminates DoneUnreviewed, not
+                    // DonePRGreen - terminal on first eval (no PR #214 wedge),
+                    // never a ship reason (never arms auto-merge). The
+                    // discriminator is coverage, NOT the `attended` manifest field
+                    // (x-be78: that field lies for spawned workers). A MERGED PR
+                    // is exempt: the merge (human out-of-band, or an earlier
+                    // autonomous arm) is the terminal authority (x-8b64), and
+                    // loop-check must not re-litigate review on an already-merged
+                    // PR - the coverage fix prevents the autonomous MERGE (arming),
+                    // not the post-merge terminal.
+                    if review_lane_configured
+                        && pr_info.state != PrState::Merged
+                        && !pr_info.coverage.coverage.is_covered()
+                    {
+                        let cov_line = coverage_receipt_line(&pr_info.coverage);
+                        let done_msg = format!(
+                            "PR #{} is green but UNREVIEWED - {}. Not mergeable by the autonomous path (DoneUnreviewed); merge by hand or after a review.",
+                            pr_info.number, cov_line
+                        );
+                        emit(
+                            "termination",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "reason": "DoneUnreviewed",
+                                "message": done_msg.clone()
+                            }),
+                        );
+                        emit(
+                            "loop_check",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "fingerprint": fingerprint,
+                                "fires": this_fire,
+                                "consecutive_unchanged": consecutive_after,
+                                "streak_window_secs": streak_window,
+                                "decision": "allow",
+                                "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                                "intent_source": intent_source,
+                                "pr_state": pr_info.state.as_str(),
+                                "ci": pr_info.ci_conclusion.render(),
+                                "reviewed": pr_info.reviewed,
+                                "review_skipped": pr_info.review_skipped,
+                                "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha),
+                                "done_probes": probe_results,
+                                "fp_read_failed": fp_read_failed,
+                            }),
+                        );
+                        return (
+                            0,
+                            allow_output(
+                                "allow",
+                                Some(TerminationReason::DoneUnreviewed),
+                                &done_msg,
+                                this_fire,
+                                Some(fingerprint),
+                            ),
+                        );
+                    }
                     // AC1-UI: name any rate-limited bot the gate proceeded
                     // without, so the terminal message and the emitted event
                     // agree on why a required bot is absent from the evidence.
@@ -6336,6 +6890,10 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: vec![],
+            },
         };
         let reason = build_block_reason(&pr, "abc", true);
         assert!(
@@ -6412,6 +6970,10 @@ mod tests {
             review_skipped: false,
             unattested_reviewers: vec![],
             malformed_attestations: 0,
+            coverage: CoverageReport {
+                coverage: Coverage::Covered(0),
+                verdicts: vec![],
+            },
         }
     }
 

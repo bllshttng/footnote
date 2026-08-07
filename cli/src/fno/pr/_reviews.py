@@ -80,6 +80,57 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
     return [n for n in names if n]
 
 
+# x-0eaf: coverage read degrades to this on any failure (additive, fail-open).
+_UNKNOWN_COVERAGE = {"coverage": "unknown", "reviewed_count": None}
+
+
+def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
+    """The latest ``review_coverage`` verdict for a PR, read from the project
+    events log (loop-check emits it every gate eval). Additive and fail-open:
+    any failure degrades to the unknown sentinel. Python consumes the event
+    rather than recomputing (Ownership: Rust computes, Python reads), so a
+    human and the loop see one number for the same PR.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.events.log import read_events
+
+        # Resolve git top-level so coverage is found from a subdirectory.
+        base = Path(cwd) if cwd else Path.cwd()
+        try:
+            import subprocess
+
+            root = subprocess.run(
+                ["git", "rev-parse", "--show-toplevel"],
+                capture_output=True, text=True, cwd=str(base), timeout=5,
+            ).stdout.strip()
+            if root:
+                base = Path(root)
+        except Exception:
+            pass
+        events_path = base / ".fno" / "events.jsonl"
+        events = read_events(events_path)
+    except Exception:  # noqa: BLE001 - additive signal, never hard-fails
+        return dict(_UNKNOWN_COVERAGE)
+    latest = None
+    for ev in events:
+        if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
+            continue
+        data = ev.get("data") or {}
+        try:
+            if int(data.get("pr", -1)) == pr_number:
+                latest = data
+        except (TypeError, ValueError):
+            continue
+    if latest is None:
+        return dict(_UNKNOWN_COVERAGE)
+    return {
+        "coverage": latest.get("coverage", "unknown"),
+        "reviewed_count": latest.get("reviewed_count"),
+    }
+
+
 def _is_optional(login: str, names: list[str]) -> bool:
     return bool(login) and _reviewer_matches(login, names)
 

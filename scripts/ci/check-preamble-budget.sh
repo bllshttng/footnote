@@ -13,11 +13,13 @@ set -euo pipefail
 
 # Raised from 37326 by 89 bytes for delivery_completion DoneDelivery terminal
 # documentation and activation logic in AGENTS.md.
-# Raised from 37415 by 585 bytes for the citizens-vs-limbs spawn-primitive
-# contract in skills/using-fno/SKILL.md (x-af92): the feature's value is a
-# SessionStart-injected contract, the long form lives out-of-preamble in
-# docs/architecture/coordination.md, and the prior preamble had 8B headroom so
-# any meaningful contract requires the raise. Contract kept at minimum density.
+# Raised from 37415 to 38000 by two changes that landed together. The
+# citizens-vs-limbs spawn-primitive contract in skills/using-fno/SKILL.md
+# (x-af92) took 585 bytes: its value IS the SessionStart injection, the long
+# form lives out-of-preamble in docs/architecture/coordination.md, and the
+# prior preamble had 8B headroom so any meaningful contract required a raise.
+# The DoneUnreviewed terminal in the ship-vocabulary line took 45 more, since
+# the auto-loaded preamble must name every public TerminationReason.
 CEILING_BYTES=38000
 RATCHET_NUDGE_BYTES=2000
 QUIET=0

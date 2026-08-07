@@ -175,3 +175,79 @@ def test_placeholder_pr_number_no_emit_no_fetch(tmp_path):
     )
     assert out is None
     assert _gate_escapes(tmp_path) == []
+
+
+# ---- zero-coverage escape (x-0eaf) ----
+#
+# CAVEAT (x-0eaf finding 3): these tests pass events_path EXPLICITLY (the same
+# path loop-check writes to). In the DEFAULT worktree workflow, loop-check writes
+# review_coverage to the SESSION worktree's .fno/events.jsonl while reconcile
+# reads the CANONICAL (repo-root) events.jsonl - they are separate files (the
+# worktree events.jsonl is NOT symlinked). So the zero-coverage escape does NOT
+# fire in the default workflow until loop-check emits review_coverage to both
+# logs. These tests stay green because they inject the path; they do NOT cover
+# the default worktree workflow. That plumbing is a follow-up.
+
+
+def _write_event(cwd: Path, ev: dict) -> None:
+    p = cwd / ".fno" / "events.jsonl"
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with p.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(ev) + "\n")
+
+
+def test_zero_coverage_escape_fires_with_no_required_bots(tmp_path):
+    """x-0eaf: an oob-merged PR nothing reviewed escapes even when no bot is
+    required - the dead-bot-only path returned early on empty github_apps and
+    emitted nothing for exactly this case (the operator's no-required-bots
+    config)."""
+    rec = _record(tmp_path)
+    _write_event(
+        tmp_path,
+        {"type": "review_coverage", "data": {"pr": 218, "coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}},
+    )
+    emit_gate_escape_for_record(
+        rec,
+        required_bots=[],
+        reviews_fetcher=lambda *a, **k: set(),
+        events_path=_epath(tmp_path),
+    )
+    escapes = _gate_escapes(tmp_path)
+    assert len(escapes) == 1
+    assert escapes[0]["data"]["reason"] == "zero-coverage"
+    assert escapes[0]["data"]["pr"] == 218
+
+
+def test_zero_coverage_no_escape_when_reviewed(tmp_path):
+    """A genuinely-reviewed PR (covered, count > 0) does not coverage-escape,
+    and with no required bots the dead-bot path emits nothing either."""
+    rec = _record(tmp_path)
+    _write_event(
+        tmp_path,
+        {"type": "review_coverage", "data": {"pr": 218, "coverage": "covered", "reviewed_count": 2, "head_sha": "abc"}},
+    )
+    emit_gate_escape_for_record(
+        rec,
+        required_bots=[],
+        reviews_fetcher=lambda *a, **k: set(),
+        events_path=_epath(tmp_path),
+    )
+    assert _gate_escapes(tmp_path) == []
+
+
+def test_zero_coverage_unknown_escapes(tmp_path):
+    """Unknown coverage (read failed at gate time) escapes - fail-closed for audit."""
+    rec = _record(tmp_path)
+    _write_event(
+        tmp_path,
+        {"type": "review_coverage", "data": {"pr": 218, "coverage": "unknown", "head_sha": "abc"}},
+    )
+    emit_gate_escape_for_record(
+        rec,
+        required_bots=[],
+        reviews_fetcher=lambda *a, **k: set(),
+        events_path=_epath(tmp_path),
+    )
+    escapes = _gate_escapes(tmp_path)
+    assert len(escapes) == 1
+    assert escapes[0]["data"]["reason"] == "zero-coverage"

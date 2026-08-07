@@ -217,6 +217,34 @@ Those units ship no PR of their own, so there is no ship gate to hang evidence o
 
 Every fire records its results in the `loop_check` event as `data.done_probes` (`{"<cmd>": "pass" \| "fail:<code>" \| "timeout"}`), which is what `fno scoreboard --plan-fidelity` joins against the declaration to report probes declared vs passed.
 
+### Review coverage: `DoneUnreviewed`
+
+The three `DonePRGreen` conjuncts (PR-exists, CI-green, review-clean, HEAD-shipped) all ask "did anyone object"; none asks "did anyone review."
+A quota-refusing bot is dropped from the missing set and reads as a pass; on a config with no required bot, nothing can object, so `DonePRGreen` fired on zero reviews.
+Review coverage is the missing predicate, computed as a first-class value and never folded back into the objection boolean.
+
+Coverage counts `reviewed` verdicts across two **producer axes** (named by axis, not by string - the `chatgpt-codex-connector` GitHub App and the local `codex` CLI share a display name and are distinct):
+`github_app` (review objects via the reviews API; can refuse on quota) and `local_attestation` (head-pinned `pass` `review_attestation` events; never quota-bound - `/code-review`, the codex CLI, sigma).
+The local axis is presence-based: a head-pinned pass counts whether or not the reviewer is in `config.review.reviewers`, so a worker-run `/code-review` counts even when `reviewers: []`.
+A head-pinned local pass makes coverage known even when the GitHub read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed - that is the PR #214 failure escaped rather than relocated.
+
+A passing PR with coverage 0 or Unknown terminates `DoneUnreviewed` instead of `DonePRGreen`.
+`DoneUnreviewed` is shaped like `DoneAwaitingMerge`: terminal on the first evaluation (no loop iteration spent waiting - that is what keeps the PR #214 wedge from returning), never a ship reason (out of `finalize.SHIP_REASONS`), never arms auto-merge.
+The autonomous merge is therefore refused structurally (`should_arm_auto_merge = approved && reason == "DonePRGreen"`); a human or out-of-band merge closes the node via reconcile.
+The discriminator is coverage, **not** the `attended` manifest field: `attended` is a known-broken substrate proxy (`FNO_AGENT_SELF` is injected by every spawn substrate including the pane default, so a spawned worker stamps `attended: false`), and the coverage path must not read it.
+
+Coverage is reported everywhere from one source: loop-check computes it (the `review_coverage` event) and the Python readers consume that event rather than recomputing, so a human and the loop see one number.
+The reachable merge paths it governs:
+
+| Path | Coverage gate |
+|---|---|
+| Target spine (loop-check terminal) | coverage 0/Unknown -> `DoneUnreviewed`, never arms auto-merge |
+| `fno pr merge` (direct CLI) | reads `review_coverage`; zero/unknown/stale refuses (only when `auto_merge.enabled`) |
+| reconcile (telemetry) | a zero-coverage out-of-band merge emits `gate_escape{zero-coverage}` even with no bots configured |
+| `fno pr status` | reports the `review_coverage` field (advisory) |
+| `gh pr merge` (raw GitHub) | not footnote-gated; the human is the authority on a non-auto-merge repo |
+
+
 There is no environment override.
 A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.
 Authoring guidance (freshness over bare existence) lives in `skills/blueprint/SKILL.md`.

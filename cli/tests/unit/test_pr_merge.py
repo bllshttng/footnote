@@ -79,6 +79,16 @@ def enabled(monkeypatch, tmp_path):
     # probe) to a tmp claims root so tests never touch the repo's .fno/claims
     # or contend with a real in-flight merge.
     monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    # x-0eaf: default to a covered review so existing merge-behavior tests
+    # proceed past the coverage guard. No head_sha -> covered_head is empty, so
+    # the --match-head-commit pin (and the head-pin tests' own verified_head)
+    # are undisturbed; the pin is exercised by its own test below.
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
+    )
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -556,6 +566,85 @@ def test_stale_base_ignored_when_no_lanes(enabled, monkeypatch, capsys, tmp_path
     assert not any(len(c) > 2 and c[1] == "api" and "/compare/" in c[2] for c in fake.calls)
 
 
+def _point_lane_read_at(monkeypatch, **fields):
+    # _review_lane_configured imports load_settings_for_repo at call time, so
+    # patching the module attribute is seen by the local import.
+    from types import SimpleNamespace
+
+    import fno.config as cfg
+
+    review_fields = dict(
+        required_bots=None,
+        optional_apps=None,
+        reviewers=None,
+        peers=[],
+        peer_identity=None,
+    )
+    review_fields.update(fields)
+    review = SimpleNamespace(**review_fields)
+    monkeypatch.setattr(
+        cfg, "load_settings_for_repo", lambda _path: SimpleNamespace(review=review)
+    )
+
+
+@pytest.mark.parametrize(
+    "fields,expected",
+    [
+        # Stock install: no lane, so the coverage guard does not apply.
+        (dict(), False),
+        # peers present but peer_identity set: peers post under the shared
+        # login, not a distinct local lane. Rust agrees (loopcheck.rs:2492).
+        (dict(peers=["codex"], peer_identity="fno-peer-bot"), False),
+        # Every peer carries its own identity: GitHub logins, not a local lane.
+        (dict(peers=[{"provider": "openai", "identity": "codex-bot"}]), False),
+        # An identity-free peer (bare string) is a local-attestation lane.
+        (dict(peers=["codex"]), True),
+        # An identity-free peer (dict without identity) is a local-attestation lane.
+        (dict(peers=[{"provider": "openai"}]), True),
+        # An explicit reviewer lane.
+        (dict(reviewers=["code-review"]), True),
+    ],
+)
+def test_review_lane_configured_matches_loopcheck_gate(
+    monkeypatch, fields, expected, tmp_path
+):
+    _point_lane_read_at(monkeypatch, **fields)
+    assert _merge._review_lane_configured(str(tmp_path)) is expected
+
+
+def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
+    monkeypatch, tmp_path
+):
+    """A lane declared at the project root is still seen from a subdirectory.
+
+    load_settings_for_repo reads ``<arg>/.fno/`` with NO upward walk, so passing
+    the raw invocation directory made ``fno pr merge`` run from ``cli/`` report
+    "no lane" - which short-circuits ``covered`` to True and lets an unreviewed
+    PR merge. The guard was decorative on that path.
+
+    The parametrized test above cannot catch this: it monkeypatches
+    load_settings_for_repo, so it pins the predicate while stubbing out the path
+    resolution the bug lives in. This one uses the REAL loader against real
+    files, and isolates the global layer via FNO_GLOBAL_SETTINGS_PATH
+    (``/dev/null`` is the documented disable hook) - without that the
+    developer's own ~/.fno lane leaks in and masks the failure entirely.
+    """
+    import subprocess
+
+    monkeypatch.setenv("FNO_GLOBAL_SETTINGS_PATH", "/dev/null")
+    repo = tmp_path / "repo"
+    (repo / ".fno").mkdir(parents=True)
+    (repo / "sub").mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    # The lane exists ONLY at the project root.
+    (repo / ".fno" / "config.toml").write_text(
+        '[review]\ngithub_apps = ["chatgpt-codex-connector"]\n'
+    )
+
+    assert _merge._review_lane_configured(str(repo)) is True
+    assert _merge._review_lane_configured(str(repo / "sub")) is True
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
@@ -977,3 +1066,84 @@ def test_a_pending_hold_does_not_mark_the_node_failed(
 
     assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
     assert seen == [], seen
+
+
+# ---- coverage guard (x-0eaf) ----
+
+
+def test_coverage_missing_refuses(enabled, monkeypatch, capsys, tmp_path):
+    """No review_coverage event -> Unknown -> the sanctioned merge refuses."""
+    monkeypatch.setattr(_merge, "_review_coverage_for_pr", lambda pr, repo: None)
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert "unreviewed" in obj["reason"]
+
+
+def test_coverage_zero_refuses(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_coverage_unknown_refuses(enabled, monkeypatch, capsys, tmp_path):
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "unknown", "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
+    (tmp_path / ".fno").mkdir()
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "abc"},
+    )
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
+def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
+    """Coverage pinned a head that no longer matches the PR head -> stale -> refuse."""
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"},
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    assert _last_json(capsys, stream="err")["outcome"] == "blocked"
+
+
+def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
+    """x-0eaf: the covered head pins the --auto merge so a racing push cannot
+    queue an unreviewed head via GitHub's auto-merge."""
+    (tmp_path / ".fno").mkdir()
+    _checks_enabled(monkeypatch)
+    monkeypatch.setattr(_merge.shutil, "which", lambda _x: "/usr/bin/gh")
+    monkeypatch.setenv("FNO_CLAIMS_ROOT", str(tmp_path))
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
+    )
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
+    fake = _AutoMergeRejectingRun(
+        rollup=_rollup("SUCCESS", "coveredSHA"), toplevel=str(tmp_path)
+    )
+    monkeypatch.setattr(_merge, "run", fake)
+    _merge.run_merge(["42"], cwd=str(tmp_path))
+    auto_cmd = fake.merge_cmds[0]
+    assert "--auto" in auto_cmd, "expected the --auto attempt first"
+    i = auto_cmd.index("--match-head-commit")
+    assert auto_cmd[i + 1] == "coveredSHA"

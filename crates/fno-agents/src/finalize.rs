@@ -836,9 +836,16 @@ pub fn run_finalize(args: &[String]) -> i32 {
     // approved" are the same silence, and the event's `auto_merge_armed: false`
     // cannot tell them apart either.
     if approved && !should_arm_auto_merge(&reason, approved) {
-        eprintln!(
-            "finalize: auto-merge approved but {reason} is not an arming terminal; not armed"
-        );
+        // x-0eaf: name the coverage reason when the autonomous path is declined.
+        // The generic "not an arming terminal" hides WHY behind a vocabulary
+        // term; an operator who armed auto-merge and sees it not fire needs to
+        // learn the diff was unreviewed, not decode a terminal name.
+        let why = if reason == "DoneUnreviewed" {
+            "the PR is unreviewed (coverage 0); review the diff then re-run, or merge by hand"
+        } else {
+            "not an arming terminal"
+        };
+        eprintln!("finalize: auto-merge approved but {reason}: {why}; not armed");
     }
 
     // ── emit terminal event ────────────────────────────────────────────────
@@ -1751,15 +1758,24 @@ fn should_arm_auto_merge(reason: &str, auto_merge_approved: bool) -> bool {
 /// Return why configured optional-review evidence forbids native auto-merge,
 /// or `None` when arming may proceed.
 ///
-/// This is deliberately an authorization check, not a completion gate. A
-/// missing or usage-limited optional App still lets finalization complete and
-/// leaves the green PR available for a human merge; it only prevents GitHub
-/// from merging without the review coverage the operator configured.
+/// x-0eaf: coverage is the authority. When loop-check emitted a covered
+/// `review_coverage` event, a local lane reviewed the diff and a quota-refused
+/// or silent optional App no longer withholds (that recreates the wedge this
+/// node exists to escape). Without such an event (e.g. finalize run with no
+/// prior loop-check fire), the per-app check below is the fallback: a missing
+/// or usage-limited optional App still withholds so GitHub does not merge
+/// without the review coverage the operator configured.
 fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     let optional_apps = crate::agents_config::review_optional_apps(cwd);
     if optional_apps.is_empty() {
         return None;
     }
+    // x-0eaf finding 1 (retraction): coverage bypasses ONLY the REFUSED case
+    // (quota-limited), NOT the ABSENT case. An absent optional App (nothing
+    // posted) must keep withholding, because unaddressed_findings is empty
+    // (built from POSTED comments only) and cannot wait for a review that does
+    // not exist yet.
+    let coverage_satisfied = coverage_satisfied_in_latest_event(cwd);
 
     let output = match Command::new("gh")
         .args(["pr", "view", "--json", "reviews,comments"])
@@ -1821,6 +1837,12 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
                 && crate::loopcheck::body_is_usage_limit(&body)
         });
         if usage_limited {
+            // x-0eaf finding 1 (retraction): a REFUSED optional App bypasses
+            // the withhold ONLY when coverage is satisfied (a local lane
+            // reviewed). Without coverage, the refused bot still withholds.
+            if coverage_satisfied {
+                continue;
+            }
             return Some(format!("optional-review-usage-limited:{app}"));
         }
 
@@ -1828,6 +1850,55 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
     }
 
     None
+}
+
+/// Whether the latest `review_coverage` event in the project log reports
+/// coverage satisfied (covered, count > 0). Used to defer the optional-app
+/// withhold to the coverage authority (x-0eaf). Missing/unreadable -> false
+/// (fall back to the per-app check).
+fn coverage_satisfied_in_latest_event(cwd: &Path) -> bool {
+    let path = cwd.join(".fno").join("events.jsonl");
+    let Ok(content) = fs::read_to_string(&path) else {
+        return false;
+    };
+    // Pin to the current HEAD: a coverage event for a prior commit doesn't
+    // describe what finalize is about to arm. (x-0eaf finding 2.)
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let mut latest: Option<Value> = None;
+    for line in content.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
+            continue;
+        }
+        if !head.is_empty() {
+            let ev_head = val
+                .pointer("/data/head_sha")
+                .and_then(Value::as_str)
+                .unwrap_or("");
+            if ev_head != head {
+                continue;
+            }
+        }
+        latest = Some(val);
+    }
+    match latest {
+        Some(v) => {
+            v.pointer("/data/coverage").and_then(Value::as_str) == Some("covered")
+                && v.pointer("/data/reviewed_count")
+                    .and_then(Value::as_i64)
+                    .map_or(false, |n| n > 0)
+        }
+        None => false,
+    }
 }
 
 /// Arm GitHub's native auto-merge for the branch's open PR. Returns whether it
@@ -1854,6 +1925,50 @@ fn optional_review_block_reason(cwd: &Path) -> Option<String> {
 /// whether `--auto` is passed at all (false meaning "merge now, do not wait");
 /// here `--auto` IS the operation and `loop-check` has already verified green,
 /// so honoring it would let a config value turn arming into a no-op.
+/// The head_sha from the latest covered review_coverage event (matching the
+/// current HEAD), or None. Used to pin the auto-merge arm. (x-0eaf)
+fn covered_head_from_event(cwd: &Path) -> Option<String> {
+    let path = cwd.join(".fno").join("events.jsonl");
+    let content = fs::read_to_string(&path).ok()?;
+    let head = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(cwd)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    let mut latest: Option<String> = None;
+    for line in content.lines() {
+        let Ok(val) = serde_json::from_str::<Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|v| v.as_str()) != Some("review_coverage") {
+            continue;
+        }
+        if val.pointer("/data/coverage").and_then(|v| v.as_str()) != Some("covered") {
+            continue;
+        }
+        if val
+            .pointer("/data/reviewed_count")
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0)
+            <= 0
+        {
+            continue;
+        }
+        let ev_head = val
+            .pointer("/data/head_sha")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        if !head.is_empty() && ev_head != head {
+            continue;
+        }
+        latest = Some(ev_head.to_string());
+    }
+    latest.filter(|s| !s.is_empty())
+}
+
 fn arm_auto_merge(cwd: &Path) -> bool {
     let Some((number, _url)) = gh_pr_ref(cwd) else {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
@@ -1869,6 +1984,12 @@ fn arm_auto_merge(cwd: &Path) -> bool {
     ];
     if crate::agents_config::auto_merge_delete_branch(cwd) {
         args.push("--delete-branch".to_string());
+    }
+    // x-0eaf P1 (codex round 3): pin the arm to the covered head so a racing
+    // remote push cannot land an unreviewed head via GitHub's --auto queue.
+    if let Some(sha) = covered_head_from_event(cwd) {
+        args.push("--match-head-commit".to_string());
+        args.push(sha);
     }
     // The strategy is named in every failure line below: a repo that forbids the
     // configured merge method fails here exactly like stale auth or an
@@ -1907,7 +2028,10 @@ fn arm_auto_merge(cwd: &Path) -> bool {
 /// ship authors no branch commits, so reusing that constant here would stamp
 /// every doc ship. The two sets disagree on purpose.
 fn is_do_stamp_terminal(reason: &str) -> bool {
-    matches!(reason, "DonePRGreen" | "DoneAwaitingMerge")
+    matches!(
+        reason,
+        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed"
+    )
 }
 
 /// Guarded `do` lifecycle stamp (x-0469). `/do` Step 1.5 is the earlier truthful

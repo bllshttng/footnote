@@ -395,6 +395,13 @@ STATE
     make_green_gh "${STUB_BIN}/gh" "deadbeefdeadbeefdeadbeefdeadbeef00000001"
     make_git_stub "${STUB_BIN}/git"
 
+    # x-0eaf: seed a local review attestation so the coverage gate sees review.
+    # This Case A config has no review lane, so the green gh stub's bot review is
+    # not fetched; a head-pinned code-review attestation provides coverage, which
+    # is the operator's actual coverage source, so the green path reaches
+    # DonePRGreen (not DoneUnreviewed).
+    printf '%s\n' '{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"deadbeefdeadbeefdeadbeefdeadbeef00000001","verdict":"pass"}}' > "${TMP_DIR}/.fno/events.jsonl"
+
     INPUT_JSON="{\"transcript_path\":\"${TRANSCRIPT}\"}"
     run_hook "$TMP_DIR" "$INPUT_JSON" \
         "HOME=${HOME_DIR}" \

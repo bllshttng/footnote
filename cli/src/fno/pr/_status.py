@@ -21,7 +21,7 @@ import json
 from typing import Any, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
-from fno.pr._reviews import read_optional_review_state
+from fno.pr._reviews import read_optional_review_state, read_review_coverage
 
 # Rollup states that count as a pass (jq parity with _verify._PASS_STATES).
 _PASS_STATES = {"SUCCESS", "NEUTRAL", "SKIPPED"}
@@ -193,6 +193,14 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
         reviews = {"optional_reviews": "unknown", "optional_reviews_unresolved": None}
     unresolved = reviews.get("optional_reviews_unresolved")
 
+    # x-0eaf: coverage signal, same additive/fail-open discipline as the optional
+    # review read above. Read from the review_coverage event so a human and the
+    # loop see one number (Ownership: Rust computes, Python reads).
+    try:
+        coverage = read_review_coverage(int(pr), cwd)
+    except Exception:
+        coverage = {"coverage": "unknown", "reviewed_count": None}
+
     sys.stdout.write(
         json.dumps(
             {
@@ -204,6 +212,7 @@ def run_status(pr: str, cwd: Optional[str] = None, *, review_reader=None) -> int
                 "checks": counts,
                 "optional_reviews": reviews.get("optional_reviews", "unknown"),
                 "optional_reviews_unresolved": unresolved,
+                "review_coverage": coverage,
                 # The obvious "read this, not green": ready iff CI is green AND no
                 # optional finding is unresolved. Advisory - never the exit code.
                 "ready": green and unresolved == 0,

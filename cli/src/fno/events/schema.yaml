@@ -214,6 +214,58 @@ event_types:
           description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
     consumers: [fno-agents loop-check]
 
+  - name: review_coverage
+    description: "Per-reviewer coverage verdicts for one gate evaluation (x-0eaf). Coverage is the count of `reviewed` verdicts across two producer axes - github_app review objects and local_attestation head-pinned passes - and is distinct from the objection predicate (a quota refusal is not a pass, and silence is not coverage). Computed at read time from observed evidence, never cached. A head-pinned local pass makes coverage known even when the bot read failed, so a bot quota outage cannot wedge the autonomous path while a local lane reviewed."
+    sources: [target, hook]
+    data:
+      required: [pr, coverage, verdicts, head_sha]
+      properties:
+        pr:
+          type: integer
+          description: "The PR number the gate evaluated."
+        coverage:
+          type: string
+          enum: [covered, unknown]
+          description: "`covered` carries a count in reviewed_count; `unknown` means the review read failed and no local evidence confirmed a review (fail closed for autonomy, honest in the receipt)."
+        reviewed_count:
+          type: integer
+          description: "Count of reviewed verdicts EXCLUDING human approvals (whether a human approval counts is the operator's deferred call; lean exclude). Present only when coverage == covered."
+        verdicts:
+          type: array
+          description: "One entry per reviewer over one producer axis. Producer is named by axis so the chatgpt-codex-connector App and the local codex CLI are distinct."
+          items:
+            type: object
+            properties:
+              producer:
+                type: string
+                enum: [github_app, local_attestation]
+              name:
+                type: string
+              verdict:
+                type: string
+                enum: [reviewed, refused, errored, absent]
+              human_approval:
+                type: boolean
+        head_sha:
+          type: string
+          description: "The HEAD the coverage was computed against (coverage is a snapshot)."
+    consumers: [fno-agents loop-check, fno pr]
+
+  - name: review_gate_bot_usage_limited
+    description: "A required/optional review bot posted a usage-limit comment (quota exhausted) and was dropped from missing_bots so the gate proceeds on remaining evidence rather than wedging until budget death (PR #214). Registered (x-0eaf) so the standard audit tooling sees a drop that was previously written to an unregistered stream. Distinct from review_coverage: this names bots that refused; coverage is the count that reviewed."
+    sources: [target, hook]
+    data:
+      required: [pr, bots]
+      properties:
+        pr:
+          type: integer
+        bots:
+          type: array
+          items:
+            type: string
+          description: "Bot logins that posted a usage-limit refusal and were dropped from missing_bots."
+    consumers: [fno-agents loop-check, fno pr]
+
   - name: review_finding
     description: "An operator annotated a node's work (via `fno annotate add` / `fno mux block annotate`). loop-check treats an open finding as a blocking review-gate input: terminal-allow is denied while any review_finding for the node has no matching review_finding_resolved. Node-scoped and NOT head-pinned - only an explicit resolve clears it, a new commit does not. The recorded text is the original; only the mail live-inject frame is x-9ed6-defanged."
     sources: [observer]
@@ -1795,7 +1847,7 @@ event_types:
           description: "Target session identifier."
         reason:
           type: string
-          enum: [DonePRGreen, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
+          enum: [DonePRGreen, DoneUnreviewed, DoneAdvisory, DoneDelivery, DoneBatched, NoWork, Budget, NoProgress, Interrupted, Aborted]
           description: "TerminationReason enum value."
         axis:
           type: string
@@ -2883,7 +2935,7 @@ event_types:
       properties:
         reason:
           type: string
-          enum: [dead-bot, flake, stale-base, wedge, spawn-cap, other]
+          enum: [dead-bot, zero-coverage, flake, stale-base, wedge, spawn-cap, other]
           description: "Which intervention. Small, summable enum; fail-closed on unknown so a typo is loud, not a silent 'other'."
         pr:
           type: integer

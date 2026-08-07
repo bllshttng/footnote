@@ -1568,6 +1568,8 @@ exit 1
     ]);
 
     assert_eq!(d.decision, "allow");
+    // x-0eaf: no review lane configured (settings is [ci] only) -> DonePRGreen
+    // (the boundary fix: a stock install still completes nodes).
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 }
 
@@ -2698,9 +2700,12 @@ fn ac3_hp_empty_required_bots_skips_review_reads() {
     assert_eq!(code, 0);
     assert_eq!(
         d.decision, "allow",
-        "declared no-review repo must pass on PR+CI alone: {}",
+        "declared no-review repo must complete (not block) on PR+CI alone: {}",
         d.message
     );
+    // x-0eaf: no review lane configured -> zero coverage is the configured
+    // state, not a defect -> DonePRGreen (the boundary fix; a stock install
+    // still completes nodes).
     assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // AC3-UI: the skip is recorded in the loop_check event.
@@ -2805,10 +2810,13 @@ fn ac3_edge_no_external_orthogonal_to_required_bots() {
 
     assert_eq!(
         d.decision, "allow",
-        "no_external must skip review per-session: {}",
+        "no_external must skip review per-session (not block): {}",
         d.message
     );
-    assert_eq!(d.termination_reason.as_deref(), Some("DonePRGreen"));
+    // x-0eaf: no_external skipped the bot read and no local attestation exists,
+    // so nothing reviewed -> DoneUnreviewed. The point of this test (no_external
+    // does not BLOCK) holds: the session completes (allow).
+    assert_eq!(d.termination_reason.as_deref(), Some("DoneUnreviewed"));
 }
 
 // ── x-e703: config.review.reviewers local-attestation gate ──────────────────
@@ -3032,6 +3040,8 @@ fn ac3_fr_restoring_required_bots_reenforces() {
         "--events",
         events_path.to_str().unwrap(),
     ]);
+    // x-0eaf: required_bots [] means no review lane -> DonePRGreen (the boundary
+    // fix; fire 2 is what tests re-enforcement with a lane restored).
     assert_eq!(d1.termination_reason.as_deref(), Some("DonePRGreen"));
 
     // Fire 2: operator restores the list -> gate enforces again immediately.
@@ -4895,5 +4905,506 @@ fn nudge_awaiting_defers_the_backstop() {
         d3.termination_reason.is_none(),
         "got: {:?}",
         d3.termination_reason
+    );
+}
+
+// ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
+
+use fno_agents::loopcheck::{
+    classify_coverage, coverage_receipt_line, Coverage, CoverageProducer, CoverageReport,
+    CoverageVerdict,
+};
+
+const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
+
+fn gh_review(author: &str, state: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": author}, "state": state, "submittedAt": "2026-08-05T10:00:00Z"})
+}
+
+fn gh_comment(author: &str, body: &str) -> serde_json::Value {
+    serde_json::json!({"author": {"login": author}, "body": body, "createdAt": "2026-08-05T10:00:00Z"})
+}
+
+fn attestation_line(reviewer: &str, head: &str, verdict: &str) -> String {
+    serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict}
+    })
+    .to_string()
+}
+
+/// Seed a head-pinned `code-review` pass attestation into `.fno/events.jsonl` so
+/// the coverage classifier counts a local review. Used by tests whose PRIMARY
+/// intent is not coverage (CI-skip, no_external, empty-config) but which now
+/// need review coverage to reach DonePRGreen under the x-0eaf coverage gate.
+fn seed_code_review_attestation(cwd: &Path, head_sha: &str) {
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let events = cwd.join(".fno/events.jsonl");
+    let mut existing = fs::read_to_string(&events).unwrap_or_default();
+    existing.push_str(&attestation_line("code-review", head_sha, "pass"));
+    existing.push('\n');
+    fs::write(&events, existing).unwrap();
+}
+
+/// AC1-HP: only bot output is the usage-limit refusal -> coverage 0, refused.
+#[test]
+fn coverage_classify_quota_refusal_is_zero_coverage_refused() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "You have reached your Codex usage limits for code reviews.",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    let bot = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "chatgpt-codex-connector")
+        .unwrap();
+    assert_eq!(bot.producer, CoverageProducer::GithubApp);
+    assert_eq!(bot.verdict, CoverageVerdict::Refused);
+}
+
+/// AC11-HP: one genuine review, no blocking findings -> coverage 1.
+#[test]
+fn coverage_classify_real_review_counts() {
+    let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
+    let rep = classify_coverage(
+        &reviews,
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// Boundary: zero configured reviewers and no evidence -> Covered(0), not an
+/// error and not vacuous success.
+#[test]
+fn coverage_classify_zero_configured_is_covered_zero() {
+    let rep = classify_coverage(&[], &[], "", COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// AC5-ERR: reviews API failed, no local attestation -> Unknown.
+#[test]
+fn coverage_classify_github_read_failure_is_unknown_without_local() {
+    let rep = classify_coverage(
+        &[],
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        false,
+    );
+    assert_eq!(rep.coverage, Coverage::Unknown);
+    assert_eq!(rep.coverage_count(), None);
+}
+
+/// Operator ruling + producer-axis correction: a head-pinned local attestation
+/// makes coverage Known even when the github read failed. A bot quota outage
+/// cannot wedge the autonomous path while a local lane reviewed.
+#[test]
+fn coverage_classify_local_pass_survives_github_outage() {
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(
+        &[],
+        &[],
+        &events,
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        false,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.name, "code-review");
+}
+
+/// The producer-axis consequence (operator correction): a bot terminal-refused
+/// does NOT imply zero coverage, because the local lane is a separate producer
+/// over a separate channel with separate limits.
+#[test]
+fn coverage_classify_bot_refused_plus_local_is_covered() {
+    let comments = vec![gh_comment(
+        "chatgpt-codex-connector[bot]",
+        "You have reached your Codex usage limits for code reviews.",
+    )];
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        &events,
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(
+        rep.verdicts
+            .iter()
+            .filter(|v| v.verdict == CoverageVerdict::Refused)
+            .count(),
+        1
+    );
+}
+
+/// AC10-INV: a configured bot with an unrecognized comment (no review object,
+/// no usage marker) is absent, never reviewed - keeps gemini's empty
+/// usage_markers from rebuilding the bug for the second bot.
+#[test]
+fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
+    let comments = vec![gh_comment(
+        "gemini-code-assist[bot]",
+        "something unrecognized",
+    )];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["gemini-code-assist".to_string()],
+        true,
+    );
+    let g = rep
+        .verdicts
+        .iter()
+        .find(|v| v.name == "gemini-code-assist")
+        .unwrap();
+    assert_eq!(g.verdict, CoverageVerdict::Absent);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// The hedge: a human GitHub APPROVAL is recorded (human_approval: true) but
+/// excluded from the count. Lean: exclude; one predicate flip includes it.
+#[test]
+fn coverage_classify_human_approval_excluded() {
+    let reviews = vec![gh_review("jason", "APPROVED")];
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &[], true);
+    let human = rep.verdicts.iter().find(|v| v.name == "jason").unwrap();
+    assert!(human.human_approval);
+    assert_eq!(human.verdict, CoverageVerdict::Reviewed);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+    assert_eq!(rep.coverage_count(), Some(0));
+}
+
+/// Boundary: a reviewer named in two lists is one verdict, not two units.
+#[test]
+fn coverage_classify_duplicate_login_one_verdict() {
+    let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
+    let logins = vec![
+        "chatgpt-codex-connector".to_string(),
+        "chatgpt-codex-connector".to_string(),
+    ];
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &logins, true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(
+        rep.verdicts
+            .iter()
+            .filter(|v| v.name == "chatgpt-codex-connector")
+            .count(),
+        1
+    );
+}
+
+/// AC7-CON: a later pass at head supersedes an earlier fail (no cached refused).
+#[test]
+fn coverage_classify_local_fail_then_pass_latest_wins() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line("code-review", COV_HEAD, "fail"),
+        attestation_line("code-review", COV_HEAD, "pass"),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+}
+
+/// A later fail at head revokes an earlier pass.
+#[test]
+fn coverage_classify_local_pass_then_fail_revokes() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line("code-review", COV_HEAD, "pass"),
+        attestation_line("code-review", COV_HEAD, "fail"),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// A pass on a prior head does not count after a new commit lands (head-pinning).
+#[test]
+fn coverage_classify_stale_head_does_not_count() {
+    let old_head = "0000000000000000000000000000000000000000";
+    let events = attestation_line("code-review", old_head, "pass");
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(0));
+}
+
+/// The classifier is NAME-AGNOSTIC on the local axis: it counts a head-pinned
+/// pass for ANY reviewer name, not only built-ins or configured entries. This
+/// pins the load-bearing property that `emit-attestation.sh`'s "reviewer name
+/// is NOT an allowlist" comment asserts on the producer side - so a future
+/// allowlist added either here or there cannot silently stop `/code-review`
+/// (or a future local lane like the codex CLI, attesting as "codex") from
+/// counting under `reviewers: []`. A comment in a sibling script is not a guard.
+#[test]
+fn coverage_classify_local_pass_unconfigured_name_counts() {
+    // "codex" here is the LOCAL CLI lane (local_attestation axis), deliberately
+    // the same display name as the github_app bot - the producer axis field is
+    // what keeps them distinct, and an unconfigured name still counts.
+    let events = attestation_line("codex", COV_HEAD, "pass");
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.name, "codex");
+}
+
+/// x-0eaf producer-axis money test (integration via run_loop_check). The bot
+/// refused on quota (usage-limit comment, no review object), but a local
+/// /code-review attested at HEAD -> coverage 1 via the local_attestation axis ->
+/// DonePRGreen. A quota-dead bot cannot block the path while a local lane
+/// reviewed, because coverage counts the local producer, not just github_app
+/// objects. This is the operator's PR #745 scenario, fixed.
+#[test]
+fn done_pr_green_when_local_attestation_survives_bot_refusal() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd); // required_bots = [chatgpt-codex-connector]
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    fs::write(
+        &manifest_path,
+        new_manifest("sess-lane", "2026-06-05T00:00:00Z", true),
+    )
+    .unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // gh: green CI; the bot posted ONLY a usage-limit refusal, no review object.
+    let dir = TempDir::new().unwrap();
+    let gh = make_script(
+        dir.path(),
+        "gh",
+        r#"
+if echo "$*" | grep -q -- "--version"; then echo 'gh version 2.x'; exit 0; fi
+if echo "$*" | grep -q "headRefName"; then
+  echo '{"state":"OPEN","number":7,"headRefName":"main","headRefOid":"deadbeefdeadbeefdeadbeefdeadbeef00000001"}'
+  exit 0
+fi
+if echo "$*" | grep -q "checks"; then
+  echo '[{"name":"ci","state":"SUCCESS","bucket":"pass"}]'
+  exit 0
+fi
+if echo "$*" | grep -q "pulls/"; then
+  echo '[]'
+  exit 0
+fi
+if echo "$*" | grep -q "reviews"; then
+  echo '{"reviews":[],"comments":[{"author":{"login":"chatgpt-codex-connector[bot]"},"body":"You have reached your Codex usage limits for code reviews.","createdAt":"2026-06-05T01:00:00Z"}]}'
+  exit 0
+fi
+exit 1
+"#,
+    );
+    let git = make_script(
+        dir.path(),
+        "git",
+        r#"echo "deadbeefdeadbeefdeadbeefdeadbeef00000001""#,
+    );
+
+    // A local /code-review pass attested at the current HEAD.
+    seed_code_review_attestation(cwd, "deadbeefdeadbeefdeadbeefdeadbeef00000001");
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", gh.display()),
+        &format!("--git-bin={}", git.display()),
+    ]);
+
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "local attestation must survive a bot refusal: {}",
+        d.message
+    );
+}
+
+/// x-0eaf AC12-INV (negative): the coverage path must not read the `attended`
+/// manifest field (x-be78: it lies for spawned workers). An attended:false
+/// (spawned-worker) session with zero coverage terminates DoneUnreviewed exactly
+/// like an attended:true one - the discriminator is coverage, not attendance.
+#[test]
+fn done_unreviewed_independent_of_attended_field() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    isolate_settings(cwd); // required_bots = [chatgpt-codex-connector]
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    // attended: false - the spawn-substrate shape x-be78 showed lies.
+    let manifest =
+        "---\nsession_id: sess-unatt\ncreated_at: 2026-06-05T00:00:00Z\nattended: false\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    // gh: green CI, bot reviewed (so objection-gate passes); but NO local
+    // attestation and we want to show attendance does not change the terminal.
+    // Use green(): ccc COMMENTED review -> coverage 1 -> DonePRGreen regardless
+    // of attended. Then a second case below uses no review -> DoneUnreviewed
+    // regardless of attended. This case pins: attended:false + coverage 1 still
+    // DonePRGreen (attendance does not downgrade).
+    let mock = MockBins::green();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(d.decision, "allow");
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "attended:false must not downgrade a reviewed PR: {}",
+        d.message
+    );
+}
+
+/// x-0eaf AC2-CON: with auto_merge approved (autonomous consent) and zero
+/// coverage, the terminal is DoneUnreviewed, not DonePRGreen - so finalize will
+/// not arm auto-merge and the autonomous path refuses to merge unreviewed code.
+/// The discriminator is coverage; auto_merge consent does not override it.
+#[test]
+fn ac2_con_auto_merge_approved_zero_coverage_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let cwd = tmp.path();
+    fs::create_dir_all(cwd.join(".fno")).unwrap();
+    let settings = cwd.join(".fno/config.toml");
+    fs::write(&settings, "[review]\nrequired_bots = []\n").unwrap();
+
+    let manifest_path = cwd.join("target-state.md");
+    let transcript_path = cwd.join("transcript.jsonl");
+    let manifest = "---\nsession_id: sess-auto\ncreated_at: 2026-06-05T00:00:00Z\nattended: false\nauto_merge_approved: true\n---\n";
+    fs::write(&manifest_path, manifest).unwrap();
+    fs::write(&transcript_path, transcript_with_promise()).unwrap();
+
+    let mock = MockBins::green();
+
+    let (_code, d) = fire(&[
+        "loop-check",
+        "--state",
+        manifest_path.to_str().unwrap(),
+        "--transcript",
+        transcript_path.to_str().unwrap(),
+        "--cwd",
+        cwd.to_str().unwrap(),
+        "--now",
+        "2026-06-05T00:30:00Z",
+        "--settings",
+        settings.to_str().unwrap(),
+        &format!("--gh-bin={}", mock.gh.display()),
+        &format!("--git-bin={}", mock.git.display()),
+    ]);
+
+    assert_eq!(d.decision, "allow");
+    // x-0eaf boundary: no review lane -> DonePRGreen even with auto_merge consent
+    // (zero coverage is the configured state, not a defect).
+    assert_eq!(
+        d.termination_reason.as_deref(),
+        Some("DonePRGreen"),
+        "no-lane config + auto_merge: {}",
+        d.message
+    );
+}
+
+// ── coverage receipt line (x-0eaf task 3.1) ──────────────────────────────────
+
+#[test]
+fn coverage_receipt_covered_names_reviewers() {
+    let rep = classify_coverage(
+        &[serde_json::json!({"author":{"login":"chatgpt-codex-connector"},"state":"COMMENTED"})],
+        &[],
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
+    assert!(line.contains("chatgpt-codex-connector"), "{line}");
+}
+
+#[test]
+fn coverage_receipt_zero_names_refused_and_absent() {
+    let comments = vec![serde_json::json!({
+        "author": {"login": "chatgpt-codex-connector[bot]"},
+        "body": "You have reached your Codex usage limits for code reviews."
+    })];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &[
+            "chatgpt-codex-connector".to_string(),
+            "gemini-code-assist".to_string(),
+        ],
+        true,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("0 reviewed"), "{line}");
+    assert!(line.contains("1 refused"), "{line}");
+    assert!(line.contains("chatgpt-codex-connector"), "{line}");
+    assert!(line.contains("Nothing reviewed this diff"), "{line}");
+}
+
+#[test]
+fn coverage_receipt_unknown_says_unknown() {
+    let rep = CoverageReport {
+        coverage: Coverage::Unknown,
+        verdicts: vec![],
+    };
+    let line = coverage_receipt_line(&rep);
+    assert!(
+        line.contains("unknown"),
+        "unknown must say unknown, not a number: {line}"
+    );
+    assert!(
+        !line.contains("reviewed:"),
+        "unknown must not present a count: {line}"
     );
 }

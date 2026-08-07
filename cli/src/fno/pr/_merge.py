@@ -38,7 +38,7 @@ import shutil
 import sys
 import time
 from contextlib import contextmanager
-from typing import Iterator, List, Literal, Optional, Sequence
+from typing import Any, Iterator, List, Literal, Optional, Sequence
 
 from fno.pr._proc import ToolMissing, run
 
@@ -141,6 +141,114 @@ def _read_state_field(state_file: str, field: str) -> str:
     except OSError:
         pass
     return ""
+
+
+def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
+    """The latest ``review_coverage`` event data for ``pr_number``, or None.
+
+    loop-check emits one every gate eval (x-0eaf). Python consumes it rather
+    than recomputing coverage (Ownership: Rust computes, Python reads). A
+    missing or corrupt log degrades to None, which the caller treats as Unknown
+    and refuses - never a pass.
+    """
+    try:
+        from fno.events.log import read_events
+    except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
+        return None
+    from pathlib import Path
+
+    events_path = Path(_repo_state_dir(repo)) / "events.jsonl"
+    try:
+        events = read_events(events_path)
+    except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
+        return None
+    latest = None
+    for ev in events:
+        if ev.get("type") != "review_coverage":
+            continue
+        data = ev.get("data") or {}
+        try:
+            if int(data.get("pr", -1)) == pr_number:
+                latest = data
+        except (TypeError, ValueError):
+            continue
+    return latest
+
+
+def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
+    """The PR's current ``headRefOid`` for a staleness check, or None."""
+    if shutil.which("gh") is None:
+        return None
+    res = _gh(["pr", "view", str(pr_number), "--json", "headRefOid"], repo)
+    if not res.ok:
+        return None
+    try:
+        oid = str(json.loads(res.stdout).get("headRefOid", "")).strip()
+    except (ValueError, TypeError):
+        return None
+    return oid or None
+
+
+def _coverage_refused_reason(cov: Optional[dict]) -> str:
+    """Why a coverage guard refused, for the blocked receipt line."""
+    if cov is None:
+        return "no review_coverage event (no gate evaluated this PR)"
+    if cov.get("coverage") != "covered":
+        return f"coverage {cov.get('coverage')}"
+    return f"0 reviewed (covered count={cov.get('reviewed_count')})"
+
+
+def _safe_int(val, default=0):
+    """int() that returns default on ValueError/TypeError (finding 7)."""
+    try:
+        return int(val)
+    except (ValueError, TypeError):
+        return default
+
+
+def _peer_is_identity_free(entry: Any) -> bool:
+    """A peer counts as a local-attestation lane only if it has no posting identity."""
+    if isinstance(entry, str):
+        return True
+    return isinstance(entry, dict) and not entry.get("identity")
+
+
+def _review_lane_configured(repo: str) -> bool:
+    """Whether any review lane (required/optional/reviewers/local-peers) is configured.
+
+    Fail-closed (True) on config error: a misread config must not bypass the
+    coverage guard. (x-0eaf boundary: a stock install with no lane opted out of
+    review, so the guard does not apply.)
+
+    Peers form a local lane only via identity-free entries. A shared
+    peer_identity, or a per-peer identity, means the review posts as a GitHub
+    login already matched by the bot sets, not a distinct local lane. This
+    mirrors resolved_local_peer_reviewers_for_author in loopcheck.rs so the
+    merge gate and the loop-check gate agree on whether a lane exists for one
+    PR - otherwise the loop ships DonePRGreen (no lane) while merge refuses as
+    unreviewed (lane), wedging the pipeline on the same config.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        # Resolve the git toplevel first: load_settings_for_repo reads
+        # <arg>/.fno/ with NO upward walk, so a merge invoked from a
+        # subdirectory would see only the global layer, report "no lane", and
+        # short-circuit the coverage guard - letting an unreviewed PR merge.
+        # _repo_state_dir already does rev-parse --show-toplevel with a cwd
+        # fallback, and the manifest and events reads in this file resolve the
+        # root the same way.
+        root = Path(_repo_state_dir(repo)).parent
+        r = load_settings_for_repo(root).review
+        if r.required_bots or r.optional_apps or r.reviewers:
+            return True
+        if r.peer_identity:
+            return False
+        return any(_peer_is_identity_free(p) for p in (r.peers or []))
+    except Exception:
+        return True
 
 
 # ---------------------------------------------------------------------------
@@ -798,6 +906,51 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(pr_number, "failed", "gh CLI not installed", "none", err=True)
         return 127
 
+    # (2a) Coverage guard (x-0eaf): the sanctioned merge must not land a PR
+    # nothing reviewed. Consume the review_coverage event loop-check emits
+    # (Ownership: Rust computes, Python reads); missing/stale/zero/unknown
+    # refuses (fail closed). Runs only when auto_merge is enabled (step 1), so a
+    # manual `gh pr merge` on a non-auto-merge repo is untouched - the
+    # discriminator is auto_merge.enabled, not attendance. After the gh check so
+    # a missing gh still reports its own exit 127. Skipped when no review lane is
+    # configured (x-0eaf boundary: a stock install opted out of review).
+    # Cache the lane check: it loads config from disk, and three reads below
+    # would re-parse the same TOML three times.
+    review_lane = _review_lane_configured(repo)
+    cov = _review_coverage_for_pr(pr_number, repo)
+    covered = (
+        not review_lane
+        or (
+            cov is not None
+            and cov.get("coverage") == "covered"
+            and _safe_int(cov.get("reviewed_count"), 0) > 0
+        )
+    )
+    if covered and cov is not None and review_lane:
+        # Staleness: the event pins a head; if the PR head moved after the gate
+        # eval, the coverage no longer describes what would merge. Best-effort:
+        # a head-fetch failure does not itself block (the event is from the
+        # current autonomous flow), but a confirmed mismatch refuses.
+        head = _pr_head_oid(pr_number, repo)
+        ev_head = cov.get("head_sha") if cov else None
+        if head and ev_head and head != ev_head:
+            covered = False
+    if not covered:
+        _emit(
+            pr_number,
+            "blocked",
+            f"unreviewed merge refused: {_coverage_refused_reason(cov)}",
+            "none",
+            err=True,
+        )
+        return 2
+
+    # The covered head pins the merge so a racing push after the coverage check
+    # cannot land an unreviewed head via `--auto`'s queue (x-0eaf TOCTOU). The
+    # staleness check above already refused a current mismatch; this makes gh
+    # itself refuse if the head moves between here and the merge.
+    covered_head = (cov.get("head_sha") or "") if cov and review_lane else ""
+
     # (2b) Merge serialization + stale-base hold (parallel mode G4, LD#9).
     # Builds run parallel; merges run one at a time, and while lanes are live a
     # PR whose head is behind its base is held for `fno pr rebase` first, so a
@@ -827,7 +980,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
                     err=False,
                 )
                 return 2
-        return _do_merge(pr_number, auto_merge, repo)
+        return _do_merge(pr_number, auto_merge, repo, covered_head)
 
 
 #: gh's refusal when a repo has not enabled the auto-merge feature. `--auto` is
@@ -878,7 +1031,7 @@ def _checks_verdict(pr_number: int, repo: str) -> tuple[str, dict, str]:
     return (verdict, counts, (data.get("headRefOid") or "").strip())
 
 
-def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
+def _do_merge(pr_number: int, auto_merge, repo: str, covered_head: str = "") -> int:
     """Steps (3)-(4): build + run the gh merge and classify the outcome."""
     # (3) Build command.
     strategy = auto_merge.merge_strategy
@@ -887,6 +1040,11 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         cmd.append("--delete-branch")
     if auto_merge.require_checks_pass:
         cmd.append("--auto")
+    # x-0eaf: pin the merge to the covered head so a racing push cannot land an
+    # unreviewed commit - including via `--auto`'s queue, which otherwise merges
+    # whatever head is latest when checks pass. gh refuses if the head moved.
+    if covered_head:
+        cmd += ["--match-head-commit", covered_head]
     # Set only on the no-auto fallback below, where THIS process is the one
     # vouching for the checks. The worktree recovery path reads it so its
     # server-side merge is pinned to the same SHA the verdict came from.
@@ -962,7 +1120,8 @@ def _do_merge(pr_number: int, auto_merge, repo: str) -> int:
         # possibly red) commit. Server-side required-check rules would cover this
         # too, but require_checks_pass exists precisely for repos without them.
         cmd_now = [arg for arg in cmd if arg != "--auto"]
-        cmd_now += ["--match-head-commit", verified_head]
+        if "--match-head-commit" not in cmd_now:
+            cmd_now += ["--match-head-commit", verified_head]
         try:
             res = _gh(cmd_now, repo)
         except ToolMissing:

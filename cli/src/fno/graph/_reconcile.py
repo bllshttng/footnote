@@ -1003,6 +1003,12 @@ def emit_human_touch_for_record(record: MergeDriftRecord) -> Optional[Path]:
 # resolved that review, and the human merge past it is the escape. Kept as a
 # module constant so the emit site and its tests name the same string.
 _GATE_ESCAPE_REASON_DEADBOT = "dead-bot"
+# x-0eaf: an out-of-band merge of a PR nothing reviewed. Distinct from dead-bot
+# (a required bot never reviewed) - this fires whether or not any bot was
+# required, closing the gap where the dead-bot escape's early return on empty
+# github_apps emitted nothing for the exact zero-coverage merges this node
+# catches.
+_GATE_ESCAPE_REASON_COVERAGE = "zero-coverage"
 
 
 def _fetch_pr_review_logins(
@@ -1072,6 +1078,66 @@ from fno.events.gate_escape import (  # noqa: E402
 )
 
 
+def _latest_review_coverage(pr_number: int, events_path: Path) -> Optional[dict]:
+    """The latest ``review_coverage`` event data for ``pr_number``, or None.
+
+    Fail-open: a missing/unreadable log or a parse error returns None (the
+    caller under-reports rather than crashes). (x-0eaf)
+    """
+    try:
+        from fno.events.log import read_events
+
+        events = read_events(events_path)
+    except Exception:  # noqa: BLE001 - telemetry must never abort reconcile
+        return None
+    latest: Optional[dict] = None
+    for ev in events:
+        if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
+            continue
+        data = ev.get("data") or {}
+        try:
+            if int(data.get("pr", -1)) == pr_number:
+                latest = data
+        except (TypeError, ValueError):
+            continue
+    return latest
+
+
+def _emit_zero_coverage_escape(record: "MergeDriftRecord", events_path: Path) -> bool:
+    """Emit a zero-coverage gate escape if the merged PR's ``review_coverage``
+    event shows 0/unknown coverage. Returns True if emitted.
+
+    Fires whether or not any bot was required, so a no-required-bots config that
+    merged a PR nothing reviewed is still recorded as autonomy debt (x-0eaf). A
+    genuinely-reviewed PR (covered, count > 0) does not escape; no event at all
+    (loop-check never ran) under-reports (fail-open). Returns True/False so the
+    caller can short-circuit the dead-bot path when the headline gap is coverage.
+    """
+    cov = _latest_review_coverage(record.pr_number, events_path)
+    if cov is None:
+        return False
+    if cov.get("coverage") == "covered":
+        try:
+            if int(cov.get("reviewed_count") or 0) > 0:
+                return False  # genuinely reviewed; not an escape
+        except (TypeError, ValueError):
+            pass
+    count = cov.get("reviewed_count", 0)
+    count_str = str(count) if count is not None else "unknown"
+    detail = (
+        f"merged with {cov.get('coverage')} review coverage "
+        f"({count_str} reviewed) - nothing reviewed this diff"
+    )
+    _emit_gate_escape(
+        _GATE_ESCAPE_REASON_COVERAGE,
+        pr=record.pr_number,
+        node_id=record.node_id or None,
+        detail=detail,
+        events_path=events_path,
+    )
+    return True
+
+
 def emit_gate_escape_for_record(
     record: MergeDriftRecord,
     *,
@@ -1103,18 +1169,27 @@ def emit_gate_escape_for_record(
     try:
         if record.pr_number <= 0:
             return None  # placeholder/unassigned PR number: nothing to escape
-        wanted = [b for b in (required_bots or []) if isinstance(b, str) and b.strip()]
-        if not wanted:
-            return None  # AC2: nothing required, so nothing to escape
 
-        # Resolve the events log NOW - before the review fetch - so a fetch
+        # Resolve the events log NOW - before any escape check - so a fetch
         # failure still knows where to write the durable emit-failure counter
-        # (AC7). If this were resolved only after the fetch, a gh-auth blind spot
-        # would log nothing and retro would read a silent zero (the exact
-        # silent-low-reading the metric exists to prevent). Resolved AFTER the
-        # no-required-bots return above, so a clean repo never touches the log.
+        # (AC7). Resolving a path is a non-mutating string computation; only the
+        # conditional emit below writes.
         if resolved_events is None:
             resolved_events = _canonical_events_path(record.cwd)
+
+        # x-0eaf: zero-coverage escape fires whether or not any bot was required.
+        # The dead-bot-only path below returned early when github_apps was empty,
+        # so on a no-required-bots config it emitted nothing for the exact
+        # zero-coverage merges this node exists to catch. Reads the
+        # review_coverage event loop-check emitted; no event (loop-check never
+        # ran, e.g. a pure out-of-band merge) under-reports (fail-open),
+        # consistent with the dead-bot path's review-fetch-failure discipline.
+        if _emit_zero_coverage_escape(record, resolved_events):
+            return resolved_events
+
+        wanted = [b for b in (required_bots or []) if isinstance(b, str) and b.strip()]
+        if not wanted:
+            return None  # AC2: nothing required, so nothing to escape (dead-bot)
 
         # On a review-fetch failure we CANNOT tell whether a required bot
         # reviewed, so we fail open (do not emit): a missed escape (under-report)
