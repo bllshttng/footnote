@@ -53,6 +53,14 @@ class ContextReading:
 def _window_for(model: str) -> int:
     if "[1m]" in model:
         return 1_000_000  # zai/GLM 1M routing marker
+    # The provider API echoes the bare GLM id and drops the [1m] routing marker
+    # the deployment carries: one real transcript held 12567 "glm-5.2" records
+    # against 2 "glm-5.2[1m]". _last_usage reads the LAST assistant line, which
+    # is almost always the bare form, so the 1M generation needs an explicit
+    # bare-id entry or the reading silently falls to 200K and overstates pressure
+    # ~5x (the read that halted a target run at 26% real as 133%).
+    if "glm-5.2" in model:
+        return 1_000_000
     if "haiku" in model:
         return 200_000  # Haiku 4.5 is 200K
     if "opus-5" in model or "sonnet-5" in model or "fable-5" in model:
