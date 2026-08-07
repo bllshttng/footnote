@@ -382,3 +382,81 @@ def test_url_only_update_is_allowed_when_it_names_the_same_pr(tmp_graph):
 
     assert result.exit_code == 0, result.output
     assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/123"
+
+
+# ---- ship provenance: the consolidated ship writer lives in `update` ----
+
+_MARKERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
+            "GEMINI_SESSION_ID", "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID")
+
+
+def _set_ambient_claude(monkeypatch, sid="SESSION-A"):
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+
+
+def _clear_ambient(monkeypatch):
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+
+
+def test_ship_stamp_fires_on_first_pr_link(tmp_graph, monkeypatch):
+    """The ship row lands when pr_number transitions unset->set, recording the
+    implementer's ambient identity. This is the one site every shipped node
+    passes through, so the row names the implementer, not the merger."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    ship = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+            if r.get("phase") == "ship"]
+    assert len(ship) == 1
+    assert ship[0]["harness"] == "claude"
+    assert ship[0]["session_id"] == "SESSION-A"
+
+
+def test_ship_stamp_skips_with_no_identity_and_exit_zero(tmp_graph, monkeypatch):
+    """No ambient identity -> the stamp skips with a named stderr reason, exit 0
+    (the link itself still lands), and no ship row is invented. Silent skips are
+    the defect this stamp exists to remove, so the reason names what refused."""
+    _clear_ambient(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000001")["pr_number"] == 77  # link still lands
+    assert "ship provenance" in result.output                   # skip names itself
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
+
+
+def test_ship_stamp_does_not_refire_on_an_already_linked_node(tmp_graph, monkeypatch):
+    """A second update on an already-linked node is not an unset->set transition,
+    so it adds no second ship row. The pr-number link is the choke point; the
+    stamp fires once, on first link."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    first = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+    assert first.exit_code == 0, first.output
+    # Already linked -> not a transition -> no second ship row.
+    second = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+    assert second.exit_code == 0, second.output
+    ship = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+            if r.get("phase") == "ship"]
+    assert len(ship) == 1

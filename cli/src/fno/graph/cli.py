@@ -598,6 +598,59 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return None
 
 
+def _manifest_created_at(cwd: Optional[str] = None) -> Optional[str]:
+    """The session-start instant from this checkout's target-state.md, or None.
+
+    The ship row's start bounds the implementation window and shares the source
+    finalize uses (the manifest created_at). None when there is no manifest (a
+    manual link outside a target session); the row then lands with an end only,
+    which the roster renders honestly rather than guessing a start.
+    """
+    try:
+        text = (Path(cwd or os.getcwd()) / ".fno" / "target-state.md").read_text(
+            encoding="utf-8"
+        )
+    except OSError:
+        return None
+    return _scan_md_field(text, "created_at")
+
+
+def _stamp_ship_on_pr_link(node_id: str) -> None:
+    """Stamp the ship lifecycle row when a node is first PR-linked.
+
+    ``backlog update --pr-number`` is the one site every shipped node passes
+    through regardless of which worker or skill opened the PR, so the row
+    records the implementer's identity, not the merger's. Best-effort: an
+    unresolvable identity or a graph failure skips with a named stderr reason
+    and never fails the update. Idempotent: append_session_record collapses a
+    re-stamp of the same (phase, harness, session_id).
+    """
+    from fno.graph.store import append_session_record
+
+    ident = resolve_harness_identity()
+    harness = (ident.harness or "").strip()
+    session_id = (ident.session_id or "").strip()
+    if not harness or not session_id:
+        typer.echo(
+            f"update: no ambient identity to stamp ship provenance for {node_id} "
+            f"(missing {'harness' if not harness else 'session_id'}); "
+            "run the link inside a session. Skipped.",
+            err=True,
+        )
+        return
+    try:
+        append_session_record(
+            _graph_path(), node_id, phase="ship",
+            harness=harness, session_id=session_id,
+            started_at=_manifest_created_at(),
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"update: ship provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+
+
 def _resolve_asserted_id(
     token: str,
     entries: list,
@@ -2978,6 +3031,7 @@ def cmd_update(
 
     projected_node: list = [None]
     reparent_old_parent: list = [None]
+    ship_stamp_node: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -3103,6 +3157,7 @@ def cmd_update(
                 node["plan_path"] = plan_path
                 if linked_size and not node.get("size"):
                     node["size"] = linked_size
+        _pr_number_before = node.get("pr_number")
         if pr_number is not None:
             # 'null' clears, like every other nullable scalar here. Without it a
             # node linked to the wrong PR could not be unlinked at all, and the
@@ -3111,6 +3166,17 @@ def cmd_update(
             node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
         elif derived_pr_number is not None:
             node["pr_number"] = derived_pr_number
+        # Ship provenance fires once on the unset->set transition. Every shipped
+        # node passes through this link regardless of which worker or skill
+        # opened the PR, so this is the choke point that records the implementer
+        # (not the merger). Detected inside the lock so two racing linkers see
+        # one transition; the stamp itself runs after the lock releases, because
+        # append_session_record takes its own lock and calling it here would
+        # deadlock. Best-effort + idempotent, never fails the update.
+        if isinstance(node.get("pr_number"), int) and not isinstance(
+            _pr_number_before, int
+        ):
+            ship_stamp_node[0] = node["id"]
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         elif derived_pr_url is not None:
@@ -3330,6 +3396,11 @@ def cmd_update(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Updated {task_id}")
+
+    # Ship provenance: the link just committed (lock released), so stamp the row
+    # here rather than inside the mutator (which would re-enter the graph lock).
+    if ship_stamp_node[0] is not None:
+        _stamp_ship_on_pr_link(ship_stamp_node[0])
 
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed
