@@ -19,10 +19,6 @@
 #   Otherwise (e.g. test_*, *_test.*): basename rule -
 #     file is excluded when its basename matches the pattern as a bash case glob
 #
-# Baseline re-anchor: if the manifest scope materially changes (include paths
-#   added or removed), add a new baseline: block in loc-ratchet-trajectory.yaml
-#   with a dated note explaining the re-anchor. This is an operational rule,
-#   not enforced mechanically. The old baseline block remains for audit trail.
 
 include:
   - hooks/
