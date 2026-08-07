@@ -6734,8 +6734,6 @@ def _stamp_and_graduate_plan(
             )
             return None
 
-    # Stamp shipped first when we have a concrete ship URL. Without the stamp,
-    # graduate below would no-op on a never-shipped plan.
     stamped_shipped = False
     if url:
         sid = session_id or "backlog-close"

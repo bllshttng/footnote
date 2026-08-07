@@ -45,9 +45,6 @@ def _warn_if_foreign_fno_repo_root(resolved: Path) -> None:
     anything) AND the cwd resolves to a different git repo. (ab-fe825805 change 4)
     """
     try:
-        # Identify the fno plugin by its marker file rather than the
-        # directory basename (a clone/worktree may be named anything). Only the
-        # plugin root is the footgun that silently repoints `fno config get`.
         if not _is_plugin_root(resolved):
             return
         # Subprocess-free short-circuit: if cwd is inside the pinned root it is
@@ -1009,16 +1006,11 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     elif post_merge_parking_lot is not None:
         raw = post_merge_parking_lot
     elif settings.obsidian.enabled:
-        # Canonical default is parking-lot.md; a legacy inbox.md that
-        # already exists wins so old captures still resolve (back-compat).
         if (root / "internal/fno/backlog/inbox.md").exists():
             raw = "internal/fno/backlog/inbox.md"
         else:
             raw = "internal/fno/backlog/parking-lot.md"
     elif (root / "internal/fno/backlog/inbox.md").exists():
-        # Back-compat: a non-vault repo that already captured deferrals to the
-        # old internal/ default keeps using that file, so upgrading never
-        # strands previously captured fu-* items (codex review, PR #424).
         raw = "internal/fno/backlog/inbox.md"
     elif (root / ".fno/backlog/inbox.md").exists():
         # Same back-compat for the non-vault .fno default.

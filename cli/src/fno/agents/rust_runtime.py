@@ -626,14 +626,6 @@ def _scrub_account_auth_at_seam(args: Sequence[str]) -> None:
     account = _spawn_flag_value(args, "--account")
     if not account:
         return
-    # A route-bearing spawn composes its own endpoint+auth+model and is parsed
-    # only by the Python spawn path (the Rust client has no ANTHROPIC_* handling,
-    # so a routed spawn never auto-routes to the binary). resolve_explicit_route
-    # reads the route key from os.environ, and a vendor may name a SCRUB_AUTH_VARS
-    # member (e.g. ANTHROPIC_AUTH_TOKEN) as its api_key_env, so scrubbing here
-    # first would strip it and report a valid route keyless only when --account is
-    # also present. The Python create lane scrubs + applies the route atomically
-    # (route-wins) itself, so the seam scrub is skipped entirely for routed spawns.
     if _is_route_bearing_spawn("spawn", args):
         return
     from fno.agents import account_env as _account_env

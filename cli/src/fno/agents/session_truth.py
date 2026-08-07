@@ -320,8 +320,6 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
 
     text = blob.decode("utf-8", "replace")
     if not text:
-        # The file exists and holds nothing yet -- the shape of a session that
-        # came up and never answered.
         return {"kind": "no-model-yet"}
     # Both harnesses terminate every record with a newline, so a window that
     # does not end in one caught the writer mid-line.

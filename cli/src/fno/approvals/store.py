@@ -647,10 +647,6 @@ class EffectStore:
             # not outlive its approval's expiration or its principal's authority.
             self._authorized_request(conn, row["request_digest"], now)
 
-            # The stored flag is what the ambiguous dispatch actually ran under.
-            # A retry adapter that newly declares remote idempotency says nothing
-            # about the send already in flight: the destination did not dedupe it,
-            # so resending under a key it never saw duplicates the effect.
             covered = bool(row["remote_idempotency"]) and adapter.remote_idempotency
             if current is EffectState.UNKNOWN and not covered:
                 if reconciliation is None:

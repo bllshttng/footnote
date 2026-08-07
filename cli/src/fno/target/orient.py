@@ -212,8 +212,6 @@ def _manifest_liveness(manifest_raw: Optional[Dict[str, Any]]) -> tuple[str, str
         # corrupted / unreadable -> claim signal unavailable, cannot confirm death
         return "live", f"claim {claim_key} unreadable (biased live)"
 
-    # No recorded claim key: owner_pid can only PROVE life (it is transient, so a
-    # dead/absent one is not proof of death - could be a live non-node target).
     if _pid_alive(raw.get("owner_pid")):
         return "live", "owner_pid alive"
     return "live", "no claim key; owner_pid transient (biased live)"
