@@ -71,7 +71,9 @@ def test_attestation_records_the_routed_model(tmp_path: Path) -> None:
         **os.environ,
         "FNO": "fno-py",
         "ANTHROPIC_MODEL": "glm-5.2[1m]",
-        "ANTHROPIC_BASE_URL": "https://api.z.ai/api/anthropic",
+        # Userinfo included on purpose: a base_url may carry a credential, and
+        # the event log is durable - neither the path nor the key may land in it.
+        "ANTHROPIC_BASE_URL": "https://sk-secret@api.z.ai/api/anthropic",
     }
     r = subprocess.run(
         ["bash", str(_SCRIPT), "code-review", "pass"],
@@ -80,8 +82,8 @@ def test_attestation_records_the_routed_model(tmp_path: Path) -> None:
     assert r.returncode == 0, r.stderr
     data = _last_event(repo)["data"]
     assert data["model"] == "glm-5.2[1m]"
-    # Host only: a base_url carries a path, which must not reach the record.
     assert data["provider"] == "api.z.ai"
+    assert "sk-secret" not in json.dumps(data) and "sk-secret" not in r.stderr
 
 
 def test_attestation_model_is_empty_not_guessed_when_unrouted(tmp_path: Path) -> None:

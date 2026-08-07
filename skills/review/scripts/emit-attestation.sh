@@ -47,13 +47,16 @@ fi
 # per-spawn role guard can see it, because the verdict is a later activity
 # inside an already-routed process. Reading the env is the only signal available
 # at emit; it reports what the environment CLAIMED, never proof of the model
-# that answered, so both stay empty on an unrouted session rather than defaulting
-# to a guess a later reader would mistake for evidence.
+# that answered, so both stay empty rather than defaulting to a guess a later
+# reader would mistake for evidence. Empty means NOT OBSERVABLE, not "primary":
+# resolve_codex_route carries a codex worker's route in `-c model=...` config
+# args with only the API key in env, so a routed codex verdict reads empty here.
 model="${ANTHROPIC_MODEL:-}"
 provider=""
 if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
   provider="${ANTHROPIC_BASE_URL#*://}"   # strip scheme
-  provider="${provider%%/*}"              # host only, no path or key material
+  provider="${provider%%/*}"              # host only, no path
+  provider="${provider##*@}"              # drop userinfo: a key in the URL must not land in the log
 fi
 
 # Build the data object with jq so a reviewer/verdict value can never break the
@@ -67,4 +70,4 @@ data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdi
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-default} provider=${provider:-anthropic}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unobserved} provider=${provider:-unobserved}" >&2

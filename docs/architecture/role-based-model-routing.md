@@ -54,7 +54,7 @@ The guard covers two role *names*. It does not cover the two things a reader rea
 
 **It does not decide the reviewer's model.** No dispatch surface anywhere passes `--role review-verdict`; the name resolves nothing because nothing declares it. The model that renders a correctness verdict is the model of the session that runs the review, and routing sets every entry in `MODEL_ENV_KEYS` for the whole worker process. So a worker routed by `build` renders its own `/code-review` verdict on the routed model, and no per-spawn role guard can see that, because the verdict is a later activity inside an already-routed process. Keep the reviewer off the authoring worker (see [review lanes](review-lanes.md)); a role table cannot enforce it.
 
-`review_attestation` records the `model` and `provider` in effect when a local verdict was emitted, so this is auditable after the fact rather than assumed. Both fields are optional and best-effort: they report what the worker's environment *claimed*, which is not proof of the model that answered.
+`review_attestation` records the `model` and `provider` in effect when a local verdict was emitted, so this is auditable after the fact rather than assumed. Both fields are optional and best-effort: they report what the worker's environment *claimed*, which is not proof of the model that answered. Empty means *not observable*, not "primary" - `resolve_codex_route` carries a codex worker's route in `-c model=...` config args and puts only the API key in the environment, so a routed codex verdict records empty on both fields.
 
 ## Config
 
