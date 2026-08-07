@@ -2674,6 +2674,7 @@ def _reg_row(name: str = "peer", hsid: Optional[str] = None):
         log_path="",
         status="spawning",
         harness_session_id=hsid,
+        mux={"session": "main", "pane_id": 7},
     )
 
 

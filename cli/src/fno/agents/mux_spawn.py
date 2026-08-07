@@ -1129,7 +1129,11 @@ def _await_pane_registration(
     while time.monotonic() < deadline:
         try:
             entry = next(
-                (e for e in load_registry(path=registry_path) if e.name == name),
+                (
+                    e
+                    for e in load_registry(path=registry_path)
+                    if e.name == name and e.mux == mux
+                ),
                 None,
             )
         except (OSError, ValueError, RegistryVersionError):
@@ -1727,9 +1731,14 @@ def dispatch_spawn_pane(
                 # error never claims "row removed" when it was not.
                 row_removed = False
                 if reaped:
+                    this_mux = {"session": session, "pane_id": pane_id}
                     try:
                         update_registry(
-                            lambda rows: [r for r in rows if r.name != name],
+                            lambda rows: [
+                                r
+                                for r in rows
+                                if not (r.name == name and r.mux == this_mux)
+                            ],
                             path=registry_path,
                         )
                         row_removed = True
