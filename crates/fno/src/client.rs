@@ -5453,13 +5453,18 @@ impl View {
         // the same `~`-prefixed pull-section shape as `~ elsewhere` / `~ backlog` -
         // rather than workspace sections an operator rightly expects to hold
         // sessions. Each mission's name already carries its `done/total` counter.
-        let missions: Vec<&SquadMeta> = self
-            .layout
-            .squads
-            .iter()
-            .filter(|s| is_mission_squad(s.id))
-            .collect();
-        if !missions.is_empty() && self.show_missions {
+        // Skip the collect entirely when the band is off (the documented reason
+        // for the toggle) - display_rows is hot, called per compose.
+        let missions: Vec<&SquadMeta> = if self.show_missions {
+            self.layout
+                .squads
+                .iter()
+                .filter(|s| is_mission_squad(s.id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !missions.is_empty() {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
@@ -10511,7 +10516,12 @@ async fn selector_keys(
                         .layout
                         .squads
                         .iter()
-                        .filter(|s| s.id != squad)
+                        // Exclude the source AND mission sentinels: a mission id
+                        // resolves to no server-side squad, so MoveTab into one is
+                        // refused. The other destination sites (Move-to-workspace,
+                        // the `p` attach picker) already guard this; the tab picker
+                        // was the holdout.
+                        .filter(|s| s.id != squad && !is_mission_squad(s.id))
                         .map(|s| s.id)
                         .take(9)
                         .collect();
@@ -10570,13 +10580,22 @@ async fn move_pick_keys(
                     // server navigates from the mover, which lives in another
                     // tab, and the move is refused.
                     MoveSrc::Pane(pid) => {
+                        // Prefer the active tab's focus leaf; if that tab has no
+                        // panes (transient during a close, or an older server with
+                        // empty TabMeta.panes), fall back to the first leaf in any
+                        // tab so a valid anchor is not missed.
                         let anchor = view
                             .layout
                             .squads
                             .iter()
                             .find(|s| s.id == sq)
-                            .and_then(|s| s.tabs.get(s.active_tab).or_else(|| s.tabs.first()))
-                            .and_then(|t| t.panes.first().map(|p| p.id));
+                            .and_then(|s| {
+                                s.tabs
+                                    .get(s.active_tab)
+                                    .and_then(|t| t.panes.first())
+                                    .or_else(|| s.tabs.iter().flat_map(|t| t.panes.first()).next())
+                                    .map(|p| p.id)
+                            });
                         match anchor {
                             Some(anchor) => {
                                 write_msg(
@@ -22141,6 +22160,23 @@ mod tests {
         v.selector = Some(0);
         selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
         assert!(v.move_pick.is_none(), "no destination squad -> no picker");
+    }
+
+    #[tokio::test]
+    async fn selector_m_picker_excludes_mission_squads() {
+        // A mission id resolves to no server-side squad, so MoveTab into one is
+        // refused; the tab-move destination list must exclude mission sentinels
+        // (the other destination sites already do).
+        let mut v = two_pane_view(); // squads 1 (footnote) + 2 (notes)
+        v.layout.squads.push(mission_meta(5, "epic  0/4"));
+        v.selector = Some(0); // squad 1
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        let (_, dsts) = v.move_pick.expect("picker opens with squad 2 available");
+        assert!(
+            !dsts.iter().any(|&id| is_mission_squad(id)),
+            "no mission sentinel in the destinations"
+        );
+        assert!(dsts.contains(&2), "the other real workspace is listed");
     }
 
     #[tokio::test]
