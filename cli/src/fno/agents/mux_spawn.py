@@ -1112,20 +1112,26 @@ def _await_pane_registration(
     name: str,
     mux: dict,
     runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    registry_path: Optional[Path] = None,
 ) -> tuple[Optional[str], str]:
     """Wait for an id-less happy-claude row to be restamped with its session id.
 
     Polls the registry for ``name`` until ``harness_session_id`` is filled (the
-    worker named itself via its SessionStart hook) or the deadline passes. A
-    confirmed-dead pane child short-circuits, so the common breakage (monitor
-    binary missing on the pane's PATH, so the pane shell errors out) fails in
-    seconds rather than the full window. Returns ``(session_id, "")`` on success
-    or ``(None, reason)`` on timeout / early death.
+    worker named itself via its SessionStart hook) or the deadline passes. Reads
+    the same ``registry_path`` the caller wrote the row through, not a
+    re-resolved default, so the poll never watches a different file than the one
+    it is waiting on. A confirmed-dead pane child short-circuits, so the common
+    breakage (monitor binary missing on the pane's PATH, so the pane shell
+    errors out) fails in seconds rather than the full window. Returns
+    ``(session_id, "")`` on success or ``(None, reason)`` on timeout / early death.
     """
     deadline = time.monotonic() + _PANE_REGISTRATION_DEADLINE_S
     while time.monotonic() < deadline:
         try:
-            entry = next((e for e in load_registry() if e.name == name), None)
+            entry = next(
+                (e for e in load_registry(path=registry_path) if e.name == name),
+                None,
+            )
         except (OSError, ValueError, RegistryVersionError):
             entry = None
         if entry is not None and entry.harness_session_id:
@@ -1711,7 +1717,7 @@ def dispatch_spawn_pane(
         # alive, so reaping it would be a regression.
         if provider == "claude" and resolved_monitor == "happy":
             registered_id, reg_reason = _await_pane_registration(
-                name, {"session": session, "pane_id": pane_id}, runner
+                name, {"session": session, "pane_id": pane_id}, runner, registry_path
             )
             if registered_id is None:
                 reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)

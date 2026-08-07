@@ -1939,7 +1939,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
     # No real SessionStart hook fires under the fake runner; script the
     # registration the bounded wait (x-1406) looks for so the spawn succeeds.
     monkeypatch.setattr(
-        mux_spawn, "_await_pane_registration", lambda name, mux, r: ("happy-sid", "")
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: ("happy-sid", "")
     )
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
@@ -2424,7 +2424,7 @@ def _happy_spawn(monkeypatch, tmp_path, **kwargs):
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
     registration = kwargs.pop("registration", ("happy-proven-sid", ""))
     monkeypatch.setattr(
-        mux_spawn, "_await_pane_registration", lambda name, mux, r: registration
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: registration
     )
     return _spawn(
         monkeypatch,
@@ -2620,7 +2620,7 @@ def test_routed_claude_pane_launches_through_happy_when_enabled(
     monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
     monkeypatch.setattr(
-        mux_spawn, "_await_pane_registration", lambda name, mux, r: ("happy-sid", "")
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: ("happy-sid", "")
     )
     settings = SettingsModel(config=ConfigBlock(model_routing=ModelRoutingBlock()))
     route = resolve_explicit_route(
@@ -2735,7 +2735,7 @@ def test_happy_pane_failure_reaps_and_raises_not_silent(
     monkeypatch.setattr(
         mux_spawn,
         "_await_pane_registration",
-        lambda name, mux, r: (None, "pane process exited before registering"),
+        lambda name, mux, r, *a, **k: (None, "pane process exited before registering"),
     )
     runner = FakeRunner()
     with pytest.raises(DispatchAskError) as ei:
@@ -2762,7 +2762,7 @@ def test_happy_pane_failure_reports_row_removal_failure_honestly(
     monkeypatch.setattr(
         mux_spawn,
         "_await_pane_registration",
-        lambda name, mux, r: (None, "no session id in window"),
+        lambda name, mux, r, *a, **k: (None, "no session id in window"),
     )
     # Let the create-write (_append) succeed, then fail the removal write.
     real_update = mux_spawn.update_registry
@@ -2795,7 +2795,7 @@ def test_happy_pane_success_returns_live_receipt(
     monkeypatch.setattr(
         mux_spawn,
         "_await_pane_registration",
-        lambda name, mux, r: ("sess-live-1", ""),
+        lambda name, mux, r, *a, **k: ("sess-live-1", ""),
     )
     result, _ = _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE))
     assert result.status == "live"
