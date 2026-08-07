@@ -94,6 +94,22 @@ pub fn hover_focus_enabled(cwd: &Path) -> bool {
         .unwrap_or(true)
 }
 
+/// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
+/// off-switch. A mission can never hold a session, so an operator who runs no
+/// epics can drop the band entirely rather than dismiss it each session.
+pub fn missions_section_enabled(cwd: &Path) -> bool {
+    mux_str(cwd, "show_missions")
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or(true)
+}
+
+/// `config.mux.show_backlog` (default ON) - the `~ backlog` lane's off-switch.
+pub fn backlog_section_enabled(cwd: &Path) -> bool {
+    mux_str(cwd, "show_backlog")
+        .and_then(|v| parse_bool(&v))
+        .unwrap_or(true)
+}
+
 /// `config.mux.attach_digest_threshold_min` (default 10) as seconds.
 pub fn threshold_secs(cwd: &Path) -> u64 {
     mux_str(cwd, "attach_digest_threshold_min")

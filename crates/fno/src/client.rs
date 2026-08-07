@@ -784,6 +784,12 @@ struct View {
     /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
+    /// `config.mux.show_missions` / `config.mux.show_backlog` (default on): drop
+    /// the `~ missions` progress band or the `~ backlog` lane entirely. Latched
+    /// once at startup; an operator who runs no epics hides the empty band rather
+    /// than collapsing it each session.
+    show_missions: bool,
+    show_backlog: bool,
     /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -1627,6 +1633,8 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
+            show_missions: true,
+            show_backlog: true,
             hover_pending: None,
             hover_row: None,
             hover_seam: None,
@@ -5446,7 +5454,7 @@ impl View {
             .iter()
             .filter(|s| is_mission_squad(s.id))
             .collect();
-        if !missions.is_empty() {
+        if !missions.is_empty() && self.show_missions {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
@@ -5496,7 +5504,7 @@ impl View {
         // ready/blocked/in-flight cards under their own header. Empty
         // (unreadable/no-work graph) renders nothing - the agents section above
         // is unaffected (AC-edge fail-open).
-        if !self.layout.backlog.is_empty() {
+        if !self.layout.backlog.is_empty() && self.show_backlog {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
@@ -7288,6 +7296,9 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
+    view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
+    view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
@@ -14548,6 +14559,38 @@ mod tests {
                 Some(ChromeHit::CycleSection(SectionKey::Missions))
             ),
             "the missions band cycles locally, never SelectSquad"
+        );
+    }
+
+    #[test]
+    fn section_toggles_hide_the_missions_and_backlog_bands() {
+        // config.mux.show_missions / show_backlog (default on) drop the bands
+        // entirely - an operator who runs no epics hides the empty missions band
+        // rather than collapsing it each session.
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        layout.squads.push(mission_meta(3, "epic  0/4"));
+        layout.backlog = vec![bcard("x-rdy", CardState::Ready)];
+        layout.backlog_lanes = vec![("ready".into(), 1)];
+        view.set_layout(layout);
+        view.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
+        let has = |v: &View, lbl: &str| {
+            v.display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Header { label, .. } if *label == lbl))
+        };
+        assert!(has(&view, "~ missions"), "missions band shown by default");
+        assert!(has(&view, "~ backlog"), "backlog band shown by default");
+        view.show_missions = false;
+        view.show_backlog = false;
+        assert!(
+            !has(&view, "~ missions"),
+            "show_missions=false hides the band"
+        );
+        assert!(
+            !has(&view, "~ backlog"),
+            "show_backlog=false hides the band"
         );
     }
 
