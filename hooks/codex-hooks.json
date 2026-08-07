@@ -72,6 +72,10 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/inside-leg-report.sh done"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/context-nudge.sh"
           }
         ]
       }
@@ -82,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/hooks/context-monitor.js"
+            "command": "node ${PLUGIN_ROOT}/hooks/spend-drift-monitor.js"
           },
           {
             "type": "command",

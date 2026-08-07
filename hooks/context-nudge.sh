@@ -29,7 +29,7 @@
 # unreadable registry is treated as non-crowned, which still nudges only on REAL
 # transcript pressure, so a registry problem can never produce a false handoff.
 # This is why context pressure has ONE measurement path; a second-hand percentage
-# whose denominator we cannot see was deleted from context-monitor.js for cause.
+# whose denominator we cannot see was deleted from spend-drift-monitor.js for cause.
 #
 # EVERY error path exits 0 with no block output. A non-zero Stop hook is not an
 # allow, and a probe/registry problem must never start blocking every session's
@@ -72,6 +72,15 @@ SESSION_ID=$(printf '%s' "$HOOK_INPUT" | sed -n \
     's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 [[ -z "$SESSION_ID" ]] && SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 
+# stop_hook_active:true means Stop re-fired after a previous block - the session
+# is mid-compaction (our block told it to compact; the summarization turn is a
+# model turn, so CC fires Stop on it) or otherwise continuing. Re-blocking loops;
+# nudging it is noise. This is the one continuation signal the Stop payload
+# carries (there is no compaction-specific field), so exit 0 the instant we see it.
+STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"stop_hook_active"[[:space:]]*:[[:space:]]*\([a-z]*\).*/\1/p' | head -1)
+[[ "$STOP_HOOK_ACTIVE" == "true" ]] && exit 0
+
 # No transcript handed to us -> not a real fire. The context check needs it; an
 # orphan-only fire on a payload with no transcript_path would fire on synthetic
 # input. Exit 0.
@@ -96,6 +105,27 @@ if command -v fno >/dev/null 2>&1; then
         *) KING_TRIGGER="$_t" ;;
     esac
 fi
+
+# ── 2b. Window gate + capacity floor (hook constants, not config). ───────────
+# Two reasons to nudge, because a percentage measures different things at
+# different window sizes. On a 1M lane the trigger is a QUALITY threshold
+# (returns diminish long before the cap); on a 200k lane the preamble alone is a
+# large fraction of the cap, so a percentage measures the preamble, not the work.
+# The gate is on window_tokens (a number the probe returns), not a harness name,
+# so a new lane classifies itself with no table to extend.
+MIN_WINDOW="400000"   # below this only the capacity branch can fire
+# RESERVE is a rung on Claude Code's own ladder, not an invented number: CC's
+# real auto-compact trigger is effectiveWindow - 13000 (absolute), warn 20000
+# below it. 80k remaining -> this nudge; 33k -> CC warn; 13k -> CC auto-compact.
+RESERVE="80000"
+
+# Flush-cadence thresholds. The plan's directive is to measure a real session
+# distribution rather than invent these - a nag that fires mid-refactor gets
+# ignored, and an ignored gate is worse than none. These are conservative
+# starting points: only substantial stale accumulation (many files, static for a
+# few turn-ends) trips it. Tune once a distribution is sampled.
+FLUSH_FILE_THRESHOLD="10"   # uncommitted files above which stale work is at risk
+FLUSH_STATIC_STOPS="3"      # consecutive turn-ends the HEAD must be unmoved
 
 # ── 3. Context reading (one probe). Unreadable -> no pressure. ────────────────
 USED_PCT=""
@@ -188,20 +218,64 @@ LATCH_DIR="${HOME}/.fno"
 mkdir -p "$LATCH_DIR" 2>/dev/null || true
 CTX_LATCH="${LATCH_DIR}/.context-nudge-ctx-${TBASE}-${BAND}"
 ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
+FLUSH_LATCH="${LATCH_DIR}/.context-nudge-flush-latch-${TBASE}-${BAND}"
+# Static-HEAD tracking is band-independent (a turn-end is a turn-end at any
+# pressure), so it keys on the transcript alone, not the band.
+FLUSH_STATE="${LATCH_DIR}/.context-nudge-flush-${TBASE}"
 
 REASON=""
 
-# ── 6. Check (a): context pressure (EVERY session). ──────────────────────────
-if [[ -n "$USED_PCT" && "$USED_PCT" -ge "$EFFECTIVE_TRIGGER" && ! -f "$CTX_LATCH" ]]; then
+# ── 6. Check (a): context pressure (EVERY session). Two branches: ─────────────
+#   quality  - large window (>= MIN_WINDOW) past the trigger (returns diminish)
+#   capacity - any window about to hit the absolute RESERVE floor (preamble-heavy
+#              lanes where a percentage measures the preamble, not the work)
+# Either sets FIRE_CTX; the once-per-band latch still gates the actual emit, so a
+# session hovering at the reserve across bands still nudges once per new band.
+FIRE_CTX=0
+if [[ -n "$USED_PCT" && -n "$WINDOW_TOKENS" ]]; then
+    if [[ "$WINDOW_TOKENS" -ge "$MIN_WINDOW" && "$USED_PCT" -ge "$EFFECTIVE_TRIGGER" ]]; then
+        FIRE_CTX=1
+    fi
+    if [[ -n "$USED_TOKENS" && $(( WINDOW_TOKENS - USED_TOKENS )) -le "$RESERVE" ]]; then
+        FIRE_CTX=1
+    fi
+fi
+if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     touch "$CTX_LATCH" 2>/dev/null || true
     if [[ "$IS_KING" -eq 1 ]]; then
         emit_event "king_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. While you still hold live workers a COMPACT beats a handoff, because it keeps your crown, session id, and mail handle, so every worker holding your handle can still reach you, whereas a successor gets a NEW handle and orphans them; /compact is a REPL built-in your Skill tool cannot call, so inject it on your own prompt line: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}. If you do hand off instead: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints."
+        # Roll up the king's neighbourhood from the same registry read (no second
+        # source). Workers are counted by the orphan check below; peers and the
+        # king above derive the same way, so the nudge states the roll-up instead
+        # of asking the king to reconstruct it. Superset is approximate (my scope
+        # starts with theirs); it degrades to silence, never to a wrong claim.
+        PEER_KINGS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
+            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
+        KING_ABOVE=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
+            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s and ($s | startswith(.crown_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
+        _rollup=""
+        [[ "$PEER_KINGS" =~ ^[0-9]+$ && "$PEER_KINGS" -gt 0 ]] && _rollup=" ${PEER_KINGS} peer king(s) also in flight."
+        [[ "$KING_ABOVE" =~ ^[0-9]+$ && "$KING_ABOVE" -gt 0 ]] && _rollup="${_rollup} A king above holds your scope."
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. While you still hold live workers a COMPACT beats a handoff, because it keeps your crown, session id, and mail handle, so every worker holding your handle can still reach you, whereas a successor gets a NEW handle and orphans them; /compact is a REPL built-in your Skill tool cannot call, so inject it on your own prompt line: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}. If you do hand off instead: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now - but /compact is a REPL built-in and your Skill tool CANNOT call it, so inject it on your own prompt line instead: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}   (the leading slash is load-bearing, and passing a brief path matters: a bare /compact at exhausted context has no headroom left to summarize). Your session id, mail handle, and claims all survive a compact, and a /target session's PreCompact handoff arms automatically on the next compact. Or wrap up the current task so the next turn is not running on stale context."
+        # Shape the ask by what already survives a compact. plan_path is read
+        # lazily here - only on a real fire, not every Stop - and best-effort: a
+        # missing read is the "neither" shape, never a skipped nudge. Reading it
+        # for wording (not gating) keeps the arm-handoff invariant intact: a king
+        # pass, which has no such manifest, still fires on real pressure above.
+        PLAN_PATH=""
+        if command -v fno >/dev/null 2>&1; then
+            PLAN_PATH=$(with_timeout 3 fno state show --type target --field plan_path 2>/dev/null | head -1 || true)
+        fi
+        _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now - but /compact is a REPL built-in and your Skill tool CANNOT call it, so inject it on your own prompt line instead: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}   (the leading slash is load-bearing, and passing a brief path matters: a bare /compact at exhausted context has no headroom left to summarize). Your session id, mail handle, and claims all survive a compact."
+        if [[ -n "$PLAN_PATH" ]]; then
+            REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
+        else
+            REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
+        fi
     fi
 fi
 
@@ -239,6 +313,59 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         else
             REASON="$ORPHAN_REASON"
         fi
+    fi
+fi
+
+# ── 7b. Check (c): flush-cadence (work only in volatile state). ───────────────
+# Carveouts, filed nodes, PR bodies, commits and SUMMARY.md are written at the
+# END of a unit of work; a session that never reaches the end records nothing
+# (a reign can die mid-flight holding two PRs, unpushed, in a local worktree).
+# git is only the code-vertical detector; the rule is vertical-agnostic - work
+# in volatile state moves to a durable store - so the check degrades to silence
+# when there is no repo (an active epic runs growth, marketing, finance and ops
+# with no git tree). Reports a FILE count, never a commit count: "0 commits this
+# session" reads as "nothing happened" when it means "everything is still in the
+# tree" - the empty-result trap in its most dangerous form.
+FIRE_FLUSH=0
+FLUSH_DIRTY=0
+FLUSH_STATIC=0
+_porcelain=$(git -C "$REPO_ROOT" status --porcelain 2>/dev/null || true)
+if [[ -n "$_porcelain" ]]; then
+    FLUSH_DIRTY=$(printf '%s' "$_porcelain" | grep -c . 2>/dev/null || printf '%s' 0)
+    case "$FLUSH_DIRTY" in ''|*[!0-9]*) FLUSH_DIRTY=0 ;; esac
+fi
+_head=$(git -C "$REPO_ROOT" rev-parse HEAD 2>/dev/null || true)
+# Count consecutive Stops that saw the same HEAD. No HEAD (no commits / no git)
+# -> can't measure staleness -> skip, degrade to silence.
+if [[ -n "$_head" ]]; then
+    _stored=""
+    [[ -f "$FLUSH_STATE" ]] && _stored=$(cat "$FLUSH_STATE" 2>/dev/null || true)
+    _stored_head=""; _stored_count=0
+    if [[ "$_stored" == *' '* ]]; then
+        _stored_head="${_stored%% *}"
+        _sc="${_stored#* }"
+        case "$_sc" in ''|*[!0-9]*) ;; *) _stored_count="$_sc" ;; esac
+    fi
+    if [[ "$_head" == "$_stored_head" ]]; then
+        FLUSH_STATIC=$((_stored_count + 1))
+    else
+        FLUSH_STATIC=1
+    fi
+    printf '%s %s\n' "$_head" "$FLUSH_STATIC" > "$FLUSH_STATE" 2>/dev/null || true
+    if [[ "$FLUSH_DIRTY" -gt "$FLUSH_FILE_THRESHOLD" \
+        && "$FLUSH_STATIC" -ge "$FLUSH_STATIC_STOPS" && ! -f "$FLUSH_LATCH" ]]; then
+        FIRE_FLUSH=1
+    fi
+fi
+if [[ "$FIRE_FLUSH" -eq 1 ]]; then
+    touch "$FLUSH_LATCH" 2>/dev/null || true
+    emit_event "context_flush_nudge" \
+        "{\"dirty_files\":${FLUSH_DIRTY},\"static_stops\":${FLUSH_STATIC},\"session_id\":\"${SESSION_ID}\"}"
+    FLUSH_REASON="flush: ${FLUSH_DIRTY} files have uncommitted changes and the tree has not moved in ${FLUSH_STATIC} turn-ends, so this work exists only in this session's volatile state - a compact or a crashed pane loses it. Fix what you found if it is small: commit it now, in this PR, as its own atomic commit. File a carveout ONLY for what is genuinely separable: 'fno carveout add -k deferred \"...\"'. A session that never reaches the end of a unit of work records nothing."
+    if [[ -n "$REASON" ]]; then
+        REASON="${REASON}  ||  ${FLUSH_REASON}"
+    else
+        REASON="$FLUSH_REASON"
     fi
 fi
 

@@ -68,37 +68,51 @@ cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events al
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
 write_registry() {
-  local king_crown="$1" has_children="$2"
-  local children='[]'
+  local king_crown="$1" has_children="$2" has_peer="${3:-no}"
+  local children='[]' peers='[]'
   if [ "$has_children" = "yes" ]; then
     children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'"},
                {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$KING_SID"'"}]'
+  fi
+  # A peer king: a DIFFERENT crowned session with a disjoint scope, for the
+  # king roll-up (peers / king-above) test.
+  if [ "$has_peer" = "yes" ]; then
+    peers='[{"name":"peer-king","harness":"claude","cwd":"/tmp","log_path":"/tmp/p","status":"live","short_id":"p","harness_session_id":"peer-sid","crown_level":1,"crown_scope":"peer-scope","crown_grantor":"human"}]'
   fi
   local crown_level='null' crown_scope='null' crown_grantor='null'
   if [ "$king_crown" = "yes" ]; then
     crown_level='1'; crown_scope="\"$SCOPE\""; crown_grantor='"human"'
   fi
-  jq -n --argjson children "$children" --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
+  jq -n --argjson children "$children" --argjson peers "$peers" \
+    --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
     schema_version: 13,
     agents: ( [{
       name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"'"$KING_SID"'",
       harness_session_id:"'"$KING_SID"'",
       crown_level:$cl, crown_scope:$cs, crown_grantor:$cg
-    }] + $children )
+    }] + $children + $peers )
   }' > "$SBX/.fno/agents/registry.json"
 }
 
 # A transcript with one assistant usage line: input_tokens sets the pct against
 # the 1M window (claude-sonnet-4-6). 500000 -> 50%, 300000 -> 30%.
-write_transcript() {  # write_transcript <path> <input_tokens>
-  jq -nc --argjson t "$2" '{type:"assistant",message:{model:"claude-sonnet-4-6",usage:{input_tokens:$t,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$1"
+write_transcript() {  # write_transcript <path> <input_tokens> [model]
+  local _m="${3:-claude-sonnet-4-6}"
+  jq -nc --argjson t "$2" --arg m "$_m" '{type:"assistant",message:{model:$m,usage:{input_tokens:$t,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$1"
 }
 
 # Build a real-shape Stop payload pointing at a sandbox transcript + the session.
 payload() {  # payload <transcript-path>
   jq -nc --arg t "$1" --arg s "$KING_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:false}'
+}
+
+# A Stop that re-fires after a previous block (mid-compaction): stop_hook_active
+# is the one continuation signal the payload carries, and the hook must exit on it.
+payload_compact() {  # payload_compact <transcript-path>
+  jq -nc --arg t "$1" --arg s "$KING_SID" \
+    '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:true}'
 }
 
 run_hook() {  # run_hook <payload> ; sets OUT, RC
@@ -213,6 +227,102 @@ mkdir -p "$SBX/no-fno-cwd"; cd "$SBX/no-fno-cwd"   # cwd with NO .fno of its own
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_absent "AC18: second fire (different cwd) is latched, no re-block" "$OUT" '"decision":"block"'
 cd "$SBX"                                 # restore for any trailing steps
+
+# === AC19: window gate - the quality branch needs a large window ===============
+# A 200k window (unlisted model) at 55% used does NOT fire quality (MIN_WINDOW),
+# and with 90k remaining it clears the RESERVE floor too, so the hook is silent.
+# The same percentage on a 1M window would block (covered by AC5/AC17).
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry no no
+write_transcript "$SBX/small.jsonl" 110000 "gpt-5-codex"   # 200k window, 55%, 90k left
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_eq     "AC19: small window high pct exits 0" "$RC" "0"
+assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
+
+# === AC20: capacity branch fires on a small window near the floor ==============
+# Same 200k window, but 60k remaining (<= RESERVE): capacity fires even though
+# quality can never fire on this window. Latches once per band like the rest.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
+assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
+
+# === AC21: a compaction re-fire (stop_hook_active:true) is silent ==============
+# A Stop that re-fires after a previous block is mid-compaction: re-blocking
+# loops, nudging is noise. The hook exits before any check, even on a payload
+# that would otherwise block.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/t.jsonl" 550000                      # 55% on 1M would block
+run_hook "$(payload_compact "$SBX/t.jsonl")"
+assert_eq     "AC21: compaction re-fire exits 0" "$RC" "0"
+assert_absent "AC21: compaction re-fire no block" "$OUT" '"decision":"block"'
+
+# === AC22: flush-cadence - dirty tree static across turns nudges to commit ====
+# Isolated git repo (the shared sandbox is not a repo, so the other checks never
+# see a dirty tree). >10 uncommitted files, HEAD unmoved across 3 turn-ends ->
+# block whose reason quotes a FILE count, never a commit count; latches per band.
+FLUSH_REPO="$SBX/flush-repo"
+mkdir -p "$FLUSH_REPO"
+git -C "$FLUSH_REPO" init -q
+git -C "$FLUSH_REPO" config user.email t@t.t
+git -C "$FLUSH_REPO" config user.name t
+git -C "$FLUSH_REPO" commit -q --allow-empty -m base      # a HEAD to track
+rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "x$i" > "$FLUSH_REPO/file$i.txt"; done
+write_transcript "$SBX/low.jsonl" 300000                   # 30% -> isolate from ctx
+cd "$FLUSH_REPO"
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 1: static=1
+assert_absent "AC22: stop 1 no flush block" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 2: static=2
+assert_absent "AC22: stop 2 no flush block" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 3: static=3 -> fires
+assert_contains "AC22: stop 3 flush blocks" "$OUT" '"decision":"block"'
+assert_contains "AC22: message quotes a file count" "$OUT" '12 files'
+assert_contains "AC22: message names uncommitted work" "$OUT" 'uncommitted'
+assert_absent "AC22: never a commit-count phrasing" "$OUT" 'commits this session'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 4: latched
+assert_absent "AC22: stop 4 latched (once per band)" "$OUT" '"decision":"block"'
+cd "$SBX"
+
+# === AC23: clean tree -> no flush output =====================================
+rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+git -C "$FLUSH_REPO" add -A && git -C "$FLUSH_REPO" commit -q -m "land the work"
+write_transcript "$SBX/low.jsonl" 300000
+cd "$FLUSH_REPO"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_absent "AC23: clean tree no flush block" "$OUT" '"decision":"block"'
+cd "$SBX"
+
+# === AC24: delta-by-shape - plan_path sets the wording ========================
+# A /target session (plan_path bound) gets the flush wording; a bare session
+# (no plan, no crown) gets the write-a-canon-doc wording. Same pressure, only
+# the ask changes. plan_path comes from the target manifest, read best-effort.
+rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+write_registry no no
+printf -- '---\nplan_path: /plans/test.md\n---\n' > "$SBX/.fno/target-state.md"
+write_transcript "$SBX/t.jsonl" 500000
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC24: plan_path set -> plan-bound wording" "$OUT" 'plan bound'
+assert_contains "AC24: plan-bound wording names SUMMARY.md" "$OUT" 'SUMMARY.md'
+# no manifest -> neither shape -> canon-doc wording
+rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC24: no plan -> full-doc (canon doc) wording" "$OUT" 'canon doc'
+
+# === AC25: king roll-up names peers (computed, not asked for) =================
+# The king message states the neighbourhood roll-up from the same registry read.
+# A peer king (disjoint scope) surfaces in the message; an isolated king gets no
+# roll-up clutter (existing AC5/AC14 cover the zero-peer case unchanged).
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry yes no yes                              # crowned king + 1 peer king
+write_transcript "$SBX/t.jsonl" 500000
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
 
 echo ""
 echo "================================"
