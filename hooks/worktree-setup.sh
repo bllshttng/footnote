@@ -69,37 +69,26 @@ if [[ -z "$WORKTREE_PATH" ]]; then
         [[ -n "$_gd" && -n "$_gcd" && "$_gd" != "$_gcd" ]] && _is_canonical=0
     fi
     if [[ "$_is_canonical" == "1" ]]; then
-        # A `name` with no `path` is a create request CC has already
-        # materialized: it pre-creates `<repo>/.claude/worktrees/<name>` before
-        # firing the hook, so adopt that path and let the normal flow relocate
-        # (external policy) and run setup. Deferring with a non-zero exit
-        # instead leaves the pre-created worktree bare - no relocation, no .fno
-        # symlink, no deps. A `never` repo still aborts, because adopting there
-        # would set up the very worktree the policy refuses. Only a payload with
-        # NEITHER path nor name is the designate-cwd-as-a-worktree case this
-        # guard exists for.
+        # A `name` with no `path` is a CREATE request CC has not materialized
+        # yet; both `claude --worktree <name>` and the EnterWorktree tool arrive
+        # this way from the canonical checkout. Aborting those refuses a
+        # legitimate creation, so defer to CC's own flow with a non-zero exit -
+        # the same "let CC handle it" idiom the MAIN_REPO check below uses. A
+        # `never` repo still aborts, because deferring there would create the
+        # very worktree the policy refuses. Only a payload with NEITHER path nor
+        # name is the designate-cwd-as-a-worktree case this guard exists for.
         if [[ -n "$_WT_NAME" && "$_WT_POLICY" != "never" ]]; then
-            _cc_default="$_gate_repo/.claude/worktrees/$_WT_NAME"
-            if [[ -d "$_cc_default" ]]; then
-                WORKTREE_PATH="$_cc_default"
-            else
-                echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
-                exit 1
-            fi
+            echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
+            exit 1
         elif [[ -n "$_WT_NAME" && "$_WT_POLICY" == "never" ]]; then
             # Named create on a `never` repo aborts too; name policy, not isolation.
             echo "WorktreeCreate: create request for '$_WT_NAME' on a worktree.policy=never repo; policy forbids worktrees, refusing." >&2
             exit 0
         fi
-        # No name (the never-policy branch already exited above) is the
-        # designate-cwd case this guard exists for; an adopted path falls
-        # through to the normal setup flow.
-        if [[ -z "$WORKTREE_PATH" ]]; then
-            echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
-            exit 0
-        fi
+        echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
+        exit 0
     fi
-    [[ -z "$WORKTREE_PATH" ]] && WORKTREE_PATH="$(pwd)"
+    WORKTREE_PATH="$(pwd)"
 fi
 # Policy gate, BEFORE the cd below. Two things force it here rather than later:
 # the cd exits non-zero when CC has not pre-created the path, and per the
