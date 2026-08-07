@@ -59,7 +59,7 @@ Spawn for citizens, harness subagent for limbs - the limb for one-shot work you 
 Neither is always correct; a limb is observable only (`fno agents top --subagents`), not addressable.
 Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane, so it is the fallback when a worker's Skill-tool self-invocation is refused: the king's `fno mail send <worker> --raw '/<verb>'` fires the verb at the worker's prompt line (a wrapped reply does NOT - it relies on the worker pulling its own trigger, which is the unreliable half; no live king -> advisory self-review; `docs/architecture/review-lanes.md`). The same property means a capability probe sent over mail can only test the user-triggered path, never autonomous action.
+**Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane, so it is the fallback when a worker's Skill-tool self-invocation is refused: the king's `fno mail send <worker> --raw '/<verb>'` fires it at the worker's prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A mail probe can only test the user-triggered path, never autonomous action.
 
 **Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.
 

@@ -704,6 +704,10 @@ pub const KNOWN_EVENT_KINDS: &[&str] = &[
     "agent_deliver_injected",
     "agent_deliver_demoted",
     "agent_deliver_status_write_failed",
+    // Unwrapped-injection audit (mail-inject binary + mux pane, x-c24d): an
+    // agent_raw_inject records a payload delivered without the <fno_mail>
+    // envelope, so the provenance marker survives in the ledger, not transcript.
+    "agent_raw_inject",
     // Active-backlog mission drain supervisor (daemon-emitted): the drain tick
     // panicked and the supervisor is restarting it with backoff. The drain
     // decision events (active_backlog_dispatched / _parked / _skip) are

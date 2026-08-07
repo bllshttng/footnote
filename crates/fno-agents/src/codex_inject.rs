@@ -262,13 +262,10 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
     while let Some(a) = it.next() {
         match a.as_str() {
             "--session" => {
-                thread_id = it
-                    .next()
-                    .map(String::clone)
-                    .or_else(|| {
-                        eprintln!("review-start: --session needs a value");
-                        None
-                    });
+                thread_id = it.next().map(String::clone).or_else(|| {
+                    eprintln!("review-start: --session needs a value");
+                    None
+                });
             }
             "--target" => {
                 target_raw = it.next().cloned();
@@ -675,7 +672,9 @@ mod tests {
         // baseBranch + detached
         let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
             "T1",
-            &ReviewTarget::BaseBranch { branch: "main".into() },
+            &ReviewTarget::BaseBranch {
+                branch: "main".into(),
+            },
             ReviewDelivery::Detached,
         ))
         .unwrap();
@@ -686,7 +685,10 @@ mod tests {
         // commit (with title)
         let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
             "T1",
-            &ReviewTarget::Commit { sha: "abc".into(), title: Some("t".into()) },
+            &ReviewTarget::Commit {
+                sha: "abc".into(),
+                title: Some("t".into()),
+            },
             ReviewDelivery::Inline,
         ))
         .unwrap();
@@ -697,7 +699,9 @@ mod tests {
         // custom
         let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
             "T1",
-            &ReviewTarget::Custom { instructions: "focus on x".into() },
+            &ReviewTarget::Custom {
+                instructions: "focus on x".into(),
+            },
             ReviewDelivery::Inline,
         ))
         .unwrap();
@@ -727,19 +731,29 @@ mod tests {
         );
         assert_eq!(
             parse_review_target("baseBranch:main"),
-            Some(ReviewTarget::BaseBranch { branch: "main".into() })
+            Some(ReviewTarget::BaseBranch {
+                branch: "main".into()
+            })
         );
         assert_eq!(
             parse_review_target("commit:abc|title"),
-            Some(ReviewTarget::Commit { sha: "abc".into(), title: Some("title".into()) })
+            Some(ReviewTarget::Commit {
+                sha: "abc".into(),
+                title: Some("title".into())
+            })
         );
         assert_eq!(
             parse_review_target("commit:abc"),
-            Some(ReviewTarget::Commit { sha: "abc".into(), title: None })
+            Some(ReviewTarget::Commit {
+                sha: "abc".into(),
+                title: None
+            })
         );
         assert_eq!(
             parse_review_target("custom:focus on x"),
-            Some(ReviewTarget::Custom { instructions: "focus on x".into() })
+            Some(ReviewTarget::Custom {
+                instructions: "focus on x".into()
+            })
         );
         assert_eq!(parse_review_target("bogus"), None);
     }
