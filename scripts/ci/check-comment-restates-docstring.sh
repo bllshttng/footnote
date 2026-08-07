@@ -30,17 +30,26 @@
 # Advisory on first landing: always exits 0, findings printed to stdout. The
 # lint never auto-deletes; it reports and a human cuts.
 #
+# Reading protocol (load-bearing): the flag set is a READING LIST, never a fix
+# list. Measured precision is 10 lossless cuts out of 172 findings (5.8%); the
+# other 162 share vocabulary with the docstring but carry unique purpose
+# (concurrency guards, edge cases, per-harness behavior, ponytail annotations)
+# the docstring does not cover. A human decides every cut, and this tool has no
+# authority to propose deletion. Treating the findings as a TODO and deleting
+# them wholesale would strip exactly the load-bearing comments the policy
+# reserves comments for. Flagging at 0.50 is recall; the lossless cut bar sits
+# above it on purpose, and the gap between them is the finding.
+#
 # Graduation (when this starts failing CI, if ever): it becomes a blocking
 # gate - exit 1 on any finding - only after it runs CLEAN (zero findings)
-# across a run of real PRs once the 172-finding baseline is cut, proving new
-# code is not reintroducing the pattern. Until that clean run it stays
-# advisory. If real-PR runs keep surfacing low-precision findings (a block
-# that overlaps its docstring yet carries unique info), it stays advisory for
-# good, and its value is then the periodic scan that surfaces reading-list
-# candidates rather than a gate. Do not delete this as dead weight while it is
-# advisory: this script is the only place the docstring-duplication axis is
-# encoded, and losing it is what lets the refuted density and line-below
-# instruments get rebuilt.
+# across a run of real PRs once the 172-finding baseline is cut. At 5.8%
+# precision that clean-run trigger may never fire, because most findings are
+# real comments a human should keep. That is the stated expectation, not a
+# failure: the tool earns its keep as the scan that holds the docstring-
+# duplication axis, and a higher flag floor can be measured on real PRs if
+# blocking is ever wanted. Do not delete this as dead weight while it is
+# advisory: this script is the only place the axis is encoded, and losing it
+# is what lets the refuted density and line-below instruments get rebuilt.
 #
 # Usage:
 #   bash scripts/ci/check-comment-restates-docstring.sh [file_or_dir ...]
