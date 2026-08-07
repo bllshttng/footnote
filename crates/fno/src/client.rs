@@ -4751,6 +4751,45 @@ impl View {
                 || self.status_on)
     }
 
+    /// A centered, inverse-video name-entry modal for the create / rename /
+    /// recruit inputs. Those used to paint the bottom-left chrome row, where they
+    /// sat outside the operator's field of view and read as "nothing happened";
+    /// centering on a mid-screen inverse-video line puts the prompt where the
+    /// operator is looking and names its target. The bottom chrome row stays
+    /// blanked so a stale status line never shows under the modal.
+    fn draw_name_modal(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        label: &str,
+        name: &str,
+        hint: Option<&str>,
+    ) {
+        for c in 0..cols {
+            cells[(rows - 1) * cols + c] = Cell::default();
+        }
+        let r = rows / 2;
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let text = match hint {
+            Some(h) => format!(" {label}: {name}_  ({h})"),
+            None => format!(" {label}: {name}_"),
+        };
+        let chars: Vec<char> = text.chars().collect();
+        let pad = cols.saturating_sub(chars.len()) / 2;
+        for (i, &ch) in chars.iter().take(cols).enumerate() {
+            let col = (pad + i).min(cols.saturating_sub(1));
+            cells[r * cols + col] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::INVERSE | cell_flags::BOLD,
+            };
+        }
+    }
+
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         if !self.bottom_row_is_chrome() {
             return;
@@ -4761,65 +4800,42 @@ impl View {
             self.draw_confirm_line(cells, rows, cols, c);
             return;
         }
-        // The new-workspace name input overlays the row while open (x-9e5e),
-        // above search/hint/status - the operator is mid-entry.
+        // The new-workspace name input is a centered modal (x-9e5e); the operator
+        // is mid-entry, so it sits above search/hint/status.
         if let Some(name) = &self.create {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
-            let text = format!(" new workspace: {name}_");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
             return;
         }
-        // The rename name input (x-c150 tab; widened x-96e8 to squads), same
-        // overlay discipline as the create input above; the hint spells out the
-        // blank-clears semantics. The noun tracks the target so the operator
-        // sees what they are renaming.
+        // The rename input (x-c150 tab; widened x-96e8 to squads): the noun tracks
+        // the target so the operator sees what they are renaming, and the hint
+        // spells out the blank-clears semantics.
         if let Some((target, name)) = &self.rename {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
             let noun = match target {
                 RenameTarget::Tab(_) => "tab",
                 RenameTarget::Squad(_) => "workspace",
             };
-            let text = format!(" rename {noun}: {name}_ (empty resets to auto)");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(
+                cells,
+                rows,
+                cols,
+                &format!("rename {noun}"),
+                name,
+                Some("empty resets to auto"),
+            );
             return;
         }
-        // The recruit workspace-name input (x-8f11): same overlay discipline; the
-        // hint names how many marked agents will join (create-if-absent).
+        // The recruit workspace-name input (x-8f11): the hint names how many
+        // marked agents will join (create-if-absent).
         if let Some(name) = &self.recruit {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
             let n = self.marks.len();
-            let text = format!(" recruit {n} into: {name}_ (create-if-absent)");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(
+                cells,
+                rows,
+                cols,
+                &format!("recruit {n} into"),
+                name,
+                Some("create-if-absent"),
+            );
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
@@ -15952,6 +15968,45 @@ mod tests {
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
             vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+        );
+    }
+
+    #[test]
+    fn name_entry_prompt_renders_centered_naming_its_target() {
+        // The create/rename/recruit name inputs used to paint the bottom-left
+        // chrome row (plain BOLD, outside the operator's field of view). They now
+        // render as a centered inverse-video modal that names the target.
+        let mut v = two_pane_view();
+        v.rename = Some((RenameTarget::Squad(1), "renamed".into()));
+        let (rows, cols) = (v.term.0 as usize, v.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        v.draw_bottom_row(&mut cells, rows, cols);
+        let mid = rows / 2;
+        let midline: String = cells[mid * cols..(mid + 1) * cols]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert!(
+            midline.contains("rename workspace"),
+            "centered modal names its target: {midline:?}"
+        );
+        assert!(
+            midline.contains("renamed_"),
+            "shows the in-progress name + cursor: {midline:?}"
+        );
+        assert!(
+            cells[mid * cols..(mid + 1) * cols]
+                .iter()
+                .any(|c| c.flags & cell_flags::INVERSE != 0),
+            "the centered modal is inverse-video, not the old plain bottom row"
+        );
+        let bottom: String = cells[(rows - 1) * cols..rows * cols]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert!(
+            !bottom.contains("rename"),
+            "the prompt left the bottom row it used to share"
         );
     }
 
