@@ -177,7 +177,10 @@ def test_claude_agents_json_total_row_drop_warns_once_about_drift(monkeypatch):
     per-row warnings and an empty map that reads exactly like "no agents
     running". A total drop is a different claim from a partial one and says so.
     """
-    payload = [{"agentId": "907fc8c5", "state": "working"} for _ in range(3)]
+    payload = [
+        {"agentId": "907fc8c5", "kind": "background", "state": "working"}
+        for _ in range(3)
+    ]
 
     def _fake(argv, **kwargs):  # noqa: ARG001
         return _fake_completed(stdout=json.dumps(payload))
@@ -186,7 +189,30 @@ def test_claude_agents_json_total_row_drop_warns_once_about_drift(monkeypatch):
     result, warnings = claude_mod.claude_agents_json()
 
     assert result == {}
-    assert any("0 of 3 rows parsed" in w for w in warnings), warnings
+    assert any("0 of 3 agent rows parsed" in w for w in warnings), warnings
+
+
+def test_claude_agents_json_all_interactive_rows_is_not_drift(monkeypatch):
+    """Peer-review finding: an operator with no agents running is not drift.
+
+    claude lists the operator's own interactive sessions in the same array and
+    those carry no id by design, so counting them toward the total-drop claim
+    cries schema drift at a perfectly healthy machine - the false alarm that
+    teaches people to ignore the warning this exists to make loud.
+    """
+    payload = [
+        {"pid": 69787, "kind": "interactive", "name": "repo-50"},
+        {"pid": 75516, "kind": "interactive", "name": "repo-74"},
+    ]
+
+    def _fake(argv, **kwargs):  # noqa: ARG001
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {}
+    assert not any("schema drift" in w for w in warnings), warnings
 
 
 def test_claude_agents_json_malformed_alias_does_not_mask_a_valid_one(monkeypatch):

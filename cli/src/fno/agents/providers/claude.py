@@ -1323,9 +1323,20 @@ def claude_agents_json(
     # shipped unnoticed once already: 42 warnings into a list most callers never
     # print, and an empty map that reads exactly like "no agents running". A
     # total drop is a different claim from a partial one, so it says so once.
-    if rows and not out_map:
+    #
+    # Only AGENT rows count toward that claim. claude lists the operator's own
+    # interactive sessions in the same array, and those carry no id by design -
+    # counting them would cry drift at a machine that simply has no agents
+    # running, which is the false alarm that teaches people to ignore the
+    # warning. `kind` is the discriminator rather than "did it have an id",
+    # because a drift that renamed BOTH the id and status keys still says
+    # `background` and must still be caught.
+    agent_rows = sum(
+        1 for row in rows if isinstance(row, dict) and row.get("kind") != "interactive"
+    )
+    if agent_rows and not out_map:
         warnings.append(
-            f"claude agents --json: 0 of {len(rows)} rows parsed; "
+            f"claude agents --json: 0 of {agent_rows} agent rows parsed; "
             "schema drift? live_status unavailable for every agent"
         )
     return out_map, warnings

@@ -60,7 +60,7 @@ Failure modes that the augmentation step catches internally and surfaces as warn
 - non-zero claude exit
 - `json.JSONDecodeError`
 - structural drift in the response shape (no short id under any accepted key)
-- a TOTAL row drop (zero rows parsed out of a non-empty response) adds one summary warning naming the count, because an empty map otherwise reads exactly like "no agents running"
+- a TOTAL drop of the AGENT rows (zero parsed, counting only rows whose `kind` is not `interactive`) adds one summary warning naming the count, because an empty map otherwise reads exactly like "no agents running". The operator's own interactive sessions appear in the same array and carry no id by design, so they are excluded: counting them would cry drift at a machine that simply has no agents running.
 - live-status sentinel drift (a resolved value outside `{Working, Needs input, Idle, Done}` triggers a forensic warning but passes through unchanged)
 
 `read.py` does NOT add a broad `except Exception` around the call — programmer errors should crash visibly. The contract is: `claude_agents_json` returns `({}, warnings)` on every documented failure; anything else escaping is a bug.
