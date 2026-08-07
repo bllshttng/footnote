@@ -704,12 +704,12 @@ def test_append_session_record_appends(tmp_path, monkeypatch):
 
     found, added = append_session_record(
         g, "ab-add00001", phase="think", harness="claude",
-        session_id="S", at="2026-07-12T03:00:00Z",
+        session_id="S", ended_at="2026-07-12T03:00:00Z",
     )
     assert (found, added) == (True, True)
     rows = _node_sessions(g, "ab-add00001")
     assert rows == [{"phase": "think", "harness": "claude",
-                     "session_id": "S", "at": "2026-07-12T03:00:00Z"}]
+                     "session_id": "S", "ended_at": "2026-07-12T03:00:00Z"}]
 
 
 def test_append_session_record_same_session_two_phases(tmp_path, monkeypatch):
@@ -726,20 +726,20 @@ def test_append_session_record_same_session_two_phases(tmp_path, monkeypatch):
     assert all(r["session_id"] == "S" for r in rows)
 
 
-def test_append_session_record_dedup_preserves_first_at(tmp_path, monkeypatch):
-    """AC5-FR: a retry of the same (phase,harness,session) is added:false, first `at` kept."""
+def test_append_session_record_dedup_preserves_first_ended_at(tmp_path, monkeypatch):
+    """AC5-FR: a retry of the same (phase,harness,session) is added:false, first ended_at kept."""
     g = _make_graph(tmp_path, [{"id": "ab-add00003", "title": "t"}])
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record
 
     append_session_record(g, "ab-add00003", phase="do", harness="codex",
-                          session_id="S", at="2026-07-12T04:00:00Z")
+                          session_id="S", ended_at="2026-07-12T04:00:00Z")
     found, added = append_session_record(g, "ab-add00003", phase="do", harness="codex",
-                                         session_id="S", at="2026-07-12T05:00:00Z")
+                                         session_id="S", ended_at="2026-07-12T05:00:00Z")
     assert (found, added) == (True, False)
     rows = _node_sessions(g, "ab-add00003")
     assert len(rows) == 1
-    assert rows[0]["at"] == "2026-07-12T04:00:00Z"  # first observation owns `at`
+    assert rows[0]["ended_at"] == "2026-07-12T04:00:00Z"  # first observation owns ended_at
 
 
 def test_append_session_record_takeover_same_phase_diff_session(tmp_path, monkeypatch):
@@ -785,13 +785,13 @@ def test_append_session_record_rejects_empty_identity(tmp_path, monkeypatch, har
         append_session_record(g, "ab-add00007", phase="do", harness=harness, session_id=sid)
 
 
-@pytest.mark.parametrize("bad_at", [
+@pytest.mark.parametrize("bad_ended_at", [
     "not-a-timestamp",
     "2026-07-12",              # date-only, no time/zone
     "2026-07-12T03:00:00",     # naive (no tz)
     "2026-07-12T03:00:00-07:00",  # non-UTC offset
 ])
-def test_append_session_record_rejects_non_utc_at(tmp_path, monkeypatch, bad_at):
+def test_append_session_record_rejects_non_utc_ended_at(tmp_path, monkeypatch, bad_ended_at):
     """The UTC contract rejects date-only, naive, and non-UTC-offset timestamps."""
     g = _make_graph(tmp_path, [{"id": "ab-add00008", "title": "t"}])
     _patch_graph(monkeypatch, g)
@@ -799,22 +799,22 @@ def test_append_session_record_rejects_non_utc_at(tmp_path, monkeypatch, bad_at)
 
     with pytest.raises(ValueError):
         append_session_record(g, "ab-add00008", phase="do", harness="claude",
-                              session_id="S", at=bad_at)
+                              session_id="S", ended_at=bad_ended_at)
 
 
-@pytest.mark.parametrize("good_at,stored", [
+@pytest.mark.parametrize("good_ended_at,stored", [
     ("2026-07-12T03:00:00Z", "2026-07-12T03:00:00Z"),
     ("2026-07-12T03:00:00+00:00", "2026-07-12T03:00:00Z"),  # normalized to Z
 ])
-def test_append_session_record_accepts_utc_at(tmp_path, monkeypatch, good_at, stored):
+def test_append_session_record_accepts_utc_ended_at(tmp_path, monkeypatch, good_ended_at, stored):
     """A tz-aware UTC timestamp is accepted and normalized to the canonical `...Z` form."""
     g = _make_graph(tmp_path, [{"id": "ab-add00009", "title": "t"}])
     _patch_graph(monkeypatch, g)
     from fno.graph.store import append_session_record, read_graph
 
     append_session_record(g, "ab-add00009", phase="do", harness="claude",
-                          session_id="S", at=good_at)
-    assert read_graph(g)[0]["sessions"][0]["at"] == stored
+                          session_id="S", ended_at=good_ended_at)
+    assert read_graph(g)[0]["sessions"][0]["ended_at"] == stored
 
 
 # -- stamp_session_for_pr: resolve the unique PR-linked node (Locked Decision 9) --
@@ -1320,7 +1320,9 @@ def test_cli_session_add_requires_node_or_pr(tmp_path, monkeypatch):
 
 
 def test_cli_session_add_uses_ambient_identity(tmp_path, monkeypatch):
-    """AC1-HP: `session add` defaults harness+session from ambient env; exits 0."""
+    """AC1-HP: `session add` defaults harness+session from ambient env; exits 0.
+    Without --ended-at the row is identity-only: no end is recorded rather than
+    the stamp-fire time, which the honest name forbids."""
     from typer.testing import CliRunner
     import fno.graph.cli as C
     from fno.graph.store import read_graph
@@ -1334,9 +1336,7 @@ def test_cli_session_add_uses_ambient_identity(tmp_path, monkeypatch):
     r = CliRunner().invoke(C.cli, ["session", "add", "ab-cli00001", "--phase", "think"])
     assert r.exit_code == 0, r.output
     rows = read_graph(g)[0]["sessions"]
-    assert rows == [{"phase": "think", "harness": "claude",
-                     "session_id": "sess-cli-1", "at": rows[0]["at"]}]
-    assert rows[0]["at"]  # a timestamp was stamped
+    assert rows == [{"phase": "think", "harness": "claude", "session_id": "sess-cli-1"}]
 
 
 def test_cli_session_add_duplicate_exits_zero_added_false(tmp_path, monkeypatch):
@@ -1433,11 +1433,11 @@ def test_started_at_lands_on_row_and_bounds_the_window(tmp_path, monkeypatch):
     g = _guard_graph(tmp_path, monkeypatch)
     append_session_record(
         g, "ab-guard001", phase="do", harness="claude", session_id="S",
-        at="2026-07-20T12:00:00Z", started_at="2026-07-20T10:00:00Z",
+        ended_at="2026-07-20T12:00:00Z", started_at="2026-07-20T10:00:00Z",
     )
     row = _sessions(g)[0]
     assert row["started_at"] == "2026-07-20T10:00:00Z"
-    assert row["started_at"] <= row["at"]
+    assert row["started_at"] <= row["ended_at"]
 
 
 def test_started_at_absent_leaves_the_key_off(tmp_path, monkeypatch):

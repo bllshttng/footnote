@@ -222,37 +222,32 @@ def test_a_chain_ending_exactly_at_the_cap_is_not_reported_truncated(graph):
 # ---------------------------------------------------------------------------
 
 
-def _row(phase, harness="claude", session_id="sess-A",
-         at="2026-08-07T10:00:00Z", started_at=None, claimed_at=None):
-    r = {"phase": phase, "harness": harness, "session_id": session_id, "at": at}
-    if started_at is not None:
-        r["started_at"] = started_at
-    if claimed_at is not None:
-        r["claimed_at"] = claimed_at
+def _row(phase, harness="claude", session_id="sess-A", **times):
+    r = {"phase": phase, "harness": harness, "session_id": session_id}
+    r.update(times)
     return r
 
 
-def test_roster_all_four_phases_with_starts_summing(graph):
-    """A node stamped across all four phases with starts reports each duration
-    and a total that is the sum: 4 of 4 phases recorded."""
+def test_roster_all_four_phases_with_honest_windows_summing(graph):
+    """Canonical started_at+ended_at on all four phases: each shows its window,
+    the total is the sum, and 4 of 4 phases recorded."""
     graph([_node("x-aaaa", sessions=[
-        _row("think", at="2026-08-07T01:00:00Z", started_at="2026-08-07T00:00:00Z"),
-        _row("blueprint", at="2026-08-07T02:00:00Z", started_at="2026-08-07T01:30:00Z"),
-        _row("do", at="2026-08-07T05:00:00Z", started_at="2026-08-07T02:30:00Z"),
-        _row("ship", at="2026-08-07T06:00:00Z", started_at="2026-08-07T05:30:00Z"),
+        _row("think", started_at="2026-08-07T00:00:00Z", ended_at="2026-08-07T01:00:00Z"),
+        _row("blueprint", started_at="2026-08-07T01:30:00Z", ended_at="2026-08-07T02:00:00Z"),
+        _row("do", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
+        _row("ship", started_at="2026-08-07T05:30:00Z", ended_at="2026-08-07T06:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "4 of 4 phases recorded" in out
     assert out.count("not recorded") == 0
-    # 1h + 30m + 2h30m + 30m = 4h30m
-    assert "4h30m" in out
+    assert "4h30m" in out  # 1h + 30m + 2h30m + 30m
 
 
-def test_roster_do_only_marks_three_not_recorded(graph):
-    """One do row: three phases render 'not recorded', the total names '1 of 4'
-    rather than summing silently over the gaps."""
+def test_roster_do_only_honest_window_marks_three_not_recorded(graph):
+    """One honest do window: three phases render 'not recorded', the total names
+    '1 of 4' rather than summing silently over the gaps."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", at="2026-08-07T05:00:00Z", started_at="2026-08-07T02:30:00Z"),
+        _row("do", started_at="2026-08-07T02:30:00Z", ended_at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert out.count("not recorded") == 3
@@ -260,12 +255,11 @@ def test_roster_do_only_marks_three_not_recorded(graph):
     assert "2h30m" in out
 
 
-def test_roster_end_only_row_contributes_no_duration(graph):
-    """A row with an end but no start renders 'end only', never '0m', and is
-    counted as unrecorded in the total. This is the acceptance rule that keeps a
-    roster from reading 'nobody touched this' by inventing a duration."""
+def test_roster_end_only_row_renders_no_duration(graph):
+    """A row with an end but no start renders 'end only', never '0m', and
+    contributes no window to the total."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", at="2026-08-07T05:00:00Z"),  # no started_at, no claimed_at
+        _row("do", ended_at="2026-08-07T05:00:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
     assert "end only" in out
@@ -273,21 +267,41 @@ def test_roster_end_only_row_contributes_no_duration(graph):
     assert "0 of 4 phases recorded" in out
 
 
-def test_roster_reads_legacy_claimed_at_as_the_start(graph):
-    """Older rows carry claimed_at; the reader falls back to it so a rename of
-    the canonical key never made existing rows startless."""
+def test_roster_in_progress_row_renders_no_duration(graph):
+    """A row with a start but no end (work in flight) renders 'in progress',
+    never a duration - an open row is not a closed window."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", at="2026-08-07T05:00:00Z", claimed_at="2026-08-07T02:30:00Z"),
+        _row("do", started_at="2026-08-07T02:30:00Z"),
     ])])
     out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
-    assert "1 of 4 phases recorded" in out
-    assert "2h30m" in out
+    assert "in progress" in out
+    assert "0m" not in out
+    assert "0 of 4 phases recorded" in out
+
+
+def test_roster_legacy_rows_are_not_summed_as_durations(graph):
+    """Legacy rows (claimed_at/at) hold stamp-fire time, not phase boundaries -
+    their span is the whole session - so they render 'end only' and are never
+    summed or shown as a duration. The reader still surfaces their start in JSON."""
+    graph([_node("x-aaaa", sessions=[
+        _row("do", claimed_at="2026-08-07T00:00:00Z", at="2026-08-07T05:00:00Z"),
+    ])])
+    out = runner.invoke(app, ["backlog", "provenance", "x-aaaa"]).output
+    assert "end only" in out
+    assert "5h" not in out  # the defective session-span duration must not appear
+    assert "0 of 4 phases recorded" in out
+    payload = json.loads(
+        runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout
+    )
+    do = next(p for p in payload["lifecycle"]["phases"] if p["phase"] == "do")
+    assert do["start"] == "2026-08-07T00:00:00Z"  # claimed_at read as the start
+    assert do["duration_seconds"] is None
 
 
 def test_roster_json_absent_values_are_null_not_zero(graph):
     """-J emits the same fields with absent values as null, never 0."""
     graph([_node("x-aaaa", sessions=[
-        _row("do", at="2026-08-07T05:00:00Z"),  # end only -> null duration
+        _row("do", ended_at="2026-08-07T05:00:00Z"),  # end only -> null duration
     ])])
     payload = json.loads(
         runner.invoke(app, ["backlog", "provenance", "x-aaaa", "--json"]).stdout

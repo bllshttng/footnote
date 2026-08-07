@@ -598,33 +598,21 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return None
 
 
-def _manifest_created_at(cwd: Optional[str] = None) -> Optional[str]:
-    """The session-start instant from this checkout's target-state.md, or None.
-
-    The ship row's start bounds the implementation window and shares the source
-    finalize uses (the manifest created_at). None when there is no manifest (a
-    manual link outside a target session); the row then lands with an end only,
-    which the roster renders honestly rather than guessing a start.
-    """
-    try:
-        text = (Path(cwd or os.getcwd()) / ".fno" / "target-state.md").read_text(
-            encoding="utf-8"
-        )
-    except OSError:
-        return None
-    return _scan_md_field(text, "created_at")
-
-
 def _stamp_ship_on_pr_link(node_id: str) -> None:
     """Stamp the ship lifecycle row when a node is first PR-linked.
 
-    ``backlog update --pr-number`` is the one site every shipped node passes
-    through regardless of which worker or skill opened the PR, so the row
-    records the implementer's identity, not the merger's. Best-effort: an
-    unresolvable identity or a graph failure skips with a named stderr reason
-    and never fails the update. Idempotent: append_session_record collapses a
+    The PR link is ship's START (the PR is open, awaiting review/merge), so the
+    row carries started_at only - no ended_at, since merge is recorded elsewhere
+    or not at all, and the roster renders the row 'in progress' rather than
+    guessing an end. ``backlog update --pr-number`` is the one site every shipped
+    node passes through regardless of which worker or skill opened the PR, so the
+    row records the implementer's identity, not the merger's. Best-effort: an
+    unresolvable identity or a graph failure skips with a named stderr reason and
+    never fails the update. Idempotent: append_session_record collapses a
     re-stamp of the same (phase, harness, session_id).
     """
+    from datetime import datetime, timezone
+
     from fno.graph.store import append_session_record
 
     ident = resolve_harness_identity()
@@ -642,7 +630,7 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
         append_session_record(
             _graph_path(), node_id, phase="ship",
             harness=harness, session_id=session_id,
-            started_at=_manifest_created_at(),
+            started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         )
     except (Exception, SystemExit) as exc:
         typer.echo(
@@ -4560,14 +4548,23 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     def _start(row: dict) -> "str | None":
         return row.get("started_at") or row.get("claimed_at")
 
+    def _end(row: dict) -> "str | None":
+        return row.get("ended_at") or row.get("at")
+
+    def _honest(row: dict) -> bool:
+        # A duration is honest only when both CANONICAL names are present.
+        # Legacy rows (claimed_at/at) hold stamp-fire time, not phase boundaries
+        # - their span is the whole session - so they render 'end only' and are
+        # never summed, named, or displayed as a phase duration.
+        return "started_at" in row and "ended_at" in row
+
     def _dur(row: dict) -> "float | None":
-        st, en = _start(row), row.get("at")
-        if not st or not en:
+        if not _honest(row):
             return None
         try:
-            sp = datetime.fromisoformat(st.replace("Z", "+00:00"))
-            ep = datetime.fromisoformat(en.replace("Z", "+00:00"))
-        except ValueError:
+            sp = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+            ep = datetime.fromisoformat(row["ended_at"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
             return None
         return (ep - sp).total_seconds()
 
@@ -4582,46 +4579,47 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
     lines: list[str] = []
     phases: list[dict] = []
     total = 0.0
-    phases_with_dur = 0
+    phases_with_window = 0
     for ph in _LIFECYCLE_PHASES:
         rows = by_phase[ph]
         if not rows:
             lines.append(f"    {ph:<9} not recorded")
             phases.append({"phase": ph, "recorded": False})
             continue
-        phase_has_dur = False
+        phase_has_window = False
         for row in rows:
-            st, en = _start(row), row.get("at")
-            dur = _dur(row)
+            st, en, dur = _start(row), _end(row), _dur(row)
             head = f"    {ph:<9} {row.get('harness', '?')}:{row.get('session_id', '?')}"
             if dur is not None:
-                lines.append(f"{head} {st} -> {en} ({_fmt(dur)})")
+                lines.append(f"{head} {row['started_at']} -> {row['ended_at']} ({_fmt(dur)})")
                 total += dur
-                phase_has_dur = True
-            else:
-                # No start (or unparseable): end only. Never render a duration
-                # for a row whose start is missing - that is the 0m lie.
+                phase_has_window = True
+            elif en:
                 lines.append(f"{head} end only @ {en}")
+            elif st:
+                lines.append(f"{head} in progress (since {st})")
+            else:
+                lines.append(head.rstrip())
             phases.append({
                 "phase": ph, "recorded": True,
                 "harness": row.get("harness"), "session_id": row.get("session_id"),
                 "start": st, "end": en,
                 "duration_seconds": dur,
             })
-        if phase_has_dur:
-            phases_with_dur += 1
+        if phase_has_window:
+            phases_with_window += 1
 
-    if phases_with_dur > 0:
+    if total > 0:
         lines.append(
-            f"    total     {_fmt(total)} ({phases_with_dur} of 4 phases recorded)"
+            f"    total     {_fmt(total)} ({phases_with_window} of 4 phases recorded)"
         )
     else:
-        lines.append("    total     0 of 4 phases recorded")
+        lines.append(f"    total     {phases_with_window} of 4 phases recorded")
 
     summary = {
         "phases": phases,
-        "total_duration_seconds": total if phases_with_dur > 0 else None,
-        "phases_recorded": phases_with_dur,
+        "total_duration_seconds": total if total > 0 else None,
+        "phases_recorded": phases_with_window,
         "phases_total": 4,
     }
     return lines, summary
@@ -4900,13 +4898,16 @@ def cmd_session_add(
     session_id: Optional[str] = typer.Option(
         None, "--session-id", help="Override session id (default: ambient session identity)."
     ),
-    at: Optional[str] = typer.Option(
-        None, "--at", help="ISO-8601 UTC timestamp (default: now); explicit for backfill."
+    ended_at: Optional[str] = typer.Option(
+        None, "--ended-at", "--at",
+        help="ISO-8601 UTC instant the phase ended. Omit when there is no honest end "
+              "to record (a row opened mid-session); explicit for backfill of completed work."
     ),
     started_at: Optional[str] = typer.Option(
-        None, "--started-at", help="ISO-8601 UTC instant the work began; lands on the "
-                                   "row so it bounds the window with --at. Honest for every "
-                                   "phase (a think row starts but claims nothing)."
+        None, "--started-at", "--claimed-at",
+        help="ISO-8601 UTC instant the work began; lands on the "
+             "row so it bounds the window with --ended-at. Honest for every "
+             "phase (a think row starts but claims nothing)."
     ),
     require_session: Optional[str] = typer.Option(
         None, "--require-session", help="Skip (exit 0) unless the ambient session id equals "
@@ -5027,7 +5028,7 @@ def cmd_session_add(
         if pr is not None:
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at,
+                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
                 started_at=started_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
@@ -5075,7 +5076,7 @@ def cmd_session_add(
                     )
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at,
+                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
                 started_at=started_at,
             )
             if not found:
