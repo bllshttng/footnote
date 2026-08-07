@@ -186,8 +186,10 @@ def test_ac3hp_concurrent_writes_never_surface_corruption(tmp_path, monkeypatch)
             # between its graph and sidecar writes (a threads-only artifact:
             # production readers are separate processes). Without this, a
             # loaded runner holds the two-write window open past load_graph's
-            # retry ceiling and surfaces false corruption.
-            time.sleep(0.0002)
+            # retry ceiling and surfaces false corruption. The yield is sized
+            # for a loaded CI runner, where 3 readers otherwise squeeze the
+            # writer across both renames on every one of its 200 mutations.
+            time.sleep(0.002)
 
     threads = [threading.Thread(target=writer)] + [
         threading.Thread(target=reader) for _ in range(3)
