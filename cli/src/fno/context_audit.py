@@ -86,7 +86,12 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _relative(path: Path, root: Path) -> str:
+def _relative(path: Path | None, root: Path) -> str:
+    # manifest is None on the gemini branch; the _relative(manifest, ...) calls
+    # that could receive it sit on claude/codex-only paths, but the type must
+    # hold for mypy. None never ships: those code paths are unreachable for gemini.
+    if path is None:
+        return ""
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except (OSError, ValueError):
