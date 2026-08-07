@@ -639,6 +639,45 @@ def _stamp_ship_on_pr_link(node_id: str) -> None:
         )
 
 
+def _stamp_blueprint_on_plan_link(node_id: str) -> None:
+    """Stamp the blueprint lifecycle row when a plan is first bound to a node.
+
+    `backlog update --plan-path` is the choke point every blueprinted node
+    passes through, so this replaces the skill-prose stamp a direct CLI call or
+    non-Claude worker would skip. The plan-bind is blueprint's END, so the row
+    carries ended_at at the bind instant and no started_at (think has no writer,
+    so there is no clean blueprint start); the roster renders it 'end only'.
+    Best-effort: an unresolvable identity or a graph failure skips with a named
+    stderr reason and never fails the update. Idempotent.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import append_session_record
+
+    ident = resolve_harness_identity()
+    harness = (ident.harness or "").strip()
+    session_id = (ident.session_id or "").strip()
+    if not harness or not session_id:
+        typer.echo(
+            f"update: no ambient identity to stamp blueprint provenance for {node_id} "
+            f"(missing {'harness' if not harness else 'session_id'}); "
+            "run the bind inside a session. Skipped.",
+            err=True,
+        )
+        return
+    try:
+        append_session_record(
+            _graph_path(), node_id, phase="blueprint",
+            harness=harness, session_id=session_id,
+            ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"update: blueprint provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+
+
 def _resolve_asserted_id(
     token: str,
     entries: list,
@@ -3020,6 +3059,7 @@ def cmd_update(
     projected_node: list = [None]
     reparent_old_parent: list = [None]
     ship_stamp_node: list = [None]
+    blueprint_stamp_node: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -3142,7 +3182,16 @@ def cmd_update(
                         f"dispatch and cost independently.",
                         err=True,
                     )
+                _plan_path_before = node.get("plan_path")
                 node["plan_path"] = plan_path
+                # Blueprint provenance fires once when a plan is first bound to
+                # the node. plan_path set is blueprint's END (the plan blueprint
+                # produced is now linked); there is no clean blueprint start
+                # (think has no writer), so the row carries ended_at only and the
+                # roster renders it 'end only'. Choke point, not prose: every
+                # blueprinted node passes through `backlog update --plan-path`.
+                if plan_path and not _plan_path_before:
+                    blueprint_stamp_node[0] = node["id"]
                 if linked_size and not node.get("size"):
                     node["size"] = linked_size
         _pr_number_before = node.get("pr_number")
@@ -3389,6 +3438,8 @@ def cmd_update(
     # here rather than inside the mutator (which would re-enter the graph lock).
     if ship_stamp_node[0] is not None:
         _stamp_ship_on_pr_link(ship_stamp_node[0])
+    if blueprint_stamp_node[0] is not None:
+        _stamp_blueprint_on_plan_link(blueprint_stamp_node[0])
 
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed

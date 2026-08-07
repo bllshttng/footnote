@@ -320,19 +320,7 @@ and no pin present -> write nothing.
 
 ## Blueprint Provenance Stamp (x-b6e4)
 
-After auto-intake mints `$NODE_ID` and the plan's Execution Strategy is
-finalized, stamp the lifecycle provenance so the graph records which
-session/harness planned the node (idempotent, append-only, best-effort):
-
-```bash
-[[ -n "$NODE_ID" ]] && { fno backlog session add "$NODE_ID" --phase blueprint \
-  || echo "blueprint: session add failed for $NODE_ID (non-fatal, provenance not stamped)" >&2; }
-```
-
-Harness + session id default from the ambient identity. A missing-identity
-warning is non-fatal; the stamp never blocks intake. When `/blueprint`
-decomposes a scope:epic into child nodes, this stamps the parent node only (the
-session planned the epic; child do-entries stamp themselves at execution).
+Blueprint provenance is stamped automatically by `fno backlog update --plan-path` (the choke point every blueprinted node passes through), not by a prose block here. The plan-bind is blueprint's end, so the row carries `ended_at` at the bind instant; the roster renders it 'end only'. A direct CLI call or non-Claude worker that skips this skill still gets the stamp, because it lives in the verb.
 
 ## PRODUCT.md Prereq Check (when executor: impeccable is locked)
 

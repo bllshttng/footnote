@@ -460,3 +460,59 @@ def test_ship_stamp_does_not_refire_on_an_already_linked_node(tmp_graph, monkeyp
     ship = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
             if r.get("phase") == "ship"]
     assert len(ship) == 1
+
+
+def test_blueprint_stamp_fires_on_first_plan_bind(tmp_graph, monkeypatch, tmp_path):
+    """The blueprint row lands when plan_path transitions unset->set. plan-bind
+    is blueprint's end, so the row carries ended_at and no started_at (the
+    roster renders it 'end only'). This is the code choke point that replaces
+    the skill-prose stamp."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    bp = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+          if r.get("phase") == "blueprint"]
+    assert len(bp) == 1
+    assert bp[0]["harness"] == "claude"
+    assert bp[0]["session_id"] == "SESSION-A"
+    assert bp[0]["ended_at"] and "started_at" not in bp[0]
+
+
+def test_blueprint_stamp_skips_with_no_identity(tmp_graph, monkeypatch, tmp_path):
+    _clear_ambient(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "blueprint provenance" in result.output  # skip names what refused
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
+
+
+def test_blueprint_stamp_does_not_refire_on_a_rebind(tmp_graph, monkeypatch, tmp_path):
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "plan_path": str(tmp_path / "old.md"),
+    }])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    # plan_path is already set -> not an unset->set transition -> no blueprint row.
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
