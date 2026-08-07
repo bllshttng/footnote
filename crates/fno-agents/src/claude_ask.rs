@@ -419,6 +419,13 @@ impl ClaudeHome {
         self.home.join(".claude").join("sessions")
     }
 
+    /// `<home>/.claude/projects` - where claude keys a transcript dir by the
+    /// session cwd slug. Used to recover the real (post-EnterWorktree) cwd of a
+    /// resumed session, which the recorded registration cwd may predate.
+    pub fn projects_dir(&self) -> PathBuf {
+        self.home.join(".claude").join("projects")
+    }
+
     pub fn jobs_dir_for(&self, short_id: &str) -> PathBuf {
         self.home.join(".claude").join("jobs").join(short_id)
     }
