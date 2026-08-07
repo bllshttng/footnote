@@ -5117,7 +5117,9 @@ def _build_mail_ctx(
     )
 
 
-def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> bool:
+def _mux_pane_send(
+    entry: "AgentEntry", text: str, *, guarded: bool = True, sender: Optional[str] = None
+) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded`` (the mail-delivery default, US4), the paste rides the
@@ -5174,6 +5176,7 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
                     harness=getattr(entry, "harness", "") or "",
                     lane="mux-pane",
                     target_cwd=getattr(entry, "cwd", None),
+                    sender=sender,
                     confirmed=confirmed,
                     source="daemon",
                 ),
@@ -5329,14 +5332,19 @@ def _mux_followup_path(
     return DispatchAskResult(kind="followup", short_id=ref, reply="")
 
 
-def _mail_inject_claude(recipient: str, text: str) -> bool:
+def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = None) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
 
     Returns True only when the verb confirms the turn landed in the recipient
     transcript; any miss (binary absent, recipient not on the roster, not
     confirmed within the poll budget) returns False so the caller writes the
-    durable fallback."""
+    durable fallback.
+
+    ``sender`` is the invoking session's mail handle, forwarded to the binary's
+    audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
+    its own ``from`` in the transcript, an unwrapped one has nowhere else to
+    record who fired it."""
     import json
 
     from fno import rust_binary
@@ -5344,9 +5352,12 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return False
+    argv = [str(binary), "mail-inject", "--session", recipient]
+    if sender:
+        argv += ["--sender", sender]
     try:
         proc = subprocess.run(
-            [str(binary), "mail-inject", "--session", recipient],
+            argv,
             input=text,
             capture_output=True,
             text=True,

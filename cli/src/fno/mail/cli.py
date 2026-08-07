@@ -1608,10 +1608,18 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
     #        validation above ran against: a leading space passes the slash check
     #        after stripping but defeats the REPL slash parser when injected raw,
     #        and the receipt would still print `injected`.
+    #        The audit event's `sender` is only populated here: an unwrapped
+    #        payload has no `from` attribute in the recipient transcript, so the
+    #        ledger is the ONLY place that can say who fired the verb. Absent
+    #        ambient identity it stays absent rather than guessing.
+    from fno.harness_identity import canonical_handle, current_session_id
+
+    own = current_session_id()
+    sender = canonical_handle(own) if own else None
     if entry.mux:
-        delivered = _mux_pane_send(entry, stripped)
+        delivered = _mux_pane_send(entry, stripped, sender=sender)
     else:  # claude control.sock - the only other keystroke lane
-        delivered = _mail_inject_claude(session_id, stripped)
+        delivered = _mail_inject_claude(session_id, stripped, sender=sender)
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     if delivered:

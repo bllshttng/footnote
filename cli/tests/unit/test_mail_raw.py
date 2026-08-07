@@ -31,7 +31,7 @@ def _seed_claude(mailbox, monkeypatch):
     injected = []
     monkeypatch.setattr(
         "fno.agents.dispatch._mail_inject_claude",
-        lambda s, t: injected.append((s, t)) or True,
+        lambda s, t, sender=None: injected.append((s, t, sender)) or True,
     )
     return injected
 
@@ -94,7 +94,7 @@ def test_raw_injects_unwrapped_on_claude_keystroke_lane(mailbox, monkeypatch, ca
         _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
     assert exc.value.exit_code == 0
     assert capsys.readouterr().out.strip() == "injected"
-    assert injected == [(SID_CLAUDE, "/code-review medium --fix")]
+    assert injected == [(SID_CLAUDE, "/code-review medium --fix", None)]
     assert not durable, "AC18: --raw never writes durable on any transport result"
 
 
@@ -103,7 +103,9 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     (exit 0, never failure wording), and never queues durable."""
     from fno.mail.cli import _raw_send
 
-    monkeypatch.setattr("fno.agents.dispatch._mail_inject_claude", lambda s, t: False)
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda s, t, sender=None: False
+    )
     register_existing_session(
         provider="claude", session_id=SID_CLAUDE, cwd=str(mailbox), name="claudepeer"
     )
@@ -145,7 +147,10 @@ def test_raw_self_flag_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "/compact", self_ok=True)
     assert exc.value.exit_code == 0
-    assert injected == [(SID_CLAUDE, "/compact")]
+    # AC27: a self-injection records sender == the recipient handle, so the
+    # ledger identifies it permanently -- the only place it can be recorded, since
+    # an unwrapped payload carries no `from` in the recipient transcript.
+    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[-8:])]
     assert "/compact" in capsys.readouterr().out
 
 
@@ -200,4 +205,4 @@ def test_raw_injects_the_stripped_payload(mailbox, monkeypatch, capsys):
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "  /code-review medium --fix  ", self_ok=False)
     assert exc.value.exit_code == 0
-    assert injected == [(SID_CLAUDE, "/code-review medium --fix")]
+    assert injected == [(SID_CLAUDE, "/code-review medium --fix", None)]
