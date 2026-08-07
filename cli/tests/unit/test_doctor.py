@@ -1862,3 +1862,45 @@ def test_fix_does_not_attempt_a_launchd_install_off_darwin(
     monkeypatch.setattr("fno.backlog.groom.install_groom_agent", _boom)
     result = runner.invoke(app, ["doctor", "--fix"])
     assert "groom agent" not in result.stderr
+
+
+def test_doctor_codex_app_server_absent_names_fix(monkeypatch):
+    """AC7: a plain `fno doctor` reports an absent codex app-server daemon with
+    the start command, the bootstrap alternative, and the restart ordering."""
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_report",
+        lambda: {"present": False, "socket_path": "/tmp/missing.sock"},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "codex app-server daemon not running" in result.stdout
+    assert "codex app-server daemon start" in result.stdout
+    assert "bootstrap" in result.stdout
+    assert "restart" in result.stdout
+
+
+def test_doctor_codex_app_server_present_is_quiet(monkeypatch):
+    """AC7 negative: when the daemon socket is present, no advisory line fires."""
+    _stub_signals(
+        monkeypatch, src=Path("/src"), source_rev="abc123", marker="abc123",
+        capture_present="present",
+    )
+    monkeypatch.setattr(
+        doctor,
+        "_codex_app_server_report",
+        lambda: {"present": True, "socket_path": "/tmp/here.sock"},
+    )
+    result = runner.invoke(app, ["doctor"])
+    assert "codex app-server daemon not running" not in result.stdout
+
+
+def test_doctor_codex_app_server_report_respects_codex_home(tmp_path, monkeypatch):
+    """The report keys the socket off $CODEX_HOME, so a fresh home reads absent."""
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+    report = doctor._codex_app_server_report()
+    assert report["present"] is False
+    assert report["socket_path"].endswith("app-server-control/app-server-control.sock")
