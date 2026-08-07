@@ -283,11 +283,12 @@ def _sync_graph_merge_status(merge_status: str, pr_number: int, cwd: str = "") -
         # P2 on PR #524). KeyboardInterrupt is deliberately NOT swallowed.
         pass
 
-    # x-b6e4: stamp ship-phase lifecycle provenance on a REAL merge (not queued/
-    # failed) -- the merge primitive is one of the plan's ship boundaries. Gated
-    # here so all three merged code paths are covered in one place.
-    if merge_status == "merged":
-        _stamp_ship_provenance(pr_number, cwd)
+    # Ship provenance used to be stamped here on a real merge, recording whoever
+    # ran `fno pr merge`. That names the merger, not the implementer, and a merge
+    # that lands out-of-band (gh, the web UI, or GitHub's native auto-merge)
+    # bypasses this primitive entirely - so it served neither consumer. The ship
+    # row now lands at `fno backlog update --pr-number` (the PR-link choke point
+    # every shipped node passes through), which records the implementer.
 
 
 def _find_pr_node_id(
@@ -432,60 +433,6 @@ def _on_confirmed_merge(pr_number: int, cwd: str = "") -> None:
     """
     _sync_graph_merge_status("merged", pr_number, cwd)
     _reconcile_merged_pr_node(pr_number, cwd)
-
-
-def _repo_slug(cwd: str) -> "Optional[str]":
-    """The merge's ``<owner>/<repo>`` slug, or None if gh can't say (x-d5f9).
-
-    Best-effort: a probe miss degrades to None, which reverts ship-stamping to
-    the bare-``pr_number`` match - a safe skip in a multi-repo graph, never a
-    wrong stamp (Failure Modes: Errors)."""
-    try:
-        res = _gh(["repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner"],
-                  cwd or os.getcwd())
-        slug = res.stdout.strip() if res.ok else ""
-        return slug or None
-    except Exception:
-        return None
-
-
-def _stamp_ship_provenance(pr_number: int, cwd: str = "") -> None:
-    """Append a `ship` lifecycle record to the PR's node for the merging session
-    (x-b6e4). Ambient identity of whoever ran `fno pr merge`; resolves the unique
-    PR-linked node in THIS repo (x-d5f9: scoped by the repo slug so a same-numbered
-    PR in another repo is never stamped). Best-effort: any failure or a missing
-    identity is a silent no-op and never blocks the merge outcome.
-
-    When the repo slug cannot be resolved, SKIP rather than fall back to a bare
-    pr_number match: in a cross-project graph a lone same-numbered PR in another
-    repo would then be stamped on the wrong node (codex P2 on #403). A merge
-    cannot have succeeded without `gh`, so an unresolved slug here is a rare
-    flake; the node-id ship stamp from pr-creator already covers provenance."""
-    try:
-        from fno.harness_identity import resolve_harness_identity
-        from fno.paths import graph_json
-        from fno.graph.store import stamp_session_for_pr
-
-        ident = resolve_harness_identity()
-        if not ident.session_id or not ident.harness:
-            return
-        repo = _repo_slug(cwd)
-        if not repo:
-            sys.stderr.write(
-                f"pr-merge: repo slug unresolved; skipping ship stamp for PR {pr_number} "
-                "(a bare match could stamp a same-numbered PR in another repo)\n"
-            )
-            return
-        path = graph_json()
-        if not path.exists():
-            return
-        stamp_session_for_pr(
-            path, pr_number, phase="ship",
-            harness=ident.harness, session_id=ident.session_id,
-            repo=repo,
-        )
-    except (Exception, SystemExit):
-        pass
 
 
 def _emit_session_satisfied(pr_url: str, state_dir: str) -> None:
