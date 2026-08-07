@@ -8,20 +8,27 @@
 # the model - so no payload shape can deliver context through it. SessionStart
 # injects via hookSpecificOutput.additionalContext, which is why this script is
 # registered under SessionStart(matcher="compact") in hooks.json, not PostCompact.
-# On Codex the same script still runs as a PostCompact hook: the event has no
-# "source" field, so SOURCE below is empty and the systemMessage carrier is used.
+# On Codex the same script still runs as a PostCompact hook, and the systemMessage
+# carrier is used there. The carrier is chosen from the harness (FNO_PLATFORM /
+# CLAUDE_PLUGIN_ROOT), not from the event payload, so a lost or empty stdin cannot
+# silently downgrade Claude to a carrier the model never sees.
 set -uo pipefail
 
 STATE_FILE=".fno/target-state.md"
 FNO_DIR=".fno"
 
-PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cat "$HOME/.fno/plugin-root" 2>/dev/null || git rev-parse --show-toplevel 2>/dev/null)}}"
+# The fallback is BASH_SOURCE-relative, never `git rev-parse`: this hook runs
+# with cwd set to the SESSION's repo, which is not the plugin, so a git toplevel
+# would resolve GUARD_LIB into an unrelated checkout and source whatever it finds.
+PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-${CODEX_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}}"
 GUARD_LIB="$PLUGIN_ROOT/scripts/lib/target-guard.sh"
 
 # Read the hook event. SessionStart carries a "source" field; "compact" is the
 # value the harness sets after a compaction. PostCompact (Codex) has no such
-# field, so SOURCE is empty there.
-INPUT="$(cat 2>/dev/null || true)"
+# field, so SOURCE is empty there. Guard the read: a bare `cat` on a terminal
+# blocks forever when the script is run by hand for debugging.
+INPUT=""
+[[ -t 0 ]] || INPUT="$(cat 2>/dev/null || true)"
 SOURCE="$(printf '%s' "$INPUT" | python3 -c '
 import json, sys
 try:
@@ -38,17 +45,32 @@ if [[ -n "$SOURCE" && "$SOURCE" != "compact" ]]; then
     exit 0
 fi
 
+# Carrier selection keys off the harness, not off SOURCE alone. An unreadable or
+# empty stdin (the observer wrapper writes an empty input file when its own `cat`
+# fails) would otherwise fall through to the systemMessage carrier on Claude,
+# which reaches the user but never the model - silently re-breaking the delivery
+# this hook exists to guarantee, with no error anywhere.
+# FNO_PLATFORM is authoritative when set (codex-hooks.json sets it to "codex"),
+# so it is checked before the ambient CLAUDE_PLUGIN_ROOT, which a nested session
+# can leak into a codex environment.
+CARRIER="systemMessage"
+if [[ -n "${FNO_PLATFORM:-}" ]]; then
+    [[ "$FNO_PLATFORM" == "claude" ]] && CARRIER="additionalContext"
+elif [[ -n "${CLAUDE_PLUGIN_ROOT:-}" || "$SOURCE" == "compact" ]]; then
+    CARRIER="additionalContext"
+fi
+
 emit_context() {
     local context="$1"
     python3 -c "
 import json, sys
-source, context = sys.argv[1:3]
-if source == 'compact':
+carrier, context = sys.argv[1:3]
+if carrier == 'additionalContext':
     payload = {'hookSpecificOutput': {'hookEventName': 'SessionStart', 'additionalContext': context}}
 else:
     payload = {'systemMessage': context}
 print(json.dumps(payload))
-" "$SOURCE" "$context" 2>/dev/null
+" "$CARRIER" "$context" 2>/dev/null
 }
 
 # Guard (c) re-surface: if a handoff was armed pre-compaction (by
