@@ -13,7 +13,7 @@
 //!
 //! A default `codex` TUI runs its app-server IN-PROCESS with no socket on disk.
 //! The socket exists ONLY when a codex app-server daemon is running
-//! (`codex remote-control start`, standalone install + ChatGPT login); TUIs
+//! (`codex app-server daemon start`, standalone install + ChatGPT login); TUIs
 //! launched afterward auto-attach to it. Absent that daemon, `deliver_via_codex_daemon`
 //! returns `"no-daemon"` and the caller writes the durable floor. e2e verification
 //! needs the user's daemon; the pure builders + `classify_turn_start_response`

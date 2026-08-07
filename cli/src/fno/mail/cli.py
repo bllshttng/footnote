@@ -1116,6 +1116,20 @@ def _wake_rung(reachable, wrapped: str) -> tuple[bool, Optional[str], Optional[s
     return False, None, f"wake={detail}"
 
 
+def _codex_daemon_socket_absent() -> bool:
+    """True when the codex app-server control socket is absent (no daemon).
+
+    Mirrors ``codex_app_server_socket_path`` in codex_inject.rs: the socket at
+    ``$CODEX_HOME/app-server-control/app-server-control.sock`` exists only while
+    a codex app-server daemon runs (``codex app-server daemon start``). A live
+    mail send to a codex peer demotes to durable when it is absent, so the demote
+    line names the fix rather than only the reason."""
+    import os
+
+    home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
+    return not (Path(home) / "app-server-control" / "app-server-control.sock").exists()
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -1361,7 +1375,14 @@ def _name_lane_send(
     # bug is diagnosable from the sender's own terminal. A self-send can never
     # inject itself; everything else here is a live miss.
     reason = "self-send" if self_send else "live-miss"
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
+    hint = ""
+    if not self_send and provider == "codex" and _codex_daemon_socket_absent():
+        hint = (
+            " codex app-server daemon not running: run "
+            "`codex app-server daemon start`, then restart the session "
+            "(the socket must exist before the codex TUI starts)"
+        )
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}")
     # Attended live-miss lane: a send to an operator-attended session that missed
     # live delivery is the stranded case (the human is not watching the drain, so
     # nothing else surfaces it). Fires on live-miss only; worker rows (no origin)

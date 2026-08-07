@@ -5589,7 +5589,7 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
     daemon accepts the turn; any miss (binary absent, no daemon socket, thread
     not attached) returns False so the caller writes the durable fallback. The
     codex app-server daemon only exists when the user runs it
-    (``codex remote-control start``); absent it this is a clean no-op."""
+    (``codex app-server daemon start``); absent it this is a clean no-op."""
     import json
 
     from fno import rust_binary
