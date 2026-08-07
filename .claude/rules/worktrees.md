@@ -28,7 +28,7 @@ Every code-payload dispatch routes through `fno worktree ensure`, which resolves
 Precedence: per-project `work.workspaces.<slug>.projects[].worktree` > global `config.worktree.policy` > built-in `harness-native`.
 
 - **`never`** - launch in place on the canonical checkout (for projects whose working tree IS the product, e.g. an Obsidian vault). ensure prints the repo root, exit 0; callers skip `setup-worktree.sh`; the location gate treats the protected branch as `ok`.
-- **`harness-native`** (default) - the harness's own location: claude lands at `<repo>/.claude/worktrees/<name>`, **always**, ignoring `worktrees_base`; Codex Desktop uses a same-thread `/worktree` or **Hand off -> Worktree** transition and Footnote never allocates beneath `$CODEX_HOME/worktrees`. A harness or Codex substrate without a native transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`, and does not inherit an external allocator configured by `worktrees_base`; ensure needs `--harness` and never guesses.
+- **`harness-native`** (default) - the harness's own location: claude lands at `<repo>/.claude/worktrees/<name>`, **always**, ignoring `worktrees_base`; Codex Desktop uses `/worktree` or **Hand off -> Worktree**; Footnote never allocates beneath `$CODEX_HOME/worktrees`. A harness or Codex substrate without a native transition degrades to the Footnote-owned `<state_dir>/worktrees` fallback, normally `~/.fno/worktrees`, and does not inherit an external allocator configured by `worktrees_base`; ensure needs `--harness` and never guesses.
 - **`external`** - fno-managed at `<worktrees_base>/<repo>/<name>`.
 
 The per-project policy outranks `worktrees_base`: setting the base alone does NOT relocate a claude default; you must also set `worktree.policy = "external"`. "conductor" is a `worktrees_base` value, not a policy value. A config parse error or out-of-enum value REFUSES creation (fail closed): ensure exits non-zero with empty stdout so the caller never auto-isolates on a misconfig.
@@ -45,7 +45,7 @@ The paths still diverge on WHERE, when `worktrees_base` is set: autonomous dispa
 bash scripts/setup/archive-worktree.sh <name|path>   # checks: clean tree, no unpushed commits, no live session
 ```
 
-Flags: `--force`, `--yes` (skip process-kill prompt), `--delete-branch`. Plain alternative: `git worktree remove <path>`; NEVER `rm -rf` (dangling refs). Pruning after merge is automated: `/fno:pr merged` archives the merged PR's worktree, and `fno worktree cleanup --merged --apply` sweeps already-landed worktrees; you rarely prune by hand.
+Flags: `--force`, `--yes` (skip process-kill prompt), `--delete-branch`. Or `git worktree remove <path>`; NEVER `rm -rf` (dangling refs). Pruning after merge is automated: `/fno:pr merged` archives the merged PR's worktree, and `fno worktree cleanup --merged --apply` sweeps already-landed worktrees.
 
 ## Forbidden locations (regardless of config)
 
@@ -53,7 +53,7 @@ Flags: `--force`, `--yes` (skip process-kill prompt), `--delete-branch`. Plain a
 - `<repo>/worktrees/` or any non-`.claude` path inside the checkout.
 - `../<name>` or any sibling-of-canonical path.
 
-Exception: `/speculate` keeps its own `.claude/worktrees/<name>` placement even when `worktrees_base` is set (scoped, documented; do not generalize).
+Exception: `/speculate` keeps its own `.claude/worktrees/<name>` placement even when `worktrees_base` is set (do not generalize).
 
 ## Enforcement
 
