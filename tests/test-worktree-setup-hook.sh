@@ -210,6 +210,42 @@ for hook in "${HOOKS[@]}"; do
     fi
     rm -f "$stdout_file" "$stderr_file"
     rm -rf "$sandbox"
+
+    # Case 6: a `name` with NO `path` on a `never`-policy repo must STILL
+    # abort (exit 0, empty stdout), not defer. Guards the `!= "never"` carveout
+    # in the deferral block. Uses an fno shim that resolves policy to `never`.
+    sandbox=$(setup_sandbox)
+    stdin_json=$(printf '{"session_id":"s1","name":"cc-created","hook_event_name":"WorktreeCreate"}')
+    never_bindir=$(mktemp -d)
+    cat > "$never_bindir/fno" <<'SH'
+#!/usr/bin/env bash
+# Only `worktree policy` is queried by the hook; answer `never`.
+case "$*" in
+    *worktree*policy*) echo "never"; exit 0 ;;
+    *) echo "{}"; exit 0 ;;
+esac
+SH
+    chmod +x "$never_bindir/fno"
+    # run_hook spawns a subshell that inherits exported PATH, so the fno shim
+    # is visible inside the hook's `command -v fno` and `fno worktree policy`.
+    _saved_path="$PATH"
+    export PATH="$never_bindir:$PATH"
+    output=$(run_hook "$sandbox" "$hook" "$stdin_json")
+    export PATH="$_saved_path"
+    rc=$(echo "$output" | sed -n '1p')
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    if [[ "$rc" -ne 0 ]]; then
+        fail "$name :: never-policy named create still aborts" \
+            "exit $rc (non-zero defers to CC; never-policy must abort at exit 0). stderr: $(cat "$stderr_file")"
+    elif [[ -n "$(cat "$stdout_file")" ]]; then
+        fail "$name :: never-policy named create still aborts" \
+            "stdout must be empty on abort, got '$(cat "$stdout_file")'"
+    else
+        pass "$name :: never-policy named create still aborts"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+    rm -rf "$sandbox" "$never_bindir"
 done
 
 echo

@@ -45,7 +45,11 @@ fi
 _gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
 _WT_POLICY=""
 if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
-    _WT_POLICY="$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]')"
+    # `|| true` is load-bearing: under `set -euo pipefail` a failing fno
+    # (stale binary lacking `worktree policy`, misconfigured, etc.) would
+    # abort the hook and skip all setup. The old inline `[[ ]]` read absorbed
+    # this; the hoisted assignment does not.
+    _WT_POLICY="$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]' || true)"
 fi
 
 if [[ -z "$WORKTREE_PATH" ]]; then
