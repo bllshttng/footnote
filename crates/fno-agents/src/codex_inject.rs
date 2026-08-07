@@ -27,6 +27,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use futures_util::{SinkExt, StreamExt};
+use serde_json::json;
 use tokio::net::UnixStream;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -95,6 +96,266 @@ pub fn turn_start_request_json(thread_id: &str, text: &str) -> String {
         }
     })
     .to_string()
+}
+
+/// `review/start` target: what the codex reviewer diffs against. Mirrors the
+/// app-server protocol's `ReviewTarget` enum (verified live against the daemon,
+/// node x-c24d): a structured target beats a typed `/review <prose>`, which only
+/// yields `{type:custom, instructions}` with no computed merge base.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ReviewTarget {
+    UncommittedChanges,
+    BaseBranch { branch: String },
+    Commit { sha: String, title: Option<String> },
+    Custom { instructions: String },
+}
+
+impl ReviewTarget {
+    fn to_json(&self) -> serde_json::Value {
+        match self {
+            ReviewTarget::UncommittedChanges => json!({"type": "uncommittedChanges"}),
+            ReviewTarget::BaseBranch { branch } => json!({"type": "baseBranch", "branch": branch}),
+            ReviewTarget::Commit { sha, title } => {
+                let mut o = json!({"type": "commit", "sha": sha});
+                if let Some(t) = title {
+                    o["title"] = json!(t);
+                }
+                o
+            }
+            ReviewTarget::Custom { instructions } => {
+                json!({"type": "custom", "instructions": instructions})
+            }
+        }
+    }
+}
+
+/// `review/start` delivery: `inline` runs the review on the worker's own thread
+/// (its current cwd), `detached` forks a new thread that inherits the session's
+/// ORIGINAL cwd - the cwd trap (node x-c24d). Default inline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReviewDelivery {
+    Inline,
+    Detached,
+}
+
+impl ReviewDelivery {
+    fn to_json(self) -> &'static str {
+        match self {
+            ReviewDelivery::Inline => "inline",
+            ReviewDelivery::Detached => "detached",
+        }
+    }
+}
+
+/// The `review/start` request. `id` is `1` (matched on the response). The
+/// response is an OUTCOME receipt (a `Turn` with a status plus a
+/// `reviewThreadId` to read findings from), strictly better than the inject
+/// path's transport boolean.
+pub fn review_start_request_json(
+    thread_id: &str,
+    target: &ReviewTarget,
+    delivery: ReviewDelivery,
+) -> String {
+    json!({
+        "id": 1,
+        "method": "review/start",
+        "params": {
+            "threadId": thread_id,
+            "target": target.to_json(),
+            "delivery": delivery.to_json()
+        }
+    })
+    .to_string()
+}
+
+/// Parse a `review/start` response into the outcome receipt.
+/// `.result.turn.id` + `.result.reviewThreadId` -> accepted; anything else -> the
+/// reason token (mirrors [`classify_turn_start_response`]'s posture).
+pub fn parse_review_start_response(raw: &str) -> Result<(String, String), &'static str> {
+    let v: serde_json::Value = match serde_json::from_str(raw) {
+        Ok(v) => v,
+        Err(_) => return Err("rpc-error"),
+    };
+    if let Some(result) = v.get("result") {
+        let turn_id = result
+            .get("turn")
+            .and_then(|t| t.get("id"))
+            .and_then(|id| id.as_str())
+            .unwrap_or("");
+        let review_thread = result
+            .get("reviewThreadId")
+            .and_then(|id| id.as_str())
+            .unwrap_or("");
+        if !turn_id.is_empty() {
+            return Ok((turn_id.to_string(), review_thread.to_string()));
+        }
+    }
+    if v.get("error").is_some() {
+        return Err("rpc-error");
+    }
+    Err("rpc-error")
+}
+
+/// Drive a `review/start` over the app-server daemon socket. `Ok((turn_id,
+/// review_thread_id))` on accept; every `Err(reason)` is a clean not-delivered
+/// signal. Socket absent -> `"no-daemon"`; a wedged socket -> `"io-error"`.
+pub async fn deliver_via_codex_review_start(
+    thread_id: &str,
+    target: &ReviewTarget,
+    delivery: ReviewDelivery,
+) -> Result<(String, String), &'static str> {
+    let sock = codex_app_server_socket_path();
+    if !sock.exists() {
+        return Err("no-daemon");
+    }
+    match tokio::time::timeout(
+        HANDSHAKE_TIMEOUT,
+        review_start_round_trip(&sock, thread_id, target, delivery),
+    )
+    .await
+    {
+        Ok(r) => r,
+        Err(_) => Err("io-error"),
+    }
+}
+
+/// Connect + initialize handshake + `review/start` round-trip. Split out so the
+/// timeout wrapper in [`deliver_via_codex_review_start`] bounds a wedged socket.
+async fn review_start_round_trip(
+    sock: &Path,
+    thread_id: &str,
+    target: &ReviewTarget,
+    delivery: ReviewDelivery,
+) -> Result<(String, String), &'static str> {
+    let conn = UnixStream::connect(sock).await.map_err(|_| "io-error")?;
+    let ws = match tokio_tungstenite::client_async("ws://localhost/rpc", conn).await {
+        Ok((ws, _resp)) => ws,
+        Err(_) => return Err("handshake-failed"),
+    };
+    let (mut sink, mut stream) = ws.split();
+    sink.send(Message::Text(initialize_request_json().into()))
+        .await
+        .map_err(|_| "io-error")?;
+    read_until_id(&mut stream, &serde_json::json!("init")).await?;
+    sink.send(Message::Text(initialized_notification_json().into()))
+        .await
+        .map_err(|_| "io-error")?;
+    sink.send(Message::Text(
+        review_start_request_json(thread_id, target, delivery).into(),
+    ))
+    .await
+    .map_err(|_| "io-error")?;
+    let resp = read_until_id(&mut stream, &serde_json::json!(1)).await?;
+    parse_review_start_response(&resp)
+}
+
+/// The `fno-agents review-start` verb entry: parse CLI, drive the round-trip,
+/// print the outcome receipt (or a clean not-delivered reason). The socket
+/// round-trip needs the user's daemon and stays a manual verification, as
+/// `turn/start` already documents for its own path; the pure builders above are
+/// the correct-by-construction unit-tested core.
+pub async fn run_review_start(rest: &[String]) -> i32 {
+    let mut thread_id: Option<String> = None;
+    let mut target_raw: Option<String> = None;
+    let mut delivery = ReviewDelivery::Inline;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match a.as_str() {
+            "--session" => {
+                thread_id = it
+                    .next()
+                    .map(String::clone)
+                    .or_else(|| {
+                        eprintln!("review-start: --session needs a value");
+                        None
+                    });
+            }
+            "--target" => {
+                target_raw = it.next().cloned();
+            }
+            "--delivery" => {
+                delivery = match it.next().map(String::as_str) {
+                    Some("inline") => ReviewDelivery::Inline,
+                    Some("detached") => ReviewDelivery::Detached,
+                    _ => {
+                        eprintln!("review-start: --delivery must be inline or detached (detached forks a thread that inherits the session's ORIGINAL cwd, not the current one - verify the review thread's cwd before trusting its findings)");
+                        return 2;
+                    }
+                };
+            }
+            other => {
+                eprintln!("review-start: unknown flag: {other}");
+                return 2;
+            }
+        }
+    }
+    let thread_id = match thread_id {
+        Some(t) => t,
+        None => {
+            eprintln!("review-start: --session is required (the codex threadId)");
+            return 2;
+        }
+    };
+    let target_raw = match target_raw {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "review-start: --target is required, one of: \
+                 uncommittedChanges | baseBranch:<branch> | commit:<sha> | custom:<instructions>"
+            );
+            return 2;
+        }
+    };
+    let target = match parse_review_target(&target_raw) {
+        Some(t) => t,
+        None => {
+            eprintln!(
+                "review-start: could not parse --target {target_raw:?} \
+                 (expected uncommittedChanges | baseBranch:<branch> | commit:<sha> | custom:<text>)"
+            );
+            return 2;
+        }
+    };
+    match deliver_via_codex_review_start(&thread_id, &target, delivery).await {
+        Ok((turn_id, review_thread)) => {
+            println!(
+                "{}",
+                json!({"delivered": true, "turn_id": turn_id, "review_thread_id": review_thread})
+            );
+            0
+        }
+        Err(reason) => {
+            println!("{}", json!({"delivered": false, "reason": reason}));
+            1
+        }
+    }
+}
+
+/// Parse a `--target` shorthand into a [`ReviewTarget`]. `baseBranch:main`,
+/// `commit:abc123`, `custom:focus on concurrency`, or the bare
+/// `uncommittedChanges`.
+fn parse_review_target(raw: &str) -> Option<ReviewTarget> {
+    if raw == "uncommittedChanges" {
+        return Some(ReviewTarget::UncommittedChanges);
+    }
+    if let Some(rest) = raw.strip_prefix("baseBranch:") {
+        return Some(ReviewTarget::BaseBranch {
+            branch: rest.to_string(),
+        });
+    }
+    if let Some(rest) = raw.strip_prefix("commit:") {
+        let (sha, title) = match rest.split_once('|') {
+            Some((sha, title)) => (sha.to_string(), Some(title.to_string())),
+            None => (rest.to_string(), None),
+        };
+        return Some(ReviewTarget::Commit { sha, title });
+    }
+    if let Some(rest) = raw.strip_prefix("custom:") {
+        return Some(ReviewTarget::Custom {
+            instructions: rest.to_string(),
+        });
+    }
+    None
 }
 
 pub fn loaded_list_request_json(id: u64, cursor: Option<&str>) -> String {
@@ -395,6 +656,92 @@ mod tests {
         assert_eq!(v["params"]["threadId"], "THREAD-9");
         assert_eq!(v["params"]["input"][0]["type"], "text");
         assert_eq!(v["params"]["input"][0]["text"], "hello MARKER");
+    }
+
+    #[test]
+    fn review_start_target_variants_and_delivery() {
+        // uncommittedChanges + inline
+        let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
+            "T1",
+            &ReviewTarget::UncommittedChanges,
+            ReviewDelivery::Inline,
+        ))
+        .unwrap();
+        assert_eq!(v["method"], "review/start");
+        assert_eq!(v["params"]["threadId"], "T1");
+        assert_eq!(v["params"]["target"]["type"], "uncommittedChanges");
+        assert_eq!(v["params"]["delivery"], "inline");
+
+        // baseBranch + detached
+        let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
+            "T1",
+            &ReviewTarget::BaseBranch { branch: "main".into() },
+            ReviewDelivery::Detached,
+        ))
+        .unwrap();
+        assert_eq!(v["params"]["target"]["type"], "baseBranch");
+        assert_eq!(v["params"]["target"]["branch"], "main");
+        assert_eq!(v["params"]["delivery"], "detached");
+
+        // commit (with title)
+        let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
+            "T1",
+            &ReviewTarget::Commit { sha: "abc".into(), title: Some("t".into()) },
+            ReviewDelivery::Inline,
+        ))
+        .unwrap();
+        assert_eq!(v["params"]["target"]["type"], "commit");
+        assert_eq!(v["params"]["target"]["sha"], "abc");
+        assert_eq!(v["params"]["target"]["title"], "t");
+
+        // custom
+        let v: serde_json::Value = serde_json::from_str(&review_start_request_json(
+            "T1",
+            &ReviewTarget::Custom { instructions: "focus on x".into() },
+            ReviewDelivery::Inline,
+        ))
+        .unwrap();
+        assert_eq!(v["params"]["target"]["type"], "custom");
+        assert_eq!(v["params"]["target"]["instructions"], "focus on x");
+    }
+
+    #[test]
+    fn review_start_response_parses_turn_and_thread() {
+        let raw = r#"{"id":1,"result":{"turn":{"id":"turn-1","status":"inProgress"},"reviewThreadId":"rt-9"}}"#;
+        assert_eq!(
+            parse_review_start_response(raw),
+            Ok(("turn-1".into(), "rt-9".into()))
+        );
+        assert_eq!(
+            parse_review_start_response(r#"{"id":1,"error":{"message":"no"}}"#),
+            Err("rpc-error")
+        );
+        assert_eq!(parse_review_start_response("garbage"), Err("rpc-error"));
+    }
+
+    #[test]
+    fn parse_review_target_shorthand() {
+        assert_eq!(
+            parse_review_target("uncommittedChanges"),
+            Some(ReviewTarget::UncommittedChanges)
+        );
+        assert_eq!(
+            parse_review_target("baseBranch:main"),
+            Some(ReviewTarget::BaseBranch { branch: "main".into() })
+        );
+        assert_eq!(
+            parse_review_target("commit:abc|title"),
+            Some(ReviewTarget::Commit { sha: "abc".into(), title: Some("title".into()) })
+        );
+        assert_eq!(
+            parse_review_target("commit:abc"),
+            Some(ReviewTarget::Commit { sha: "abc".into(), title: None })
+        );
+        assert_eq!(
+            parse_review_target("custom:focus on x"),
+            Some(ReviewTarget::Custom { instructions: "focus on x".into() })
+        );
+        assert_eq!(parse_review_target("bogus"), None);
     }
 
     #[test]
