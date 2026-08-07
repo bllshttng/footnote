@@ -784,6 +784,12 @@ struct View {
     /// (x-a496) `config.mux.hover_focus`: focus-follows-mouse over panes.
     /// Latched once at startup (default on); false disables the hover pre-pass.
     hover_focus: bool,
+    /// `config.mux.show_missions` / `config.mux.show_backlog` (default on): drop
+    /// the `~ missions` progress band or the `~ backlog` lane entirely. Latched
+    /// once at startup; an operator who runs no epics hides the empty band rather
+    /// than collapsing it each session.
+    show_missions: bool,
+    show_backlog: bool,
     /// (x-a496) Focus-follows-mouse debounce: the pane the pointer is settling on
     /// and when it first landed there. `FocusPane` fires once the same pane holds
     /// for [`HOVER_DEBOUNCE`]; a different pane or chrome resets it.
@@ -861,9 +867,10 @@ struct View {
     recruit_esc: Vec<u8>,
     /// (x-96e8) The move-a-tab-to-another-squad picker: `(tab captured at open,
     /// candidate squad ids in the numbered order shown)`, `Some` while the
-    /// selector `m` overlay is open. A digit sends [`Command::MoveTab`]; the id
+    /// selector `m` overlay is open. A digit sends [`Command::MoveTab`] for a tab
+    /// source or [`Command::MovePane`] (cross-squad) for a pane source; the id
     /// is re-validated against the current catalog before it goes on the wire.
-    move_pick: Option<(TabId, Vec<u64>)>,
+    move_pick: Option<(MoveSrc, Vec<u64>)>,
     /// Pending target and geometry for selector `p` placement.
     attach_place: Option<AttachPlace>,
     /// (x-96e8) The squad the selector cursor is tracking across a `J`/`K`
@@ -1194,6 +1201,14 @@ enum MenuAction {
     /// Break a pane-hosted row's live pane out into its own tab
     /// (`Command::BreakPane`) - the menu twin of dragging its grip to the strip.
     BreakOut,
+    /// Relocate a pane-hosted row's live pane into ANOTHER workspace. Opens the
+    /// move picker (the same numbered picker `m` uses for a tab); the chosen
+    /// workspace's active-tab focus pane is the `MovePane` anchor, so the live
+    /// pane grafts in beside it and de-recruits from its source (the
+    /// `move_pane_cross_tab` path the row drag already uses). Appended in
+    /// [`View::open_row_menu`] only when another non-mission workspace exists,
+    /// so the entry never offers a move with no destination.
+    MoveToWorkspace,
     /// Focus an existing pane-hosted row.
     Focus,
     /// Open the read-only peek overlay.
@@ -1212,6 +1227,16 @@ enum MenuAction {
     /// Open the rename overlay for a workspace section header - menu parity with
     /// selector `r` (x-96e8). Only built for a section carrying a squad id.
     Rename,
+}
+
+/// What the numbered move picker is relocating: a whole tab (selector `m`) or a
+/// single pane-hosted row's live pane (the row menu's Move-to-workspace entry).
+/// Both list destination workspaces and resolve the same way; only the command
+/// the digit sends differs (`MoveTab` vs `MovePane`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MoveSrc {
+    Tab(TabId),
+    Pane(u64),
 }
 
 /// Build the per-state row menu for the agent at `display_rows()` index `i`,
@@ -1608,6 +1633,8 @@ impl View {
             search: None,
             search_esc: Vec::new(),
             hover_focus: true,
+            show_missions: true,
+            show_backlog: true,
             hover_pending: None,
             hover_row: None,
             hover_seam: None,
@@ -2017,7 +2044,7 @@ impl View {
     /// Open the move-tab-to-squad picker modally for `tab` (x-96e8), listing the
     /// candidate destination squads (source excluded, capped at 9) in the order
     /// a digit selects them. Same overlay-clearing discipline as the others.
-    fn open_move_pick(&mut self, tab: TabId, squads: Vec<u64>) {
+    fn open_move_pick(&mut self, src: MoveSrc, squads: Vec<u64>) {
         self.selector = None;
         self.answers = None;
         self.search = None;
@@ -2029,7 +2056,7 @@ impl View {
         self.recruit_esc.clear();
         self.attach_place = None;
         self.clear_peek();
-        self.move_pick = Some((tab, squads));
+        self.move_pick = Some((src, squads));
     }
 
     fn open_attach_place(&mut self, id: String, target: u64, squads: Vec<u64>) {
@@ -2190,6 +2217,20 @@ impl View {
         }
     }
 
+    /// The candidate destination squads for a Move-to-workspace gesture on a row
+    /// owned by `own`: every other non-mission workspace, capped at the picker's
+    /// 9-digit range. Shared by the menu entry's construction and its dispatch so
+    /// the two cannot drift on what counts as a destination.
+    fn move_dst_squads(&self, own: Option<u64>) -> Vec<u64> {
+        self.layout
+            .squads
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
+            .take(9)
+            .collect()
+    }
+
     /// Open the row context menu on `display_rows()` index `i`, anchored at
     /// `anchor` (x-8ccf US2): the agent lifecycle menu, (x-1d91) the Backlog
     /// card's reorder menu, or (x-f300) a section header's clear-dead menu (a
@@ -2203,7 +2244,29 @@ impl View {
         // Resolve what the row needs while `display_rows()` holds the borrow, so
         // the section arm below is free to mutate `self`.
         let pick = match self.display_rows().get(i) {
-            Some(DisplayRow::Agent(a)) => Some(Pick::Menu(Box::new(build_row_menu(a, anchor)))),
+            Some(DisplayRow::Agent(a)) => {
+                let mut menu = build_row_menu(a, anchor);
+                // A pane-hosted row can relocate its live pane into another
+                // workspace; a paneless row already gets the `p` placement
+                // picker. Append the entry only when another non-mission
+                // workspace exists, so it never offers a move to nowhere. Built
+                // here (where the layout is) rather than in build_row_menu so
+                // the per-state builder stays layout-free and its direct tests
+                // stay untouched.
+                if a.pane_id.is_some() {
+                    let move_dsts = self.move_dst_squads(a.squad);
+                    if !move_dsts.is_empty() {
+                        menu.popup.rows.push(PopupRow::Rule);
+                        menu.popup.rows.push(PopupRow::Entry {
+                            glyph: "↪".into(),
+                            label: "Move to workspace".into(),
+                            hint: String::new(),
+                        });
+                        menu.actions.push(MenuAction::MoveToWorkspace);
+                    }
+                }
+                Some(Pick::Menu(Box::new(menu)))
+            }
             // (x-1d91) A Backlog card gets the reorder menu.
             Some(DisplayRow::Card(c)) => Some(Pick::Menu(Box::new(build_card_menu(c, anchor)))),
             Some(DisplayRow::Sel(row)) if row.tab.is_none() => squad_key(&self.layout, row.squad)
@@ -3817,6 +3880,11 @@ impl View {
         }
         match key {
             SectionKey::Mission(_) => self.expanded_or_live_only(key),
+            // The `~ missions` band is a progress summary, not a workspace: it
+            // opens Expanded (the mission names are the content) and the operator
+            // collapses it explicitly. No LiveOnly tier - the names have no
+            // exited state, so it is binary.
+            SectionKey::Missions => SectionView::Expanded,
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
             SectionKey::Squad(_) | SectionKey::Elsewhere | SectionKey::WorkQueue => {
                 SectionView::Collapsed
@@ -4026,6 +4094,8 @@ impl View {
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
             // Cards have no exited state, so the Backlog section is always binary.
             SectionKey::WorkQueue => Vec::new(),
+            // The `~ missions` band holds progress names, not agents.
+            SectionKey::Missions => Vec::new(),
         }
     }
 
@@ -4576,10 +4646,11 @@ impl View {
             let sel = sel.min(queue.len().saturating_sub(1));
             let lines = needs_overlay_lines(&queue, sel, dropped, self.needs_footer());
             draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
-        } else if let Some((_, squads)) = &self.move_pick {
-            // x-96e8 move-tab picker: `move tab to:` + one numbered line per
-            // candidate squad, on the same inverse-video overlay chrome.
-            let lines = self.move_pick_lines(squads);
+        } else if let Some((src, squads)) = &self.move_pick {
+            // x-96e8 move picker: `move tab to:` / `move pane to:` + one
+            // numbered line per candidate squad, on the same inverse-video
+            // overlay chrome.
+            let lines = self.move_pick_lines(src, squads);
             draw_lines_overlay(&mut cells, rows, cols, overlay_origin, overlay_dims, &lines);
         } else if let Some(picker) = &self.attach_place {
             let lines = self.attach_place_lines(picker);
@@ -4694,6 +4765,44 @@ impl View {
                 || self.status_on)
     }
 
+    /// A centered, inverse-video name-entry modal for the create / rename /
+    /// recruit inputs. Those used to paint the bottom-left chrome row, where they
+    /// sat outside the operator's field of view and read as "nothing happened";
+    /// centering on a mid-screen inverse-video line puts the prompt where the
+    /// operator is looking and names its target. The bottom chrome row stays
+    /// blanked so a stale bottom row never shows under the modal.
+    fn draw_name_modal(
+        &self,
+        cells: &mut [Cell],
+        rows: usize,
+        cols: usize,
+        label: &str,
+        name: &str,
+        hint: Option<&str>,
+    ) {
+        for c in 0..cols {
+            cells[(rows - 1) * cols + c] = Cell::default();
+        }
+        let r = rows / 2;
+        for c in 0..cols {
+            cells[r * cols + c] = Cell::default();
+        }
+        let text = match hint {
+            Some(h) => format!(" {label}: {name}_  ({h})"),
+            None => format!(" {label}: {name}_"),
+        };
+        let pad = cols.saturating_sub(text.chars().count()) / 2;
+        for (i, ch) in text.chars().take(cols).enumerate() {
+            let col = (pad + i).min(cols.saturating_sub(1));
+            cells[r * cols + col] = Cell {
+                c: ch,
+                fg: Color::Default,
+                bg: Color::Default,
+                flags: cell_flags::INVERSE | cell_flags::BOLD,
+            };
+        }
+    }
+
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
         if !self.bottom_row_is_chrome() {
             return;
@@ -4704,65 +4813,42 @@ impl View {
             self.draw_confirm_line(cells, rows, cols, c);
             return;
         }
-        // The new-workspace name input overlays the row while open (x-9e5e),
-        // above search/hint/status - the operator is mid-entry.
+        // The new-workspace name input is a centered modal (x-9e5e); the operator
+        // is mid-entry, so it sits above search/hint/status.
         if let Some(name) = &self.create {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
-            let text = format!(" new workspace: {name}_");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(cells, rows, cols, "new workspace", name, None);
             return;
         }
-        // The rename name input (x-c150 tab; widened x-96e8 to squads), same
-        // overlay discipline as the create input above; the hint spells out the
-        // blank-clears semantics. The noun tracks the target so the operator
-        // sees what they are renaming.
+        // The rename input (x-c150 tab; widened x-96e8 to squads): the noun tracks
+        // the target so the operator sees what they are renaming, and the hint
+        // spells out the blank-clears semantics.
         if let Some((target, name)) = &self.rename {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
             let noun = match target {
                 RenameTarget::Tab(_) => "tab",
                 RenameTarget::Squad(_) => "workspace",
             };
-            let text = format!(" rename {noun}: {name}_ (empty resets to auto)");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(
+                cells,
+                rows,
+                cols,
+                &format!("rename {noun}"),
+                name,
+                Some("empty resets to auto"),
+            );
             return;
         }
-        // The recruit workspace-name input (x-8f11): same overlay discipline; the
-        // hint names how many marked agents will join (create-if-absent).
+        // The recruit workspace-name input (x-8f11): the hint names how many
+        // marked agents will join (create-if-absent).
         if let Some(name) = &self.recruit {
-            let r = rows - 1;
-            for c in 0..cols {
-                cells[r * cols + c] = Cell::default();
-            }
             let n = self.marks.len();
-            let text = format!(" recruit {n} into: {name}_ (create-if-absent)");
-            for (i, ch) in text.chars().take(cols).enumerate() {
-                cells[r * cols + i] = Cell {
-                    c: ch,
-                    fg: Color::Default,
-                    bg: Color::Default,
-                    flags: cell_flags::BOLD,
-                };
-            }
+            self.draw_name_modal(
+                cells,
+                rows,
+                cols,
+                &format!("recruit {n} into"),
+                name,
+                Some("create-if-absent"),
+            );
             return;
         }
         // Search line takes the bottom row when active (precedence: search >
@@ -4957,9 +5043,13 @@ impl View {
     /// selects it. A candidate that vanished from the catalog since open still
     /// renders (labelled) - the digit is re-validated on press, and the server
     /// refuses a stale id regardless.
-    fn move_pick_lines(&self, squads: &[u64]) -> Vec<String> {
+    fn move_pick_lines(&self, src: &MoveSrc, squads: &[u64]) -> Vec<String> {
         const W: usize = 40;
-        let mut lines = vec![pad_to(" move tab to: · digit selects · esc cancel", W)];
+        let verb = match src {
+            MoveSrc::Tab(_) => "move tab to:",
+            MoveSrc::Pane(_) => "move pane to:",
+        };
+        let mut lines = vec![pad_to(&format!(" {verb} · digit selects · esc cancel"), W)];
         for (i, &sid) in squads.iter().enumerate() {
             let name = self
                 .layout
@@ -5259,7 +5349,15 @@ impl View {
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
-        for (idx, s) in self.layout.squads.iter().enumerate() {
+        // Real workspaces only: a mission squad renders later under the
+        // `~ missions` band, never as a workspace section (it can hold no agent).
+        let real_squads: Vec<&SquadMeta> = self
+            .layout
+            .squads
+            .iter()
+            .filter(|s| !is_mission_squad(s.id))
+            .collect();
+        for (idx, s) in real_squads.into_iter().enumerate() {
             // One spacer between consecutive workspace groups (never before the
             // first, so no leading blank and never doubled).
             if multi_squad && idx > 0 {
@@ -5350,6 +5448,39 @@ impl View {
         // The `+` create-workspace affordance sits directly under the squad list
         // (x-9e5e), above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
+        // Mission squads are progress indicators, not workspaces (an agent is
+        // never assigned a mission id), so they render as one `~ missions` band -
+        // the same `~`-prefixed pull-section shape as `~ elsewhere` / `~ backlog` -
+        // rather than workspace sections an operator rightly expects to hold
+        // sessions. Each mission's name already carries its `done/total` counter.
+        // Skip the collect entirely when the band is off (the documented reason
+        // for the toggle) - display_rows is hot, called per compose.
+        let missions: Vec<&SquadMeta> = if self.show_missions {
+            self.layout
+                .squads
+                .iter()
+                .filter(|s| is_mission_squad(s.id))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !missions.is_empty() {
+            if multi_squad {
+                out.push(DisplayRow::Blank);
+            }
+            let view = self.section_view(&SectionKey::Missions);
+            out.push(DisplayRow::Header {
+                label: "~ missions",
+                rollup: Vec::new(),
+                key: SectionKey::Missions,
+                view,
+            });
+            if view != SectionView::Collapsed {
+                for m in missions {
+                    out.push(DisplayRow::Sub(m.name.clone()));
+                }
+            }
+        }
         let orphans = self.orphans();
         if !orphans.is_empty() {
             // Orphans (cwd matched no squad) keep one flat section in the same
@@ -5383,7 +5514,7 @@ impl View {
         // ready/blocked/in-flight cards under their own header. Empty
         // (unreadable/no-work graph) renders nothing - the agents section above
         // is unaffected (AC-edge fail-open).
-        if !self.layout.backlog.is_empty() {
+        if !self.layout.backlog.is_empty() && self.show_backlog {
             if multi_squad {
                 out.push(DisplayRow::Blank);
             }
@@ -6095,7 +6226,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
         SectionKey::Squad(_) if is_mission_squad(s.id) => false,
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
-        SectionKey::Elsewhere | SectionKey::WorkQueue => false,
+        SectionKey::Elsewhere | SectionKey::WorkQueue | SectionKey::Missions => false,
     }
 }
 
@@ -6107,6 +6238,9 @@ fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
         SectionKey::Squad(_) | SectionKey::Mission(_) => {
             layout.squads.iter().any(|s| squad_matches(s, key))
         }
+        // The `~ missions` band is live while any mission squad exists; the two
+        // pull-sections are always considered live (their rows come and go).
+        SectionKey::Missions => layout.squads.iter().any(|s| is_mission_squad(s.id)),
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
 }
@@ -7172,6 +7306,9 @@ async fn attach_and_run(
     // Latch the focus-follows-mouse off-switch once (x-a496); a direct
     // config.toml read (fail-open to on), the digest_overlay idiom.
     view.hover_focus = crate::digest_overlay::hover_focus_enabled(Path::new(&cwd));
+    // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
+    view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
+    view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
@@ -9216,6 +9353,19 @@ async fn execute_row_menu_action(
             .map_err(|e| format!("break send failed: {e}"))?,
             None => view.set_notice("agent has no pane here".into()),
         },
+        MenuAction::MoveToWorkspace => match a.pane_id {
+            Some(pid) => {
+                // Recomputed at execute (a workspace added or removed between
+                // open and pick is reflected); `move_pick_keys` re-validates.
+                let dsts = view.move_dst_squads(a.squad);
+                if dsts.is_empty() {
+                    view.set_notice("no other workspace to move into".into());
+                } else {
+                    view.open_move_pick(MoveSrc::Pane(pid), dsts);
+                }
+            }
+            None => view.set_notice("agent has no pane here".into()),
+        },
         MenuAction::Focus => match a.pane_id {
             Some(pid) => write_msg(sock_w, &ClientMsg::Command(Command::FocusPane(pid)))
                 .await
@@ -10366,14 +10516,19 @@ async fn selector_keys(
                         .layout
                         .squads
                         .iter()
-                        .filter(|s| s.id != squad)
+                        // Exclude the source AND mission sentinels: a mission id
+                        // resolves to no server-side squad, so MoveTab into one is
+                        // refused. The other destination sites (Move-to-workspace,
+                        // the `p` attach picker) already guard this; the tab picker
+                        // was the holdout.
+                        .filter(|s| s.id != squad && !is_mission_squad(s.id))
                         .map(|s| s.id)
                         .take(9)
                         .collect();
                     (!dsts.is_empty()).then_some((tid, dsts))
                 });
                 match picked {
-                    Some((tid, dsts)) => view.open_move_pick(tid, dsts),
+                    Some((tid, dsts)) => view.open_move_pick(MoveSrc::Tab(tid), dsts),
                     None => view.set_notice("no other workspace to move this tab to".into()),
                 }
             }
@@ -10398,7 +10553,7 @@ async fn move_pick_keys(
     bytes: &[u8],
     sock_w: &mut (impl tokio::io::AsyncWrite + Unpin),
 ) -> Result<StdinFlow, String> {
-    let Some((tab, squads)) = view.move_pick.take() else {
+    let Some((src, squads)) = view.move_pick.take() else {
         return Ok(StdinFlow::Continue);
     };
     match bytes.first() {
@@ -10408,14 +10563,57 @@ async fn move_pick_keys(
                 // The captured id must still name a live squad; the server
                 // refuses a stale id regardless, but pre-validating saves a
                 // round-trip and keeps the BEL local.
-                Some(&sq) if view.layout.squads.iter().any(|s| s.id == sq) => {
-                    write_msg(
-                        sock_w,
-                        &ClientMsg::Command(Command::MoveTab { tab, squad: sq }),
-                    )
-                    .await
-                    .map_err(|e| format!("move-tab send failed: {e}"))?;
-                }
+                Some(&sq) if view.layout.squads.iter().any(|s| s.id == sq) => match src {
+                    MoveSrc::Tab(tab) => {
+                        write_msg(
+                            sock_w,
+                            &ClientMsg::Command(Command::MoveTab { tab, squad: sq }),
+                        )
+                        .await
+                        .map_err(|e| format!("move-tab send failed: {e}"))?;
+                    }
+                    // A pane move needs an anchor pane in the destination: its
+                    // active tab's focus leaf (else the first leaf). MovePane
+                    // grafts the mover beside that anchor, de-recruiting it from
+                    // the source workspace (the `move_pane_cross_tab` path).
+                    // `target` is mandatory for a cross-tab move; without it the
+                    // server navigates from the mover, which lives in another
+                    // tab, and the move is refused.
+                    MoveSrc::Pane(pid) => {
+                        // Prefer the active tab's focus leaf; if that tab has no
+                        // panes (transient during a close, or an older server with
+                        // empty TabMeta.panes), fall back to the first leaf in any
+                        // tab so a valid anchor is not missed.
+                        let anchor = view
+                            .layout
+                            .squads
+                            .iter()
+                            .find(|s| s.id == sq)
+                            .and_then(|s| {
+                                s.tabs
+                                    .get(s.active_tab)
+                                    .and_then(|t| t.panes.first())
+                                    .or_else(|| s.tabs.iter().flat_map(|t| t.panes.first()).next())
+                                    .map(|p| p.id)
+                            });
+                        match anchor {
+                            Some(anchor) => {
+                                write_msg(
+                                    sock_w,
+                                    &ClientMsg::Command(Command::MovePane {
+                                        mover: Some(pid),
+                                        target: Some(anchor),
+                                        dir: Dir::Right,
+                                    }),
+                                )
+                                .await
+                                .map_err(|e| format!("move-pane send failed: {e}"))?;
+                            }
+                            None => view
+                                .set_notice("no pane in that workspace to anchor against".into()),
+                        }
+                    }
+                },
                 _ => {
                     let _ = raw_out(b"\x07");
                 }
@@ -14342,25 +14540,71 @@ mod tests {
         );
     }
 
-    // A mission squad has no server-side squad `SelectSquad` could resolve
-    // (it would refuse "no such squad"), so acting on its header row must
-    // always toggle locally instead - even though it is never the active
-    // squad (codex review of x-1a47 change 2/3, P1-a).
+    // A mission squad can never hold an agent (its id is a high-bit sentinel
+    // nothing is assigned), so it renders as a progress line under the
+    // `~ missions` band rather than a workspace section an operator would expect
+    // to hold sessions. The band header cycles locally; no per-mission row ever
+    // reaches SelectSquad (a mission has no server-side squad to select).
     #[test]
-    fn row_action_on_mission_squad_toggles_expand_not_select() {
+    fn mission_renders_under_the_missions_band_not_as_a_workspace() {
         let mut view = two_pane_view();
         let mut layout = two_squad_layout(1);
-        let mid = mission_meta(3, "mux-squad  2/2").id;
         layout.squads.push(mission_meta(3, "mux-squad  2/2"));
         view.set_layout(layout);
-        let i = view
-            .display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Sel(row) if row.squad == mid))
-            .expect("mission header row");
+        let rows = view.display_rows();
         assert!(
-            matches!(view.row_action(i), Some(ChromeHit::CycleSection(_))),
-            "a mission header must toggle, never SelectSquad"
+            !rows
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Sel(row) if is_mission_squad(row.squad))),
+            "a mission must not render as a workspace section"
+        );
+        let band = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ missions"))
+            .expect("a `~ missions` band");
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, DisplayRow::Sub(s) if s == "mux-squad  2/2")),
+            "the mission's name renders as a band line"
+        );
+        assert!(
+            matches!(
+                view.row_action(band),
+                Some(ChromeHit::CycleSection(SectionKey::Missions))
+            ),
+            "the missions band cycles locally, never SelectSquad"
+        );
+    }
+
+    #[test]
+    fn section_toggles_hide_the_missions_and_backlog_bands() {
+        // config.mux.show_missions / show_backlog (default on) drop the bands
+        // entirely - an operator who runs no epics hides the empty missions band
+        // rather than collapsing it each session.
+        let mut view = two_pane_view();
+        let mut layout = two_squad_layout(1);
+        layout.squads.push(mission_meta(3, "epic  0/4"));
+        layout.backlog = vec![bcard("x-rdy", CardState::Ready)];
+        layout.backlog_lanes = vec![("ready".into(), 1)];
+        view.set_layout(layout);
+        view.section_view
+            .insert(SectionKey::WorkQueue, SectionView::Expanded);
+        let has = |v: &View, lbl: &str| {
+            v.display_rows()
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Header { label, .. } if *label == lbl))
+        };
+        assert!(has(&view, "~ missions"), "missions band shown by default");
+        assert!(has(&view, "~ backlog"), "backlog band shown by default");
+        view.show_missions = false;
+        view.show_backlog = false;
+        assert!(
+            !has(&view, "~ missions"),
+            "show_missions=false hides the band"
+        );
+        assert!(
+            !has(&view, "~ backlog"),
+            "show_backlog=false hides the band"
         );
     }
 
@@ -15636,6 +15880,41 @@ mod tests {
         assert!(v.notice.is_none(), "an inert row says nothing");
     }
 
+    #[test]
+    fn row_menu_opens_on_pane_hosted_agent_row() {
+        // Operator report: "right-click does nothing on most rows; it works only
+        // on a row not on a pane yet." A pane-hosted session renders as a
+        // DisplayRow::Agent with pane_id: Some (x-0090 moved these off the old
+        // Sel-with-tab rows), so the one path a right-click reaches is
+        // open_row_menu -> build_row_menu. This goes THROUGH open_row_menu on that
+        // exact row - not build_row_menu directly - so it pins the pane-row
+        // affordance (Focus/BreakOut/Move/Stop) on the path a user has, the case
+        // the direct-builder tests never covered.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "worker" && a.pane_id.is_some());
+        assert!(
+            v.open_row_menu(idx, Anchor::Center),
+            "pane-hosted row opens a menu"
+        );
+        let actions = &v.row_menu.as_ref().unwrap().actions;
+        assert!(
+            actions.contains(&MenuAction::Focus),
+            "pane row offers Focus"
+        );
+        assert!(
+            actions.contains(&MenuAction::BreakOut),
+            "pane row offers BreakOut"
+        );
+        assert!(actions.contains(&MenuAction::Stop), "pane row offers Stop");
+        assert!(
+            actions.iter().any(|a| matches!(a, MenuAction::MoveDir(_))),
+            "pane row offers the Move grid"
+        );
+        // The paneless-only attach verbs must not appear on a pane-hosted row.
+        assert!(!actions.contains(&MenuAction::OpenHere));
+        assert!(!actions.contains(&MenuAction::NewTab));
+    }
+
     /// The display index of the squad-name header row for `squad`.
     fn squad_header_at(view: &View, squad: u64) -> usize {
         view.display_rows()
@@ -15755,6 +16034,45 @@ mod tests {
         assert_eq!(
             v.row_menu.as_ref().unwrap().actions,
             vec![super::MenuAction::Rename, super::MenuAction::ClearDead]
+        );
+    }
+
+    #[test]
+    fn name_entry_prompt_renders_centered_naming_its_target() {
+        // The create/rename/recruit name inputs used to paint the bottom-left
+        // chrome row (plain BOLD, outside the operator's field of view). They now
+        // render as a centered inverse-video modal that names the target.
+        let mut v = two_pane_view();
+        v.rename = Some((RenameTarget::Squad(1), "renamed".into()));
+        let (rows, cols) = (v.term.0 as usize, v.term.1 as usize);
+        let mut cells = vec![Cell::default(); rows * cols];
+        v.draw_bottom_row(&mut cells, rows, cols);
+        let mid = rows / 2;
+        let midline: String = cells[mid * cols..(mid + 1) * cols]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert!(
+            midline.contains("rename workspace"),
+            "centered modal names its target: {midline:?}"
+        );
+        assert!(
+            midline.contains("renamed_"),
+            "shows the in-progress name + cursor: {midline:?}"
+        );
+        assert!(
+            cells[mid * cols..(mid + 1) * cols]
+                .iter()
+                .any(|c| c.flags & cell_flags::INVERSE != 0),
+            "the centered modal is inverse-video, not the old plain bottom row"
+        );
+        let bottom: String = cells[(rows - 1) * cols..rows * cols]
+            .iter()
+            .map(|c| c.c)
+            .collect();
+        assert!(
+            !bottom.contains("rename"),
+            "the prompt left the bottom row it used to share"
         );
     }
 
@@ -21821,7 +22139,7 @@ mod tests {
         assert!(buf.is_empty(), "opening the picker sends nothing");
         assert_eq!(
             v.move_pick,
-            Some((1, vec![2])),
+            Some((MoveSrc::Tab(1), vec![2])),
             "picker captures the squad's active tab id and the non-source squads"
         );
 
@@ -21845,11 +22163,28 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn selector_m_picker_excludes_mission_squads() {
+        // A mission id resolves to no server-side squad, so MoveTab into one is
+        // refused; the tab-move destination list must exclude mission sentinels
+        // (the other destination sites already do).
+        let mut v = two_pane_view(); // squads 1 (footnote) + 2 (notes)
+        v.layout.squads.push(mission_meta(5, "epic  0/4"));
+        v.selector = Some(0); // squad 1
+        selector_keys(&mut v, b"m", &mut Vec::new()).await.unwrap();
+        let (_, dsts) = v.move_pick.expect("picker opens with squad 2 available");
+        assert!(
+            !dsts.iter().any(|&id| is_mission_squad(id)),
+            "no mission sentinel in the destinations"
+        );
+        assert!(dsts.contains(&2), "the other real workspace is listed");
+    }
+
+    #[tokio::test]
     async fn move_pick_keys_digit_sends_move_tab_and_stale_id_bels() {
         // A digit sends MoveTab for the numbered squad; a captured id that
         // vanished is refused locally (no wire message).
         let mut v = two_pane_view();
-        v.move_pick = Some((7, vec![2])); // move tab 7 to squad 2 (digit 1)
+        v.move_pick = Some((MoveSrc::Tab(7), vec![2])); // move tab 7 to squad 2 (digit 1)
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         let mut cur = std::io::Cursor::new(buf);
@@ -21862,7 +22197,7 @@ mod tests {
 
         // A stale captured id (not in the current catalog) sends nothing.
         let mut v = two_pane_view();
-        v.move_pick = Some((7, vec![999]));
+        v.move_pick = Some((MoveSrc::Tab(7), vec![999]));
         let mut buf: Vec<u8> = Vec::new();
         move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
         assert!(
@@ -21870,6 +22205,97 @@ mod tests {
             "a stale destination id never reaches the wire"
         );
         assert_eq!(v.move_pick, None);
+    }
+
+    #[test]
+    fn row_menu_pane_row_offers_move_to_workspace_with_another_squad() {
+        // A pane-hosted row gets a Move-to-workspace entry when another real
+        // workspace exists - the cross-workspace affordance it lacked. Built in
+        // open_row_menu (layout-aware), so this goes through open_row_menu, not
+        // build_row_menu directly.
+        let mut v = unified_rows_view(); // squads 1 (footnote) + 2 (notes)
+        let idx = agent_row_at(&v, |a| a.name == "worker" && a.pane_id.is_some());
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        assert!(
+            v.row_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .contains(&MenuAction::MoveToWorkspace),
+            "pane row with a second workspace offers Move to workspace"
+        );
+    }
+
+    #[test]
+    fn row_menu_pane_row_omits_move_to_workspace_with_one_squad() {
+        // No destination -> no entry. A dead Move-to-workspace item that bels on
+        // open would be worse than none.
+        let mut v = view_with_agents(vec![]);
+        v.set_layout(LayoutView {
+            squads: vec![meta(1, "footnote", 2, 1)],
+            active_squad: 1,
+            panes: vec![(
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 35,
+                },
+            )],
+            focus: 10,
+            area: (29, 72),
+            agents: vec![pane_hosted_row("only", 10)],
+            focus_node: None,
+            backlog: Vec::new(),
+            backlog_lanes: Vec::new(),
+            backlog_stale: false,
+        });
+        let idx = agent_row_at(&v, |a| a.name == "only");
+        assert!(v.open_row_menu(idx, Anchor::Center));
+        assert!(
+            !v.row_menu
+                .as_ref()
+                .unwrap()
+                .actions
+                .contains(&MenuAction::MoveToWorkspace),
+            "a lone workspace offers no move"
+        );
+    }
+
+    #[tokio::test]
+    async fn move_pick_keys_pane_sends_cross_squad_move_pane() {
+        // A pane source relocates the live pane into the chosen workspace beside
+        // its active-tab focus pane (the MovePane anchor), the cross-squad path
+        // the row drag already uses. With no anchor pane in the destination,
+        // nothing goes on the wire and the operator is told.
+        let mut v = two_pane_view();
+        // Give squad 2's active tab a leaf pane to anchor against (200).
+        v.layout.squads[1].tabs[0].panes.push(PaneMeta {
+            id: 200,
+            label: "dst".into(),
+        });
+        v.move_pick = Some((MoveSrc::Pane(10), vec![2])); // move pane 10 to squad 2
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
+        assert_eq!(
+            decode_cmds(buf),
+            vec![Command::MovePane {
+                mover: Some(10),
+                target: Some(200),
+                dir: Dir::Right,
+            }],
+            "pane move targets the destination's anchor pane"
+        );
+        assert_eq!(v.move_pick, None);
+
+        // Destination with no leaf pane: anchor is None -> a notice, no command.
+        let mut v = two_pane_view(); // squad 2's tabs carry no PaneMeta here
+        v.move_pick = Some((MoveSrc::Pane(10), vec![2]));
+        let mut buf: Vec<u8> = Vec::new();
+        move_pick_keys(&mut v, b"1", &mut buf).await.unwrap();
+        assert!(buf.is_empty(), "no anchor -> nothing on the wire");
+        assert!(v.notice.is_some(), "and the operator is told why");
     }
 
     #[tokio::test]

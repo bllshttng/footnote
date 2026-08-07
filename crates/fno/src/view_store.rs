@@ -43,6 +43,13 @@ pub enum SectionKey {
     Elsewhere,
     /// The `~ backlog` lane.
     WorkQueue,
+    /// The `~ missions` band: the synthetic mission squads grouped as one
+    /// pull-section. A mission squad can never hold an agent row (its id is a
+    /// high-bit sentinel no agent is ever assigned), so it is a progress
+    /// indicator, not a workspace - rendering it under a `~` band keeps it from
+    /// being read as one. Binary like WorkQueue: the mission names have no
+    /// exited state, so the cycle is expanded <-> collapsed.
+    Missions,
 }
 
 impl SectionKey {
@@ -56,6 +63,7 @@ impl SectionKey {
             SectionKey::Mission(id) => format!("mission:{id:x}"),
             SectionKey::Elsewhere => "elsewhere".into(),
             SectionKey::WorkQueue => "work-queue".into(),
+            SectionKey::Missions => "missions".into(),
         }
     }
 
@@ -63,6 +71,7 @@ impl SectionKey {
         match s {
             "elsewhere" => Some(SectionKey::Elsewhere),
             "work-queue" => Some(SectionKey::WorkQueue),
+            "missions" => Some(SectionKey::Missions),
             _ => {
                 if let Some(cwd) = s.strip_prefix("squad:") {
                     return Some(SectionKey::Squad(cwd.into()));
@@ -77,7 +86,7 @@ impl SectionKey {
     /// Backlog section's rows are cards, which have no exited state, so its middle
     /// state would hide nothing.
     fn is_binary(&self) -> bool {
-        matches!(self, SectionKey::WorkQueue)
+        matches!(self, SectionKey::WorkQueue | SectionKey::Missions)
     }
 }
 
