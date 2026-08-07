@@ -357,6 +357,15 @@ The one reason to mint a new session is **context pressure**. Every teammate rep
 
 **The king's own threshold is lower than a teammate's.** You hand yourself off at `config.target.handoff.king_used_pct_trigger` (default 40), deliberately below the teammate trigger of 50. A teammate's degradation costs one node; yours propagates into every ruling you issue and every worker you route, and the handoff itself costs context, so a king that waits until it is degraded is too degraded to hand off well. The config validator refuses a king trigger at or above the teammate trigger and prints the rationale, so the 40 cannot be quietly normalized to 50. A king Stop hook blocks you past the trigger and tells you your exact usage; do not wait for it - read `fno whoami` at a boundary and hand off first.
 
+**A king arriving on a node it did not spawn looks up the existing agent before it spawns.** The continuity above assumes you held the handle from the start; a pass king or a successor after abdication does not, and the eight-spawn failure (three live agents re-spawned because nobody looked first) is what this prevents. Look in order, each step naming the store it reads:
+
+1. `fno claim status node:<id>` for the live holder. The claim is the ownership authority; the manifest's claim field is an init-time snapshot and can lie, so read the verb, not the manifest.
+2. If the claim is empty or stale, `fno agents top` for the process census. Use `top`, not `list`: `top` is the union the spawn gate counts and the one that matches reality.
+3. If both are empty, `ls ~/.claude/projects/*<branch-or-node>*`, keyed on the worktree path; confirm liveness by the transcript file's mtime and tail, the one probe that has not lied.
+4. Only then resume: `fno agents resume <id> --print-command` accepts a registry name, the full `sessions[].session_id` UUID, or its 8-hex short form. Read the printed `cd` before executing it; if it does not match the dir holding that session's transcript under `~/.claude/projects/`, correct it by hand. That is a belt on top of the mechanism that resolves the transcript's dir, kept because the second check is cheap once the first is right.
+
+Resume is the common case in writing and the rare one in practice: of the agents behind four open PRs at last measure, one was still alive. So the default end of the ladder is **spawn and record**, not resume. Spawn the successor, then `fno backlog update <node> --dispatch-brief "..."` so the next king is not in the same position; the brief is the durable channel that survives the session.
+
 ### Monitor: report first, sweep as backstop
 
 - **Primary signal is the teammate's report mail** (push). It wakes you the turn it lands. The minion clause is what makes this work: a teammate projects its own boundaries - a question, a block, a PR opened, a review verdict, merge readiness - so you are woken by events rather than hunting for them.
