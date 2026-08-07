@@ -4764,7 +4764,7 @@ impl View {
     /// sat outside the operator's field of view and read as "nothing happened";
     /// centering on a mid-screen inverse-video line puts the prompt where the
     /// operator is looking and names its target. The bottom chrome row stays
-    /// blanked so a stale status line never shows under the modal.
+    /// blanked so a stale bottom row never shows under the modal.
     fn draw_name_modal(
         &self,
         cells: &mut [Cell],
