@@ -6,9 +6,9 @@ mutations belong to dedicated write verbs (stop, rm, future reconcile).
 
 Locked Decision 6 — rendered ``status`` (registry status corrected read-only
 by family-1 truth) and ``live_status`` (claude's supervisor view, Title-case
-``Working | Needs input | Idle`` on older claude builds, lowercase ``working |
-blocked | idle | done`` on current ones, or ``null``) are separate axes. Both
-appear in the JSON shape.
+``Working | Needs input | Idle | Done`` or ``null``) are separate axes. Both appear in
+the JSON shape. The provider normalizes every claude spelling onto that one
+vocabulary, so this layer reads Title-case whatever binary produced the row.
 """
 from __future__ import annotations
 

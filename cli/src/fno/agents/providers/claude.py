@@ -1099,26 +1099,25 @@ _AGENTS_JSON_TIMEOUT_DEFAULT = 3.0
 _FOLLOW_POLL_INTERVAL = 0.5
 
 
-# Claude supervisor's live-status sentinel set. A value outside this set
-# surfaces a forensic warning so vocabulary drift is loud, not silent. The value
-# still passes through unchanged so consumers that already adapted aren't
-# blocked on our config.
-#
-# Two vocabularies are live. The Title-case set is the original documented one;
-# claude now emits lowercase `state` values including "blocked", which the
-# Title-case set alone rejected. Both are accepted so neither claude version
-# produces spurious drift warnings.
-KNOWN_LIVE_STATUSES = frozenset(
-    {
-        "Working",
-        "Needs input",
-        "Idle",
-        "working",
-        "blocked",
-        "idle",
-        "done",
-    }
-)
+# The OUTPUT vocabulary: what this parser promises its callers, regardless of
+# which spelling the binary used. A resolved value outside this set surfaces a
+# forensic warning so vocabulary drift is loud, not silent; it still passes
+# through unchanged so consumers that already adapted aren't blocked on us.
+KNOWN_LIVE_STATUSES = frozenset({"Working", "Needs input", "Idle", "Done"})
+
+# The INPUT vocabulary: every spelling observed from a real binary, mapped onto
+# the output set. Widening the output set instead (accepting "blocked" as its
+# own value) is what let raw lowercase leak to every consumer, so `Needs input`
+# was never produced and downstream Title-case comparisons silently never
+# matched. Keeping the two sets separate is what keeps a NEW value loud.
+_LIVE_STATUS_INPUT = {
+    "working": "Working",
+    "busy": "Working",
+    "blocked": "Needs input",
+    "needs input": "Needs input",
+    "idle": "Idle",
+    "done": "Done",
+}
 
 # Field aliases for the row schema. claude's `agents --json` emits `id` and
 # `state`; earlier versions emitted `short_id` and `status`, which is what this
@@ -1127,11 +1126,29 @@ KNOWN_LIVE_STATUSES = frozenset(
 # than a silent empty map: reading only the old names dropped every row, so the
 # live_status enrichment returned {} on every call while the unit tests, whose
 # fixtures used the old shape, stayed green.
+#
+# Status alias ORDER is load-bearing, and it is the reverse of the short-id
+# order. claude 2.1.220 emits BOTH keys on the rows that carry a live pid, with
+# different vocabularies and disagreeing values (`state: working` alongside
+# `status: idle`). `state` wins because it is the supervisor field the binary's
+# own header renders and it is present on ~94% of rows, where `status` appears
+# only on the handful with a live pid. Preferring `status` resolved an actively
+# working session to Idle, which read.py then replaced with a stale
+# truth-status fallback - the render-Idle-while-working bug.
 _SHORT_ID_KEYS = ("short_id", "id")
-_STATUS_KEYS = ("status", "state")
+_STATUS_KEYS = ("state", "status")
 
 
-def _alias_value(row: dict, keys: tuple[str, ...], valid) -> tuple[Any, Optional[str]]:
+def _normalize_live_status(value: Any) -> Any:
+    """Map one input spelling onto the output vocabulary; pass anything else."""
+    if not isinstance(value, str):
+        return value
+    return _LIVE_STATUS_INPUT.get(value.strip().lower(), value)
+
+
+def _alias_value(
+    row: dict, keys: tuple[str, ...], valid, normalize=None
+) -> tuple[Any, Optional[str]]:
     """Resolve one field across its schema aliases. Returns (value, warning).
 
     Each alias is validated INDEPENDENTLY and only valid values are considered,
@@ -1141,10 +1158,16 @@ def _alias_value(row: dict, keys: tuple[str, ...], valid) -> tuple[Any, Optional
     dropped - the same silent-drop shape this aliasing exists to prevent.
 
     When two aliases both hold valid but DIFFERENT values there is no way to
-    tell which the producer meant, so the first (oldest-spelling) value is
+    tell which the producer meant, so the first value in ``keys`` order is
     returned with a warning rather than a silent pick.
+
+    ``normalize`` is applied per alias BEFORE the comparison, so two spellings
+    of the same meaning (``state: working`` / ``status: busy``) agree instead of
+    warning on every live row, and only a real disagreement is reported.
     """
     found = [(key, row.get(key)) for key in keys if valid(row.get(key))]
+    if normalize is not None:
+        found = [(key, normalize(value)) for key, value in found]
     if not found:
         return None, None
     value = found[0][1]
@@ -1187,7 +1210,7 @@ def claude_agents_json(
     ::
 
         {
-            "<short_id>": {"live_status": "Working" | "Needs input" | "Idle"},
+            "<short_id>": {"live_status": "Working" | "Needs input" | "Idle" | "Done"},
             ...
         }
 
@@ -1198,7 +1221,10 @@ def claude_agents_json(
     claude emits ``id``/``state`` today and emitted ``short_id``/``status``
     earlier, so both spellings are accepted (``_SHORT_ID_KEYS`` /
     ``_STATUS_KEYS``) rather than pinning one and silently dropping every
-    row on the other.
+    row on the other. Values are normalized onto the output vocabulary above
+    (``_LIVE_STATUS_INPUT``), so a caller reads one set of names no matter
+    which spelling the binary used; an unmapped value passes through with a
+    drift warning.
     """
     argv = ["claude", "agents", "--json"]
 
@@ -1276,7 +1302,9 @@ def claude_agents_json(
             continue
         if id_warning:
             warnings.append(f"claude agents --json row {index} short id {id_warning}")
-        live_status, status_warning = _alias_value(row, _STATUS_KEYS, _valid_status)
+        live_status, status_warning = _alias_value(
+            row, _STATUS_KEYS, _valid_status, normalize=_normalize_live_status
+        )
         if status_warning:
             warnings.append(f"claude agents --json row {index} status {status_warning}")
         # The isinstance guard short-circuits before the frozenset lookup: a
@@ -1291,6 +1319,15 @@ def claude_agents_json(
                 "passing through unchanged"
             )
         out_map[short_id] = {"live_status": live_status}
+    # A per-row warning is quiet enough that a schema change dropping EVERY row
+    # shipped unnoticed once already: 42 warnings into a list most callers never
+    # print, and an empty map that reads exactly like "no agents running". A
+    # total drop is a different claim from a partial one, so it says so once.
+    if rows and not out_map:
+        warnings.append(
+            f"claude agents --json: 0 of {len(rows)} rows parsed; "
+            "schema drift? live_status unavailable for every agent"
+        )
     return out_map, warnings
 
 
