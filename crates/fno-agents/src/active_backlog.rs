@@ -1159,6 +1159,7 @@ mod tests {
         assert!(is_done_reason(&TerminationReason::DoneDelivery));
         assert!(!is_done_reason(&TerminationReason::DoneBatched));
         assert!(!is_done_reason(&TerminationReason::DoneAwaitingMerge));
+        assert!(!is_done_reason(&TerminationReason::DoneAwaitingReview));
         assert!(!is_done_reason(&TerminationReason::NoProgress));
     }
 
