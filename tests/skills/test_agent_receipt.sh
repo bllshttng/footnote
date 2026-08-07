@@ -442,7 +442,7 @@ fi
 # A Codex pane can be addressable by its unique registry name before the
 # provider writes the canonical thread id. That receipt must remain pending.
 reset_log
-PANE_RECEIPT='{"name":"handoff-pane","short_id":"","provider":"codex","status":"spawning","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
+PANE_RECEIPT='{"name":"handoff-pane","short_id":"","harness":"codex","status":"spawning","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
 OUT="$(MOCK_SPAWN_OUT="$PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=pending"* ]] && [[ "$OUT" != *"result=launched"* ]] \
@@ -455,7 +455,7 @@ fi
 
 # An empty short_id without matching pane evidence remains a hard failure.
 reset_log
-BAD_PANE_RECEIPT='{"name":"other-worker","short_id":"","provider":"codex","status":"live","mux_session":"fno-agent-other","pane_id":"%8"}'
+BAD_PANE_RECEIPT='{"name":"other-worker","short_id":"","harness":"codex","status":"live","mux_session":"fno-agent-other","pane_id":"%8"}'
 OUT="$(MOCK_SPAWN_OUT="$BAD_PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]]; then

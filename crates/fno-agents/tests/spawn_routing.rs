@@ -1190,7 +1190,9 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     );
     // Receipt is exactly one compact JSON line (the contract the shell
     // callers' `grep -F '"short_id"' | jq -r .short_id` parse relies on).
-    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"provider\": \"claude\", \"status\": \"live\"}\n";
+    // harness axis under `harness`; an unrouted bg spawn carries no provider
+    // (vendor) or model key (AC5).
+    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"harness\": \"claude\", \"status\": \"live\"}\n";
     assert_eq!(
         stdout, expected,
         "claude spawn receipt must be the exact compact JSON line"
