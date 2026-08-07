@@ -29,7 +29,7 @@
 # unreadable registry is treated as non-crowned, which still nudges only on REAL
 # transcript pressure, so a registry problem can never produce a false handoff.
 # This is why context pressure has ONE measurement path; a second-hand percentage
-# whose denominator we cannot see was deleted from context-monitor.js for cause.
+# whose denominator we cannot see was deleted from spend-drift-monitor.js for cause.
 #
 # EVERY error path exits 0 with no block output. A non-zero Stop hook is not an
 # allow, and a probe/registry problem must never start blocking every session's

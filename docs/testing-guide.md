@@ -456,7 +456,7 @@ Before resetting a `COMPLETE` or `BLOCKED` state file, the helper checks the `cr
 - Restores in-progress state from previous sessions
 - Injects project vision and workspace context
 
-**Spend and model drift (`context-monitor.js`):**
+**Spend and model drift (`spend-drift-monitor.js`):**
 
 - Enforces the interactive spend cap
 - Checks the routed model against the attested one

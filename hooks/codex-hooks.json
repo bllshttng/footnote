@@ -86,7 +86,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "node ${PLUGIN_ROOT}/hooks/context-monitor.js"
+            "command": "node ${PLUGIN_ROOT}/hooks/spend-drift-monitor.js"
           },
           {
             "type": "command",

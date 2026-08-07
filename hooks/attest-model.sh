@@ -10,7 +10,7 @@
 # injected as additionalContext) and always exits 0. An un-routed session
 # (no ANTHROPIC_MODEL) is coherent by definition and prints nothing. It also
 # records the resolved intended identity to a per-session sidecar that the
-# PostToolUse drift check (Layer 2, context-monitor.js) reads.
+# PostToolUse drift check (Layer 2, spend-drift-monitor.js) reads.
 set -uo pipefail
 
 # session_id from stdin (SessionStart payload). Skip the read when stdin is a

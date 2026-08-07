@@ -61,10 +61,10 @@ The `session_satisfied(trigger=delegated)` event written at step 8 is the audit 
 - Exit 3 ("unreadable"): missing file, jq absent, no assistant line with usage block, parse failure
 - Any nonzero exit is treated as no-pressure (fail-safe toward not firing)
 
-The statusline chain (`statusline-wrapper.sh` -> `~/.claude/.session-context.json` -> `hooks/context-monitor.js`) is **retired**, not merely disqualified.
+The statusline chain (`statusline-wrapper.sh` -> `~/.claude/.session-context.json` -> `hooks/spend-drift-monitor.js`) is **retired**, not merely disqualified.
 The wrapper was never shipped, nothing in this repo ever wrote the sidecar or its `/tmp` bridge fallback, and the read consequently failed on every fire, so the hook never warned once.
 It was also structurally the wrong source: a second-hand percentage whose denominator footnote could neither see nor validate, which is how it reported 200K-window numbers on a 1M-context model.
-`hooks/context-monitor.js` now carries only the spend-cap and model-drift guards; its context-percentage path was deleted.
+`hooks/spend-drift-monitor.js` now carries only the spend-cap and model-drift guards; its context-percentage path was deleted.
 
 `fno context` (the CLI behind the skill-local shim) is the single context-measurement path: first-hand token counts from the transcript, with a denominator this repo owns.
 

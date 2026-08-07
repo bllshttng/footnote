@@ -1,6 +1,6 @@
 // spend-drift.js - pure decision logic for the interactive spend cap (guard b)
 // and model-drift (guard a, Layer 2) one-shot warnings. No I/O; unit-testable.
-// context-monitor.js gathers the inputs, shells the probes, and persists the
+// spend-drift-monitor.js gathers the inputs, shells the probes, and persists the
 // returned latch state; this module only decides.
 'use strict'
 

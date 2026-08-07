@@ -65,7 +65,7 @@ graph TB
     subgraph "Hooks Layer"
         STOP["Stop Hooks<br/>target-stop-hook.sh"]
         SESS["Session Hooks<br/>session-start.sh<br/>inject-project-vision.sh"]
-        TOOL["Tool Hooks<br/>context-monitor.js"]
+        TOOL["Tool Hooks<br/>spend-drift-monitor.js"]
         HELP["Helpers<br/>init-target-state.sh<br/>init-session-state.sh<br/>enforce-fork-context.sh"]
     end
 
@@ -420,7 +420,7 @@ Hooks intercept CLI lifecycle events to enforce behavior. The footnote plugin us
 | `target-stop-hook.sh` | Stop | Blocks exit when target-state.md is IN_PROGRESS and no promise tag |
 | `session-start.sh` | SessionStart | Cross-platform wrapper that injects vision |
 | `inject-project-vision.sh` | SessionStart | Loads project context into session |
-| `context-monitor.js` | PostToolUse | Interactive spend cap + model-drift check (Claude Code only) |
+| `spend-drift-monitor.js` | PostToolUse | Interactive spend cap + model-drift check (Claude Code only) |
 | `init-target-state.sh` | PreToolUse | Initializes target-state.md before first tool action |
 
 ### Stop Hook Blocking Mechanism
@@ -605,7 +605,7 @@ footnote/                               # Flat root (plugin.json at .claude-plug
         hooks-codex.json                # Codex CLI hook config
         target-stop-hook.sh             # Stop hook (blocks exit)
         session-start.sh              # Cross-platform session init
-        context-monitor.js            # Spend cap + model drift
+        spend-drift-monitor.js            # Spend cap + model drift
         helpers/                       # Hook helper scripts
     commands/                            # 6 slash commands
     scripts/                             # Shell/Python utilities
