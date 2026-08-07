@@ -2960,6 +2960,16 @@ def cmd_update(
             "Pass --pr-number null too, or supply a replacement url."
         )
 
+    # Symmetric to derived_pr_url: a url-only update derives pr_number from the
+    # url. repo_slug_from_url and pr_number_from_url share _PR_URL_RE, so any
+    # url that passed _check_url_shape above carries a number. Without this,
+    # reconcile never sees the PR (node_pr_refs gates on isinstance(pr_number,
+    # int)) - a node linked by --pr-url alone stays invisible to merge
+    # detection, the x-9ab2 shape.
+    derived_pr_number: Optional[int] = None
+    if pr_url is not None and not clearing_url and pr_number is None:
+        derived_pr_number = pr_number_from_url(pr_url)
+
     # additional_prs entries are read by the same repo-scoped matcher as the
     # primary field, so a bare --add-pr is unattributable for the same reason.
     derived_add_pr_url: Optional[str] = None
@@ -3099,6 +3109,8 @@ def cmd_update(
             # graph is hand-edit-forbidden - so a mislink would ride to a merge
             # and close a node that shipped nothing.
             node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
+        elif derived_pr_number is not None:
+            node["pr_number"] = derived_pr_number
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         elif derived_pr_url is not None:

@@ -91,6 +91,28 @@ def test_pr_number_alone_derives_the_url(tmp_graph, monkeypatch):
     assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/77"
 
 
+def test_pr_url_alone_derives_the_number(tmp_graph):
+    """A url-only update derives pr_number from the url. node_pr_refs gates on
+    isinstance(pr_number, int), so without this a node linked by --pr-url alone
+    is invisible to merge detection - the x-9ab2 shape."""
+    from fno.graph._reconcile import node_pr_refs
+
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    node = _first(tmp_graph)
+    assert node["pr_number"] == 77
+    assert node["pr_url"] == "https://github.com/o/r/pull/77"
+    assert node_pr_refs(node), "reconcile must see the PR"
+
+
 def test_pr_number_refused_when_repo_unresolvable(tmp_graph, monkeypatch):
     import fno.graph._reconcile as rec
     monkeypatch.setattr(rec, "pr_url_for_repo", lambda pr, cwd=None: None)
