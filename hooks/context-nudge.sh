@@ -245,11 +245,37 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     if [[ "$IS_KING" -eq 1 ]]; then
         emit_event "king_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. While you still hold live workers a COMPACT beats a handoff, because it keeps your crown, session id, and mail handle, so every worker holding your handle can still reach you, whereas a successor gets a NEW handle and orphans them; /compact is a REPL built-in your Skill tool cannot call, so inject it on your own prompt line: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}. If you do hand off instead: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints."
+        # Roll up the king's neighbourhood from the same registry read (no second
+        # source). Workers are counted by the orphan check below; peers and the
+        # king above derive the same way, so the nudge states the roll-up instead
+        # of asking the king to reconstruct it. Superset is approximate (my scope
+        # starts with theirs); it degrades to silence, never to a wrong claim.
+        PEER_KINGS=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
+            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s)] | length' 2>/dev/null || printf '%s' 0)
+        KING_ABOVE=$(printf '%s' "$AGENTS_JSON" | jq -r --arg s "$CROWN_SCOPE" \
+            '[.agents[] | select((.crown_level // 0) > 0 and (.crown_scope // "") != $s and ($s | startswith(.crown_scope // "")))] | length' 2>/dev/null || printf '%s' 0)
+        _rollup=""
+        [[ "$PEER_KINGS" =~ ^[0-9]+$ && "$PEER_KINGS" -gt 0 ]] && _rollup=" ${PEER_KINGS} peer king(s) also in flight."
+        [[ "$KING_ABOVE" =~ ^[0-9]+$ && "$KING_ABOVE" -gt 0 ]] && _rollup="${_rollup} A king above holds your scope."
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. While you still hold live workers a COMPACT beats a handoff, because it keeps your crown, session id, and mail handle, so every worker holding your handle can still reach you, whereas a successor gets a NEW handle and orphans them; /compact is a REPL built-in your Skill tool cannot call, so inject it on your own prompt line: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}. If you do hand off instead: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now - but /compact is a REPL built-in and your Skill tool CANNOT call it, so inject it on your own prompt line instead: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}   (the leading slash is load-bearing, and passing a brief path matters: a bare /compact at exhausted context has no headroom left to summarize). Your session id, mail handle, and claims all survive a compact, and a /target session's PreCompact handoff arms automatically on the next compact. Or wrap up the current task so the next turn is not running on stale context."
+        # Shape the ask by what already survives a compact. plan_path is read
+        # lazily here - only on a real fire, not every Stop - and best-effort: a
+        # missing read is the "neither" shape, never a skipped nudge. Reading it
+        # for wording (not gating) keeps the arm-handoff invariant intact: a king
+        # pass, which has no such manifest, still fires on real pressure above.
+        PLAN_PATH=""
+        if command -v fno >/dev/null 2>&1; then
+            PLAN_PATH=$(with_timeout 3 fno state show --type target --field plan_path 2>/dev/null | head -1 || true)
+        fi
+        _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now - but /compact is a REPL built-in and your Skill tool CANNOT call it, so inject it on your own prompt line instead: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}   (the leading slash is load-bearing, and passing a brief path matters: a bare /compact at exhausted context has no headroom left to summarize). Your session id, mail handle, and claims all survive a compact."
+        if [[ -n "$PLAN_PATH" ]]; then
+            REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
+        else
+            REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
+        fi
     fi
 fi
 

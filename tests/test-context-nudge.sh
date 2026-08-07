@@ -68,24 +68,30 @@ cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events al
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
 write_registry() {
-  local king_crown="$1" has_children="$2"
-  local children='[]'
+  local king_crown="$1" has_children="$2" has_peer="${3:-no}"
+  local children='[]' peers='[]'
   if [ "$has_children" = "yes" ]; then
     children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'"},
                {"name":"kfad-b","harness":"claude","cwd":"/tmp","log_path":"/tmp/b","status":"live","short_id":"b","spawned_by_session":"'"$KING_SID"'"}]'
+  fi
+  # A peer king: a DIFFERENT crowned session with a disjoint scope, for the
+  # king roll-up (peers / king-above) test.
+  if [ "$has_peer" = "yes" ]; then
+    peers='[{"name":"peer-king","harness":"claude","cwd":"/tmp","log_path":"/tmp/p","status":"live","short_id":"p","harness_session_id":"peer-sid","crown_level":1,"crown_scope":"peer-scope","crown_grantor":"human"}]'
   fi
   local crown_level='null' crown_scope='null' crown_grantor='null'
   if [ "$king_crown" = "yes" ]; then
     crown_level='1'; crown_scope="\"$SCOPE\""; crown_grantor='"human"'
   fi
-  jq -n --argjson children "$children" --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
+  jq -n --argjson children "$children" --argjson peers "$peers" \
+    --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
     schema_version: 13,
     agents: ( [{
       name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"'"$KING_SID"'",
       harness_session_id:"'"$KING_SID"'",
       crown_level:$cl, crown_scope:$cs, crown_grantor:$cg
-    }] + $children )
+    }] + $children + $peers )
   }' > "$SBX/.fno/agents/registry.json"
 }
 
@@ -291,6 +297,32 @@ run_hook "$(payload "$SBX/low.jsonl")"
 run_hook "$(payload "$SBX/low.jsonl")"
 assert_absent "AC23: clean tree no flush block" "$OUT" '"decision":"block"'
 cd "$SBX"
+
+# === AC24: delta-by-shape - plan_path sets the wording ========================
+# A /target session (plan_path bound) gets the flush wording; a bare session
+# (no plan, no crown) gets the write-a-canon-doc wording. Same pressure, only
+# the ask changes. plan_path comes from the target manifest, read best-effort.
+rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+write_registry no no
+printf -- '---\nplan_path: /plans/test.md\n---\n' > "$SBX/.fno/target-state.md"
+write_transcript "$SBX/t.jsonl" 500000
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC24: plan_path set -> plan-bound wording" "$OUT" 'plan bound'
+assert_contains "AC24: plan-bound wording names SUMMARY.md" "$OUT" 'SUMMARY.md'
+# no manifest -> neither shape -> canon-doc wording
+rm -f "$SBX/.fno"/.context-nudge-* "$SBX/.fno/target-state.md" 2>/dev/null
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC24: no plan -> full-doc (canon doc) wording" "$OUT" 'canon doc'
+
+# === AC25: king roll-up names peers (computed, not asked for) =================
+# The king message states the neighbourhood roll-up from the same registry read.
+# A peer king (disjoint scope) surfaces in the message; an isolated king gets no
+# roll-up clutter (existing AC5/AC14 cover the zero-peer case unchanged).
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry yes no yes                              # crowned king + 1 peer king
+write_transcript "$SBX/t.jsonl" 500000
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
 
 echo ""
 echo "================================"
