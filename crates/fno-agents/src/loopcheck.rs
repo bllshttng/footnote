@@ -50,6 +50,18 @@ pub enum TerminationReason {
     /// reconcile path closes it. The discriminator is coverage, NOT the
     /// `attended` manifest field (x-be78: that field lies for spawned workers).
     DoneUnreviewed,
+    /// Work complete (PR open, green, HEAD shipped) but `done()` fails because a
+    /// required review bot is rate-limited: it posted a usage-limit (quota)
+    /// comment instead of a review, so the gate cannot be auto-satisfied. The
+    /// agent cannot make a rate-limited bot recover, so holding would wedge to
+    /// budget death (the PR #214 shape); instead the loop terminates cleanly.
+    /// Terminal, but NOT a ship reason (like DoneAwaitingMerge): never merges,
+    /// never graduates - a human merges after a real review (or quota recovery
+    /// / a local review and a re-run), then the out-of-band-merge reconcile
+    /// path closes it. This is the fail-closed flip of the old "drop the bot
+    /// and proceed" behavior that let ~10 PRs (#890-#912) merge unreviewed
+    /// (x-9ab2).
+    DoneAwaitingReview,
     /// A plan-only thread reached the plan boundary cleanly (manifest `planned`
     /// flag + a promise). It produced planning output, not a delivery, so it is
     /// terminal but deliberately NOT a ship reason (out of finalize.SHIP_REASONS
@@ -1823,6 +1835,23 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     Ok(CiConclusion::Success)
 }
 
+/// True when a quota-bounced required bot is the ONLY unmet conjunct of
+/// `reviewed`, which is what `DoneAwaitingReview` claims when it fires (x-9ab2).
+///
+/// `reviewed` is `all_required_passed() && unaddressed.is_empty() &&
+/// reviewers_ok`, so reconstructing only `!usage_limited.is_empty()` fires the
+/// terminal on a PR the agent still has work on: a bot that has not reviewed
+/// YET is owed its nudge window (x-b167), a blocking finding is work to DO, and
+/// `unattested_reviewers` is `reviewers_ok` in `PrInfo` terms (x-e703, a
+/// configured local review that never ran). Any of them non-empty falls through
+/// to the existing hold, which is the fail-closed direction.
+fn awaiting_review_only(pr: &PrInfo) -> bool {
+    !pr.usage_limited.is_empty()
+        && pr.missing_bots.is_empty()
+        && pr.unaddressed_findings.is_empty()
+        && pr.unattested_reviewers.is_empty()
+}
+
 // ── DoneAwaitingMerge classifier ───────────────────────────────────────────────
 //
 // When done() fails SOLELY on CI-green (PR open+mergeable, reviewed, HEAD
@@ -2611,8 +2640,14 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// object (PR #214). Matched case-insensitively via `contains` against a
 /// lowercased body, mirroring the pinned-string approach in `blocking_severity`.
 /// Unioned rather than scoped per-login to stay byte-identical to the old flat
-/// `USAGE_LIMIT_MARKERS` const it replaced: an under-match degrades to the safe
-/// old block behavior; an over-match risks a false drop.
+/// `USAGE_LIMIT_MARKERS` const it replaced.
+///
+/// The asymmetry here INVERTED with x-9ab2 and the marker list must be read in
+/// the new direction: an under-match leaves the bot in `missing_bots`, which
+/// blocks (safe, just slow), while an over-match now PARKS the PR at
+/// `DoneAwaitingReview` with no automatic path back, rather than dropping the
+/// bot and proceeding. Add a marker only for a string the bot posts when it
+/// truly will not review; a phrase a real review could quote is not one.
 pub(crate) fn body_is_usage_limit(body: &str) -> bool {
     BOT_PROFILES
         .iter()
@@ -2630,19 +2665,23 @@ struct ReviewInfo {
     /// (verified on PR #447; codex reviews once per PR and never re-reviews,
     /// so requiring a pass on HEAD would make the gate unsatisfiable).
     missing_bots: Vec<String>,
-    /// Required bots dropped from `missing_bots` because they are env-blocked
-    /// (rate-limited): they posted only a usage-limit comment, never a review.
-    /// Keeping them in `missing_bots` wedged the gate until budget death
-    /// (PR #214); dropping them lets the gate proceed on remaining evidence
-    /// while the caller records the drop (AC1-UI). A bot is never in both
-    /// lists - it is scanned only while still in `missing_bots`.
+    /// Required bots that posted only a usage-limit (quota) comment, never a
+    /// review. Such a bot has NOT reviewed, so `all_required_passed` is false
+    /// while this is non-empty: the gate fails closed instead of merging
+    /// unreviewed (x-9ab2). They are moved OUT of `missing_bots` (not scanned
+    /// for nudges) because the agent cannot make a rate-limited bot recover, so
+    /// a nudge/idle would wedge until budget death; the loop instead terminates
+    /// cleanly via `DoneAwaitingReview`. Scoped to the bot's OWN author.login.
     usage_limited: Vec<String>,
 }
 
 impl ReviewInfo {
-    /// Every required bot has at least one completed pass.
+    /// Every required bot has at least one completed pass. A bot that posted
+    /// only a usage-limit (quota) comment has NOT reviewed, so it counts as
+    /// not-passed: a quota bounce must fail the gate closed instead of letting
+    /// it proceed (x-9ab2). The caller still records the drop for telemetry.
     fn all_required_passed(&self) -> bool {
-        self.missing_bots.is_empty()
+        self.missing_bots.is_empty() && self.usage_limited.is_empty()
     }
 }
 
@@ -2704,14 +2743,16 @@ fn compute_review_info(reviews_json: &Value, required_bots: &[String]) -> Review
 
     // (a) Usage-limit detection. A still-missing required bot that authored a
     // comment carrying a pinned usage-limit marker is env-blocked, not
-    // hasn't-reviewed-yet: it will never post a review, so leaving it in
-    // missing_bots blocks every fire until the budget cap kills the session
-    // (PR #214). Move it OUT of missing_bots into usage_limited so the gate
-    // proceeds on remaining evidence (the caller logs the drop + names the bot,
-    // and the merge stays human-gated). Scoped to the bot's OWN author.login so
-    // a stranger's comment never drops a required bot (AC1-ERR). Only
-    // still-missing bots are scanned, so a bot that actually reviewed is never
-    // usage-limited-dropped (AC1-EDGE).
+    // hasn't-reviewed-yet: it will never post a review. Move it OUT of
+    // missing_bots into usage_limited so it is not nudged/idled-on (the agent
+    // cannot make a rate-limited bot recover, so a nudge would wedge until
+    // budget death - the PR #214 shape). Unlike PR #214, a usage-limited bot
+    // now FAILS the gate closed (`all_required_passed` is false while
+    // usage_limited is non-empty, x-9ab2): the PR does not merge on a quota
+    // bounce. The loop terminates cleanly via DoneAwaitingReview instead of
+    // spinning. Scoped to the bot's OWN author.login so a stranger's comment
+    // never drops a required bot (AC1-ERR). Only still-missing bots are
+    // scanned, so a bot that actually reviewed is never usage-limited (AC1-EDGE).
     let mut usage_limited: Vec<String> = Vec::new();
     missing_bots.retain(|bot| {
         let rate_limited = comments.iter().any(|c| {
@@ -4843,18 +4884,10 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             ),
                         );
                     }
-                    // AC1-UI: name any rate-limited bot the gate proceeded
-                    // without, so the terminal message and the emitted event
-                    // agree on why a required bot is absent from the evidence.
-                    let done_msg = if pr_info.usage_limited.is_empty() {
-                        format!("PR #{} is green and reviewed", pr_info.number)
-                    } else {
-                        format!(
-                            "PR #{} is green and reviewed (rate-limited, dropped from gate: {})",
-                            pr_info.number,
-                            pr_info.usage_limited.join(", ")
-                        )
-                    };
+                    // A rate-limited bot now fails the gate closed (x-9ab2), so a
+                    // green+reviewed DonePRGreen can never carry one: reaching
+                    // here means every required bot has a real completed pass.
+                    let done_msg = format!("PR #{} is green and reviewed", pr_info.number);
                     emit(
                         "termination",
                         serde_json::json!({
@@ -4990,6 +5023,69 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             );
                         }
                     }
+                }
+
+                // x-9ab2: a required bot posted only a usage-limit (quota)
+                // comment, so `reviewed` is false and the gate must NOT merge on
+                // it. The agent cannot make a rate-limited bot recover, so a hold
+                // would wedge to budget death (the PR #214 shape this replaces);
+                // terminate cleanly instead. Terminal but NOT a ship reason
+                // (mirrors DoneAwaitingMerge): a human merges after a real review,
+                // or the operator re-runs once quota recovers / a local review
+                // posts, then out-of-band-merge reconcile closes the node.
+                // This sits ABOVE every hold that handles a finding or a
+                // still-pending bot, so `awaiting_review_only` is load-bearing:
+                // anything looser parks work the agent should still be doing.
+                if pr_open && ci_ok && head_shipped && awaiting_review_only(&pr_info) {
+                    let bots = pr_info.usage_limited.join(", ");
+                    let msg = format!(
+                        "PR #{} is green and shipped, but required review bot(s) {} posted a usage-limit (quota) comment instead of a review; the review gate cannot be auto-satisfied. Wait for quota recovery or run a local review, then re-run; or merge manually after a real review.",
+                        pr_info.number, bots
+                    );
+                    emit(
+                        "termination",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "reason": "DoneAwaitingReview",
+                            "message": msg.clone()
+                        }),
+                    );
+                    emit(
+                        "loop_check",
+                        serde_json::json!({
+                            "session_id": session_id,
+                            "fingerprint": fingerprint,
+                            "fires": this_fire,
+                            "consecutive_unchanged": consecutive_after,
+                            "streak_window_secs": streak_window,
+                            "decision": "allow",
+                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                            "intent_source": intent_source,
+                            "pr_state": pr_info.state.as_str(),
+                            "ci": pr_info.ci_conclusion.render(),
+                            "reviewed": pr_info.reviewed,
+                            "review_skipped": pr_info.review_skipped,
+                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                            "fp_read_failed": fp_read_failed
+                        }),
+                    );
+                    best_effort_notify(
+                        &format!(
+                            "PR #{} blocked - required review bot rate-limited",
+                            pr_info.number
+                        ),
+                        &msg,
+                    );
+                    return (
+                        0,
+                        allow_output(
+                            "allow",
+                            Some(TerminationReason::DoneAwaitingReview),
+                            &msg,
+                            this_fire,
+                            Some(fingerprint),
+                        ),
+                    );
                 }
 
                 // ── Watching idle-allow (x-e2c8) ─────────────────────────────
@@ -6977,6 +7073,51 @@ mod tests {
         }
     }
 
+    /// x-9ab2: the terminal fires only when the quota bounce is the SOLE unmet
+    /// conjunct of `reviewed`. Each case drops one other conjunct and must
+    /// block; reverting `awaiting_review_only` to the bare
+    /// `!usage_limited.is_empty()` check fails them.
+    #[test]
+    fn awaiting_review_only_requires_every_other_conjunct() {
+        let bounced = || {
+            let mut pr = watch_pr();
+            pr.usage_limited = vec!["chatgpt-codex-connector".to_string()];
+            pr
+        };
+        assert!(awaiting_review_only(&bounced()), "the terminal's own case");
+        assert!(!awaiting_review_only(&watch_pr()), "no bounce to report");
+
+        // A bot that has not reviewed YET is owed its nudge window: one bot's
+        // quota state must not end the session on the others' behalf.
+        let mut still_pending = bounced();
+        still_pending.missing_bots = vec!["gemini-code-assist".to_string()];
+        assert!(
+            !awaiting_review_only(&still_pending),
+            "bot still owed a wait"
+        );
+
+        // A standing blocking finding is work the agent must DO; parking hands
+        // a human a PR carrying an unaddressed P1.
+        let mut with_finding = bounced();
+        with_finding.unaddressed_findings = vec![Finding {
+            id: 1,
+            author: "gemini-code-assist".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: 12,
+            created_at: "2026-08-06T00:00:00Z".to_string(),
+            severity: "P1",
+        }];
+        assert!(!awaiting_review_only(&with_finding), "unaddressed P1");
+
+        let mut unattested = bounced();
+        unattested.unattested_reviewers = vec![UnattestedReviewer {
+            name: "sigma".to_string(),
+            superseded_head: None,
+            failed_at_head: false,
+        }];
+        assert!(!awaiting_review_only(&unattested), "local review never ran");
+    }
+
     #[test]
     fn watch_idle_classifies_pending_ci() {
         assert_eq!(async_wait_class(&watch_pr(), "abc", true), Some("ci"));
@@ -8312,6 +8453,7 @@ mod tests {
         let cases = [
             (TerminationReason::DonePRGreen, "DonePRGreen"),
             (TerminationReason::DoneAdvisory, "DoneAdvisory"),
+            (TerminationReason::DoneAwaitingReview, "DoneAwaitingReview"),
             (TerminationReason::NoWork, "NoWork"),
             (TerminationReason::Budget, "Budget"),
             (TerminationReason::NoProgress, "NoProgress"),
@@ -9681,9 +9823,13 @@ mod tests {
     }
 
     #[test]
-    fn compute_review_info_usage_limited_bot_dropped() {
-        // AC1-HP: a required bot that posted only a usage-limit comment (no
-        // review) leaves missing_bots for usage_limited, so the gate proceeds.
+    fn compute_review_info_usage_limited_bot_blocks_gate() {
+        // x-9ab2: a required bot that posted only a usage-limit (quota) comment,
+        // never a review, is detected as rate-limited (moved to usage_limited,
+        // out of missing_bots) AND must FAIL the gate closed: a quota bounce is
+        // not a review, so all_required_passed is false and the PR does not
+        // merge. Reverting all_required_passed to `missing_bots.is_empty()`
+        // alone makes this assertion fail - that is the regression guard.
         let required = vec!["chatgpt-codex-connector".to_string()];
         let json = serde_json::json!({
             "reviews": [],
@@ -9694,12 +9840,17 @@ mod tests {
             ]
         });
         let info = compute_review_info(&json, &required);
+        // Detection still holds: the bot is classified rate-limited, not missing.
         assert!(info.missing_bots.is_empty());
         assert_eq!(
             info.usage_limited,
             vec!["chatgpt-codex-connector".to_string()]
         );
-        assert!(info.all_required_passed());
+        // The gate decision: a usage-limit body does NOT satisfy the gate.
+        assert!(
+            !info.all_required_passed(),
+            "a usage-limit comment must not satisfy the review gate"
+        );
     }
 
     #[test]

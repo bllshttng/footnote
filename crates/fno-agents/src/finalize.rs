@@ -124,7 +124,7 @@ const HELP: &str = "fno-agents finalize - terminal-only side-effect writer (step
 Usage: fno-agents finalize --state <target-state.md> --cwd <project-root> --reason <TerminationReason> \\\n\
                            [--transcript <transcript.jsonl>] [--events <p>] [--global-events <p>] \\\n\
                            [--settings <p>] [--handoffs-dir <p>] [--postmortems-dir <p>]\n\
-Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
+Reason values: DonePRGreen|DoneAdvisory|DoneDelivery|DoneBatched|DoneAwaitingMerge|DoneAwaitingReview|DonePlanned|NoWork|Budget|NoProgress|Interrupted|Aborted";
 
 // ── manifest fields finalize reads directly ────────────────────────────────
 
@@ -2030,7 +2030,7 @@ fn arm_auto_merge(cwd: &Path) -> bool {
 fn is_do_stamp_terminal(reason: &str) -> bool {
     matches!(
         reason,
-        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed"
+        "DonePRGreen" | "DoneAwaitingMerge" | "DoneUnreviewed" | "DoneAwaitingReview"
     )
 }
 

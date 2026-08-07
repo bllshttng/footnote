@@ -217,6 +217,9 @@ pub(crate) fn exit_code_for_reason(reason: &TerminationReason) -> i32 {
         // red - a clean stop like the other Done* terminals. The reason string
         // (not the exit code) is what a wrapper reads to distinguish it.
         | TerminationReason::DoneAwaitingMerge
+        // DoneAwaitingReview: work complete, but a required review bot is
+        // rate-limited (x-9ab2) - a clean stop, human-gated like DoneAwaitingMerge.
+        | TerminationReason::DoneAwaitingReview
         // DonePlanned: a plan-only thread finished cleanly. Not a delivery, but a
         // clean stop (exit 0); the reason string distinguishes it from a ship.
         | TerminationReason::DonePlanned
