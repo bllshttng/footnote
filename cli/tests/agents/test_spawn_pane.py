@@ -1936,6 +1936,11 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
         "happy_routed_panes_enabled",
         lambda: pytest.fail("explicit --monitor happy must not read the config default"),
     )
+    # No real SessionStart hook fires under the fake runner; script the
+    # registration the bounded wait looks for so the spawn succeeds.
+    monkeypatch.setattr(
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: ("happy-sid", "")
+    )
     monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
     monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
     monkeypatch.setenv("ZAI_API_KEY", "zai-secret")
@@ -2406,10 +2411,21 @@ def _zai_route(monkeypatch):
 
 
 def _happy_spawn(monkeypatch, tmp_path, **kwargs):
-    """A happy-monitored claude pane spawn."""
+    """A happy-monitored claude pane spawn.
+
+    No real SessionStart hook fires under the fake runner, so the bounded
+    registration wait is scripted: by default the worker "restamps" a known id
+    (the success path); pass ``registration=(None, reason)`` to drive the
+    failure path (reap + raise). The argv is built before that wait, so argv
+    assertions are unaffected.
+    """
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    registration = kwargs.pop("registration", ("happy-proven-sid", ""))
+    monkeypatch.setattr(
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: registration
+    )
     return _spawn(
         monkeypatch,
         tmp_path,
@@ -2428,23 +2444,29 @@ def test_happy_spawn_never_pins_a_session_id(tmp_path: Path, monkeypatch) -> Non
     provider_argv = run_call[run_call.index("--") + 1 :]
     assert "--session-id" not in provider_argv
     assert "happy" in provider_argv
-    assert result.session_uuid is None
+    # fno did not mint an id; the one on the receipt came from the restamp.
+    assert result.session_uuid == "happy-proven-sid"
 
 
 def test_happy_spawn_is_not_reported_live_without_a_proven_session(
     tmp_path: Path, monkeypatch
 ) -> None:
-    """The spawn cannot know a happy pane's session id, so it must not claim one.
+    """No proven session means fail loud, never strand a `spawning`/`live` corpse.
 
-    This is the reported corpse: a real pid, a real pane, and status "live" for
-    ~55 minutes with no session behind it. The row waits for the worker to name
-    itself via the SessionStart restamp instead of guessing.
+    The reported corpse was a real pid, a real pane, and a row reading
+    `live`/`spawning` with no session behind it. Under the bounded-wait contract
+    A happy pane that never registers is reaped and raised, not left as
+    a silent no-op the receipt would call success.
     """
-    result, _ = _happy_spawn(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.registry import load_registry
 
-    assert result.session_uuid is None
-    assert result.status == "spawning"
-    assert result.short_id == ""
+    with pytest.raises(DispatchAskError, match="did not register"):
+        _happy_spawn(
+            monkeypatch, tmp_path, registration=(None, "no session id in window")
+        )
+
+    assert load_registry() == [], "the stranded row must be removed on failure"
 
 
 def test_happy_spawn_never_guesses_from_the_transcript_store(
@@ -2465,10 +2487,10 @@ def test_happy_spawn_never_guesses_from_the_transcript_store(
     (pdir / "someone-elses-sid.jsonl").write_text("{}\n")
     monkeypatch.setenv(PROJECTS_DIR_ENV, str(projects))
 
-    result, _ = _happy_spawn(monkeypatch, tmp_path)
+    result, _ = _happy_spawn(monkeypatch, tmp_path, registration=("restamped-sid", ""))
 
-    assert result.session_uuid is None
-    assert result.status == "spawning"
+    # The receipt uses the restamped id, never a guess read from the store.
+    assert result.session_uuid == "restamped-sid"
     assert not hasattr(mux_spawn, "_backfill_claude_session_id")
 
 
@@ -2597,6 +2619,9 @@ def test_routed_claude_pane_launches_through_happy_when_enabled(
 
     monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: ("happy-sid", "")
+    )
     settings = SettingsModel(config=ConfigBlock(model_routing=ModelRoutingBlock()))
     route = resolve_explicit_route(
         "zai", "glm-5.2", settings=settings, env={"ZAI_API_KEY": "zai-secret"}
@@ -2629,3 +2654,150 @@ def test_unrouted_and_disabled_panes_still_launch_plain_claude(
     monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: False)
     _, runner2 = _spawn(monkeypatch, tmp_path, name="peer2", route_env=dict(_ROUTE))
     assert "happy" not in _pane_run_argv(runner2), "knob off must leave the argv alone"
+
+
+# A happy-hosted claude pane is created id-less (`spawning`) because
+# happy owns the session id and restamps the row later via the worker's
+# SessionStart hook. If that restamp never lands, the row strands `spawning`
+# forever and the receipt reads as a soft success - a silent no-op. The fix
+# waits for the restamp within a bounded window, then either hands back a
+# `live` receipt or reaps the pane and fails loud.
+
+
+def _reg_row(name: str = "peer", hsid: Optional[str] = None):
+    from fno.agents.registry import AgentEntry
+
+    return AgentEntry(
+        name=name,
+        harness="claude",
+        cwd="/w",
+        log_path="",
+        status="spawning",
+        harness_session_id=hsid,
+        mux={"session": "main", "pane_id": 7},
+    )
+
+
+def test_await_pane_registration_returns_id_once_restamped(monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    calls = {"n": 0}
+
+    def fake_load(*a, **k):
+        calls["n"] += 1
+        return [_reg_row(hsid="sess-1" if calls["n"] > 1 else None)]
+
+    monkeypatch.setattr(mux_spawn, "load_registry", fake_load)
+    monkeypatch.setattr(mux_spawn, "_PANE_REGISTRATION_POLL_S", 0.001)
+    sid, reason = mux_spawn._await_pane_registration(
+        "peer", {"session": "main", "pane_id": 7}, FakeRunner(wait_returncode=11)
+    )
+    assert sid == "sess-1"
+    assert reason == ""
+
+
+def test_await_pane_registration_fast_fails_a_dead_pane(monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *a, **k: [_reg_row(hsid=None)])
+    # wait returncode 12 == EXIT_WAIT_EXITED: the pane child is gone, so no
+    # restamp is ever coming. Must short-circuit, not sit out the full window.
+    sid, reason = mux_spawn._await_pane_registration(
+        "peer", {"session": "main", "pane_id": 7}, FakeRunner(wait_returncode=12)
+    )
+    assert sid is None
+    assert "exited" in reason
+
+
+def test_await_pane_registration_times_out_when_alive_but_unregistered(monkeypatch) -> None:
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "load_registry", lambda *a, **k: [_reg_row(hsid=None)])
+    monkeypatch.setattr(mux_spawn, "_PANE_REGISTRATION_DEADLINE_S", 0.01)
+    monkeypatch.setattr(mux_spawn, "_PANE_REGISTRATION_POLL_S", 0.001)
+    # Alive (11) but never registered: the reproduced failure shape.
+    sid, reason = mux_spawn._await_pane_registration(
+        "peer", {"session": "main", "pane_id": 7}, FakeRunner(wait_returncode=11)
+    )
+    assert sid is None
+    assert "no session id" in reason
+
+
+def test_happy_pane_failure_reaps_and_raises_not_silent(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The headline: a stranded happy pane must fail loud, not return `spawning`."""
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_registration",
+        lambda name, mux, r, *a, **k: (None, "pane process exited before registering"),
+    )
+    runner = FakeRunner()
+    with pytest.raises(DispatchAskError) as ei:
+        _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE), runner=runner)
+
+    assert ei.value.exit_code == 1
+    assert "did not register" in str(ei.value)
+    assert runner.kill_calls, "the stranded pane must be reaped"
+    assert load_registry() == [], "the stranded spawning row must be removed"
+
+
+def test_happy_pane_failure_reports_row_removal_failure_honestly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the row removal throws after a successful reap, the error must not
+    claim 'row removed'. The row lingers and the message
+    names it instead of lying about cleanup."""
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_registration",
+        lambda name, mux, r, *a, **k: (None, "no session id in window"),
+    )
+    # Let the create-write (_append) succeed, then fail the removal write.
+    real_update = mux_spawn.update_registry
+    state = {"n": 0}
+
+    def flaky(*a, **k):
+        state["n"] += 1
+        if state["n"] >= 2:
+            raise OSError("registry locked")
+        return real_update(*a, **k)
+
+    monkeypatch.setattr(mux_spawn, "update_registry", flaky)
+    runner = FakeRunner()  # kill_returncode=0 -> reaped=True
+    with pytest.raises(DispatchAskError) as ei:
+        _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE), runner=runner)
+
+    msg = str(ei.value)
+    assert "row removal failed" in msg, "must not claim 'row removed' when it was not"
+    assert load_registry() != [], "the row must still be present (removal failed)"
+
+
+def test_happy_pane_success_returns_live_receipt(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """When the restamp lands, the receipt earns `live` + a real short_id."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_registration",
+        lambda name, mux, r, *a, **k: ("sess-live-1", ""),
+    )
+    result, _ = _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE))
+    assert result.status == "live"
+    assert result.short_id, "a live receipt must carry a non-empty short_id"

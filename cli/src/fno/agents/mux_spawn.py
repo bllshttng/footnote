@@ -1098,6 +1098,56 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
     return None
 
 
+#: Bounded window an id-less happy-claude pane row waits for its worker to
+#: register the session id (the SessionStart restamp). happy owns the id, so the
+#: row is created `spawning` and only becomes addressable once the worker names
+#: itself; if that never lands the row strands `spawning` forever, an
+#: unrecoverable pane whose receipt would read as a soft success. The working
+#: case lands well under this; the ceiling is paid only on failure.
+_PANE_REGISTRATION_DEADLINE_S = 60
+_PANE_REGISTRATION_POLL_S = 1.0
+
+
+def _await_pane_registration(
+    name: str,
+    mux: dict,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+    registry_path: Optional[Path] = None,
+) -> tuple[Optional[str], str]:
+    """Wait for an id-less happy-claude row to be restamped with its session id.
+
+    Polls the registry for ``name`` until ``harness_session_id`` is filled (the
+    worker named itself via its SessionStart hook) or the deadline passes. Reads
+    the same ``registry_path`` the caller wrote the row through, not a
+    re-resolved default, so the poll never watches a different file than the one
+    it is waiting on. A confirmed-dead pane child short-circuits, so the common
+    breakage (monitor binary missing on the pane's PATH, so the pane shell
+    errors out) fails in seconds rather than the full window. Returns
+    ``(session_id, "")`` on success or ``(None, reason)`` on timeout / early death.
+    """
+    deadline = time.monotonic() + _PANE_REGISTRATION_DEADLINE_S
+    while time.monotonic() < deadline:
+        try:
+            entry = next(
+                (
+                    e
+                    for e in load_registry(path=registry_path)
+                    if e.name == name and e.mux == mux
+                ),
+                None,
+            )
+        except (OSError, ValueError, RegistryVersionError):
+            entry = None
+        if entry is not None and entry.harness_session_id:
+            return entry.harness_session_id, ""
+        # Fast-fail a dead pane: no restamp is ever coming, so don't sit out the
+        # full window. `None` (mux could not answer) is NOT a death signal.
+        if _mux_pane_alive(mux, runner) is False:
+            return None, "pane process exited before registering"
+        time.sleep(_PANE_REGISTRATION_POLL_S)
+    return None, f"no session id within {_PANE_REGISTRATION_DEADLINE_S}s"
+
+
 def _await_interactive_readiness(
     session: str,
     pane_id: int,
@@ -1658,6 +1708,71 @@ def dispatch_spawn_pane(
                 f"session {session!r} because exact cleanup failed: {cleanup_detail}",
                 exit_code=12,
             ) from exc
+
+        # A happy-hosted claude row is created id-less (`spawning`)
+        # because happy owns the session id and restamps the row via the worker's
+        # SessionStart hook. If that restamp never lands the row strands
+        # `spawning` forever, an unrecoverable pane (unreachable on control.sock,
+        # so mail-inject cannot rescue it) whose receipt would read as a soft
+        # success. Wait for the restamp within a bounded window; on timeout reap
+        # the pane, drop the stranded row, and fail loud so the receipt earns its
+        # status. Scoped to the happy route: a codex id-less row is a different
+        # mechanism (spawn-time backfill, not a worker hook) and its pane is
+        # alive, so reaping it would be a regression.
+        if provider == "claude" and resolved_monitor == "happy":
+            registered_id, reg_reason = _await_pane_registration(
+                name, {"session": session, "pane_id": pane_id}, runner, registry_path
+            )
+            if registered_id is None:
+                reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
+                # Only drop the row once the pane is actually gone: removing it
+                # while the pane may still live orphans a worker fno can no
+                # longer point the operator at. Track removal success so the
+                # error never claims "row removed" when it was not.
+                row_removed = False
+                if reaped:
+                    this_mux = {"session": session, "pane_id": pane_id}
+                    try:
+                        update_registry(
+                            lambda rows: [
+                                r
+                                for r in rows
+                                if not (r.name == name and r.mux == this_mux)
+                            ],
+                            path=registry_path,
+                        )
+                        row_removed = True
+                    except (
+                        OSError,
+                        ValueError,
+                        AgentResolutionError,
+                        RegistryVersionError,
+                    ):
+                        row_removed = False
+                if reaped and row_removed:
+                    tail = "pane reaped, registry row removed"
+                elif reaped:
+                    tail = (
+                        "pane reaped, but registry row removal failed; a "
+                        f"`spawning` row for {name!r} may linger - remove "
+                        f"with 'fno agents rm {name}'"
+                    )
+                else:
+                    tail = (
+                        f"pane kill failed ({cleanup_detail}); it may still "
+                        f"exist in session {session!r} - remove with "
+                        f"'fno mux pane kill --session {session} {pane_id}'"
+                    )
+                raise DispatchAskError(
+                    f"agent {name!r} did not register within "
+                    f"{_PANE_REGISTRATION_DEADLINE_S}s ({reg_reason}); {tail}. "
+                    "The worker's session id never arrived, so the pane was "
+                    "neither addressable nor seeded - retry, or spawn with "
+                    "--substrate bg.",
+                    exit_code=1,
+                )
+            stored_session_uuid = registered_id
+            row_status = "live"
 
         # Claude and Codex both resolve the canonical full harness id through the
         # generated mailbox handle. The row keeps short_id empty because mux is
