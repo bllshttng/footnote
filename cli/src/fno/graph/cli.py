@@ -6277,6 +6277,27 @@ def _apply_completion_fields(node: dict, *, merge_status: Optional[str] = None) 
         node["merge_status"] = merge_status
 
 
+def _auto_closed_note(entry: dict) -> str:
+    """completion_note for a container closed by all-children-complete (x-b9a5).
+
+    Both close paths (_cascade_close_parents on a child close,
+    _sweep_close_done_epics on reconcile) reach here holding the parent dict. A
+    container with its own plan_path but no PR may carry planned deliverables
+    the children never built; the cascade closes it anyway and stamps a real
+    completed_at, so the false-done is invisible to any audit keyed on
+    completion. Flag the gap: when plan_path is set and there is no pr_number,
+    the note records the container's own deliverables as UNVERIFIED.
+
+    It asserts nothing about whether the deliverables exist. A filesystem stat
+    had a measured 75% false-positive rate (renames and path conventions read
+    as missing), so plan_path + no pr_number is the only signal that does not
+    lie. A flag, not a gate: the close still happens, it just becomes findable.
+    """
+    if entry.get("plan_path") and not entry.get("pr_number"):
+        return "auto-closed: all children complete; own plan deliverables UNVERIFIED (plan_path set, no PR)"
+    return "auto-closed: all children complete"
+
+
 def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
     """Close ancestor epics whose children are now all complete (x-33b2).
 
@@ -6321,7 +6342,7 @@ def _cascade_close_parents(entries: list[dict], node_id: str) -> list[str]:
             break  # at least one child still open -> the epic is not done yet
         _apply_completion_fields(parent)
         if not parent.get("completion_note"):
-            parent["completion_note"] = "auto-closed: all children complete"
+            parent["completion_note"] = _auto_closed_note(parent)
         # Deactivate the mission (x-9608 K1): a kicked-off epic carries
         # mission_active=true for K2's drain loop; its last child landing closes
         # the epic here, so clear the marker in the same mutation. Durable
@@ -6655,7 +6676,7 @@ def _sweep_close_done_epics(entries: list[dict]) -> list[str]:
                 continue
             _apply_completion_fields(parent)
             if not parent.get("completion_note"):
-                parent["completion_note"] = "auto-closed: all children complete"
+                parent["completion_note"] = _auto_closed_note(parent)
             closed.append(pid)
     return closed
 

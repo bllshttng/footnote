@@ -466,6 +466,62 @@ def test_cascade_close_clears_mission_active(monkeypatch):
     assert "mission_active" not in epic
 
 
+def test_auto_close_flag_set_on_both_close_paths():
+    """A plan_path+no-pr container is flagged UNVERIFIED on BOTH close paths.
+
+    reconcile auto-fires on SessionStart via _sweep_close_done_epics, so a flag
+    set only by the cascade (_cascade_close_parents) is reverted on the next
+    session. Pinning both paths is the load-bearing part of x-b9a5: a test that
+    covers only the cascade passes on a fix the sweep silently reverts.
+    """
+    from fno.graph.cli import _cascade_close_parents, _sweep_close_done_epics
+
+    def entries():
+        return [
+            {"id": "x-EPIC", "project": "fno", "plan_path": "/p/plan.md"},
+            {"id": "x-only", "parent": "x-EPIC", "project": "fno",
+             "completed_at": "2026-08-06T00:00:00Z"},
+        ]
+
+    expected = (
+        "auto-closed: all children complete; "
+        "own plan deliverables UNVERIFIED (plan_path set, no PR)"
+    )
+
+    # cascade path: the close that fires when a child lands
+    cas = entries()
+    _cascade_close_parents(cas, "x-only")
+    assert next(e for e in cas if e["id"] == "x-EPIC")["completion_note"] == expected
+
+    # sweep path: the reconcile self-heal that re-closes on SessionStart
+    swe = entries()
+    _sweep_close_done_epics(swe)
+    assert next(e for e in swe if e["id"] == "x-EPIC")["completion_note"] == expected
+
+
+def test_auto_close_short_note_without_unverified_marker():
+    """The UNVERIFIED marker is gated on plan_path AND no pr_number. A container
+    with no plan_path, or one that shipped its own PR, keeps the short note.
+    Pins the exact predicate so a future change cannot flag on plan_path alone
+    (x-b9a5)."""
+    from fno.graph.cli import _cascade_close_parents
+
+    def note_for(parent_extra):
+        entries = [
+            {"id": "x-EPIC", "project": "fno", **parent_extra},
+            {"id": "x-only", "parent": "x-EPIC", "project": "fno",
+             "completed_at": "2026-08-06T00:00:00Z"},
+        ]
+        _cascade_close_parents(entries, "x-only")
+        return next(e for e in entries if e["id"] == "x-EPIC")["completion_note"]
+
+    short = "auto-closed: all children complete"
+    # no plan_path -> short note
+    assert note_for({}) == short
+    # plan_path but it shipped its own PR -> deliverables verified -> short note
+    assert note_for({"plan_path": "/p/plan.md", "pr_number": 605}) == short
+
+
 # ---------------------------------------------------------------------------
 # CLI wiring
 # ---------------------------------------------------------------------------
