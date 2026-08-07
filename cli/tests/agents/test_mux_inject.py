@@ -115,6 +115,33 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     assert verbs == ["claim", "send", "send"]
 
 
+def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
+    """AC10: the mux pane lane records an agent_raw_inject for an unwrapped
+    payload (it never reaches the Rust mail-inject binary, so this site is
+    mandatory, not decorative) and stays silent for a <fno_mail>-wrapped one."""
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod.events, "emit", lambda kind, **data: emitted.append((kind, data))
+    )
+
+    # Unwrapped -> one audit record; wrapped envelope -> none.
+    _mux_pane_send(_mux_entry(), "/code-review medium --fix")
+    _mux_pane_send(_mux_entry(), "<fno_mail from=\"a\">hi</fno_mail>")
+
+    audits = [e for e in emitted if e[0] == "agent_raw_inject"]
+    assert len(audits) == 1, "only the unwrapped payload is audited"
+    data = audits[0][1]
+    assert data["payload"] == "/code-review medium --fix"
+    assert data["lane"] == "mux-pane"
+    assert data["harness"] == "claude"
+    assert data["target_cwd"] == "/w"
+
+
 def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
     tmp_path: Path, monkeypatch
 ) -> None:

@@ -5140,6 +5140,22 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
     pane_id = mux.get("pane_id")
     if not session or pane_id is None:
         return False
+    # Audit floor: an UNWRAPPED payload leaves no <fno_mail> marker in the
+    # recipient transcript, so record it in the ledger. The mux pane lane never
+    # reaches the Rust mail-inject binary, so this site is mandatory, not
+    # decorative. Best-effort: an events-write failure never breaks the send.
+    if not text.lstrip().startswith("<fno_mail"):
+        try:
+            events.emit(
+                "agent_raw_inject",
+                target_session=getattr(entry, "harness_session_id", "") or "",
+                payload=text[:512],
+                harness=getattr(entry, "harness", "") or "",
+                lane="mux-pane",
+                target_cwd=getattr(entry, "cwd", None),
+            )
+        except Exception:
+            pass
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
