@@ -28,7 +28,12 @@ The registry's view (`status`, mutated by the follow-up and reconcile paths) and
 | Axis | Source | Values | Owner |
 |---|---|---|---|
 | `status` | `~/.fno/agents/registry.json` | `live`, `orphaned` | fno |
-| `live_status` | shell-out to `claude agents --json` | `Working`, `Needs input`, `Idle`, `null` | claude supervisor |
+| `live_status` | shell-out to `claude agents --json` | `Working`, `Needs input`, `Idle`, `Done`, `null` | claude supervisor |
+
+Those four values are the OUTPUT vocabulary, not the wire vocabulary.
+Which key and which spelling a claude build emits has changed twice, so the provider reads both `id`/`short_id` and `state`/`status` and maps every observed spelling (`working`, `busy`, `blocked`, `idle`, `done`) onto the table above.
+`state` outranks `status` when a row carries both: current builds emit them in different vocabularies with disagreeing values, and `state` is the field the binary's own header count renders.
+A spelling not in the input map passes through unchanged with a drift warning, which is what keeps the NEXT rename loud instead of silent.
 
 Both fields appear on every JSON entry. `live_status` is `null` for non-Claude entries and for Claude entries when the shellout fails or omits the entry. Conflating them would lose information — an `orphaned` registry entry whose `live_status` is `null` because claude reports it doesn't exist is a different story than a `live` entry whose `live_status` is `Idle` because the supervisor is between jobs.
 
@@ -54,8 +59,9 @@ Failure modes that the augmentation step catches internally and surfaces as warn
 - `subprocess.TimeoutExpired` — exceeded the 3-second per-call budget
 - non-zero claude exit
 - `json.JSONDecodeError`
-- structural drift in the response shape (missing `short_id`)
-- live-status sentinel drift (value outside `{Working, Needs input, Idle}` triggers a forensic warning but passes through unchanged)
+- structural drift in the response shape (no short id under any accepted key)
+- a TOTAL drop of the AGENT rows (zero parsed, counting only rows whose `kind` is not `interactive`) adds one summary warning naming the count, because an empty map otherwise reads exactly like "no agents running". The operator's own interactive sessions appear in the same array and carry no id by design, so they are excluded: counting them would cry drift at a machine that simply has no agents running.
+- live-status sentinel drift (a resolved value outside `{Working, Needs input, Idle, Done}` triggers a forensic warning but passes through unchanged)
 
 `read.py` does NOT add a broad `except Exception` around the call — programmer errors should crash visibly. The contract is: `claude_agents_json` returns `({}, warnings)` on every documented failure; anything else escaping is a bug.
 
@@ -138,7 +144,7 @@ The JSON-when-non-TTY default aligns with the orchestrator-first audience: a pip
 The CLI's `AgentStatusFilter` Typer enum exposes the family-1 read verdicts `live`, `orphaned`, and `unknown`.
 It intentionally does not mirror `registry.KNOWN_STATUSES`: stored lifecycle metadata and rendered transcript liveness answer different questions.
 
-The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogonal drift case — claude renaming `"Working"` to `"working"` or shipping a new sentinel like `"Reflecting"`. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
+The `KNOWN_LIVE_STATUSES` allowlist in `providers/claude.py` catches the orthogonal drift case — claude shipping a new sentinel like `"Reflecting"`. A rename it has already made, such as `"Working"` to `"working"`, is not drift: `_LIVE_STATUS_INPUT` maps every observed spelling onto the output vocabulary, and only an UNMAPPED value warns. The value still passes through (we don't fail closed on an unknown enum from an external CLI), but a forensic warning lands on stderr so operators see the change rather than getting silently-stale table values.
 
 ## Known gaps
 
