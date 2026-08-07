@@ -4617,7 +4617,13 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
             ep = datetime.fromisoformat(row["ended_at"].replace("Z", "+00:00"))
         except (ValueError, AttributeError):
             return None
-        return (ep - sp).total_seconds()
+        sec = (ep - sp).total_seconds()
+        # An inverted window (started_at after ended_at) is a backfill typo or
+        # a clock skew, not a phase duration. Render it as end-only rather than
+        # summing a negative span into the node total.
+        if sec < 0:
+            return None
+        return sec
 
     def _fmt(sec: float) -> str:
         sec = int(round(sec))
@@ -4660,7 +4666,12 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
         if phase_has_window:
             phases_with_window += 1
 
-    if total > 0:
+    # Predicate on phases_with_window, not total: a zero-second window
+    # (started_at == ended_at) or any out-of-order stamp leaves total at 0
+    # while a phase still contributed a window. Keying on total would drop
+    # the duration line and report total_duration_seconds: null despite a
+    # real recorded window.
+    if phases_with_window > 0:
         lines.append(
             f"    total     {_fmt(total)} ({phases_with_window} of 4 phases recorded)"
         )
@@ -4669,7 +4680,7 @@ def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
 
     summary = {
         "phases": phases,
-        "total_duration_seconds": total if total > 0 else None,
+        "total_duration_seconds": total if phases_with_window > 0 else None,
         "phases_recorded": phases_with_window,
         "phases_total": 4,
     }

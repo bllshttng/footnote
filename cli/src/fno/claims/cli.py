@@ -233,7 +233,7 @@ def _stamp_do_on_release(key: str, claim) -> None:
     ).strftime("%Y-%m-%dT%H:%M:%SZ")
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
-        append_session_record(
+        found, _added = append_session_record(
             graph_json(), node_id, phase="do",
             harness=ident.harness, session_id=ident.session_id,
             started_at=started, ended_at=ended,
@@ -241,6 +241,17 @@ def _stamp_do_on_release(key: str, claim) -> None:
     except (Exception, SystemExit) as exc:
         typer.echo(
             f"claim release: do provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+        return
+    # append_session_record returns (found=False, added=False) without raising
+    # when the node id is absent from the graph (a superseded node whose claim
+    # file lingers). The named-skip contract requires an explicit stderr line
+    # so the operator knows provenance was lost, not silently dropped.
+    if not found:
+        typer.echo(
+            f"claim release: do provenance stamp skipped for {node_id} "
+            f"(node not in graph); the row was not written. Skipped.",
             err=True,
         )
 
