@@ -5149,8 +5149,14 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
     # Best-effort: an events-write failure never breaks the send.
     if not text.lstrip().startswith(("<fno_mail", "<cross-session-message")):
         try:
+            from fno.paths import agents_home_dir
+
+            # Write to the SAME log the Rust mail-inject binary uses
+            # (~/.fno/agents/events.jsonl) so the audit floor is one file, not
+            # fragmented across the fno state log and the agents log.
             events.emit(
                 "agent_raw_inject",
+                path=agents_home_dir() / "events.jsonl",
                 target_session=getattr(entry, "harness_session_id", "") or "",
                 payload=text[:512],
                 harness=getattr(entry, "harness", "") or "",
@@ -5641,7 +5647,10 @@ def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:
     A raw slash payload fires a verb only on a keystroke lane. The codex/gemini/
     opencode daemon lanes answer False (``agent.deliver`` / ``turn/start`` submit
     a turn to the model with no TUI prompt line, so the slash never reaches a
-    parser); only the mux pane paste and claude's ``control.sock`` are keystrokes.
+    parser); the mux pane paste and claude's ``control.sock`` (the --raw inject
+    lane) are keystrokes. The claude answer models the control.sock door ``--raw``
+    uses, not every claude sub-lane (a stream-json switchboard peer is a different
+    lane this predicate does not classify).
     """
     if entry.mux:
         return ("mux-pane", True)

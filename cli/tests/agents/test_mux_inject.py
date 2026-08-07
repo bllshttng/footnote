@@ -140,6 +140,9 @@ def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     assert data["lane"] == "mux-pane"
     assert data["harness"] == "claude"
     assert data["target_cwd"] == "/w"
+    # The Python mux site writes the SAME log the Rust mail-inject binary uses
+    # (~/.fno/agents/events.jsonl), so the audit floor is one file, not two.
+    assert str(data["path"]).endswith("agents/events.jsonl")
 
 
 def test_mux_pane_send_does_not_audit_cross_session_envelope(monkeypatch) -> None:
