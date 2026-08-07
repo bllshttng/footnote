@@ -511,6 +511,11 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
     )
     by_harness = {cell["harness"]: cell for cell in report["cells"]}
 
+    # The reinject is registered and delivering post-compact on both lanes, but
+    # via different carriers: PostCompact on Codex, SessionStart(source=compact)
+    # on Claude (PostCompact on Claude is stderr-only and cannot inject). The
+    # lifecycle records which carrier each harness registered it under.
+    expected_lifecycle = {"claude": "session_start", "codex": "post_compact"}
     for harness in ("claude", "codex"):
         manifest = by_harness[harness]["compiled"]["source_manifest"]
         source = next(
@@ -519,11 +524,11 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
             if item["source_id"] == "target-postcompact-reinject"
         )
         assert source["status"] == "registered"
+        assert source["lifecycle"] == expected_lifecycle[harness]
         assert source["measurement"] == "carrier_template_bytes"
         assert source["bytes"] == 0
         assert source["content_hash"] is None
         assert source["carrier_bytes"] > 0
-        assert all(item["lifecycle"] != "session_start" for item in manifest)
     gemini = next(
         item
         for item in by_harness["gemini"]["compiled"]["source_manifest"]
@@ -535,9 +540,13 @@ def test_static_postcompact_inventory_distinguishes_registration_from_delivery()
 
 def test_every_claude_sessionstart_recorder_declares_the_exact_same_inventory() -> None:
     manifest = json.loads((ROOT / "hooks" / "hooks.json").read_text(encoding="utf-8"))
+    # Startup recorders live in the matcher="" SessionStart group and share one
+    # inventory. A compact-only recorder (the reinject) declares its own, so it
+    # is excluded from the startup consensus.
     commands = [
         item["command"]
         for group in manifest["hooks"]["SessionStart"]
+        if group.get("matcher", "") == ""
         for item in group["hooks"]
         if "context-observe-hook.sh" in item.get("command", "")
     ]
@@ -855,6 +864,10 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         "graph_node_id: x-2e3c\n",
         encoding="utf-8",
     )
+    # Claude reinjects via SessionStart(source=compact); Codex via PostCompact
+    # (no source field on the event). Feed each the event shape its carrier rides
+    # so the hook picks the right wire schema.
+    hook_input = json.dumps({"source": "compact"}) if platform == "claude" else "{}"
     result = subprocess.run(
         [str(ROOT / "hooks" / "target-postcompact-reinject.sh")],
         cwd=tmp_path,
@@ -863,6 +876,7 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
             "CLAUDE_PLUGIN_ROOT": str(plugin),
             "FNO_PLATFORM": platform,
         },
+        input=hook_input,
         text=True,
         capture_output=True,
         check=False,
@@ -875,7 +889,7 @@ def test_postcompact_producer_uses_each_harness_wire_schema(
         assert "Keep the target oriented" in payload["systemMessage"]
     else:
         assert set(payload) == {"hookSpecificOutput"}
-        assert payload["hookSpecificOutput"]["hookEventName"] == "PostCompact"
+        assert payload["hookSpecificOutput"]["hookEventName"] == "SessionStart"
         assert (
             "Keep the target oriented"
             in payload["hookSpecificOutput"]["additionalContext"]

@@ -86,7 +86,12 @@ def _sha256(content: bytes) -> str:
     return hashlib.sha256(content).hexdigest()
 
 
-def _relative(path: Path, root: Path) -> str:
+def _relative(path: Path | None, root: Path) -> str:
+    # manifest is None on the gemini branch; the _relative(manifest, ...) calls
+    # that could receive it sit on claude/codex-only paths, but the type must
+    # hold for mypy. None never ships: those code paths are unreachable for gemini.
+    if path is None:
+        return ""
     try:
         return path.resolve().relative_to(root.resolve()).as_posix()
     except (OSError, ValueError):
@@ -553,7 +558,10 @@ def runtime_native_context_manifest(
 
 
 def _load_hook_commands(
-    repo_root: Path, manifest: Path, event_names: Sequence[str]
+    repo_root: Path,
+    manifest: Path,
+    event_names: Sequence[str],
+    matchers: set[str] | None = None,
 ) -> tuple[list[str], str | None]:
     try:
         data = json.loads(manifest.read_text(encoding="utf-8"))
@@ -568,6 +576,12 @@ def _load_hook_commands(
                     raise ValueError(
                         f"hooks.{event_name}[{group_index}] is not an object"
                     )
+                # SessionStart groups carry a "matcher" that filters by source
+                # (startup|resume|clear|compact|fork); "" fires for all sources.
+                # When a caller requests specific sources, honor it so a
+                # compact-only recorder is not counted among startup recorders.
+                if matchers is not None and group.get("matcher", "") not in matchers:
+                    continue
                 entries = group.get("hooks", [])
                 if not isinstance(entries, list):
                     raise ValueError(
@@ -720,21 +734,45 @@ def _discover_cell_sources(
 ) -> list[ContextSource]:
     sources = _host_sources(host_root, harness, entry_state, 0)
     ordinal = len(sources) + 10
-    event_names = ["PostCompact"] if entry_state == "post_compact" else ["SessionStart"]
+    # Each spec is (event_name, matchers, lifecycle). matchers=None loads every
+    # group; a set restricts to SessionStart groups whose "matcher" is in it.
+    # Post-compaction context rides different events per harness - PostCompact on
+    # Codex, SessionStart(source=compact) on Claude - so the post_compact census
+    # enumerates both carriers. Startup enumerates only matcher="" recorders so a
+    # compact-only recorder is not miscounted as a startup one.
+    if entry_state == "post_compact":
+        specs = [
+            ("PostCompact", None, "post_compact"),
+            ("SessionStart", {"compact"}, "session_start"),
+        ]
+    else:
+        specs = [("SessionStart", {"", entry_state}, "session_start")]
 
-    if harness == "claude":
-        manifest = plugin_root / "hooks" / "hooks.json"
-        commands, manifest_error = _load_hook_commands(plugin_root, manifest, event_names)
-    elif harness == "codex":
-        manifest = plugin_root / "hooks" / "codex-hooks.json"
-        commands, manifest_error = _load_hook_commands(plugin_root, manifest, event_names)
+    commands: list[tuple[str, str]] = []  # (command, lifecycle)
+    manifest_error: str | None = None
+    manifest: Path | None = None
+    if harness in ("claude", "codex"):
+        manifest = (
+            plugin_root / "hooks" / "hooks.json"
+            if harness == "claude"
+            else plugin_root / "hooks" / "codex-hooks.json"
+        )
+        for event_name, matchers, lifecycle in specs:
+            loaded, err = _load_hook_commands(
+                plugin_root, manifest, [event_name], matchers
+            )
+            if err:
+                manifest_error = err
+                break
+            commands.extend((cmd, lifecycle) for cmd in loaded)
     else:
         carrier = next(item for item in SESSION_START_CONTEXT_CARRIERS if item.harness == "gemini")
-        commands = (
+        gemini_cmds = (
             [f"${{PLUGIN_ROOT}}/{carrier.script}"] if entry_state in carrier.entry_states else []
         )
-        manifest_error = None
-        if not commands:
+        if gemini_cmds:
+            commands.extend((cmd, "session_start") for cmd in gemini_cmds)
+        else:
             sources.append(
                 measure_file_source(
                     source_id="session-start-wrapper",
@@ -788,7 +826,7 @@ def _discover_cell_sources(
         )
         return sources
 
-    for command_index, command in enumerate(commands):
+    for command_index, (command, lifecycle) in enumerate(commands):
         path = _command_path(command, plugin_root)
         if path is None:
             sources.append(
@@ -796,7 +834,7 @@ def _discover_cell_sources(
                     source_id=f"unresolved-hook:{command_index}",
                     harness=harness,
                     entry_state=entry_state,
-                    lifecycle="session_start",
+                    lifecycle=lifecycle,
                     layer="progressive",
                     provenance=_relative(manifest, plugin_root),
                     carrier=command,
@@ -810,9 +848,6 @@ def _discover_cell_sources(
             )
             ordinal += 1
             continue
-        lifecycle = (
-            "post_compact" if path.name == "target-postcompact-reinject.sh" else "session_start"
-        )
         if path.name == "session-start.sh":
             sources.extend(
                 _folded_sources(

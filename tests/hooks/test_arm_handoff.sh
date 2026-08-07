@@ -5,7 +5,7 @@
 # recorder) and the re-surface path in hooks/target-postcompact-reinject.sh.
 # Verifies: arm on pressure + outstanding work; no arm on <promise>; no arm
 # below threshold; no arm when the done sentinel exists; decline on unreadable
-# transcript; the manifest is never mutated; PostCompact re-surfaces the marker.
+# transcript; the manifest is never mutated; SessionStart(compact) re-surfaces the marker.
 
 set -uo pipefail
 
@@ -183,17 +183,18 @@ run_arm "$TMP/p"
 [[ -f "$TMP/p/.fno/.handoff-armed-$SID" ]] && pass "arms despite a stale <promise> in an earlier turn" \
   || fail "stale earlier <promise> wrongly suppressed arming"
 
-# 7. PostCompact re-surfaces an armed marker (even though target_is_active is
-#    false for the statusless manifest).
+# 7. SessionStart(compact) re-surfaces an armed marker (even though
+#    target_is_active is false for the statusless manifest). The reinject rides
+#    SessionStart source=="compact" on Claude, so the event carries that source.
 setup_ws "$TMP/g" 800000 "working"
 run_arm "$TMP/g"
-OUT="$( cd "$TMP/g" && printf '{"session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
-echo "$OUT" | grep -q "Handoff armed" && pass "PostCompact re-surfaces the armed marker" \
+OUT="$( cd "$TMP/g" && printf '{"source":"compact","session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
+echo "$OUT" | grep -q "Handoff armed" && pass "SessionStart(compact) re-surfaces the armed marker" \
   || fail "re-surface missing: $OUT"
 
-# 8. handoff done -> marker cleared: PostCompact stops nudging.
+# 8. handoff done -> marker cleared: SessionStart(compact) stops nudging.
 touch "$TMP/g/.fno/.handoff-done-$SID"; rm -f "$TMP/g/.fno/.handoff-armed-$SID"
-OUT="$( cd "$TMP/g" && printf '{"session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
+OUT="$( cd "$TMP/g" && printf '{"source":"compact","session_id":"%s"}' "$SID" | bash "$REINJECT" 2>/dev/null )"
 echo "$OUT" | grep -q "Handoff armed" && fail "still nudging after marker cleared: $OUT" \
   || pass "no nudge once marker cleared"
 
