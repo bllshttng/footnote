@@ -10594,9 +10594,9 @@ async fn move_pick_keys(
                                 .await
                                 .map_err(|e| format!("move-pane send failed: {e}"))?;
                             }
-                            None => view.set_notice(format!(
-                                "no pane in that workspace to anchor against"
-                            )),
+                            None => view.set_notice(
+                                "no pane in that workspace to anchor against".into(),
+                            ),
                         }
                     }
                 },
