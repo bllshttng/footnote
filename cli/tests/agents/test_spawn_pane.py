@@ -1330,7 +1330,7 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "name": "peer",
         "short_id": "",
         "harness": "codex",
-        "provider_source": "explicit",  # dispatch-provider provenance
+        "harness_source": "explicit",  # dispatch-harness provenance
         "status": "spawning",
         "mux_session": "main",
         "pane_id": 9,

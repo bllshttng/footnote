@@ -86,7 +86,7 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     # harness; model is absent too (no --model). Both were the receipt-lie defect.
     assert "provider" not in receipt
     assert "model" not in receipt
-    assert receipt["provider_source"] == "builtin-default"
+    assert receipt["harness_source"] == "builtin-default"
 
 
 def test_spawn_infers_claude_from_harness(monkeypatch, runner):
@@ -100,7 +100,7 @@ def test_spawn_infers_claude_from_harness(monkeypatch, runner):
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"
     receipt = json.loads(result.stdout.strip().splitlines()[-1])
-    assert receipt["provider_source"] == "harness-inferred"
+    assert receipt["harness_source"] == "harness-inferred"
 
 
 def test_spawn_explicit_provider_still_wins(monkeypatch, runner):

@@ -55,7 +55,7 @@ case "$1 $2" in
     if [[ "${STUB_MUX:-0}" == "1" ]]; then
       echo "{\"name\":\"${STUB_MUX_NAME-x}\",\"short_id\":\"${STUB_MUX_SHORT_ID-}\",\"session_id\":\"${STUB_MUX_SESSION_ID-}\",\"harness\":\"${STUB_MUX_PROVIDER-claude}\",\"status\":\"${STUB_MUX_STATUS-live}\",\"mux_session\":\"${STUB_MUX_SESSION-main}\",\"pane_id\":${STUB_PANE_ID-1}}"; exit 0
     fi
-    echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"provider\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
+    echo "{\"name\":\"x\",\"short_id\":\"${STUB_SHORT_ID-deadbeef}\",\"harness\":\"claude\",\"status\":\"live\"}"; exit 0 ;;
   "claim release")
     exit 0 ;;
   *) exit 0 ;;

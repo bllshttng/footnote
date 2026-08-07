@@ -333,7 +333,7 @@ fn spawn_claude_receipt_byte_shape() {
         "spawn claude happy path should exit 0, stderr: {}",
         out.stderr
     );
-    // Receipt: {"name": "<name>", "short_id": "<8hex>", "provider": "claude", "status": "live"}\n
+    // Receipt: {"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n
     let receipt = out.stdout.trim_end_matches('\n');
     assert!(
         receipt.starts_with(r#"{"name": "myspawn", "short_id": "#),
