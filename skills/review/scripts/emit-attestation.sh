@@ -41,14 +41,30 @@ if [[ -f "$repo_root/.fno/target-state.md" ]]; then
     | head -1 | sed 's/^harness:[[:space:]]*//' | tr -d '[:space:]' || true)
 fi
 
+# Record WHICH MODEL rendered the verdict. Model routing stamps ANTHROPIC_MODEL
+# (and every tier var) for the whole worker process, so a worker routed to a
+# cheap secondary provider renders its own review verdict there - and no
+# per-spawn role guard can see it, because the verdict is a later activity
+# inside an already-routed process. Reading the env is the only signal available
+# at emit; it reports what the environment CLAIMED, never proof of the model
+# that answered, so both stay empty on an unrouted session rather than defaulting
+# to a guess a later reader would mistake for evidence.
+model="${ANTHROPIC_MODEL:-}"
+provider=""
+if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
+  provider="${ANTHROPIC_BASE_URL#*://}"   # strip scheme
+  provider="${provider%%/*}"              # host only, no path or key material
+fi
+
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno event emit then validates envelope + required
 # fields + the verdict enum before writing.
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness}')"
+  --arg model "$model" --arg provider "$provider" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-default} provider=${provider:-anthropic}" >&2
