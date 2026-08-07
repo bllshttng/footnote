@@ -8,7 +8,7 @@ The single place that says where git worktrees go and what to do after creating 
 
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
-- **`worktree.use_conductor_canonical: true` is DEPRECATED:** behaves as `worktrees_base = ~/conductor/workspaces`; prefer the single `worktrees_base` knob. Honored by the `WorktreeCreate` hook, `cli/src/fno/worktree.py`, and `cli/src/fno/worktree_paths.py` (whose own neutral default is `~/.fno/worktrees/{proj}-{name}`).
+- **`worktree.use_conductor_canonical: true` is DEPRECATED:** behaves as `worktrees_base = ~/conductor/workspaces`; prefer the single `worktrees_base` knob.
 
 After `git worktree add`, always run the setup script from inside the worktree:
 
