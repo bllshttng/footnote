@@ -1164,10 +1164,12 @@ def _alias_value(
     ``normalize`` is applied per alias BEFORE the comparison, so two spellings
     of the same meaning (``state: working`` / ``status: busy``) agree instead of
     warning on every live row, and only a real disagreement is reported.
+    The warning still quotes the RAW wire values: an operator reading it is
+    debugging vocabulary drift against a real binary, and the normalized form
+    is this parser's own output vocabulary, not anything the binary emitted.
     """
-    found = [(key, row.get(key)) for key in keys if valid(row.get(key))]
-    if normalize is not None:
-        found = [(key, normalize(value)) for key, value in found]
+    raw = [(key, row.get(key)) for key in keys if valid(row.get(key))]
+    found = [(key, normalize(value)) for key, value in raw] if normalize else raw
     if not found:
         return None, None
     value = found[0][1]
@@ -1175,7 +1177,7 @@ def _alias_value(
     # non-None JSON value, and hashing a dict/list one would raise TypeError
     # out of a function contracted to be best-effort.
     if any(other != value for _, other in found[1:]):
-        pairs = ", ".join(f"{k}={v!r}" for k, v in found)
+        pairs = ", ".join(f"{k}={v!r}" for k, v in raw)
         return value, f"conflicting values across aliases ({pairs}); used {value!r}"
     return value, None
 
@@ -1301,6 +1303,12 @@ def claude_agents_json(
         # to ignore the warnings below. `kind` is the discriminator rather than
         # "did the row have an id", because a drift that renamed BOTH the id and
         # status keys still says `background` and must still be caught.
+        #
+        # `kind` is itself a drift surface, and this match is exact: a rename to
+        # `session_type` or a recase to `Interactive` makes the skip fail OPEN,
+        # and every interactive row falls back through to the "no usable short
+        # id" path. That degrades to the wall of warnings this skip removed -
+        # loud, not silent, which is the direction a diagnostic should fail.
         if row.get("kind") == "interactive":
             continue
         agent_rows += 1
@@ -1335,10 +1343,16 @@ def claude_agents_json(
     # print, and an empty map that reads exactly like "no agents running". A
     # total drop is a different claim from a partial one, so it says so once,
     # over the agent rows counted above.
+    # The tail names the SHORT ID, not live_status: every row that resolves a
+    # short id lands in out_map regardless of what its status field held, so an
+    # empty map can only mean short-id resolution failed on all of them. Naming
+    # live_status as the failure would point a drift investigation at the one
+    # axis that was never reached.
     if agent_rows and not out_map:
         warnings.append(
             f"claude agents --json: 0 of {agent_rows} agent rows parsed; "
-            "schema drift? live_status unavailable for every agent"
+            "schema drift? no usable short id on any of them, "
+            "so live_status is unavailable for every agent"
         )
     return out_map, warnings
 

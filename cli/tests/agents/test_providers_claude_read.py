@@ -133,7 +133,12 @@ def test_claude_agents_json_prefers_state_over_status_on_live_rows(monkeypatch):
     # busy/working mean the same thing, so normalizing before the comparison
     # keeps that row silent; idle/working genuinely disagree and still report.
     assert not any("7f7d7627" in w or "row 0" in w for w in warnings), warnings
-    assert any("conflicting values across aliases" in w for w in warnings), warnings
+    conflict = next(w for w in warnings if "conflicting values across aliases" in w)
+    # RAW wire spellings, not the normalized output vocabulary: an operator
+    # reading this is debugging drift against a real binary, and `state='Working'`
+    # is this parser's word, not anything claude emitted.
+    assert "state='working'" in conflict and "status='idle'" in conflict, conflict
+    assert "used 'Working'" in conflict, conflict
     # The interactive row is not an agent: skipped silently, not warned about
     # and not crashed on.
     assert not any("short id" in w for w in warnings), warnings
@@ -191,6 +196,13 @@ def test_claude_agents_json_total_row_drop_warns_once_about_drift(monkeypatch):
 
     assert result == {}
     assert any("0 of 3 agent rows parsed" in w for w in warnings), warnings
+    # The tail must name the axis that actually failed. Every row resolving a
+    # short id lands in out_map whatever its status held, so an empty map means
+    # short-id resolution failed - blaming live_status would send a drift
+    # investigation to the one axis never reached. Asserting only the count is
+    # what let the wrong wording ship.
+    drop = next(w for w in warnings if "0 of 3 agent rows parsed" in w)
+    assert "no usable short id on any of them" in drop, drop
 
 
 def test_claude_agents_json_all_interactive_rows_is_not_drift(monkeypatch):
