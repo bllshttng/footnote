@@ -4750,7 +4750,11 @@ session_app = typer.Typer(
 
 
 def _plan_claims(plan_path: str) -> "set[str]":
-    """The node ids a plan's frontmatter ``claims:``, as a set.
+    """The node ids a plan's frontmatter declares ownership of, as a set.
+
+    Reads both ``claims:`` (a list) and ``node:`` (a single id). 330 of 807 plans
+    carry ``node:`` instead of ``claims:``, so reading only ``claims:`` left G3
+    unevaluable on roughly 41% of plans and the leniency was invisible.
 
     Empty means "no claim declared" -- including every unreadable-plan case, since
     ``_read_plan_frontmatter`` returns ``{}`` on all of them. The caller treats
@@ -4758,12 +4762,23 @@ def _plan_claims(plan_path: str) -> "set[str]":
     """
     from fno.graph._intake import _read_plan_frontmatter
 
-    claims = _read_plan_frontmatter(plan_path).get("claims")
+    fm = _read_plan_frontmatter(plan_path)
+    out: "set[str]" = set()
+
+    claims = fm.get("claims")
     if isinstance(claims, str):
         claims = [claims]
-    if not isinstance(claims, list):
-        return set()
-    return {c.strip() for c in claims if isinstance(c, str) and c.strip() not in ("", "null")}
+    if isinstance(claims, list):
+        out.update(
+            c.strip() for c in claims
+            if isinstance(c, str) and c.strip() not in ("", "null")
+        )
+
+    node = fm.get("node")
+    if isinstance(node, str) and node.strip() not in ("", "null"):
+        out.add(node.strip())
+
+    return out
 
 
 @session_app.callback()

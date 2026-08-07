@@ -1514,6 +1514,12 @@ def _plan(tmp_path, claims: str) -> str:
     return str(p)
 
 
+def _plan_node(tmp_path, node: str) -> str:
+    p = tmp_path / "plan-node.md"
+    p.write_text(f"---\nstatus: ready\nnode: {node}\n---\n\n# plan\n")
+    return str(p)
+
+
 def test_guard_plan_disagreement_skips_naming_both_ids(tmp_path, monkeypatch):
     """AC8-EDGE: a plan claiming another node skips, exit 0, both ids named."""
     from typer.testing import CliRunner
@@ -1559,6 +1565,38 @@ def test_guard_plan_absent_evidence_is_agreement(tmp_path, monkeypatch, plan_arg
 
     r = CliRunner().invoke(C.cli, [
         "session", "add", "ab-guard001", "--phase", "do", "--guard-plan", plan_arg,
+    ])
+    assert r.exit_code == 0
+    assert len(_sessions(g)) == 1
+
+
+def test_plan_claims_reads_node_key_as_single_claim(tmp_path):
+    """330 of 807 plans carry `node:` not `claims:`. Reading only claims: left
+    G3 unevaluable on ~41% of plans; node: is now a single-value claim too."""
+    import fno.graph.cli as C
+
+    assert C._plan_claims(_plan_node(tmp_path, "x-abcd")) == {"x-abcd"}
+
+
+def test_plan_claims_unions_claims_and_node(tmp_path):
+    """Both keys present -> the union. A plan should not declare both, but the
+    read must not drop either if it does."""
+    import fno.graph.cli as C
+
+    p = tmp_path / "both.md"
+    p.write_text("---\nstatus: ready\nnode: x-1111\nclaims: [x-2222, x-3333]\n---\n\n# plan\n")
+    assert C._plan_claims(str(p)) == {"x-1111", "x-2222", "x-3333"}
+
+
+def test_guard_plan_agreement_via_node_key(tmp_path, monkeypatch):
+    """The node: key satisfies --guard-plan the same way claims: does."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _guard_graph(tmp_path, monkeypatch)
+    r = CliRunner().invoke(C.cli, [
+        "session", "add", "ab-guard001", "--phase", "do",
+        "--guard-plan", _plan_node(tmp_path, "ab-guard001"),
     ])
     assert r.exit_code == 0
     assert len(_sessions(g)) == 1
