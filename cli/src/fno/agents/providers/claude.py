@@ -1099,12 +1099,70 @@ _AGENTS_JSON_TIMEOUT_DEFAULT = 3.0
 _FOLLOW_POLL_INTERVAL = 0.5
 
 
-# Claude supervisor's documented live-status sentinel set. A value
-# outside this set surfaces a forensic warning so vocabulary drift
-# (e.g. claude renaming "Working" to "running") is loud, not silent.
-# The value still passes through unchanged so consumers that already
-# adapted aren't blocked on our config.
-KNOWN_LIVE_STATUSES = frozenset({"Working", "Needs input", "Idle"})
+# Claude supervisor's live-status sentinel set. A value outside this set
+# surfaces a forensic warning so vocabulary drift is loud, not silent. The value
+# still passes through unchanged so consumers that already adapted aren't
+# blocked on our config.
+#
+# Two vocabularies are live. The Title-case set is the original documented one;
+# claude now emits lowercase `state` values including "blocked", which the
+# Title-case set alone rejected. Both are accepted so neither claude version
+# produces spurious drift warnings.
+KNOWN_LIVE_STATUSES = frozenset(
+    {
+        "Working",
+        "Needs input",
+        "Idle",
+        "working",
+        "blocked",
+        "idle",
+        "done",
+    }
+)
+
+# Field aliases for the row schema. claude's `agents --json` emits `id` and
+# `state`; earlier versions emitted `short_id` and `status`, which is what this
+# parser originally read. Accepting both keeps one code path working across
+# versions - and the aliasing is why a schema change is a WARNING here rather
+# than a silent empty map: reading only the old names dropped every row, so the
+# live_status enrichment returned {} on every call while the unit tests, whose
+# fixtures used the old shape, stayed green.
+_SHORT_ID_KEYS = ("short_id", "id")
+_STATUS_KEYS = ("status", "state")
+
+
+def _alias_value(row: dict, keys: tuple[str, ...], valid) -> tuple[Any, Optional[str]]:
+    """Resolve one field across its schema aliases. Returns (value, warning).
+
+    Each alias is validated INDEPENDENTLY and only valid values are considered,
+    so a malformed value under one spelling cannot mask a good value under
+    another. Taking the first merely-present key would let a row carrying a
+    junk ``short_id`` alongside a valid ``id`` resolve to the junk and be
+    dropped - the same silent-drop shape this aliasing exists to prevent.
+
+    When two aliases both hold valid but DIFFERENT values there is no way to
+    tell which the producer meant, so the first (oldest-spelling) value is
+    returned with a warning rather than a silent pick.
+    """
+    found = [(key, row.get(key)) for key in keys if valid(row.get(key))]
+    if not found:
+        return None, None
+    value = found[0][1]
+    # Compared by equality, not via a set: a status alias is accepted as any
+    # non-None JSON value, and hashing a dict/list one would raise TypeError
+    # out of a function contracted to be best-effort.
+    if any(other != value for _, other in found[1:]):
+        pairs = ", ".join(f"{k}={v!r}" for k, v in found)
+        return value, f"conflicting values across aliases ({pairs}); used {value!r}"
+    return value, None
+
+
+def _valid_short_id(value: Any) -> bool:
+    return isinstance(value, str) and bool(value)
+
+
+def _valid_status(value: Any) -> bool:
+    return value is not None
 
 
 def claude_agents_json(
@@ -1120,8 +1178,8 @@ def claude_agents_json(
     - ``subprocess.TimeoutExpired`` — exceeded the per-call timeout.
     - non-zero exit code — claude itself reported an error.
     - ``json.JSONDecodeError`` — stdout was not parseable JSON.
-    - structural drift — a record missing the documented ``short_id`` key
-      is dropped with a forensic warning naming the missing field
+    - structural drift — a record carrying none of the accepted short-id
+      keys is dropped with a forensic warning naming the keys tried
       (AC3-FR).
 
     The success shape:
@@ -1135,8 +1193,12 @@ def claude_agents_json(
 
     Per Locked Decision 1, the source of live-status truth is claude's
     supervisor view — replicating that state in fno would be duplicate
-    truth. We translate claude's field name (``status`` in its --json
-    output) to our orthogonal ``live_status`` axis (Locked Decision 6).
+    truth. We translate claude's field name to our orthogonal
+    ``live_status`` axis (Locked Decision 6). That field name is versioned:
+    claude emits ``id``/``state`` today and emitted ``short_id``/``status``
+    earlier, so both spellings are accepted (``_SHORT_ID_KEYS`` /
+    ``_STATUS_KEYS``) rather than pinning one and silently dropping every
+    row on the other.
     """
     argv = ["claude", "agents", "--json"]
 
@@ -1205,12 +1267,24 @@ def claude_agents_json(
         if not isinstance(row, dict):
             warnings.append(f"claude agents --json row {index} is not an object; skipped")
             continue
-        short_id = row.get("short_id")
-        if not isinstance(short_id, str) or not short_id:
-            warnings.append(f"claude agents --json row {index} missing short_id; skipped")
+        short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
+        if short_id is None:
+            warnings.append(
+                f"claude agents --json row {index} has no usable short id "
+                f"under any of {list(_SHORT_ID_KEYS)}; skipped"
+            )
             continue
-        live_status = row.get("status")
-        if live_status is not None and live_status not in KNOWN_LIVE_STATUSES:
+        if id_warning:
+            warnings.append(f"claude agents --json row {index} short id {id_warning}")
+        live_status, status_warning = _alias_value(row, _STATUS_KEYS, _valid_status)
+        if status_warning:
+            warnings.append(f"claude agents --json row {index} status {status_warning}")
+        # The isinstance guard short-circuits before the frozenset lookup: a
+        # non-string status (dict/list under drift) is itself unrecognized, and
+        # hashing it here would raise TypeError out of a best-effort probe.
+        if live_status is not None and (
+            not isinstance(live_status, str) or live_status not in KNOWN_LIVE_STATUSES
+        ):
             warnings.append(
                 f"claude agents --json row {index} has unrecognized status="
                 f"{live_status!r} (expected one of {sorted(KNOWN_LIVE_STATUSES)}); "

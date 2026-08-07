@@ -27,6 +27,114 @@ def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):
 # --- claude_agents_json() ---------------------------------------------------
 
 
+def test_claude_agents_json_accepts_the_current_claude_row_shape(monkeypatch):
+    """Regression: the parser read ``short_id``/``status``, but claude emits
+    ``id``/``state``. Every row was dropped, so the live_status enrichment
+    returned {} on EVERY call while this file's other tests stayed green on
+    fabricated old-shape fixtures - a test suite pinning a shape production
+    never produces.
+
+    This payload is copied verbatim from real ``claude agents --json`` output
+    (keys and lowercase state values as observed), so it fails if the parser
+    stops handling what the binary actually emits."""
+    payload = {
+        "agents": [
+            {
+                "id": "907fc8c5",
+                "sessionId": "907fc8c5-137e-44ff-95a0-f02b038ffefe",
+                "name": "king-crown-agents",
+                "state": "working",
+                "kind": "background",
+                "cwd": "/repo",
+                "startedAt": 1786023667738,
+            },
+            {
+                "id": "baf9409a",
+                "sessionId": "baf9409a-2af5-444a-846c-059e8fa2f758",
+                "name": "tgt-let-s-think-about-wh",
+                "state": "blocked",
+                "kind": "background",
+            },
+        ]
+    }
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {
+        "907fc8c5": {"live_status": "working"},
+        "baf9409a": {"live_status": "blocked"},
+    }
+    # No row is dropped and no vocabulary-drift warning fires: "working" and
+    # "blocked" are real values the current binary emits, not drift.
+    assert warnings == [], warnings
+
+
+def test_claude_agents_json_malformed_alias_does_not_mask_a_valid_one(monkeypatch):
+    """Each alias is validated independently. A row carrying a junk `short_id`
+    alongside a valid `id` must resolve to the `id` and survive; taking the
+    first merely-PRESENT key would resolve to the junk and drop the row - the
+    same silent-drop the aliasing exists to prevent."""
+    payload = {
+        "agents": [
+            {"short_id": 12345, "id": "907fc8c5", "state": "working"},
+            {"short_id": "", "id": "baf9409a", "status": None, "state": "blocked"},
+        ]
+    }
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {
+        "907fc8c5": {"live_status": "working"},
+        "baf9409a": {"live_status": "blocked"},
+    }
+    assert warnings == [], warnings
+
+
+def test_claude_agents_json_conflicting_aliases_warn_rather_than_pick_silently(monkeypatch):
+    """Two aliases both valid but DIFFERENT: there is no way to tell which the
+    producer meant, so the pick is reported. Silently choosing one is the
+    receipt-cannot-express-the-truth shape; the row still resolves so a
+    conflict never costs the enrichment."""
+    payload = {"agents": [{"short_id": "aaaaaaaa", "id": "bbbbbbbb", "state": "working"}]}
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {"aaaaaaaa": {"live_status": "working"}}
+    assert len(warnings) == 1, warnings
+    assert "conflicting values across aliases" in warnings[0]
+    assert "aaaaaaaa" in warnings[0] and "bbbbbbbb" in warnings[0]
+
+
+def test_claude_agents_json_unhashable_status_does_not_raise(monkeypatch):
+    """A status alias is accepted as any non-None JSON value, so a dict or list
+    one reaches the conflict check. Comparing aliases through a set would raise
+    TypeError out of a best-effort probe that read.py deliberately does not
+    wrap, crashing `fno agents ls` on drifted output."""
+    payload = {"agents": [{"id": "907fc8c5", "status": {"phase": "run"}, "state": "working"}]}
+
+    def _fake(argv, **kwargs):
+        return _fake_completed(stdout=json.dumps(payload))
+
+    monkeypatch.setattr(claude_mod, "_subprocess_run", _fake)
+    result, warnings = claude_mod.claude_agents_json()
+
+    assert result == {"907fc8c5": {"live_status": {"phase": "run"}}}
+    assert any("conflicting values across aliases" in w for w in warnings), warnings
+    assert any("unrecognized status=" in w for w in warnings), warnings
+
+
 def test_claude_agents_json_success_returns_short_id_map(monkeypatch):
     payload = {
         "agents": [

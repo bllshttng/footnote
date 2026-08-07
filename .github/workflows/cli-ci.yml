@@ -143,7 +143,14 @@ jobs:
 
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # 20 left no margin and cancelled green runs. Measured 2026-08-06: the test
+    # step alone is 16m35s on a warm main run, and a branch with a cold uv/cargo
+    # cache - the normal state for a new branch - runs ~19m and hit the cap with
+    # every test passing. A cancelled job reports as `smoke fail`, so the tax was
+    # paid as phantom red PRs and re-run cycles, not as a visible timeout.
+    # Raise the ceiling rather than the suite: if this step approaches 30, the
+    # suite is the thing to fix.
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v4

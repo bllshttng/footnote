@@ -69,6 +69,23 @@ def test_idle_target_worker_shows_working(tmp_path, monkeypatch, _patch_claude):
     assert rows["target-x-4a48-fleet-status"]["live_status"] == "Working (loop 2m ago)"
 
 
+def test_lowercase_idle_from_current_claude_still_fills(
+    tmp_path, monkeypatch, _patch_claude
+):
+    """Current claude emits lowercase ``idle``. Matching only the Title-case
+    spelling would skip the fill and leave every bg worker reading idle."""
+    use_tmpdir(monkeypatch, tmp_path)
+    write_registry([_claude("target-x-4a48-fleet-status", short_id="s1")])
+    _patch_claude({"s1": {"live_status": "idle"}})
+    monkeypatch.setattr(
+        truth_status,
+        "resolve_truth_status",
+        lambda nid, **_: {"state": "working", "last_loop_check_age_s": 120},
+    )
+    rows = _rows(monkeypatch, tmp_path)
+    assert rows["target-x-4a48-fleet-status"]["live_status"] == "Working (loop 2m ago)"
+
+
 def test_target_worker_passes_manifest_cwd_to_truth_resolver(
     tmp_path, monkeypatch, _patch_claude
 ):
