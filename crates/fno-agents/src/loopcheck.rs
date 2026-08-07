@@ -2011,11 +2011,11 @@ fn main_head_failing_checks(gh_bin: &str, cwd: &Path, n: usize) -> Option<Vec<St
 }
 
 /// Idempotency guard (Concurrency AC): true iff a prior `termination` event with
-/// reason `DoneAwaitingMerge` for this session already exists, so a re-evaluation
+/// the given `reason` for this session already exists, so a re-evaluation
 /// (crash restart, or the two consumers racing) does not double-emit or
 /// double-notify. Fail-open (false) on an unreadable events file: at worst one
 /// extra notify, never a silent skip of the terminal.
-fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool {
+fn already_emitted_terminal(events_path: &Path, session_id: &str, reason: &str) -> bool {
     let Ok(content) = std::fs::read_to_string(events_path) else {
         return false;
     };
@@ -2025,7 +2025,7 @@ fn already_emitted_awaiting_merge(events_path: &Path, session_id: &str) -> bool 
         };
         val.get("type").and_then(|v| v.as_str()) == Some("termination")
             && val.pointer("/data/session_id").and_then(|v| v.as_str()) == Some(session_id)
-            && val.pointer("/data/reason").and_then(|v| v.as_str()) == Some("DoneAwaitingMerge")
+            && val.pointer("/data/reason").and_then(|v| v.as_str()) == Some(reason)
     })
 }
 
@@ -4975,7 +4975,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                             // once per session; a re-eval or the two consumers
                             // racing still returns the terminal but does not
                             // double-notify.
-                            if !already_emitted_awaiting_merge(&project_events, &session_id) {
+                            if !already_emitted_terminal(&project_events, &session_id, "DoneAwaitingMerge") {
                                 emit(
                                     "termination",
                                     serde_json::json!({
@@ -5042,40 +5042,45 @@ pub fn decide(args: &[String]) -> (i32, String) {
                         "PR #{} is green and shipped, but required review bot(s) {} posted a usage-limit (quota) comment instead of a review; the review gate cannot be auto-satisfied. Wait for quota recovery or run a local review, then re-run; or merge manually after a real review.",
                         pr_info.number, bots
                     );
-                    emit(
-                        "termination",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "reason": "DoneAwaitingReview",
-                            "message": msg.clone()
-                        }),
-                    );
-                    emit(
-                        "loop_check",
-                        serde_json::json!({
-                            "session_id": session_id,
-                            "fingerprint": fingerprint,
-                            "fires": this_fire,
-                            "consecutive_unchanged": consecutive_after,
-                            "streak_window_secs": streak_window,
-                            "decision": "allow",
-                            "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
-                            "intent_source": intent_source,
-                            "pr_state": pr_info.state.as_str(),
-                            "ci": pr_info.ci_conclusion.render(),
-                            "reviewed": pr_info.reviewed,
-                            "review_skipped": pr_info.review_skipped,
-                            "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                            "fp_read_failed": fp_read_failed
-                        }),
-                    );
-                    best_effort_notify(
-                        &format!(
-                            "PR #{} blocked - required review bot rate-limited",
-                            pr_info.number
-                        ),
-                        &msg,
-                    );
+                    // Idempotency (Concurrency AC, mirrors DoneAwaitingMerge):
+                    // emit + notify at most once per session; a re-eval or racing
+                    // consumers still return the terminal but do not double-notify.
+                    if !already_emitted_terminal(&project_events, &session_id, "DoneAwaitingReview") {
+                        emit(
+                            "termination",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "reason": "DoneAwaitingReview",
+                                "message": msg.clone()
+                            }),
+                        );
+                        emit(
+                            "loop_check",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "fingerprint": fingerprint,
+                                "fires": this_fire,
+                                "consecutive_unchanged": consecutive_after,
+                                "streak_window_secs": streak_window,
+                                "decision": "allow",
+                                "intent": if intent == Intent::Promise { "promise" } else { "backstop" },
+                                "intent_source": intent_source,
+                                "pr_state": pr_info.state.as_str(),
+                                "ci": pr_info.ci_conclusion.render(),
+                                "reviewed": pr_info.reviewed,
+                                "review_skipped": pr_info.review_skipped,
+                                "unaddressed_blocking": pr_info.unaddressed_findings.len(),
+                                "fp_read_failed": fp_read_failed
+                            }),
+                        );
+                        best_effort_notify(
+                            &format!(
+                                "PR #{} blocked - required review bot rate-limited",
+                                pr_info.number
+                            ),
+                            &msg,
+                        );
+                    }
                     return (
                         0,
                         allow_output(
@@ -8203,26 +8208,28 @@ mod tests {
     }
 
     #[test]
-    fn already_emitted_awaiting_merge_detects_prior_and_absence() {
+    fn already_emitted_terminal_detects_prior_and_absence() {
         let dir = tempfile::tempdir().unwrap();
         let events = dir.path().join("events.jsonl");
         // Absent file -> false (fail open).
-        assert!(!already_emitted_awaiting_merge(&events, "sess-A"));
+        assert!(!already_emitted_terminal(&events, "sess-A", "DoneAwaitingMerge"));
         // A DonePRGreen termination for the same session must NOT count.
         std::fs::write(
             &events,
             "{\"type\":\"termination\",\"data\":{\"session_id\":\"sess-A\",\"reason\":\"DonePRGreen\"}}\n",
         )
         .unwrap();
-        assert!(!already_emitted_awaiting_merge(&events, "sess-A"));
-        // A prior DoneAwaitingMerge for sess-A counts; a different session does not.
+        assert!(!already_emitted_terminal(&events, "sess-A", "DoneAwaitingMerge"));
+        // A prior DoneAwaitingMerge for sess-A counts for that reason; a different session does not.
         std::fs::write(
             &events,
             "{\"type\":\"termination\",\"data\":{\"session_id\":\"sess-A\",\"reason\":\"DoneAwaitingMerge\"}}\n",
         )
         .unwrap();
-        assert!(already_emitted_awaiting_merge(&events, "sess-A"));
-        assert!(!already_emitted_awaiting_merge(&events, "sess-B"));
+        assert!(already_emitted_terminal(&events, "sess-A", "DoneAwaitingMerge"));
+        assert!(!already_emitted_terminal(&events, "sess-B", "DoneAwaitingMerge"));
+        // The reason is matched exactly: a DoneAwaitingReview query does not match a DoneAwaitingMerge row.
+        assert!(!already_emitted_terminal(&events, "sess-A", "DoneAwaitingReview"));
     }
 
     /// AC5-HP: enums parse known gh strings.
