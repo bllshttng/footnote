@@ -256,6 +256,16 @@ if [[ -n "$TERMINATION_REASON" ]]; then
     # STOPPED (PR open, more work coming) KEEPS holding, so a stopped-but-
     # resumable session is not handed to a twin. CHANGES CLAIM LIFECYCLE:
     # finished-terminal releases instead of stale-after-TTL.
+    #
+    # SOURCE OF TRUTH: the variants below are a hand-maintained mirror of the
+    # Rust `TerminationReason` enum in crates/fno-agents/src/loopcheck.rs. The
+    # four deliberately omitted clean terminals (DoneBatched, DoneAwaitingMerge,
+    # DoneUnreviewed, DonePlanned) keep their claim because no further agent
+    # work is coming but a human/batch merge or the reconcile path still owes
+    # the close - releasing here would hand a twin dispatcher the node mid-flight.
+    # When Rust gains a new Done* variant, update both this list and the
+    # classification in loopcheck.rs; the deeper fix is a `releases_claim: bool`
+    # field on the decision JSON so this stop pattern-matching goes away.
     case "$TERMINATION_REASON" in
         DonePRGreen|DoneAdvisory|DoneDelivery|NoWork)
             _REL_KEY="$(sed -n 's/^target_claim_key:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"

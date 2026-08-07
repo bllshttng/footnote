@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.harness_identity import AMBIENT_IDENTITY_ENV as _MARKERS
 
 runner = CliRunner()
 
@@ -386,8 +387,11 @@ def test_url_only_update_is_allowed_when_it_names_the_same_pr(tmp_graph):
 
 # ---- ship provenance: the consolidated ship writer lives in `update` ----
 
-_MARKERS = ("CODEX_THREAD_ID", "CLAUDE_CODE_SESSION_ID", "CODEX_SESSION_ID",
-            "GEMINI_SESSION_ID", "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID")
+# _MARKERS is imported at the top of the file (AMBIENT_IDENTITY_ENV). Several
+# modules read a session marker directly rather than through the resolver
+# (carveout/core.py, done/cli.py, log_cmd.py, adapters/hermes.py), so a
+# hand-maintained copy stops covering a marker the moment one is added - the
+# canonical tuple stays in sync with the resolver's scrub set.
 
 
 def _set_ambient_claude(monkeypatch, sid="SESSION-A"):

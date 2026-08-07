@@ -1420,8 +1420,16 @@ fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> P
     }
     let projects = claude_home.projects_dir();
     let transcript = format!("{}.jsonl", uuid);
-    let mut candidates: Vec<PathBuf> = vec![PathBuf::from(recorded)];
-    candidates.extend(git_worktree_paths(Path::new(recorded)));
+    // Probe the recorded cwd first: the common case (no EnterWorktree) keeps
+    // the transcript under its own project dir, and a stat is far cheaper than
+    // spawning `git worktree list` on every resume. Only on a miss do we
+    // enumerate worktrees.
+    let recorded_pb = PathBuf::from(recorded);
+    let recorded_slug = claude_cwd_slug(&recorded_pb);
+    if projects.join(&recorded_slug).join(&transcript).exists() {
+        return recorded_pb;
+    }
+    let candidates: Vec<PathBuf> = git_worktree_paths(Path::new(recorded));
     for cand in &candidates {
         let slug = claude_cwd_slug(cand);
         if projects.join(&slug).join(&transcript).exists() {
@@ -1437,7 +1445,7 @@ fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> P
          using the recorded cwd ({})",
         recorded
     );
-    PathBuf::from(recorded)
+    recorded_pb
 }
 
 fn git_worktree_paths(cwd: &Path) -> Vec<PathBuf> {

@@ -649,6 +649,15 @@ def _stamp_blueprint_on_plan_link(node_id: str) -> None:
     so there is no clean blueprint start); the roster renders it 'end only'.
     Best-effort: an unresolvable identity or a graph failure skips with a named
     stderr reason and never fails the update. Idempotent.
+
+    KNOWN LABEL APPROXIMATION (owned by node x-8824): this stamps the DESIGN
+    BOUNDARY - the moment a plan is bound - not strictly /blueprint. On the
+    normal path /think runs `backlog update --plan-path` (think SKILL), and
+    /blueprint only binds CHILD plans during epic decomposition; so on the
+    normal path this row fires at /think, wearing the 'blueprint' label. The
+    row is honest about WHEN the plan was bound and WHO bound it; the phase
+    label is the approximation. x-8824 tests whether plan-bind IS the think
+    boundary (which would make think a mislabeled writer, not a missing one).
     """
     from datetime import datetime, timezone
 
