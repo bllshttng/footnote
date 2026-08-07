@@ -254,6 +254,44 @@ run_hook "$(payload_compact "$SBX/t.jsonl")"
 assert_eq     "AC21: compaction re-fire exits 0" "$RC" "0"
 assert_absent "AC21: compaction re-fire no block" "$OUT" '"decision":"block"'
 
+# === AC22: flush-cadence - dirty tree static across turns nudges to commit ====
+# Isolated git repo (the shared sandbox is not a repo, so the other checks never
+# see a dirty tree). >10 uncommitted files, HEAD unmoved across 3 turn-ends ->
+# block whose reason quotes a FILE count, never a commit count; latches per band.
+FLUSH_REPO="$SBX/flush-repo"
+mkdir -p "$FLUSH_REPO"
+git -C "$FLUSH_REPO" init -q
+git -C "$FLUSH_REPO" config user.email t@t.t
+git -C "$FLUSH_REPO" config user.name t
+git -C "$FLUSH_REPO" commit -q --allow-empty -m base      # a HEAD to track
+rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+for i in 1 2 3 4 5 6 7 8 9 10 11 12; do echo "x$i" > "$FLUSH_REPO/file$i.txt"; done
+write_transcript "$SBX/low.jsonl" 300000                   # 30% -> isolate from ctx
+cd "$FLUSH_REPO"
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 1: static=1
+assert_absent "AC22: stop 1 no flush block" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 2: static=2
+assert_absent "AC22: stop 2 no flush block" "$OUT" '"decision":"block"'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 3: static=3 -> fires
+assert_contains "AC22: stop 3 flush blocks" "$OUT" '"decision":"block"'
+assert_contains "AC22: message quotes a file count" "$OUT" '12 files'
+assert_contains "AC22: message names uncommitted work" "$OUT" 'uncommitted'
+assert_absent "AC22: never a commit-count phrasing" "$OUT" 'commits this session'
+run_hook "$(payload "$SBX/low.jsonl")"                      # stop 4: latched
+assert_absent "AC22: stop 4 latched (once per band)" "$OUT" '"decision":"block"'
+cd "$SBX"
+
+# === AC23: clean tree -> no flush output =====================================
+rm -f "$SBX/.fno"/.context-nudge-flush* 2>/dev/null
+git -C "$FLUSH_REPO" add -A && git -C "$FLUSH_REPO" commit -q -m "land the work"
+write_transcript "$SBX/low.jsonl" 300000
+cd "$FLUSH_REPO"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+run_hook "$(payload "$SBX/low.jsonl")"
+assert_absent "AC23: clean tree no flush block" "$OUT" '"decision":"block"'
+cd "$SBX"
+
 echo ""
 echo "================================"
 echo "Results: $pass passed, $fail failed"
