@@ -54,6 +54,11 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 
 **You are one of many agents (the mesh).** The loop is backlog -> spawn -> target -> mail: pull work with `fno backlog next`, spawn a peer into any project via `fno agents spawn --cwd <repo-root> "/fno:target <node>"` (the `--cwd` is load-bearing - never do another project's work inline), coordinate over `fno mail send <handle>`. Spawned workers are roster citizens; a hand-started session joins via `/fno-me`. `fno mux` hosts all of it as panes you can watch, drive, or message.
 
+**Citizens vs limbs.** `fno agents spawn` makes a *citizen* (registry row, mail handle, survives its spawner); your harness's native subagent makes a *limb* (nested, no handle, no life of its own).
+Spawn for citizens, harness subagent for limbs - the limb for one-shot work you consume next turn; spawn when it must outlive its spawner, be driven by a third party, or hold a claim.
+Neither is always correct; a limb is observable only (`fno agents top --subagents`), not addressable.
+Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
+
 **Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane, so it is the fallback when a worker's Skill-tool self-invocation is refused: the king's reply triggers the verb (no live king -> advisory self-review; `docs/architecture/review-lanes.md`). The same property means a capability probe sent over mail can only test the user-triggered path, never autonomous action.
 
 **Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.

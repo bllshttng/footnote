@@ -294,3 +294,75 @@ Deferred for separate plans:
   load-bearing race prevention.
 - Cross-host claim coordination - intentionally out of scope.
 - Web UI / TUI for claim inspection - `fno claim list` covers it.
+
+## Agent primitives: citizens and limbs
+
+fno models one agent-spawn primitive, `fno agents spawn`, but two run in
+every session: the fno-spawned *citizen* and the harness-native *subagent*
+(a *limb*).
+The contract below names the difference so the choice rests on properties,
+not folklore, and records why the limb cannot be made fully addressable.
+
+### The two primitives
+
+A **citizen** is what `fno agents spawn` produces: a row in the fno agents
+registry, discoverable by `fno agents peek`, addressable by `fno mail`,
+holding its own `node:` claim, surviving its spawner's death, and
+handoff-able to a successor king.
+Its transcript sits beside its peers at the project root as
+`~/.claude/projects/<proj>/<session-id>.jsonl`.
+
+A **limb** is a harness-native subagent - Claude's Agent tool, or the
+task/agent primitive on codex, agy, and opencode.
+It is a nested conversation inside its parent's session process: no pid, no
+roster entry, no registry row, no mail handle, and no transcript of its own
+at the project root (it lives at
+`<proj>/<parent-session-id>/subagents/agent-<id>.jsonl`).
+It reports to its spawner or to nobody.
+
+### When to use which
+
+Reach for the **limb** when the work is one-shot, you consume the result in
+your own next turn, and nothing outside you needs to observe, message,
+drive, or inherit it.
+It is genuinely the better tool there: no spawn latency, no worktree setup,
+no registry write, parallel fan-out inside one context, and the result lands
+back in a context that already holds the problem.
+This is plausibly why a measured subagent caught a config alias a design doc
+had missed - it returned into the context that held the design rather than
+into a registry row someone would have to go read.
+
+Reach for **`fno agents spawn`** when any of these hold: the work must
+outlive its spawner; someone other than the spawner must observe, message,
+or drive it; it must be handed to a successor king; it holds a `node:`
+claim, since the registry row is what makes the claim attributable; it must
+join king-mediated review, which is mail-shaped and therefore needs a
+handle; or it needs its own worktree or branch.
+
+Neither primitive is always correct.
+"Always spawn" discards the limb's real advantages; "always subagent"
+orphans anything that must outlive its parent.
+
+### Why full addressability is rejected
+
+The honest ceiling for a limb is **read-only visibility**, not
+addressability.
+A subagent has no input stream of its own: `fno mail send` injects as
+user-shaped text into a session's input, and a limb has no input to inject
+into.
+Inventing a second delivery path for subagent mail would be exactly the
+"guard placed on one of N reachable paths" trap this repo has already paid
+for, with the added cost that the new path would be the one nobody tests.
+Addressability is therefore rejected by design, not deferred as an ambition
+to revisit every quarter.
+
+What is shipped instead is observation: `fno agents top --subagents`
+enumerates sidechain transcripts (keyed on `agentId`, not pid, since a limb
+has no pid), lists each with its parent session and an mtime-based liveness
+verdict against a stated threshold, and is claude-only today.
+The codex, agy, and opencode task primitives have their own on-disk layouts
+that are unmeasured here; a future harness reader slots into the same
+per-harness discovery seam.
+The subagent source is a display-only third input to `fno agents top`; it is
+deliberately not wired into `census()`'s slot arithmetic, so it cannot move
+the spawn gate's `slot_count` denominator.

@@ -20,7 +20,16 @@ from typer.testing import CliRunner
 ROOT = Path(__file__).resolve().parents[3]
 GATE = ROOT / "scripts" / "ci" / "check-preamble-budget.sh"
 WORKFLOW = ROOT / ".github" / "workflows" / "preamble-budget.yml"
-CEILING_BYTES = 37_415
+
+
+def _ceiling_bytes_from_script() -> int:
+    """Read CEILING_BYTES from the gate so a raise can never desync the test."""
+    match = re.search(r"^CEILING_BYTES=(\d+)", GATE.read_text(), re.MULTILINE)
+    assert match is not None, f"CEILING_BYTES assignment not found in {GATE}"
+    return int(match.group(1))
+
+
+CEILING_BYTES = _ceiling_bytes_from_script()
 
 
 def _run(repo_root: Path) -> subprocess.CompletedProcess[str]:
@@ -305,12 +314,12 @@ def test_doctor_resolves_a_footnote_subdirectory(
     monkeypatch.setattr(
         doctor,
         "_bounded_command",
-        lambda argv: (0, "preamble: 36213 / 38000 B (~9.1K tok/turn)\n", ""),
+        lambda argv: (0, f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)\n", ""),
     )
 
     line = doctor._preamble_budget_line(ROOT, cwd=ROOT / "cli")
 
-    assert line == "preamble: 36213 / 38000 B (~9.1K tok/turn)"
+    assert line == f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)"
 
 
 def test_doctor_surfaces_a_present_gate_failure(
@@ -375,7 +384,7 @@ def test_doctor_deleted_cwd_degrades_to_silence(
 @pytest.mark.parametrize(
     ("preamble_line", "expected_count"),
     [
-        ("preamble: 36213 / 38000 B (~9.1K tok/turn)", 1),
+        (f"preamble: 36213 / {CEILING_BYTES} B (~9.1K tok/turn)", 1),
         (None, 0),
     ],
 )

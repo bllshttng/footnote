@@ -193,26 +193,60 @@ $(cat "$STDERR_C")"
 fi
 pass "(c): init stderr free of command-substitution errors"
 
+# Orphan-run the init: reparent it to PID 1 so its owned-identity verb sees no
+# harness ancestor. The verb proves the harness by walking the process tree, so
+# under a live harness session (e.g. this test run from inside claude) it would
+# prove THAT harness and override the CODEX_THREAD_ID marker - the documented
+# design at init-target-state.sh:924-927 ("a claude session carrying a foreign
+# CODEX_THREAD_ID resolves to claude as the owned provider, so its session_id reads cl,
+# never cx"). Reparenting to init gives the verb no harness ancestor - the same
+# condition a CI runner runs under - so detect_provider honors CODEX_THREAD_ID
+# -> codex -> cx, deterministically, regardless of who launched the test. A test
+# whose verdict depends on who ran it is the bug this pins.
+_orphan_init() {  # $1 = failure label, $2 = TARGET_INPUT
+  local _label="$1" _input="$2" _rc
+  _rc="${TMP_D}/.init_rc.$(printf '%s' "$_input" | tr -c '[:alnum:]' '_')"
+  (
+    cd "$TMP_D" || exit 99
+    {
+      HOME="${TMP_D}/home" \
+        TARGET_START=1 \
+        TARGET_INPUT="$_input" \
+        CODEX_THREAD_ID="019f48e4-codex-thread" \
+        TARGET_SESSION_ID= \
+        TARGET_LOCATION_OK="main-acknowledged" \
+        bash "$INIT" >/dev/null 2>&1
+      echo "$?" > "$_rc"
+    } &
+  )
+  local _i
+  for _i in $(seq 1 200); do [[ -f "$_rc" ]] && break; sleep 0.1; done
+  [[ -f "$_rc" ]] || fail "${_label}: orphaned init did not complete (20s timeout)"
+  [[ "$(cat "$_rc" 2>/dev/null)" == "0" ]] || fail "${_label}: orphaned init exited non-zero"
+}
+
 # ── (d) CODEX_THREAD_ID owns claims; target session ids stay unique ───
 log "(d): no TARGET_SESSION_ID + CODEX_THREAD_ID => unique target session id"
 
 make_repo TMP_D
 _ALL_TMPS+=("$TMP_D")
 
-(cd "$TMP_D" && \
-  HOME="${TMP_D}/home" \
-  TARGET_START=1 \
-  TARGET_INPUT="test-codex-thread-id" \
-  CODEX_THREAD_ID="019f48e4-codex-thread" \
-  TARGET_SESSION_ID= \
-  TARGET_LOCATION_OK="main-acknowledged" \
-  bash "$INIT" >/dev/null 2>&1) \
-  || fail "(d): init exited non-zero"
+_orphan_init "(d)" "test-codex-thread-id"
 
 STATE_D="${TMP_D}/.fno/target-state.md"
 [[ -f "$STATE_D" ]] || fail "(d): target-state.md was not created"
 
 SESSION_ID_D=$(grep '^session_id:' "$STATE_D" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
+# Precondition for the orphan-run fix: the init must have resolved with NO
+# ambient harness ancestor visible, else the cx tag below fails for an
+# environmental reason, not a regression. Reparenting to PID 1 is the
+# macOS/CI-docker behaviour; on Linux a subreaper (systemd user session,
+# some container inits) can adopt the orphan and the verb's walk may still
+# find an ancestor. Asserting the resolved harness here turns a future ubuntu
+# red into a diagnosis instead of a mystery.
+HARNESS_D=$(grep '^harness:' "$STATE_D" | sed 's/^harness:[[:space:]]*//' | tr -d '\r')
+[[ "$HARNESS_D" == "codex" ]] \
+  || fail "(d): orphaned init resolved harness='${HARNESS_D}' (expected codex) - an ambient harness ancestor was visible despite reparenting to PID 1. On Linux a subreaper can adopt the orphan instead of PID 1; if this fires on ubuntu, suspect process reparenting first, not codex resolution."
 CODEX_THREAD_ID_D=$(grep '^codex_thread_id:' "$STATE_D" | sed 's/^codex_thread_id:[[:space:]]*//' | tr -d '\r')
 echo "$SESSION_ID_D" | grep -qE '^[0-9]{8}T[0-9]{6}Z-cx[0-9]+-[0-9a-f]{6}$' \
   || fail "(d): expected unique cx-tagged target session_id, got '${SESSION_ID_D}'"
@@ -229,15 +263,7 @@ mkdir -p "${TMP_D}/.fno"
 printf '%s\n' \
   "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_D}\",\"termination_reason\":\"NoWork\",\"ship\":false}}" \
   > "${TMP_D}/.fno/events.jsonl"
-(cd "$TMP_D" && \
-  HOME="${TMP_D}/home" \
-  TARGET_START=1 \
-  TARGET_INPUT="test-codex-thread-id-second-run" \
-  CODEX_THREAD_ID="019f48e4-codex-thread" \
-  TARGET_SESSION_ID= \
-  TARGET_LOCATION_OK="main-acknowledged" \
-  bash "$INIT" >/dev/null 2>&1) \
-  || fail "(d): second target init exited non-zero"
+_orphan_init "(d)" "test-codex-thread-id-second-run"
 SESSION_ID_E=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 [[ "$SESSION_ID_E" != "$SESSION_ID_D" ]] \
   || fail "(d): two completed targets in one worktree/thread reused session_id '${SESSION_ID_D}'"
@@ -249,15 +275,7 @@ pass "(d): completed targets in one worktree/thread receive distinct session ids
 printf '%s\n' \
   "{\"type\":\"session_finalized\",\"data\":{\"session_id\":\"${SESSION_ID_E}\",\"termination_reason\":\"DonePRGreen\",\"ship\":true}}" \
   >> "${TMP_D}/.fno/events.jsonl"
-(cd "$TMP_D" && \
-  HOME="${TMP_D}/home" \
-  TARGET_START=1 \
-  TARGET_INPUT="test-codex-thread-id-third-run" \
-  CODEX_THREAD_ID="019f48e4-codex-thread" \
-  TARGET_SESSION_ID= \
-  TARGET_LOCATION_OK="main-acknowledged" \
-  bash "$INIT" >/dev/null 2>&1) \
-  || fail "(d): third target init exited non-zero"
+_orphan_init "(d)" "test-codex-thread-id-third-run"
 SESSION_ID_F=$(grep '^session_id:' "${TMP_D}/.fno/target-state.md" | sed 's/^session_id:[[:space:]]*//' | tr -d '\r')
 [[ "$SESSION_ID_F" != "$SESSION_ID_E" ]] \
   || fail "(d): shipped target reused session_id '${SESSION_ID_E}'"

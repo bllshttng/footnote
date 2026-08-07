@@ -2579,17 +2579,24 @@ def cmd_top(
     as_json: bool = typer.Option(
         False, "--json", "-J", help="Emit the same rows as JSON (script parity)."
     ),
+    show_subagents: bool = typer.Option(
+        False,
+        "--subagents",
+        help="Also list harness-native subagents (sidechain limbs) the census "
+        "cannot see: read-only, claude-only, not slot-counted.",
+    ),
 ) -> None:
-    """Show every live worker process — fno-spawned and foreign claude bg
-    alike — with pid, RSS (MB), and status (x-c5cc US4).
+    """Show every live worker process - fno-spawned and foreign claude bg
+    alike - with pid, RSS (MB), and status (x-c5cc US4).
 
     The same union the spawn gate counts, so this is the audit surface every
     gate message points at. Python-only (RSS via psutil; not routed to the
-    Rust client).
+    Rust client). ``--subagents`` (x-af92) appends a read-only sidechain
+    section; those rows are observable but not addressable.
     """
     from fno.agents.top import render_top
 
-    print(render_top(as_json=as_json))
+    print(render_top(as_json=as_json, include_subagents=show_subagents))
 
 
 @agents_app.command("truth", hidden=True)
