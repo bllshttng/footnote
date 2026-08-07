@@ -164,3 +164,41 @@ This shape is general to any programmatic skill invocation, not just
 review: counting king-for-a-day reigns by the `<command-name>` marker
 undercounts the same way, since a reign fired through the Skill tool is a
 `tool_use`, not a typed command.
+
+## Attestation origin: whose process rendered the verdict
+
+A local attestation records `attester_session_id`, the harness session of the
+process that emitted it, read from the live environment on the same marker
+precedence `fno target init` resolves.
+loop-check compares it against the authoring session's manifest
+`harness_session_id` and labels each local verdict with a tri-state
+`attestation_origin`:
+
+- `self_attested` - the authoring session emitted the attestation.
+- `other_session` - a different session emitted it.
+- `unknown` - no attester was recorded, or the author session is unknown.
+
+`other_session` is not `independent`.
+The manifest names the session that ran `fno target init` in the worktree, so a
+self-handoff successor or a second agent in a shared worktree is a different
+session and is still not independent.
+A match is strong evidence of self-attestation; a mismatch is weak evidence of
+anything.
+
+The origin is recorded, not gating.
+It sits on the verdict beside `human_approval` with the same exclusion from
+`reviewed_count`: whether self-attested coverage should count is a later
+decision, not a field this records.
+A self-attestation exclusion is deferred to a review-lane decision because no
+lane today can produce a non-self attestation: `emit-attestation.sh` runs in
+whichever session invokes the review verb, and the king-mediated lane (Lane 3)
+fires the verb at the worker's prompt line, so the author always emits and
+nothing spawns a separate reviewing session.
+"Land this, measure, then gate" would measure zero percent independent forever,
+so the gate waits on a lane that can produce one, not on elapsed measurement
+time.
+
+This records WHOSE process rendered a verdict; the role-routing note in
+[role-based-model-routing.md](role-based-model-routing.md) records WHICH model,
+and states the claim this makes measurable: keep the reviewer off the authoring
+worker; a role table cannot enforce it.
