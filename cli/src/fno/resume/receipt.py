@@ -596,8 +596,6 @@ def revalidate(
     if live_claim_holder and live_claim_holder != own:
         return RevalidationResult(False, "foreign_claim", checked)
 
-    # duplicate generation: a delegated event for (node, harness) already
-    # minted this generation from a different session.
     if detect_duplicate_generation(
         node_events,
         node=ident.node,

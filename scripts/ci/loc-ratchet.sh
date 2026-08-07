@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # scripts/ci/loc-ratchet.sh
 #
-# LOC gate for the control-plane scope: counts executable-LOC delta for every
-# PR inside a checked-in path manifest and fails when the delta is positive,
-# unless a `loc-exception:` line is present in the PR body.
+# LOC gate for the control-plane scope: counts the line-count delta (raw git
+# diff --numstat lines, NOT executable-LOC - comments and blanks are included)
+# for every PR inside a checked-in path manifest and fails when the delta is
+# positive, unless a `loc-exception:` line is present in the PR body.
 #
 # NOTE: this is a per-PR delta gate, not a ratchet against a baseline. There is
 # no backsliding-over-time mechanism; an earlier CUMULATIVE metric and a checked

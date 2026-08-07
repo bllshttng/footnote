@@ -812,9 +812,6 @@ def _stamp_status(
     """
 
     def _updater(entries: list[AgentEntry]) -> list[AgentEntry]:
-        # Resolve callable ``last_message_at`` HERE so the timestamp is
-        # generated under the registry-wide flock held by
-        # ``update_registry``.
         if last_message_at_preserve:
             resolved_last: Optional[str] = None  # not used; preserve branch
         elif callable(last_message_at):
