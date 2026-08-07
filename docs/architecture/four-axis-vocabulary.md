@@ -96,6 +96,7 @@ The guard's harness-literal set is the union the operator declared, broader than
 | `FNO_AGENT_HARNESS` | harness | injected at spawn, read for identity |
 | spawn/register receipt `harness` | harness | |
 | spawn/register receipt `provider` | provider | present only when a route was applied |
+| spawn/register receipt `model` | model | effective model; an explicit `--model` wins over `--route` |
 | `observed_model` | model | the sole answer to "what is this worker actually running" |
 
 ## Prior attempts

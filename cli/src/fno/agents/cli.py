@@ -1643,9 +1643,10 @@ def cmd_spawn(
             # literal: provider never carries a harness value.
             # `model` reports the EFFECTIVE model, so an explicit --model beats
             # the routed one: mux_spawn/dispatch pass it as the harness's own
-            # `--model` flag, which wins over the route's ANTHROPIC_MODEL. Report
-            # route_model there and a `--route zai,glm-5.2 --model opus` spawn
-            # gets a receipt naming glm-5.2 while the worker runs opus.
+            # `--model` flag, which wins over the route's ANTHROPIC_MODEL.
+            # Reporting only route_model here would re-introduce the
+            # receipt-can-lie defect: a `--route zai,glm-5.2 --model opus` spawn
+            # would name glm-5.2 in the receipt while the worker runs opus.
             if route_provider is not None:
                 receipt_obj["provider"] = route_provider
             receipt_model = model or route_model
