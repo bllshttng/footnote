@@ -5140,11 +5140,14 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
     pane_id = mux.get("pane_id")
     if not session or pane_id is None:
         return False
-    # Audit floor: an UNWRAPPED payload leaves no <fno_mail> marker in the
-    # recipient transcript, so record it in the ledger. The mux pane lane never
-    # reaches the Rust mail-inject binary, so this site is mandatory, not
-    # decorative. Best-effort: an events-write failure never breaks the send.
-    if not text.lstrip().startswith("<fno_mail"):
+    # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
+    # the <cross-session-message> peer-follow-up container) leaves no agent-authored
+    # marker in the recipient transcript, so record it in the ledger. Both wrapped
+    # forms carry their own marker, so excluding only <fno_mail> would log every
+    # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
+    # the Rust mail-inject binary, so this site is mandatory, not decorative.
+    # Best-effort: an events-write failure never breaks the send.
+    if not text.lstrip().startswith(("<fno_mail", "<cross-session-message")):
         try:
             events.emit(
                 "agent_raw_inject",

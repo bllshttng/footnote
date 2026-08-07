@@ -142,6 +142,30 @@ def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
     assert data["target_cwd"] == "/w"
 
 
+def test_mux_pane_send_does_not_audit_cross_session_envelope(monkeypatch) -> None:
+    """A wrapped <cross-session-message> peer follow-up carries its own
+    agent-authored marker, so it must NOT be logged as a raw inject (regression:
+    the guard admitted it because it does not start with <fno_mail)."""
+    from fno.agents import dispatch as dispatch_mod
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    emitted: list[tuple[str, dict]] = []
+    monkeypatch.setattr(
+        dispatch_mod.events, "emit", lambda kind, **data: emitted.append((kind, data))
+    )
+
+    _mux_pane_send(
+        _mux_entry(),
+        '<cross-session-message from-name="peer-x">\nstatus?\n</cross-session-message>',
+    )
+
+    assert not [e for e in emitted if e[0] == "agent_raw_inject"], (
+        "the cross-session-message envelope is wrapped; it must not audit"
+    )
+
+
 def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
     tmp_path: Path, monkeypatch
 ) -> None:

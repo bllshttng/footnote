@@ -194,7 +194,7 @@ pub fn emit_raw_inject_audit(
     if let Some(s) = sender {
         fields.insert("sender".into(), s.to_string().into());
     }
-    let _ = crate::events::EventEmitter::new(events_path, "target")
+    let _ = crate::events::EventEmitter::new(events_path, "daemon")
         .emit_fields("agent_raw_inject", fields);
 }
 
@@ -477,7 +477,7 @@ mod tests {
         assert_eq!(lines.len(), 1, "only the unwrapped payload is audited");
         let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
         assert_eq!(v["type"], "agent_raw_inject");
-        assert_eq!(v["source"], "target");
+        assert_eq!(v["source"], "daemon");
         assert_eq!(v["data"]["target_session"], "ses-9");
         assert_eq!(v["data"]["payload"], "/code-review medium --fix");
         assert_eq!(v["data"]["harness"], "claude");
