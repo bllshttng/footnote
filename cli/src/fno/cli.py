@@ -23,6 +23,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
+import click
 import typer
 
 from fno._lazy_group import make_lazy_group_cls
@@ -330,7 +331,7 @@ def _check_migration() -> None:
 # ---------------------------------------------------------------------------
 
 
-class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):
+class _HonestMenuGroup(make_lazy_group_cls(LAZY_SUBCOMMANDS)):  # type: ignore[misc]
     """Root group; appends the honest verb-count line to `fno --help`.
 
     The curated menu is small on purpose (menu-caps). Without a count it reads
