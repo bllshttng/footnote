@@ -208,6 +208,50 @@ def test_receipt_model_is_the_effective_model_not_the_routed_one(
     assert receipt["harness"] == "claude"
 
 
+def test_bg_receipt_carries_route_provider_and_effective_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A routed bg spawn's receipt carries the same three axes as the pane path.
+
+    The bg receipt branch builds provider_field and model_field with the same
+    ``model or route_model`` logic as the pane branch. Without this test, a
+    regression in the bg branch's receipt (dropping provider/model, or reporting
+    route_model instead of the effective model) would pass CI.
+    """
+    from fno.agents import dispatch, spawn_gate
+    from fno.agents.cli import agents_app
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--route", "zai,glm-5.2", "--model", "opus"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "opus"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
+    receipt_line = next(
+        line for line in result.output.strip().splitlines() if '"short_id"' in line
+    )
+    receipt = json.loads(receipt_line)
+    assert receipt["harness"] == "claude"
+    assert receipt["provider"] == "zai"
+    assert receipt["model"] == "opus"
+
+
 @pytest.mark.parametrize("missing", [False, True])
 def test_route_on_pane_capability_fails_closed_before_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing: bool
