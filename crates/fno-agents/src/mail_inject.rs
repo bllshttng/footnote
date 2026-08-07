@@ -85,6 +85,8 @@ pub struct MailInjectArgs {
     pub provider: MailInjectProvider,
     pub attempts: u32,
     pub interval_ms: u64,
+    /// Sender mail handle for the audit event; absent on a direct binary call.
+    pub sender: Option<String>,
 }
 
 /// Parse `mail-inject` argv (everything after the verb). Pure + total so the flag
@@ -94,6 +96,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut provider = MailInjectProvider::Claude;
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
+    let mut sender: Option<String> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -117,6 +120,13 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 };
             }
             "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
+            "--sender" => {
+                sender = Some(
+                    it.next()
+                        .ok_or((2, "mail-inject: --sender needs a value".to_string()))?
+                        .to_string(),
+                );
+            }
             "--attempts" => {
                 attempts = it.next().and_then(|v| v.parse().ok()).ok_or((
                     2,
@@ -140,6 +150,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         provider,
         attempts,
         interval_ms,
+        sender,
     })
 }
 
@@ -153,6 +164,47 @@ pub fn outcome_json(delivered: bool, reason: &str) -> String {
 /// JSON `delivered` field; the exit code is the same signal for shell callers.
 pub fn outcome_exit(delivered: bool) -> i32 {
     i32::from(!delivered)
+}
+
+/// Append an `agent_raw_inject` audit record for an UNWRAPPED payload, or do
+/// nothing when the payload carries an agent-authored envelope marker. An
+/// unwrapped injection leaves no such tag in the recipient transcript, so the
+/// audit moves to the ledger (x-f26c's greppability property). BOTH wrapped
+/// forms are excluded, matching the Python mux-pane site: the ask-lane peer
+/// follow-up (`claude::build_cross_session_container` -> `_mail_inject_claude`)
+/// ships a `<cross-session-message>` through this very binary, and excluding
+/// only `<fno_mail` logs every routine follow-up as a false raw-inject.
+/// `confirmed` is the transport's own answer, so a call is audited AFTER the
+/// send and never asserts an injection an absent daemon did not perform.
+/// Best-effort: a write failure is swallowed and never propagates to the caller.
+pub fn emit_raw_inject_audit(
+    events_path: &Path,
+    sender: Option<&str>,
+    session: &str,
+    text: &str,
+    provider: MailInjectProvider,
+    confirmed: bool,
+) {
+    let head = text.trim_start();
+    if head.starts_with("<fno_mail") || head.starts_with("<cross-session-message") {
+        return;
+    }
+    let (harness, lane) = match provider {
+        MailInjectProvider::Claude => ("claude", "control.sock"),
+        MailInjectProvider::Codex => ("codex", "codex-daemon"),
+    };
+    let payload_for_event: String = text.chars().take(512).collect();
+    let mut fields = serde_json::Map::new();
+    fields.insert("target_session".into(), session.to_string().into());
+    fields.insert("payload".into(), payload_for_event.into());
+    fields.insert("harness".into(), harness.into());
+    fields.insert("lane".into(), lane.into());
+    fields.insert("confirmed".into(), confirmed.into());
+    if let Some(s) = sender {
+        fields.insert("sender".into(), s.to_string().into());
+    }
+    let _ = crate::events::EventEmitter::new(events_path, "daemon")
+        .emit_fields("agent_raw_inject", fields);
 }
 
 /// Print the outcome JSON to stdout and return its exit code.
@@ -348,6 +400,22 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             crate::codex_inject::deliver_via_codex_daemon(&args.session, &text).await
         }
     };
+
+    // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
+    // marker survives in the recipient transcript, so x-f26c's greppability
+    // property moves from transcript to event). AFTER the delivery, carrying its
+    // answer: emitting first left a phantom record on every send to a session
+    // with no daemon. Best-effort, never blocks.
+    let home = crate::paths::AgentsHome::from_env();
+    emit_raw_inject_audit(
+        &home.events_jsonl(),
+        args.sender.as_deref(),
+        &args.session,
+        &text,
+        args.provider,
+        result.is_ok(),
+    );
+
     match result {
         Ok(()) => emit(true, "delivered"),
         Err(reason) => emit(false, reason),
@@ -379,6 +447,94 @@ mod tests {
 
     fn argv(parts: &[&str]) -> Vec<String> {
         parts.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn parse_args_accepts_optional_sender() {
+        let a = parse_args(&argv(&["--session", "s1", "--sender", "0ab49ebc"])).unwrap();
+        assert_eq!(a.session, "s1");
+        assert_eq!(a.sender.as_deref(), Some("0ab49ebc"));
+        let b = parse_args(&argv(&["--session", "s1", "--harness", "codex"])).unwrap();
+        assert!(b.sender.is_none(), "sender defaults to absent");
+    }
+
+    #[test]
+    fn raw_inject_audit_records_unwrapped_and_skips_envelope() {
+        let dir = std::env::temp_dir().join(format!("rawinj-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("events.jsonl");
+        let _ = std::fs::remove_file(&path);
+
+        // Unwrapped slash command -> one agent_raw_inject record.
+        emit_raw_inject_audit(
+            &path,
+            Some("0ab49ebc"),
+            "ses-9",
+            "/code-review medium --fix",
+            MailInjectProvider::Claude,
+            true,
+        );
+        // Wrapped envelope -> no record (the marker survives in the transcript).
+        emit_raw_inject_audit(
+            &path,
+            None,
+            "ses-9",
+            "<fno_mail from=\"a\">hi</fno_mail>",
+            MailInjectProvider::Codex,
+            true,
+        );
+        // The ask-lane peer follow-up rides this same binary wrapped in a
+        // <cross-session-message> container; it carries its own transcript
+        // marker, so auditing it would log every routine follow-up as a false
+        // raw-inject (the Python mux site already excludes it).
+        emit_raw_inject_audit(
+            &path,
+            None,
+            "ses-9",
+            "<cross-session-message from-name=\"peer\">\nstatus?\n</cross-session-message>",
+            MailInjectProvider::Claude,
+            true,
+        );
+
+        let lines: Vec<String> = std::fs::read_to_string(&path)
+            .unwrap()
+            .lines()
+            .map(String::from)
+            .collect();
+        assert_eq!(lines.len(), 1, "only the unwrapped payload is audited");
+        let v: serde_json::Value = serde_json::from_str(&lines[0]).unwrap();
+        assert_eq!(v["type"], "agent_raw_inject");
+        assert_eq!(v["source"], "daemon");
+        assert_eq!(v["data"]["target_session"], "ses-9");
+        assert_eq!(v["data"]["payload"], "/code-review medium --fix");
+        assert_eq!(v["data"]["harness"], "claude");
+        assert_eq!(v["data"]["lane"], "control.sock");
+        assert_eq!(v["data"]["sender"], "0ab49ebc");
+        assert_eq!(v["data"]["confirmed"], true);
+
+        // A not-delivered send is still audited (the bytes may have landed past
+        // the confirm budget) but records confirmed:false, so an auditor reading
+        // the ledger as ground truth cannot overcount phantom injections.
+        emit_raw_inject_audit(
+            &path,
+            None,
+            "ses-9",
+            "/compact",
+            MailInjectProvider::Claude,
+            false,
+        );
+        let last: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["data"]["confirmed"], false);
+
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir(&dir);
     }
 
     fn tmp_transcript(tag: &str) -> PathBuf {

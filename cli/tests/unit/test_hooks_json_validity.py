@@ -92,7 +92,11 @@ def test_codex_plugin_manifest_points_to_session_start_hook() -> None:
                 {
                     "type": "command",
                     "command": "env FNO_PLATFORM=codex ${PLUGIN_ROOT}/hooks/session-start.sh",
-                }
+                },
+                {
+                    "type": "command",
+                    "command": "${PLUGIN_ROOT}/hooks/codex-app-server-nudge-session-start.sh",
+                },
             ],
         }
     ]

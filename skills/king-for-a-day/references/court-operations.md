@@ -21,7 +21,7 @@ The pane layer owns placement, lifecycle, and I/O; fno stays the authority for i
 
 ## The `<fno_mail>` envelope, on every lane
 
-Every agent-to-agent payload carries the `<fno_mail>` envelope - king to teammate, teammate to teammate, on every lane. The reason is a transcript-safety one: an injected message lands in the recipient's transcript as *user-role* text, indistinguishable from the human at the keyboard, and the envelope is the only marker that says "an agent said this." An unwrapped ruling impersonates the maintainer.
+Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king to teammate, teammate to teammate, on every lane. The reason is a transcript-safety one: an injected message lands in the recipient's transcript as *user-role* text, indistinguishable from the human at the keyboard, and the envelope is the only marker that says "an agent said this." An unwrapped ruling impersonates the maintainer. The one exception is `fno mail send --raw`: a verb invocation is not authored text, so it is injected unwrapped at the recipient's prompt line (the only way to fire a verb the model is barred from invoking) and recorded in the event ledger (`agent_raw_inject`) rather than the transcript - the eval corpus stays exactly as clean.
 
 - **`fno mail send` wraps automatically.** Nothing to do; the ruling is already marked.
 - **A pane-layer prompt verb does not.** If the crowning brief routes you through the pane layer's own prompt/send verb instead of `fno mail`, include the wrapper in the text yourself:

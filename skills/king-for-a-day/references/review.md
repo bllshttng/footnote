@@ -13,10 +13,10 @@ A `think` or `blueprint` phase resolves without a diff. There is nothing for a r
 
 Match the vocabulary the canonical clause actually emits - `RESULT: <resolved|blocked|failed>` ([minion-clause.md](minion-clause.md)) - not the `SUCCESS`/`DONE_WITH_CONCERNS` set from the execution-agent return contract in `AGENTS.md`. Two vocabularies share the `RESULT:` prefix, and a king matching on the wrong one never fires on a report its own spawn payload produced.
 
-## Why the king serves the verb at all
+## Why the king fires the verb at all
 
-A harness-native review verb can be self-invoked via the Skill tool but is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so a mailed order is the reliable trigger.
-`fno mail send` injects as user-shaped text in the recipient's pane, so **your reply is the user invocation**, and the review runs in the teammate's OWN harness against the tree it actually built.
+A harness-native review verb can be self-invoked via the Skill tool but is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so the king fires it directly.
+`fno mail send <teammate> --raw '/<review-verb>'` injects the verb unwrapped at the teammate's prompt line, so the REPL's slash parser runs it - **--raw IS the user invocation**, and the review runs in the teammate's OWN harness against the tree it actually built. A wrapped `fno mail send` does NOT fire the verb; it relies on the teammate pulling its own trigger. You must not have authored the diff - a king reviewing its own diff is self-review even through --raw.
 
 Two consequences fall straight out of that, and both are load-bearing:
 

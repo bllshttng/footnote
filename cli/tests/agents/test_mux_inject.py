@@ -115,6 +115,84 @@ def test_unguarded_claim_refusal_is_fail_open(monkeypatch) -> None:
     assert verbs == ["claim", "send", "send"]
 
 
+def _capture_audits(monkeypatch) -> list[tuple[dict, object]]:
+    """Intercept the canonical fno.events append the audit floor uses."""
+    import fno.events as events_mod
+
+    seen: list[tuple[dict, object]] = []
+    monkeypatch.setattr(
+        events_mod,
+        "append_event",
+        lambda event, path=None, **kw: seen.append((event, path)),
+    )
+    return seen
+
+
+def test_mux_pane_send_audits_raw_inject(monkeypatch) -> None:
+    """AC10: the mux pane lane records an agent_raw_inject for an unwrapped
+    payload (it never reaches the Rust mail-inject binary, so this site is
+    mandatory, not decorative) and stays silent for a <fno_mail>-wrapped one."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    seen = _capture_audits(monkeypatch)
+
+    # Unwrapped -> one audit record; wrapped envelope -> none.
+    _mux_pane_send(_mux_entry(), "/code-review medium --fix")
+    _mux_pane_send(_mux_entry(), "<fno_mail from=\"a\">hi</fno_mail>")
+
+    assert len(seen) == 1, "only the unwrapped payload is audited"
+    event, path = seen[0]
+    # The CANONICAL {type, source, data} envelope, not the flat {kind, ...} shape:
+    # ~/.fno/agents/events.jsonl is canonical-only, and a consumer reading
+    # data.target_session (where schema.yaml says it lives) must not miss this.
+    assert event["type"] == "agent_raw_inject"
+    assert event["source"] == "daemon"
+    data = event["data"]
+    assert data["payload"] == "/code-review medium --fix"
+    assert data["lane"] == "mux-pane"
+    assert data["harness"] == "claude"
+    assert data["target_cwd"] == "/w"
+    assert data["confirmed"] is True
+    # The Python mux site writes the SAME log the Rust mail-inject binary uses
+    # (~/.fno/agents/events.jsonl), so the audit floor is one file, not two.
+    assert str(path).endswith("agents/events.jsonl")
+
+
+def test_mux_pane_send_audit_records_a_failed_send_as_unconfirmed(monkeypatch) -> None:
+    """No phantom records: a stalled pane still audits (the bytes may have
+    landed) but says so, instead of asserting an injection that never happened."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    _patch_mux(monkeypatch, FakeMux(fail_verbs={"send"}))
+    seen = _capture_audits(monkeypatch)
+
+    assert _mux_pane_send(_mux_entry(), "/code-review") is False
+    assert len(seen) == 1
+    assert seen[0][0]["data"]["confirmed"] is False
+
+
+def test_mux_pane_send_does_not_audit_cross_session_envelope(monkeypatch) -> None:
+    """A wrapped <cross-session-message> peer follow-up carries its own
+    agent-authored marker, so it must NOT be logged as a raw inject (regression:
+    the guard admitted it because it does not start with <fno_mail)."""
+    from fno.agents.dispatch import _mux_pane_send
+
+    fake = FakeMux()
+    _patch_mux(monkeypatch, fake)
+    seen = _capture_audits(monkeypatch)
+
+    _mux_pane_send(
+        _mux_entry(),
+        '<cross-session-message from-name="peer-x">\nstatus?\n</cross-session-message>',
+    )
+
+    assert not seen, (
+        "the cross-session-message envelope is wrapped; it must not audit"
+    )
+
+
 def test_deliver_live_dispatches_on_mux_ref_before_legacy_lanes(
     tmp_path: Path, monkeypatch
 ) -> None:

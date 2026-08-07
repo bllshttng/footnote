@@ -1116,6 +1116,23 @@ def _wake_rung(reachable, wrapped: str) -> tuple[bool, Optional[str], Optional[s
     return False, None, f"wake={detail}"
 
 
+def _codex_daemon_socket_absent() -> bool:
+    """True when the codex app-server control socket is absent (no daemon).
+
+    Mirrors ``codex_app_server_socket_path`` in codex_inject.rs: the socket at
+    ``$CODEX_HOME/app-server-control/app-server-control.sock`` exists only while
+    a codex app-server daemon runs (``codex app-server daemon start``). A live
+    mail send to a codex peer demotes to durable when it is absent, so the demote
+    line names the fix rather than only the reason.
+
+    Delegates to the doctor report so the send-time demote line and `fno doctor`
+    can never disagree about where the socket lives (lazy import: doctor is a
+    heavy module and this is one line on a cold path)."""
+    from fno.doctor import _codex_app_server_report
+
+    return not _codex_app_server_report().get("present", False)
+
+
 def _name_lane_send(
     message: str,
     *,
@@ -1361,7 +1378,14 @@ def _name_lane_send(
     # bug is diagnosable from the sender's own terminal. A self-send can never
     # inject itself; everything else here is a live miss.
     reason = "self-send" if self_send else "live-miss"
-    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]")
+    hint = ""
+    if not self_send and provider == "codex" and _codex_daemon_socket_absent():
+        hint = (
+            " codex app-server daemon not running: run "
+            "`codex app-server daemon start`, then restart the session "
+            "(the socket must exist before the codex TUI starts)"
+        )
+    print(f"{th.thread_id} queued (durable) for {recipient}{live}{corr} [{reason}]{hint}")
     # Attended live-miss lane: a send to an operator-attended session that missed
     # live delivery is the stranded case (the human is not watching the drain, so
     # nothing else surfaces it). Fires on live-miss only; worker rows (no origin)
@@ -1497,6 +1521,130 @@ def _escalate_to_human(
     return "escalated" if code == 0 else "notifier-unavailable"
 
 
+def _raw_send(name, payload, *, self_ok: bool) -> None:
+    """``fno mail send --raw``: fire a verb in a peer by injecting ``payload``
+    UNWRAPPED at the recipient's prompt line (no ``<fno_mail>`` envelope), so the
+    REPL's slash parser runs it before the model sees it.
+
+    This is the only way to make a verb the model is barred from invoking
+    actually run (a harness built-in like ``/compact``, or a skill the model may
+    not self-invoke). Ordinary wrapped mail already works for model-invocable
+    verbs. See node x-c24d and ``internal/fno/plans/20260806-bare-verb-injection.md``.
+
+    Never queues durable on any transport result: a not-confirmed raw inject may
+    still land, and re-queueing it is how a verb fires twice at the wrong moment.
+    """
+    from fno.agents.dispatch import _mail_inject_claude, _mux_pane_send, keystroke_lane
+    from fno.agents.registry import AgentResolutionError, resolve_agent
+
+    def _refused(reason: str) -> None:
+        print(f"refused: {reason}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    # 1. Leading slash after stripping; refuse bare "/" and whitespace-only. The
+    #    leading slash is the marker a human skimming a transcript reads as
+    #    "invocation, not a typed ruling".
+    stripped = payload.strip()
+    if not stripped.startswith("/"):
+        _refused(
+            "payload must start with / (a verb invocation); free prose belongs "
+            "in an ordinary wrapped send"
+        )
+    if stripped == "/":
+        _refused("payload is just '/'; nothing to invoke")
+
+    # 2. Single line: the transport is one bracketed paste plus one CR, so a
+    #    second line would ride in as trailing content on the same turn.
+    if "\n" in payload or "\r" in payload:
+        _refused(
+            "payload must be a single line (a second line rides in as trailing "
+            "content on the same submitted turn)"
+        )
+
+    # 3. Resolve name -> registry row. The lane lives on the row.
+    try:
+        entry = resolve_agent(name).entry
+    except (AgentResolutionError, OSError):
+        _refused(f"could not resolve {name!r} to a registered agent")
+
+    session_id = getattr(entry, "harness_session_id", None) or ""
+
+    # 5. Self-send: refuse unless --self. NOT justified by impossibility
+    #    (self-injection demonstrably works) -- by the capability boundary:
+    #    self-injection supplies the very user-shaped trigger a model-invocation
+    #    refusal exists to require. Cross-session injection is the sanctioned
+    #    king-mediated path (a distinct actor stands in the user's position).
+    #    Fail closed on an unknown session id: _self_recipient compares the
+    #    RESOLVED id, and session_handle_tier returns None for an empty token, so
+    #    a row carrying no harness_session_id (legacy/unmigrated) would sail past
+    #    the self-check even when it IS this session. No id, no soundness.
+    if not session_id and not self_ok:
+        _refused(
+            f"{name!r} resolves to a registry row with no harness_session_id, so "
+            "the self-injection check cannot be decided; re-register the row "
+            "(`fno agents register`) or pass --self if you intend a self-inject"
+        )
+    if _self_recipient(name, resolved_session_id=session_id) and not self_ok:
+        _refused(
+            "self-injection supplies the user-shaped trigger a model-invocation "
+            "refusal exists to require; cross-session injection (mail a peer) is "
+            "the sanctioned path. Pass --self only for a verb carrying no "
+            "model-invocation refusal (e.g. /compact rescue)."
+        )
+
+    # 4. Keystroke lane: a raw slash payload fires only where it reaches a prompt
+    #    line. The codex/gemini/opencode daemon lanes submit a turn to the model
+    #    with no TUI prompt line, so the slash never reaches a parser.
+    lane, is_keystroke = keystroke_lane(entry)
+    if not is_keystroke:
+        _refused(
+            f"{name!r} resolves to the {lane} lane, which is not a prompt-line "
+            "keystroke path; a raw slash payload would reach the model as text, "
+            "not fire. (Codex review forcing routes to the review/start RPC, not --raw.)"
+        )
+
+    # 6 + 7. Inject UNWRAPPED (no _MailCtx -> none of the four wrap sites fire).
+    #        Never durable on any result. Inject `stripped`, the string every
+    #        validation above ran against: a leading space passes the slash check
+    #        after stripping but defeats the REPL slash parser when injected raw,
+    #        and the receipt would still print `injected`.
+    #        The audit event's `sender` is only populated here: an unwrapped
+    #        payload has no `from` attribute in the recipient transcript, so the
+    #        ledger is the ONLY place that can say who fired the verb. Absent
+    #        ambient identity it stays absent rather than guessing.
+    from fno.harness_identity import canonical_handle, current_session_id
+
+    own = current_session_id()
+    sender = canonical_handle(own) if own else None
+    if entry.mux:
+        delivered = _mux_pane_send(entry, stripped, sender=sender)
+    else:  # claude control.sock - the only other keystroke lane
+        delivered = _mail_inject_claude(session_id, stripped, sender=sender)
+
+    # 8. Four-state receipt (never a boolean; never a durable write).
+    if delivered:
+        note = ""
+        if stripped == "/compact":
+            note = (
+                " (bare /compact at ~100% context has no headroom to summarize; "
+                "pass a handoff path)"
+            )
+        print(f"injected{note}")
+        raise typer.Exit(code=0)
+    # not-confirmed: the transport returns one bool for two different worlds --
+    # poll-budget exhaustion on a paste that DID land, and a clean send failure
+    # (binary absent, pane stalled on EXIT_TARGET_NOT_IDLE, socket refused) where
+    # nothing was sent. Do NOT claim "sent"; both readings keep the same standing
+    # order, because the one we cannot rule out is the landed one and re-queueing
+    # it is how a verb fires twice. Exit 0, never durable.
+    print(
+        "unconfirmed (not confirmed: either the confirm budget expired on a "
+        "payload that landed, or the transport refused and nothing was sent - "
+        "check the recipient before assuming either; never re-queue)"
+    )
+    raise typer.Exit(code=0)
+
+
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
@@ -1582,6 +1730,27 @@ def cmd_send(
         False, "--json", "-J",
         help="With --kind: print {msg_id, thread_path, appended} as JSON.",
     ),
+    raw: bool = typer.Option(
+        False, "--raw",
+        help=(
+            "Inject the payload UNWRAPPED at the recipient's prompt line so the "
+            "REPL slash parser fires it - the only way to make a verb the model "
+            "is barred from invoking actually run. Two axes bind it: an actor "
+            "OTHER than the model must supply the trigger (cross-session, the "
+            "king-mediated path; self-injection is barred unless --self), AND the "
+            "reviewer must not have authored the diff (a cross-session inject of "
+            "your own diff is still self-review). Payload must start with / and be "
+            "a single line. Never queues durable. A payload-varying retry is a "
+            "two-variable experiment - report any refusal verbatim and stop."
+        ),
+    ),
+    self_send: bool = typer.Option(
+        False, "--self",
+        help=(
+            "With --raw: opt in to self-injection. Use only for a verb carrying "
+            "no model-invocation refusal (e.g. /compact rescue)."
+        ),
+    ),
 ) -> None:
     """Send a message asynchronously to a registered agent or a project.
 
@@ -1608,6 +1777,16 @@ def cmd_send(
     refuse_retired_provider(_provider_tombstone)
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
+
+    # --raw: fire a verb in a peer by injecting the payload UNWRAPPED at the
+    # prompt line (no <fno_mail> envelope, so the REPL slash parser runs it).
+    # Separate flow: never wraps, never queues durable, four-state receipt.
+    if raw:
+        if message is None:
+            print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
+            raise typer.Exit(code=2)
+        _raw_send(name, message, self_ok=self_send)
+        return
 
     # --from-self resolves this session's own canonical handle and threads it as
     # from_name, so every lane below (project-note / --to-project / name) stamps a

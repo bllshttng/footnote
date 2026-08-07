@@ -5117,7 +5117,9 @@ def _build_mail_ctx(
     )
 
 
-def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> bool:
+def _mux_pane_send(
+    entry: "AgentEntry", text: str, *, guarded: bool = True, sender: Optional[str] = None
+) -> bool:
     """Live-inject to a mux-hosted agent via ``fno mux pane send``.
 
     When ``guarded`` (the mail-delivery default, US4), the paste rides the
@@ -5140,6 +5142,50 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
     pane_id = mux.get("pane_id")
     if not session or pane_id is None:
         return False
+    # Audit floor: an UNWRAPPED payload (neither the <fno_mail> a2a envelope nor
+    # the <cross-session-message> peer-follow-up container) leaves no agent-authored
+    # marker in the recipient transcript, so record it in the ledger. Both wrapped
+    # forms carry their own marker, so excluding only <fno_mail> would log every
+    # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
+    # the Rust mail-inject binary, so this site is mandatory, not decorative.
+    # Emitted AFTER the send with the transport's own answer: an emit-before-send
+    # leaves a phantom record asserting an injection that a stalled pane or an
+    # absent `fno mux` never performed. Best-effort -- a write failure never
+    # breaks or fails the send.
+    audit_unwrapped = not text.lstrip().startswith(
+        ("<fno_mail", "<cross-session-message")
+    )
+
+    def _audit_raw_inject(confirmed: bool) -> None:
+        if not audit_unwrapped:
+            return
+        try:
+            from fno.events import agent_raw_inject, append_event
+            from fno.paths import agents_home_dir
+
+            # Write the CANONICAL {type, source, data} envelope to the SAME log
+            # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
+            # file is canonical-shape only; the flat {kind, ...} emitter would put
+            # a second shape in one file and a consumer reading data.target_session
+            # (where schema.yaml says it lives) would silently miss every mux
+            # record -- the exact audit gap this event exists to close.
+            append_event(
+                agent_raw_inject(
+                    target_session=getattr(entry, "harness_session_id", "") or "",
+                    payload=text[:512],
+                    harness=getattr(entry, "harness", "") or "",
+                    lane="mux-pane",
+                    target_cwd=getattr(entry, "cwd", None),
+                    sender=sender,
+                    confirmed=confirmed,
+                    source="daemon",
+                ),
+                agents_home_dir() / "events.jsonl",
+                lock_timeout_seconds=2,
+            )
+        except Exception:
+            pass
+
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
@@ -5186,11 +5232,15 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
         return _run(["send", pane, "--text", "\r"]) == 0
 
     if guarded:
-        return _paste_then_submit()
+        sent = _paste_then_submit()
+        _audit_raw_inject(sent)
+        return sent
 
     claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
     try:
-        return _paste_then_submit()
+        sent = _paste_then_submit()
+        _audit_raw_inject(sent)
+        return sent
     finally:
         if claimed:
             _run(["release", pane])
@@ -5282,14 +5332,19 @@ def _mux_followup_path(
     return DispatchAskResult(kind="followup", short_id=ref, reply="")
 
 
-def _mail_inject_claude(recipient: str, text: str) -> bool:
+def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = None) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).
 
     Returns True only when the verb confirms the turn landed in the recipient
     transcript; any miss (binary absent, recipient not on the roster, not
     confirmed within the poll budget) returns False so the caller writes the
-    durable fallback."""
+    durable fallback.
+
+    ``sender`` is the invoking session's mail handle, forwarded to the binary's
+    audit event. Only the UNWRAPPED lanes need it: a wrapped envelope carries
+    its own ``from`` in the transcript, an unwrapped one has nowhere else to
+    record who fired it."""
     import json
 
     from fno import rust_binary
@@ -5297,9 +5352,12 @@ def _mail_inject_claude(recipient: str, text: str) -> bool:
     binary = rust_binary.resolve_installed_binary()
     if binary is None:
         return False
+    argv = [str(binary), "mail-inject", "--session", recipient]
+    if sender:
+        argv += ["--sender", sender]
     try:
         proc = subprocess.run(
-            [str(binary), "mail-inject", "--session", recipient],
+            argv,
             input=text,
             capture_output=True,
             text=True,
@@ -5589,7 +5647,7 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
     daemon accepts the turn; any miss (binary absent, no daemon socket, thread
     not attached) returns False so the caller writes the durable fallback. The
     codex app-server daemon only exists when the user runs it
-    (``codex remote-control start``); absent it this is a clean no-op."""
+    (``codex app-server daemon start``); absent it this is a clean no-op."""
     import json
 
     from fno import rust_binary
@@ -5611,6 +5669,27 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
         return bool(json.loads(proc.stdout.strip()).get("delivered"))
     except (ValueError, AttributeError):
         return False
+
+
+def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:
+    """The live delivery lane for a registry row and whether it is a KEYSTROKE
+    lane (a prompt-line path where the REPL's slash parser runs before the
+    model), mirroring ``_deliver_live``'s routing order EXACTLY: mux first, then
+    harness. A predicate that disagrees with the real router is worse than none.
+
+    A raw slash payload fires a verb only on a keystroke lane. The codex/gemini/
+    opencode daemon lanes answer False (``agent.deliver`` / ``turn/start`` submit
+    a turn to the model with no TUI prompt line, so the slash never reaches a
+    parser); the mux pane paste and claude's ``control.sock`` (the --raw inject
+    lane) are keystrokes. The claude answer models the control.sock door ``--raw``
+    uses, not every claude sub-lane (a stream-json switchboard peer is a different
+    lane this predicate does not classify).
+    """
+    if entry.mux:
+        return ("mux-pane", True)
+    if entry.harness != "claude":
+        return (f"{entry.harness or 'unknown'}-daemon", False)
+    return ("control.sock", True)
 
 
 def _deliver_live(

@@ -1332,6 +1332,16 @@ def _emit_human(
             "for the per-command config.toml/hooks.json breakdown)."
         )
 
+    cas = result.get("codex_app_server") or {}
+    if not cas.get("present"):
+        out(
+            "fno doctor: codex app-server daemon not running (no control socket); "
+            "live mail to codex sessions demotes to durable. Start it BEFORE the "
+            "codex TUI: `codex app-server daemon start` (or "
+            "`codex app-server daemon bootstrap` for durable SSH-driven use). A "
+            "session launched before the daemon cannot receive live mail without a restart."
+        )
+
 
 # ---------------------------------------------------------------------------
 # Command
@@ -1384,6 +1394,19 @@ def _codex_hooks_report() -> dict[str, Any]:
         "foreign_json_hooks": list(diagnostics.json_foreign_commands),
         "errors": list(diagnostics.errors),
     }
+
+
+def _codex_app_server_report() -> dict[str, Any]:
+    """Whether the codex app-server control socket exists.
+
+    The socket at ``$CODEX_HOME/app-server-control/app-server-control.sock``
+    exists only while a codex app-server daemon runs (``codex app-server daemon
+    start``). Absent it, live mail to a codex session demotes to durable, so a
+    plain ``fno doctor`` names the fix for hand-started sessions no spawn
+    preflight can reach."""
+    codex_home = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex").expanduser()
+    socket_path = codex_home / "app-server-control" / "app-server-control.sock"
+    return {"present": socket_path.exists(), "socket_path": str(socket_path)}
 
 
 def _emit_codex_hooks_report(result: dict[str, Any], *, err: bool) -> None:
@@ -1725,6 +1748,14 @@ def _harness_surface_report() -> dict[str, Any]:
         # node exists to close, so surface it rather than stay silent (x-d991).
         if codex.get("foreign_json_hooks"):
             report["codex_hooks_foreign_json"] = codex["foreign_json_hooks"]
+    except Exception:
+        pass
+
+    # Codex app-server daemon socket (the live-mail prerequisite for a codex
+    # peer). Advisory: a plain `fno doctor` names the fix for the hand-started
+    # sessions no spawn preflight can reach.
+    try:
+        report["codex_app_server"] = _codex_app_server_report()
     except Exception:
         pass
 
@@ -2266,6 +2297,14 @@ def doctor_command(
     # Advisory dead-letter visibility (US7): an unwired drain hook + stale bus
     # mail to a dead handle are silent quicksand. Never changes status/exit.
     result["dead_letter"] = _dead_letter_report()
+
+    # Advisory codex app-server daemon socket: the live-mail prerequisite for a
+    # codex peer. Names the fix for hand-started sessions no spawn preflight
+    # reaches. Never changes status/exit.
+    try:
+        result["codex_app_server"] = _codex_app_server_report()
+    except Exception:
+        pass
 
     # Advisory managed-block staleness (US8): a host AGENTS.md/CLAUDE.md footnote
     # block older than the current template. Never changes status/exit.

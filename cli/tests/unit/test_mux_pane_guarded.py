@@ -22,7 +22,12 @@ def _install_fake_run(monkeypatch, exit_codes):
 
     def _run(argv, **_kwargs):
         calls.append(list(argv))
-        code = exit_codes.pop(0) if exit_codes else 0
+        # Only ``fno mux pane`` calls consume a scripted exit code; unrelated
+        # subprocess activity (e.g. the audit emit's state-dir git lookup when
+        # cwd is not the pinned root) returns a neutral 0 without shifting the
+        # mux call sequence.
+        is_mux_pane = len(argv) > 2 and argv[1:3] == ["mux", "pane"]
+        code = exit_codes.pop(0) if (is_mux_pane and exit_codes) else 0
         return SimpleNamespace(returncode=code, stdout="", stderr="receiving agent not idle")
 
     monkeypatch.setattr(dispatch.subprocess, "run", _run)
@@ -36,8 +41,9 @@ def _paste_call(calls):
 
 
 def _verbs(calls):
-    """The pane verb of each call (claim/send/release), argv[3]."""
-    return [c[3] for c in calls]
+    """The pane verb of each MUX pane call (argv[3]); non-mux subprocess calls
+    (git state-dir lookups, etc.) are ignored."""
+    return [c[3] for c in calls if len(c) > 3 and c[1:3] == ["mux", "pane"]]
 
 
 def test_guarded_paste_carries_the_guarded_flag_and_confirms(monkeypatch):

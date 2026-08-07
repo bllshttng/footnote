@@ -298,3 +298,54 @@ def test_registry_read_failure_escalates_neither_nor_breaks(monkeypatch):
 
     monkeypatch.setattr("fno.agents.registry.load_registry", _boom)
     assert _recipient_is_attended("9a063cd3") is False
+
+
+# ---------------------------------------------------------------------------
+# AC8 (x-c24d Wave 1): a codex send that demotes to durable with no app-server
+# daemon prints the fix command, not only the live-miss reason token. The
+# codex daemon socket is the live-mail prerequisite; naming `codex app-server
+# daemon start` at the demote site is self-teaching runtime text.
+# ---------------------------------------------------------------------------
+
+
+def _resolved_codex(session_id: str):
+    """A minimal duck-typed resolved codex session for _name_lane_send."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        session_id=session_id, agent="codex", handle=session_id[-8:]
+    )
+
+
+def test_mail_demote_reason_codex_no_daemon_carries_fix(mailbox, monkeypatch, capsys):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(provider="codex", session_id=sid, cwd=str(mailbox))
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+    monkeypatch.setattr("fno.mail.cli._codex_daemon_socket_absent", lambda: True)
+
+    _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
+
+    out = capsys.readouterr().out
+    assert "queued (durable)" in out
+    assert "codex app-server daemon start" in out, "demote line names the fix command"
+
+
+def test_mail_demote_reason_codex_daemon_present_no_hint(mailbox, monkeypatch, capsys):
+    from fno.agents.registry import register_existing_session
+    from fno.mail.cli import _name_lane_send
+
+    sid = "9a063cd3-69d4-415a-ada5-649b0164189c"
+    register_existing_session(provider="codex", session_id=sid, cwd=str(mailbox))
+    monkeypatch.setattr("fno.agents.dispatch._mail_inject_codex", lambda *_a, **_k: False)
+    _skip_mux(monkeypatch)
+    monkeypatch.setattr("fno.mail.cli._codex_daemon_socket_absent", lambda: False)
+
+    _name_lane_send("ping", from_name="sender", resolved=_resolved_codex(sid))
+
+    out = capsys.readouterr().out
+    assert "queued (durable)" in out
+    assert "codex app-server daemon start" not in out

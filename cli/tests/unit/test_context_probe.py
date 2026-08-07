@@ -66,6 +66,17 @@ def test_probe_window_table_1m_marker_is_not_a_catchall(tmp_path):
     assert probe_context(transcript_path=transcript).window_tokens == 1_000_000
 
 
+def test_probe_window_table_bare_glm_1m_id_is_1m(tmp_path):
+    # The provider API drops the [1m] routing marker, so the transcript carries
+    # the bare "glm-5.2" id (12567 vs 2 in one real transcript). The bare id of
+    # the 1M generation must read 1M, not fall through to 200K.
+    transcript = tmp_path / "t.jsonl"
+    _write_transcript(transcript, [_usage_record("glm-5.2", 265_000, 0, 0)])
+    reading = probe_context(transcript_path=transcript)
+    assert reading.window_tokens == 1_000_000
+    assert reading.used_pct == 27  # 265k/1M ~ 26.5% rounds to 27 (half-up)
+
+
 def test_probe_window_table_unlisted_falls_to_200k(tmp_path):
     transcript = tmp_path / "t.jsonl"
     _write_transcript(transcript, [_usage_record("claude-opus-4-5", 200_000, 0, 0)])

@@ -150,7 +150,7 @@ crates/fno-agents/src/claude_ask.rs:9
 crates/fno-agents/src/client.rs:25
 crates/fno-agents/src/client_verbs.rs:67
 crates/fno-agents/src/codex_ask.rs:3
-crates/fno-agents/src/codex_inject.rs:1
+crates/fno-agents/src/codex_inject.rs:3
 crates/fno-agents/src/daemon.rs:130
 crates/fno-agents/src/delivery_completion.rs:4
 crates/fno-agents/src/drift.rs:4

@@ -821,6 +821,48 @@ def mail_escalation(
     return _build("mail_escalation", source, data)
 
 
+def agent_raw_inject(
+    *,
+    target_session: str,
+    payload: str,
+    harness: str,
+    lane: str,
+    sender: str | None = None,
+    target_cwd: str | None = None,
+    target_head: str | None = None,
+    confirmed: bool | None = None,
+    source: str = "daemon",
+) -> dict[str, Any]:
+    """Build an ``agent_raw_inject`` provenance event.
+
+    Records an UNWRAPPED injection (no ``<fno_mail`` envelope) at the transport,
+    so the audit trail survives the loss of the in-transcript marker (x-f26c's
+    greppability property moves to the ledger). Keyed on the payload not starting
+    with ``<fno_mail``; emitted best-effort from both the mail-inject binary and
+    the mux pane send. ``sender``/``target_cwd``/``target_head`` are optional
+    enrichments the transport populates when the invoking layer knows them.
+    ``confirmed`` is the transport's own answer, so the record never asserts an
+    injection a stalled pane or an absent daemon did not perform; it is emitted
+    after the send, and its ``False`` covers both a clean refusal and a landed
+    payload the confirm budget missed.
+    """
+    data: dict[str, Any] = {
+        "target_session": target_session,
+        "payload": payload,
+        "harness": harness,
+        "lane": lane,
+    }
+    if sender is not None:
+        data["sender"] = sender
+    if target_cwd is not None:
+        data["target_cwd"] = target_cwd
+    if target_head is not None:
+        data["target_head"] = target_head
+    if confirmed is not None:
+        data["confirmed"] = confirmed
+    return _build("agent_raw_inject", source, data)
+
+
 def done_race_collision(
     *,
     node_id: str,
