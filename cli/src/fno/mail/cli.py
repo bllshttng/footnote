@@ -154,6 +154,52 @@ def _read_body(body: Optional[str], body_file: Optional[Path]) -> str:
     raise typer.Exit(code=1)
 
 
+def _cap_env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+# Brevity gate for authored relay bodies. Mail is re-read every turn by every
+# recipient, so a body that duplicates a node or doc is paid many times over.
+# Thresholds target the verbose tail (measured p90 ~3390 B over 354 real
+# messages), not the median (p50 ~1182 B); a 1200 B cap would hit half of live
+# coordination. Override via env; set a knob to 0 to disable that tier.
+_BODY_WARN_BYTES = _cap_env_int("FNO_MAIL_BODY_WARN", 3000)
+_BODY_REFUSE_BYTES = _cap_env_int("FNO_MAIL_BODY_REFUSE", 5000)
+
+
+def _enforce_body_cap(body: str) -> None:
+    """Warn over WARN bytes, refuse over REFUSE bytes.
+
+    Fail-open: a disabled tier (0) or an unset body never blocks coordination.
+    The refusal teaches the rule: put the detail in a node or doc and send a
+    short pointer, since the mail is re-read far more often than the node.
+    """
+    warn, refuse = _BODY_WARN_BYTES, _BODY_REFUSE_BYTES
+    if warn <= 0 and refuse <= 0:
+        return
+    n = len(body.encode("utf-8"))
+    if refuse > 0 and n > refuse:
+        print(
+            f"error: mail body is {n} bytes (cap {refuse}). Relay mail is re-read "
+            f"every turn; put the detail in a node or doc and send a short pointer. "
+            f"Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=1)
+    if warn > 0 and n > warn:
+        print(
+            f"note: mail body is {n} bytes (over the {warn}-byte brevity guide); "
+            f"prefer a short pointer with the detail in a node/doc.",
+            file=sys.stderr,
+        )
+
+
 def _validate_kind(kind: str) -> str:
     """Validate a CLI ``--kind`` value. Hint at replacement for deprecated kinds."""
     if kind in VALID_KINDS:
@@ -470,6 +516,7 @@ def cmd_reply(
     """
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file)
+    _enforce_body_cap(body_text)
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session mail back to its original sender. Anything else
@@ -1634,6 +1681,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _enforce_body_cap(content)
 
         # US10 kind-scoped guard: question/fyi are project-inbox drain contracts
         # (question -> wake-signal, fyi -> memory). Addressed to an agent they
@@ -1796,6 +1844,7 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
+        _enforce_body_cap(content)
         try:
             result = dispatch_send_to_project(
                 to_project,
@@ -1841,6 +1890,7 @@ def cmd_send(
         )
         raise typer.Exit(code=2)
 
+    _enforce_body_cap(message)
     try:
         result = dispatch_send(
             name=name,
