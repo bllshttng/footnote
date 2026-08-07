@@ -5174,14 +5174,24 @@ fn coverage_classify_local_pass_unconfigured_name_counts() {
     assert_eq!(local.name, "codex");
 }
 
-/// x-0eaf producer-axis money test (integration via run_loop_check). The bot
-/// refused on quota (usage-limit comment, no review object), but a local
-/// /code-review attested at HEAD -> coverage 1 via the local_attestation axis ->
-/// DonePRGreen. A quota-dead bot cannot block the path while a local lane
-/// reviewed, because coverage counts the local producer, not just github_app
-/// objects. This is the operator's PR #745 scenario, fixed.
+/// x-9ab2 (usage-limit gate): a required review bot that bounces on quota now
+/// fails the gate closed UNCONDITIONALLY - `all_required_passed` requires
+/// `usage_limited` to be empty, with no attestation exception. So even when a
+/// local /code-review attests at HEAD, a bounce terminates DoneAwaitingReview,
+/// not DonePRGreen. The local attestation is not wasted: it clears
+/// `unattested_reviewers` so `awaiting_review_only` holds, and the case exits
+/// cleanly at DoneAwaitingReview instead of wedging to budget death. What is
+/// given up is auto-SHIPPING on a bounce, not liveness.
+///
+/// This test was added by x-0eaf asserting DonePRGreen on the grounds that "a
+/// quota-dead bot cannot block the path while a local lane reviewed". x-9ab2
+/// supersedes that: when both apply, usage_limited wins (a bounce is an external
+/// cause the operator acts on, and the codex connector is permanently
+/// quota-exhausted, so a bounce is the steady state, not an anomaly). A flipped
+/// assertion under the old doc comment would read as a bug to the next reader;
+/// the comment and the rename carry the decision so it is not silently reverted.
 #[test]
-fn done_pr_green_when_local_attestation_survives_bot_refusal() {
+fn done_awaiting_review_when_required_bot_bounces_despite_local_attestation() {
     let tmp = TempDir::new().unwrap();
     let cwd = tmp.path();
     fs::create_dir_all(cwd.join(".fno")).unwrap();
@@ -5248,8 +5258,8 @@ exit 1
     assert_eq!(d.decision, "allow");
     assert_eq!(
         d.termination_reason.as_deref(),
-        Some("DonePRGreen"),
-        "local attestation must survive a bot refusal: {}",
+        Some("DoneAwaitingReview"),
+        "a required-bot quota bounce fails closed even with a local attestation (x-9ab2): {}",
         d.message
     );
 }
