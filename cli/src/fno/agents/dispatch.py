@@ -5629,6 +5629,24 @@ def _mail_inject_codex(thread_id: str, text: str) -> bool:
         return False
 
 
+def keystroke_lane(entry: "AgentEntry") -> tuple[str, bool]:
+    """The live delivery lane for a registry row and whether it is a KEYSTROKE
+    lane (a prompt-line path where the REPL's slash parser runs before the
+    model), mirroring ``_deliver_live``'s routing order EXACTLY: mux first, then
+    harness. A predicate that disagrees with the real router is worse than none.
+
+    A raw slash payload fires a verb only on a keystroke lane. The codex/gemini/
+    opencode daemon lanes answer False (``agent.deliver`` / ``turn/start`` submit
+    a turn to the model with no TUI prompt line, so the slash never reaches a
+    parser); only the mux pane paste and claude's ``control.sock`` are keystrokes.
+    """
+    if entry.mux:
+        return ("mux-pane", True)
+    if entry.harness != "claude":
+        return (f"{entry.harness or 'unknown'}-daemon", False)
+    return ("control.sock", True)
+
+
 def _deliver_live(
     entry: "AgentEntry",
     body: str,
