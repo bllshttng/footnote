@@ -167,18 +167,26 @@ pub fn outcome_exit(delivered: bool) -> i32 {
 }
 
 /// Append an `agent_raw_inject` audit record for an UNWRAPPED payload, or do
-/// nothing when the payload carries the `<fno_mail>` marker. An unwrapped
-/// injection leaves no agent-authored tag in the recipient transcript, so the
-/// audit moves to the ledger (x-f26c's greppability property). Best-effort: a
-/// write failure is swallowed and never propagates to the caller.
+/// nothing when the payload carries an agent-authored envelope marker. An
+/// unwrapped injection leaves no such tag in the recipient transcript, so the
+/// audit moves to the ledger (x-f26c's greppability property). BOTH wrapped
+/// forms are excluded, matching the Python mux-pane site: the ask-lane peer
+/// follow-up (`claude::build_cross_session_container` -> `_mail_inject_claude`)
+/// ships a `<cross-session-message>` through this very binary, and excluding
+/// only `<fno_mail` logs every routine follow-up as a false raw-inject.
+/// `confirmed` is the transport's own answer, so a call is audited AFTER the
+/// send and never asserts an injection an absent daemon did not perform.
+/// Best-effort: a write failure is swallowed and never propagates to the caller.
 pub fn emit_raw_inject_audit(
     events_path: &Path,
     sender: Option<&str>,
     session: &str,
     text: &str,
     provider: MailInjectProvider,
+    confirmed: bool,
 ) {
-    if text.trim_start().starts_with("<fno_mail") {
+    let head = text.trim_start();
+    if head.starts_with("<fno_mail") || head.starts_with("<cross-session-message") {
         return;
     }
     let (harness, lane) = match provider {
@@ -191,6 +199,7 @@ pub fn emit_raw_inject_audit(
     fields.insert("payload".into(), payload_for_event.into());
     fields.insert("harness".into(), harness.into());
     fields.insert("lane".into(), lane.into());
+    fields.insert("confirmed".into(), confirmed.into());
     if let Some(s) = sender {
         fields.insert("sender".into(), s.to_string().into());
     }
@@ -383,18 +392,6 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         return emit(false, "io-error");
     }
 
-    // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
-    // marker survives in the recipient transcript, so x-f26c's greppability
-    // property moves from transcript to event). Best-effort, never blocks.
-    let home = crate::paths::AgentsHome::from_env();
-    emit_raw_inject_audit(
-        &home.events_jsonl(),
-        args.sender.as_deref(),
-        &args.session,
-        &text,
-        args.provider,
-    );
-
     let result = match args.provider {
         MailInjectProvider::Claude => {
             deliver_via_control_sock(&args.session, &text, args.attempts, args.interval_ms)
@@ -403,6 +400,22 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
             crate::codex_inject::deliver_via_codex_daemon(&args.session, &text).await
         }
     };
+
+    // Audit floor: record an unwrapped injection in the ledger (no `<fno_mail>`
+    // marker survives in the recipient transcript, so x-f26c's greppability
+    // property moves from transcript to event). AFTER the delivery, carrying its
+    // answer: emitting first left a phantom record on every send to a session
+    // with no daemon. Best-effort, never blocks.
+    let home = crate::paths::AgentsHome::from_env();
+    emit_raw_inject_audit(
+        &home.events_jsonl(),
+        args.sender.as_deref(),
+        &args.session,
+        &text,
+        args.provider,
+        result.is_ok(),
+    );
+
     match result {
         Ok(()) => emit(true, "delivered"),
         Err(reason) => emit(false, reason),
@@ -459,6 +472,7 @@ mod tests {
             "ses-9",
             "/code-review medium --fix",
             MailInjectProvider::Claude,
+            true,
         );
         // Wrapped envelope -> no record (the marker survives in the transcript).
         emit_raw_inject_audit(
@@ -467,6 +481,19 @@ mod tests {
             "ses-9",
             "<fno_mail from=\"a\">hi</fno_mail>",
             MailInjectProvider::Codex,
+            true,
+        );
+        // The ask-lane peer follow-up rides this same binary wrapped in a
+        // <cross-session-message> container; it carries its own transcript
+        // marker, so auditing it would log every routine follow-up as a false
+        // raw-inject (the Python mux site already excludes it).
+        emit_raw_inject_audit(
+            &path,
+            None,
+            "ses-9",
+            "<cross-session-message from-name=\"peer\">\nstatus?\n</cross-session-message>",
+            MailInjectProvider::Claude,
+            true,
         );
 
         let lines: Vec<String> = std::fs::read_to_string(&path)
@@ -483,6 +510,28 @@ mod tests {
         assert_eq!(v["data"]["harness"], "claude");
         assert_eq!(v["data"]["lane"], "control.sock");
         assert_eq!(v["data"]["sender"], "0ab49ebc");
+        assert_eq!(v["data"]["confirmed"], true);
+
+        // A not-delivered send is still audited (the bytes may have landed past
+        // the confirm budget) but records confirmed:false, so an auditor reading
+        // the ledger as ground truth cannot overcount phantom injections.
+        emit_raw_inject_audit(
+            &path,
+            None,
+            "ses-9",
+            "/compact",
+            MailInjectProvider::Claude,
+            false,
+        );
+        let last: serde_json::Value = serde_json::from_str(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .lines()
+                .last()
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(last["data"]["confirmed"], false);
 
         let _ = std::fs::remove_file(&path);
         let _ = std::fs::remove_dir(&dir);

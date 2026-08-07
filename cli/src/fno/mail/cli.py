@@ -1123,11 +1123,14 @@ def _codex_daemon_socket_absent() -> bool:
     ``$CODEX_HOME/app-server-control/app-server-control.sock`` exists only while
     a codex app-server daemon runs (``codex app-server daemon start``). A live
     mail send to a codex peer demotes to durable when it is absent, so the demote
-    line names the fix rather than only the reason."""
-    import os
+    line names the fix rather than only the reason.
 
-    home = os.environ.get("CODEX_HOME") or str(Path.home() / ".codex")
-    return not (Path(home) / "app-server-control" / "app-server-control.sock").exists()
+    Delegates to the doctor report so the send-time demote line and `fno doctor`
+    can never disagree about where the socket lives (lazy import: doctor is a
+    heavy module and this is one line on a cold path)."""
+    from fno.doctor import _codex_app_server_report
+
+    return not _codex_app_server_report().get("present", False)
 
 
 def _name_lane_send(
@@ -1571,6 +1574,16 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
     #    self-injection supplies the very user-shaped trigger a model-invocation
     #    refusal exists to require. Cross-session injection is the sanctioned
     #    king-mediated path (a distinct actor stands in the user's position).
+    #    Fail closed on an unknown session id: _self_recipient compares the
+    #    RESOLVED id, and session_handle_tier returns None for an empty token, so
+    #    a row carrying no harness_session_id (legacy/unmigrated) would sail past
+    #    the self-check even when it IS this session. No id, no soundness.
+    if not session_id and not self_ok:
+        _refused(
+            f"{name!r} resolves to a registry row with no harness_session_id, so "
+            "the self-injection check cannot be decided; re-register the row "
+            "(`fno agents register`) or pass --self if you intend a self-inject"
+        )
     if _self_recipient(name, resolved_session_id=session_id) and not self_ok:
         _refused(
             "self-injection supplies the user-shaped trigger a model-invocation "
@@ -1591,11 +1604,14 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
         )
 
     # 6 + 7. Inject UNWRAPPED (no _MailCtx -> none of the four wrap sites fire).
-    #        Never durable on any result.
+    #        Never durable on any result. Inject `stripped`, the string every
+    #        validation above ran against: a leading space passes the slash check
+    #        after stripping but defeats the REPL slash parser when injected raw,
+    #        and the receipt would still print `injected`.
     if entry.mux:
-        delivered = _mux_pane_send(entry, payload)
+        delivered = _mux_pane_send(entry, stripped)
     else:  # claude control.sock - the only other keystroke lane
-        delivered = _mail_inject_claude(session_id, payload)
+        delivered = _mail_inject_claude(session_id, stripped)
 
     # 8. Four-state receipt (never a boolean; never a durable write).
     if delivered:
@@ -1607,11 +1623,16 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
             )
         print(f"injected{note}")
         raise typer.Exit(code=0)
-    # not-confirmed: 10s poll-budget exhaustion, NOT rejection. The paste may
-    # still land; re-queueing it is how a verb fires twice. Exit 0, never durable.
+    # not-confirmed: the transport returns one bool for two different worlds --
+    # poll-budget exhaustion on a paste that DID land, and a clean send failure
+    # (binary absent, pane stalled on EXIT_TARGET_NOT_IDLE, socket refused) where
+    # nothing was sent. Do NOT claim "sent"; both readings keep the same standing
+    # order, because the one we cannot rule out is the landed one and re-queueing
+    # it is how a verb fires twice. Exit 0, never durable.
     print(
-        "unconfirmed (sent; the confirm budget expired; the payload may still "
-        "land - never re-queue)"
+        "unconfirmed (not confirmed: either the confirm budget expired on a "
+        "payload that landed, or the transport refused and nothing was sent - "
+        "check the recipient before assuming either; never re-queue)"
     )
     raise typer.Exit(code=0)
 

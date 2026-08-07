@@ -313,7 +313,34 @@ pub async fn run_review_start(rest: &[String]) -> i32 {
             return 2;
         }
     };
-    match deliver_via_codex_review_start(&thread_id, &target, delivery).await {
+    let outcome = deliver_via_codex_review_start(&thread_id, &target, delivery).await;
+
+    // Audit floor: `review/start` is the second unwrapped-fire path this crate
+    // ships. It carries no `<fno_mail>` envelope and leaves no agent-authored
+    // marker in the recipient thread, so it needs the same ledger record the
+    // mail-inject lane writes -- a guard on one of two reachable paths is
+    // decorative. Best-effort; a write failure never changes the exit code.
+    let mut fields = serde_json::Map::new();
+    fields.insert("target_session".into(), thread_id.clone().into());
+    fields.insert(
+        "payload".into(),
+        format!(
+            "review/start {} delivery={}",
+            target_raw,
+            delivery.to_json()
+        )
+        .into(),
+    );
+    fields.insert("harness".into(), "codex".into());
+    fields.insert("lane".into(), "codex-review-start".into());
+    fields.insert("confirmed".into(), outcome.is_ok().into());
+    let _ = crate::events::EventEmitter::new(
+        crate::paths::AgentsHome::from_env().events_jsonl(),
+        "daemon",
+    )
+    .emit_fields("agent_raw_inject", fields);
+
+    match outcome {
         Ok((turn_id, review_thread)) => {
             println!(
                 "{}",

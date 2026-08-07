@@ -830,7 +830,8 @@ def agent_raw_inject(
     sender: str | None = None,
     target_cwd: str | None = None,
     target_head: str | None = None,
-    source: str = "target",
+    confirmed: bool | None = None,
+    source: str = "daemon",
 ) -> dict[str, Any]:
     """Build an ``agent_raw_inject`` provenance event.
 
@@ -840,6 +841,10 @@ def agent_raw_inject(
     with ``<fno_mail``; emitted best-effort from both the mail-inject binary and
     the mux pane send. ``sender``/``target_cwd``/``target_head`` are optional
     enrichments the transport populates when the invoking layer knows them.
+    ``confirmed`` is the transport's own answer, so the record never asserts an
+    injection a stalled pane or an absent daemon did not perform; it is emitted
+    after the send, and its ``False`` covers both a clean refusal and a landed
+    payload the confirm budget missed.
     """
     data: dict[str, Any] = {
         "target_session": target_session,
@@ -853,6 +858,8 @@ def agent_raw_inject(
         data["target_cwd"] = target_cwd
     if target_head is not None:
         data["target_head"] = target_head
+    if confirmed is not None:
+        data["confirmed"] = confirmed
     return _build("agent_raw_inject", source, data)
 
 

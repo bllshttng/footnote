@@ -118,3 +118,86 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
     assert "unconfirmed" in out
     assert "fail" not in out.lower()
     assert not durable, "AC30: unconfirmed never queues durable"
+
+
+def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):
+    """The self-send refusal is the PR's capability boundary: self-injection
+    supplies the very user-shaped trigger a model-invocation refusal requires.
+    Untested, an inverted `and not self_ok` ships green."""
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "self-injection" in capsys.readouterr().err
+    assert not injected, "a refused self-send must not reach the transport"
+
+
+def test_raw_self_flag_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
+    """--self is the documented opt-in for a verb carrying no model-invocation
+    refusal (the /compact rescue)."""
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "/compact", self_ok=True)
+    assert exc.value.exit_code == 0
+    assert injected == [(SID_CLAUDE, "/compact")]
+    assert "/compact" in capsys.readouterr().out
+
+
+def test_raw_self_refusal_fires_on_the_canonical_handle(mailbox, monkeypatch, capsys):
+    """The king-mediated flow addresses by the 8-char canonical handle, not the
+    full session id; the refusal must fire on that alias path too."""
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send(SID_CLAUDE[-8:], "/code-review", self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "self-injection" in capsys.readouterr().err
+    assert not injected
+
+
+def test_raw_refuses_a_row_with_no_harness_session_id(mailbox, monkeypatch, capsys):
+    """Fail closed: session_handle_tier returns None on an empty token, so a row
+    with no harness_session_id would sail past the self-check even when it IS
+    this session. No id, no soundness."""
+    import fno.mail.cli as mail_cli
+    from fno.agents.registry import AgentEntry
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    entry = AgentEntry(
+        name="legacy", harness="claude", cwd=str(mailbox), log_path="", status="live"
+    )
+    monkeypatch.setattr(
+        mail_cli, "_self_recipient", lambda *a, **k: None, raising=True
+    )
+    monkeypatch.setattr(
+        "fno.agents.registry.resolve_agent",
+        lambda n: type("R", (), {"entry": entry})(),
+    )
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("legacy", "/code-review", self_ok=False)
+    assert exc.value.exit_code != 0
+    assert "no harness_session_id" in capsys.readouterr().err
+    assert not injected
+
+
+def test_raw_injects_the_stripped_payload(mailbox, monkeypatch, capsys):
+    """A leading space passes the slash check (which runs on the STRIPPED string)
+    but defeats the REPL slash parser when injected raw -- and the receipt would
+    still print `injected`. Inject what was validated."""
+    from fno.mail.cli import _raw_send
+
+    injected = _seed_claude(mailbox, monkeypatch)
+    with pytest.raises(typer.Exit) as exc:
+        _raw_send("claudepeer", "  /code-review medium --fix  ", self_ok=False)
+    assert exc.value.exit_code == 0
+    assert injected == [(SID_CLAUDE, "/code-review medium --fix")]

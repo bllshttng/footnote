@@ -1857,6 +1857,9 @@ event_types:
         target_head:
           type: string
           description: "Optional. Recipient repo HEAD, same join. Records facts only; carries no computed self-review verdict."
+        confirmed:
+          type: boolean
+          description: "Optional. The transport's own answer, recorded after the send so the record never asserts an injection a stalled pane or an absent daemon never performed. False covers both a clean refusal (nothing sent) and a payload that landed past the confirm budget - the transport returns one bool for both."
     consumers: [operator]
 
   - name: loop_check_gh_error

@@ -5146,25 +5146,43 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
     # forms carry their own marker, so excluding only <fno_mail> would log every
     # routine peer follow-up as a false raw-inject. The mux pane lane never reaches
     # the Rust mail-inject binary, so this site is mandatory, not decorative.
-    # Best-effort: an events-write failure never breaks the send.
-    if not text.lstrip().startswith(("<fno_mail", "<cross-session-message")):
+    # Emitted AFTER the send with the transport's own answer: an emit-before-send
+    # leaves a phantom record asserting an injection that a stalled pane or an
+    # absent `fno mux` never performed. Best-effort -- a write failure never
+    # breaks or fails the send.
+    audit_unwrapped = not text.lstrip().startswith(
+        ("<fno_mail", "<cross-session-message")
+    )
+
+    def _audit_raw_inject(confirmed: bool) -> None:
+        if not audit_unwrapped:
+            return
         try:
+            from fno.events import agent_raw_inject, append_event
             from fno.paths import agents_home_dir
 
-            # Write to the SAME log the Rust mail-inject binary uses
-            # (~/.fno/agents/events.jsonl) so the audit floor is one file, not
-            # fragmented across the fno state log and the agents log.
-            events.emit(
-                "agent_raw_inject",
-                path=agents_home_dir() / "events.jsonl",
-                target_session=getattr(entry, "harness_session_id", "") or "",
-                payload=text[:512],
-                harness=getattr(entry, "harness", "") or "",
-                lane="mux-pane",
-                target_cwd=getattr(entry, "cwd", None),
+            # Write the CANONICAL {type, source, data} envelope to the SAME log
+            # the Rust mail-inject binary uses (~/.fno/agents/events.jsonl). That
+            # file is canonical-shape only; the flat {kind, ...} emitter would put
+            # a second shape in one file and a consumer reading data.target_session
+            # (where schema.yaml says it lives) would silently miss every mux
+            # record -- the exact audit gap this event exists to close.
+            append_event(
+                agent_raw_inject(
+                    target_session=getattr(entry, "harness_session_id", "") or "",
+                    payload=text[:512],
+                    harness=getattr(entry, "harness", "") or "",
+                    lane="mux-pane",
+                    target_cwd=getattr(entry, "cwd", None),
+                    confirmed=confirmed,
+                    source="daemon",
+                ),
+                agents_home_dir() / "events.jsonl",
+                lock_timeout_seconds=2,
             )
         except Exception:
             pass
+
     fno_bin = os.environ.get("FNO_BIN") or "fno"
     pane = str(pane_id)
 
@@ -5211,11 +5229,15 @@ def _mux_pane_send(entry: "AgentEntry", text: str, *, guarded: bool = True) -> b
         return _run(["send", pane, "--text", "\r"]) == 0
 
     if guarded:
-        return _paste_then_submit()
+        sent = _paste_then_submit()
+        _audit_raw_inject(sent)
+        return sent
 
     claimed = _run(["claim", pane, "--pid", str(os.getpid())]) == 0
     try:
-        return _paste_then_submit()
+        sent = _paste_then_submit()
+        _audit_raw_inject(sent)
+        return sent
     finally:
         if claimed:
             _run(["release", pane])
