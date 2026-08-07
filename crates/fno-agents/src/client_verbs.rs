@@ -3917,7 +3917,17 @@ mod tests {
         _git(&canonical, &["config", "user.name", "t"]);
         _git(&canonical, &["commit", "-q", "--allow-empty", "-m", "base"]);
         let wt = home.join("wt");
-        _git(&canonical, &["worktree", "add", "-q", "-b", "feature/x", wt.to_str().unwrap()]);
+        _git(
+            &canonical,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+            ],
+        );
 
         let uuid = "9d2874cb-9365-48c0-aeb6-9e1d244f4cd3";
         let wt_project = home
@@ -3927,12 +3937,11 @@ mod tests {
         std::fs::create_dir_all(&wt_project).unwrap();
         std::fs::write(wt_project.join(format!("{uuid}.jsonl")), "[]").unwrap();
 
-        let resolved = resolve_resume_cwd(
-            &ClaudeHome::at(home),
-            canonical.to_str().unwrap(),
-            uuid,
+        let resolved = resolve_resume_cwd(&ClaudeHome::at(home), canonical.to_str().unwrap(), uuid);
+        assert_eq!(
+            resolved, wt,
+            "resolved to the transcript's worktree, not the recorded cwd"
         );
-        assert_eq!(resolved, wt, "resolved to the transcript's worktree, not the recorded cwd");
     }
 
     #[test]
