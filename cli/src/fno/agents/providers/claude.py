@@ -1289,10 +1289,21 @@ def claude_agents_json(
 
     out_map: dict[str, dict] = {}
     warnings: list[str] = []
+    agent_rows = 0
     for index, row in enumerate(rows):
         if not isinstance(row, dict):
             warnings.append(f"claude agents --json row {index} is not an object; skipped")
             continue
+        # The operator's own interactive sessions ride in the same array and
+        # carry no id BY DESIGN. They are not agents and never were, so they are
+        # skipped silently: warning about each one turns a healthy invocation
+        # into a wall of "no usable short id", which is how an operator learns
+        # to ignore the warnings below. `kind` is the discriminator rather than
+        # "did the row have an id", because a drift that renamed BOTH the id and
+        # status keys still says `background` and must still be caught.
+        if row.get("kind") == "interactive":
+            continue
+        agent_rows += 1
         short_id, id_warning = _alias_value(row, _SHORT_ID_KEYS, _valid_short_id)
         if short_id is None:
             warnings.append(
@@ -1322,18 +1333,8 @@ def claude_agents_json(
     # A per-row warning is quiet enough that a schema change dropping EVERY row
     # shipped unnoticed once already: 42 warnings into a list most callers never
     # print, and an empty map that reads exactly like "no agents running". A
-    # total drop is a different claim from a partial one, so it says so once.
-    #
-    # Only AGENT rows count toward that claim. claude lists the operator's own
-    # interactive sessions in the same array, and those carry no id by design -
-    # counting them would cry drift at a machine that simply has no agents
-    # running, which is the false alarm that teaches people to ignore the
-    # warning. `kind` is the discriminator rather than "did it have an id",
-    # because a drift that renamed BOTH the id and status keys still says
-    # `background` and must still be caught.
-    agent_rows = sum(
-        1 for row in rows if isinstance(row, dict) and row.get("kind") != "interactive"
-    )
+    # total drop is a different claim from a partial one, so it says so once,
+    # over the agent rows counted above.
     if agent_rows and not out_map:
         warnings.append(
             f"claude agents --json: 0 of {agent_rows} agent rows parsed; "

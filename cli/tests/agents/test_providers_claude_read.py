@@ -134,8 +134,9 @@ def test_claude_agents_json_prefers_state_over_status_on_live_rows(monkeypatch):
     # keeps that row silent; idle/working genuinely disagree and still report.
     assert not any("7f7d7627" in w or "row 0" in w for w in warnings), warnings
     assert any("conflicting values across aliases" in w for w in warnings), warnings
-    # The interactive row has no agent id at all and is skipped, not crashed on.
-    assert any("no usable short id" in w for w in warnings), warnings
+    # The interactive row is not an agent: skipped silently, not warned about
+    # and not crashed on.
+    assert not any("short id" in w for w in warnings), warnings
 
 
 def test_claude_agents_json_maps_every_observed_spelling(monkeypatch):
@@ -212,7 +213,9 @@ def test_claude_agents_json_all_interactive_rows_is_not_drift(monkeypatch):
     result, warnings = claude_mod.claude_agents_json()
 
     assert result == {}
-    assert not any("schema drift" in w for w in warnings), warnings
+    # Silent, not merely un-warned about drift: a per-row "no usable short id"
+    # for each interactive session is the same false alarm one level down.
+    assert warnings == [], warnings
 
 
 def test_claude_agents_json_malformed_alias_does_not_mask_a_valid_one(monkeypatch):
