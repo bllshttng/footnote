@@ -341,14 +341,14 @@ fn spawn_claude_receipt_byte_shape() {
         out.stdout
     );
     assert!(
-        receipt.ends_with(r#""provider": "claude", "status": "live"}"#),
-        "receipt must end with provider/status: {}",
+        receipt.ends_with(r#""harness": "claude", "status": "live"}"#),
+        "receipt must end with harness/status: {}",
         out.stdout
     );
     // Parse as JSON to verify structure.
     let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
     assert_eq!(v["name"], "myspawn");
-    assert_eq!(v["provider"], "claude");
+    assert_eq!(v["harness"], "claude");
     assert_eq!(v["status"], "live");
     let short_id = v["short_id"].as_str().unwrap();
     assert_eq!(

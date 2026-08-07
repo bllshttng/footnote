@@ -9,6 +9,7 @@ Layers:
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from typing import Any, Dict
 
@@ -148,6 +149,15 @@ def test_route_allowed_on_capability_enabled_pane(
             continue
         assert route_env[key] == "glm-5.2"
     assert route_env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == DEFAULT_ZAI_HAIKU_MODEL
+    # AC4 + the live specimen (2026-08-06): a routed spawn's receipt carries
+    # three axes in three keys - harness (claude), provider (the vendor zai),
+    # model (glm-5.2) - and NO key holds a harness literal under `provider`.
+    # The defect was a receipt reading {"provider": "claude"} for this exact
+    # invocation while the worker ran on glm-5.2: the flags took, the receipt lied.
+    receipt = json.loads(result.output.strip().splitlines()[-1])
+    assert receipt["harness"] == "claude"
+    assert receipt["provider"] == "zai"
+    assert receipt["model"] == "glm-5.2"
 
 
 @pytest.mark.parametrize("missing", [False, True])

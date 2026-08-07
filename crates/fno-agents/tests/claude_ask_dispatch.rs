@@ -178,7 +178,12 @@ fn spawn_writes_python_readable_row_and_emits_done() {
     // spawn returns JSON receipt, not bare short_id.
     let receipt: serde_json::Value =
         serde_json::from_str(out.stdout.trim_end_matches('\n')).unwrap();
-    assert_eq!(receipt["provider"], "claude");
+    // harness axis under `harness`; an unrouted claude spawn carries no
+    // provider (vendor) or model key (AC5) - a provider key holding "claude"
+    // is the four-axis defect this shape corrects.
+    assert_eq!(receipt["harness"], "claude");
+    assert!(receipt.get("provider").is_none());
+    assert!(receipt.get("model").is_none());
     assert_eq!(receipt["status"], "live");
     let short_id = receipt["short_id"].as_str().unwrap();
     assert_eq!(short_id, "7c5dcf5d");

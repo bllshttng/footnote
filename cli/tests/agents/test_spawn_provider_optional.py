@@ -81,7 +81,11 @@ def test_spawn_without_provider_defaults_to_claude(monkeypatch, runner):
     assert result.exit_code == 0, result.output
     assert received["provider"] == "claude"
     receipt = json.loads(result.stdout.strip().splitlines()[-1])
-    assert receipt["provider"] == "claude"
+    assert receipt["harness"] == "claude"
+    # AC5: no -P -> the provider (vendor) key is absent, not defaulted to the
+    # harness; model is absent too (no --model). Both were the receipt-lie defect.
+    assert "provider" not in receipt
+    assert "model" not in receipt
     assert receipt["provider_source"] == "builtin-default"
 
 
