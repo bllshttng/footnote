@@ -183,6 +183,33 @@ for hook in "${HOOKS[@]}"; do
     sandbox=$(setup_sandbox)
     assert_refusal "$name :: empty stdin from canonical root refuses" "$hook" "__empty__" "$sandbox"
     rm -rf "$sandbox"
+
+    # Case 5: a `name` with NO `path` from the canonical root is a CREATE
+    # request CC has not materialized yet - the shape `claude --worktree <name>`
+    # and the EnterWorktree tool both send. Case 4's refusal used to swallow it,
+    # which aborted every creation from the main checkout. The hook must instead
+    # exit NON-ZERO so CC falls back to its own worktree flow. Case 4 stays the
+    # guard for the genuinely pathless payload.
+    sandbox=$(setup_sandbox)
+    stdin_json=$(printf '{"session_id":"s1","name":"cc-created","hook_event_name":"WorktreeCreate"}')
+    output=$(run_hook "$sandbox" "$hook" "$stdin_json")
+    rc=$(echo "$output" | sed -n '1p')
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    if [[ "$rc" -eq 0 ]]; then
+        fail "$name :: named create from canonical defers to CC" \
+            "exit 0 aborts the creation; expected non-zero so CC's default flow runs"
+    elif [[ -n "$(cat "$stdout_file")" ]]; then
+        fail "$name :: named create from canonical defers to CC" \
+            "stdout must stay empty, got '$(cat "$stdout_file")'"
+    elif ! grep -q "deferring to Claude Code" "$stderr_file"; then
+        fail "$name :: named create from canonical defers to CC" \
+            "stderr missing the deferral reason. stderr: $(cat "$stderr_file")"
+    else
+        pass "$name :: named create from canonical defers to CC"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+    rm -rf "$sandbox"
 done
 
 echo

@@ -25,9 +25,19 @@ set -euo pipefail
 # starts invoking the hook without chdir'ing, the JSON path is still right.
 HOOK_INPUT=$(cat 2>/dev/null || echo "{}")
 WORKTREE_PATH=""
+_WT_NAME=""
 if command -v jq >/dev/null 2>&1; then
     WORKTREE_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.path // .worktree_path // empty' 2>/dev/null || true)
+    _WT_NAME=$(printf '%s' "$HOOK_INPUT" | jq -r '.name // empty' 2>/dev/null || true)
 fi
+# Resolve the worktree policy ONCE, before any decision reads it. Kept in sync
+# with hooks/worktree-setup.sh; only that file's relocation block diverges.
+_gate_repo="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null | sed 's|/\.git$||')"
+_WT_POLICY=""
+if [[ -n "$_gate_repo" ]] && command -v fno >/dev/null 2>&1; then
+    _WT_POLICY="$(fno worktree policy --repo "$_gate_repo" 2>/dev/null | head -1 | tr -d '[:space:]')"
+fi
+
 if [[ -z "$WORKTREE_PATH" ]]; then
     # No .path from CC is normal (the contract lists only `name`). $(pwd) is a
     # safe fallback only in a linked worktree; on the canonical checkout emitting
@@ -46,6 +56,15 @@ if [[ -z "$WORKTREE_PATH" ]]; then
         [[ -n "$_gd" && -n "$_gcd" && "$_gd" != "$_gcd" ]] && _is_canonical=0
     fi
     if [[ "$_is_canonical" == "1" ]]; then
+        # A `name` with no `path` is a CREATE request the harness has not
+        # materialized yet; aborting it refuses a legitimate creation, so defer
+        # with a non-zero exit and let the harness's own flow run. A `never`
+        # repo still aborts. Only a payload with NEITHER path nor name is the
+        # designate-cwd-as-a-worktree case this guard exists for.
+        if [[ -n "$_WT_NAME" && "$_WT_POLICY" != "never" ]]; then
+            echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
+            exit 1
+        fi
         echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
         exit 0
     fi
