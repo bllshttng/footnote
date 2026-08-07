@@ -1103,7 +1103,7 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
 #: row is created `spawning` and only becomes addressable once the worker names
 #: itself; if that never lands the row strands `spawning` forever, an
 #: unrecoverable pane whose receipt would read as a soft success. The working
-#: case lands well under this; the ceiling is paid only on failure (x-1406).
+#: case lands well under this; the ceiling is paid only on failure.
 _PANE_REGISTRATION_DEADLINE_S = 60
 _PANE_REGISTRATION_POLL_S = 1.0
 
@@ -1709,7 +1709,7 @@ def dispatch_spawn_pane(
                 exit_code=12,
             ) from exc
 
-        # x-1406: a happy-hosted claude row is created id-less (`spawning`)
+        # A happy-hosted claude row is created id-less (`spawning`)
         # because happy owns the session id and restamps the row via the worker's
         # SessionStart hook. If that restamp never lands the row strands
         # `spawning` forever, an unrecoverable pane (unreachable on control.sock,

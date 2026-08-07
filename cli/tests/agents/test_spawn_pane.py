@@ -1937,7 +1937,7 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
         lambda: pytest.fail("explicit --monitor happy must not read the config default"),
     )
     # No real SessionStart hook fires under the fake runner; script the
-    # registration the bounded wait (x-1406) looks for so the spawn succeeds.
+    # registration the bounded wait looks for so the spawn succeeds.
     monkeypatch.setattr(
         mux_spawn, "_await_pane_registration", lambda name, mux, r, *a, **k: ("happy-sid", "")
     )
@@ -2455,7 +2455,7 @@ def test_happy_spawn_is_not_reported_live_without_a_proven_session(
 
     The reported corpse was a real pid, a real pane, and a row reading
     `live`/`spawning` with no session behind it. Under the bounded-wait contract
-    (x-1406) a happy pane that never registers is reaped and raised, not left as
+    A happy pane that never registers is reaped and raised, not left as
     a silent no-op the receipt would call success.
     """
     from fno.agents.dispatch import DispatchAskError
@@ -2656,7 +2656,7 @@ def test_unrouted_and_disabled_panes_still_launch_plain_claude(
     assert "happy" not in _pane_run_argv(runner2), "knob off must leave the argv alone"
 
 
-# x-1406: a happy-hosted claude pane is created id-less (`spawning`) because
+# A happy-hosted claude pane is created id-less (`spawning`) because
 # happy owns the session id and restamps the row later via the worker's
 # SessionStart hook. If that restamp never lands, the row strands `spawning`
 # forever and the receipt reads as a soft success - a silent no-op. The fix
@@ -2752,7 +2752,7 @@ def test_happy_pane_failure_reports_row_removal_failure_honestly(
     tmp_path: Path, monkeypatch
 ) -> None:
     """If the row removal throws after a successful reap, the error must not
-    claim 'row removed' (x-1406 review finding). The row lingers and the message
+    claim 'row removed'. The row lingers and the message
     names it instead of lying about cleanup."""
     import fno.agents.mux_spawn as mux_spawn
     from fno.agents.dispatch import DispatchAskError
