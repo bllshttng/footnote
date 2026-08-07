@@ -91,7 +91,7 @@ class Carveout:
     description: str
     truncated: bool
     # Optional crown scope this carve-out discharges (e.g. an epic id). The king
-    # orphan check (hooks/king-context-nudge.sh) reads this FIELD rather than
+    # orphan check (hooks/context-nudge.sh) reads this FIELD rather than
     # grepping `description` free text, so rewording a sentence cannot silently
     # silence it. Optional + last so existing records and retro-triage parse
     # unchanged (a missing key reads as None).
