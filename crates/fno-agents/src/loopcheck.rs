@@ -1567,7 +1567,8 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage = classify_coverage(&[], &[], &events_text, head_sha, &[], false, author_session);
+        let coverage =
+            classify_coverage(&[], &[], &events_text, head_sha, &[], false, author_session);
         (
             "none".to_string(),
             reviewers_ok,
@@ -3240,18 +3241,18 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 // buckets are always shown so a reader learns the vocabulary
                 // even when two are zero; `other` is a different session, NOT
                 // "independent".
-                let (self_n, other_n, unknown_n) =
-                    rep.verdicts
-                        .iter()
-                        .filter(|v| {
-                            v.producer == CoverageProducer::LocalAttestation
-                                && v.verdict == CoverageVerdict::Reviewed
-                        })
-                        .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
-                            AttestationOrigin::SelfAttested => (s + 1, o, u),
-                            AttestationOrigin::OtherSession => (s, o + 1, u),
-                            AttestationOrigin::Unknown => (s, o, u + 1),
-                        });
+                let (self_n, other_n, unknown_n) = rep
+                    .verdicts
+                    .iter()
+                    .filter(|v| {
+                        v.producer == CoverageProducer::LocalAttestation
+                            && v.verdict == CoverageVerdict::Reviewed
+                    })
+                    .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
+                        AttestationOrigin::SelfAttested => (s + 1, o, u),
+                        AttestationOrigin::OtherSession => (s, o + 1, u),
+                        AttestationOrigin::Unknown => (s, o, u + 1),
+                    });
                 return format!(
                     "review coverage: {} reviewed ({}) - self {}, other {}, unknown {}",
                     n,
