@@ -912,7 +912,7 @@ def append_session_record(
     harness: str,
     session_id: str,
     at: "str | None" = None,
-    claimed_at: "str | None" = None,
+    started_at: "str | None" = None,
 ) -> "tuple[bool, bool]":
     """Append a ``{phase, harness, session_id, at}`` lifecycle record to a node's
     append-only ``sessions`` list, returning ``(found, added)`` (x-b6e4).
@@ -923,13 +923,17 @@ def append_session_record(
     to one row and the first observation owns ``at``. Never edits or removes an
     entry.
 
-    ``claimed_at`` is optional and records when the work was claimed, so one row
-    bounds the implementation window (``claimed_at`` start, ``at`` terminal). It
-    is omitted from the row when absent, keeping legacy rows valid, and is never
-    part of the idempotency key.
+    ``started_at`` is optional and records when the work began, so one row
+    bounds the implementation window (``started_at`` start, ``at`` terminal). It
+    applies to every phase, not just ``do``: a think or blueprint row has a start
+    even though nothing is claimed, so the honest name is "started", not
+    "claimed". The canonical row key is ``started_at``; ``claimed_at`` is the
+    legacy key older rows carry and the reader accepts forever, but no row is
+    rewritten - new rows always write ``started_at``. It is omitted from the row
+    when absent and is never part of the idempotency key.
 
     Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
-    session id, or an unparseable ``at``/``claimed_at`` -- validation lives here
+    session id, or an unparseable ``at``/``started_at`` -- validation lives here
     so every caller (CLI, tests, future backfill) is bound by the same contract.
     ``found=False`` when the node is absent (no mutation).
     """
@@ -969,8 +973,8 @@ def append_session_record(
     at = _utc("at", at) if at is not None else datetime.now(timezone.utc).strftime(
         "%Y-%m-%dT%H:%M:%SZ"
     )
-    if claimed_at is not None:
-        claimed_at = _utc("claimed_at", claimed_at)
+    if started_at is not None:
+        started_at = _utc("started_at", started_at)
 
     result = {"found": False, "added": False}
 
@@ -984,8 +988,8 @@ def append_session_record(
         if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
             return entries  # duplicate: first observation owns `at`
         row = {"phase": phase, "harness": harness, "session_id": session_id, "at": at}
-        if claimed_at is not None:
-            row["claimed_at"] = claimed_at
+        if started_at is not None:
+            row["started_at"] = started_at
         rows.append(row)
         result["added"] = True
         return entries
@@ -1068,7 +1072,7 @@ def stamp_session_for_pr(
     harness: str,
     session_id: str,
     at: "str | None" = None,
-    claimed_at: "str | None" = None,
+    started_at: "str | None" = None,
     repo: "str | None" = None,
 ) -> "tuple[str | None, str]":
     """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
@@ -1095,6 +1099,6 @@ def stamp_session_for_pr(
     node_id = matches[0]
     _found, added = append_session_record(
         path, node_id, phase=phase, harness=harness, session_id=session_id, at=at,
-        claimed_at=claimed_at,
+        started_at=started_at,
     )
     return node_id, ("added" if added else "duplicate")

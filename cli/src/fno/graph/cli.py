@@ -4725,9 +4725,10 @@ def cmd_session_add(
     at: Optional[str] = typer.Option(
         None, "--at", help="ISO-8601 UTC timestamp (default: now); explicit for backfill."
     ),
-    claimed_at: Optional[str] = typer.Option(
-        None, "--claimed-at", help="ISO-8601 UTC instant work was claimed; lands on the "
-                                   "row so it bounds the implementation window with --at."
+    started_at: Optional[str] = typer.Option(
+        None, "--started-at", help="ISO-8601 UTC instant the work began; lands on the "
+                                   "row so it bounds the window with --at. Honest for every "
+                                   "phase (a think row starts but claims nothing)."
     ),
     require_session: Optional[str] = typer.Option(
         None, "--require-session", help="Skip (exit 0) unless the ambient session id equals "
@@ -4849,7 +4850,7 @@ def cmd_session_add(
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
                 harness=eff_harness, session_id=eff_session, at=at,
-                claimed_at=claimed_at, repo=repo,
+                started_at=started_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
@@ -4897,7 +4898,7 @@ def cmd_session_add(
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,
                 harness=eff_harness, session_id=eff_session, at=at,
-                claimed_at=claimed_at,
+                started_at=started_at,
             )
             if not found:
                 typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)

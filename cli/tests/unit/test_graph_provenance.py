@@ -1426,55 +1426,55 @@ def _sessions(g):
     return read_graph(g)[0].get("sessions", [])
 
 
-def test_claimed_at_lands_on_row_and_bounds_the_window(tmp_path, monkeypatch):
-    """AC1-HP: claimed_at (start) and at (terminal) both ride one row."""
+def test_started_at_lands_on_row_and_bounds_the_window(tmp_path, monkeypatch):
+    """AC1-HP: started_at (start) and at (terminal) both ride one row."""
     from fno.graph.store import append_session_record
 
     g = _guard_graph(tmp_path, monkeypatch)
     append_session_record(
         g, "ab-guard001", phase="do", harness="claude", session_id="S",
-        at="2026-07-20T12:00:00Z", claimed_at="2026-07-20T10:00:00Z",
+        at="2026-07-20T12:00:00Z", started_at="2026-07-20T10:00:00Z",
     )
     row = _sessions(g)[0]
-    assert row["claimed_at"] == "2026-07-20T10:00:00Z"
-    assert row["claimed_at"] <= row["at"]
+    assert row["started_at"] == "2026-07-20T10:00:00Z"
+    assert row["started_at"] <= row["at"]
 
 
-def test_claimed_at_absent_leaves_the_key_off(tmp_path, monkeypatch):
+def test_started_at_absent_leaves_the_key_off(tmp_path, monkeypatch):
     """Legacy rows and Step 1.5 stamps stay valid: no key, not a null."""
     from fno.graph.store import append_session_record
 
     g = _guard_graph(tmp_path, monkeypatch)
     append_session_record(g, "ab-guard001", phase="do", harness="claude", session_id="S")
-    assert "claimed_at" not in _sessions(g)[0]
+    assert "started_at" not in _sessions(g)[0]
 
 
 @pytest.mark.parametrize("bad", ["2026-07-20", "2026-07-20T10:00:00-07:00", "nope"])
-def test_claimed_at_rejects_non_utc_like_at(tmp_path, monkeypatch, bad):
+def test_started_at_rejects_non_utc_like_at(tmp_path, monkeypatch, bad):
     from fno.graph.store import append_session_record
 
     g = _guard_graph(tmp_path, monkeypatch)
-    with pytest.raises(ValueError, match="claimed_at"):
+    with pytest.raises(ValueError, match="started_at"):
         append_session_record(
-            g, "ab-guard001", phase="do", harness="claude", session_id="S", claimed_at=bad,
+            g, "ab-guard001", phase="do", harness="claude", session_id="S", started_at=bad,
         )
     assert _sessions(g) == []
 
 
-def test_claimed_at_is_not_part_of_the_idempotency_key(tmp_path, monkeypatch):
+def test_started_at_is_not_part_of_the_idempotency_key(tmp_path, monkeypatch):
     """AC1-HP: a double fire stays one row, and the first observation owns both
-    timestamps even when the second passes a different claimed_at."""
+    timestamps even when the second passes a different started_at."""
     from fno.graph.store import append_session_record
 
     g = _guard_graph(tmp_path, monkeypatch)
-    for claimed in ("2026-07-20T10:00:00Z", "2026-07-20T11:00:00Z"):
+    for started in ("2026-07-20T10:00:00Z", "2026-07-20T11:00:00Z"):
         append_session_record(
             g, "ab-guard001", phase="do", harness="claude", session_id="S",
-            claimed_at=claimed,
+            started_at=started,
         )
     rows = _sessions(g)
     assert len(rows) == 1
-    assert rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+    assert rows[0]["started_at"] == "2026-07-20T10:00:00Z"
 
 
 def test_require_session_mismatch_skips_with_exit_zero(tmp_path, monkeypatch):
@@ -1500,12 +1500,12 @@ def test_require_session_match_stamps(tmp_path, monkeypatch):
     g = _guard_graph(tmp_path, monkeypatch)
     r = CliRunner().invoke(C.cli, [
         "session", "add", "ab-guard001", "--phase", "do",
-        "--require-session", "SESSION-A", "--claimed-at", "2026-07-20T10:00:00Z",
+        "--require-session", "SESSION-A", "--started-at", "2026-07-20T10:00:00Z",
     ])
     assert r.exit_code == 0
     rows = _sessions(g)
     assert len(rows) == 1
-    assert rows[0]["phase"] == "do" and rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+    assert rows[0]["phase"] == "do" and rows[0]["started_at"] == "2026-07-20T10:00:00Z"
 
 
 def _plan(tmp_path, claims: str) -> str:
@@ -1650,7 +1650,7 @@ def test_skip_json_carries_the_resolved_node_and_identity(tmp_path, monkeypatch)
     assert payload["session_id"] == "SESSION-A"
 
 
-def test_claimed_at_is_forwarded_on_the_pr_number_path(tmp_path, monkeypatch):
+def test_started_at_is_forwarded_on_the_pr_number_path(tmp_path, monkeypatch):
     """A flag accepted, reported as success, and silently dropped is the failure
     this feature refuses elsewhere; the --pr-number path must honor it too."""
     from typer.testing import CliRunner
@@ -1667,15 +1667,15 @@ def test_claimed_at_is_forwarded_on_the_pr_number_path(tmp_path, monkeypatch):
 
     r = CliRunner().invoke(C.cli, [
         "session", "add", "--pr-number", "4242", "--repo", "o/r", "--phase", "do",
-        "--claimed-at", "2026-07-20T10:00:00Z",
+        "--started-at", "2026-07-20T10:00:00Z",
     ])
     assert r.exit_code == 0
     rows = _sessions(g)
     assert len(rows) == 1
-    assert rows[0]["claimed_at"] == "2026-07-20T10:00:00Z"
+    assert rows[0]["started_at"] == "2026-07-20T10:00:00Z"
 
 
-def test_claimed_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
+def test_started_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
     """It was accepted unvalidated there while the NODE path raised."""
     from typer.testing import CliRunner
     import fno.graph.cli as C
@@ -1691,7 +1691,7 @@ def test_claimed_at_is_validated_on_the_pr_number_path(tmp_path, monkeypatch):
 
     r = CliRunner().invoke(C.cli, [
         "session", "add", "--pr-number", "4243", "--repo", "o/r", "--phase", "do",
-        "--claimed-at", "not-a-timestamp",
+        "--started-at", "not-a-timestamp",
     ])
     assert r.exit_code == 2
     assert _sessions(g) == []
