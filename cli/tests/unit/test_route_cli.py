@@ -122,6 +122,33 @@ def test_set_protected_role_refused_no_write(project_scope: Path) -> None:
     assert not (project_scope / ".fno" / "config.toml").exists()
 
 
+@pytest.mark.parametrize(
+    ("role", "expected"),
+    [("implement", "'build'"), ("review-verdict", "nothing declares this role")],
+)
+def test_set_protected_role_hint_names_the_owning_surface(
+    project_scope: Path, role: str, expected: str
+) -> None:
+    """Refusing without naming the real surface sends the operator hunting for a
+    knob this table does not have. Both protected names have drifted from the
+    dispatch surface, so each carries its own pointer."""
+    res = runner.invoke(route_app, ["set", role, "zai,glm-5.2", "--local"])
+    assert res.exit_code == 2
+    assert "hint:" in res.output
+    assert expected in res.output
+    assert not (project_scope / ".fno" / "config.toml").exists()
+
+
+def test_route_table_protected_rows_name_why(monkeypatch: pytest.MonkeyPatch) -> None:
+    rows = {r["role"]: r for r in mr.build_route_table(settings=_settings(), env={})}
+    assert "build" in rows["implement"]["assigned_by"]
+    assert "no dispatch surface" in rows["review-verdict"]["assigned_by"]
+    # The guard itself is unchanged: both still never route.
+    for name in ("implement", "review-verdict"):
+        assert "never routed" in rows[name]["provider_model"]
+        assert mr.resolve_route(name, settings=_settings(), env={}) is None
+
+
 def test_set_unknown_provider_refused_no_write(project_scope: Path) -> None:
     res = runner.invoke(route_app, ["set", "build", "zia,glm-5.2", "--local"])
     assert res.exit_code == 2
