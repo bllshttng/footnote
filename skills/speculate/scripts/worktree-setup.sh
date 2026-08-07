@@ -58,23 +58,32 @@ if [[ -z "$WORKTREE_PATH" ]]; then
         [[ -n "$_gd" && -n "$_gcd" && "$_gd" != "$_gcd" ]] && _is_canonical=0
     fi
     if [[ "$_is_canonical" == "1" ]]; then
-        # A `name` with no `path` is a CREATE request the harness has not
-        # materialized yet; aborting it refuses a legitimate creation, so defer
-        # with a non-zero exit and let the harness's own flow run. A `never`
+        # A `name` with no `path` is a create request the harness has already
+        # materialized: it pre-creates `<repo>/.claude/worktrees/<name>` before
+        # firing this script, so adopt that path and run setup (in place - this
+        # copy does not relocate). Deferring instead leaves the pre-created
+        # worktree bare. Kept in sync with hooks/worktree-setup.sh. A `never`
         # repo still aborts. Only a payload with NEITHER path nor name is the
         # designate-cwd-as-a-worktree case this guard exists for.
         if [[ -n "$_WT_NAME" && "$_WT_POLICY" != "never" ]]; then
-            echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
-            exit 1
+            _cc_default="$_gate_repo/.claude/worktrees/$_WT_NAME"
+            if [[ -d "$_cc_default" ]]; then
+                WORKTREE_PATH="$_cc_default"
+            else
+                echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
+                exit 1
+            fi
         elif [[ -n "$_WT_NAME" && "$_WT_POLICY" == "never" ]]; then
             # Named create on a `never` repo aborts too; name policy, not isolation.
             echo "WorktreeCreate: create request for '$_WT_NAME' on a worktree.policy=never repo; policy forbids worktrees, refusing." >&2
             exit 0
         fi
-        echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
-        exit 0
+        if [[ -z "$WORKTREE_PATH" ]]; then
+            echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
+            exit 0
+        fi
     fi
-    WORKTREE_PATH="$(pwd)"
+    [[ -z "$WORKTREE_PATH" ]] && WORKTREE_PATH="$(pwd)"
 fi
 # Normalize to an absolute path and cd into it. Subsequent checks (pnpm-lock.yaml,
 # node_modules, pyproject.toml, etc.) use relative paths, so they must run inside

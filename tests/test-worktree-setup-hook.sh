@@ -249,6 +249,29 @@ SH
     fi
     rm -f "$stdout_file" "$stderr_file"
     rm -rf "$sandbox" "$never_bindir"
+
+    # Case 7: a `name` with NO `path` where CC has PRE-CREATED
+    # <repo>/.claude/worktrees/<name> (the live shape `claude --worktree <name>`
+    # sends). The hook must ADOPT that path and run setup (exit 0, path on
+    # stdout), not defer - deferring leaves the pre-created worktree bare.
+    sandbox=$(setup_sandbox)
+    mkdir -p "$sandbox/.claude/worktrees/cc-created"
+    stdin_json=$(printf '{"session_id":"s1","name":"cc-created","hook_event_name":"WorktreeCreate"}')
+    output=$(run_hook "$sandbox" "$hook" "$stdin_json")
+    rc=$(echo "$output" | sed -n '1p')
+    stdout_file=$(echo "$output" | sed -n '2p')
+    stderr_file=$(echo "$output" | sed -n '3p')
+    if [[ "$rc" -ne 0 ]]; then
+        fail "$name :: named create adopts pre-created path" \
+            "exit $rc (should adopt the pre-created path and run setup, not defer). stderr: $(cat "$stderr_file")"
+    elif ! grep -q "cc-created" "$stdout_file"; then
+        fail "$name :: named create adopts pre-created path" \
+            "stdout should be the adopted cc-created path, got '$(cat "$stdout_file")'"
+    else
+        pass "$name :: named create adopts pre-created path"
+    fi
+    rm -f "$stdout_file" "$stderr_file"
+    rm -rf "$sandbox"
 done
 
 echo
