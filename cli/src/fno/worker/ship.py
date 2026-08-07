@@ -270,25 +270,11 @@ def ship(
                 f"PR {pr_number}: {(stamp.stderr or stamp.stdout).strip()[:200]}",
                 file=sys.stderr,
             )
-
-        # Step 2.6: stamp ship-phase lifecycle provenance (x-b6e4). No explicit
-        # --session-id: the primitive resolves the ambient conversation identity,
-        # which is what a transcript is found by (NOT the target run id). A
-        # takeover session that later merges/post-merges appends its own ship
-        # entry. Best-effort + idempotent; a skip (no ambient identity) or failure
-        # logs but never fails the ship.
-        sess_stamp = subprocess.run(
-            ["fno", "backlog", "session", "add", node_id, "--phase", "ship"],
-            capture_output=True,
-            text=True,
-        )
-        if sess_stamp.returncode != 0:
-            import sys
-            print(
-                f"worker.ship: ship-phase provenance stamp skipped for {node_id}: "
-                f"{(sess_stamp.stderr or sess_stamp.stdout).strip()[:200]}",
-                file=sys.stderr,
-            )
+        # Step 2.6 used to stamp ship provenance here with an explicit
+        # `session add --phase ship`. The `update --pr-number` call above now
+        # owns that stamp (it fires on the pr_number unset->set transition with
+        # the same ambient identity), so a second explicit stamp would only
+        # double-fire.
 
     # Arming auto-merge here would pre-authorize a merge before any gate ran, so
     # it moved to `fno-agents finalize` (see the module docstring). The

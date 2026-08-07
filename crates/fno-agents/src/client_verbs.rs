@@ -1395,6 +1395,59 @@ fn line_closes_quoted_scalar(raw: &str) -> bool {
 /// adopt path scans these. Mirrors [`crate::paths::canonical_repo_root`] but
 /// returns every worktree, not just the main checkout. Empty outside a git repo
 /// (callers also fall back to `cwd`).
+/// claude's projects-dir slug for a cwd: both '/' and '.' replaced with '-'
+/// (matches Python's `fno.provenance.resolver._slug`). Not reversible, so the
+/// resume path resolves cwd by trying candidates and slug-checking rather than
+/// decoding a slug back to a path.
+fn claude_cwd_slug(path: &Path) -> String {
+    path.to_string_lossy().replace('/', "-").replace('.', "-")
+}
+
+/// The cwd `claude --resume <uuid>` must run in: the dir whose projects-dir
+/// slug actually holds the transcript, not the (possibly stale) recorded
+/// registration cwd. A session that ran `EnterWorktree` after registration has
+/// its transcript under the worktree's project dir, while the recorded cwd is
+/// the pre-`EnterWorktree` canonical - resuming there looks for the transcript
+/// in the wrong dir and lands on the wrong branch.
+///
+/// Tries the recorded cwd then its git worktrees; the first whose
+/// `<projects>/<slug>/<uuid>.jsonl` exists wins. Falls back to the recorded cwd
+/// and names which branch was taken on stderr (a probe that does not name the
+/// store it read is the trap the king's own SKILL.md warns about).
+fn resolve_resume_cwd(claude_home: &ClaudeHome, recorded: &str, uuid: &str) -> PathBuf {
+    if uuid.is_empty() {
+        return PathBuf::from(recorded);
+    }
+    let projects = claude_home.projects_dir();
+    let transcript = format!("{}.jsonl", uuid);
+    // Probe the recorded cwd first: the common case (no EnterWorktree) keeps
+    // the transcript under its own project dir, and a stat is far cheaper than
+    // spawning `git worktree list` on every resume. Only on a miss do we
+    // enumerate worktrees.
+    let recorded_pb = PathBuf::from(recorded);
+    let recorded_slug = claude_cwd_slug(&recorded_pb);
+    if projects.join(&recorded_slug).join(&transcript).exists() {
+        return recorded_pb;
+    }
+    let candidates: Vec<PathBuf> = git_worktree_paths(Path::new(recorded));
+    for cand in &candidates {
+        let slug = claude_cwd_slug(cand);
+        if projects.join(&slug).join(&transcript).exists() {
+            eprintln!(
+                "fno agents resume: cwd resolved from the transcript's project dir ({})",
+                cand.display()
+            );
+            return cand.clone();
+        }
+    }
+    eprintln!(
+        "fno agents resume: no transcript found under any candidate for {uuid}; \
+         using the recorded cwd ({})",
+        recorded
+    );
+    recorded_pb
+}
+
 fn git_worktree_paths(cwd: &Path) -> Vec<PathBuf> {
     let out = match std::process::Command::new("git")
         .arg("-C")
@@ -2113,7 +2166,23 @@ pub fn run_resume(rest: &[String], home: &AgentsHome) -> i32 {
         .filter(|s| !s.is_empty())
         .or_else(|| entry.get("provider").and_then(Value::as_str))
         .unwrap_or("");
-    let cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
+    let recorded_cwd = entry.get("cwd").and_then(Value::as_str).unwrap_or("");
+    // claude keys transcript dirs by the session cwd, so a session that ran
+    // EnterWorktree after registration has its transcript under a different
+    // project dir than the recorded (pre-EnterWorktree) cwd. Resolve the cwd
+    // from where the transcript actually is; other harnesses keep the recorded.
+    let resolved_cwd = if harness == "claude" {
+        let claude_uuid = entry
+            .get("claude_session_uuid")
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        resolve_resume_cwd(&ClaudeHome::from_env(), recorded_cwd, claude_uuid)
+            .to_string_lossy()
+            .into_owned()
+    } else {
+        recorded_cwd.to_string()
+    };
+    let cwd: &str = &resolved_cwd;
     let session_id = session_id_field(harness)
         .and_then(|f| entry.get(f))
         .and_then(Value::as_str)
@@ -3827,6 +3896,97 @@ mod tests {
                 None
             )
         );
+    }
+
+    fn _git(repo: &Path, args: &[&str]) {
+        let st = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .status()
+            .unwrap();
+        assert!(st.success(), "git {:?} in {} failed", args, repo.display());
+    }
+
+    #[test]
+    fn resolve_resume_cwd_picks_the_transcripts_worktree_over_the_stale_recorded_cwd() {
+        // Registered at the canonical checkout; transcript under a worktree's
+        // project dir (the EnterWorktree case). Resume must resolve to the
+        // worktree, not the pre-EnterWorktree recorded cwd.
+        let tmp = tempfile::tempdir().unwrap();
+        // Canonicalize: macOS houses tempfile under /var/folders (a symlink to
+        // /private/var/folders), and `git` records the resolved /private/var
+        // path while the test's PathBuf carries /var - the slugs would diverge.
+        let home = tmp.path().canonicalize().unwrap();
+        let canonical = home.join("repo");
+        std::fs::create_dir_all(&canonical).unwrap();
+        _git(&canonical, &["init", "-q"]);
+        _git(&canonical, &["config", "user.email", "t@t"]);
+        _git(&canonical, &["config", "user.name", "t"]);
+        _git(&canonical, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let wt = home.join("wt");
+        _git(
+            &canonical,
+            &[
+                "worktree",
+                "add",
+                "-q",
+                "-b",
+                "feature/x",
+                wt.to_str().unwrap(),
+            ],
+        );
+
+        let uuid = "9d2874cb-9365-48c0-aeb6-9e1d244f4cd3";
+        let wt_project = home
+            .join(".claude")
+            .join("projects")
+            .join(claude_cwd_slug(&wt));
+        std::fs::create_dir_all(&wt_project).unwrap();
+        std::fs::write(wt_project.join(format!("{uuid}.jsonl")), "[]").unwrap();
+
+        let resolved = resolve_resume_cwd(&ClaudeHome::at(home), canonical.to_str().unwrap(), uuid);
+        assert_eq!(
+            resolved, wt,
+            "resolved to the transcript's worktree, not the recorded cwd"
+        );
+    }
+
+    #[test]
+    fn resolve_resume_cwd_falls_back_to_recorded_when_no_transcript_exists() {
+        // No transcript under any candidate: fall back to the recorded cwd and
+        // say so on stderr. An absent number beats a guessed one.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let recorded = home.join("recorded");
+        std::fs::create_dir_all(&recorded).unwrap();
+
+        let resolved = resolve_resume_cwd(
+            &ClaudeHome::at(home),
+            recorded.to_str().unwrap(),
+            "deadbeef-0000-0000-0000-000000000000",
+        );
+        assert_eq!(resolved, recorded);
+    }
+
+    #[test]
+    fn resolve_resume_cwd_confirms_recorded_when_its_slug_holds_the_transcript() {
+        // The transcript under the recorded cwd's own slug confirms it; no
+        // worktree enumeration needed.
+        let tmp = tempfile::tempdir().unwrap();
+        let home = tmp.path();
+        let recorded = home.join("recorded");
+        std::fs::create_dir_all(&recorded).unwrap();
+        let uuid = "aaaaaaaa-0000-0000-0000-000000000000";
+        let project = home
+            .join(".claude")
+            .join("projects")
+            .join(claude_cwd_slug(&recorded));
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join(format!("{uuid}.jsonl")), "[]").unwrap();
+
+        let resolved = resolve_resume_cwd(&ClaudeHome::at(home), recorded.to_str().unwrap(), uuid);
+        assert_eq!(resolved, recorded);
     }
 
     #[test]

@@ -388,10 +388,13 @@ class Ritual:
             self._emit("reconcile", _OK, detail)
         else:
             self._emit("reconcile", _FAILED, f"exit={r.returncode}")
-        # Step 2a + 2b: plan frontmatter + ship provenance. Idempotent.
+        # Step 2a: plan frontmatter. Idempotent.
         self._leg("plan-reconcile", ["plan", "reconcile-status", "--apply"])
-        self._leg("session-add", ["backlog", "session", "add",
-                                  "--pr-number", str(self.ctx.pr), "--phase", "ship"])
+        # Ship provenance used to be stamped here (`session add --phase ship` on
+        # the PR). It recorded the ritual session, not the implementer, and only
+        # fired on the `fno pr merged` path. The ship row now lands at
+        # `fno backlog update --pr-number` (the PR-link choke point), which every
+        # shipped node passes through regardless of how it merged.
 
     def leg_harvest(self) -> None:
         argv = ["retro", "run", "--pr-number", str(self.ctx.pr)]

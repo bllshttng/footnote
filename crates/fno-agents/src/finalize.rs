@@ -149,7 +149,7 @@ struct ManifestFields {
     /// Absent on manifests minted before x-0469 -> the do stamp skips.
     initial_head: Option<String>,
     /// Init instant: the author-date floor for work evidence, and the value the
-    /// do row carries as `claimed_at` (the start of the implementation window).
+    /// do row carries as `started_at` (the start of the implementation window).
     created_at: Option<String>,
     /// Cross-project plan: graduation must wait for ALL project PRs, so the
     /// expected URL count is derived from the plan's `projects:` map, never 1.
@@ -2088,7 +2088,7 @@ fn stamp_node_do(cwd: &Path, m: &ManifestFields, reason: &str) {
     if let Some(plan) = m.plan_path.as_deref() {
         cmd.args(["--guard-plan", plan]);
     }
-    cmd.args(["--claimed-at", created_at]);
+    cmd.args(["--started-at", created_at]);
     let ok = cmd
         .current_dir(cwd)
         .status()

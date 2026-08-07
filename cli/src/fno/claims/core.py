@@ -622,7 +622,7 @@ def release_claim(
     *,
     strict: bool = False,
     root: Optional[Path] = None,
-) -> None:
+) -> Optional["Claim"]:
     """Release a claim we hold.
 
     Behavior:
@@ -636,36 +636,42 @@ def release_claim(
     The duration_held_ms field in the audit event is best-effort: read from
     acquired_at minus now. If the file disappears between read and unlink,
     that race is benign (another caller released).
+
+    Returns the released ``Claim`` (carrying ``acquired_at``) on a real
+    release, or ``None`` when nothing was released (already gone, holder
+    mismatch, corrupted) - so a caller can stamp a window bounded by the
+    claim's own acquire time without re-reading the file.
     """
     if not key or not holder:
         raise ClaimValidationError("key and holder must be non-empty")
 
     path = claim_path(key, root=root)
     if not path.exists():
-        return
+        return None
 
     try:
         existing = read_claim_file(path)
     except ClaimGoneAway:
-        return
+        return None
     except ClaimCorrupted:
         # Corrupted file: we cannot verify ownership. Conservative default
         # is to leave it for force_release. strict mode surfaces the issue.
         if strict:
             raise
-        return
+        return None
 
     if existing.holder != holder:
         if strict:
             raise HolderMismatch(expected=holder, actual=existing.holder, key=key)
-        return
+        return None
 
     duration_ms = max(0, now_ms() - existing.acquired_at)
     try:
         path.unlink()
     except FileNotFoundError:
-        return
+        return None
     emit_claim_released(existing, duration_ms=duration_ms)
+    return existing
 
 
 def refresh_claim(

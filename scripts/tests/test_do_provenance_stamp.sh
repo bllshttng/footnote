@@ -4,7 +4,7 @@
 # These exercise the REAL fno-agents binary against synthetic manifests, with a
 # `fno` shim on PATH capturing argv. That is the only way to pin two things the
 # unit tests structurally cannot: that finalize passes the manifest's created_at
-# as --claimed-at (rather than, say, now), and that each guard's decision
+# as --started-at (rather than, say, now), and that each guard's decision
 # actually reaches the subprocess boundary.
 
 set -uo pipefail
@@ -132,7 +132,7 @@ done
 
 # ---- AC1-HP: real authored work stamps once, carrying created_at ----
 echo ""
-echo "test_ac1_hp_authored_work_stamps_with_claimed_at"
+echo "test_ac1_hp_authored_work_stamps_with_started_at"
 : > "$CAPTURE"
 commit_at "my own work" 1800000001 1800000001
 OUT=$(run_finalize DonePRGreen)
@@ -141,9 +141,9 @@ assert_not_contains "AC1-HP: no guard skip" "skipped" "$OUT"
 assert_contains "AC1-HP: stamps the node with phase do" "session add ab-e2e0001 --phase do" "$CAP"
 assert_contains "AC1-HP: passes the identity guard" "--require-session SESSION-LIVE" "$CAP"
 assert_contains "AC1-HP: passes the plan guard" "--guard-plan $T/repo/plan.md" "$CAP"
-# The binding a unit test cannot reach: claimed_at is the manifest's created_at,
+# The binding a unit test cannot reach: started_at is the manifest's created_at,
 # not the finalize instant.
-assert_contains "AC1-HP: claimed_at is the manifest created_at" "--claimed-at $CREATED" "$CAP"
+assert_contains "AC1-HP: started_at is the manifest created_at" "--started-at $CREATED" "$CAP"
 if [[ "$(grep -c 'session add' <<< "$CAP")" == "1" ]]; then
     pass "AC1-HP: exactly one stamp call"
 else

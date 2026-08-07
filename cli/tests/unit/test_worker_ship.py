@@ -299,18 +299,18 @@ def _make_state_with_node(tmp_path: Path, node_id: str) -> Path:
 
 def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
     """AC2-HP: with a graph_node_id, ship() runs `fno backlog update --pr-number`,
-    then stamps the ship-phase lifecycle provenance (x-b6e4)."""
+    which is also where the ship-phase lifecycle row now lands (update stamps it
+    on the pr_number unset->set transition), so ship() no longer fires a separate
+    `session add --phase ship`."""
     state_path = _make_state_with_node(tmp_path, "x-1a2b")
 
-    # Calls: git rev-parse, gh pr list, gh pr create, fno backlog update,
-    #        fno backlog session add (ship-phase provenance, x-b6e4).
+    # Calls: git rev-parse, gh pr list, gh pr create, fno backlog update.
     mock_run = MagicMock()
     mock_run.side_effect = [
         MagicMock(returncode=0, stdout="feature/test\n", stderr=""),  # git rev-parse
         MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
         MagicMock(returncode=0, stdout="", stderr=""),                 # fno backlog update
-        MagicMock(returncode=0, stdout="", stderr=""),                 # fno backlog session add
     ]
 
     with patch("subprocess.run", mock_run), patch(
@@ -331,14 +331,15 @@ def test_ac2_hp_ship_stamps_node_pr_link(tmp_path):
         "--pr-number", "42",
         "--pr-url", "https://github.com/owner/repo/pull/42",
     ]
-    # x-b6e4: ship-phase provenance stamped with ambient identity (no explicit
-    # --session-id -- it records the conversation id, not the target run id).
-    sess_cmd = mock_run.call_args_list[4][0][0]
-    assert sess_cmd == ["fno", "backlog", "session", "add", "x-1a2b", "--phase", "ship"]
+    # The ship row now lands inside the update above, so ship() must NOT fire a
+    # separate `session add --phase ship`: a double-fire would write two ship
+    # rows for one PR link.
+    argvs = [c[0][0] for c in mock_run.call_args_list]
+    assert not any("session" in a and "add" in a for a in argvs), argvs
 
 
 def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
-    """AC2-ERR: a non-zero stamp is logged but ship still reports the PR created."""
+    """AC2-ERR: a non-zero link stamp is logged but ship still reports the PR created."""
     state_path = _make_state_with_node(tmp_path, "x-1a2b")
 
     mock_run = MagicMock()
@@ -347,7 +348,6 @@ def test_ac2_err_stamp_failure_never_fails_ship(tmp_path):
         MagicMock(returncode=0, stdout="[]", stderr=""),               # gh pr list
         MagicMock(returncode=0, stdout="https://github.com/owner/repo/pull/42", stderr=""),  # gh pr create
         MagicMock(returncode=1, stdout="", stderr="graph locked"),     # fno backlog update FAILS
-        MagicMock(returncode=1, stdout="", stderr="graph locked"),     # session add also fails
     ]
 
     with patch("subprocess.run", mock_run), patch(

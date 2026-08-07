@@ -300,6 +300,69 @@ def test_list_node_prefix_finds_global_claims_without_env(tmp_path, monkeypatch)
     assert "node:ab-deadbeef" in keys
 
 
+def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
+    """--stamp-do on a node claim release writes the do row: started_at from the
+    claim's acquire time, ended_at at the release instant - the third choke point.
+    Gated to the session's own release (the flag), so a handoff release that does
+    not pass it records nothing."""
+    import fno.paths
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-do-1")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "ab-dotest", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n')
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+
+    acquire_claim(key="node:ab-dotest", holder="target-session:s",
+                  ttl_ms=3_600_000, root=home)
+
+    stamped = runner.invoke(
+        cli, ["release", "node:ab-dotest", "--holder", "target-session:s", "--stamp-do"]
+    )
+    assert stamped.exit_code == 0, stamped.output
+    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    do = [x for x in rows if x.get("phase") == "do"]
+    assert len(do) == 1
+    assert do[0]["harness"] == "claude"
+    assert do[0]["session_id"] == "sess-do-1"
+    assert do[0]["started_at"] and do[0]["ended_at"]
+    assert do[0]["started_at"] <= do[0]["ended_at"]
+
+
+def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
+    """A bare release (the handoff path) records nothing - the do window would
+    mis-attribute the predecessor under the successor's identity."""
+    import fno.paths
+    from fno.claims.core import acquire_claim
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-do-2")
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "ab-dotest2", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n')
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+
+    acquire_claim(key="node:ab-dotest2", holder="target-session:s",
+                  ttl_ms=3_600_000, root=home)
+    bare = runner.invoke(
+        cli, ["release", "node:ab-dotest2", "--holder", "target-session:s"]
+    )
+    assert bare.exit_code == 0, bare.output
+    assert json.loads(g.read_text())["entries"][0].get("sessions", []) == []
+
+
 def test_non_node_key_uses_cwd_not_global(tmp_path, monkeypatch):
     """A non-node key keeps the cwd default - a node claim at the global root
     must NOT leak into a cwd-scoped lookup of a different key."""

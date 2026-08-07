@@ -14,6 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.harness_identity import AMBIENT_IDENTITY_ENV as _MARKERS
 
 runner = CliRunner()
 
@@ -89,6 +90,28 @@ def test_pr_number_alone_derives_the_url(tmp_graph, monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/77"
+
+
+def test_pr_url_alone_derives_the_number(tmp_graph):
+    """A url-only update derives pr_number from the url. node_pr_refs gates on
+    isinstance(pr_number, int), so without this a node linked by --pr-url alone
+    is invisible to merge detection - the x-9ab2 shape."""
+    from fno.graph._reconcile import node_pr_refs
+
+    _seed(tmp_graph, [
+        {"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"},
+    ])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    node = _first(tmp_graph)
+    assert node["pr_number"] == 77
+    assert node["pr_url"] == "https://github.com/o/r/pull/77"
+    assert node_pr_refs(node), "reconcile must see the PR"
 
 
 def test_pr_number_refused_when_repo_unresolvable(tmp_graph, monkeypatch):
@@ -360,3 +383,140 @@ def test_url_only_update_is_allowed_when_it_names_the_same_pr(tmp_graph):
 
     assert result.exit_code == 0, result.output
     assert _first(tmp_graph)["pr_url"] == "https://github.com/o/r/pull/123"
+
+
+# ---- ship provenance: the consolidated ship writer lives in `update` ----
+
+# _MARKERS is imported at the top of the file (AMBIENT_IDENTITY_ENV). Several
+# modules read a session marker directly rather than through the resolver
+# (carveout/core.py, done/cli.py, log_cmd.py, adapters/hermes.py), so a
+# hand-maintained copy stops covering a marker the moment one is added - the
+# canonical tuple stays in sync with the resolver's scrub set.
+
+
+def _set_ambient_claude(monkeypatch, sid="SESSION-A"):
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", sid)
+
+
+def _clear_ambient(monkeypatch):
+    for m in _MARKERS:
+        monkeypatch.delenv(m, raising=False)
+
+
+def test_ship_stamp_fires_on_first_pr_link(tmp_graph, monkeypatch):
+    """The ship row lands when pr_number transitions unset->set, recording the
+    implementer's ambient identity. This is the one site every shipped node
+    passes through, so the row names the implementer, not the merger."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    ship = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+            if r.get("phase") == "ship"]
+    assert len(ship) == 1
+    assert ship[0]["harness"] == "claude"
+    assert ship[0]["session_id"] == "SESSION-A"
+
+
+def test_ship_stamp_skips_with_no_identity_and_exit_zero(tmp_graph, monkeypatch):
+    """No ambient identity -> the stamp skips with a named stderr reason, exit 0
+    (the link itself still lands), and no ship row is invented. Silent skips are
+    the defect this stamp exists to remove, so the reason names what refused."""
+    _clear_ambient(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000001")["pr_number"] == 77  # link still lands
+    assert "ship provenance" in result.output                   # skip names itself
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
+
+
+def test_ship_stamp_does_not_refire_on_an_already_linked_node(tmp_graph, monkeypatch):
+    """A second update on an already-linked node is not an unset->set transition,
+    so it adds no second ship row. The pr-number link is the choke point; the
+    stamp fires once, on first link."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+
+    first = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+    assert first.exit_code == 0, first.output
+    # Already linked -> not a transition -> no second ship row.
+    second = runner.invoke(app, [
+        "backlog", "update", "ab-00000001",
+        "--pr-number", "77", "--pr-url", "https://github.com/o/r/pull/77",
+    ])
+    assert second.exit_code == 0, second.output
+    ship = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+            if r.get("phase") == "ship"]
+    assert len(ship) == 1
+
+
+def test_blueprint_stamp_fires_on_first_plan_bind(tmp_graph, monkeypatch, tmp_path):
+    """The blueprint row lands when plan_path transitions unset->set. plan-bind
+    is blueprint's end, so the row carries ended_at and no started_at (the
+    roster renders it 'end only'). This is the code choke point that replaces
+    the skill-prose stamp."""
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    bp = [r for r in _node(tmp_graph, "ab-00000001").get("sessions", [])
+          if r.get("phase") == "blueprint"]
+    assert len(bp) == 1
+    assert bp[0]["harness"] == "claude"
+    assert bp[0]["session_id"] == "SESSION-A"
+    assert bp[0]["ended_at"] and "started_at" not in bp[0]
+
+
+def test_blueprint_stamp_skips_with_no_identity(tmp_graph, monkeypatch, tmp_path):
+    _clear_ambient(monkeypatch)
+    _seed(tmp_graph, [{"id": "ab-00000001", "title": "t", "domain": "code", "project": "p"}])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert "blueprint provenance" in result.output  # skip names what refused
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []
+
+
+def test_blueprint_stamp_does_not_refire_on_a_rebind(tmp_graph, monkeypatch, tmp_path):
+    _set_ambient_claude(monkeypatch)
+    _seed(tmp_graph, [{
+        "id": "ab-00000001", "title": "t", "domain": "code", "project": "p",
+        "plan_path": str(tmp_path / "old.md"),
+    }])
+    plan = tmp_path / "plan.md"
+    plan.write_text("---\nstatus: ready\n---\n# plan\n")
+
+    # plan_path is already set -> not an unset->set transition -> no blueprint row.
+    result = runner.invoke(app, [
+        "backlog", "update", "ab-00000001", "--plan-path", str(plan),
+    ])
+
+    assert result.exit_code == 0, result.output
+    assert _node(tmp_graph, "ab-00000001").get("sessions", []) == []

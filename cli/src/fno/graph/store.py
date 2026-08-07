@@ -911,26 +911,33 @@ def append_session_record(
     phase: str,
     harness: str,
     session_id: str,
-    at: "str | None" = None,
-    claimed_at: "str | None" = None,
+    ended_at: "str | None" = None,
+    started_at: "str | None" = None,
 ) -> "tuple[bool, bool]":
-    """Append a ``{phase, harness, session_id, at}`` lifecycle record to a node's
-    append-only ``sessions`` list, returning ``(found, added)`` (x-b6e4).
+    """Append a ``{phase, harness, session_id, ended_at, started_at}`` lifecycle
+    record to a node's append-only ``sessions`` list, returning ``(found,
+    added)`` (x-b6e4).
 
     The single graph-owned mutation primitive behind ``fno backlog session add``.
     Idempotent under the graph lock: appends only when ``(phase, harness,
     session_id)`` is absent, so a retried or concurrent duplicate stamp collapses
-    to one row and the first observation owns ``at``. Never edits or removes an
-    entry.
+    to one row and the first observation owns the timestamps. Never edits or
+    removes an entry.
 
-    ``claimed_at`` is optional and records when the work was claimed, so one row
-    bounds the implementation window (``claimed_at`` start, ``at`` terminal). It
-    is omitted from the row when absent, keeping legacy rows valid, and is never
-    part of the idempotency key.
+    ``started_at`` / ``ended_at`` are optional and bound the phase window. Both
+    are omitted unless the writer has an honest value: ``ended_at`` is the phase
+    END (not the stamp-fire time - defaulting to now would name that instant as
+    the end, the receipt-can-lie failure under an honest name), so a row opened
+    mid-session with no recorded end omits it. The canonical keys are
+    ``started_at`` / ``ended_at``; ``claimed_at`` and ``at`` are the legacy keys
+    older rows carry and the reader accepts forever, but no row is rewritten -
+    new rows always write the canonical names. Neither is part of the
+    idempotency key.
 
     Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
-    session id, or an unparseable ``at``/``claimed_at`` -- validation lives here
-    so every caller (CLI, tests, future backfill) is bound by the same contract.
+    session id, or an unparseable ``ended_at``/``started_at`` -- validation lives
+    here so every caller (CLI, tests, future backfill) is bound by the same
+    contract.
     ``found=False`` when the node is absent (no mutation).
     """
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
@@ -966,11 +973,14 @@ def append_session_record(
             )
         return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    at = _utc("at", at) if at is not None else datetime.now(timezone.utc).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
-    if claimed_at is not None:
-        claimed_at = _utc("claimed_at", claimed_at)
+    # ended_at is the phase END; omitted when the writer has no honest end to
+    # record (a row opened mid-session has a start and no end). Defaulting to the
+    # stamp-fire time would name that instant as the phase end - the receipt-can-
+    # lie failure under an honest name - so it is absent, not faked.
+    if ended_at is not None:
+        ended_at = _utc("ended_at", ended_at)
+    if started_at is not None:
+        started_at = _utc("started_at", started_at)
 
     result = {"found": False, "added": False}
 
@@ -982,10 +992,12 @@ def append_session_record(
         rows = node.setdefault("sessions", [])
         key = (phase, harness, session_id)
         if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
-            return entries  # duplicate: first observation owns `at`
-        row = {"phase": phase, "harness": harness, "session_id": session_id, "at": at}
-        if claimed_at is not None:
-            row["claimed_at"] = claimed_at
+            return entries  # duplicate: first observation owns the timestamps
+        row = {"phase": phase, "harness": harness, "session_id": session_id}
+        if ended_at is not None:
+            row["ended_at"] = ended_at
+        if started_at is not None:
+            row["started_at"] = started_at
         rows.append(row)
         result["added"] = True
         return entries
@@ -1067,8 +1079,8 @@ def stamp_session_for_pr(
     phase: str,
     harness: str,
     session_id: str,
-    at: "str | None" = None,
-    claimed_at: "str | None" = None,
+    ended_at: "str | None" = None,
+    started_at: "str | None" = None,
     repo: "str | None" = None,
 ) -> "tuple[str | None, str]":
     """Resolve the UNIQUE node carrying ``pr_number`` and append a lifecycle
@@ -1094,7 +1106,7 @@ def stamp_session_for_pr(
         return None, "ambiguous"
     node_id = matches[0]
     _found, added = append_session_record(
-        path, node_id, phase=phase, harness=harness, session_id=session_id, at=at,
-        claimed_at=claimed_at,
+        path, node_id, phase=phase, harness=harness, session_id=session_id,
+        ended_at=ended_at, started_at=started_at,
     )
     return node_id, ("added" if added else "duplicate")

@@ -246,6 +246,37 @@ fi
 # when the session process exits, defeating the survive-compaction goal.
 TERMINATION_REASON=$(echo "$DECISION_JSON" | jq -r '.termination_reason // empty')
 if [[ -n "$TERMINATION_REASON" ]]; then
+    # ── 10b. Release the node claim at a FINISHED terminal ─────────────
+    # Fires BEFORE finalize on purpose: both stamp a `do` row for the same
+    # session, and sessions[] is append-only (first observation wins), so the
+    # release row must land first to carry its ended_at window; finalize's later
+    # stamp collapses. A terminal that means the node's work is FINISHED frees
+    # its claim now (wiring the intent section 11 states and no code executed -
+    # a real doc/code divergence). A terminal that only means THIS SESSION
+    # STOPPED (PR open, more work coming) KEEPS holding, so a stopped-but-
+    # resumable session is not handed to a twin. CHANGES CLAIM LIFECYCLE:
+    # finished-terminal releases instead of stale-after-TTL.
+    #
+    # SOURCE OF TRUTH: the variants below are a hand-maintained mirror of the
+    # Rust `TerminationReason` enum in crates/fno-agents/src/loopcheck.rs. The
+    # four deliberately omitted clean terminals (DoneBatched, DoneAwaitingMerge,
+    # DoneUnreviewed, DonePlanned) keep their claim because no further agent
+    # work is coming but a human/batch merge or the reconcile path still owes
+    # the close - releasing here would hand a twin dispatcher the node mid-flight.
+    # When Rust gains a new Done* variant, update both this list and the
+    # classification in loopcheck.rs; the deeper fix is a `releases_claim: bool`
+    # field on the decision JSON so this stop pattern-matching goes away.
+    case "$TERMINATION_REASON" in
+        DonePRGreen|DoneAdvisory|DoneDelivery|NoWork)
+            _REL_KEY="$(sed -n 's/^target_claim_key:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
+            _REL_HOLDER="$(sed -n 's/^target_claim_holder:[[:space:]]*"\([^"]*\)".*/\1/p' "$STATE_FILE" 2>/dev/null | head -1)"
+            if [[ "$_REL_KEY" == node:* && -n "$_REL_HOLDER" ]]; then
+                FNO_CLAIMS_ROOT="$HOME" fno claim release "$_REL_KEY" \
+                    --holder "$_REL_HOLDER" --stamp-do \
+                    >/dev/null 2>>"${REPO_ROOT}/.fno/loop-check.stderr.log" || true
+            fi
+            ;;
+    esac
     FINALIZE_STATE="$STATE_FILE"
     if [[ "$TERMINATION_REASON" == "DoneDelivery" ]]; then
         if [[ "$STATE_FILE" != "$DELIVERY_PENDING_STATE" ]] \

@@ -169,11 +169,20 @@ def release(
     key: str = typer.Argument(...),
     holder: str = typer.Option(..., "--holder"),
     strict: bool = typer.Option(False, "--strict", help="Raise if holder does not match"),
+    stamp_do: bool = typer.Option(
+        False, "--stamp-do",
+        help="Stamp a do provenance row (started_at from this claim's acquire time, "
+             "ended_at now). Set ONLY by a session releasing its OWN node claim at a "
+             "finished terminal - never a handoff, which runs under a successor's "
+             "identity and would mis-attribute the predecessor's window.",
+    ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
     """Release a claim we own. Silent success if already released."""
     try:
-        release_claim(key=key, holder=holder, strict=strict, root=_node_aware_root(key))
+        released = release_claim(
+            key=key, holder=holder, strict=strict, root=_node_aware_root(key)
+        )
     except HolderMismatch as exc:
         typer.echo(f"holder mismatch: {exc}", err=True)
         raise typer.Exit(code=4)
@@ -184,10 +193,67 @@ def release(
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
 
+    # do provenance: the third choke point (ship=pr_number, blueprint=plan_path,
+    # do=claim release). started_at from the claim's own acquire time, ended_at
+    # at the release instant - a true per-session hold window, not the
+    # stamp-fire time. The --stamp-do gate means only a session releasing its
+    # own claim (the finished-terminal path) records it.
+    if stamp_do and released is not None and key.startswith("node:"):
+        _stamp_do_on_release(key, released)
+
     if json_output:
         typer.echo(json.dumps({"key": key, "released": True}))
     else:
         typer.echo(f"released: {key}")
+
+
+def _stamp_do_on_release(key: str, claim) -> None:
+    """Append the do lifecycle row for the session that just released a node
+    claim. Best-effort: a graph failure or missing identity is a named stderr
+    skip and never fails the release."""
+    from datetime import datetime, timezone
+
+    from fno.graph.store import append_session_record
+    from fno.harness_identity import resolve_harness_identity
+    from fno.paths import graph_json
+
+    node_id = key.split(":", 1)[1] if ":" in key else ""
+    if not node_id:
+        return
+    ident = resolve_harness_identity()
+    if not ident.session_id or not ident.harness:
+        typer.echo(
+            f"claim release: no ambient identity to stamp do provenance for "
+            f"{node_id}; the row is skipped. Skipped.",
+            err=True,
+        )
+        return
+    started = datetime.fromtimestamp(
+        claim.acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        found, _added = append_session_record(
+            graph_json(), node_id, phase="do",
+            harness=ident.harness, session_id=ident.session_id,
+            started_at=started, ended_at=ended,
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"claim release: do provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+        return
+    # append_session_record returns (found=False, added=False) without raising
+    # when the node id is absent from the graph (a superseded node whose claim
+    # file lingers). The named-skip contract requires an explicit stderr line
+    # so the operator knows provenance was lost, not silently dropped.
+    if not found:
+        typer.echo(
+            f"claim release: do provenance stamp skipped for {node_id} "
+            f"(node not in graph); the row was not written. Skipped.",
+            err=True,
+        )
 
 
 @cli.command()

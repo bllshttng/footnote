@@ -598,6 +598,95 @@ def _scan_md_field(text: str, key: str) -> Optional[str]:
     return None
 
 
+def _stamp_ship_on_pr_link(node_id: str) -> None:
+    """Stamp the ship lifecycle row when a node is first PR-linked.
+
+    The PR link is ship's START (the PR is open, awaiting review/merge), so the
+    row carries started_at only - no ended_at, since merge is recorded elsewhere
+    or not at all, and the roster renders the row 'in progress' rather than
+    guessing an end. ``backlog update --pr-number`` is the one site every shipped
+    node passes through regardless of which worker or skill opened the PR, so the
+    row records the implementer's identity, not the merger's. Best-effort: an
+    unresolvable identity or a graph failure skips with a named stderr reason and
+    never fails the update. Idempotent: append_session_record collapses a
+    re-stamp of the same (phase, harness, session_id).
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import append_session_record
+
+    ident = resolve_harness_identity()
+    harness = (ident.harness or "").strip()
+    session_id = (ident.session_id or "").strip()
+    if not harness or not session_id:
+        typer.echo(
+            f"update: no ambient identity to stamp ship provenance for {node_id} "
+            f"(missing {'harness' if not harness else 'session_id'}); "
+            "run the link inside a session. Skipped.",
+            err=True,
+        )
+        return
+    try:
+        append_session_record(
+            _graph_path(), node_id, phase="ship",
+            harness=harness, session_id=session_id,
+            started_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"update: ship provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+
+
+def _stamp_blueprint_on_plan_link(node_id: str) -> None:
+    """Stamp the blueprint lifecycle row when a plan is first bound to a node.
+
+    `backlog update --plan-path` is the choke point every blueprinted node
+    passes through, so this replaces the skill-prose stamp a direct CLI call or
+    non-Claude worker would skip. The plan-bind is blueprint's END, so the row
+    carries ended_at at the bind instant and no started_at (think has no writer,
+    so there is no clean blueprint start); the roster renders it 'end only'.
+    Best-effort: an unresolvable identity or a graph failure skips with a named
+    stderr reason and never fails the update. Idempotent.
+
+    KNOWN LABEL APPROXIMATION (owned by node x-8824): this stamps the DESIGN
+    BOUNDARY - the moment a plan is bound - not strictly /blueprint. On the
+    normal path /think runs `backlog update --plan-path` (think SKILL), and
+    /blueprint only binds CHILD plans during epic decomposition; so on the
+    normal path this row fires at /think, wearing the 'blueprint' label. The
+    row is honest about WHEN the plan was bound and WHO bound it; the phase
+    label is the approximation. x-8824 tests whether plan-bind IS the think
+    boundary (which would make think a mislabeled writer, not a missing one).
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import append_session_record
+
+    ident = resolve_harness_identity()
+    harness = (ident.harness or "").strip()
+    session_id = (ident.session_id or "").strip()
+    if not harness or not session_id:
+        typer.echo(
+            f"update: no ambient identity to stamp blueprint provenance for {node_id} "
+            f"(missing {'harness' if not harness else 'session_id'}); "
+            "run the bind inside a session. Skipped.",
+            err=True,
+        )
+        return
+    try:
+        append_session_record(
+            _graph_path(), node_id, phase="blueprint",
+            harness=harness, session_id=session_id,
+            ended_at=datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"update: blueprint provenance stamp skipped for {node_id}: {exc}",
+            err=True,
+        )
+
+
 def _resolve_asserted_id(
     token: str,
     entries: list,
@@ -2960,6 +3049,16 @@ def cmd_update(
             "Pass --pr-number null too, or supply a replacement url."
         )
 
+    # Symmetric to derived_pr_url: a url-only update derives pr_number from the
+    # url. repo_slug_from_url and pr_number_from_url share _PR_URL_RE, so any
+    # url that passed _check_url_shape above carries a number. Without this,
+    # reconcile never sees the PR (node_pr_refs gates on isinstance(pr_number,
+    # int)) - a node linked by --pr-url alone stays invisible to merge
+    # detection, the x-9ab2 shape.
+    derived_pr_number: Optional[int] = None
+    if pr_url is not None and not clearing_url and pr_number is None:
+        derived_pr_number = pr_number_from_url(pr_url)
+
     # additional_prs entries are read by the same repo-scoped matcher as the
     # primary field, so a bare --add-pr is unattributable for the same reason.
     derived_add_pr_url: Optional[str] = None
@@ -2968,6 +3067,8 @@ def cmd_update(
 
     projected_node: list = [None]
     reparent_old_parent: list = [None]
+    ship_stamp_node: list = [None]
+    blueprint_stamp_node: list = [None]
 
     # Size flows doc->graph when a plan is (re)linked and the node has no size
     # yet (Wave 2.2). Read the linked plan's frontmatter size best-effort,
@@ -3090,15 +3191,38 @@ def cmd_update(
                         f"dispatch and cost independently.",
                         err=True,
                     )
+                _plan_path_before = node.get("plan_path")
                 node["plan_path"] = plan_path
+                # Blueprint provenance fires once when a plan is first bound to
+                # the node. plan_path set is blueprint's END (the plan blueprint
+                # produced is now linked); there is no clean blueprint start
+                # (think has no writer), so the row carries ended_at only and the
+                # roster renders it 'end only'. Choke point, not prose: every
+                # blueprinted node passes through `backlog update --plan-path`.
+                if plan_path and not _plan_path_before:
+                    blueprint_stamp_node[0] = node["id"]
                 if linked_size and not node.get("size"):
                     node["size"] = linked_size
+        _pr_number_before = node.get("pr_number")
         if pr_number is not None:
             # 'null' clears, like every other nullable scalar here. Without it a
             # node linked to the wrong PR could not be unlinked at all, and the
             # graph is hand-edit-forbidden - so a mislink would ride to a merge
             # and close a node that shipped nothing.
             node["pr_number"] = None if pr_number.lower() == "null" else int(pr_number)
+        elif derived_pr_number is not None:
+            node["pr_number"] = derived_pr_number
+        # Ship provenance fires once on the unset->set transition. Every shipped
+        # node passes through this link regardless of which worker or skill
+        # opened the PR, so this is the choke point that records the implementer
+        # (not the merger). Detected inside the lock so two racing linkers see
+        # one transition; the stamp itself runs after the lock releases, because
+        # append_session_record takes its own lock and calling it here would
+        # deadlock. Best-effort + idempotent, never fails the update.
+        if isinstance(node.get("pr_number"), int) and not isinstance(
+            _pr_number_before, int
+        ):
+            ship_stamp_node[0] = node["id"]
         if pr_url is not None:
             node["pr_url"] = None if pr_url.lower() == "null" else pr_url
         elif derived_pr_url is not None:
@@ -3318,6 +3442,13 @@ def cmd_update(
 
     locked_mutate_graph(_graph_path(), mutator)
     typer.echo(f"Updated {task_id}")
+
+    # Ship provenance: the link just committed (lock released), so stamp the row
+    # here rather than inside the mutator (which would re-enter the graph lock).
+    if ship_stamp_node[0] is not None:
+        _stamp_ship_on_pr_link(ship_stamp_node[0])
+    if blueprint_stamp_node[0] is not None:
+        _stamp_blueprint_on_plan_link(blueprint_stamp_node[0])
 
     # Project the graph-authoritative fields (nav mirror + forward-only status)
     # onto the plan when a mirrored OR status-affecting field changed. Routed
@@ -4453,6 +4584,118 @@ def _spawned_walk(
     return rows, cycle, truncated
 
 
+_LIFECYCLE_PHASES = ("think", "blueprint", "do", "ship")
+
+
+def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
+    """Per-phase lifecycle roster: start, end, duration per row, and an honest
+    node total. Returns ``(human_lines, summary_dict)``.
+
+    Honesty is the acceptance criterion (node x-015c): a phase with no row
+    renders 'not recorded'; a row with an end but no start renders 'end only';
+    neither renders as a duration, and the total states how many of the four
+    phases contributed a duration rather than summing silently over gaps. Start
+    reads ``started_at`` (canonical) with ``claimed_at`` as the legacy fallback.
+    """
+    from datetime import datetime
+
+    by_phase: "dict[str, list[dict]]" = {p: [] for p in _LIFECYCLE_PHASES}
+    for s in sessions or []:
+        ph = s.get("phase") if isinstance(s, dict) else None
+        if ph in by_phase:
+            by_phase[ph].append(s)
+
+    def _start(row: dict) -> "str | None":
+        return row.get("started_at") or row.get("claimed_at")
+
+    def _end(row: dict) -> "str | None":
+        return row.get("ended_at") or row.get("at")
+
+    def _honest(row: dict) -> bool:
+        # A duration is honest only when both CANONICAL names are present.
+        # Legacy rows (claimed_at/at) hold stamp-fire time, not phase boundaries
+        # - their span is the whole session - so they render 'end only' and are
+        # never summed, named, or displayed as a phase duration.
+        return "started_at" in row and "ended_at" in row
+
+    def _dur(row: dict) -> "float | None":
+        if not _honest(row):
+            return None
+        try:
+            sp = datetime.fromisoformat(row["started_at"].replace("Z", "+00:00"))
+            ep = datetime.fromisoformat(row["ended_at"].replace("Z", "+00:00"))
+        except (ValueError, AttributeError):
+            return None
+        sec = (ep - sp).total_seconds()
+        # An inverted window (started_at after ended_at) is a backfill typo or
+        # a clock skew, not a phase duration. Render it as end-only rather than
+        # summing a negative span into the node total.
+        if sec < 0:
+            return None
+        return sec
+
+    def _fmt(sec: float) -> str:
+        sec = int(round(sec))
+        if sec < 60:
+            return f"{sec}s"
+        if sec < 3600:
+            return f"{sec // 60}m"
+        return f"{sec // 3600}h{(sec % 3600) // 60}m"
+
+    lines: list[str] = []
+    phases: list[dict] = []
+    total = 0.0
+    phases_with_window = 0
+    for ph in _LIFECYCLE_PHASES:
+        rows = by_phase[ph]
+        if not rows:
+            lines.append(f"    {ph:<9} not recorded")
+            phases.append({"phase": ph, "recorded": False})
+            continue
+        phase_has_window = False
+        for row in rows:
+            st, en, dur = _start(row), _end(row), _dur(row)
+            head = f"    {ph:<9} {row.get('harness', '?')}:{row.get('session_id', '?')}"
+            if dur is not None:
+                lines.append(f"{head} {row['started_at']} -> {row['ended_at']} ({_fmt(dur)})")
+                total += dur
+                phase_has_window = True
+            elif en:
+                lines.append(f"{head} end only @ {en}")
+            elif st:
+                lines.append(f"{head} in progress (since {st})")
+            else:
+                lines.append(head.rstrip())
+            phases.append({
+                "phase": ph, "recorded": True,
+                "harness": row.get("harness"), "session_id": row.get("session_id"),
+                "start": st, "end": en,
+                "duration_seconds": dur,
+            })
+        if phase_has_window:
+            phases_with_window += 1
+
+    # Predicate on phases_with_window, not total: a zero-second window
+    # (started_at == ended_at) or any out-of-order stamp leaves total at 0
+    # while a phase still contributed a window. Keying on total would drop
+    # the duration line and report total_duration_seconds: null despite a
+    # real recorded window.
+    if phases_with_window > 0:
+        lines.append(
+            f"    total     {_fmt(total)} ({phases_with_window} of 4 phases recorded)"
+        )
+    else:
+        lines.append(f"    total     {phases_with_window} of 4 phases recorded")
+
+    summary = {
+        "phases": phases,
+        "total_duration_seconds": total if phases_with_window > 0 else None,
+        "phases_recorded": phases_with_window,
+        "phases_total": 4,
+    }
+    return lines, summary
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
@@ -4539,6 +4782,10 @@ def cmd_provenance(
 
     runtime = runtime_attempts(node_id, e)
 
+    # Lifecycle roster (x-015c): per-phase start/end/duration + an honest total,
+    # computed once for both the JSON and human paths.
+    roster_lines, roster_summary = _lifecycle_roster(e["sessions"])
+
     if json_out:
         import dataclasses
 
@@ -4559,6 +4806,9 @@ def cmd_provenance(
             # Append-only lifecycle provenance in raw append order (x-b6e4).
             # read_graph's defaults guarantee the key, so no fallback guard.
             "sessions": e["sessions"],
+            # Per-phase roster with starts, durations, and an honest total
+            # (absent values are null, never 0). See _lifecycle_roster.
+            "lifecycle": roster_summary,
             "source_node_id": origin_id,
             "source_node_title": (index.get(origin_id) or {}).get("title"),
             "source_plan_path": e.get("source_plan_path"),
@@ -4639,19 +4889,13 @@ def cmd_provenance(
             lines.append(f"      work:      {work}")
             lines.append(f"      lifecycle: {a.get('lifecycle', '?')}")
 
-    # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
-    # birth/spawn edges above -- those are single parent pointers; this is the
-    # per-phase who-did-what across sessions and harnesses. read_graph's defaults
-    # guarantee the key.
-    sessions = e["sessions"]
-    if sessions:
-        lines.append("  lifecycle:")
-        for s in sessions:
-            lines.append(
-                f"    {s.get('phase', '?'):<9} "
-                f"{s.get('harness', '?')}:{s.get('session_id', '?')} "
-                f"@ {s.get('at', '?')}"
-            )
+    # Lifecycle roster (x-b6e4, x-015c): per-phase start/end/duration + an
+    # honest total. Distinct from the birth/spawn edges above -- those are
+    # single parent pointers; this is the per-phase who-did-what across sessions
+    # and harnesses. All four phases always render (not recorded / end only for
+    # gaps) so a roster never reads "nobody touched this" by omission.
+    lines.append("  lifecycle:")
+    lines.extend(roster_lines)
 
     typer.echo("\n".join(lines))
 
@@ -4667,7 +4911,11 @@ session_app = typer.Typer(
 
 
 def _plan_claims(plan_path: str) -> "set[str]":
-    """The node ids a plan's frontmatter ``claims:``, as a set.
+    """The node ids a plan's frontmatter declares ownership of, as a set.
+
+    Reads both ``claims:`` (a list) and ``node:`` (a single id). 330 of 807 plans
+    carry ``node:`` instead of ``claims:``, so reading only ``claims:`` left G3
+    unevaluable on roughly 41% of plans and the leniency was invisible.
 
     Empty means "no claim declared" -- including every unreadable-plan case, since
     ``_read_plan_frontmatter`` returns ``{}`` on all of them. The caller treats
@@ -4675,12 +4923,23 @@ def _plan_claims(plan_path: str) -> "set[str]":
     """
     from fno.graph._intake import _read_plan_frontmatter
 
-    claims = _read_plan_frontmatter(plan_path).get("claims")
+    fm = _read_plan_frontmatter(plan_path)
+    out: "set[str]" = set()
+
+    claims = fm.get("claims")
     if isinstance(claims, str):
         claims = [claims]
-    if not isinstance(claims, list):
-        return set()
-    return {c.strip() for c in claims if isinstance(c, str) and c.strip() not in ("", "null")}
+    if isinstance(claims, list):
+        out.update(
+            c.strip() for c in claims
+            if isinstance(c, str) and c.strip() not in ("", "null")
+        )
+
+    node = fm.get("node")
+    if isinstance(node, str) and node.strip() not in ("", "null"):
+        out.add(node.strip())
+
+    return out
 
 
 @session_app.callback()
@@ -4710,12 +4969,16 @@ def cmd_session_add(
     session_id: Optional[str] = typer.Option(
         None, "--session-id", help="Override session id (default: ambient session identity)."
     ),
-    at: Optional[str] = typer.Option(
-        None, "--at", help="ISO-8601 UTC timestamp (default: now); explicit for backfill."
+    ended_at: Optional[str] = typer.Option(
+        None, "--ended-at", "--at",
+        help="ISO-8601 UTC instant the phase ended. Omit when there is no honest end "
+              "to record (a row opened mid-session); explicit for backfill of completed work."
     ),
-    claimed_at: Optional[str] = typer.Option(
-        None, "--claimed-at", help="ISO-8601 UTC instant work was claimed; lands on the "
-                                   "row so it bounds the implementation window with --at."
+    started_at: Optional[str] = typer.Option(
+        None, "--started-at", "--claimed-at",
+        help="ISO-8601 UTC instant the work began; lands on the "
+             "row so it bounds the window with --ended-at. Honest for every "
+             "phase (a think row starts but claims nothing)."
     ),
     require_session: Optional[str] = typer.Option(
         None, "--require-session", help="Skip (exit 0) unless the ambient session id equals "
@@ -4836,8 +5099,8 @@ def cmd_session_add(
         if pr is not None:
             node_id, status = stamp_session_for_pr(
                 _graph_path(), pr, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at,
-                claimed_at=claimed_at, repo=repo,
+                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
+                started_at=started_at, repo=repo,
             )
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
@@ -4884,8 +5147,8 @@ def cmd_session_add(
                     )
             found, added = append_session_record(
                 _graph_path(), node_id, phase=phase,
-                harness=eff_harness, session_id=eff_session, at=at,
-                claimed_at=claimed_at,
+                harness=eff_harness, session_id=eff_session, ended_at=ended_at,
+                started_at=started_at,
             )
             if not found:
                 typer.echo(f"session add: node {node_id} not found (phase={phase}).", err=True)
