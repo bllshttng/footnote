@@ -1,11 +1,9 @@
 """Phase 01 + 02a + 03: backlog sub-app + verb aliases + triage nesting.
 
-Verifies dual registration: `backlog` is canonical, `graph` is a
-hidden deprecated alias. Both must resolve to the same Typer app so
-every verb and help output is byte-identical. Also verifies that the
-canonical `intake` verb is registered (and the deprecated `adopt`
-alias is gone), the `done` verb works, and the nested `triage`
-sub-app surface is present.
+`backlog` is the canonical graph sub-app (the deprecated `graph` top-level
+alias was removed as a true duplicate). Verifies the canonical `intake` verb
+is registered (and the deprecated `adopt` alias is gone), the `done` verb
+works, and the nested `triage` sub-app surface is present.
 """
 from __future__ import annotations
 
@@ -55,18 +53,8 @@ def test_ac1_hp_backlog_help_lists_verbs():
         assert verb in r.output, f"verb {verb!r} missing from backlog help"
 
 
-def test_ac1_hp_graph_alias_help_identical_to_backlog():
-    """`fno graph --help` produces the same verb surface as `fno backlog --help`."""
-    r_backlog = _invoke("backlog", "--help")
-    r_graph = _invoke("graph", "--help")
-    assert r_backlog.exit_code == 0 and r_graph.exit_code == 0
-    # Every advertised verb listed in backlog must also be listed in graph.
-    for verb in ("add", "next", "get", "find", "done"):
-        assert verb in r_graph.output, f"verb {verb!r} missing from graph alias help"
-
-
 def test_ac1_hp_top_level_help_hides_graph_shows_backlog():
-    """`fno --help` lists `backlog` but not `graph` (graph is hidden)."""
+    """`fno --help` lists `backlog`; the `graph` alias is gone (removed, not hidden)."""
     r = _invoke("--help")
     assert r.exit_code == 0
     assert "backlog" in r.output, "backlog should appear in top-level help"
@@ -75,22 +63,16 @@ def test_ac1_hp_top_level_help_hides_graph_shows_backlog():
     # check would false-positive on docstrings. Look for the command row.
     command_lines = [ln for ln in r.output.splitlines() if ln.strip().startswith("graph ")]
     assert not command_lines, (
-        f"graph should be hidden from top-level help, found lines: {command_lines}"
+        f"graph alias should be gone from top-level help, found lines: {command_lines}"
     )
 
 
-def test_ac2_hp_backlog_and_graph_share_behavior(tmp_graph):
-    """`fno backlog add X` and `fno graph add X` produce the same node schema."""
-    r_b = _invoke("--json", "backlog", "add", "FeatureB")
-    r_g = _invoke("--json", "graph", "add", "FeatureG")
-    assert r_b.exit_code == 0, r_b.output
-    assert r_g.exit_code == 0, r_g.output
-    node_b = json.loads(r_b.stdout)
-    node_g = json.loads(r_g.stdout)
-    # Both should have the same keys (same schema)
-    assert set(node_b.keys()) == set(node_g.keys())
-    assert node_b["title"] == "FeatureB"
-    assert node_g["title"] == "FeatureG"
+def test_ac2_hp_backlog_add_round_trips(tmp_graph):
+    """`fno backlog add X` round-trips: returns the node JSON with the title set."""
+    r = _invoke("--json", "backlog", "add", "FeatureB")
+    assert r.exit_code == 0, r.output
+    node = json.loads(r.stdout)
+    assert node["title"] == "FeatureB"
 
 
 # ---------------------------------------------------------------------------

@@ -49,7 +49,7 @@ def test_scenario1_hp_find_single_match(tmp_graph):
         {"id": "ab-other0001", "title": "Unrelated", "status": "ready",
          "domain": "code", "project": "fno"},
     ])
-    result = runner.invoke(app, ["find", "outreach"])
+    result = runner.invoke(app, ["backlog", "find", "outreach"])
     assert result.exit_code == 0, result.output
     assert "ab-q2000001" in result.stdout
     assert "Q2 outreach campaign" in result.stdout
@@ -66,7 +66,7 @@ def test_scenario2_hp_find_with_status_filter(tmp_graph):
         {"id": "ab-pl000002", "title": "Plan 02", "status": "done",
          "domain": "code", "project": "fno"},
     ])
-    result = runner.invoke(app, ["find", "plan", "--status", "ready"])
+    result = runner.invoke(app, ["backlog", "find", "plan", "--status", "ready"])
     assert result.exit_code == 0, result.output
     assert "ab-pl000001" in result.stdout
     assert "ab-pl000002" not in result.stdout
@@ -80,7 +80,7 @@ def test_find_with_project_filter(tmp_graph):
         {"id": "ab-aa000002", "title": "shared title", "status": "ready",
          "domain": "code", "project": "another-project"},
     ])
-    result = runner.invoke(app, ["find", "shared", "--project", "fno"])
+    result = runner.invoke(app, ["backlog", "find", "shared", "--project", "fno"])
     assert result.exit_code == 0, result.output
     assert "ab-aa000001" in result.stdout
     assert "ab-aa000002" not in result.stdout
@@ -94,7 +94,7 @@ def test_find_with_domain_filter(tmp_graph):
         {"id": "ab-aa000002", "title": "task", "status": "ready",
          "domain": "code", "project": "p"},
     ])
-    result = runner.invoke(app, ["find", "task", "--domain", "research"])
+    result = runner.invoke(app, ["backlog", "find", "task", "--domain", "research"])
     assert result.exit_code == 0
     assert "ab-aa000001" in result.stdout
     assert "ab-aa000002" not in result.stdout
@@ -106,7 +106,7 @@ def test_scenario3_hp_find_json_output(tmp_graph):
         {"id": "ab-js000001", "title": "Q2 outreach",
          "status": "ready", "domain": "research", "project": "p"},
     ])
-    result = runner.invoke(app, ["find", "outreach", "--json"])
+    result = runner.invoke(app, ["backlog", "find", "outreach", "--json"])
     assert result.exit_code == 0, result.output
     data = json.loads(result.stdout)
     assert isinstance(data, list)
@@ -119,7 +119,7 @@ def test_scenario7_err_find_no_matches(tmp_graph):
         {"id": "ab-aa000001", "title": "some title", "status": "ready",
          "domain": "code", "project": "p"},
     ])
-    result = runner.invoke(app, ["find", "xyzzy"])
+    result = runner.invoke(app, ["backlog", "find", "xyzzy"])
     assert result.exit_code == 1
     combined = result.stdout + (result.stderr or "")
     assert "xyzzy" in combined
@@ -134,7 +134,7 @@ def test_find_shows_multiple_matches(tmp_graph):
         {"id": "ab-pp000002", "title": "Plan 02", "status": "ready",
          "domain": "code", "project": "p"},
     ])
-    result = runner.invoke(app, ["find", "plan"])
+    result = runner.invoke(app, ["backlog", "find", "plan"])
     assert result.exit_code == 0
     assert "ab-pp000001" in result.stdout
     assert "ab-pp000002" in result.stdout
@@ -147,7 +147,7 @@ def test_scenario4_hp_new_creates_entry(tmp_graph):
     """Scenario 4 (HP): fno new writes a new ab- entry with defaults."""
     result = runner.invoke(
         app,
-        ["new", "Research: Q3 budgets", "--domain", "research"],
+        ["backlog", "new", "Research: Q3 budgets", "--domain", "research"],
     )
     assert result.exit_code == 0, result.output
     # Emits the new id on stdout
@@ -168,7 +168,7 @@ def test_scenario4_hp_new_creates_entry(tmp_graph):
 
 def test_new_default_domain_is_code(tmp_graph):
     """Without --domain, new entries default to code."""
-    result = runner.invoke(app, ["new", "Some code task"])
+    result = runner.invoke(app, ["backlog", "new", "Some code task"])
     assert result.exit_code == 0, result.output
     e = _read(tmp_graph)[0]
     assert e["domain"] == "code"
@@ -179,7 +179,7 @@ def test_new_sets_project_and_priority(tmp_graph):
     result = runner.invoke(
         app,
         [
-            "new", "Urgent thing",
+            "backlog", "new", "Urgent thing",
             "--project", "acme",
             "--priority", "p1",
         ],
@@ -196,7 +196,7 @@ def test_scenario5_edge_new_fuzzy_domain_warns(tmp_graph):
         {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "research", "project": "p"},
     ])
-    result = runner.invoke(app, ["new", "New task", "--domain", "res"])
+    result = runner.invoke(app, ["backlog", "new", "New task", "--domain", "res"])
     assert result.exit_code == 2, result.output
     combined = result.stdout + (result.stderr or "")
     assert "research" in combined
@@ -214,7 +214,7 @@ def test_scenario6_edge_new_force_domain_bypasses(tmp_graph):
          "domain": "research", "project": "p"},
     ])
     result = runner.invoke(
-        app, ["new", "New task", "--domain", "res", "--force-domain"],
+        app, ["backlog", "new", "New task", "--domain", "res", "--force-domain"],
     )
     assert result.exit_code == 0, result.output
     # New entry has domain="res" verbatim (not auto-corrected to research)
@@ -230,7 +230,7 @@ def test_new_exact_domain_match_no_warning(tmp_graph):
         {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "research", "project": "p"},
     ])
-    result = runner.invoke(app, ["new", "New task", "--domain", "research"])
+    result = runner.invoke(app, ["backlog", "new", "New task", "--domain", "research"])
     assert result.exit_code == 0, result.output
 
 
@@ -240,7 +240,7 @@ def test_new_unfamiliar_domain_passes_through(tmp_graph):
         {"id": "ab-seed0001", "title": "seed", "status": "done",
          "domain": "code", "project": "p"},
     ])
-    result = runner.invoke(app, ["new", "New task", "--domain", "trading"])
+    result = runner.invoke(app, ["backlog", "new", "New task", "--domain", "trading"])
     assert result.exit_code == 0, result.output
     entries = _read(tmp_graph)
     new_entries = [e for e in entries if e["id"] != "ab-seed0001"]
@@ -249,7 +249,7 @@ def test_new_unfamiliar_domain_passes_through(tmp_graph):
 
 def test_new_id_has_correct_prefix_and_length(tmp_graph):
     """Generated id matches the ab-xxxxxxxx pattern."""
-    result = runner.invoke(app, ["new", "T"])
+    result = runner.invoke(app, ["backlog", "new", "T"])
     assert result.exit_code == 0
     e = _read(tmp_graph)[0]
     assert e["id"].startswith("ab-")
@@ -258,7 +258,7 @@ def test_new_id_has_correct_prefix_and_length(tmp_graph):
 
 def test_new_sets_created_at_iso8601(tmp_graph):
     """created_at is ISO 8601."""
-    result = runner.invoke(app, ["new", "T"])
+    result = runner.invoke(app, ["backlog", "new", "T"])
     assert result.exit_code == 0
     e = _read(tmp_graph)[0]
     assert e["created_at"]
@@ -294,7 +294,7 @@ def test_ac1_hp_new_with_source_flags_populates_provenance(tmp_graph):
     result = runner.invoke(
         app,
         [
-            "new", "Add region filter",
+            "backlog", "new", "Add region filter",
             "--project", "acme-web",
             "--source-kind", "from_inbox",
             "--source-project", "example-pipeline",
@@ -317,7 +317,7 @@ def test_ac1_hp_new_with_source_session_id(tmp_graph):
     result = runner.invoke(
         app,
         [
-            "new", "Session sourced task",
+            "backlog", "new", "Session sourced task",
             "--source-kind", "from_supervisor",
             "--source-session-id", "sess-xyz123",
         ],
@@ -332,7 +332,7 @@ def test_ac2_err_new_invalid_source_kind_rejected(tmp_graph):
     """AC2-ERR: --source-kind invalid_value exits non-zero, no graph mutation."""
     result = runner.invoke(
         app,
-        ["new", "x", "--source-kind", "invalid_value"],
+        ["backlog", "new", "x", "--source-kind", "invalid_value"],
     )
     assert result.exit_code != 0, result.output
     # No entries written
@@ -342,7 +342,7 @@ def test_ac2_err_new_invalid_source_kind_rejected(tmp_graph):
 
 def test_new_source_kind_defaults_to_organic(tmp_graph):
     """Without --source-kind, new entries default to source_kind=organic."""
-    result = runner.invoke(app, ["new", "Organic task"])
+    result = runner.invoke(app, ["backlog", "new", "Organic task"])
     assert result.exit_code == 0, result.output
     e = _read(tmp_graph)[0]
     assert e["source_kind"] == "organic"

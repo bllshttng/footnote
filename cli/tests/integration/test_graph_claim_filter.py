@@ -76,7 +76,7 @@ def test_next_skips_live_claimed_node(tmp_graph, tmp_path):
         ttl_ms=3_600_000,
         root=tmp_path,
     )
-    r = _invoke("graph", "next", "--all")
+    r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None, r.stdout
     assert out["id"] == "ab-bbbbbbbb"
@@ -91,7 +91,7 @@ def test_ready_excludes_live_claimed_node(tmp_graph, tmp_path):
         ttl_ms=3_600_000,
         root=tmp_path,
     )
-    r = _invoke("graph", "ready", "--all")
+    r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert "ab-aaaaaaaa" not in ids
     assert "ab-bbbbbbbb" in ids
@@ -123,7 +123,7 @@ def test_next_prefers_sibling_of_live_claimed_epic(tmp_graph, tmp_path):
         root=tmp_path,
     )
 
-    result = _invoke("graph", "next", "--all")
+    result = _invoke("backlog", "next", "--all")
 
     assert result.exit_code == 0, result.output
     assert json.loads(result.stdout)["id"] == "ab-sibling1"
@@ -144,7 +144,7 @@ def test_parallel_next_draw_holds_unique_nodes(tmp_graph, tmp_path):
     selected: list[str] = []
 
     for lane in range(max_lanes):
-        out = json.loads(_invoke("graph", "next", "--all").stdout)
+        out = json.loads(_invoke("backlog", "next", "--all").stdout)
         assert out["id"] not in selected
         selected.append(out["id"])
         acquire_claim(
@@ -218,7 +218,7 @@ def test_released_claim_does_not_block(tmp_graph, tmp_path):
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
     acquire_claim(key="node:ab-aaaaaaaa", holder="h", ttl_ms=3_600_000, root=tmp_path)
     release_claim(key="node:ab-aaaaaaaa", holder="h", root=tmp_path)
-    r = _invoke("graph", "ready", "--all")
+    r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert "ab-aaaaaaaa" in ids
 
@@ -235,7 +235,7 @@ def test_dispatch_selection_refuses_when_live_claim_state_is_unavailable(
 
     monkeypatch.setattr("fno.graph.cli._live_claimed_node_ids", unavailable)
 
-    result = _invoke("graph", *command)
+    result = _invoke("backlog", *command)
 
     assert result.exit_code == 1
     assert "live claim state is unavailable" in result.output
@@ -260,7 +260,7 @@ def test_expired_claim_does_not_block(tmp_graph, tmp_path):
         metadata={},
     )
     claim_path("node:ab-aaaaaaaa", root=tmp_path).write_text(serialize_claim(expired))
-    r = _invoke("graph", "ready", "--all")
+    r = _invoke("backlog", "ready", "--all")
     ids = [e["id"] for e in json.loads(r.stdout)]
     assert "ab-aaaaaaaa" in ids, "expired claim should not block selection"
 
@@ -268,7 +268,7 @@ def test_expired_claim_does_not_block(tmp_graph, tmp_path):
 def test_no_claims_directory_is_graceful(tmp_graph, tmp_path):
     """Absent claims dir: selection behaves exactly as before (no crash)."""
     tmp_graph.write_text(json.dumps({"entries": _two_ready_entries()}) + "\n")
-    r = _invoke("graph", "next", "--all")
+    r = _invoke("backlog", "next", "--all")
     out = json.loads(r.stdout)
     assert out is not None
     assert out["id"] in {"ab-aaaaaaaa", "ab-bbbbbbbb"}

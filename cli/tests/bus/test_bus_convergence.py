@@ -251,9 +251,9 @@ def test_ac8_ui_heads_up_on_bus_triaged_with_provenance(inbox_and_bus, tmp_path,
             self.stderr = stderr
 
     def fake_run(cmd, *args, **kwargs):
-        if cmd[:3] == ["fno-py", "new", "--help"]:
+        if cmd[:4] == ["fno-py", "backlog", "new", "--help"]:
             return _FakeRun(stdout="--source-kind --source-project --source-inbox-msg\n")
-        if cmd[:2] == ["fno-py", "new"]:
+        if cmd[:3] == ["fno-py", "backlog", "new"]:
             captured["argv"] = cmd
             return _FakeRun(stdout="created node ab-abc123\n")
         raise AssertionError(f"unexpected subprocess: {cmd}")

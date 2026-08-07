@@ -123,18 +123,14 @@ def _visible_command_names(group: click.Group) -> list[str]:
 
 
 def _repo_root() -> Path:
-    result = subprocess.run(
-        ["git", "rev-parse", "--show-toplevel"],
-        capture_output=True,
-        text=True,
-    )
-    if result.returncode != 0:
-        typer.echo(
-            "fno lint: git rev-parse failed; run from inside the repo",
-            err=True,
-        )
-        raise typer.Exit(2)
-    return Path(result.stdout.strip())
+    # The canonical cached, FNO_REPO_ROOT-aware resolver. This used to be a
+    # third bare git-rev-parse copy (flock-pattern and shellout-drift already
+    # call resolve_repo_root directly); the duplicate drifted without the env
+    # hook and the worktree fallback, so spawn-paths/provider-stderr-merge got
+    # different answers from their siblings. One resolver, same answer.
+    from fno.paths import resolve_repo_root
+
+    return resolve_repo_root()
 
 
 @app.command("flock-pattern")
@@ -335,6 +331,46 @@ def menu_caps() -> None:
             typer.echo(f"menu-caps: FAIL\n{f}", err=True)
         raise typer.Exit(1)
     typer.echo(f"menu-caps: ok (top-level {len(top_visible)}/{MENU_CAP_TOP_LEVEL})")
+
+
+@app.command("verb-ratchet")
+def verb_ratchet(
+    update: bool = typer.Option(
+        False,
+        "--update",
+        help="Regenerate scripts/ci/verb-baseline.txt from the live surface.",
+    ),
+) -> None:
+    """Ratchet the REAL verb count.
+
+    ``menu-caps`` caps what ``fno --help`` ADVERTISES; this caps what EXISTS.
+    Fails when the live surface and ``scripts/ci/verb-baseline.txt`` disagree,
+    naming the added or removed verbs. Covers BOTH binaries (the fno-py
+    registry and the Rust front's mux + version surface) and fails closed with
+    a named error - writing no baseline - when the Rust front cannot be reached,
+    so the ratchet can never pass by reporting only half the surface. ``--update``
+    regenerates the baseline after an intentional change.
+    """
+    from fno import lint_verb_ratchet as vr
+
+    if update:
+        try:
+            leaves = vr.enumerate_all_leaves()
+        except vr.VerbRatchetError as exc:
+            typer.echo(str(exc), err=True)
+            raise typer.Exit(1)
+        path = vr.baseline_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(vr.generate(leaves), encoding="utf-8")
+        typer.echo(f"verb-ratchet: regenerated {path.name} ({len(leaves)} leaves)")
+        return
+    try:
+        report = vr.check()
+    except vr.VerbRatchetError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(1)
+    typer.echo(report.message, err=not report.ok)
+    raise typer.Exit(0 if report.ok else 1)
 
 
 @app.command("stale-skill-refs")

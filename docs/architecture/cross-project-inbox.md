@@ -90,7 +90,7 @@ and renames the original to `inbox-pre-migration.md` as a safety net.
 
 The two substrates never overlap: questions/fyi never become graph
 entries; only triaged heads-up threads do (via `fno mail triage` ->
-`fno new --source-*`).
+`fno backlog new --source-*`).
 
 ## Symmetric mailbox model
 
@@ -104,7 +104,7 @@ entries; only triaged heads-up threads do (via `fno mail triage` ->
                 |                                    |   sees new msg
                 |                                    | fno mail triage <id>
                 |                                    |   -> claude -p
-                |                                    | fno new --source-* ...
+                |                                    | fno backlog new --source-* ...
                 |                                    | fno mail ack <id>
                 |                                    |
                 |  fno mail send                   |
@@ -192,7 +192,7 @@ Megawalk's Step 0 only runs at the top of a target iteration. Projects without a
 
 ### The three pieces
 
-- **`fno mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno new`, dismiss, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
+- **`fno mail drain --json --max 10`** - an LLM-side processor for the four non-interrupting message kinds: `heads-up`, `notification`, `lesson`, and `answer`. For each unread message it runs the appropriate handler (triage to `fno backlog new`, dismiss, extract to memory, integrate into context) and acks. A `kind: question` message is never handled here: the drain drops a wake-signal and leaves the message unread for a human to answer.
 
 - **Per-project launchd daemon** (`scripts/fno-watch.sh`, opt-in via `config.inbox.watch.enabled: true`) - wraps the drain with an `fswatch` trigger loop. On each file-change event it calls `wake.detect.detect_session_state` to determine whether a human or target session is already active. When the project is IDLE it spawns `claude -p --bare` to run the drain. When a session is active it either drops a wake-signal (INTERACTIVE_ACTIVE) or does nothing at all (TARGET_ACTIVE, because megawalk Step 0 will pick the message up at the next iteration boundary).
 
@@ -247,6 +247,6 @@ The substrate ships as a single feature. Four follow-up backlog entries land in 
 - `cli/src/fno/inbox/triage.py` - `claude -p` subprocess wrapper with retry-once and env-stub override
 - `cli/src/fno/graph/store.py` - Provenance setdefaults in `_apply_graph_defaults`
 - `cli/src/fno/graph/load.py` - `query_by_source_inbox_msg` helper
-- `cli/src/fno/graph/cli.py` - `--source-*` flags on `fno new`
+- `cli/src/fno/graph/cli.py` - `--source-*` flags on `fno backlog new`
 - `skills/megawalk/SKILL.md` - Step 0 drain section
 - `skills/megawalk/references/inbox-handlers.md` - Per-kind handler reference

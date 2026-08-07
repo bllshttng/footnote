@@ -219,7 +219,7 @@ Two enforcement points:
    so the stop hook authors `BLOCKED`. A non-contention acquire error (transient,
    or an older `fno` that predates `--ttl`) does NOT block - the session proceeds
    without a claim rather than wedging during an upgrade window.
-2. **Filter at selection** (`fno graph next` / `graph ready`). Candidates holding
+2. **Filter at selection** (`fno backlog next` / `backlog ready`). Candidates holding
    a live `node:<id>` claim are dropped before sorting, so the walker never hands
    out a node a live session already owns. Best-effort: a claims-subsystem fault
    degrades to no filtering (the acquire/refuse mutex above is the authoritative

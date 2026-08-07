@@ -94,7 +94,7 @@ Returns a structured plan:
 }
 ```
 
-Three actions: `create_node` (becomes graph entry via `fno new --source-*`), `ignore` (just ack), `request_clarification` (send back as `kind: question`).
+Three actions: `create_node` (becomes graph entry via `fno backlog new --source-*`), `ignore` (just ack), `request_clarification` (send back as `kind: question`).
 
 ## Where messages live (post-2026-05 thread-per-file layout)
 

@@ -29,7 +29,7 @@ def tmp_graph(tmp_path, monkeypatch):
 
 
 def _add(title, **opts) -> str:
-    args = ["graph", "add", title]
+    args = ["backlog", "add", title]
     for k, v in opts.items():
         args += [f"--{k}", str(v)]
     r = runner.invoke(app, args, catch_exceptions=False)
@@ -41,7 +41,7 @@ def _add(title, **opts) -> str:
 
 def _set_parent(child_id, parent_id):
     r = runner.invoke(
-        app, ["graph", "update", child_id, "--parent", parent_id],
+        app, ["backlog", "update", child_id, "--parent", parent_id],
         catch_exceptions=False,
     )
     assert r.exit_code == 0, r.output
@@ -61,7 +61,7 @@ def test_ac2_hp_next_parent_scopes_to_children(tmp_graph):
     """`next --parent <epic>` only ever returns a child of the epic."""
     epic, c1, c2, loose = _epic_with_children(tmp_graph)
     r = runner.invoke(
-        app, ["graph", "next", "--parent", epic, "--include-ideas", "--all"],
+        app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
         catch_exceptions=False,
     )
     assert r.exit_code == 0, r.output
@@ -75,7 +75,7 @@ def test_ac2_hp_ready_parent_scopes_to_children(tmp_graph):
     """`ready --parent <epic>` lists only the epic's children, not loose nodes."""
     epic, c1, c2, loose = _epic_with_children(tmp_graph)
     r = runner.invoke(
-        app, ["graph", "ready", "--parent", epic, "--include-ideas", "--all"],
+        app, ["backlog", "ready", "--parent", epic, "--include-ideas", "--all"],
         catch_exceptions=False,
     )
     assert r.exit_code == 0, r.output
@@ -89,7 +89,7 @@ def test_ac2_err_next_missing_parent_exits_nonzero(tmp_graph):
     """`--parent ab-doesnotexist` is a hard error, not silent nothing."""
     _epic_with_children(tmp_graph)
     r = runner.invoke(
-        app, ["graph", "next", "--parent", "ab-doesnotexist", "--all"],
+        app, ["backlog", "next", "--parent", "ab-doesnotexist", "--all"],
         catch_exceptions=True,
     )
     assert r.exit_code != 0
@@ -101,7 +101,7 @@ def test_ac2_edge_parent_with_no_children_emits_message(tmp_graph):
     so the walker can fall back rather than treating it as an error."""
     epic, c1, c2, loose = _epic_with_children(tmp_graph)
     r = runner.invoke(
-        app, ["graph", "next", "--parent", loose, "--include-ideas", "--all"],
+        app, ["backlog", "next", "--parent", loose, "--include-ideas", "--all"],
         catch_exceptions=False,
     )
     assert r.exit_code == 0, r.output
@@ -118,7 +118,7 @@ def test_parent_combines_with_priority_order(tmp_graph):
     _set_parent(lo, epic)
     _set_parent(hi, epic)
     r = runner.invoke(
-        app, ["graph", "next", "--parent", epic, "--include-ideas", "--all"],
+        app, ["backlog", "next", "--parent", epic, "--include-ideas", "--all"],
         catch_exceptions=False,
     )
     assert r.exit_code == 0, r.output

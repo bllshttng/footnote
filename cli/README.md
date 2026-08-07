@@ -137,18 +137,17 @@ Run `fno --help` for the full list. The main trees are `state`, `graph`
   rollup (no status change); without a query it sweeps every node with
   `status=done`, useful for reconciling nodes marked done before the
   rollup existed.
-- `fno find <query> [--domain X] [--project Y] [--status S] [--json]` --
+- `fno backlog find <query> [--domain X] [--project Y] [--status S] [--json]` --
   fuzzy search across graph entries. Output is tab-separated by default
   (id, status, domain, project, title); `--json` emits an array.
-- `fno new <title> [--domain X] [--project Y] [--priority P] [--force-domain]`
+- `fno backlog new <title> [--domain X] [--project Y] [--priority P] [--force-domain]`
   -- create a new graph entry from the CLI without a plan file.
   Ambiguous `--domain` values (fuzzy prefix match against history)
   exit 2 with a "did you mean" suggestion; pass `--force-domain` to
   introduce a genuinely new domain.
 
-See `fno done --help`, `fno find --help`, `fno new --help` for the full
-flag list. Each of these also works under the backlog/graph subapp
-(`fno backlog find`, `fno backlog new`, `fno graph find`, etc.).
+See `fno done --help`, `fno backlog find --help`, `fno backlog new --help` for
+the full flag list.
 
 Key exit codes (see `fno <sub> --help` for per-command specifics):
 

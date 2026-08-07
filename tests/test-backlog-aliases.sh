@@ -1,14 +1,13 @@
 #!/usr/bin/env bash
-# test-backlog-aliases.sh - verify backlog/graph alias stability.
+# test-backlog-aliases.sh - verify backlog sub-app stability.
 #
 # Covers ab-67de1b86 Phase 05 Task 5.2 scenarios:
 #   1. fno backlog --help succeeds and lists intake/done/next/ready/triage
-#   2. fno graph --help is identical (hidden deprecated alias)
-#   3. fno --help lists backlog but not graph
-#   4. fno backlog intake <plan> creates a node
-#   5. fno backlog adopt <plan> creates a node + warns on stderr
-#   6. fno backlog done <id> marks the node complete
-#   7. fno backlog done <id> second time is a safe no-op
+#   2. fno --help lists backlog (the graph top-level alias was removed)
+#   3. fno backlog intake <plan> creates a node
+#   4. fno backlog adopt <plan> creates a node + warns on stderr
+#   5. fno backlog done <id> marks the node complete
+#   6. fno backlog done <id> second time is a safe no-op
 
 set -uo pipefail
 
@@ -82,15 +81,8 @@ for verb in add done next find triage; do
     fi
 done
 
-# --- Scenario 2: fno graph --help identical verb surface --------------------
-graph_out=$(run_fno graph --help 2>&1)
-if verb_in_help "find" "$graph_out"; then
-    pass "graph --help lists 'find' (alias shares app)"
-else
-    fail "graph --help missing 'find' - alias not sharing the same Typer app?"
-fi
-
-# --- Scenario 3: fno --help hides graph, shows backlog ----------------------
+# --- Scenario 2: fno --help shows backlog, no graph alias ------------------
+# The `graph` top-level alias was removed as a true duplicate of `backlog`.
 top_out=$(run_fno --help 2>&1)
 if verb_in_help "backlog" "$top_out"; then
     pass "top-level help shows 'backlog'"
@@ -98,12 +90,12 @@ else
     fail "top-level help missing 'backlog'"
 fi
 if verb_in_help "graph" "$top_out"; then
-    fail "top-level help leaks deprecated 'graph' (should be hidden)"
+    fail "top-level help lists removed 'graph' alias"
 else
-    pass "top-level help hides 'graph'"
+    pass "top-level help has no 'graph' alias"
 fi
 
-# --- Scenario 4: backlog intake adopts a plan -------------------------------
+# --- Scenario 3: backlog intake adopts a plan -------------------------------
 plan_a="$TMP/plan-a.md"
 cat > "$plan_a" <<EOF
 ---
@@ -121,7 +113,7 @@ else
     fail "intake did not report a minted node: $intake_out"
 fi
 
-# --- Scenario 5: backlog adopt is gone (alias removed) ----------------------
+# --- Scenario 4: backlog adopt is gone (alias removed) ----------------------
 plan_b="$TMP/plan-b.md"
 cat > "$plan_b" <<EOF
 ---
@@ -145,7 +137,7 @@ else
     fail "adopt is still forwarding through the deprecated alias: $adopt_combined"
 fi
 
-# --- Scenario 6: backlog done marks node complete ---------------------------
+# --- Scenario 5: backlog done marks node complete ---------------------------
 # Extract the last adopted ID from graph.json (one of the two we just added)
 node_id=$(python3 -c "
 import json, sys
@@ -180,7 +172,7 @@ for e in data.get('entries', []):
     fi
 fi
 
-# --- Scenario 7: done is idempotent on re-run -------------------------------
+# --- Scenario 6: done is idempotent on re-run -------------------------------
 if [[ -n "$node_id" ]]; then
     done_again=$(run_fno backlog done "$node_id" 2>&1)
     rc=$?
