@@ -4536,6 +4536,97 @@ def _spawned_walk(
     return rows, cycle, truncated
 
 
+_LIFECYCLE_PHASES = ("think", "blueprint", "do", "ship")
+
+
+def _lifecycle_roster(sessions: list) -> "tuple[list[str], dict]":
+    """Per-phase lifecycle roster: start, end, duration per row, and an honest
+    node total. Returns ``(human_lines, summary_dict)``.
+
+    Honesty is the acceptance criterion (node x-015c): a phase with no row
+    renders 'not recorded'; a row with an end but no start renders 'end only';
+    neither renders as a duration, and the total states how many of the four
+    phases contributed a duration rather than summing silently over gaps. Start
+    reads ``started_at`` (canonical) with ``claimed_at`` as the legacy fallback.
+    """
+    from datetime import datetime
+
+    by_phase: "dict[str, list[dict]]" = {p: [] for p in _LIFECYCLE_PHASES}
+    for s in sessions or []:
+        ph = s.get("phase") if isinstance(s, dict) else None
+        if ph in by_phase:
+            by_phase[ph].append(s)
+
+    def _start(row: dict) -> "str | None":
+        return row.get("started_at") or row.get("claimed_at")
+
+    def _dur(row: dict) -> "float | None":
+        st, en = _start(row), row.get("at")
+        if not st or not en:
+            return None
+        try:
+            sp = datetime.fromisoformat(st.replace("Z", "+00:00"))
+            ep = datetime.fromisoformat(en.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return (ep - sp).total_seconds()
+
+    def _fmt(sec: float) -> str:
+        sec = int(round(sec))
+        if sec < 60:
+            return f"{sec}s"
+        if sec < 3600:
+            return f"{sec // 60}m"
+        return f"{sec // 3600}h{(sec % 3600) // 60}m"
+
+    lines: list[str] = []
+    phases: list[dict] = []
+    total = 0.0
+    phases_with_dur = 0
+    for ph in _LIFECYCLE_PHASES:
+        rows = by_phase[ph]
+        if not rows:
+            lines.append(f"    {ph:<9} not recorded")
+            phases.append({"phase": ph, "recorded": False})
+            continue
+        phase_has_dur = False
+        for row in rows:
+            st, en = _start(row), row.get("at")
+            dur = _dur(row)
+            head = f"    {ph:<9} {row.get('harness', '?')}:{row.get('session_id', '?')}"
+            if dur is not None:
+                lines.append(f"{head} {st} -> {en} ({_fmt(dur)})")
+                total += dur
+                phase_has_dur = True
+            else:
+                # No start (or unparseable): end only. Never render a duration
+                # for a row whose start is missing - that is the 0m lie.
+                lines.append(f"{head} end only @ {en}")
+            phases.append({
+                "phase": ph, "recorded": True,
+                "harness": row.get("harness"), "session_id": row.get("session_id"),
+                "start": st, "end": en,
+                "duration_seconds": dur,
+            })
+        if phase_has_dur:
+            phases_with_dur += 1
+
+    if phases_with_dur > 0:
+        lines.append(
+            f"    total     {_fmt(total)} ({phases_with_dur} of 4 phases recorded)"
+        )
+    else:
+        lines.append("    total     0 of 4 phases recorded")
+
+    summary = {
+        "phases": phases,
+        "total_duration_seconds": total if phases_with_dur > 0 else None,
+        "phases_recorded": phases_with_dur,
+        "phases_total": 4,
+    }
+    return lines, summary
+
+
 @cli.command("provenance", hidden=True)
 def cmd_provenance(
     id: str = typer.Argument(
@@ -4622,6 +4713,10 @@ def cmd_provenance(
 
     runtime = runtime_attempts(node_id, e)
 
+    # Lifecycle roster (x-015c): per-phase start/end/duration + an honest total,
+    # computed once for both the JSON and human paths.
+    roster_lines, roster_summary = _lifecycle_roster(e["sessions"])
+
     if json_out:
         import dataclasses
 
@@ -4642,6 +4737,9 @@ def cmd_provenance(
             # Append-only lifecycle provenance in raw append order (x-b6e4).
             # read_graph's defaults guarantee the key, so no fallback guard.
             "sessions": e["sessions"],
+            # Per-phase roster with starts, durations, and an honest total
+            # (absent values are null, never 0). See _lifecycle_roster.
+            "lifecycle": roster_summary,
             "source_node_id": origin_id,
             "source_node_title": (index.get(origin_id) or {}).get("title"),
             "source_plan_path": e.get("source_plan_path"),
@@ -4722,19 +4820,13 @@ def cmd_provenance(
             lines.append(f"      work:      {work}")
             lines.append(f"      lifecycle: {a.get('lifecycle', '?')}")
 
-    # Lifecycle rows (x-b6e4): raw append order, phase-forward. Distinct from the
-    # birth/spawn edges above -- those are single parent pointers; this is the
-    # per-phase who-did-what across sessions and harnesses. read_graph's defaults
-    # guarantee the key.
-    sessions = e["sessions"]
-    if sessions:
-        lines.append("  lifecycle:")
-        for s in sessions:
-            lines.append(
-                f"    {s.get('phase', '?'):<9} "
-                f"{s.get('harness', '?')}:{s.get('session_id', '?')} "
-                f"@ {s.get('at', '?')}"
-            )
+    # Lifecycle roster (x-b6e4, x-015c): per-phase start/end/duration + an
+    # honest total. Distinct from the birth/spawn edges above -- those are
+    # single parent pointers; this is the per-phase who-did-what across sessions
+    # and harnesses. All four phases always render (not recorded / end only for
+    # gaps) so a roster never reads "nobody touched this" by omission.
+    lines.append("  lifecycle:")
+    lines.extend(roster_lines)
 
     typer.echo("\n".join(lines))
 
