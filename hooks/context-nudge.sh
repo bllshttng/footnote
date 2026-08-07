@@ -72,6 +72,15 @@ SESSION_ID=$(printf '%s' "$HOOK_INPUT" | sed -n \
     's/.*"session_id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)
 [[ -z "$SESSION_ID" ]] && SESSION_ID="${CLAUDE_CODE_SESSION_ID:-}"
 
+# stop_hook_active:true means Stop re-fired after a previous block - the session
+# is mid-compaction (our block told it to compact; the summarization turn is a
+# model turn, so CC fires Stop on it) or otherwise continuing. Re-blocking loops;
+# nudging it is noise. This is the one continuation signal the Stop payload
+# carries (there is no compaction-specific field), so exit 0 the instant we see it.
+STOP_HOOK_ACTIVE=$(printf '%s' "$HOOK_INPUT" | sed -n \
+    's/.*"stop_hook_active"[[:space:]]*:[[:space:]]*\([a-z]*\).*/\1/p' | head -1)
+[[ "$STOP_HOOK_ACTIVE" == "true" ]] && exit 0
+
 # No transcript handed to us -> not a real fire. The context check needs it; an
 # orphan-only fire on a payload with no transcript_path would fire on synthetic
 # input. Exit 0.
@@ -96,6 +105,19 @@ if command -v fno >/dev/null 2>&1; then
         *) KING_TRIGGER="$_t" ;;
     esac
 fi
+
+# ── 2b. Window gate + capacity floor (hook constants, not config). ───────────
+# Two reasons to nudge, because a percentage measures different things at
+# different window sizes. On a 1M lane the trigger is a QUALITY threshold
+# (returns diminish long before the cap); on a 200k lane the preamble alone is a
+# large fraction of the cap, so a percentage measures the preamble, not the work.
+# The gate is on window_tokens (a number the probe returns), not a harness name,
+# so a new lane classifies itself with no table to extend.
+MIN_WINDOW="400000"   # below this only the capacity branch can fire
+# RESERVE is a rung on Claude Code's own ladder, not an invented number: CC's
+# real auto-compact trigger is effectiveWindow - 13000 (absolute), warn 20000
+# below it. 80k remaining -> this nudge; 33k -> CC warn; 13k -> CC auto-compact.
+RESERVE="80000"
 
 # ── 3. Context reading (one probe). Unreadable -> no pressure. ────────────────
 USED_PCT=""
@@ -191,8 +213,22 @@ ORPHAN_LATCH="${LATCH_DIR}/.context-nudge-orphan-${TBASE}-${BAND}"
 
 REASON=""
 
-# ── 6. Check (a): context pressure (EVERY session). ──────────────────────────
-if [[ -n "$USED_PCT" && "$USED_PCT" -ge "$EFFECTIVE_TRIGGER" && ! -f "$CTX_LATCH" ]]; then
+# ── 6. Check (a): context pressure (EVERY session). Two branches: ─────────────
+#   quality  - large window (>= MIN_WINDOW) past the trigger (returns diminish)
+#   capacity - any window about to hit the absolute RESERVE floor (preamble-heavy
+#              lanes where a percentage measures the preamble, not the work)
+# Either sets FIRE_CTX; the once-per-band latch still gates the actual emit, so a
+# session hovering at the reserve across bands still nudges once per new band.
+FIRE_CTX=0
+if [[ -n "$USED_PCT" && -n "$WINDOW_TOKENS" ]]; then
+    if [[ "$WINDOW_TOKENS" -ge "$MIN_WINDOW" && "$USED_PCT" -ge "$EFFECTIVE_TRIGGER" ]]; then
+        FIRE_CTX=1
+    fi
+    if [[ -n "$USED_TOKENS" && $(( WINDOW_TOKENS - USED_TOKENS )) -le "$RESERVE" ]]; then
+        FIRE_CTX=1
+    fi
+fi
+if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     touch "$CTX_LATCH" 2>/dev/null || true
     if [[ "$IS_KING" -eq 1 ]]; then
         emit_event "king_context_nudge" \

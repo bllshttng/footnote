@@ -91,14 +91,22 @@ write_registry() {
 
 # A transcript with one assistant usage line: input_tokens sets the pct against
 # the 1M window (claude-sonnet-4-6). 500000 -> 50%, 300000 -> 30%.
-write_transcript() {  # write_transcript <path> <input_tokens>
-  jq -nc --argjson t "$2" '{type:"assistant",message:{model:"claude-sonnet-4-6",usage:{input_tokens:$t,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$1"
+write_transcript() {  # write_transcript <path> <input_tokens> [model]
+  local _m="${3:-claude-sonnet-4-6}"
+  jq -nc --argjson t "$2" --arg m "$_m" '{type:"assistant",message:{model:$m,usage:{input_tokens:$t,cache_creation_input_tokens:0,cache_read_input_tokens:0}}}' > "$1"
 }
 
 # Build a real-shape Stop payload pointing at a sandbox transcript + the session.
 payload() {  # payload <transcript-path>
   jq -nc --arg t "$1" --arg s "$KING_SID" \
     '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:false}'
+}
+
+# A Stop that re-fires after a previous block (mid-compaction): stop_hook_active
+# is the one continuation signal the payload carries, and the hook must exit on it.
+payload_compact() {  # payload_compact <transcript-path>
+  jq -nc --arg t "$1" --arg s "$KING_SID" \
+    '{session_id:$s, transcript_path:$t, cwd:"/repo", hook_event_name:"Stop", stop_hook_active:true}'
 }
 
 run_hook() {  # run_hook <payload> ; sets OUT, RC
@@ -213,6 +221,38 @@ mkdir -p "$SBX/no-fno-cwd"; cd "$SBX/no-fno-cwd"   # cwd with NO .fno of its own
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_absent "AC18: second fire (different cwd) is latched, no re-block" "$OUT" '"decision":"block"'
 cd "$SBX"                                 # restore for any trailing steps
+
+# === AC19: window gate - the quality branch needs a large window ===============
+# A 200k window (unlisted model) at 55% used does NOT fire quality (MIN_WINDOW),
+# and with 90k remaining it clears the RESERVE floor too, so the hook is silent.
+# The same percentage on a 1M window would block (covered by AC5/AC17).
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry no no
+write_transcript "$SBX/small.jsonl" 110000 "gpt-5-codex"   # 200k window, 55%, 90k left
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_eq     "AC19: small window high pct exits 0" "$RC" "0"
+assert_absent "AC19: small window no quality block" "$OUT" '"decision":"block"'
+
+# === AC20: capacity branch fires on a small window near the floor ==============
+# Same 200k window, but 60k remaining (<= RESERVE): capacity fires even though
+# quality can never fire on this window. Latches once per band like the rest.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/small.jsonl" 140000 "gpt-5-codex"   # 200k window, 70%, 60k left
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_contains "AC20: capacity branch blocks" "$OUT" '"decision":"block"'
+assert_contains "AC20: reason carries measured 70%" "$OUT" '70% used'
+run_hook "$(payload "$SBX/small.jsonl")"
+assert_absent "AC20: capacity latch holds (second fire silent)" "$OUT" '"decision":"block"'
+
+# === AC21: a compaction re-fire (stop_hook_active:true) is silent ==============
+# A Stop that re-fires after a previous block is mid-compaction: re-blocking
+# loops, nudging is noise. The hook exits before any check, even on a payload
+# that would otherwise block.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_transcript "$SBX/t.jsonl" 550000                      # 55% on 1M would block
+run_hook "$(payload_compact "$SBX/t.jsonl")"
+assert_eq     "AC21: compaction re-fire exits 0" "$RC" "0"
+assert_absent "AC21: compaction re-fire no block" "$OUT" '"decision":"block"'
 
 echo ""
 echo "================================"
