@@ -4,7 +4,9 @@ fno spawns every claude worker on the primary model (Anthropic Opus, billed to t
 
 ## Why route by role, not task
 
-A spawn's *role* is what it is doing, not what it is touching. `coordinate | tidy | orient | consolidate` shuffle the backlog and consolidate memory: route them. `implement | review-verdict` write code and render the correctness verdict: primary model only. Keying on role keeps the policy a tiny table instead of a per-task classifier.
+A spawn's *role* is what it is doing, not what it is touching. `coordinate | tidy | orient | consolidate` shuffle the backlog and consolidate memory: route them. `implement | review-verdict` are reserved names that never route. Keying on role keeps the policy a tiny table instead of a per-task classifier.
+
+The reserved names have since drifted from the dispatch surface, and the table below is the honest state rather than the original intent. Read [What the guard does and does not cover](#what-the-guard-does-and-does-not-cover) before treating either name as protection.
 
 ## Mechanism: per-spawn env
 
@@ -40,9 +42,19 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
 
 ## Two non-negotiable invariants
 
-**Hard quality guard.** `implement` and `review-verdict` are in `PROTECTED_ROLES` and short-circuit to `None` *before* any config is read. No settings edit, however malformed, can route the diff or the verdict to a secondary provider. The guard is structural, not a default.
+**Hard quality guard.** `implement` and `review-verdict` are in `PROTECTED_ROLES` and short-circuit to `None` *before* any config is read. No settings edit, however malformed, can make **either of those two role names** resolve to a secondary provider. The guard is structural, not a default. What it does not cover is below.
 
 **Fail safe, not fail closed.** If no key is configured for the role's provider (the named env var / `.env` file has none), the role falls back to the primary Anthropic model with a one-line stderr notice, and the spawn still succeeds. `resolve_route` never raises.
+
+## What the guard does and does not cover
+
+The guard covers two role *names*. It does not cover the two things a reader reasonably assumes it covers.
+
+**It does not keep the diff on the primary model.** `build` is a routable lane carrying exactly the payload `implement` names: `skills/target/scripts/dispatch-node.sh` attaches `--role build` to claude node dispatch, so a configured `build` route sends the worker that writes the diff to a secondary provider. That is deliberate, and config presence is the consent, but it means "no settings edit can route the diff" is false. `implement` is guarded; the lane that actually delivers is not.
+
+**It does not decide the reviewer's model.** No dispatch surface anywhere passes `--role review-verdict`; the name resolves nothing because nothing declares it. The model that renders a correctness verdict is the model of the session that runs the review, and routing sets every entry in `MODEL_ENV_KEYS` for the whole worker process. So a worker routed by `build` renders its own `/code-review` verdict on the routed model, and no per-spawn role guard can see that, because the verdict is a later activity inside an already-routed process. Keep the reviewer off the authoring worker (see [review lanes](review-lanes.md)); a role table cannot enforce it.
+
+`review_attestation` records the `model` and `provider` in effect when a local verdict was emitted, so this is auditable after the fact rather than assumed. Both fields are optional and best-effort: they report what the worker's environment *claimed*, which is not proof of the model that answered.
 
 ## Config
 
