@@ -26,6 +26,7 @@ ratchet necessary.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from dataclasses import dataclass
@@ -191,6 +192,17 @@ def enumerate_python_leaves() -> list[str]:
 
 
 def _locate_rust_front() -> Optional[Path]:
+    """The Rust front binary, by explicit path first and then PATH.
+
+    ``FNO_RUST_FRONT`` exists for environments that HAVE the front but must not
+    put it on PATH: the CI smoke job builds it for this gate alone, and a bare
+    ``fno`` there would shadow the Python entry point every other smoke step
+    resolves. An unset variable keeps the ordinary PATH lookup; a set-but-wrong
+    one still reaches the reachability probe below and fails closed.
+    """
+    override = os.environ.get("FNO_RUST_FRONT", "").strip()
+    if override:
+        return Path(override)
     found = shutil.which("fno")
     return Path(found) if found else None
 

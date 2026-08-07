@@ -97,6 +97,18 @@ def test_fail_closed_when_rust_front_missing(monkeypatch):
         vr.enumerate_rust_leaves()
 
 
+def test_rust_front_override_beats_path(monkeypatch):
+    monkeypatch.setenv("FNO_RUST_FRONT", "/explicit/fno")
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/on/path/fno")
+    assert vr._locate_rust_front() == Path("/explicit/fno")
+
+
+def test_rust_front_override_unset_falls_back_to_path(monkeypatch):
+    monkeypatch.delenv("FNO_RUST_FRONT", raising=False)
+    monkeypatch.setattr(vr.shutil, "which", lambda _: "/on/path/fno")
+    assert vr._locate_rust_front() == Path("/on/path/fno")
+
+
 def test_fail_closed_when_version_not_rust_front(monkeypatch):
     monkeypatch.setattr(vr, "_locate_rust_front", lambda: Path("/fake/fno"))
     # version exits nonzero -> unreachable

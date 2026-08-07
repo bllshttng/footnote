@@ -199,9 +199,21 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             crates/fno-agents/target
-          key: ${{ runner.os }}-cargo-journey-${{ hashFiles('crates/fno-agents/Cargo.lock') }}
+            crates/fno/target
+          key: ${{ runner.os }}-cargo-journey-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-journey-
+
+      - name: Build the Rust front (verb-surface ratchet)
+        # `fno lint verb-ratchet` covers BOTH binaries and fails closed when the
+        # front is unreachable, so the smoke job has to supply it: the toolchain
+        # above is provisioned for fno-agents, which is a separate crate with its
+        # own target dir. Handed over by explicit path rather than added to PATH,
+        # because a bare `fno` here would shadow the Python entry point that every
+        # other smoke step resolves.
+        run: |
+          cargo build --manifest-path crates/fno/Cargo.toml
+          echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"
 
       - name: Smoke (test + lint registry)
         # The test/lint steps live in the code-owned `fno test smoke` runner
