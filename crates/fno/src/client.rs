@@ -3866,6 +3866,11 @@ impl View {
         }
         match key {
             SectionKey::Mission(_) => self.expanded_or_live_only(key),
+            // The `~ missions` band is a progress summary, not a workspace: it
+            // opens Expanded (the mission names are the content) and the operator
+            // collapses it explicitly. No LiveOnly tier - the names have no
+            // exited state, so it is binary.
+            SectionKey::Missions => SectionView::Expanded,
             SectionKey::Squad(_) if self.is_active_squad(key) => self.expanded_or_live_only(key),
             SectionKey::Squad(_) | SectionKey::Elsewhere | SectionKey::WorkQueue => {
                 SectionView::Collapsed
@@ -4075,6 +4080,8 @@ impl View {
             SectionKey::Elsewhere => self.orphans().into_iter().filter(|a| a.exited).collect(),
             // Cards have no exited state, so the Backlog section is always binary.
             SectionKey::WorkQueue => Vec::new(),
+            // The `~ missions` band holds progress names, not agents.
+            SectionKey::Missions => Vec::new(),
         }
     }
 
@@ -5313,7 +5320,15 @@ impl View {
         // single squad has no groups to separate (US3 verify: absent with 1
         // squad).
         let multi_squad = self.layout.squads.len() > 1;
-        for (idx, s) in self.layout.squads.iter().enumerate() {
+        // Real workspaces only: a mission squad renders later under the
+        // `~ missions` band, never as a workspace section (it can hold no agent).
+        let real_squads: Vec<&SquadMeta> = self
+            .layout
+            .squads
+            .iter()
+            .filter(|s| !is_mission_squad(s.id))
+            .collect();
+        for (idx, s) in real_squads.into_iter().enumerate() {
             // One spacer between consecutive workspace groups (never before the
             // first, so no leading blank and never doubled).
             if multi_squad && idx > 0 {
@@ -5404,6 +5419,34 @@ impl View {
         // The `+` create-workspace affordance sits directly under the squad list
         // (x-9e5e), above the agents/work-queue sections.
         out.push(DisplayRow::NewSquad);
+        // Mission squads are progress indicators, not workspaces (an agent is
+        // never assigned a mission id), so they render as one `~ missions` band -
+        // the same `~`-prefixed pull-section shape as `~ elsewhere` / `~ backlog` -
+        // rather than workspace sections an operator rightly expects to hold
+        // sessions. Each mission's name already carries its `done/total` counter.
+        let missions: Vec<&SquadMeta> = self
+            .layout
+            .squads
+            .iter()
+            .filter(|s| is_mission_squad(s.id))
+            .collect();
+        if !missions.is_empty() {
+            if multi_squad {
+                out.push(DisplayRow::Blank);
+            }
+            let view = self.section_view(&SectionKey::Missions);
+            out.push(DisplayRow::Header {
+                label: "~ missions",
+                rollup: Vec::new(),
+                key: SectionKey::Missions,
+                view,
+            });
+            if view != SectionView::Collapsed {
+                for m in missions {
+                    out.push(DisplayRow::Sub(m.name.clone()));
+                }
+            }
+        }
         let orphans = self.orphans();
         if !orphans.is_empty() {
             // Orphans (cwd matched no squad) keep one flat section in the same
@@ -6149,7 +6192,7 @@ fn squad_matches(s: &SquadMeta, key: &SectionKey) -> bool {
         SectionKey::Squad(_) if is_mission_squad(s.id) => false,
         SectionKey::Squad(ident) if !s.canonical_cwd.is_empty() => &s.canonical_cwd == ident,
         SectionKey::Squad(ident) => &s.name == ident,
-        SectionKey::Elsewhere | SectionKey::WorkQueue => false,
+        SectionKey::Elsewhere | SectionKey::WorkQueue | SectionKey::Missions => false,
     }
 }
 
@@ -6161,6 +6204,9 @@ fn section_is_live(layout: &LayoutView, key: &SectionKey) -> bool {
         SectionKey::Squad(_) | SectionKey::Mission(_) => {
             layout.squads.iter().any(|s| squad_matches(s, key))
         }
+        // The `~ missions` band is live while any mission squad exists; the two
+        // pull-sections are always considered live (their rows come and go).
+        SectionKey::Missions => layout.squads.iter().any(|s| is_mission_squad(s.id)),
         SectionKey::Elsewhere | SectionKey::WorkQueue => true,
     }
 }
@@ -14453,25 +14499,39 @@ mod tests {
         );
     }
 
-    // A mission squad has no server-side squad `SelectSquad` could resolve
-    // (it would refuse "no such squad"), so acting on its header row must
-    // always toggle locally instead - even though it is never the active
-    // squad (codex review of x-1a47 change 2/3, P1-a).
+    // A mission squad can never hold an agent (its id is a high-bit sentinel
+    // nothing is assigned), so it renders as a progress line under the
+    // `~ missions` band rather than a workspace section an operator would expect
+    // to hold sessions. The band header cycles locally; no per-mission row ever
+    // reaches SelectSquad (a mission has no server-side squad to select).
     #[test]
-    fn row_action_on_mission_squad_toggles_expand_not_select() {
+    fn mission_renders_under_the_missions_band_not_as_a_workspace() {
         let mut view = two_pane_view();
         let mut layout = two_squad_layout(1);
-        let mid = mission_meta(3, "mux-squad  2/2").id;
         layout.squads.push(mission_meta(3, "mux-squad  2/2"));
         view.set_layout(layout);
-        let i = view
-            .display_rows()
-            .iter()
-            .position(|r| matches!(r, DisplayRow::Sel(row) if row.squad == mid))
-            .expect("mission header row");
+        let rows = view.display_rows();
         assert!(
-            matches!(view.row_action(i), Some(ChromeHit::CycleSection(_))),
-            "a mission header must toggle, never SelectSquad"
+            !rows
+                .iter()
+                .any(|r| matches!(r, DisplayRow::Sel(row) if is_mission_squad(row.squad))),
+            "a mission must not render as a workspace section"
+        );
+        let band = rows
+            .iter()
+            .position(|r| matches!(r, DisplayRow::Header { label, .. } if *label == "~ missions"))
+            .expect("a `~ missions` band");
+        assert!(
+            rows.iter()
+                .any(|r| matches!(r, DisplayRow::Sub(s) if s == "mux-squad  2/2")),
+            "the mission's name renders as a band line"
+        );
+        assert!(
+            matches!(
+                view.row_action(band),
+                Some(ChromeHit::CycleSection(SectionKey::Missions))
+            ),
+            "the missions band cycles locally, never SelectSquad"
         );
     }
 
