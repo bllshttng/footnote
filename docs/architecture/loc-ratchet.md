@@ -1,18 +1,21 @@
-# Control-plane LOC ratchet
+# Control-plane LOC gate
 
 ## Why
 
 An early control-plane collapse step self-assessed "net -16 lines" while executable control-plane code grew +74; the negative came entirely from markdown. Review-time discipline missed the divergence, so the discipline moves to CI.
 
-This gate is correction 3 of the control-plane collapse design (grilled decision 11). It measures every PR's executable-LOC delta inside a checked-in path manifest and fails when the delta is positive - unless the PR declares a `loc-exception:` in its body AND records the borrow in a checked-in trajectory file. Both factors are required; neither alone passes. The gate is permanent: it outlives the collapse initiative as the anti-regrowth immune system.
+This gate is correction 3 of the control-plane collapse design (grilled decision 11). It measures every PR's executable-LOC delta inside a checked-in path manifest and fails when the delta is positive - unless the PR declares a `loc-exception:` line in its body. The gate is permanent: it outlives the collapse initiative as the anti-regrowth immune system.
 
-## The four artifacts
+## What this gate is (and is not)
+
+This is a **per-PR delta gate**, not a ratchet against a baseline. There is no backsliding-over-time mechanism here. An earlier revision kept a checked-in trajectory log of granted exceptions and printed a CUMULATIVE (live count - baseline) number; both were removed because nothing consumed them and every loc-exception PR appends to the end of that log, so any two such PRs conflicted by construction. What actually blocks or passes a PR is its own delta. If a backsliding-over-time measure is wanted later, it has to be built; do not look for it here.
+
+## The three artifacts
 
 | Artifact | Path | Role |
 |---|---|---|
 | Manifest | `scripts/ci/loc-ratchet-manifest.yaml` | Single source of scope: include paths, extensions, test-exclusion patterns |
-| Gate script | `scripts/ci/loc-ratchet.sh` | Computes delta + live cumulative, enforces the decision table, prints per-file breakdown |
-| Trajectory file | `scripts/ci/loc-ratchet-trajectory.yaml` | Frozen baseline (`12778ef1`, pre-#437 main = 26,453 LOC) + append-only exceptions ledger |
+| Gate script | `scripts/ci/loc-ratchet.sh` | Computes delta, enforces the decision, prints per-file breakdown |
 | Workflow | `.github/workflows/loc-ratchet.yml` | Runs the script on every PR; also runs the test harness in a `self-test` job |
 
 Gate tooling lives in `scripts/ci/` - outside manifest scope - so the gate never counts itself. Manifest edits are review-guarded.
@@ -54,20 +57,15 @@ git diff --numstat --no-renames "$MB" HEAD -- <include paths>
 
 | Condition | Result |
 |---|---|
-| delta <= 0 | PASS (cumulative summary printed) |
-| delta > 0, PR body has `loc-exception:` line AND trajectory adds exactly one new entry with `delta:` == computed and non-empty `reason:` | PASS with warning annotation |
-| delta > 0, new trajectory entry has an empty or missing `reason:` | FAIL |
+| delta <= 0 | PASS |
+| delta > 0, PR body has a `loc-exception:` line with non-empty rationale | PASS with warning annotation |
 | delta > 0, PR body is null/empty or no line matches the regex | FAIL ("no exception declared") |
-| delta > 0, body line present but no new trajectory entry (or vice versa) | FAIL naming the missing factor |
-| delta > 0, new trajectory entry's `delta:` != computed | FAIL printing declared vs computed |
-| delta > 0, diff adds more than one new trajectory entry | FAIL (one borrow per PR; ledger stays attributable) |
+| delta > 0, body line present but rationale is empty/whitespace | FAIL |
 | script/parse/merge-base error | FAIL (fail-closed; never skip) |
 
 ## Declaring an exception
 
-Both steps are required. Either alone fails.
-
-**Step 1 - PR body line.** Add a line to the PR body (description field) matching:
+A single PR-body line is the whole exception. Add to the PR body (description field):
 
 ```
 loc-exception: <rationale here>
@@ -75,51 +73,7 @@ loc-exception: <rationale here>
 
 The rationale must be non-empty on the same line. The `edited` workflow trigger re-evaluates the gate when the PR body changes, so adding this line after a red run is sufficient to re-check without a new push.
 
-**Step 2 - Trajectory entry.** Append exactly one new entry under `entries:` in `scripts/ci/loc-ratchet-trajectory.yaml`:
-
-```yaml
-  - date: YYYY-MM-DD
-    pr: <PR number>
-    branch: <branch name>
-    delta: <positive integer>
-    reason: "<same rationale or expanded version>"
-```
-
-`delta:` must equal the computed delta exactly. The CI failure output states the computed number: "computed delta: +N". If a review push later changes the delta, update the single ledger line to the new number and the gate re-passes.
-
-Compute the delta locally as the LAST edit before pushing, then commit the trajectory entry in the same push. The gate reads the trajectory at committed HEAD (`git show HEAD:<rel>`), so an uncommitted `delta:` edit is invisible to it: a local re-run will keep printing the old number and CI will keep failing on the mismatch until the edit lands as a commit. The working local invocation is `BASE_REF=main bash scripts/ci/loc-ratchet.sh` redirected to a file (a bare call fails "no base ref"; `BASE_REF=origin/main` fails as `origin/origin/main`); read the computed `delta:` off that, set the entry, commit, push once. Declaring the delta before the last code change guarantees a mismatch.
-
-Known limitation: two exception PRs racing on the trajectory tail produce a git merge conflict. The second author resolves it by keeping both entries; the gate re-validates on the synchronize run.
-
-## Trajectory file semantics
-
-The trajectory file has two parts: a frozen baseline block and an exceptions ledger.
-
-```yaml
-baseline:
-  commit: 12778ef19d61f85fda8d868a708cd6ada72c4b7c   # main immediately before the first collapse step
-  executable_loc: 26453
-  note: "pre-step-1 main; the collapse must end below this number"
-
-entries:
-  - date: 2026-06-04
-    pr: 437
-    branch: control-plane-output-validated
-    delta: 74
-    reason: "step 1 wedge: output_validated reads CI checks on the PR ..."
-```
-
-The `entries:` list records only PRs granted exceptions - negative or zero-delta PRs do not appear. The cumulative number is NOT the sum of entries; it is computed live on every run:
-
-```
-cumulative = (live line count of manifest files at HEAD) - baseline.executable_loc
-```
-
-This means cumulative cannot rot in a stale cache. A cumulative above zero prints a warning annotation ("initiative is still in debt"); it does not fail the gate. The per-PR delta is what blocks or passes.
-
-The `entries:` key is required even when empty. A missing key is a parse failure - fail-closed, consistent with the gate's posture everywhere.
-
-Re-anchor rule: if the manifest scope materially changes (include paths added or removed), add a new `baseline:` block with a dated note before the old one. The script reads only the first `baseline.executable_loc` it encounters. The old block stays for audit trail.
+The CI failure output prints the computed delta and the per-file breakdown. There is no separate ledger to keep in sync; the exception lives entirely in the PR body, so it cannot conflict with another PR the way an append-only log does.
 
 ## Permanence and enforceability
 
@@ -142,7 +96,5 @@ Runtime: git + POSIX shell utilities (awk, grep, sed, wc, tr, head) only. No ins
 ## Known limitations
 
 - **Inline Rust `#[cfg(test)]` modules** are not excludable: numstat counts lines, not AST nodes. Test code inside a non-test file counts toward the delta. Accepted.
-- **Duplicate trajectory entries** are rejected: if two entries carry byte-identical content, the new-entry detection (diff of entry count at HEAD vs merge-base) may not distinguish them. Vary the reason text between entries, even for the same PR.
-- **Baseline tamper resistance** is review-guarded, not mechanical: a PR that silently decrements `baseline.executable_loc` would inflate the cumulative-positive threshold. The baseline block is 5 lines in a checked-in file - the change is visible in diff; the gate does not mechanize this check.
 
-Implementation: `scripts/ci/loc-ratchet.sh`, `scripts/ci/loc-ratchet-manifest.yaml`, `scripts/ci/loc-ratchet-trajectory.yaml`, `.github/workflows/loc-ratchet.yml`, `tests/ci/test_loc_ratchet.sh`.
+Implementation: `scripts/ci/loc-ratchet.sh`, `scripts/ci/loc-ratchet-manifest.yaml`, `.github/workflows/loc-ratchet.yml`, `tests/ci/test_loc_ratchet.sh`.

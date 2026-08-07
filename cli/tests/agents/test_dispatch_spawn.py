@@ -312,17 +312,22 @@ def test_spawn_claude_plain(workdir_claude) -> None:
     first_line = result.output.split("\n")[0].strip()
     receipt = json.loads(first_line)
     assert receipt["name"] == "myagent-c"
-    assert receipt["provider"] == "claude"
+    assert receipt["harness"] == "claude"
+    # AC5: no -P on this spawn -> provider (vendor) and model are absent, not
+    # defaulted to the harness. A provider key holding "claude" is the defect.
+    assert "provider" not in receipt
+    assert "model" not in receipt
     assert receipt["status"] == "live"
     assert "short_id" in receipt
     # jq .short_id must work (i.e. it's a plain string value)
     assert isinstance(receipt["short_id"], str)
     assert len(receipt["short_id"]) == 8
 
-    # Verify the exact format: hand-rolled, keys in order name/short_id/provider/status
+    # Verify the exact format: hand-rolled, keys in order name/short_id/harness/status.
+    # No -P -> provider/model absent (AC5); harness carries the harness literal.
     assert first_line == (
         f'{{"name": "{receipt["name"]}", "short_id": "{receipt["short_id"]}", '
-        f'"provider": "claude", "status": "live"}}'
+        f'"harness": "claude", "status": "live"}}'
     )
 
     # Registry row must be present

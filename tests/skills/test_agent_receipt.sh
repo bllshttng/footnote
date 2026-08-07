@@ -115,7 +115,7 @@ run_spawn() { PATH="$BIN:$PATH" bash "$SPAWN" "$@"; }
 reset_log() { : > "$ASK_LOG"; : > "$SPAWN_LOG"; }
 # The client-side claude spawn receipt (Group 1 ab-8b3e4fe0): ONE compact JSON
 # line, byte-parity across the Python and Rust runtimes.
-claude_receipt() { printf '{"name": "%s", "short_id": "%s", "provider": "claude", "status": "live"}\n' "${2:-tgt-x}" "$1"; }
+claude_receipt() { printf '{"name": "%s", "short_id": "%s", "harness": "claude", "status": "live"}\n' "${2:-tgt-x}" "$1"; }
 
 # ---- AC1-HP: real short-id -> launched ------------------------------------
 reset_log
@@ -323,9 +323,9 @@ fi
 # US1 - codex/gemini build dispatch -> `fno agents spawn` (exec) + JSON receipt
 # ===========================================================================
 # Pretty (multi-line) JSON is what `serde_json::to_string_pretty` emits for the
-# spawn/host daemon Ok payload {"short_id","provider","status"}; the bare-8-hex
+# spawn/host daemon Ok payload {"short_id","harness","status"}; the bare-8-hex
 # grep would find NOTHING here, so a JSON branch (jq .short_id) is mandatory.
-spawn_json() { printf '{\n  "short_id": "%s",\n  "provider": "%s",\n  "status": "live"\n}\n' "$1" "$2"; }
+spawn_json() { printf '{\n  "short_id": "%s",\n  "harness": "%s",\n  "status": "live"\n}\n' "$1" "$2"; }
 
 # ---- AC1-HP: codex exec spawn launches; ask NEVER called -------------------
 reset_log
@@ -368,7 +368,7 @@ fi
 
 # ---- AC1-FR: spawn exits 0 but short_id empty -> failed, never fabricated ---
 reset_log
-OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "provider": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"no valid short-id"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then
@@ -405,7 +405,7 @@ fi
 # A JSON value with an embedded newline whose 2nd line is 8-hex would slip past a
 # line-anchored `grep -qx`; the whole-string `[[ =~ ^...$ ]]` guard rejects it.
 reset_log
-OUT="$(MOCK_SPAWN_OUT='{"short_id": "junk\ndeadbeef", "provider": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+OUT="$(MOCK_SPAWN_OUT='{"short_id": "junk\ndeadbeef", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]] \
    && [[ "$OUT" != *"short_id=deadbeef"* ]]; then
@@ -442,7 +442,7 @@ fi
 # A Codex pane can be addressable by its unique registry name before the
 # provider writes the canonical thread id. That receipt must remain pending.
 reset_log
-PANE_RECEIPT='{"name":"handoff-pane","short_id":"","provider":"codex","status":"spawning","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
+PANE_RECEIPT='{"name":"handoff-pane","short_id":"","harness":"codex","status":"spawning","mux_session":"fno-agent-handoff-pane","pane_id":"%7"}'
 OUT="$(MOCK_SPAWN_OUT="$PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=pending"* ]] && [[ "$OUT" != *"result=launched"* ]] \
@@ -455,7 +455,7 @@ fi
 
 # An empty short_id without matching pane evidence remains a hard failure.
 reset_log
-BAD_PANE_RECEIPT='{"name":"other-worker","short_id":"","provider":"codex","status":"live","mux_session":"fno-agent-other","pane_id":"%8"}'
+BAD_PANE_RECEIPT='{"name":"other-worker","short_id":"","harness":"codex","status":"live","mux_session":"fno-agent-other","pane_id":"%8"}'
 OUT="$(MOCK_SPAWN_OUT="$BAD_PANE_RECEIPT" MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name handoff-pane --provider codex --payload-mode handoff --message "$handoff_seed" --mode exec)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" != *"result=launched"* ]]; then
@@ -549,7 +549,7 @@ fi
 
 # ---- AC2-FR: interactive receipt parsed from JSON; empty short_id never faked
 reset_log
-OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "provider": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
+OUT="$(MOCK_SPAWN_OUT='{"short_id": "", "harness": "codex", "status": "live"}' MOCK_SPAWN_RC=0 MOCK_CLAIM_STATE=free \
        run_spawn --name tgt-x --provider codex --message "build it" --node ab-deadbeef --mode interactive)"
 if [[ "$OUT" == *"result=failed"* ]] && [[ "$OUT" == *"no valid short-id"* ]] \
    && [[ "$OUT" != *"short_id="* ]] && [[ "$OUT" != *"result=launched"* ]]; then

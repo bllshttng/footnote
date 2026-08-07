@@ -333,7 +333,7 @@ fn spawn_claude_receipt_byte_shape() {
         "spawn claude happy path should exit 0, stderr: {}",
         out.stderr
     );
-    // Receipt: {"name": "<name>", "short_id": "<8hex>", "provider": "claude", "status": "live"}\n
+    // Receipt: {"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n
     let receipt = out.stdout.trim_end_matches('\n');
     assert!(
         receipt.starts_with(r#"{"name": "myspawn", "short_id": "#),
@@ -341,14 +341,14 @@ fn spawn_claude_receipt_byte_shape() {
         out.stdout
     );
     assert!(
-        receipt.ends_with(r#""provider": "claude", "status": "live"}"#),
-        "receipt must end with provider/status: {}",
+        receipt.ends_with(r#""harness": "claude", "status": "live"}"#),
+        "receipt must end with harness/status: {}",
         out.stdout
     );
     // Parse as JSON to verify structure.
     let v: serde_json::Value = serde_json::from_str(receipt).expect("receipt must be valid JSON");
     assert_eq!(v["name"], "myspawn");
-    assert_eq!(v["provider"], "claude");
+    assert_eq!(v["harness"], "claude");
     assert_eq!(v["status"], "live");
     let short_id = v["short_id"].as_str().unwrap();
     assert_eq!(
@@ -1190,7 +1190,9 @@ fn client_spawn_bg_claude_happy_path_prints_receipt() {
     );
     // Receipt is exactly one compact JSON line (the contract the shell
     // callers' `grep -F '"short_id"' | jq -r .short_id` parse relies on).
-    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"provider\": \"claude\", \"status\": \"live\"}\n";
+    // harness axis under `harness`; an unrouted bg spawn carries no provider
+    // (vendor) or model key (AC5).
+    let expected = "{\"name\": \"hp-agent\", \"short_id\": \"7c5dcf5d\", \"harness\": \"claude\", \"status\": \"live\"}\n";
     assert_eq!(
         stdout, expected,
         "claude spawn receipt must be the exact compact JSON line"

@@ -9,6 +9,7 @@ Layers:
 from __future__ import annotations
 
 import os
+import json
 from pathlib import Path
 from typing import Any, Dict
 
@@ -148,6 +149,107 @@ def test_route_allowed_on_capability_enabled_pane(
             continue
         assert route_env[key] == "glm-5.2"
     assert route_env["ANTHROPIC_DEFAULT_HAIKU_MODEL"] == DEFAULT_ZAI_HAIKU_MODEL
+    # AC4 + the live specimen (2026-08-06): a routed spawn's receipt carries
+    # three axes in three keys - harness (claude), provider (the vendor zai),
+    # model (glm-5.2) - and NO key holds a harness literal under `provider`.
+    # The defect was a receipt reading {"provider": "claude"} for this exact
+    # invocation while the worker ran on glm-5.2: the flags took, the receipt lied.
+    receipt = json.loads(result.output.strip().splitlines()[-1])
+    assert receipt["harness"] == "claude"
+    assert receipt["provider"] == "zai"
+    assert receipt["model"] == "glm-5.2"
+
+
+def test_receipt_model_is_the_effective_model_not_the_routed_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An explicit --model beats the route's model, so the receipt reports it.
+
+    ``mux_spawn.dispatch_spawn_pane`` forwards ``--model`` as the harness's own
+    ``--model`` flag, which wins over the route's ``ANTHROPIC_MODEL``. Reporting
+    ``route_model`` here would make the receipt name glm-5.2 while the worker
+    runs opus - the same receipt-lies defect, moved into the new key.
+    """
+    from fno.agents import mux_spawn, spawn_gate
+    from fno.agents.cli import agents_app
+    from fno.agents.mux_spawn import MuxSpawnResult
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch(**kwargs: Any) -> MuxSpawnResult:
+        captured.update(kwargs)
+        return MuxSpawnResult(
+            name=kwargs["name"],
+            provider=kwargs["provider"],
+            session="main",
+            pane_id=1,
+            child_pid=None,
+            session_uuid="u",
+        )
+
+    monkeypatch.setattr(mux_spawn, "dispatch_spawn_pane", fake_dispatch)
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude",
+         "--route", "zai,glm-5.2", "--model", "opus"],
+    )
+    assert result.exit_code == 0, result.output
+    # What the worker actually gets, versus what the receipt claims.
+    assert captured["model"] == "opus"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
+    receipt = json.loads(result.output.strip().splitlines()[-1])
+    assert receipt["model"] == "opus"
+    assert receipt["provider"] == "zai"
+    assert receipt["harness"] == "claude"
+
+
+def test_bg_receipt_carries_route_provider_and_effective_model(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A routed bg spawn's receipt carries the same three axes as the pane path.
+
+    The bg receipt branch builds provider_field and model_field with the same
+    ``model or route_model`` logic as the pane branch. Without this test, a
+    regression in the bg branch's receipt (dropping provider/model, or reporting
+    route_model instead of the effective model) would pass CI.
+    """
+    from fno.agents import dispatch, spawn_gate
+    from fno.agents.cli import agents_app
+
+    _setup_tmp_home(tmp_path, monkeypatch)
+    monkeypatch.setenv("FNO_AGENTS_RUNTIME", "python")
+    monkeypatch.setenv("FNO_REPO_ROOT", os.getcwd())
+    monkeypatch.setenv("ZAI_API_KEY", "zk-live")
+    monkeypatch.setattr(spawn_gate, "run_gate", lambda *a, **k: _Gate())
+    captured: Dict[str, Any] = {}
+
+    def fake_dispatch(**kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return dispatch.SpawnResult(
+            kind="created", name=kwargs["name"], provider="claude", short_id="abcd1234"
+        )
+
+    monkeypatch.setattr("fno.agents.dispatch.dispatch_spawn", fake_dispatch)
+    result = runner.invoke(
+        agents_app,
+        ["spawn", "--name", "w1", "hi", "--harness", "claude", "--substrate", "bg",
+         "--route", "zai,glm-5.2", "--model", "opus"],
+    )
+    assert result.exit_code == 0, result.output
+    assert captured["model"] == "opus"
+    assert captured["route_env"]["ANTHROPIC_MODEL"] == "glm-5.2"
+    receipt_line = next(
+        line for line in result.output.strip().splitlines() if '"short_id"' in line
+    )
+    receipt = json.loads(receipt_line)
+    assert receipt["harness"] == "claude"
+    assert receipt["provider"] == "zai"
+    assert receipt["model"] == "opus"
 
 
 @pytest.mark.parametrize("missing", [False, True])

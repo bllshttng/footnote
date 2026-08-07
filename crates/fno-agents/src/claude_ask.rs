@@ -1944,7 +1944,7 @@ pub fn dispatch_claude_ask(
 /// reused directly; only the output shape differs from `dispatch_claude_ask`.
 ///
 /// Receipt (byte-parity with Python `cmd_spawn`):
-/// `{"name": "<name>", "short_id": "<8hex>", "provider": "claude", "status": "live"}\n`
+/// `{"name": "<name>", "short_id": "<8hex>", "harness": "claude", "status": "live"}\n`
 #[allow(clippy::too_many_arguments)]
 pub fn dispatch_claude_spawn(
     home: &AgentsHome,
@@ -2090,7 +2090,7 @@ pub fn dispatch_claude_spawn(
     };
     AskOutcome {
         stdout: format!(
-            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "provider": "claude", "status": "live"{perm_field}{cwd_field}}}"#
+            r#"{{"name": "{safe_name}", "short_id": "{short_id}", "harness": "claude", "status": "live"{perm_field}{cwd_field}}}"#
         ) + "\n",
         stderr: inner.stderr,
         exit_code: 0,

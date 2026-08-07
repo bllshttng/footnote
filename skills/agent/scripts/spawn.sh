@@ -469,11 +469,11 @@ else
   case "$SUBSTRATE" in
     ""|pane)
       receipt_name="$(printf '%s' "$spawn_out" | jq -r '.name // empty' 2>/dev/null)"
-      receipt_provider="$(printf '%s' "$spawn_out" | jq -r '.provider // empty' 2>/dev/null)"
+      receipt_harness="$(printf '%s' "$spawn_out" | jq -r '.harness // empty' 2>/dev/null)"
       receipt_status="$(printf '%s' "$spawn_out" | jq -r '.status // empty' 2>/dev/null)"
       mux_session="$(printf '%s' "$spawn_out" | jq -r '.mux_session // empty' 2>/dev/null)"
       pane_id="$(printf '%s' "$spawn_out" | jq -r '.pane_id // empty' 2>/dev/null)"
-      if [[ "$receipt_name" == "$NAME" && "$receipt_provider" == "$PROVIDER" \
+      if [[ "$receipt_name" == "$NAME" && "$receipt_harness" == "$PROVIDER" \
          && ( "$receipt_status" == "live" || "$receipt_status" == "spawning" ) \
          && -n "$mux_session" && -n "$pane_id" ]]; then
         pane_identity_ok=1

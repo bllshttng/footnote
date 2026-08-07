@@ -2082,9 +2082,12 @@ fn format_success(
         "spawn" => {
             // x-3ab8: PTY-provider spawns now route through the daemon (owned
             // interactive pane) instead of the client-side claude `--bg` lane.
-            // Emit the SAME compact single-line JSON receipt that lane produced
-            // ({"name","short_id","provider","status"}) so receipt parsers
-            // (dispatch-node.sh, backlog/advance.py) keep working across the move.
+            // Emit the SAME compact single-line JSON receipt that lane produces
+            // ({"name","short_id","harness","status"}). The harness axis is
+            // reported under `harness`, never under a `provider` key (a provider
+            // key holding a harness literal is the four-axis defect). The in-repo
+            // receipt parsers (skills/target/scripts/dispatch-node.sh and
+            // backlog/advance.py) read only `short_id`, so the rename is safe.
             // serde_json::to_string (NOT _pretty) keeps it one line for the
             // line-by-line `json.loads` consumers. `--once` spawns are handled
             // client-side and never reach here.
@@ -2092,10 +2095,7 @@ fn format_success(
                 .get("short_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("");
-            let provider = result
-                .get("provider")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
+            let harness = result.get("harness").and_then(|v| v.as_str()).unwrap_or("");
             let status = result
                 .get("status")
                 .and_then(|v| v.as_str())
@@ -2104,7 +2104,7 @@ fn format_success(
                 serde_json::to_string(&json!({
                     "name": name,
                     "short_id": short_id,
-                    "provider": provider,
+                    "harness": harness,
                     "status": status,
                 }))
                 .unwrap_or_default(),
@@ -3703,7 +3703,7 @@ mod tests {
         // json.loads needs it compact, not pretty-printed).
         let result = json!({
             "short_id": "ab12cd34",
-            "provider": "claude",
+            "harness": "claude",
             "status": "live",
             "extra": "ignored"
         });
@@ -3712,7 +3712,7 @@ mod tests {
         let parsed: Value = serde_json::from_str(&line).expect("valid JSON receipt");
         assert_eq!(parsed["name"], "wk");
         assert_eq!(parsed["short_id"], "ab12cd34");
-        assert_eq!(parsed["provider"], "claude");
+        assert_eq!(parsed["harness"], "claude");
         assert_eq!(parsed["status"], "live");
     }
 

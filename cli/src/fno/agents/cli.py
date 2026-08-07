@@ -1105,7 +1105,9 @@ def cmd_spawn(
 
     claude ``--substrate bg``: creates a persistent bg thread; prints a
     compact JSON receipt on stdout: {\"name\": ..., \"short_id\": ...,
-    \"provider\": \"claude\", \"status\": \"live\"}.
+    \"harness\": \"claude\", \"status\": \"live\"}, plus \"provider\" (the model
+    vendor) and \"model\" keys only when a route was applied (-P/--route) or a
+    model named.
 
     codex/gemini --once: creates + exchanges + tears down the registry
     row. stdout = provider reply verbatim. stderr = teardown receipt.
@@ -1177,9 +1179,11 @@ def cmd_spawn(
     except DispatchFlagError as exc:
         print(str(exc), file=sys.stderr)
         raise typer.Exit(code=2) from exc
-    # Provenance rides the pane receipt's provider_source field below (the
-    # default substrate). The bg/once stdout receipts stay byte-parity-locked
-    # with the Rust client, so they don't carry it.
+    # Provenance rides the pane receipt's harness_source field below (the
+    # default substrate) - it is the HARNESS axis's provenance, so it must not
+    # be named provider_*, which now holds the vendor. The bg/once stdout
+    # receipts stay byte-parity-locked with the Rust client, so they don't
+    # carry it.
 
     # x-2c27 named the substrate axis; 4a-G2 retargeted its default: `pane`
     # is mux-hosted and Python OWNS that back half (rust_runtime carves pane
@@ -1372,6 +1376,11 @@ def cmd_spawn(
     # for --route is a hard refusal, not the role lane's silent fallback.
     route_env: dict[str, str] | None = None
     route_provider: str | None = None
+    # The model axis for the receipt: the model token an explicit route named
+    # (-P vendor/model or --route vendor,model). Absent when no route was
+    # applied. A bare --model (no route) is still reported via the `model`
+    # local below, since claude bg_create applies it as `claude --model`.
+    route_model: str | None = None
     if route is not None:
         # Pane routing is a per-harness evidence claim, independent from both
         # pane autonomy and substrate preference. Missing capability stays
@@ -1404,6 +1413,7 @@ def cmd_spawn(
             )
             raise typer.Exit(code=2)
         route_provider = parsed[0]
+        route_model = parsed[1]
         if monitor == "happy" and route_provider != "zai":
             print(
                 "--monitor happy currently supports only the zai provider",
@@ -1615,18 +1625,33 @@ def cmd_spawn(
                 raise typer.Exit(code=exc.exit_code) from exc
             spawn_succeeded = True
             # Compact one-line receipt, superset of the daemon-spawn receipt shape
-            # ({"name","short_id","provider","status"}) so line-parsing consumers
+            # ({"name","short_id","harness","status"}) so line-parsing consumers
             # keep working. A Codex pane is `spawning` until its rollout identity
             # is bound; a `live` Codex receipt always carries the full identity.
             receipt_obj = {
                 "name": pane_result.name,
                 "short_id": pane_result.short_id,
-                "provider": pane_result.provider,
-                "provider_source": provider_source,
+                "harness": pane_result.provider,
+                "harness_source": provider_source,
                 "status": pane_result.status,
                 "mux_session": pane_result.session,
                 "pane_id": pane_result.pane_id,
             }
+            # Three orthogonal axes: harness always; provider (the model vendor)
+            # and model only when an explicit route was applied (-P/--route) or a
+            # model was named, absent otherwise. No key may hold another axis's
+            # literal: provider never carries a harness value.
+            # `model` reports the EFFECTIVE model, so an explicit --model beats
+            # the routed one: mux_spawn/dispatch pass it as the harness's own
+            # `--model` flag, which wins over the route's ANTHROPIC_MODEL.
+            # Reporting only route_model here would re-introduce the
+            # receipt-can-lie defect: a `--route zai,glm-5.2 --model opus` spawn
+            # would name glm-5.2 in the receipt while the worker runs opus.
+            if route_provider is not None:
+                receipt_obj["provider"] = route_provider
+            receipt_model = model or route_model
+            if receipt_model is not None:
+                receipt_obj["model"] = receipt_model
             if pane_result.session_uuid is not None:
                 receipt_obj["session_id"] = pane_result.session_uuid
             effective_message = getattr(pane_result, "effective_message", None)
@@ -1751,9 +1776,20 @@ def cmd_spawn(
             if effective_message is not None
             else ""
         )
+        # provider/model axes: present only when an explicit route was applied
+        # (-P/--route) or a model named; absent otherwise. provider holds the
+        # model vendor, never a harness literal (the defect this corrects).
+        # `model` is the EFFECTIVE model: an explicit --model reaches claude as
+        # its own `--model` flag and beats the route's ANTHROPIC_MODEL, so it
+        # wins the receipt too (see the pane branch above).
+        provider_field = (
+            f", \"provider\": {json.dumps(route_provider)}" if route_provider else ""
+        )
+        receipt_model = model or route_model
+        model_field = f", \"model\": {json.dumps(receipt_model)}" if receipt_model else ""
         receipt = (
             f'{{"name": "{safe_name}", "short_id": "{result.short_id}", '
-            f'"provider": "{result.provider}", "status": "live"'
+            f'"harness": "{result.provider}"{provider_field}{model_field}, "status": "live"'
             f"{perm_field}{cwd_field}{account_field}{message_field}}}"
         )
         sys.stdout.write(receipt + "\n")
@@ -2565,7 +2601,7 @@ def cmd_register(
         import json as _json
 
         sys.stdout.write(
-            _json.dumps({"registered": True, "name": entry.name, "provider": entry.harness}) + "\n"
+            _json.dumps({"registered": True, "name": entry.name, "harness": entry.harness}) + "\n"
         )
     else:
         sys.stdout.write(

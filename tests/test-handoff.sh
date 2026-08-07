@@ -237,7 +237,7 @@ EOF
   echo "0"  > "$sbx/scenario/fno-ask-rc"
   # Group 1 (ab-8b3e4fe0): the claude create is `agents spawn`, whose receipt
   # is one compact JSON line carrying .short_id (handoff.sh parses it via jq).
-  printf '{"name": "tgt-x", "short_id": "abc123", "provider": "claude", "status": "live"}\n' > "$sbx/scenario/fno-ask-out"
+  printf '{"name": "tgt-x", "short_id": "abc123", "harness": "claude", "status": "live"}\n' > "$sbx/scenario/fno-ask-out"
   # Default list output: shows the agent as live after spawn
   # Will be overridden per scenario
   printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live"}]}\n' "${NODE_ID:3:8}" "$TEST_HARNESS" > "$sbx/scenario/fno-list-out"
@@ -1116,7 +1116,7 @@ echo ""
 echo "=== Scenario 20: AC1-HP live receiptless child (backfill) ==="
 SBX="$(make_sandbox s20)"
 # Spawn exits 0 but the receipt carries no short_id key.
-printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+printf '{"name": "tgt-%s-%s-g2", "harness": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # Registry row IS live and DOES carry a short_id to backfill from.
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"reg789"}]}\n' \
@@ -1144,7 +1144,7 @@ check_contains "AC1-HP-backfill: delegated event child_session=reg789" '"child_s
 echo ""
 echo "=== Scenario 21: AC3-FR phantom spawn parks after poll ==="
 SBX="$(make_sandbox s21)"
-printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+printf '{"name": "tgt-%s-%s-g2", "harness": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # No child ever appears in the registry.
 echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
@@ -1175,7 +1175,7 @@ check_eq "AC3-FR: no delegated event emitted" "0" "$phantom_delegated"
 echo ""
 echo "=== Scenario 22: AC4-EDGE live child, empty short_id, no session_id ==="
 SBX="$(make_sandbox s22)"
-printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+printf '{"name": "tgt-%s-%s-g2", "harness": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 # Live row with empty short_id and empty session_id -> nothing to backfill.
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":""}]}\n' \
@@ -1202,7 +1202,7 @@ check_contains "AC4-EDGE: to_session stays CHILD_NAME" \
 echo ""
 echo "=== Scenario 22b: AC4-EDGE empty short_id falls back to session_id ==="
 SBX="$(make_sandbox s22b)"
-printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+printf '{"name": "tgt-%s-%s-g2", "harness": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 printf '{"agents":[{"name":"tgt-%s-%s-g2","status":"live","short_id":"","session_id":"sess456"}]}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-list-out"
@@ -1225,7 +1225,7 @@ check_contains "AC4-EDGE-fallback: child_session=sess456" '"child_session":"sess
 echo ""
 echo "=== Scenario 23: AC5-EDGE timeout re-acquire loses race ==="
 SBX="$(make_sandbox s23)"
-printf '{"name": "tgt-%s-%s-g2", "provider": "claude", "status": "live"}\n' \
+printf '{"name": "tgt-%s-%s-g2", "harness": "claude", "status": "live"}\n' \
   "${NODE_ID:3:8}" "$TEST_HARNESS" > "$SBX/scenario/fno-ask-out"
 echo '{"agents":[]}' > "$SBX/scenario/fno-list-out"
 # Re-acquire of node:<id> fails because a lagging child already claimed it.

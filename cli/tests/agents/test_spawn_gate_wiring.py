@@ -79,10 +79,11 @@ def test_bg_spawn_gates_as_bg_and_receipt_is_byte_identical(
         {"name": "w1", "substrate": "bg", "force": False, "no_wait": False}
     ]
     # Hand-rolled f-string receipt, byte-parity with the Rust path (LD10).
+    # harness axis under `harness`; no -P -> provider/model absent (AC5).
     line = result.stdout.strip().splitlines()[-1]
     assert (
         line
-        == '{"name": "w1", "short_id": "abcd1234", "provider": "claude", "status": "live"}'
+        == '{"name": "w1", "short_id": "abcd1234", "harness": "claude", "status": "live"}'
     )
     assert FakeGuard.released >= 1
 

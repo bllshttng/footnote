@@ -138,7 +138,7 @@ case "$sub $verb" in
       echo "agent 'tgt-aaaa1111' already exists; use 'fno agents rm tgt-aaaa1111' first or pick another name" >&2; exit 2
     fi
     # ask_noid models a broken receipt: exit 0 but no parseable short_id.
-    if [[ -f "$S/ask_noid" ]]; then echo "Sure, starting on that now."; else echo '{"name": "tgt-aaaa1111", "short_id": "deadbeef01", "provider": "claude", "status": "live"}'; fi ;;
+    if [[ -f "$S/ask_noid" ]]; then echo "Sure, starting on that now."; else echo '{"name": "tgt-aaaa1111", "short_id": "deadbeef01", "harness": "claude", "status": "live"}'; fi ;;
   "dispatch resolve")
     # x-567d: provider/substrate resolver. Default resolves claude/bg (every
     # existing scenario expects the claude bg lane). A resolve_* state file

@@ -891,7 +891,7 @@ for id in "${NODES[@]}"; do
 
   # Receipt shape is substrate-dependent (x-567d). bg lands a DETACHED thread and
   # returns a compact JSON receipt with a short_id we require as launch proof:
-  #   {"name": "...", "short_id": "<8hex>", "provider": "claude", "status": "live"}
+  #   {"name": "...", "short_id": "<8hex>", "harness": "claude", "status": "live"}
   # headless is a ONE-SHOT that already ran to completion on exit 0 (no detached
   # thread, no short_id) - the clean exit IS the proof, so we skip the short_id
   # requirement and label the session `headless`.

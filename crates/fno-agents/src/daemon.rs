@@ -1987,7 +1987,7 @@ async fn spawn_claude_stream_lane(
 
     Response::ok(
         req.id,
-        json!({"short_id": short_id, "provider": "claude", "status": "live", "lane": "stream"}),
+        json!({"short_id": short_id, "harness": "claude", "status": "live", "lane": "stream"}),
     )
 }
 
@@ -7374,7 +7374,7 @@ done
         );
         let resp = handle_spawn(&ctx, &req).await;
         let res = resp.result().expect("claude adopt errored");
-        assert_eq!(res["provider"], "claude");
+        assert_eq!(res["harness"], "claude");
         assert_eq!(res["status"], "live");
         assert_eq!(res["lane"], "stream");
 

@@ -341,7 +341,7 @@ def test_register_verb_joins_under_canonical_handle(tmp_path: Path, monkeypatch)
     result = CliRunner().invoke(agents_app, ["register"])
     assert result.exit_code == 0, result.output
     payload = json.loads(result.output)
-    assert payload == {"registered": True, "name": "55556666", "provider": "claude"}
+    assert payload == {"registered": True, "name": "55556666", "harness": "claude"}
     rows = load_registry()
     assert len(rows) == 1 and rows[0].name == "55556666" and rows[0].status == "idle"
 
