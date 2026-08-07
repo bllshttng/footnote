@@ -212,6 +212,12 @@ event_types:
         harness:
           type: string
           description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
+        model:
+          type: string
+          description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
+        provider:
+          type: string
+          description: "The endpoint host the attesting session was pointed at (host only, derived from ANTHROPIC_BASE_URL at emit; scheme, path, and any userinfo are stripped so no key material lands here). Empty means not observable from the environment - the default Anthropic endpoint, or a lane that does not route via env. Same best-effort caveat as model."
     consumers: [fno-agents loop-check]
 
   - name: review_coverage

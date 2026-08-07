@@ -1155,6 +1155,30 @@ AUTO_ASSIGNED_BY: dict[str, str] = {
     "build": "/target bg + blueprint autolaunch",
 }
 
+# Why each protected name is guarded, rendered in the `assigned_by` column so a
+# reader of `fno route ls` learns what the guard does NOT cover without opening
+# source. Both names have drifted from the dispatch surface: `build` carries the
+# delivery payload `implement` names, and nothing declares `review-verdict` at
+# all (the reviewer's model is the reviewing session's own). See
+# docs/architecture/role-based-model-routing.md.
+PROTECTED_ROLE_NOTE: dict[str, str] = {
+    "implement": "protected name; delivery routes via 'build'",
+    "review-verdict": "protected name; no dispatch surface declares it",
+}
+
+# The same facts at sentence length, for `fno route set`'s refusal. Kept beside
+# the column text so the two registers cannot drift apart.
+PROTECTED_ROLE_HINT: dict[str, str] = {
+    "implement": (
+        "delivery spawns route via the 'build' lane "
+        "(fno route set build <provider/model>)"
+    ),
+    "review-verdict": (
+        "nothing declares this role; a verdict runs on the model of the session "
+        "that reviews, so keep the reviewer off the routed authoring worker"
+    ),
+}
+
 
 def build_route_table(
     *,
@@ -1200,7 +1224,9 @@ def build_route_table(
                     "provider_model": "never routed (hard guard)",
                     "protocol": "-",
                     "key": "-",
-                    "assigned_by": "protected (hard guard)",
+                    "assigned_by": PROTECTED_ROLE_NOTE.get(
+                        role, "protected (hard guard)"
+                    ),
                 }
             )
             continue

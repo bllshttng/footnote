@@ -104,6 +104,7 @@ def set_cmd(
     at an openai provider) warns but writes (resolve_route degrades safely).
     """
     from fno.agents.model_routing import (
+        PROTECTED_ROLE_HINT,
         PROTECTED_ROLES,
         _parse_target,
         effective_providers,
@@ -114,9 +115,13 @@ def set_cmd(
     name = role.strip().lower()
 
     if name in PROTECTED_ROLES:
+        # Name the surface that actually owns the decision: refusing without it
+        # sends the operator looking for a knob this table does not have.
+        owner = PROTECTED_ROLE_HINT.get(name, "")
         typer.echo(
             f"error: {name!r} is a protected role (never routable via the roles "
-            "table); refusing. Config unchanged.",
+            "table); refusing. Config unchanged."
+            + (f"\nhint: {owner}." if owner else ""),
             err=True,
         )
         raise typer.Exit(2)
