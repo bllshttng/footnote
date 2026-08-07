@@ -25,9 +25,9 @@ import yaml
 
 # termination_reason -> outcome class. The delivered-ship set is the explicit
 # _SHIPPED_TERMINALS allowlist below; the wedge set is the stuck-terminal set.
-# Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge, or no
-# reason at all) is neither and lands in "other" so the spend split always
-# reconciles to the window total.
+# Everything else (Interrupted, delegated, NoWork, DoneAwaitingMerge,
+# DoneAwaitingReview, or no reason at all) is neither and lands in "other" so
+# the spend split always reconciles to the window total.
 _WEDGE_REASONS = frozenset({"NoProgress", "Budget", "Aborted"})
 
 # Terminal reasons that count a node as DELIVERED for telemetry (cost

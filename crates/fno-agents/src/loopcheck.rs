@@ -1835,6 +1835,23 @@ fn compute_ci_conclusion(checks: &Value) -> Result<CiConclusion, String> {
     Ok(CiConclusion::Success)
 }
 
+/// True when a quota-bounced required bot is the ONLY unmet conjunct of
+/// `reviewed`, which is what `DoneAwaitingReview` claims when it fires (x-9ab2).
+///
+/// `reviewed` is `all_required_passed() && unaddressed.is_empty() &&
+/// reviewers_ok`, so reconstructing only `!usage_limited.is_empty()` fires the
+/// terminal on a PR the agent still has work on: a bot that has not reviewed
+/// YET is owed its nudge window (x-b167), a blocking finding is work to DO, and
+/// `unattested_reviewers` is `reviewers_ok` in `PrInfo` terms (x-e703, a
+/// configured local review that never ran). Any of them non-empty falls through
+/// to the existing hold, which is the fail-closed direction.
+fn awaiting_review_only(pr: &PrInfo) -> bool {
+    !pr.usage_limited.is_empty()
+        && pr.missing_bots.is_empty()
+        && pr.unaddressed_findings.is_empty()
+        && pr.unattested_reviewers.is_empty()
+}
+
 // ── DoneAwaitingMerge classifier ───────────────────────────────────────────────
 //
 // When done() fails SOLELY on CI-green (PR open+mergeable, reviewed, HEAD
@@ -2623,8 +2640,14 @@ fn is_bot_reviewer(login: &str, external_reviewers: &[String]) -> bool {
 /// object (PR #214). Matched case-insensitively via `contains` against a
 /// lowercased body, mirroring the pinned-string approach in `blocking_severity`.
 /// Unioned rather than scoped per-login to stay byte-identical to the old flat
-/// `USAGE_LIMIT_MARKERS` const it replaced: an under-match degrades to the safe
-/// old block behavior; an over-match risks a false drop.
+/// `USAGE_LIMIT_MARKERS` const it replaced.
+///
+/// The asymmetry here INVERTED with x-9ab2 and the marker list must be read in
+/// the new direction: an under-match leaves the bot in `missing_bots`, which
+/// blocks (safe, just slow), while an over-match now PARKS the PR at
+/// `DoneAwaitingReview` with no automatic path back, rather than dropping the
+/// bot and proceeding. Add a marker only for a string the bot posts when it
+/// truly will not review; a phrase a real review could quote is not one.
 pub(crate) fn body_is_usage_limit(body: &str) -> bool {
     BOT_PROFILES
         .iter()
@@ -5010,19 +5033,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
                 // (mirrors DoneAwaitingMerge): a human merges after a real review,
                 // or the operator re-runs once quota recovers / a local review
                 // posts, then out-of-band-merge reconcile closes the node.
-                if pr_open && ci_ok && head_shipped && !pr_info.usage_limited.is_empty() {
+                // This sits ABOVE every hold that handles a finding or a
+                // still-pending bot, so `awaiting_review_only` is load-bearing:
+                // anything looser parks work the agent should still be doing.
+                if pr_open && ci_ok && head_shipped && awaiting_review_only(&pr_info) {
                     let bots = pr_info.usage_limited.join(", ");
-                    let also_missing = if pr_info.missing_bots.is_empty() {
-                        String::new()
-                    } else {
-                        format!(
-                            " (also still awaiting review from: {})",
-                            pr_info.missing_bots.join(", ")
-                        )
-                    };
                     let msg = format!(
-                        "PR #{} is green and shipped, but required review bot(s) {} posted a usage-limit (quota) comment instead of a review; the review gate cannot be auto-satisfied.{} Wait for quota recovery or run a local review, then re-run; or merge manually after a real review.",
-                        pr_info.number, bots, also_missing
+                        "PR #{} is green and shipped, but required review bot(s) {} posted a usage-limit (quota) comment instead of a review; the review gate cannot be auto-satisfied. Wait for quota recovery or run a local review, then re-run; or merge manually after a real review.",
+                        pr_info.number, bots
                     );
                     emit(
                         "termination",
@@ -7053,6 +7071,51 @@ mod tests {
                 verdicts: vec![],
             },
         }
+    }
+
+    /// x-9ab2: the terminal fires only when the quota bounce is the SOLE unmet
+    /// conjunct of `reviewed`. Each case drops one other conjunct and must
+    /// block; reverting `awaiting_review_only` to the bare
+    /// `!usage_limited.is_empty()` check fails them.
+    #[test]
+    fn awaiting_review_only_requires_every_other_conjunct() {
+        let bounced = || {
+            let mut pr = watch_pr();
+            pr.usage_limited = vec!["chatgpt-codex-connector".to_string()];
+            pr
+        };
+        assert!(awaiting_review_only(&bounced()), "the terminal's own case");
+        assert!(!awaiting_review_only(&watch_pr()), "no bounce to report");
+
+        // A bot that has not reviewed YET is owed its nudge window: one bot's
+        // quota state must not end the session on the others' behalf.
+        let mut still_pending = bounced();
+        still_pending.missing_bots = vec!["gemini-code-assist".to_string()];
+        assert!(
+            !awaiting_review_only(&still_pending),
+            "bot still owed a wait"
+        );
+
+        // A standing blocking finding is work the agent must DO; parking hands
+        // a human a PR carrying an unaddressed P1.
+        let mut with_finding = bounced();
+        with_finding.unaddressed_findings = vec![Finding {
+            id: 1,
+            author: "gemini-code-assist".to_string(),
+            path: "src/lib.rs".to_string(),
+            line: 12,
+            created_at: "2026-08-06T00:00:00Z".to_string(),
+            severity: "P1",
+        }];
+        assert!(!awaiting_review_only(&with_finding), "unaddressed P1");
+
+        let mut unattested = bounced();
+        unattested.unattested_reviewers = vec![UnattestedReviewer {
+            name: "sigma".to_string(),
+            superseded_head: None,
+            failed_at_head: false,
+        }];
+        assert!(!awaiting_review_only(&unattested), "local review never ran");
     }
 
     #[test]

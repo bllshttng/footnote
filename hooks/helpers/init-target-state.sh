@@ -562,6 +562,7 @@ with lines:
                 "DoneBatched",
                 "DoneAwaitingMerge",
                 "DoneUnreviewed",
+                "DoneAwaitingReview",
                 "DonePlanned",
                 "NoWork",
             }
