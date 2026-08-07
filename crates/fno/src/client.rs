@@ -10594,9 +10594,8 @@ async fn move_pick_keys(
                                 .await
                                 .map_err(|e| format!("move-pane send failed: {e}"))?;
                             }
-                            None => view.set_notice(
-                                "no pane in that workspace to anchor against".into(),
-                            ),
+                            None => view
+                                .set_notice("no pane in that workspace to anchor against".into()),
                         }
                     }
                 },
@@ -15878,10 +15877,19 @@ mod tests {
         // the direct-builder tests never covered.
         let mut v = unified_rows_view();
         let idx = agent_row_at(&v, |a| a.name == "worker" && a.pane_id.is_some());
-        assert!(v.open_row_menu(idx, Anchor::Center), "pane-hosted row opens a menu");
+        assert!(
+            v.open_row_menu(idx, Anchor::Center),
+            "pane-hosted row opens a menu"
+        );
         let actions = &v.row_menu.as_ref().unwrap().actions;
-        assert!(actions.contains(&MenuAction::Focus), "pane row offers Focus");
-        assert!(actions.contains(&MenuAction::BreakOut), "pane row offers BreakOut");
+        assert!(
+            actions.contains(&MenuAction::Focus),
+            "pane row offers Focus"
+        );
+        assert!(
+            actions.contains(&MenuAction::BreakOut),
+            "pane row offers BreakOut"
+        );
         assert!(actions.contains(&MenuAction::Stop), "pane row offers Stop");
         assert!(
             actions.iter().any(|a| matches!(a, MenuAction::MoveDir(_))),
@@ -22194,7 +22202,15 @@ mod tests {
         v.set_layout(LayoutView {
             squads: vec![meta(1, "footnote", 2, 1)],
             active_squad: 1,
-            panes: vec![(10, Rect { x: 0, y: 0, rows: 29, cols: 35 })],
+            panes: vec![(
+                10,
+                Rect {
+                    x: 0,
+                    y: 0,
+                    rows: 29,
+                    cols: 35,
+                },
+            )],
             focus: 10,
             area: (29, 72),
             agents: vec![pane_hosted_row("only", 10)],
