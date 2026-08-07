@@ -238,17 +238,16 @@ through the whole review window and a lapsed claim lets the 5-min dispatcher
 re-spawn a finished node (x-a166). Best-effort: a stamp failure is logged, never
 fatal; re-stamping the same PR is a no-op.
 
-This is the *fast path* only: it engages `in_review` mid-session, before the next dispatch selection. `fno-agents finalize` re-runs the same stamp at every terminal loop decision as a deterministic backstop (crates/fno-agents/src/finalize.rs, `stamp_node_pr`), so a skipped step here still gets stamped at session end. Both are idempotent - do NOT dedupe them into one.
+This is the *fast path* only: it engages `in_review` mid-session, before the next dispatch selection. `fno-agents finalize` re-runs the same link at every terminal loop decision as a deterministic backstop (crates/fno-agents/src/finalize.rs, `stamp_node_pr`), so a skipped step here still gets stamped at session end. Idempotent.
 
 ```bash
 NODE_ID=$(sed -n 's/^[[:space:]]*graph_node_id:[[:space:]]*//p' .fno/target-state.md | head -1 | tr -d "\"'")
 if [[ -n "$NODE_ID" && "$NODE_ID" != "null" && -n "$PR_NUMBER" ]]; then
   fno backlog update "$NODE_ID" --pr-number "$PR_NUMBER" --pr-url "$PR_URL" \
     || echo "warn: node<->PR stamp failed for $NODE_ID PR #$PR_NUMBER (PR still created)" >&2
-  # x-b6e4: stamp ship-phase provenance for the session that created the PR
-  # (ambient identity; idempotent, best-effort - a skip never fails the PR).
-  fno backlog session add "$NODE_ID" --phase ship \
-    || echo "warn: ship provenance stamp failed for $NODE_ID (PR still created)" >&2
+  # Ship-phase provenance is no longer a separate stamp: the `update --pr-number`
+  # above fires it on the pr_number unset->set transition (ambient identity), so
+  # a `session add --phase ship` here would double-fire.
 fi
 ```
 
