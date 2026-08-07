@@ -241,6 +241,9 @@ SH
     elif [[ -n "$(cat "$stdout_file")" ]]; then
         fail "$name :: never-policy named create still aborts" \
             "stdout must be empty on abort, got '$(cat "$stdout_file")'"
+    elif ! grep -q "policy" "$stderr_file"; then
+        fail "$name :: never-policy named create names policy=never" \
+            "stderr should name policy=never, not the defeat-isolation case. stderr: $(cat "$stderr_file")"
     else
         pass "$name :: never-policy named create still aborts"
     fi

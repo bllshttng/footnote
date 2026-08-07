@@ -80,6 +80,10 @@ if [[ -z "$WORKTREE_PATH" ]]; then
         if [[ -n "$_WT_NAME" && "$_WT_POLICY" != "never" ]]; then
             echo "WorktreeCreate: create request for '$_WT_NAME' with no pre-created path; deferring to Claude Code's default worktree flow." >&2
             exit 1
+        elif [[ -n "$_WT_NAME" && "$_WT_POLICY" == "never" ]]; then
+            # Named create on a `never` repo aborts too; name policy, not isolation.
+            echo "WorktreeCreate: create request for '$_WT_NAME' on a worktree.policy=never repo; policy forbids worktrees, refusing." >&2
+            exit 0
         fi
         echo "WorktreeCreate: no path in hook input and cwd is the canonical checkout - refusing to designate it as a worktree (it would defeat isolation)." >&2
         exit 0
