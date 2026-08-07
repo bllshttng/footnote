@@ -2217,6 +2217,20 @@ impl View {
         }
     }
 
+    /// The candidate destination squads for a Move-to-workspace gesture on a row
+    /// owned by `own`: every other non-mission workspace, capped at the picker's
+    /// 9-digit range. Shared by the menu entry's construction and its dispatch so
+    /// the two cannot drift on what counts as a destination.
+    fn move_dst_squads(&self, own: Option<u64>) -> Vec<u64> {
+        self.layout
+            .squads
+            .iter()
+            .map(|s| s.id)
+            .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
+            .take(9)
+            .collect()
+    }
+
     /// Open the row context menu on `display_rows()` index `i`, anchored at
     /// `anchor` (x-8ccf US2): the agent lifecycle menu, (x-1d91) the Backlog
     /// card's reorder menu, or (x-f300) a section header's clear-dead menu (a
@@ -2240,15 +2254,7 @@ impl View {
                 // the per-state builder stays layout-free and its direct tests
                 // stay untouched.
                 if a.pane_id.is_some() {
-                    let own = a.squad;
-                    let move_dsts: Vec<u64> = self
-                        .layout
-                        .squads
-                        .iter()
-                        .map(|s| s.id)
-                        .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
-                        .take(9)
-                        .collect();
+                    let move_dsts = self.move_dst_squads(a.squad);
                     if !move_dsts.is_empty() {
                         menu.popup.rows.push(PopupRow::Rule);
                         menu.popup.rows.push(PopupRow::Entry {
@@ -4785,9 +4791,8 @@ impl View {
             Some(h) => format!(" {label}: {name}_  ({h})"),
             None => format!(" {label}: {name}_"),
         };
-        let chars: Vec<char> = text.chars().collect();
-        let pad = cols.saturating_sub(chars.len()) / 2;
-        for (i, &ch) in chars.iter().take(cols).enumerate() {
+        let pad = cols.saturating_sub(text.chars().count()) / 2;
+        for (i, ch) in text.chars().take(cols).enumerate() {
             let col = (pad + i).min(cols.saturating_sub(1));
             cells[r * cols + col] = Cell {
                 c: ch,
@@ -9345,18 +9350,9 @@ async fn execute_row_menu_action(
         },
         MenuAction::MoveToWorkspace => match a.pane_id {
             Some(pid) => {
-                // Same candidate set the entry was built from, recomputed at
-                // execute: a workspace added or removed between open and pick
-                // is reflected, and `move_pick_keys` re-validates the chosen id.
-                let own = a.squad;
-                let dsts: Vec<u64> = view
-                    .layout
-                    .squads
-                    .iter()
-                    .map(|s| s.id)
-                    .filter(|id| !is_mission_squad(*id) && Some(*id) != own)
-                    .take(9)
-                    .collect();
+                // Recomputed at execute (a workspace added or removed between
+                // open and pick is reflected); `move_pick_keys` re-validates.
+                let dsts = view.move_dst_squads(a.squad);
                 if dsts.is_empty() {
                     view.set_notice("no other workspace to move into".into());
                 } else {

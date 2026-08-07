@@ -80,34 +80,34 @@ pub fn selector_from_cwd(cwd: &str) -> Option<String> {
 
 /// `config.mux.attach_digest` (default ON) — gate the overlay entirely.
 pub fn attach_digest_enabled(cwd: &Path) -> bool {
-    mux_str(cwd, "attach_digest")
-        .and_then(|v| parse_bool(&v))
-        .unwrap_or(true)
+    mux_bool(cwd, "attach_digest", true)
 }
 
 /// `config.mux.hover_focus` (default ON) — the focus-follows-mouse off-switch
 /// (x-a496). Latched once at client startup. Lives here because this module owns
 /// the `fno` crate's `config.mux.*` reader (mirrors `attach_digest_enabled`).
 pub fn hover_focus_enabled(cwd: &Path) -> bool {
-    mux_str(cwd, "hover_focus")
-        .and_then(|v| parse_bool(&v))
-        .unwrap_or(true)
+    mux_bool(cwd, "hover_focus", true)
 }
 
 /// `config.mux.show_missions` (default ON) - the `~ missions` progress band's
 /// off-switch. A mission can never hold a session, so an operator who runs no
 /// epics can drop the band entirely rather than dismiss it each session.
 pub fn missions_section_enabled(cwd: &Path) -> bool {
-    mux_str(cwd, "show_missions")
-        .and_then(|v| parse_bool(&v))
-        .unwrap_or(true)
+    mux_bool(cwd, "show_missions", true)
 }
 
 /// `config.mux.show_backlog` (default ON) - the `~ backlog` lane's off-switch.
 pub fn backlog_section_enabled(cwd: &Path) -> bool {
-    mux_str(cwd, "show_backlog")
+    mux_bool(cwd, "show_backlog", true)
+}
+
+/// A `config.mux.<key>` boolean with a fail-open default. The four readers above
+/// are one line each now; the coercion lives in one place.
+fn mux_bool(cwd: &Path, key: &str, default: bool) -> bool {
+    mux_str(cwd, key)
         .and_then(|v| parse_bool(&v))
-        .unwrap_or(true)
+        .unwrap_or(default)
 }
 
 /// `config.mux.attach_digest_threshold_min` (default 10) as seconds.
