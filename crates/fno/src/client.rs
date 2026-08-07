@@ -15636,6 +15636,32 @@ mod tests {
         assert!(v.notice.is_none(), "an inert row says nothing");
     }
 
+    #[test]
+    fn row_menu_opens_on_pane_hosted_agent_row() {
+        // Operator report: "right-click does nothing on most rows; it works only
+        // on a row not on a pane yet." A pane-hosted session renders as a
+        // DisplayRow::Agent with pane_id: Some (x-0090 moved these off the old
+        // Sel-with-tab rows), so the one path a right-click reaches is
+        // open_row_menu -> build_row_menu. This goes THROUGH open_row_menu on that
+        // exact row - not build_row_menu directly - so it pins the pane-row
+        // affordance (Focus/BreakOut/Move/Stop) on the path a user has, the case
+        // the direct-builder tests never covered.
+        let mut v = unified_rows_view();
+        let idx = agent_row_at(&v, |a| a.name == "worker" && a.pane_id.is_some());
+        assert!(v.open_row_menu(idx, Anchor::Center), "pane-hosted row opens a menu");
+        let actions = &v.row_menu.as_ref().unwrap().actions;
+        assert!(actions.contains(&MenuAction::Focus), "pane row offers Focus");
+        assert!(actions.contains(&MenuAction::BreakOut), "pane row offers BreakOut");
+        assert!(actions.contains(&MenuAction::Stop), "pane row offers Stop");
+        assert!(
+            actions.iter().any(|a| matches!(a, MenuAction::MoveDir(_))),
+            "pane row offers the Move grid"
+        );
+        // The paneless-only attach verbs must not appear on a pane-hosted row.
+        assert!(!actions.contains(&MenuAction::OpenHere));
+        assert!(!actions.contains(&MenuAction::NewTab));
+    }
+
     /// The display index of the squad-name header row for `squad`.
     fn squad_header_at(view: &View, squad: u64) -> usize {
         view.display_rows()
