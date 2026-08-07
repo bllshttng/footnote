@@ -1715,15 +1715,33 @@ def dispatch_spawn_pane(
             )
             if registered_id is None:
                 reaped, cleanup_detail = _reap_spawned_pane(session, pane_id, runner)
-                try:
-                    update_registry(
-                        lambda rows: [r for r in rows if r.name != name],
-                        path=registry_path,
-                    )
-                except (OSError, ValueError, AgentResolutionError, RegistryVersionError):
-                    pass
+                # Only drop the row once the pane is actually gone: removing it
+                # while the pane may still live orphans a worker fno can no
+                # longer point the operator at. Track removal success so the
+                # error never claims "row removed" when it was not.
+                row_removed = False
                 if reaped:
+                    try:
+                        update_registry(
+                            lambda rows: [r for r in rows if r.name != name],
+                            path=registry_path,
+                        )
+                        row_removed = True
+                    except (
+                        OSError,
+                        ValueError,
+                        AgentResolutionError,
+                        RegistryVersionError,
+                    ):
+                        row_removed = False
+                if reaped and row_removed:
                     tail = "pane reaped, registry row removed"
+                elif reaped:
+                    tail = (
+                        "pane reaped, but registry row removal failed; a "
+                        f"`spawning` row for {name!r} may linger - remove "
+                        f"with 'fno agents rm {name}'"
+                    )
                 else:
                     tail = (
                         f"pane kill failed ({cleanup_detail}); it may still "

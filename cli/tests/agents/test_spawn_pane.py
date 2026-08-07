@@ -2747,6 +2747,43 @@ def test_happy_pane_failure_reaps_and_raises_not_silent(
     assert load_registry() == [], "the stranded spawning row must be removed"
 
 
+def test_happy_pane_failure_reports_row_removal_failure_honestly(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """If the row removal throws after a successful reap, the error must not
+    claim 'row removed' (x-1406 review finding). The row lingers and the message
+    names it instead of lying about cleanup."""
+    import fno.agents.mux_spawn as mux_spawn
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.registry import load_registry
+
+    monkeypatch.setattr(mux_spawn, "happy_routed_panes_enabled", lambda: True)
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/usr/local/bin/happy")
+    monkeypatch.setattr(
+        mux_spawn,
+        "_await_pane_registration",
+        lambda name, mux, r: (None, "no session id in window"),
+    )
+    # Let the create-write (_append) succeed, then fail the removal write.
+    real_update = mux_spawn.update_registry
+    state = {"n": 0}
+
+    def flaky(*a, **k):
+        state["n"] += 1
+        if state["n"] >= 2:
+            raise OSError("registry locked")
+        return real_update(*a, **k)
+
+    monkeypatch.setattr(mux_spawn, "update_registry", flaky)
+    runner = FakeRunner()  # kill_returncode=0 -> reaped=True
+    with pytest.raises(DispatchAskError) as ei:
+        _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE), runner=runner)
+
+    msg = str(ei.value)
+    assert "row removal failed" in msg, "must not claim 'row removed' when it was not"
+    assert load_registry() != [], "the row must still be present (removal failed)"
+
+
 def test_happy_pane_success_returns_live_receipt(
     tmp_path: Path, monkeypatch
 ) -> None:
