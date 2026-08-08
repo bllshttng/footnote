@@ -114,3 +114,40 @@ def verify_cmd(
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+@app.command(name="handoff")
+def handoff(
+    session: str = typer.Option(
+        ...,
+        "--session",
+        help=(
+            "Session id (full uuid or 8-hex short id). Names the canon "
+            "handoff doc unless --slug overrides."
+        ),
+    ),
+    slug: str = typer.Option(
+        "",
+        "--slug",
+        help="Human-readable slug; overrides the session-derived short id in the filename.",
+    ),
+    name_only: bool = typer.Option(
+        False, "--name-only", help="Print just the rendered filename, no directory."
+    ),
+) -> None:
+    """Print the save path for a session's canon handoff doc.
+
+    Backed by ``paths.handoffs_dir()``. The filename key is the session's mail
+    handle (``canonical_handle``, the last-8 of the session id) unless --slug
+    overrides. The PreCompact canon-doc hook and any session writing a handoff
+    doc shell this instead of composing a path, so the configured location is
+    the one door.
+    """
+    import datetime as _dt
+
+    from fno.harness_identity import canonical_handle
+    from fno.paths import handoffs_dir
+
+    key = slug or canonical_handle(session)
+    filename = f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
+    typer.echo(filename if name_only else str(handoffs_dir() / filename))
