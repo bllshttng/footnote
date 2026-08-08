@@ -60,8 +60,12 @@ fi
 
 # ---------------------------------------------------------------------------
 # 2. No session id anywhere -> exit 0, no stdout (nothing to point at).
+# Unset every session-id env var the hook's fallback chain reads, or a leaked
+# codex-companion id resolves a SID and the hook writes a real doc.
 # ---------------------------------------------------------------------------
-NO_SID_OUT="$(printf '{"trigger":"auto"}' | env -u CLAUDE_CODE_SESSION_ID bash "$HOOK" 2>/dev/null)"
+NO_SID_OUT="$(printf '{"trigger":"auto"}' \
+  | env -u CLAUDE_CODE_SESSION_ID -u CODEX_COMPANION_SESSION_ID -u CODEX_SESSION_ID \
+    bash "$HOOK" 2>/dev/null)"
 NO_SID_RC=$?
 if [[ "$NO_SID_RC" == "0" && -z "$NO_SID_OUT" ]]; then
   pass "no session id -> exit 0, no stdout"
