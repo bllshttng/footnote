@@ -2889,8 +2889,10 @@ impl Coverage {
 
 /// Authorship of a local attestation: did the authoring session emit it, did a
 /// different session, or is that unknowable. Computed from the attestation's
-/// `attester_session_id` against the manifest's `harness_session_id` and
-/// EXCLUDED from the coverage count, mirroring `human_approval`.
+/// `attester_session_id` against the manifest's `harness_session_id`.
+///
+/// Recorded, never gating. `coverage_count` does not read this field: every
+/// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
 ///
 /// The middle state is deliberately not `Independent`. The manifest names the
 /// session that ran `fno target init` in the worktree, so a self-handoff
@@ -2919,9 +2921,11 @@ pub struct ReviewerVerdict {
     pub human_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
     /// (`SelfAttested`), a different one (`OtherSession`), or that is
-    /// unknowable (`Unknown`). Excluded from `coverage_count`: whether
-    /// self-attested coverage should count is a later gate decision, not this
-    /// field. Only meaningful on `local_attestation` verdicts; github_app and
+    /// unknowable (`Unknown`). `coverage_count` never reads it: a
+    /// `SelfAttested` verdict counts toward coverage exactly like any other,
+    /// and a PR whose only attestation is self-attested is covered. Whether
+    /// that should stay true is a later gate decision, not this field.
+    /// Only meaningful on `local_attestation` verdicts; github_app and
     /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
     /// login has no session to compare. Defaults to `Unknown` so every
     /// pre-existing attestation lands there unchanged.

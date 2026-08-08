@@ -186,9 +186,10 @@ A match is strong evidence of self-attestation; a mismatch is weak evidence of
 anything.
 
 The origin is recorded, not gating.
-It sits on the verdict beside `human_approval` with the same exclusion from
-`reviewed_count`: whether self-attested coverage should count is a later
-decision, not a field this records.
+`reviewed_count` never consults it: every `reviewed` verdict counts toward
+coverage regardless of its origin, `self_attested` included.
+A green PR whose only attestation is `self_attested` is covered and may merge.
+Whether that should stay true is a later decision, not a field this records.
 A self-attestation exclusion is deferred to a review-lane decision because no
 lane today can produce a non-self attestation: `emit-attestation.sh` runs in
 whichever session invokes the review verb, and the king-mediated lane (Lane 3)
