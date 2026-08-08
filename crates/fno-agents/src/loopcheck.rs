@@ -3062,7 +3062,8 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 /// `attester_session_id` is compared against it to label `attestation_origin`;
 /// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
 /// failing open on unknown authorship so the coverage verdict is byte-identical
-/// to the pre-change behavior. The origin is excluded from the coverage count.
+/// to the pre-change behavior. `coverage_count` never reads the origin: every
+/// `Reviewed` verdict counts regardless of it, `SelfAttested` included.
 pub fn classify_coverage(
     reviews: &[Value],
     comments: &[Value],
