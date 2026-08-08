@@ -5412,11 +5412,15 @@ fn coverage_receipt_zero_names_refused_and_absent() {
     // attestation_origin - so the line must not mention origin either.
     assert!(line.contains("No head-pinned pass attestation"), "{line}");
     assert!(!line.contains("origin"), "{line}");
-    // gemini-code-assist is configured and silent (absent=1), so the line must
-    // NOT prescribe a local re-attest: a worker told to run the review verb here
-    // would satisfy the local lane and merge ahead of a bot that never spoke.
-    assert!(line.contains("have not responded yet"), "{line}");
-    assert!(!line.contains("run the review verb"), "{line}");
+    // gemini-code-assist is configured and silent, so it is NAMED as the thing
+    // being waited on - not merely counted, and not conflated with the refused
+    // reviewer, which is the only other name on the line.
+    assert!(line.contains("waiting on gemini-code-assist"), "{line}");
+    // The local verb is still offered, with its consequence stated. Withholding
+    // it stalls forever when the absent App is optional and never installed,
+    // which is this node's own bug rebuilt inside its fix.
+    assert!(line.contains("ahead of them"), "{line}");
+    assert!(line.contains("review verb at HEAD"), "{line}");
 }
 
 /// A refusal is not an absence. The only configured reviewer hit its quota and

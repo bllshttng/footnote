@@ -1188,6 +1188,36 @@ def test_genuine_zero_refusal_names_the_missing_evidence():
     assert "origin" not in reason
 
 
+def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
+    """Parity with the Rust receipt, and this is the twin that matters more: the
+    merge gate here reads coverage only, so a worker who follows a bare "run the
+    review verb" while a configured reviewer is still out self-attests and merges
+    ahead of a bot that never spoke. Name who is outstanding, and say what
+    covering locally would do - do not steer to either."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"},
+            {"producer": "github_app", "name": "chatgpt-codex-connector", "verdict": "refused"},
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "waiting on gemini-code-assist" in reason
+    assert "ahead of them" in reason
+    # The refused reviewer is not misreported as something we are waiting for.
+    assert "chatgpt-codex-connector" not in reason
+
+
+def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
+    """No absent verdict -> the local verb is the unqualified next step."""
+    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
+    reason = _merge._coverage_refused_reason(cov)
+    assert "run the review verb at HEAD" in reason
+    assert "waiting on" not in reason
+
+
 def test_refusal_reason_unchanged_when_no_coverage_event():
     """The two non-covered branches keep their wording, and `head` is optional
     so every existing caller still type-checks."""

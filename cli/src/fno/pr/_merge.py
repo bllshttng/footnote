@@ -213,6 +213,24 @@ def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) ->
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"
         )
+    # Same next-action contract as the Rust receipt (`coverage_receipt_line`),
+    # and this is the twin that matters more: the merge gate here consults
+    # coverage ONLY - `required_bots` is never read in this file - so a worker
+    # who follows "run the review verb" while a configured reviewer is still out
+    # self-attests, flips reviewed_count to 1, and merges ahead of a bot that
+    # never spoke. Name who is outstanding and what covering locally would do;
+    # steer to neither. The verdicts breakdown is already on the event.
+    absent = [
+        str(v.get("name") or "")
+        for v in (cov.get("verdicts") or [])
+        if v.get("verdict") == "absent" and v.get("name")
+    ]
+    if absent:
+        return (
+            "0 reviewed (no head-pinned pass attestation; waiting on "
+            f"{', '.join(absent)} - the review verb at HEAD would cover this "
+            "locally, ahead of them)"
+        )
     return "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
 
 
