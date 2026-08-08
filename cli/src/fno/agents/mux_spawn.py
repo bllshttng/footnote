@@ -245,9 +245,30 @@ def happy_pane_argv(
     """Carry a routed claude pane through happy without losing its endpoint.
 
     happy reserves ``--settings`` for its hook server and discards a caller's
-    file, so routed values must use its ``--claude-env`` interface instead. It
+    file, so a routed value cannot reach the child through a settings file. It
     consumes ``--session-id`` the same way: the session id belongs to happy on
     this route and is discovered after the spawn, never pinned before it.
+
+    ``--settings`` being closed does NOT make ``--claude-env`` the only channel,
+    which is what this docstring used to claim. happy's ``claudeLocal`` builds
+    its child env as ``{...process.env, ...claudeEnvVars}`` -- an overlay on
+    inheritance, not a replacement for it -- and the bundle never reads, sets,
+    or scrubs any ``ANTHROPIC_*`` var (its sole occurrence of that string is a
+    usage example in ``--help``). So happy's OWN environment reaches claude
+    intact, and :func:`_mesh_env_wrapper` already puts every ``route_env`` key
+    there via ``env(1)``, since it wraps the argv this function returns. Each
+    route key therefore reaches the child twice, and the ``--claude-env`` copy
+    is the redundant one.
+
+    That redundancy is not free: ``env(1)`` execs, so its assignments vanish
+    from the process image, while happy is a long-lived node parent whose argv
+    survives for the whole session. A credential on ``--claude-env`` is a
+    world-readable ``ps`` token for as long as the worker lives, and from there
+    it reaches transcripts and screen capture -- durable stores that leave the
+    box. So the carry below drops :data:`SECRET_ROUTE_VARS` and keeps the rest.
+    Dropping them is behavior-preserving by happy's merge semantics above; it is
+    not a tradeoff, and the credential is not "lost" but carried by the wrapper
+    that was always carrying it.
 
     These refusals are on the ONLY reachable happy path, so the usual "a guard
     on one of N paths is decorative" audit does not apply here and does not need
@@ -259,9 +280,13 @@ def happy_pane_argv(
     over explicit trees, not an ``rg`` glob exclude) if that branch ever grows a
     sibling.
 
-    The carry below is lossless by construction -- it iterates the route, so it
-    cannot drop a key -- and the test suite holds it to set equality against a
-    full seven-key route, not just the endpoint pair.
+    The carry below is lossless at the CHILD, not at this function: the suite
+    holds the fully wrapped argv to a union invariant (every route key rides
+    either the ``env(1)`` run or ``--claude-env``; no secret rides
+    ``--claude-env``; every secret rides the ``env(1)`` run). Asserting on this
+    function's output alone cannot tell "the secret moved to the wrapper" from
+    "the secret was dropped", and those two differ by a 401 in production and by
+    nothing in a test.
     """
     if any(arg == "--settings" or arg.startswith("--settings=") for arg in argv):
         raise DispatchAskError(
@@ -269,7 +294,10 @@ def happy_pane_argv(
             "--settings: happy consumes that flag for its own hook server and "
             "discards the caller's file, so the route would be silently ignored "
             "and the worker would launch on the default account. Carry the route "
-            "as --claude-env KEY=VALUE instead.",
+            "in the env(1) wrapper (happy merges its own environment into the "
+            "claude child), with the non-secret remainder as --claude-env "
+            "KEY=VALUE. Never put a credential on --claude-env: happy is a "
+            "long-lived parent, so its argv is a world-readable `ps` token.",
             exit_code=2,
         )
     if any(arg == "--session-id" or arg.startswith("--session-id=") for arg in argv):
@@ -295,8 +323,12 @@ def happy_pane_argv(
             "config.agents.happy_routed_panes = false to accept a local-only pane.",
             exit_code=127,
         )
+    from fno.agents.account_env import SECRET_ROUTE_VARS
+
     claude_env: list[str] = []
     for key, value in route_env.items():
+        if key in SECRET_ROUTE_VARS:
+            continue
         claude_env += ["--claude-env", f"{key}={value}"]
     return ["happy", *claude_env, *argv[1:]]
 
@@ -1368,8 +1400,12 @@ def dispatch_spawn_pane(
             "claude",
             exit_code=2,
         )
-    # Keep the outer env wrapper: it scrubs inherited Anthropic credentials,
-    # while --claude-env reasserts the complete route in happy's claude child.
+    # The outer env wrapper is not merely a scrub: it SETS the whole route in
+    # happy's own environment, and happy merges that into its claude child. So
+    # the wrapper is what delivers the credential, and --claude-env carries only
+    # the non-secret remainder (see happy_pane_argv). Order matters -- this runs
+    # BEFORE _mesh_env_wrapper below, so the wrapper's assignments land outside
+    # `happy` and reach it as env rather than as argv.
     if resolved_monitor == "happy":
         assert route_env is not None
         argv = happy_pane_argv(argv, route_env, explicit=monitor is not None)
@@ -1597,9 +1633,11 @@ def dispatch_spawn_pane(
 
         # x-ae2d: record WHICH route this pane launched with, so a later relaunch
         # (which re-launches a process rather than attaching to this live one) can
-        # re-apply it or refuse. A happy pane carries its route as --claude-env
-        # rather than --settings, so nothing has materialized the file yet;
-        # materializing here is what makes the route recoverable at all. The
+        # re-apply it or refuse. A happy pane carries its route as env(1) plus
+        # --claude-env rather than --settings, so nothing has materialized the
+        # file yet; materializing here is what makes the route recoverable at
+        # all -- including the credential, which by design rides neither the
+        # pane's --claude-env nor any other argv token. The
         # writer is content-addressed, so this costs one 0600 file per distinct
         # route, not one per spawn.
         #
