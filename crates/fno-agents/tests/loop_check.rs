@@ -5407,12 +5407,40 @@ fn coverage_receipt_zero_names_refused_and_absent() {
     assert!(line.contains("0 reviewed"), "{line}");
     assert!(line.contains("1 refused"), "{line}");
     assert!(line.contains("chatgpt-codex-connector"), "{line}");
-    // Names the missing evidence and the next action. "Nothing reviewed this
-    // diff" stated the count a second time and no cause, which is the vacuum a
-    // reader fills with attestation_origin.
+    // Names the missing evidence. "Nothing reviewed this diff" stated the count
+    // a second time and no cause, which is the vacuum a reader fills with
+    // attestation_origin - so the line must not mention origin either.
     assert!(line.contains("No head-pinned pass attestation"), "{line}");
-    assert!(line.contains("run the review verb at HEAD"), "{line}");
     assert!(!line.contains("origin"), "{line}");
+    // gemini-code-assist is configured and silent (absent=1), so the line must
+    // NOT prescribe a local re-attest: a worker told to run the review verb here
+    // would satisfy the local lane and merge ahead of a bot that never spoke.
+    assert!(line.contains("have not responded yet"), "{line}");
+    assert!(!line.contains("run the review verb"), "{line}");
+}
+
+/// A refusal is not an absence. The only configured reviewer hit its quota and
+/// declined, so nothing is still coming and a local attestation IS the move -
+/// the line prescribes the verb here, unlike the absent case above.
+#[test]
+fn coverage_receipt_zero_prescribes_the_verb_when_the_only_reviewer_refused() {
+    let comments = vec![serde_json::json!({
+        "author": {"login": "chatgpt-codex-connector[bot]"},
+        "body": "You have reached your Codex usage limits for code reviews."
+    })];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("1 refused"), "{line}");
+    assert!(line.contains("0 absent"), "{line}");
+    assert!(line.contains("run the review verb at HEAD"), "{line}");
 }
 
 #[test]
@@ -5572,7 +5600,10 @@ fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
     let line = coverage_receipt_line(&rep);
 
     // The affirmation, and the sole self-attested verdict it is affirming.
-    assert!(line.contains("all counted"), "{line}");
+    // Scoped to ORIGINS: `n` does drop human approvals, so a bare "all counted"
+    // would be false on a human-approved PR and re-open the very question the
+    // line exists to close.
+    assert!(line.contains("all origins counted"), "{line}");
     assert!(line.contains("1 reviewed"), "{line}");
     assert!(line.contains("self 1"), "{line}");
 

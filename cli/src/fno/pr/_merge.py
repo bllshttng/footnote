@@ -199,10 +199,9 @@ def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) ->
     inference while actually looking at a head that had moved.
 
     ``head`` is the PR's observed head, passed only when the caller fetched it.
-    Its absence is why the staleness branch can never fire on an unobserved
-    head: without it the reason falls back to the count, and the caller only
-    refuses on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it
-    is printed.
+    Its absence is why the staleness branch cannot fire on an unobserved head:
+    without it the reason falls back to the count, and the caller only refuses
+    on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it prints.
     """
     if cov is None:
         return "no review_coverage event (no gate evaluated this PR)"
@@ -214,8 +213,7 @@ def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) ->
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"
         )
-    at_head = f" at HEAD {head[:8]}" if head else ""
-    return f"0 reviewed{at_head} (no head-pinned pass attestation - run the review verb at HEAD)"
+    return "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
 
 
 def _safe_int(val, default=0):

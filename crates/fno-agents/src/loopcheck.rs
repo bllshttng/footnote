@@ -3256,10 +3256,12 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 // a reader learns the vocabulary even when two are zero; `other`
                 // is a different session, NOT "independent".
                 //
-                // "all counted" is load-bearing: readers took the bare tally for
-                // a subtraction and refused to merge green PRs over it. A
-                // positive claim, not a disclaimer - a denial ("not a gate")
-                // answers the question by raising it.
+                // "all origins counted" is load-bearing: readers took the bare
+                // tally for a subtraction and refused to merge green PRs over
+                // it. A positive claim, not a disclaimer - a denial ("not a
+                // gate") answers the question by raising it. Scoped to ORIGINS
+                // because `n` does drop human approvals, so a bare "all
+                // counted" would be false on a human-approved PR.
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
@@ -3270,7 +3272,7 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                         AttestationOrigin::Unknown => (s, o, u + 1),
                     });
                 return format!(
-                    "review coverage: {} reviewed ({}) - all counted; origin self {}, other {}, unknown {}",
+                    "review coverage: {} reviewed ({}) - all origins counted; self {}, other {}, unknown {}",
                     n,
                     reviewed_names.join(", "),
                     self_n,
@@ -3294,12 +3296,24 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .iter()
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .count();
+            // Naming the missing evidence closes the vacuum a reader otherwise
+            // fills with attestation_origin. The next ACTION is conditional:
+            // prescribing a local re-attest while a configured reviewer is
+            // merely slow would walk a worker into satisfying the local lane
+            // and merging ahead of a bot that has not spoken. A refusal is
+            // different - that reviewer will not help, so the verb is the move.
+            let next = if absent > 0 {
+                "the reviewers above have not responded yet"
+            } else {
+                "run the review verb at HEAD"
+            };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - run the review verb at HEAD.",
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
                 refused.join(", "),
                 errored,
-                absent
+                absent,
+                next
             )
         }
     }
