@@ -189,30 +189,7 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return oid or None
 
 
-def _required_bot_logins(repo: str) -> Optional[set]:
-    """Configured `required_bots` logins, or None when config cannot be read.
-
-    None is NOT an empty set. The caller must fail closed on it: an empty set
-    means "nothing is required", which would license offering a local re-attest
-    past a reviewer that is in fact required.
-    """
-    try:
-        from pathlib import Path
-
-        from fno.config import load_settings_for_repo
-
-        root = Path(_repo_state_dir(repo)).parent
-        bots = load_settings_for_repo(root).review.required_bots or []
-        return {str(b).strip().lstrip("/") for b in bots if str(b).strip()}
-    except Exception:
-        return None
-
-
-def _coverage_refused_reason(
-    cov: Optional[dict],
-    head: Optional[str] = None,
-    required: Optional[set] = None,
-) -> str:
+def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) -> str:
     """Why a coverage guard refused, for the blocked receipt line.
 
     Names the CAUSE and the next action, not just the count. A refusal that
@@ -236,11 +213,13 @@ def _coverage_refused_reason(
             f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
             "attestations are head-pinned by design - re-run the review verb at HEAD"
         )
-    # Name who is outstanding. The Rust receipt can offer the local verb freely
-    # because a required-absent bot already fails `all_required_passed()` and
-    # blocks its terminal; THIS gate reads coverage alone, so the same sentence
-    # here would walk a worker into self-attesting past a required reviewer and
-    # landing the PR before its blocking finding posts.
+    # Same rule as the Rust receipt, and this time the sameness is correct: the
+    # rule no longer depends on which gate prints it. Never prescribe the local
+    # verb while a reviewer is outstanding (it may be REQUIRED, and this gate
+    # reads coverage alone, so nothing downstream catches a self-attest past
+    # one), and never leave a bare wait either (an optional App that is never
+    # installed sits absent forever). Name who, and point at the move that is
+    # safe whichever they are.
     raw = cov.get("verdicts")
     verdicts = raw if isinstance(raw, list) else []
     absent = [
@@ -249,20 +228,10 @@ def _coverage_refused_reason(
         if isinstance(v, dict) and v.get("verdict") == "absent" and v.get("name")
     ]
     if absent:
-        # Offer the local verb only when EVERY absentee is optional. Unknown
-        # config (``required is None``) fails closed and offers nothing: naming
-        # who we wait on still leaves a reader a move, while a wrong offer is
-        # a merge ahead of a reviewer that had something to say.
-        low = {r.lower() for r in (required or set())}
-        optional_only = required is not None and not any(a.lower() in low for a in absent)
-        tail = (
-            " - the review verb at HEAD would cover this locally, ahead of them"
-            if optional_only
-            else ""
-        )
         return (
             "0 reviewed (no head-pinned pass attestation; waiting on "
-            f"{', '.join(absent)}{tail})"
+            f"{', '.join(absent)} - if a reviewer there is uninstalled or no "
+            "longer configured, check config.review)"
         )
     return "0 reviewed (no head-pinned pass attestation - run the review verb at HEAD)"
 
@@ -959,8 +928,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(
             pr_number,
             "blocked",
-            "unreviewed merge refused: "
-            f"{_coverage_refused_reason(cov, head, _required_bot_logins(repo))}",
+            f"unreviewed merge refused: {_coverage_refused_reason(cov, head)}",
             "none",
             err=True,
         )

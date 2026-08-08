@@ -3300,26 +3300,31 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .map(|v| v.name.as_str())
                 .collect();
-            // Never WITHHOLD the local verb on an absent reviewer. `gh_logins`
-            // is required ∪ optional, so an optional App that is never installed
-            // sits absent forever and the PR would have no reachable exit at
-            // all. State both facts - who we wait on, and that covering locally
-            // lands ahead of them - and steer to neither.
+            // Never prescribe the local verb while anyone is absent, and never
+            // suppress the next action entirely either. Both were tried here and
+            // both were wrong: the offer walks a worker into self-attesting past
+            // a reviewer that may be REQUIRED (the merge gate reads coverage
+            // alone, so nothing downstream catches it), and bare suppression
+            // strands an optional App that is never installed, which sits absent
+            // forever with no reachable exit.
+            //
+            // The escape is that this line cannot know required-ness and should
+            // not try. Name who is outstanding and point at the one move that is
+            // safe whichever they are: check whether they are still configured.
             let next = if absent.is_empty() {
                 "run the review verb at HEAD".to_string()
             } else {
                 format!(
-                    "waiting on {}; the review verb at HEAD would cover this locally, ahead of them",
+                    "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
                     absent.join(", ")
                 )
             };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent ({}). No head-pinned pass attestation for this head - {}.",
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
                 refused.join(", "),
                 errored,
                 absent.len(),
-                absent.join(", "),
                 next
             )
         }

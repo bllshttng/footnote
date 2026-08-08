@@ -1203,40 +1203,18 @@ def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
             {"producer": "github_app", "name": "chatgpt-codex-connector", "verdict": "refused"},
         ],
     }
-    reason = _merge._coverage_refused_reason(cov, None, set())
+    reason = _merge._coverage_refused_reason(cov)
     assert "waiting on gemini-code-assist" in reason
-    assert "ahead of them" in reason
+    # Never prescribes a local re-attest while someone is outstanding: this gate
+    # reads coverage alone, so a worker that self-attests past a REQUIRED bot
+    # lands the PR before its blocking finding posts, and this line cannot tell
+    # required from optional.
+    assert "review verb" not in reason
+    # But it is not a bare wait either - an absent App that is never installed
+    # would strand the PR - so a safe move is always named.
+    assert "check config.review" in reason
     # The refused reviewer is not misreported as something we are waiting for.
     assert "chatgpt-codex-connector" not in reason
-
-
-def test_absent_required_bot_is_never_offered_the_local_verb():
-    """This gate reads coverage alone, so offering a local re-attest while a
-    REQUIRED bot is still queued lands the PR before its blocking finding posts.
-    The Rust receipt can offer it freely - a required-absent bot already fails
-    all_required_passed() there - which is why the parity wording is unsafe here."""
-    cov = {
-        "coverage": "covered",
-        "reviewed_count": 0,
-        "head_sha": "abc",
-        "verdicts": [{"name": "gemini-code-assist", "verdict": "absent"}],
-    }
-    reason = _merge._coverage_refused_reason(cov, None, {"gemini-code-assist"})
-    assert "waiting on gemini-code-assist" in reason
-    assert "review verb" not in reason
-
-
-def test_unreadable_required_config_fails_closed():
-    """None is not an empty set. Unknown config must not license the offer."""
-    cov = {
-        "coverage": "covered",
-        "reviewed_count": 0,
-        "head_sha": "abc",
-        "verdicts": [{"name": "gemini-code-assist", "verdict": "absent"}],
-    }
-    reason = _merge._coverage_refused_reason(cov, None, None)
-    assert "waiting on gemini-code-assist" in reason
-    assert "review verb" not in reason
 
 
 def test_malformed_verdicts_do_not_raise():
@@ -1244,13 +1222,13 @@ def test_malformed_verdicts_do_not_raise():
     hand-edited log must still produce a blocked receipt, not a traceback."""
     for bad in ({"a": 1}, ["nope", 3], None, "verdicts"):
         cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": bad}
-        assert "0 reviewed" in _merge._coverage_refused_reason(cov, None, set())
+        assert "0 reviewed" in _merge._coverage_refused_reason(cov)
 
 
 def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
     """No absent verdict -> the local verb is the unqualified next step."""
     cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
-    reason = _merge._coverage_refused_reason(cov, None, set())
+    reason = _merge._coverage_refused_reason(cov)
     assert "run the review verb at HEAD" in reason
     assert "waiting on" not in reason
 

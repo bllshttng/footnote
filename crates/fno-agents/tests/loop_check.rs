@@ -5416,11 +5416,18 @@ fn coverage_receipt_zero_names_refused_and_absent() {
     // being waited on - not merely counted, and not conflated with the refused
     // reviewer, which is the only other name on the line.
     assert!(line.contains("waiting on gemini-code-assist"), "{line}");
-    // The local verb is still offered, with its consequence stated. Withholding
-    // it stalls forever when the absent App is optional and never installed,
-    // which is this node's own bug rebuilt inside its fix.
-    assert!(line.contains("ahead of them"), "{line}");
-    assert!(line.contains("review verb at HEAD"), "{line}");
+    // Never prescribes the local verb while someone is outstanding. This line
+    // cannot tell required from optional, and `fno pr merge` reads coverage
+    // alone, so a worker that self-attests past a required bot lands the PR
+    // before its blocking finding posts.
+    assert!(!line.contains("review verb"), "{line}");
+    // Not a bare wait either: an optional App that is never installed sits
+    // absent forever, so a move that is safe either way is always named.
+    assert!(line.contains("check config.review"), "{line}");
+    // Names appear once. The earlier form printed them in a count parenthetical
+    // AND in the tail, and rendered "0 absent ()" when there were none.
+    assert_eq!(line.matches("gemini-code-assist").count(), 1, "{line}");
+    assert!(!line.contains("()"), "{line}");
 }
 
 /// A refusal is not an absence. The only configured reviewer hit its quota and
