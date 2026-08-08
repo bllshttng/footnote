@@ -6580,7 +6580,10 @@ mod tests {
         for path in [&project, &global] {
             let text = std::fs::read_to_string(path).unwrap();
             assert!(text.contains("review_coverage"), "missing in {path:?}");
-            assert!(text.contains("\"repo\":\"footnote\""), "unscoped in {path:?}");
+            assert!(
+                text.contains("\"repo\":\"footnote\""),
+                "unscoped in {path:?}"
+            );
         }
     }
 
