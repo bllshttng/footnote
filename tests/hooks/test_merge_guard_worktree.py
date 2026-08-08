@@ -463,6 +463,42 @@ def test_merge_mixed_with_no_verify_approval_is_refused():
         assert marker.exists(), "a refused command must not consume the marker"
 
 
+def test_no_verify_approval_does_not_open_push_to_main_single_segment():
+    """The protected-branch gate outranks the --no-verify approval. This is ONE
+    segment, so no cross-segment rule can catch it: the evaluator checked
+    --no-verify first and returned allow without ever reaching the branch
+    check, so an operator-touchable flag opened main directly."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess("git push --no-verify origin main",
+                                      fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists(), "a denied push must not consume the approval"
+
+
+def test_one_flag_cannot_authorize_several_no_verify_segments():
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m a && git commit --no-verify -m b",
+            fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_marker_override_requires_a_lone_merge():
+    """A PreToolUse allow blankets the WHOLE Bash call, so a marker-authorized
+    merge would approve whatever rides along - including a direct force-move of
+    main via the API, which no git gate inspects."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists(), "a refused override must not be spent"
+
+
 def test_one_marker_cannot_authorize_several_merges():
     """`gh pr merge 1 && gh pr merge 2` rode a single marker consume, and only
     the first reached the audit log."""

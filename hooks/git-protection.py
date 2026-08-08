@@ -1056,11 +1056,13 @@ def _compound_authorization_deny_message(command):
 
 Command: {command}
 
-This carries more than one action a single-use approval would have to
-cover: several `gh pr merge` invocations, or an approved --no-verify
-segment beside a merge. Run them as separate commands - honoring one
-approval across several multiplies what the operator approved, and only
-the first would reach the audit log.
+This carries more than one thing a single-use approval can cover
+(several `gh pr merge` or `--no-verify` segments, or both kinds at
+once), or rides the merge-gate override alongside other commands.
+
+An approval here authorizes exactly ONE action, and a PreToolUse allow
+applies to the WHOLE Bash call - so `gh pr merge 1 && <anything>` would
+approve the anything too. Run the approved action as its own command.
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1132,17 +1134,13 @@ def _evaluate_git_segment(command, has_approval):
     None means the segment is fine (explicitly-allowed git command, a
     feature-branch push, or a bypass-approved protected push).
     """
-    # --no-verify (checked first: an allowed verb like `git commit` must still
-    # be denied when it carries --no-verify)
-    for pattern in NO_VERIFY_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            if has_approval:
-                return ("allow", "[Approved] User approved --no-verify commit")
-            return ("deny", _no_verify_deny_message(command))
-
-    if is_allowed_git_command(command):
-        return None
-
+    # The protected-branch gate is checked FIRST, because it outranks the
+    # --no-verify approval. The two are one protection with two doors:
+    # --no-verify skips .git/hooks/pre-push, and that hook IS the branch guard,
+    # so an approval for one door must never open the other. Checking
+    # --no-verify first returned ("allow", ...) for
+    # `git push --no-verify origin main` and never reached this check at all -
+    # a single segment, so no cross-segment rule can catch it.
     is_protected, branch = is_push_to_protected_branch(command)
     if is_protected:
         state = load_state()
@@ -1154,6 +1152,17 @@ def _evaluate_git_segment(command, has_approval):
         save_state(state)
         return ("deny", _push_deny_message(command, branch,
                                            is_using_no_verify(command)))
+
+    # --no-verify before is_allowed_git_command: an allowed verb like
+    # `git commit` must still be denied when it carries --no-verify.
+    for pattern in NO_VERIFY_PATTERNS:
+        if re.search(pattern, command, re.IGNORECASE):
+            if has_approval:
+                return ("allow", "[Approved] User approved --no-verify commit")
+            return ("deny", _no_verify_deny_message(command))
+
+    if is_allowed_git_command(command):
+        return None
     return None
 
 
@@ -1204,8 +1213,11 @@ def main():
         # quote in a command not literally beginning with `git`
         # (`echo "oops<newline>git push origin main`) dropped the push gate
         # entirely, while the merge gate below still fired on the same input.
-        merge_segs = [command] if re.search(r'gh\s+pr\s+merge', command,
-                                            re.IGNORECASE) else []
+        # findall, not search: the whole malformed string is one "segment", so a
+        # length-1 list would make the multi-merge guard below unfirable on
+        # exactly the input this deny-leaning fallback exists to catch.
+        merge_segs = [command] * len(re.findall(r'gh\s+pr\s+merge', command,
+                                                re.IGNORECASE))
         git_segs = [command] if re.search(r'\bgit\b', command) else []
 
     merge_seg = merge_segs[0] if merge_segs else None
@@ -1217,11 +1229,18 @@ def main():
     # startswith('git') check. Evaluated exactly once - a deny writes state -
     # and the verdict is then applied in a fixed precedence below.
     # ==========================================
-    git_decisions = [(seg, _evaluate_git_segment(seg, has_approval))
-                     for seg in git_segs]
+    # Stops at the first deny: a deny writes state (`last_blocked_command`), so
+    # evaluating past it would persist a later segment while the message names
+    # the first, making the state file an unreliable record of what was refused.
+    git_decisions = []
+    for seg in git_segs:
+        decision = _evaluate_git_segment(seg, has_approval)
+        git_decisions.append((seg, decision))
+        if decision is not None and decision[0] == "deny":
+            break
 
-    # A DENY ANYWHERE OUTRANKS AN ALLOW ANYWHERE. Both loops used to
-    # short-circuit on the first decision they met, which made the verdict
+    # A DENY ANYWHERE OUTRANKS AN ALLOW ANYWHERE. The loop used to
+    # short-circuit on the first decision of either kind, which made the verdict
     # depend on segment order: `git commit --no-verify && git push origin main`
     # returned the approval's allow and carried the push to main with it, while
     # the reverse order denied. One authorization must never cover a sibling
@@ -1232,21 +1251,24 @@ def main():
             _emit("deny", decision[1])
             sys.exit(0)
 
-    # Which segment, if any, is relying on the single-use --no-verify approval.
+    # Which segments, if any, rely on the single-use --no-verify approval.
     # Nothing is CLAIMED yet: a claim before the outcome is known burns the
     # operator's approval on a command that then gets denied anyway.
-    git_allow = next(((seg, d[1]) for seg, d in git_decisions
-                      if d is not None and d[0] == "allow"), None)
+    git_allows = [(seg, d[1]) for seg, d in git_decisions
+                  if d is not None and d[0] == "allow"]
+    git_allow = git_allows[0] if git_allows else None
 
     # ONE AUTHORIZATION AUTHORIZES ONE ACTION. Refuse a command carrying more
-    # than one thing a single-use approval would have to cover: `gh pr merge 1
-    # && gh pr merge 2` rode one marker consume (and logged only the first), and
-    # an approved --no-verify segment beside a merge would need two independent
-    # single-use claims committed atomically within one tool call. Both are the
-    # compound-smuggling shape this gate exists to refuse, so they are refused
-    # rather than half-honored. Keeping these mutually exclusive is also what
-    # lets each branch below claim without a two-phase commit.
-    if len(merge_segs) > 1 or (merge_seg is not None and git_allow is not None):
+    # than one thing a single-use approval would have to cover: several merges
+    # rode one marker consume (logging only the first), several approved
+    # --no-verify segments rode one flag consume, and an approved --no-verify
+    # segment beside a merge would need two independent single-use claims
+    # committed atomically within one tool call. All are the compound-smuggling
+    # shape this gate exists to refuse, so they are refused rather than
+    # half-honored. Keeping them mutually exclusive is also what lets each
+    # branch below claim without a two-phase commit.
+    if (len(merge_segs) > 1 or len(git_allows) > 1
+            or (merge_seg is not None and git_allow is not None)):
         _emit("deny", _compound_authorization_deny_message(command))
         sys.exit(0)
 
@@ -1258,6 +1280,19 @@ def main():
         # Scoped override, reached only after the legitimate two-factor path
         # failed and every git segment cleared, so the marker is claimed only
         # when it is actually the thing authorizing the merge.
+        #
+        # Held to a LONE merge, checked before the claim so a refusal does not
+        # spend the marker. A PreToolUse allow blankets the entire Bash call, so
+        # `gh pr merge 1 && gh api -X PATCH .../refs/heads/main` would have been
+        # approved whole - the marker cannot open main directly, but it could
+        # carry something that does. The two-factor path is an established flow
+        # that may legally be prefixed (`cd X && gh pr merge`); the marker is the
+        # new one-touch trigger and gets the stricter rule. On the unparseable
+        # fallback there are no real segments to count, so it refuses.
+        if _fresh_marker(MERGE_GATE_MARKER) and (
+                segments is None or len(segments) != 1):
+            _emit("deny", _compound_authorization_deny_message(command))
+            sys.exit(0)
         if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
             if not _audit("two-factor check failed, merge allowed by "
                           f"marker: {merge_seg}"):
