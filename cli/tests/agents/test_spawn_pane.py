@@ -1979,8 +1979,12 @@ def test_cmd_spawn_explicit_happy_monitor_routes_zai_pane(
         if token == "--claude-env"
     ]
     assert f"ANTHROPIC_BASE_URL={DEFAULT_ZAI_BASE_URL}" in pairs
-    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
     assert "ANTHROPIC_MODEL=glm-5.2" in pairs
+    # The credential rides the env(1) wrapper, never --claude-env: happy is a
+    # long-lived parent whose argv is a world-readable `ps` token, while env(1)
+    # execs and its assignments leave the process image.
+    assert not any(p.startswith("ANTHROPIC_AUTH_TOKEN=") for p in pairs)
+    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in argv[: argv.index("happy")]
     assert "--settings" not in argv
 
 
@@ -2120,32 +2124,80 @@ def _claude_env_pairs(argv: list[str]) -> dict:
     )
 
 
-def test_happy_pane_argv_carries_the_route_as_claude_env(monkeypatch) -> None:
-    """The WHOLE route rides --claude-env, never --settings.
+def _env1_assignments(wrapped: list[str]) -> dict:
+    """The ``NAME=VALUE`` run of an ``env(1)`` wrapper, as the child receives it.
 
-    Set equality against the route that was passed IN, not membership and not a
-    hardcoded key list. Membership is exactly what let five of seven keys go
-    unchecked while reading in review as "the route is covered"; comparing
-    against the supplied route is what keeps a shorter legitimate route (a
-    provider with no haiku_model, a model without the [1m] suffix) passing.
+    Mirrors the mux server's ``env_assignments_start`` scan (server.rs): skip the
+    leading ``env``, step over each ``-u NAME`` pair, collect assignments, and
+    stop at the first token that is the command rather than an assignment.
     """
+    assert wrapped[0] == "env", wrapped[:3]
+    pairs: dict[str, str] = {}
+    i = 1
+    while i < len(wrapped):
+        tok = wrapped[i]
+        if tok == "-u":
+            i += 2
+            continue
+        if "=" in tok and not tok.startswith("-"):
+            key, value = tok.split("=", 1)
+            pairs[key] = value
+            i += 1
+            continue
+        break
+    return pairs
+
+
+def _wrapped_happy_argv(route: dict) -> list[str]:
+    """The argv that actually executes for a happy pane: env(1) -> happy -> claude."""
+    import fno.agents.mux_spawn as mux_spawn
+
+    inner = mux_spawn.happy_pane_argv(["claude", "--model", "glm-5.2", "go"], route)
+    return mux_spawn._mesh_env_wrapper("wk", "claude", None, inner, None, None, route)
+
+
+def test_happy_pane_wrapped_argv_holds_the_union_invariant(monkeypatch) -> None:
+    """Every route key reaches the child, and no credential reaches ``ps``.
+
+    Asserted on the FULLY WRAPPED argv, not on happy_pane_argv's output, and
+    that is the whole point of the test. happy builds its child env as
+    ``{...process.env, ...claudeEnvVars}``, so a key is delivered whether it
+    rides the env(1) run or --claude-env -- but only --claude-env publishes it
+    to `ps`. A test that saw happy_pane_argv alone could not distinguish "the
+    secret moved to the wrapper" (correct) from "the secret was dropped"
+    (a 401 in production, and silent here).
+    """
+    from fno.agents.account_env import SECRET_ROUTE_VARS
     import fno.agents.mux_spawn as mux_spawn
 
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
-    argv = mux_spawn.happy_pane_argv(["claude", "--model", "glm-5.2", "go"], _ROUTE)
+    wrapped = _wrapped_happy_argv(_ROUTE)
 
-    assert argv[0] == "happy"
-    assert "--settings" not in argv
-    assert _claude_env_pairs(argv) == _ROUTE, "no key dropped and none invented"
-    assert argv[-3:] == ["--model", "glm-5.2", "go"]
+    env1 = _env1_assignments(wrapped)
+    claude_env = _claude_env_pairs(wrapped)
+    secrets = [k for k in _ROUTE if k in SECRET_ROUTE_VARS]
+    assert secrets, "fixture must carry a credential or this proves nothing"
+
+    for key, value in _ROUTE.items():
+        assert env1.get(key) == value or claude_env.get(key) == value, (
+            f"{key} reaches the child on neither channel"
+        )
+    for key in secrets:
+        assert key not in claude_env, f"{key} is a world-readable ps token"
+        assert env1.get(key) == _ROUTE[key], f"{key} dropped, not moved"
+    assert set(claude_env) == set(_ROUTE) - set(secrets), "none dropped, none invented"
+
+    assert "--settings" not in wrapped
+    assert wrapped[wrapped.index("happy") - 1] != "env", "env(1) must set, not just exec"
+    assert wrapped[-3:] == ["--model", "glm-5.2", "go"]
 
 
 def test_happy_pane_argv_carries_a_route_with_no_model_keys(monkeypatch) -> None:
     """A route legitimately carrying only an endpoint and a credential passes.
 
-    The assertion above compares against the supplied route, so a provider with
-    no haiku_model and a model with no [1m] suffix are not held to the seven-key
-    shape a full zai route happens to have.
+    The endpoint still rides --claude-env; the credential rides the wrapper
+    only. A provider with no haiku_model and a model with no [1m] suffix are not
+    held to the seven-key shape a full zai route happens to have.
     """
     import fno.agents.mux_spawn as mux_spawn
 
@@ -2154,9 +2206,30 @@ def test_happy_pane_argv_carries_a_route_with_no_model_keys(monkeypatch) -> None
         "ANTHROPIC_AUTH_TOKEN": "other-secret",
     }
     monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
-    argv = mux_spawn.happy_pane_argv(["claude", "go"], minimal)
+    wrapped = _wrapped_happy_argv(minimal)
 
-    assert _claude_env_pairs(argv) == minimal
+    assert _claude_env_pairs(wrapped) == {
+        "ANTHROPIC_BASE_URL": "https://api.example.test/anthropic"
+    }
+    assert _env1_assignments(wrapped)["ANTHROPIC_AUTH_TOKEN"] == "other-secret"
+
+
+def test_happy_pane_argv_emits_no_claude_env_for_a_credential_only_route(
+    monkeypatch,
+) -> None:
+    """An all-secret route yields NO --claude-env tokens, not a dangling flag.
+
+    The filter drops every key here, so the boundary worth pinning is that the
+    list collapses to nothing rather than to a `--claude-env` with no argument
+    (which happy would parse as the next argv token, i.e. `claude`).
+    """
+    import fno.agents.mux_spawn as mux_spawn
+
+    monkeypatch.setattr(mux_spawn.shutil, "which", lambda b: "/opt/homebrew/bin/happy")
+    argv = mux_spawn.happy_pane_argv(["claude", "go"], {"ANTHROPIC_AUTH_TOKEN": "s"})
+
+    assert "--claude-env" not in argv
+    assert argv == ["happy", "go"]
 
 
 def test_happy_pane_argv_refuses_a_pinned_session_id(monkeypatch) -> None:
@@ -2643,7 +2716,9 @@ def test_routed_claude_pane_launches_through_happy_when_enabled(
         if token == "--claude-env"
     ]
     assert f"ANTHROPIC_BASE_URL={DEFAULT_ZAI_BASE_URL}" in pairs
-    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in pairs
+    # Credential on the env(1) run only -- see the union invariant test.
+    assert not any(p.startswith("ANTHROPIC_AUTH_TOKEN=") for p in pairs)
+    assert "ANTHROPIC_AUTH_TOKEN=zai-secret" in argv[: argv.index("happy")]
     assert "--settings" not in argv
 
 

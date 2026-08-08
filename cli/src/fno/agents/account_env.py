@@ -77,6 +77,19 @@ SCRUB_AUTH_VARS = (
     *MODEL_ENV_KEYS,
 )
 
+# The subset of a route whose VALUE is a credential. Deliberately NOT
+# SCRUB_AUTH_VARS: that set answers "clear these so the route wins" and so it
+# also names the endpoint and every model key, none of which is a secret. This
+# set answers a different question -- "which values must never be written where
+# a reader other than the child process can see them" -- and its one caller is
+# the happy pane argv build, where a route key becomes a world-readable `ps`
+# token. Keeping the two adjacent is the point: a future credential var has to
+# be added to both, and the comments say why they differ.
+SECRET_ROUTE_VARS = (
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+)
+
 
 @dataclass(frozen=True)
 class AccountOverlay:
