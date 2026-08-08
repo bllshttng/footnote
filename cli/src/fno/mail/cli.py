@@ -1735,12 +1735,12 @@ def cmd_send(
         help=(
             "Inject the payload UNWRAPPED at the recipient's prompt line so the "
             "REPL slash parser fires it - the only way to make a verb the model "
-            "is barred from invoking actually run. Two axes bind it: an actor "
+            "is barred from invoking actually run. One axis binds it: an actor "
             "OTHER than the model must supply the trigger (cross-session, the "
             "king-mediated path; self-injection is barred unless --self). Keeping "
-            "the reviewer off the author is the aim of this lane, not a gate it "
-            "enforces: a self-attested review counts as coverage and merges. "
-            "Payload must start with / and be "
+            "the reviewer off the author is the aim of this lane, not a second "
+            "axis it enforces: a self-attested review counts as coverage and "
+            "merges. Payload must start with / and be "
             "a single line. Never queues durable. A payload-varying retry is a "
             "two-variable experiment - report any refusal verbatim and stop."
         ),
