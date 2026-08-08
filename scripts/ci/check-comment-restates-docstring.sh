@@ -27,8 +27,10 @@
 # misreads as bloat. A finding there means the instrument has drifted toward
 # density and the threshold needs re-examining, not lowering.
 #
-# Advisory on first landing: always exits 0, findings printed to stdout. The
-# lint never auto-deletes; it reports and a human cuts.
+# Advisory on first landing: findings never affect the exit code (printed to
+# stdout, always exit 0 on a successful run). A Python crash exits non-zero -
+# that is a real bug and is allowed to surface; it is not the findings firing.
+# The lint never auto-deletes; it reports and a human cuts.
 #
 # Reading protocol (load-bearing): the flag set is a READING LIST, never a fix
 # list. Measured precision is 10 lossless cuts out of 172 findings (5.8%); the
@@ -96,11 +98,11 @@ def collect(args):
 
 
 def scan(path):
-    src = Path(path).read_text(errors="replace")
     try:
+        src = Path(path).read_text(errors="replace")
         tree = ast.parse(src)
     except Exception:
-        return []
+        return []  # unreadable / unparseable: skip, never crash the advisory run
     lines = src.splitlines()
     # Full-line '# ' comments only: a trailing comment (code before the #) does
     # not mark its whole line, so it is not counted as inline narration.
@@ -122,7 +124,18 @@ def scan(path):
         if len(dt) < 15:
             continue
         end = n.end_lineno or n.lineno
-        body_lines = sorted(k for k in coms if n.lineno <= k <= end)
+        # Exclude nested def/class bodies: a comment inside an inner scope
+        # belongs to that scope, not this function, so it is evaluated against
+        # the inner docstring (if any) rather than this outer one.
+        nested = [
+            (c.lineno, c.end_lineno or c.lineno)
+            for c in ast.walk(n)
+            if c is not n and isinstance(c, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))
+        ]
+        body_lines = sorted(
+            k for k in coms
+            if n.lineno <= k <= end and not any(s <= k <= e for s, e in nested)
+        )
         # Group contiguous comment lines into blocks.
         blocks, cur = [], []
         for ln in body_lines:
