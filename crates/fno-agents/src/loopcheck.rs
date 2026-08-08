@@ -3291,29 +3291,19 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .iter()
                 .filter(|v| v.verdict == CoverageVerdict::Errored)
                 .count();
-            // Absent reviewers are NAMED, not just counted: "the reviewers
-            // above have not responded" pointed at the only names on the line,
-            // which are the refused ones - asserting a reviewer is silent when
-            // it explicitly declined.
+            // Absent reviewers are NAMED: "the reviewers above" pointed at the
+            // refused ones, the only names the line had.
             let absent: Vec<&str> = rep
                 .verdicts
                 .iter()
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .map(|v| v.name.as_str())
                 .collect();
-            // Naming the missing evidence closes the vacuum a reader otherwise
-            // fills with attestation_origin. The next action states BOTH facts
-            // when someone is still out, and steers to neither.
-            //
-            // Suppressing the verb outright was worse than the hazard it
-            // dodged. This login set is required ∪ optional, so an optional App
-            // that is never installed sits absent forever - and a receipt that
-            // withholds the local verb leaves that PR with no reachable exit at
-            // all, which is this node's own bug rebuilt inside its fix. Naming
-            // who we wait on AND what covering locally would do costs one clause
-            // and hides nothing: a worker who proceeds knows it lands ahead of a
-            // reviewer that has not spoken. A refusal is different - that
-            // reviewer will not help, so the verb is simply the move.
+            // Never WITHHOLD the local verb on an absent reviewer. `gh_logins`
+            // is required ∪ optional, so an optional App that is never installed
+            // sits absent forever and the PR would have no reachable exit at
+            // all. State both facts - who we wait on, and that covering locally
+            // lands ahead of them - and steer to neither.
             let next = if absent.is_empty() {
                 "run the review verb at HEAD".to_string()
             } else {
