@@ -487,6 +487,81 @@ def test_shell_keywords_do_not_hide_a_push_to_main():
             assert '"permissionDecision": "deny"' in out, cmd
 
 
+def test_refspec_forms_that_reach_main_are_denied():
+    """Only the `feature:main` form was normalized, so a force-prefixed or
+    fully-qualified destination never compared equal to a protected branch.
+    `git push origin +main` is a FORCE push to main from any branch."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git push origin +main",
+                    "git push origin refs/heads/main",
+                    "git push origin +refs/heads/main",
+                    "git push --all origin",
+                    "git push --mirror origin"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_git_global_options_do_not_hide_the_subcommand():
+    """Both gates key on the subcommand - one by `git push` adjacency, the other
+    by token position - so a global option before it hid the push from both.
+    `-c core.hooksPath=...` additionally disables .git/hooks/pre-push, which IS
+    the branch guard, so it is a --no-verify by another name."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git -C /repo push origin main",
+                    "git --no-pager push origin main",
+                    "git -c core.hooksPath=/dev/null push origin main",
+                    "git -c core.hooksPath=/dev/null commit -m x"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+        # A global option must not turn an ordinary push into a refusal.
+        out2, rc2 = _run_hook_subprocess("git -C /repo push origin feature/x",
+                                         fno, cwd=td)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_quoted_shell_runner_argument_is_re_tokenized():
+    """`eval git push ...` was caught while `eval "git push ..."` - the form
+    anyone actually writes - was invisible, because the whole command sat in one
+    quoted token. Same for `bash -c "..."`."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ('eval "git push origin main"',
+                    'bash -c "git push origin main"',
+                    'sh -c "git push origin main"'):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_heredoc_check_ignores_quoted_argument_text():
+    """`<<` inside an ARGUMENT is not a heredoc opener. A raw regex scan refused
+    a commit whose message read "shift << 2"."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            'git commit --no-verify -m "shift << 2"', fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
+def test_unparseable_merge_reaches_the_two_factor_gate():
+    """An apostrophe raises in shlex, and the lone-command rule cannot count
+    segments on that fallback. Enforcing it anyway refused every fallback merge
+    with a compound-command message, blocking legitimate auto-merge on routine
+    prose. It must be refused by the MERGE gate, naming the real reason."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 12 --body \"it's ready\"", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert "two-factor check failed" in out
+        assert "one approval cannot authorize" not in out
+
+
 def test_case_arm_does_not_hide_the_verb():
     """`)` terminates a case arm pattern. Without it as a separator the arm body
     stayed in the case word's segment and both gates saw nothing."""

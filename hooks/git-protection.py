@@ -69,13 +69,6 @@ MARKER_TTL_SECONDS = 300
 # command, whatever its delimiter, and a PreToolUse allow would cover it.
 _SUBSTITUTION_FORMS = ("`", "$(", "<(", ">(")
 
-# An UNQUOTED heredoc delimiter (<<EOF) means the shell expands the body, so a
-# substitution can hide in there; a quoted one (<<'EOF') is literal. Segmentation
-# excludes heredoc bodies entirely, which is exactly what makes the recommended
-# `-F - <<'EOF'` escape usable - so the body is checked here by delimiter form
-# rather than by scanning text the segmenter never produces.
-_UNQUOTED_HEREDOC_RE = re.compile(r'<<-?[ \t]*(?![\'"])\w')
-
 # Output redirection, matched as WHOLE operator tokens. `any(">" in tok)` also
 # matched quoted argument text, so `-m "a > b"` and a message containing a
 # markdown code span were refused with a message about several actions. `<` is
@@ -215,7 +208,18 @@ def extract_branch_from_push(command):
         # branch (right side of the colon). Without this, `git push origin
         # feature:main` bypasses the protected-branch check because
         # `feature:main` is not literally in PROTECTED_BRANCHES.
-        return refspec.split(':')[-1] if ':' in refspec else refspec
+        dest = refspec.split(':')[-1] if ':' in refspec else refspec
+        # Normalize the destination before the membership test. Only the `:`
+        # form was handled, so a fully-qualified or force-prefixed destination
+        # never compared equal to a protected branch: `git push origin +main`
+        # (a FORCE push to main from any branch) and
+        # `git push origin refs/heads/main` were both allowed through.
+        dest = dest.lstrip('+')
+        for prefix in ("refs/heads/", "heads/"):
+            if dest.startswith(prefix):
+                dest = dest[len(prefix):]
+                break
+        return dest
 
     return None
 
@@ -263,6 +267,13 @@ def is_push_to_protected_branch(command):
 
     if not is_push:
         return False, None
+
+    # `--all` / `--mirror` push every local ref, so they update a protected
+    # branch without ever naming one. They named no branch, so the refspec parse
+    # read the REMOTE as the destination and the push sailed through from any
+    # feature branch.
+    if re.search(r'\s--(all|mirror)\b', command):
+        return True, "all refs (--all/--mirror)"
 
     # Extract explicit branch from command
     explicit_branch = extract_branch_from_push(command)
@@ -629,6 +640,8 @@ _SEGMENT_KEYWORDS = {"then", "do", "if", "elif", "else", "while", "until",
 # caught them; command-position matching must not silently drop them).
 _CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
                  "xargs", "nohup", "stdbuf", "eval", "coproc"}
+# Shells that take the real command as the argument of `-c`.
+_SHELL_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh"}
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -920,8 +933,85 @@ def _effective_argv(seg):
         if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
             i += 1
             continue
+        # `sh -c "..."` / `bash -c "..."`: the command lives in the NEXT token.
+        if (tok.rsplit("/", 1)[-1].lower() in _SHELL_RUNNERS
+                and i + 1 < n and seg[i + 1] == "-c"):
+            i += 2
+            continue
         break
-    return seg[i:]
+    argv = seg[i:]
+    # A wrapper's argument is one quoted token holding a whole command, so the
+    # verb is inside it rather than at argv[0]: `eval "git push origin main"`
+    # and `bash -c "git push origin main"` were invisible while the UNQUOTED
+    # `eval git push ...` was caught - protection that only covered the form
+    # nobody writes. Re-tokenize so the real verb surfaces.
+    if len(argv) == 1 and any(c.isspace() for c in argv[0]):
+        try:
+            inner = shlex.split(argv[0])
+        except ValueError:
+            inner = argv[0].split()
+        if inner:
+            return _effective_argv(inner)
+    return argv
+
+
+# Git's global options, which sit BEFORE the subcommand. The value-taking ones
+# swallow the next token when written separately (`-C /repo`, `-c a=b`).
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                          "--exec-path", "--super-prefix"}
+_GIT_GLOBAL_FLAGS = {"-p", "--paginate", "--no-pager", "--bare", "--no-replace-objects",
+                     "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                     "--icase-pathspecs", "--no-optional-locks"}
+
+
+def _strip_git_global_opts(argv):
+    """Drop git's global options so argv[1] is the real subcommand.
+
+    Returns argv[0] followed by the subcommand onward. A `-c core.hooksPath=...`
+    is deliberately KEPT as a synthetic `--no-verify` token: setting hooksPath to
+    a bogus path disables .git/hooks/pre-push, which IS the protected-branch
+    guard, so it is a --no-verify by another name and must reach that gate.
+    """
+    head, rest = argv[:1], argv[1:]
+    hooks_path_override = False
+    i, n = 0, len(rest)
+    while i < n:
+        tok = rest[i]
+        if "core.hookspath" in tok.lower():
+            hooks_path_override = True
+        if tok in _GIT_GLOBAL_VALUE_OPTS:
+            if tok == "-c" and i + 1 < n and "core.hookspath" in rest[i + 1].lower():
+                hooks_path_override = True
+            i += 2          # option plus its value
+            continue
+        if tok in _GIT_GLOBAL_FLAGS or (
+                tok.startswith("--") and "=" in tok
+                and tok.split("=", 1)[0] in _GIT_GLOBAL_VALUE_OPTS):
+            i += 1
+            continue
+        break
+    out = head + rest[i:]
+    if hooks_path_override:
+        out = out + ["--no-verify"]
+    return out
+
+
+def _has_unquoted_heredoc(command):
+    """True when a REAL heredoc opener uses an UNQUOTED delimiter, whose body the
+    shell expands (so a substitution can hide there). Quoted (<<'EOF') is
+    literal, which is what makes the recommended `-F - <<'EOF'` escape work.
+
+    Uses the quote-aware opener scan rather than a raw regex over the command:
+    the raw form matched `<<` inside an ARGUMENT, so a commit message reading
+    "shift << 2" was refused - the same raw-scan mistake _REDIRECT_TOKENS exists
+    to avoid for `>`.
+    """
+    for line in _split_lines_outside_quotes(command):
+        if _find_heredoc_opener(line) is None:
+            continue
+        if not re.search(r"<<-?[ \t]*['\"]", line):
+            return True
+    return False
 
 
 def _find_merge_segments(segments):
@@ -952,12 +1042,19 @@ def _find_git_segments(segments):
 
     Case-insensitive, to match _find_merge_segments: on a case-insensitive
     filesystem (macOS) `GIT push origin main` resolves and ran, while the
-    lowercase-only comparison here handed the gate nothing at all."""
+    lowercase-only comparison here handed the gate nothing at all.
+
+    Git's own global options are dropped before the subcommand, so every
+    downstream matcher sees a canonical `git <subcommand> ...`. Both gates key
+    on the subcommand - one by `git\\s+push` adjacency, the other by token
+    position - so `git -C /repo push origin main` and
+    `git -c core.hooksPath=/dev/null push origin main` were invisible to both.
+    """
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
         if argv and argv[0].rsplit("/", 1)[-1].lower() == "git":
-            out.append(" ".join(argv))
+            out.append(" ".join(_strip_git_global_opts(argv)))
     return out
 
 
@@ -1403,12 +1500,19 @@ def main():
     carries_substitution = (
         any(f in tok for tok in tokens for f in _SUBSTITUTION_FORMS)
         or any(tok in _REDIRECT_TOKENS for tok in tokens)
-        or bool(_UNQUOTED_HEREDOC_RE.search(command)))
-    authorizes_alone = (segments is not None and len(segments) == 1
-                        and not carries_substitution)
-    if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
-        _emit("deny", _compound_authorization_deny_message(command))
-        sys.exit(0)
+        or _has_unquoted_heredoc(command))
+    # Only enforceable when shlex actually parsed the command. On the
+    # unbalanced-quote fallback there is one pseudo-segment, so requiring
+    # len == 1 there refused EVERY fallback merge before the two-factor check
+    # ran - a routine apostrophe in `--body "it's ready"` was enough to block a
+    # legitimate auto-merge, with a wrong reason. The two-factor path keeps its
+    # prior behaviour there; the marker override does not, since it needs parsed
+    # segments to prove the merge stands alone (see its own guard below).
+    if segments is not None:
+        authorizes_alone = len(segments) == 1 and not carries_substitution
+        if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
+            _emit("deny", _compound_authorization_deny_message(command))
+            sys.exit(0)
 
     if merge_seg is not None:
         allow_reason = _check_pr_merge_allowed(merge_seg)
@@ -1418,9 +1522,11 @@ def main():
         # Scoped override, reached only after the legitimate two-factor path
         # failed and every git segment cleared, so the marker is claimed only
         # when it is actually the thing authorizing the merge.
-        # The lone-command rule above already ran, so by here the merge is the
-        # only segment and claiming cannot authorize a sibling.
-        if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
+        # `segments is not None` is load-bearing: the lone-command rule above is
+        # skipped on the unparseable fallback, so without it the override could
+        # authorize a command whose siblings were never counted.
+        if (segments is not None and _fresh_marker(MERGE_GATE_MARKER)
+                and _claim_marker(MERGE_GATE_MARKER)):
             if not _audit("two-factor check failed, merge allowed by "
                           f"marker: {merge_seg}"):
                 _emit("deny", _unrecordable_override_deny_message())
