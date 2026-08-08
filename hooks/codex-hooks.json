@@ -125,6 +125,10 @@
           {
             "type": "command",
             "command": "${PLUGIN_ROOT}/hooks/arm-handoff-precompact.sh"
+          },
+          {
+            "type": "command",
+            "command": "${PLUGIN_ROOT}/hooks/precompact-canon-doc.sh"
           }
         ]
       }
