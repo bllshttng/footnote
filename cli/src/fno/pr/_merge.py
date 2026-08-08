@@ -189,13 +189,33 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return oid or None
 
 
-def _coverage_refused_reason(cov: Optional[dict]) -> str:
-    """Why a coverage guard refused, for the blocked receipt line."""
+def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) -> str:
+    """Why a coverage guard refused, for the blocked receipt line.
+
+    Names the CAUSE and the next action, not just the count. A refusal that
+    reports a bare number leaves the reader to explain it, and the nearest
+    exclusion-flavoured vocabulary in this repo is ``attestation_origin``, which
+    gates nothing - two workers escalated green PRs to the operator on that
+    inference while actually looking at a head that had moved.
+
+    ``head`` is the PR's observed head, passed only when the caller fetched it.
+    Its absence is why the staleness branch can never fire on an unobserved
+    head: without it the reason falls back to the count, and the caller only
+    refuses on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it
+    is printed.
+    """
     if cov is None:
         return "no review_coverage event (no gate evaluated this PR)"
     if cov.get("coverage") != "covered":
         return f"coverage {cov.get('coverage')}"
-    return f"0 reviewed (covered count={cov.get('reviewed_count')})"
+    ev_head = cov.get("head_sha")
+    if head and ev_head and head != ev_head:
+        return (
+            f"coverage was computed at {ev_head[:8]} but HEAD is {head[:8]}; "
+            "attestations are head-pinned by design - re-run the review verb at HEAD"
+        )
+    at_head = f" at HEAD {head[:8]}" if head else ""
+    return f"0 reviewed{at_head} (no head-pinned pass attestation - run the review verb at HEAD)"
 
 
 def _safe_int(val, default=0):
@@ -873,6 +893,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             and _safe_int(cov.get("reviewed_count"), 0) > 0
         )
     )
+    # Carried into the refusal reason so a stale-head block says so. Stays None
+    # when the count already refused (no gh round-trip on a path that cannot be
+    # stale) or when the fetch failed.
+    head: Optional[str] = None
     if covered and cov is not None and review_lane:
         # Staleness: the event pins a head; if the PR head moved after the gate
         # eval, the coverage no longer describes what would merge. Best-effort:
@@ -886,7 +910,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(
             pr_number,
             "blocked",
-            f"unreviewed merge refused: {_coverage_refused_reason(cov)}",
+            f"unreviewed merge refused: {_coverage_refused_reason(cov, head)}",
             "none",
             err=True,
         )
