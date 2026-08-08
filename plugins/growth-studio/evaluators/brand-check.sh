@@ -21,8 +21,30 @@ voice="$script_dir/../assets/brand-voice.md"
 [[ -f "$voice" ]] || { echo "brand-check: brand-voice asset not found: $voice" >&2; exit 2; }
 
 identity="${2:-}"
+never_names=()
+allowed_names=()
 if [[ -n "$identity" ]]; then
   [[ -f "$identity" ]] || { echo "brand-check: brand-identity not found: $identity" >&2; exit 2; }
+  while IFS=$'\t' read -r kind val; do
+    [[ -z "$val" ]] && continue
+    case "$kind" in
+      never) never_names+=("$val") ;;
+      formal|byline) allowed_names+=("$val") ;;
+    esac
+  done < <(awk '
+    /^##[[:space:]]+Founder([[:space:]]|$)/ { in_founder = 1; next }
+    in_founder && /^##[[:space:]]/ { in_founder = 0 }
+    in_founder && /^[[:space:]]*(formal|byline|never):[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*/, "", line)
+      kind = line
+      sub(/:.*$/, "", kind)
+      val = line
+      sub(/^[^:]*:[[:space:]]*/, "", val)
+      sub(/[[:space:]]*#.*$/, "", val)
+      if (val != "") print kind "\t" val
+    }
+  ' "$identity")
 fi
 
 fail=0
@@ -60,8 +82,11 @@ fi
 #    punctuation (. ! ? : ;) is a sentence split across lines, because a
 #    complete sentence on one line always terminates. Skip headings, list
 #    items, tables, code fences, image lines, and blank lines.
-wrapped="$(awk '
-  BEGIN { infence = 0 }
+#    A standalone founder-name line (a byline) is a signature, not a wrapped
+#    sentence, so declared formal/byline forms are skipped too.
+allowed_csv="$(IFS=,; printf '%s' "${allowed_names[*]}")"
+wrapped="$(awk -v allowed="$allowed_csv" '
+  BEGIN { infence = 0; n = split(allowed, a, ","); for (i=1; i<=n; i++) if (a[i] != "") allowed_set[a[i]] = 1 }
   /^[[:space:]]*$/ { next }
   /^```/ { infence = !infence; next }
   infence { next }
@@ -70,6 +95,9 @@ wrapped="$(awk '
   /^[[:space:]]*\|/ { next }
   /^[[:space:]]*!\[/ { next }
   {
+    trimmed = $0
+    gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
+    if (trimmed in allowed_set) next
     last = substr($0, length($0), 1)
     if (last !~ /[.!?:;]/) { print NR }
   }
@@ -80,29 +108,16 @@ if [ -n "$wrapped" ]; then
 fi
 
 # 4. Founder-name forms from brand-identity ## Founder. A `never:` form in the
-#    draft fails brand review. The allowed (formal/byline) and banned (never)
-#    forms are declared per-project in brand-identity, so this enforces the
-#    name rule without hardcoding it into the pack voice.
-if [[ -n "$identity" ]]; then
-  never_names=()
-  while IFS= read -r line; do [[ -n "$line" ]] && never_names+=("$line"); done < <(awk '
-    /^##[[:space:]]+Founder([[:space:]]|$)/ { in_founder = 1; next }
-    in_founder && /^##[[:space:]]/ { in_founder = 0 }
-    in_founder && /^[[:space:]]*never:[[:space:]]*/ {
-      line = $0
-      sub(/^[[:space:]]*never:[[:space:]]*/, "", line)
-      sub(/[[:space:]]*#.*$/, "", line)
-      if (line != "") print line
-    }
-  ' "$identity")
-  if [ "${#never_names[@]}" -gt 0 ]; then
-    for name in "${never_names[@]}"; do
-      if grep -qniF -- "$name" "$draft"; then
-        echo "brand-check: banned founder-name form present: $name" >&2
-        fail=1
-      fi
-    done
-  fi
+#    draft fails brand review; `formal`/`byline` pass (and are skipped as
+#    signature lines in the wrapped-prose check). Declared per-project, so this
+#    enforces the name rule without hardcoding it into the pack voice.
+if [ "${#never_names[@]}" -gt 0 ]; then
+  for name in "${never_names[@]}"; do
+    if grep -qniF -- "$name" "$draft"; then
+      echo "brand-check: banned founder-name form present: $name" >&2
+      fail=1
+    fi
+  done
 fi
 
 exit $fail
