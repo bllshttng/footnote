@@ -69,6 +69,13 @@ MARKER_TTL_SECONDS = 300
 # command, whatever its delimiter, and a PreToolUse allow would cover it.
 _SUBSTITUTION_FORMS = ("`", "$(", "<(", ">(")
 
+# An UNQUOTED heredoc delimiter (<<EOF) means the shell expands the body, so a
+# substitution can hide in there; a quoted one (<<'EOF') is literal. Segmentation
+# excludes heredoc bodies entirely, which is exactly what makes the recommended
+# `-F - <<'EOF'` escape usable - so the body is checked here by delimiter form
+# rather than by scanning text the segmenter never produces.
+_UNQUOTED_HEREDOC_RE = re.compile(r'<<-?[ \t]*(?![\'"])\w')
+
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
 
@@ -482,7 +489,12 @@ def _parse_merge_pr(command):
     tokens = command.split()
     start = None
     for i in range(len(tokens) - 2):
-        if (tokens[i].lower() == "gh" and tokens[i + 1].lower() == "pr"
+        # basename, to match _find_merge_segments: `/usr/bin/gh pr merge 42`
+        # reached the merge gate but parsed no PR number here, and a None
+        # prefer_pr authorizes against whichever single session is active rather
+        # than against PR 42 - silently dropping the wrong-PR protection.
+        if (tokens[i].rsplit("/", 1)[-1].lower() == "gh"
+                and tokens[i + 1].lower() == "pr"
                 and tokens[i + 2].lower() == "merge"):
             start = i + 3
             break
@@ -578,8 +590,20 @@ def _check_pr_merge_allowed(command=""):
 # silently eats a newline as whitespace, so it can never be a separator token -
 # a `git status\ngh pr merge` two-liner would otherwise collapse into one
 # segment and hide the merge on line 2.
-_SEGMENT_SEPARATORS = {";", "&&", "||", "|", "&"}
-_SEGMENT_KEYWORDS = {"then", "do"}
+# `|&` is one token under punctuation_chars=True, so omitting it collapsed
+# `true |& git push origin main` into a single segment whose argv[0] was `true` -
+# the push gate never saw it. `;;` ends a case arm the same way `;` ends a
+# command.
+_SEGMENT_SEPARATORS = {";", ";;", "&&", "||", "|", "|&", "&"}
+# Keywords and prefixes that occupy command position, so the REAL command is the
+# next token. With only {then, do} here, every other shell construct hid a
+# command from both gates and the hook emitted no decision at all:
+# `! git push origin main`, `if git push origin main; then true; fi`,
+# `{ git push origin main; }`, `while/until git push origin main; do ...`.
+# Each is one token away from a bare push to main.
+_SEGMENT_KEYWORDS = {"then", "do", "if", "elif", "else", "while", "until",
+                     "!", "{", "}", "fi", "done", "esac", "case", "in",
+                     "select", "for"}
 
 # Command wrappers and env-assignment prefixes that precede the real executable.
 # Stripped before identifying a segment's command so `sudo gh pr merge`,
@@ -1203,8 +1227,10 @@ def _evaluate_git_segment(command, has_approval):
                 return ("allow", "[Approved] User approved --no-verify commit")
             return ("deny", _no_verify_deny_message(command))
 
-    if is_allowed_git_command(command):
-        return None
+    # No allowlist check here: with the branch and --no-verify gates above, both
+    # branches of an is_allowed_git_command() test returned None, so it was a
+    # no-op. A git verb this hook does not gate is simply not this hook's
+    # business - it declines to opine and the normal permission system decides.
     return None
 
 
@@ -1334,7 +1360,22 @@ def main():
     # lone command and ran the backtick body under the override. Any
     # substitution form disqualifies an authorization - a command substitution
     # IS a second command, whatever its delimiter.
-    carries_substitution = any(f in command for f in _SUBSTITUTION_FORMS)
+    # Scanned over the parsed TOKENS, not the raw command. A raw substring scan
+    # also matched a backtick inside a heredoc body, which broke the very
+    # `-F - <<'EOF'` escape the refusal message recommends - a markdown code span
+    # in a commit message was enough. Tokens exclude heredoc bodies, so the
+    # quoted-delimiter form works while a double-quoted or unquoted `$(...)` /
+    # backtick still lands in a token and is caught.
+    #
+    # A `>` disqualifies too: an authorization covers the whole Bash call, so
+    # `git commit --no-verify -m ok > /tmp/log` also approved an arbitrary file
+    # overwrite that no gate inspected. `<` is deliberately NOT listed - input
+    # redirection cannot run a command, and `<<` is the recommended escape.
+    tokens = [tok for seg in (segments or []) for tok in seg]
+    carries_substitution = (
+        any(f in tok for tok in tokens for f in _SUBSTITUTION_FORMS)
+        or any(">" in tok for tok in tokens)
+        or bool(_UNQUOTED_HEREDOC_RE.search(command)))
     authorizes_alone = (segments is not None and len(segments) == 1
                         and not carries_substitution)
     if (merge_seg is not None or git_allow is not None) and not authorizes_alone:

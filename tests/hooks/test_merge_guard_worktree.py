@@ -467,6 +467,56 @@ def test_merge_mixed_with_no_verify_approval_is_refused():
 _BT = chr(96)  # backtick, kept out of the f-strings below for readability
 
 
+def test_shell_keywords_do_not_hide_a_push_to_main():
+    """A keyword occupying command position leaves the real command at the next
+    token. With only {then, do} recognized, every other construct hid the push
+    from both gates and the hook emitted no decision at all - each of these is
+    one token away from a bare `git push origin main`."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("! git push origin main",
+                    "if git push origin main; then true; fi",
+                    "{ git push origin main; }",
+                    "while git push origin main; do true; done",
+                    "until git push origin main; do true; done",
+                    "for x in a; do git push origin main; done",
+                    "if gh pr merge 42 --merge; then true; fi",
+                    "true |& git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_redirection_disqualifies_an_authorization():
+    """An authorization covers the whole Bash call, so a `>` rides it into an
+    arbitrary file overwrite no gate inspects."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m ok > /tmp/gp-test-log", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_quoted_heredoc_body_may_contain_a_backtick():
+    """The refusal message recommends `-F - <<'EOF'`, so that has to survive a
+    markdown code span in the message. A raw substring scan for substitutions
+    broke it; the scan runs over parsed tokens, which exclude heredoc bodies.
+    An UNQUOTED delimiter does expand, so it stays refused."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        ok_cmd = (f"git commit --no-verify -F - <<'EOF'\n"
+                  f"fix {_BT}foo{_BT} handling\nEOF")
+        out, _ = _run_hook_subprocess(ok_cmd, fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+        flag.write_text("")
+        bad_cmd = (f"git commit --no-verify -F - <<EOF\n"
+                   f"fix {_BT}id{_BT}\nEOF")
+        out2, _ = _run_hook_subprocess(bad_cmd, fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out2
+
+
 def test_substitution_disqualifies_an_authorization():
     """A `$(...)` body is re-segmented and trips the count, but backticks are
     skipped by _substitution_bodies and `<(` is not a separator, so both stayed
