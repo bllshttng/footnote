@@ -22,7 +22,7 @@ that happened. Both ground every claim in a verified product-truth fact.
 
 ## Do
 
-- Read the resolved product-truth and brand-voice files before writing.
+- Read the resolved product-truth, brand-voice, and brand-identity files before writing.
 - Cite every claim as `[Heading]` against a product-truth heading.
 - Lead with the shipped fact, then the consequence for the reader.
 - One full sentence per physical line in prose.

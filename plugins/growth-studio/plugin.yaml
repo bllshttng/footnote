@@ -20,6 +20,7 @@ roles:
     context_selectors:
       - {kind: artifact, identifier: product-truth, max_sensitivity: public}
       - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
+      - {kind: artifact, identifier: brand-identity, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -39,6 +40,7 @@ roles:
     context_selectors:
       - {kind: artifact, identifier: product-truth, max_sensitivity: public}
       - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
+      - {kind: artifact, identifier: brand-identity, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -57,6 +59,7 @@ roles:
     required_capabilities: [growth.render, growth.accessibility]
     context_selectors:
       - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
+      - {kind: artifact, identifier: brand-identity, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -76,6 +79,7 @@ roles:
     context_selectors:
       - {kind: artifact, identifier: product-truth, max_sensitivity: public}
       - {kind: artifact, identifier: brand-voice, max_sensitivity: internal}
+      - {kind: artifact, identifier: brand-identity, max_sensitivity: internal}
     authority_ceiling: internal
     review_policy:
       required: true
@@ -132,6 +136,8 @@ adapters:
 assets:
   - id: brand-voice
     source: assets/brand-voice.md
+  - id: brand-identity
+    source: assets/brand-identity.md
   - id: product-truth
     source: assets/product-truth.md
 

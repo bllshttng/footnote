@@ -51,23 +51,27 @@ PACK_ROOT="$(dirname "$(fno plugins inspect growth-studio --json \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["manifest_path"])')")"
 ```
 
-The roles read two artifacts, both resolved through the project's context
+The roles read three artifacts, all resolved through the project's context
 catalog (`[context.artifacts]` in `.fno/config.toml`):
 
 - `product-truth`: project-supplied product facts (sensitivity `public`).
 - `brand-voice`: the pack-supplied voice contract. Voice is a property of the
   pack, so the project configures this entry to point at the pack's
   `$PACK_ROOT/assets/brand-voice.md` (sensitivity `internal`).
+- `brand-identity`: project-supplied brand identity (the brand name, founder,
+  and positioning a draft speaks from). A second consumer points this entry at
+  its own identity file; the pack's `$PACK_ROOT/assets/brand-identity.md` is
+  the Footnote dogfood default (sensitivity `internal`).
 
-Build the catalog and confirm both are present and readable:
+Build the catalog and confirm all three are present and readable:
 
 ```bash
 fno roles context --json > .fno/campaigns/<slug>/catalog.json
 ```
 
-If either `product-truth` or `brand-voice` is absent from the catalog or
-`readable: false`, stop and name the missing artifact and its config key
-(resolution would block with MISSING_CONTEXT or UNREADABLE_CONTEXT).
+If any of `product-truth`, `brand-voice`, or `brand-identity` is absent from
+the catalog or `readable: false`, stop and name the missing artifact and its
+config key (resolution would block with MISSING_CONTEXT or UNREADABLE_CONTEXT).
 
 ## 3. Resolution gate
 
@@ -125,8 +129,8 @@ Dispatch the roles that resolved, concurrently via the Task tool:
 - `@fno:growth-social` producing `social-post.md` and `social-calendar.md`
 
 Hand each subagent only the asset paths its role resolved: design gets
-brand-voice only; marketing, communications, and social get product-truth and
-brand-voice.
+brand-voice and brand-identity; marketing, communications, and social get
+product-truth, brand-voice, and brand-identity.
 One round.
 A subagent that returns `FAILED` or `BLOCKED` is recorded as such beside its
 draft and the campaign continues to a partial bundle; it does not abort the
