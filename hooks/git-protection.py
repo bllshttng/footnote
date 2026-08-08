@@ -860,15 +860,23 @@ def _effective_argv(seg):
     return seg[i:]
 
 
-def _find_merge_segment(segments):
-    """Return the joined string of the first segment that is a `gh pr merge`
-    invocation (ignoring any wrapper/assignment prefix), else None."""
+def _find_merge_segments(segments):
+    """Every `gh pr merge` segment, not just the first. One override consume
+    must not authorize `gh pr merge 1 && gh pr merge 2 && gh pr merge 3`, which
+    an only-the-first search allowed while logging one of the three."""
+    out = []
     for seg in segments:
         argv = _effective_argv(seg)
         if (len(argv) >= 3 and argv[0].rsplit("/", 1)[-1].lower() == "gh"
                 and argv[1].lower() == "pr" and argv[2].lower() == "merge"):
-            return " ".join(seg)
-    return None
+            out.append(" ".join(seg))
+    return out
+
+
+def _find_merge_segment(segments):
+    """The first `gh pr merge` segment (wrapper/assignment prefix ignored)."""
+    found = _find_merge_segments(segments)
+    return found[0] if found else None
 
 
 def _find_git_segments(segments):
@@ -930,17 +938,26 @@ def _audit(message):
     `message` carries a command, so its newlines are flattened - a trail an
     embedded newline can forge entries into is not a trail. Records cwd as the
     caller, since the marker is global while the merge it authorizes belongs to
-    one worktree. Best-effort: an unwritable log must never crash the gate or
-    block the merge it is recording."""
+    one worktree.
+
+    Returns True only if the trail was actually recorded. The caller REFUSES on
+    False rather than allowing unrecorded: the trail is the whole justification
+    for reintroducing an override, and an unwritable log (a directory at the log
+    path, a read-only FNO_HOME) is the one case an agent could arrange. Never
+    raises - an unguarded raise out of a PreToolUse hook fails open."""
     flat = " ".join(message.split())
     try:
         print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
+    except OSError:
+        pass
+    try:
         OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().isoformat(timespec="seconds")
         with OVERRIDE_LOG.open("a") as fh:
             fh.write(f"{stamp} cwd={os.getcwd()} {flat}\n")
+        return True
     except OSError:
-        pass
+        return False
 
 
 def _no_verify_deny_message(command):
@@ -1023,10 +1040,45 @@ The proper workflow:
 
 ═══════════════════════════════════════════════════════════════════
 
-No marker turns this gate off. A genuine emergency push needs the
-bypass phrase "Push to Main" in recent command history - a human
-signal, not a file an agent can touch. The merge-gate override does
-not apply here.
+No marker turns this gate off, and the merge-gate override does not
+apply here. For an agent session there is deliberately no bypass: push
+a branch and open a PR. A human pushing from their own shell is not
+gated by this hook at all.
+
+═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _compound_authorization_deny_message(command):
+    return f"""╔════════════════════════════════════════════════════════════════╗
+║  🚫 BLOCKED: one approval cannot authorize several actions
+╚════════════════════════════════════════════════════════════════╝
+
+Command: {command}
+
+This carries more than one action a single-use approval would have to
+cover: several `gh pr merge` invocations, or an approved --no-verify
+segment beside a merge. Run them as separate commands - honoring one
+approval across several multiplies what the operator approved, and only
+the first would reach the audit log.
+
+═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _unrecordable_override_deny_message():
+    return f"""╔════════════════════════════════════════════════════════════════╗
+║  🚫 BLOCKED: merge-gate override could not be recorded
+╚════════════════════════════════════════════════════════════════╝
+
+The marker was valid but the trail could not be written, and the trail
+is what justifies having an override at all - so this is refused rather
+than allowed unrecorded. Check that this path is an appendable file (not
+a directory) with a writable parent:
+  {OVERRIDE_LOG}
+
+The marker was consumed; fix the path, then touch it again:
+  touch {MERGE_GATE_MARKER}
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1142,7 +1194,7 @@ def main():
     # two-factor (state + artifact) verification.
     # ==========================================
     if segments is not None:
-        merge_seg = _find_merge_segment(segments)
+        merge_segs = _find_merge_segments(segments)
         git_segs = _find_git_segments(segments)
     else:
         # legacy fallback (deny-leaning): loose match on the whole command.
@@ -1152,10 +1204,11 @@ def main():
         # quote in a command not literally beginning with `git`
         # (`echo "oops<newline>git push origin main`) dropped the push gate
         # entirely, while the merge gate below still fired on the same input.
-        merge_seg = command if re.search(r'gh\s+pr\s+merge', command,
-                                          re.IGNORECASE) else None
+        merge_segs = [command] if re.search(r'gh\s+pr\s+merge', command,
+                                            re.IGNORECASE) else []
         git_segs = [command] if re.search(r'\bgit\b', command) else []
 
+    merge_seg = merge_segs[0] if merge_segs else None
     has_approval = _fresh_marker(APPROVAL_FLAG)
 
     # ==========================================
@@ -1179,15 +1232,22 @@ def main():
             _emit("deny", decision[1])
             sys.exit(0)
 
-    # A segment that relies on the single-use --no-verify approval consumes it
-    # here, before any other gate can emit the decision and skip the consume.
-    # The claim must WIN: has_approval above is a plain stat, so two concurrent
-    # hook processes both see the fresh flag, and only the one that removes it
-    # is authorized.
+    # Which segment, if any, is relying on the single-use --no-verify approval.
+    # Nothing is CLAIMED yet: a claim before the outcome is known burns the
+    # operator's approval on a command that then gets denied anyway.
     git_allow = next(((seg, d[1]) for seg, d in git_decisions
                       if d is not None and d[0] == "allow"), None)
-    if git_allow is not None and not _claim_marker(APPROVAL_FLAG):
-        _emit("deny", _no_verify_deny_message(git_allow[0]))
+
+    # ONE AUTHORIZATION AUTHORIZES ONE ACTION. Refuse a command carrying more
+    # than one thing a single-use approval would have to cover: `gh pr merge 1
+    # && gh pr merge 2` rode one marker consume (and logged only the first), and
+    # an approved --no-verify segment beside a merge would need two independent
+    # single-use claims committed atomically within one tool call. Both are the
+    # compound-smuggling shape this gate exists to refuse, so they are refused
+    # rather than half-honored. Keeping these mutually exclusive is also what
+    # lets each branch below claim without a two-phase commit.
+    if len(merge_segs) > 1 or (merge_seg is not None and git_allow is not None):
+        _emit("deny", _compound_authorization_deny_message(command))
         sys.exit(0)
 
     if merge_seg is not None:
@@ -1199,7 +1259,10 @@ def main():
         # failed and every git segment cleared, so the marker is claimed only
         # when it is actually the thing authorizing the merge.
         if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
-            _audit(f"two-factor check failed, merge allowed by marker: {merge_seg}")
+            if not _audit("two-factor check failed, merge allowed by "
+                          f"marker: {merge_seg}"):
+                _emit("deny", _unrecordable_override_deny_message())
+                sys.exit(0)
             _emit("allow", "[fno merge-gate override] marker consumed; "
                            "recorded in merge-gate-overrides.log")
             sys.exit(0)
@@ -1207,6 +1270,12 @@ def main():
         sys.exit(0)
 
     if git_allow is not None:
+        # The claim must WIN, not merely find a fresh flag: has_approval above
+        # is a plain stat, so two concurrent hooks both see it and only the one
+        # that removes it is authorized.
+        if not _claim_marker(APPROVAL_FLAG):
+            _emit("deny", _no_verify_deny_message(git_allow[0]))
+            sys.exit(0)
         _emit("allow", git_allow[1])
         sys.exit(0)
 

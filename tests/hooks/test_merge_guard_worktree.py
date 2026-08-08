@@ -447,19 +447,42 @@ def test_no_verify_approval_does_not_open_push_to_main_compound():
             assert flag.exists(), f"denied command must not consume: {cmd}"
 
 
-def test_merge_path_still_consumes_the_no_verify_approval():
-    """The single-use invariant must not depend on which gate emits. A merge
-    segment used to emit first and skip the approval consume entirely, leaving
-    one operator approval reusable by a later standalone --no-verify."""
+def test_merge_mixed_with_no_verify_approval_is_refused():
+    """One approval authorizes one action. Mixing an approved --no-verify
+    segment with a merge would need two single-use claims committed atomically
+    in one tool call; refusing keeps each branch claim-free of the other, and
+    keeps a merge denial from burning the operator's --no-verify approval."""
     with tempfile.TemporaryDirectory() as td:
         fno, marker = _with_marker(td)
         flag = fno / "approve_no_verify.flag"
         flag.write_text("")
         out, _ = _run_hook_subprocess(
             "gh pr merge 1 --squash && git commit --no-verify -m x", fno, cwd=td)
-        assert '"permissionDecision": "allow"' in out
-        assert not flag.exists(), "approval must be consumed on the merge path"
-        assert not marker.exists(), "merge marker consumed too"
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists(), "a refused command must not consume the approval"
+        assert marker.exists(), "a refused command must not consume the marker"
+
+
+def test_one_marker_cannot_authorize_several_merges():
+    """`gh pr merge 1 && gh pr merge 2` rode a single marker consume, and only
+    the first reached the audit log."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh pr merge 2 --squash", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists()
+
+
+def test_unrecordable_override_fails_closed():
+    """The trail is what justifies having an override, so an unwritable log
+    refuses rather than allowing unrecorded - the one case an agent could
+    arrange by putting a directory at the log path."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td)
+        (fno / "merge-gate-overrides.log").mkdir()
+        out, _ = _run_hook_subprocess("gh pr merge 9 --squash", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
 
 
 def test_legacy_disable_marker_is_inert():
