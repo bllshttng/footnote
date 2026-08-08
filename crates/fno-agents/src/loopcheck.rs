@@ -2889,8 +2889,10 @@ impl Coverage {
 
 /// Authorship of a local attestation: did the authoring session emit it, did a
 /// different session, or is that unknowable. Computed from the attestation's
-/// `attester_session_id` against the manifest's `harness_session_id` and
-/// EXCLUDED from the coverage count, mirroring `human_approval`.
+/// `attester_session_id` against the manifest's `harness_session_id`.
+///
+/// Recorded, never gating. `coverage_count` does not read this field: every
+/// `Reviewed` verdict counts regardless of origin, `SelfAttested` included.
 ///
 /// The middle state is deliberately not `Independent`. The manifest names the
 /// session that ran `fno target init` in the worktree, so a self-handoff
@@ -2919,9 +2921,11 @@ pub struct ReviewerVerdict {
     pub human_approval: bool,
     /// Whether a local attestation was emitted by the authoring session
     /// (`SelfAttested`), a different one (`OtherSession`), or that is
-    /// unknowable (`Unknown`). Excluded from `coverage_count`: whether
-    /// self-attested coverage should count is a later gate decision, not this
-    /// field. Only meaningful on `local_attestation` verdicts; github_app and
+    /// unknowable (`Unknown`). `coverage_count` never reads it: a
+    /// `SelfAttested` verdict counts toward coverage exactly like any other,
+    /// and a PR whose only attestation is self-attested is covered. Whether
+    /// that should stay true is a later gate decision, not this field.
+    /// Only meaningful on `local_attestation` verdicts; github_app and
     /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
     /// login has no session to compare. Defaults to `Unknown` so every
     /// pre-existing attestation lands there unchanged.
@@ -3058,7 +3062,8 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 /// `attester_session_id` is compared against it to label `attestation_origin`;
 /// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
 /// failing open on unknown authorship so the coverage verdict is byte-identical
-/// to the pre-change behavior. The origin is excluded from the coverage count.
+/// to the pre-change behavior. `coverage_count` never reads the origin: every
+/// `Reviewed` verdict counts regardless of it, `SelfAttested` included.
 pub fn classify_coverage(
     reviews: &[Value],
     comments: &[Value],
@@ -3251,6 +3256,13 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 // origin, not its verdict). All three buckets are always shown so
                 // a reader learns the vocabulary even when two are zero; `other`
                 // is a different session, NOT "independent".
+                //
+                // "all origins counted" is load-bearing: readers took the bare
+                // tally for a subtraction and refused to merge green PRs over
+                // it. A positive claim, not a disclaimer - a denial ("not a
+                // gate") answers the question by raising it. Scoped to ORIGINS
+                // because `n` does drop human approvals, so a bare "all
+                // counted" would be false on a human-approved PR.
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
@@ -3261,7 +3273,7 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                         AttestationOrigin::Unknown => (s, o, u + 1),
                     });
                 return format!(
-                    "review coverage: {} reviewed ({}) - self {}, other {}, unknown {}",
+                    "review coverage: {} reviewed ({}) - all origins counted; self {}, other {}, unknown {}",
                     n,
                     reviewed_names.join(", "),
                     self_n,
@@ -3280,17 +3292,40 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .iter()
                 .filter(|v| v.verdict == CoverageVerdict::Errored)
                 .count();
-            let absent = rep
+            // Absent reviewers are NAMED: "the reviewers above" pointed at the
+            // refused ones, the only names the line had.
+            let absent: Vec<&str> = rep
                 .verdicts
                 .iter()
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
-                .count();
+                .map(|v| v.name.as_str())
+                .collect();
+            // Never prescribe the local verb while anyone is absent, and never
+            // suppress the next action entirely either. Both were tried here and
+            // both were wrong: the offer walks a worker into self-attesting past
+            // a reviewer that may be REQUIRED (the merge gate reads coverage
+            // alone, so nothing downstream catches it), and bare suppression
+            // strands an optional App that is never installed, which sits absent
+            // forever with no reachable exit.
+            //
+            // The escape is that this line cannot know required-ness and should
+            // not try. Name who is outstanding and point at the one move that is
+            // safe whichever they are: check whether they are still configured.
+            let next = if absent.is_empty() {
+                "run the review verb at HEAD".to_string()
+            } else {
+                format!(
+                    "waiting on {} - if a reviewer there is uninstalled or no longer configured, check config.review",
+                    absent.join(", ")
+                )
+            };
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. Nothing reviewed this diff.",
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - {}.",
                 refused.len(),
                 refused.join(", "),
                 errored,
-                absent
+                absent.len(),
+                next
             )
         }
     }

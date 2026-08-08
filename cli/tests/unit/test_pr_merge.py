@@ -1147,3 +1147,109 @@ def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
     assert "--auto" in auto_cmd, "expected the --auto attempt first"
     i = auto_cmd.index("--match-head-commit")
     assert auto_cmd[i + 1] == "coveredSHA"
+
+
+# ── refusal reasons name the cause ───────────────────────────────────────────
+#
+# A refusal that reports only a count leaves the reader to invent the cause, and
+# the nearest exclusion-flavoured vocabulary in the repo is `attestation_origin`,
+# which gates nothing. Two workers escalated green, unblocked PRs to the operator
+# on exactly that inference; both were looking at a head that had moved. These
+# pin the cause into the message so the vacuum is not there to fill.
+
+
+def test_stale_head_refusal_names_both_shas_and_the_action():
+    """The staleness branch flips `covered` False in run_merge, but the reason
+    function knew nothing about it and reported the count instead. Its output
+    for a moved head was the self-contradiction `0 reviewed (covered count=2)`.
+    Name the real cause and the fix instead."""
+    cov = {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0deadbeef"}
+    reason = _merge._coverage_refused_reason(cov, "newhead0cafef00d")
+    assert "oldhead0" in reason
+    assert "newhead0" in reason
+    assert "re-run the review verb" in reason
+
+
+def test_refusal_reason_never_claims_zero_when_the_count_is_positive():
+    """The contradiction guard. `0 reviewed (covered count=2)` is not a message
+    a reader can act on; it is a message a reader has to explain away."""
+    cov = {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead"}
+    assert "0 reviewed" not in _merge._coverage_refused_reason(cov, "newhead")
+
+
+def test_genuine_zero_refusal_names_the_missing_evidence():
+    """A true zero says WHAT is missing (a head-pinned pass) and what to do, not
+    just that the number is zero. It must not mention attestation origin:
+    volunteering it here is what put the idea in the reader's head."""
+    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc"}
+    reason = _merge._coverage_refused_reason(cov)
+    assert "head-pinned" in reason
+    assert "review verb" in reason
+    assert "origin" not in reason
+
+
+def test_genuine_zero_names_an_absent_reviewer_and_its_consequence():
+    """Parity with the Rust receipt, and this is the twin that matters more: the
+    merge gate here reads coverage only, so a worker who follows a bare "run the
+    review verb" while a configured reviewer is still out self-attests and merges
+    ahead of a bot that never spoke. Name who is outstanding, and say what
+    covering locally would do - do not steer to either."""
+    cov = {
+        "coverage": "covered",
+        "reviewed_count": 0,
+        "head_sha": "abc",
+        "verdicts": [
+            {"producer": "github_app", "name": "gemini-code-assist", "verdict": "absent"},
+            {"producer": "github_app", "name": "chatgpt-codex-connector", "verdict": "refused"},
+        ],
+    }
+    reason = _merge._coverage_refused_reason(cov)
+    assert "waiting on gemini-code-assist" in reason
+    # Never prescribes a local re-attest while someone is outstanding: this gate
+    # reads coverage alone, so a worker that self-attests past a REQUIRED bot
+    # lands the PR before its blocking finding posts, and this line cannot tell
+    # required from optional.
+    assert "review verb" not in reason
+    # But it is not a bare wait either - an absent App that is never installed
+    # would strand the PR - so a safe move is always named.
+    assert "check config.review" in reason
+    # The refused reviewer is not misreported as something we are waiting for.
+    assert "chatgpt-codex-connector" not in reason
+
+
+def test_malformed_verdicts_do_not_raise():
+    """Every other event-log read in this file is defensive; a truncated or
+    hand-edited log must still produce a blocked receipt, not a traceback."""
+    for bad in ({"a": 1}, ["nope", 3], None, "verdicts"):
+        cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": bad}
+        assert "0 reviewed" in _merge._coverage_refused_reason(cov)
+
+
+def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
+    """No absent verdict -> the local verb is the unqualified next step."""
+    cov = {"coverage": "covered", "reviewed_count": 0, "head_sha": "abc", "verdicts": []}
+    reason = _merge._coverage_refused_reason(cov)
+    assert "run the review verb at HEAD" in reason
+    assert "waiting on" not in reason
+
+
+def test_refusal_reason_unchanged_when_no_coverage_event():
+    """The two non-covered branches keep their wording, and `head` is optional
+    so every existing caller still type-checks."""
+    assert "no gate evaluated" in _merge._coverage_refused_reason(None)
+    assert "unknown" in _merge._coverage_refused_reason({"coverage": "unknown"})
+
+
+def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, capsys, tmp_path):
+    """End to end through run_merge: the emitted blocked receipt - the line a
+    worker actually reads - names the moved head, not a bare count."""
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {"coverage": "covered", "reviewed_count": 2, "head_sha": "oldhead0"},
+    )
+    monkeypatch.setattr(_merge, "_pr_head_oid", lambda pr, repo: "newhead0")
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    reason = _last_json(capsys, stream="err")["reason"]
+    assert "0 reviewed" not in reason
+    assert "oldhead0" in reason and "newhead0" in reason

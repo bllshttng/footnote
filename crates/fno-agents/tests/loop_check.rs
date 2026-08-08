@@ -5407,7 +5407,51 @@ fn coverage_receipt_zero_names_refused_and_absent() {
     assert!(line.contains("0 reviewed"), "{line}");
     assert!(line.contains("1 refused"), "{line}");
     assert!(line.contains("chatgpt-codex-connector"), "{line}");
-    assert!(line.contains("Nothing reviewed this diff"), "{line}");
+    // Names the missing evidence. "Nothing reviewed this diff" stated the count
+    // a second time and no cause, which is the vacuum a reader fills with
+    // attestation_origin - so the line must not mention origin either.
+    assert!(line.contains("No head-pinned pass attestation"), "{line}");
+    assert!(!line.contains("origin"), "{line}");
+    // gemini-code-assist is configured and silent, so it is NAMED as the thing
+    // being waited on - not merely counted, and not conflated with the refused
+    // reviewer, which is the only other name on the line.
+    assert!(line.contains("waiting on gemini-code-assist"), "{line}");
+    // Never prescribes the local verb while someone is outstanding. This line
+    // cannot tell required from optional, and `fno pr merge` reads coverage
+    // alone, so a worker that self-attests past a required bot lands the PR
+    // before its blocking finding posts.
+    assert!(!line.contains("review verb"), "{line}");
+    // Not a bare wait either: an optional App that is never installed sits
+    // absent forever, so a move that is safe either way is always named.
+    assert!(line.contains("check config.review"), "{line}");
+    // Names appear once. The earlier form printed them in a count parenthetical
+    // AND in the tail, and rendered "0 absent ()" when there were none.
+    assert_eq!(line.matches("gemini-code-assist").count(), 1, "{line}");
+    assert!(!line.contains("()"), "{line}");
+}
+
+/// A refusal is not an absence. The only configured reviewer hit its quota and
+/// declined, so nothing is still coming and a local attestation IS the move -
+/// the line prescribes the verb here, unlike the absent case above.
+#[test]
+fn coverage_receipt_zero_prescribes_the_verb_when_the_only_reviewer_refused() {
+    let comments = vec![serde_json::json!({
+        "author": {"login": "chatgpt-codex-connector[bot]"},
+        "body": "You have reached your Codex usage limits for code reviews."
+    })];
+    let rep = classify_coverage(
+        &[],
+        &comments,
+        "",
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        None,
+    );
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("1 refused"), "{line}");
+    assert!(line.contains("0 absent"), "{line}");
+    assert!(line.contains("run the review verb at HEAD"), "{line}");
 }
 
 #[test]
@@ -5549,4 +5593,54 @@ fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
     assert!(line.contains("other 0"), "{line}");
     assert!(line.contains("unknown 1"), "{line}");
     assert!(line.contains("2 reviewed"), "{line}");
+}
+
+/// The receipt states that the tally is not a subtraction. Two workers read
+/// `self 1` beside a review count as "one was dropped" and refused to merge
+/// green, unblocked PRs; a bare tally next to a number invites arithmetic.
+/// "all counted" is a positive claim rather than a disclaimer - a denial
+/// ("not a gate") answers the question by raising it.
+///
+/// The claim is checked, not asserted: the three buckets must sum to the
+/// reviewed count, so the line cannot say "all counted" while dropping one.
+#[test]
+fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
+    let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], false, Some(AUTHOR));
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    let line = coverage_receipt_line(&rep);
+
+    // The affirmation, and the sole self-attested verdict it is affirming.
+    // Scoped to ORIGINS: `n` does drop human approvals, so a bare "all counted"
+    // would be false on a human-approved PR and re-open the very question the
+    // line exists to close.
+    assert!(line.contains("all origins counted"), "{line}");
+    assert!(line.contains("1 reviewed"), "{line}");
+    assert!(line.contains("self 1"), "{line}");
+
+    // The affirmation is true: buckets sum to the reviewed count.
+    let counted = rep.coverage_count().expect("covered");
+    let (s, o, u) = (
+        line_bucket(&line, "self "),
+        line_bucket(&line, "other "),
+        line_bucket(&line, "unknown "),
+    );
+    assert_eq!(s + o + u, counted, "{line}");
+
+    // And no denial: naming a gate to rule it out is what teaches a reader a
+    // gate exists.
+    assert!(!line.contains("not a gate"), "{line}");
+}
+
+/// Pull `<label><n>` out of the receipt line for the sum check above.
+fn line_bucket(line: &str, label: &str) -> usize {
+    let tail = line
+        .split(label)
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {label:?} in {line}"));
+    tail.chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or_else(|_| panic!("no digits after {label:?} in {line}"))
 }

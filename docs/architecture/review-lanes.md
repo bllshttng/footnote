@@ -186,14 +186,25 @@ A match is strong evidence of self-attestation; a mismatch is weak evidence of
 anything.
 
 The origin is recorded, not gating.
-It sits on the verdict beside `human_approval` with the same exclusion from
-`reviewed_count`: whether self-attested coverage should count is a later
-decision, not a field this records.
-A self-attestation exclusion is deferred to a review-lane decision because no
-lane today can produce a non-self attestation: `emit-attestation.sh` runs in
+`reviewed_count` never consults it: every `reviewed` verdict counts toward
+coverage regardless of its origin, `self_attested` included.
+
+**A green PR whose only attestation is `self_attested` is covered. Merge it.**
+`self_attested` is not a hold condition and has never been one.
+
+No lane today can produce a non-self attestation: `emit-attestation.sh` runs in
 whichever session invokes the review verb, and the king-mediated lane (Lane 3)
 fires the verb at the worker's prompt line, so the author always emits and
 nothing spawns a separate reviewing session.
+Holding a green PR until someone else attests therefore waits on something no
+dispatched lane emits today.
+Two workers did exactly that on 2026-08-07, on separate PRs, and escalated to
+the operator to merge on their behalf; neither was blocked.
+
+"Keep the reviewer off the authoring worker" is the standing aspiration, and it
+is not a merge precondition.
+It becomes one when a lane exists that can satisfy it, and that decision is
+tracked on its own.
 "Land this, measure, then gate" would measure zero percent independent forever,
 so the gate waits on a lane that can produce one, not on elapsed measurement
 time.
