@@ -908,14 +908,30 @@ def _fresh_marker(path, ttl_seconds=MARKER_TTL_SECONDS):
     return False
 
 
+def _claim_marker(path):
+    """Atomically claim `path`; True only for the caller that removed it.
+
+    unlink() IS the claim, not a cleanup afterwards. Two concurrent hook
+    processes both pass a plain exists()/stat check, so `missing_ok=True` would
+    let both authorize a merge from one operator approval - the loser here gets
+    ENOENT instead. Guarded because an unguarded raise out of a PreToolUse hook
+    fails OPEN on the very gate it was protecting."""
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
 def _audit(message):
-    """Append-only record of a consumed merge-gate override, plus a stderr line
-    so it is visible in the transcript. One line per entry: `message` carries a
-    command, so its newlines are flattened - a trail that can be forged with an
-    embedded newline is not a trail. Records cwd as the caller, since the marker
-    is global while the merge it authorizes belongs to one worktree.
-    Best-effort: an unwritable log must never crash the gate or block the merge
-    it is recording."""
+    """Append-only record of a consumed merge-gate override; the log file is the
+    durable trail (a PreToolUse hook's stderr is debug output, not user-facing -
+    permissionDecisionReason is what the operator reads). One line per entry:
+    `message` carries a command, so its newlines are flattened - a trail an
+    embedded newline can forge entries into is not a trail. Records cwd as the
+    caller, since the marker is global while the merge it authorizes belongs to
+    one worktree. Best-effort: an unwritable log must never crash the gate or
+    block the merge it is recording."""
     flat = " ".join(message.split())
     print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
     try:
@@ -1127,19 +1143,40 @@ def main():
     # ==========================================
     if segments is not None:
         merge_seg = _find_merge_segment(segments)
+        git_segs = _find_git_segments(segments)
     else:
-        # legacy fallback (deny-leaning): loose match on the whole command
+        # legacy fallback (deny-leaning): loose match on the whole command.
+        # Deny-leaning for git too: on unbalanced quotes we cannot tell command
+        # position from prose, so ANY `git` in the string hands the whole
+        # command to the gate. `startswith` was fail-OPEN - an unterminated
+        # quote in a command not literally beginning with `git`
+        # (`echo "oops<newline>git push origin main`) dropped the push gate
+        # entirely, while the merge gate below still fired on the same input.
         merge_seg = command if re.search(r'gh\s+pr\s+merge', command,
                                           re.IGNORECASE) else None
+        git_segs = [command] if re.search(r'\bgit\b', command) else []
+
+    has_approval = _fresh_marker(APPROVAL_FLAG)
+
     if merge_seg is not None:
+        # A merge decision covers the merge segment ONLY. Without this, a
+        # compound `gh pr merge 1 && git push origin main` rode the merge allow
+        # straight past every git gate - which is exactly the unconditional
+        # allow the scoped marker exists to avoid.
+        for seg in git_segs:
+            decision = _evaluate_git_segment(seg, has_approval)
+            if decision is not None and decision[0] == "deny":
+                _emit("deny", decision[1])
+                sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
             sys.exit(0)
         # Scoped override, checked only after the legitimate two-factor path
-        # has failed so the marker is consumed only when actually needed.
-        if _fresh_marker(MERGE_GATE_MARKER):
-            MERGE_GATE_MARKER.unlink(missing_ok=True)  # single-use, race-safe
+        # has failed so the marker is consumed only when actually needed. The
+        # claim must win, not merely find the marker present: only the process
+        # that removed it is authorized.
+        if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
             _audit(f"two-factor check failed, merge allowed by marker: {merge_seg}")
             _emit("allow", "[fno merge-gate override] marker consumed; "
                            "recorded in merge-gate-overrides.log")
@@ -1152,27 +1189,16 @@ def main():
     # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
     # startswith('git') check. Non-git commands fall through to allow.
     # ==========================================
-    if segments is not None:
-        git_segs = _find_git_segments(segments)
-    else:
-        # Deny-leaning, matching the merge fallback above: on unbalanced quotes
-        # we cannot tell command position from prose, so ANY `git` in the string
-        # hands the whole command to the gate. `startswith` was fail-OPEN - an
-        # unterminated quote in a command not literally beginning with `git`
-        # (`echo "oops<newline>git push origin main`) dropped the push gate
-        # entirely, while the merge gate above still fired on the same input.
-        git_segs = [command] if re.search(r'\bgit\b', command) else []
     if not git_segs:
         sys.exit(0)
 
-    has_approval = _fresh_marker(APPROVAL_FLAG)
     for seg in git_segs:
         decision = _evaluate_git_segment(seg, has_approval)
         if decision is None:
             continue
         kind, reason = decision
         if kind == "allow":
-            APPROVAL_FLAG.unlink(missing_ok=True)  # one-time consume, race-safe
+            _claim_marker(APPROVAL_FLAG)  # one-time consume; best-effort, guarded
             _emit("allow", reason)
             sys.exit(0)
         _emit("deny", reason)

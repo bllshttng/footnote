@@ -422,6 +422,17 @@ def test_merge_marker_does_not_open_no_verify_commit():
         assert '"permissionDecision": "deny"' in out
 
 
+def test_merge_marker_does_not_open_push_to_main_in_a_compound_command():
+    """A merge decision covers the merge segment only. `gh pr merge && git push
+    origin main` must not ride the merge allow past the branch gate."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 123 --squash && git push origin main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists(), "a denied command must not consume the marker"
+
+
 def test_legacy_disable_marker_is_inert():
     """A stale git-protection.disabled from before the rename must no longer
     bypass anything. The rename is the migration: fail-safe, no cleanup."""
@@ -457,6 +468,16 @@ def test_override_log_entry_cannot_be_forged_with_a_newline():
                  .read_text().splitlines() if ln.strip()]
         assert len(lines) == 1, f"expected 1 log line, got {lines}"
         assert "forged entry" in lines[0], "content kept, just flattened"
+
+
+def test_claim_marker_wins_exactly_once():
+    """The unlink IS the claim, so exactly one caller can win. Two concurrent
+    hook processes both pass the freshness stat; without an atomic claim, one
+    operator approval would authorize two merges."""
+    with tempfile.TemporaryDirectory() as td:
+        _, marker = _with_marker(td)
+        assert git_protection._claim_marker(marker) is True
+        assert git_protection._claim_marker(marker) is False
 
 
 def test_expired_merge_marker_denies_and_is_removed():
