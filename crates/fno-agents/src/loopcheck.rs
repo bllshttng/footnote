@@ -179,7 +179,17 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
                         m.session_id = Some(v.to_string());
                     }
                 }
-                "harness_session_id" => m.harness_session_id = Some(v.to_string()),
+                "harness_session_id" => {
+                    // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`,
+                    // so an unresolvable session lands as the literal string "null"
+                    // (and an empty value as ""). Treat both as absent - the shell
+                    // side (target-stop-hook.sh) strips "null" the same way - or a
+                    // real attester compared against Some("null") mislabels as
+                    // other_session instead of unknown.
+                    if v != "null" && !v.is_empty() {
+                        m.harness_session_id = Some(v.to_string());
+                    }
+                }
                 "created_at" => m.created_at = Some(v.to_string()),
                 "attended" => m.attended = v == "true",
                 "advisory" => m.advisory = v == "true",
@@ -3233,21 +3243,18 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .map(|v| v.name.as_str())
                 .collect();
             if *n > 0 {
-                // Origin breakdown over reviewed LOCAL attestations only: the
-                // self-attestation hazard lives on the local lane (the author
-                // always emits there). GitHub App / human reviews come from the
-                // API as distinct logins and cannot be self-attested, so they
-                // are named above but excluded from this tally. All three
-                // buckets are always shown so a reader learns the vocabulary
-                // even when two are zero; `other` is a different session, NOT
-                // "independent".
+                // Origin breakdown over EVERY reviewed (non-human) verdict, folded
+                // by its attestation_origin, so the three buckets sum to `n`. The
+                // self-attestation hazard lives on the local lane; a GitHub App
+                // review has no session to compare and reads `unknown` here (it is
+                // named above, so a reader sees it reviewed - "unknown" is its
+                // origin, not its verdict). All three buckets are always shown so
+                // a reader learns the vocabulary even when two are zero; `other`
+                // is a different session, NOT "independent".
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
-                    .filter(|v| {
-                        v.producer == CoverageProducer::LocalAttestation
-                            && v.verdict == CoverageVerdict::Reviewed
-                    })
+                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
                     .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
                         AttestationOrigin::SelfAttested => (s + 1, o, u),
                         AttestationOrigin::OtherSession => (s, o + 1, u),
@@ -6607,6 +6614,31 @@ mod tests {
         assert_eq!(m.created_at.as_deref(), Some("2026-06-05T00:00:00Z"));
         assert!(m.attended);
         assert!(m.legacy_status.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_harness_session_id_null_sentinel_is_none() {
+        // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`, so an
+        // unresolvable session lands as the literal "null" and an empty value as
+        // "". Both must read as None or a real attester compared against
+        // Some("null") mislabels a self-attestation as other_session.
+        for raw in ["null", ""] {
+            let content = format!("---\nsession_id: abc\nharness_session_id: {raw}\n---\n");
+            let m = parse_manifest(&content).unwrap();
+            assert_eq!(
+                m.harness_session_id, None,
+                "harness_session_id: {raw:?} must parse as None"
+            );
+        }
+        // A real id parses through unchanged.
+        let m = parse_manifest(
+            "---\nsession_id: abc\nharness_session_id: 3abddea3-ad19-481f-b0c1-af19043c95fe\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.harness_session_id.as_deref(),
+            Some("3abddea3-ad19-481f-b0c1-af19043c95fe")
+        );
     }
 
     #[test]

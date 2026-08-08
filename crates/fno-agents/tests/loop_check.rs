@@ -5526,12 +5526,12 @@ fn coverage_receipt_names_origin_buckets() {
     assert!(line.contains("unknown 0"), "{line}");
 }
 
-/// github_app / human-approval verdicts carry no session, so they are named in
-/// the reviewed list but excluded from the origin tally: a GitHub login cannot
-/// be self-attested by the local author. The origin tally sums to the local
-/// count, not the total reviewed.
+/// The origin tally folds EVERY reviewed (non-human) verdict by its
+/// attestation_origin, so the three buckets sum to the reviewed count. A GitHub
+/// App review has no session to compare and reads `unknown`; it is named in the
+/// reviewed list, so "unknown" there is its origin, not its verdict.
 #[test]
-fn coverage_receipt_origin_tally_excludes_github_axis() {
+fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
     let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
     let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
     let rep = classify_coverage(
@@ -5547,6 +5547,6 @@ fn coverage_receipt_origin_tally_excludes_github_axis() {
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("self 1"), "{line}");
     assert!(line.contains("other 0"), "{line}");
-    assert!(line.contains("unknown 0"), "{line}");
+    assert!(line.contains("unknown 1"), "{line}");
     assert!(line.contains("2 reviewed"), "{line}");
 }

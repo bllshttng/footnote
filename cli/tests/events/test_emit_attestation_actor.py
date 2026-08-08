@@ -155,6 +155,7 @@ def test_attestation_attester_session_empty_without_marker(tmp_path: Path) -> No
             "CLAUDE_CODE_SESSION_ID",
             "CODEX_SESSION_ID",
             "GEMINI_SESSION_ID",
+            "OPENCODE_SESSION_ID",
         )
     }
     env["FNO"] = "fno-py"
@@ -185,3 +186,21 @@ def test_attestation_attester_session_marker_precedence(tmp_path: Path) -> None:
     )
     assert r.returncode == 0, r.stderr
     assert _last_event(repo)["data"]["attester_session_id"] == "codex-thread-wins"
+
+
+def test_attestation_attester_session_reads_opencode_marker(tmp_path: Path) -> None:
+    """OPENCODE_SESSION_ID is a first-class harness marker (harness_identity.py);
+    an opencode-authored review must carry it, or the whole opencode lane reads
+    attester_session_id empty and can never classify as self_attested."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: opencode\n")
+    env = {
+        **os.environ,
+        "FNO": "fno-py",
+        "OPENCODE_SESSION_ID": "opencode-session-cccc",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _last_event(repo)["data"]["attester_session_id"] == "opencode-session-cccc"

@@ -64,12 +64,18 @@ fi
 # (above) is grepped from the worktree manifest, so it equals manifest.session_id
 # for every emitter in this worktree - including a reviewer who is genuinely not
 # the author - and a join on it returns 'self' 100% of the time by construction.
-# The live process env is what makes this field vary with who emitted. Read on
-# the same marker precedence as init-target-state.sh, and NEVER fall back to the
-# manifest: a fallback would restore the tautology under a new name. Empty when
-# no marker is set, never guessed.
+# The live process env is what makes this field vary with who emitted.
+#
+# Read on the HARNESS_SESSION_MARKERS precedence (cli/src/fno/harness_identity.py)
+# - the same list the owned-identity resolver stamps as manifest.harness_session_id
+# on the common path - so attester and author stay in one namespace. NEVER fall
+# back to the manifest: a fallback would restore the tautology under a new name.
+# Empty when no marker is set, never guessed. Narrow caveat: init's bash fail-open
+# prefers TARGET_TRANSCRIPT_ID for a claude driver session, which this loop does
+# not mirror; on a stale fno where owned-identity did not run, such a session's
+# self-attestation can read as other_session rather than self_attested.
 attester_session_id=""
-for _marker in CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID; do
+for _marker in CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID; do
   if [[ "${!_marker:-}" == *[![:space:]]* ]]; then
     attester_session_id="${!_marker}"
     break
