@@ -184,7 +184,13 @@ def extract_branch_from_push(command):
     cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', command)
 
     # Match: git push [optional remote] [branch-or-refspec]
-    match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned)
+    # IGNORECASE: GIT_PUSH_PATTERNS already matches case-insensitively, so a
+    # case-SENSITIVE parse here made `GIT push origin main` look like a push with
+    # no named branch - which fell through to the current-branch check and was
+    # allowed from a feature branch. `GIT` resolves on a case-insensitive
+    # filesystem (macOS), so that was a live hole, and fixing it at the parse
+    # covers both the tokenized and the unbalanced-quote fallback path.
+    match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned, re.IGNORECASE)
     if match:
         refspec = match.group(1)
         # Handle refspecs like `feature:main` by extracting the destination
@@ -207,7 +213,7 @@ def push_names_explicit_dest(command):
     # Drop flags including an attached =value, so `--force-with-lease=origin/x`
     # leaves no positional token to miscount.
     cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', cleaned)
-    m = re.search(r'git\s+push\b(.*)$', cleaned)
+    m = re.search(r'git\s+push\b(.*)$', cleaned, re.IGNORECASE)
     if not m:
         return False
     args = m.group(1).split()
@@ -270,7 +276,7 @@ def is_push_to_protected_branch(command):
 
 def is_using_no_verify(command):
     """Check if command uses --no-verify flag."""
-    return bool(re.search(r'--no-verify', command))
+    return bool(re.search(r'--no-verify', command, re.IGNORECASE))
 
 def is_allowed_git_command(command):
     """Check if git command is in allowed list."""
@@ -874,7 +880,9 @@ def _find_merge_segments(segments):
 
 
 def _find_merge_segment(segments):
-    """The first `gh pr merge` segment (wrapper/assignment prefix ignored)."""
+    """First `gh pr merge` segment, else None. TEST-FACING convenience only:
+    main() needs the full list to count them, so it calls the plural directly.
+    Kept so the segment-matching tests can assert one match readably."""
     found = _find_merge_segments(segments)
     return found[0] if found else None
 
@@ -882,11 +890,15 @@ def _find_merge_segment(segments):
 def _find_git_segments(segments):
     """Return the executable-onward string of every segment whose command is
     `git` (wrapper/assignment prefix stripped). Catches compound commands a bare
-    startswith('git') would miss, and git behind sudo/env/an assignment."""
+    startswith('git') would miss, and git behind sudo/env/an assignment.
+
+    Case-insensitive, to match _find_merge_segments: on a case-insensitive
+    filesystem (macOS) `GIT push origin main` resolves and ran, while the
+    lowercase-only comparison here handed the gate nothing at all."""
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
-        if argv and argv[0].rsplit("/", 1)[-1] == "git":
+        if argv and argv[0].rsplit("/", 1)[-1].lower() == "git":
             out.append(" ".join(argv))
     return out
 
@@ -1144,14 +1156,18 @@ def _evaluate_git_segment(command, has_approval):
     is_protected, branch = is_push_to_protected_branch(command)
     if is_protected:
         state = load_state()
-        if has_recent_approval(state) or check_for_bypass_phrase(state):
-            print(f"[Git Protection: Approved] Emergency push to {branch}: "
-                  f"{command}", file=sys.stderr)
-            return None
-        state["last_blocked_command"] = command
-        save_state(state)
-        return ("deny", _push_deny_message(command, branch,
-                                           is_using_no_verify(command)))
+        if not (has_recent_approval(state) or check_for_bypass_phrase(state)):
+            state["last_blocked_command"] = command
+            save_state(state)
+            return ("deny", _push_deny_message(command, branch,
+                                               is_using_no_verify(command)))
+        # Approved for the BRANCH only, so this deliberately falls through to
+        # the --no-verify check rather than returning safe. "One approval must
+        # not open the other door" has to hold in BOTH directions: returning
+        # here let one bypass-phrase push also skip .git/hooks/pre-push and
+        # every pre-commit hook.
+        print(f"[Git Protection: Approved] Emergency push to {branch}: "
+              f"{command}", file=sys.stderr)
 
     # --no-verify before is_allowed_git_command: an allowed verb like
     # `git commit` must still be denied when it carries --no-verify.
@@ -1218,7 +1234,8 @@ def main():
         # exactly the input this deny-leaning fallback exists to catch.
         merge_segs = [command] * len(re.findall(r'gh\s+pr\s+merge', command,
                                                 re.IGNORECASE))
-        git_segs = [command] if re.search(r'\bgit\b', command) else []
+        git_segs = ([command] if re.search(r'\bgit\b', command, re.IGNORECASE)
+                    else [])
 
     merge_seg = merge_segs[0] if merge_segs else None
     has_approval = _fresh_marker(APPROVAL_FLAG)
@@ -1272,6 +1289,23 @@ def main():
         _emit("deny", _compound_authorization_deny_message(command))
         sys.exit(0)
 
+    # A PreToolUse allow is NOT segment-scoped: it approves the whole Bash call.
+    # So anything this hook AUTHORIZES must stand alone, or the authorization
+    # silently covers its siblings - `gh pr merge 1 && gh api -X PATCH
+    # .../refs/heads/main` and `git commit --no-verify -m x && rm -rf ...` were
+    # each allowed whole, and neither sibling is a git segment any gate
+    # inspects. Applied to EVERY authorizing path, including the two-factor
+    # merge: a leading `cd` is deliberately not carved out, because the allow
+    # covers a prefix exactly as it covers a suffix, so tolerating one reopens
+    # the hole from the other side. Only a DENY may be emitted for a compound
+    # command. Verified: no production caller compounds `gh pr merge` through
+    # the Bash tool - the fno/gh call sites all go through subprocess, which
+    # this hook never sees.
+    authorizes_alone = segments is not None and len(segments) == 1
+    if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
+        _emit("deny", _compound_authorization_deny_message(command))
+        sys.exit(0)
+
     if merge_seg is not None:
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
@@ -1280,19 +1314,8 @@ def main():
         # Scoped override, reached only after the legitimate two-factor path
         # failed and every git segment cleared, so the marker is claimed only
         # when it is actually the thing authorizing the merge.
-        #
-        # Held to a LONE merge, checked before the claim so a refusal does not
-        # spend the marker. A PreToolUse allow blankets the entire Bash call, so
-        # `gh pr merge 1 && gh api -X PATCH .../refs/heads/main` would have been
-        # approved whole - the marker cannot open main directly, but it could
-        # carry something that does. The two-factor path is an established flow
-        # that may legally be prefixed (`cd X && gh pr merge`); the marker is the
-        # new one-touch trigger and gets the stricter rule. On the unparseable
-        # fallback there are no real segments to count, so it refuses.
-        if _fresh_marker(MERGE_GATE_MARKER) and (
-                segments is None or len(segments) != 1):
-            _emit("deny", _compound_authorization_deny_message(command))
-            sys.exit(0)
+        # The lone-command rule above already ran, so by here the merge is the
+        # only segment and claiming cannot authorize a sibling.
         if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
             if not _audit("two-factor check failed, merge allowed by "
                           f"marker: {merge_seg}"):

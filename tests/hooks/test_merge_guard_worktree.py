@@ -359,8 +359,9 @@ def test_command_segments_unbalanced_quote_raises():
 # State placement + opt-out marker + flag race-safety (subprocess)
 # ---------------------------------------------------------------------------
 
-def _run_hook_subprocess(command, fno_home, cwd=None):
+def _run_hook_subprocess(command, fno_home, cwd=None, extra_env=None):
     env = dict(os.environ, FNO_HOME=str(fno_home))
+    env.update(extra_env or {})
     payload = json.dumps({"tool_name": "Bash", "tool_input": {"command": command}})
     p = subprocess.run([sys.executable, str(HOOK_PATH)], input=payload,
                        capture_output=True, text=True, env=env, cwd=cwd)
@@ -461,6 +462,60 @@ def test_merge_mixed_with_no_verify_approval_is_refused():
         assert '"permissionDecision": "deny"' in out
         assert flag.exists(), "a refused command must not consume the approval"
         assert marker.exists(), "a refused command must not consume the marker"
+
+
+def test_branch_bypass_does_not_also_open_no_verify():
+    """"One approval must not open the other door" has to hold in BOTH
+    directions. Checking the branch gate first and returning safe on an approved
+    push let one bypass phrase also skip .git/hooks/pre-push."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        env = {"CLAUDE_RECENT_USER_MESSAGE": "Push to Main"}
+        out, _ = _run_hook_subprocess("git push --no-verify origin main",
+                                      fno, cwd=td, extra_env=env)
+        assert '"permissionDecision": "deny"' in out
+        # The branch bypass itself still works for a plain push.
+        out2, rc2 = _run_hook_subprocess("git push origin main", fno, cwd=td,
+                                         extra_env=env)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_uppercase_git_is_still_gated():
+    """`GIT` resolves on a case-insensitive filesystem (macOS). The push
+    patterns matched case-insensitively but extract_branch_from_push did not, so
+    the branch never parsed and the push fell through to allowed."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("GIT push origin main", "Git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_no_verify_approval_requires_a_lone_command():
+    """The lone-command rule applies to every authorizing path, not just the
+    merge marker: the sibling here is not a git segment, so no gate inspects it,
+    yet the approval's allow covered the whole Bash call."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m x && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
+def test_two_factor_merge_also_requires_a_lone_command():
+    """Not just the marker path. A leading `cd` is deliberately not carved out:
+    an allow covers a prefix exactly as it covers a suffix."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && gh api -X PATCH "
+            "repos/o/r/git/refs/heads/main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
 
 
 def test_no_verify_approval_does_not_open_push_to_main_single_segment():
