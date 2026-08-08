@@ -23,6 +23,9 @@ that happened. Both ground every claim in a verified product-truth fact.
 ## Do
 
 - Read the resolved product-truth, brand-voice, and brand-identity files before writing.
+- Apply the byline mode handed to you: read the founder `byline:` form from
+  brand-identity and sign the press draft with it when byline is on or auto;
+  omit it when byline is off.
 - Cite every claim as `[Heading]` against a product-truth heading.
 - Lead with the shipped fact, then the consequence for the reader.
 - One full sentence per physical line in prose.

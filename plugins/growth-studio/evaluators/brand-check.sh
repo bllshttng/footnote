@@ -1,10 +1,13 @@
 #!/usr/bin/env bash
-# brand-check.sh <draft>
+# brand-check.sh <draft> [brand-identity]
 #
 # A deterministic STRUCTURAL voice check. Fails when the draft contains a
 # banned term (read from the 'Don't' block of assets/brand-voice.md, so the
 # asset is the rule source and this script is only the enforcement), an em dash
 # (U+2014), or a prose paragraph that wraps one sentence across physical lines.
+# When a brand-identity path is given, also fails on a founder-name form
+# declared `never:` under its `## Founder` block: the per-project name rule,
+# enforced rather than left to prose.
 #
 # POSIX-portable: no mapfile (bash 3.2), no grep -P (BSD grep). The em dash is
 # matched by its UTF-8 byte sequence so no literal em dash appears in source.
@@ -16,6 +19,11 @@ draft="${1:?usage: brand-check.sh <draft>}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 voice="$script_dir/../assets/brand-voice.md"
 [[ -f "$voice" ]] || { echo "brand-check: brand-voice asset not found: $voice" >&2; exit 2; }
+
+identity="${2:-}"
+if [[ -n "$identity" ]]; then
+  [[ -f "$identity" ]] || { echo "brand-check: brand-identity not found: $identity" >&2; exit 2; }
+fi
 
 fail=0
 
@@ -69,6 +77,32 @@ wrapped="$(awk '
 if [ -n "$wrapped" ]; then
   echo "brand-check: prose wraps a sentence across physical lines (first at line $(printf '%s\n' "$wrapped" | head -1))" >&2
   fail=1
+fi
+
+# 4. Founder-name forms from brand-identity ## Founder. A `never:` form in the
+#    draft fails brand review. The allowed (formal/byline) and banned (never)
+#    forms are declared per-project in brand-identity, so this enforces the
+#    name rule without hardcoding it into the pack voice.
+if [[ -n "$identity" ]]; then
+  never_names=()
+  while IFS= read -r line; do [[ -n "$line" ]] && never_names+=("$line"); done < <(awk '
+    /^##[[:space:]]+Founder([[:space:]]|$)/ { in_founder = 1; next }
+    in_founder && /^##[[:space:]]/ { in_founder = 0 }
+    in_founder && /^[[:space:]]*never:[[:space:]]*/ {
+      line = $0
+      sub(/^[[:space:]]*never:[[:space:]]*/, "", line)
+      sub(/[[:space:]]*#.*$/, "", line)
+      if (line != "") print line
+    }
+  ' "$identity")
+  if [ "${#never_names[@]}" -gt 0 ]; then
+    for name in "${never_names[@]}"; do
+      if grep -qniF -- "$name" "$draft"; then
+        echo "brand-check: banned founder-name form present: $name" >&2
+        fail=1
+      fi
+    done
+  fi
 fi
 
 exit $fail
