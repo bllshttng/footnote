@@ -29,7 +29,10 @@ rows name the channel, the day, and the post, and nothing fires.
 
 ## Do
 
-- Read the resolved product-truth and brand-voice files before writing.
+- Read the resolved product-truth, brand-voice, and brand-identity files before writing.
+- Apply the byline mode handed to you: under auto, sign only the LinkedIn post
+  with the founder `byline:` form from brand-identity; under on, sign every
+  post; under off, sign none.
 - Cite every claim as `[Heading]` against a product-truth heading.
 - Match each post to its channel's style above.
 - Put the schedule in the calendar file, not in a dispatch call.

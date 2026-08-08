@@ -23,7 +23,8 @@ only one whose required evidence lists accessibility review.
 
 ## Do
 
-- Read the resolved brand-voice file before writing; design follows voice.
+- Read the resolved brand-voice and brand-identity files before writing; design
+  follows voice and identity.
 - Give every image non-empty alt text that names what the image conveys.
 - Include a contrast note naming the ratio and the WCAG level it meets.
 - Cite any product claim the mock makes as `[Heading]`.

@@ -21,8 +21,8 @@ measured goal, and every claim it makes cites a verified fact.
 
 ## Do
 
-- Read the two asset paths you are handed before writing: the resolved
-  product-truth file and the brand-voice file.
+- Read the three asset paths you are handed before writing: the resolved
+  product-truth, brand-voice, and brand-identity files.
 - Ground every claim in a product-truth heading, cited as `[Heading]`.
 - One full sentence per physical line in prose.
 - State the concrete goal (a number, a deadline, an audience) over vague aspiration.

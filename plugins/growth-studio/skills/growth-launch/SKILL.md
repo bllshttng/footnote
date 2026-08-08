@@ -43,6 +43,15 @@ component (`..`), or a NUL: it becomes a filesystem path under
 If that directory already exists, refuse and name it rather than interleaving
 into a prior campaign.
 
+Parse the `byline` argument from the invocation: `auto` (the default when
+absent), `on`, or `off`. It controls whether drafts carry the founder byline,
+read from the `byline:` form under `## Founder` in brand-identity, so the name
+is per-project and the skill never free-texts one. Under `auto`, the
+press-draft and the social LinkedIn post carry the byline (the founder-voice
+surfaces); the campaign-plan, the rendered-mock, and the social X/Threads
+posts carry none. `on` puts the byline on every text draft; `off` strips it
+everywhere. Write the resolved byline mode to `.fno/campaigns/<slug>/byline`.
+
 Derive the activated pack's root from its receipt so paths resolve whether the
 pack is the in-tree dogfood copy or an installed pack in another project:
 
@@ -51,23 +60,27 @@ PACK_ROOT="$(dirname "$(fno plugins inspect growth-studio --json \
   | python3 -c 'import json,sys;print(json.load(sys.stdin)["manifest_path"])')")"
 ```
 
-The roles read two artifacts, both resolved through the project's context
+The roles read three artifacts, all resolved through the project's context
 catalog (`[context.artifacts]` in `.fno/config.toml`):
 
 - `product-truth`: project-supplied product facts (sensitivity `public`).
 - `brand-voice`: the pack-supplied voice contract. Voice is a property of the
   pack, so the project configures this entry to point at the pack's
   `$PACK_ROOT/assets/brand-voice.md` (sensitivity `internal`).
+- `brand-identity`: project-supplied brand identity (the brand name, founder,
+  and positioning a draft speaks from). A second consumer points this entry at
+  its own identity file; the pack's `$PACK_ROOT/assets/brand-identity.md` is
+  the Footnote dogfood default (sensitivity `internal`).
 
-Build the catalog and confirm both are present and readable:
+Build the catalog and confirm all three are present and readable:
 
 ```bash
 fno roles context --json > .fno/campaigns/<slug>/catalog.json
 ```
 
-If either `product-truth` or `brand-voice` is absent from the catalog or
-`readable: false`, stop and name the missing artifact and its config key
-(resolution would block with MISSING_CONTEXT or UNREADABLE_CONTEXT).
+If any of `product-truth`, `brand-voice`, or `brand-identity` is absent from
+the catalog or `readable: false`, stop and name the missing artifact and its
+config key (resolution would block with MISSING_CONTEXT or UNREADABLE_CONTEXT).
 
 ## 3. Resolution gate
 
@@ -125,8 +138,12 @@ Dispatch the roles that resolved, concurrently via the Task tool:
 - `@fno:growth-social` producing `social-post.md` and `social-calendar.md`
 
 Hand each subagent only the asset paths its role resolved: design gets
-brand-voice only; marketing, communications, and social get product-truth and
-brand-voice.
+brand-voice and brand-identity; marketing, communications, and social get
+product-truth, brand-voice, and brand-identity. Hand each text role its
+byline instruction from the resolved byline mode: under `auto`, communications
+(press-draft) and social's LinkedIn post carry the founder byline read from
+brand-identity's `byline:` form; under `on`, every text role carries it; under
+`off`, none do. Marketing and design never carry a byline.
 One round.
 A subagent that returns `FAILED` or `BLOCKED` is recorded as such beside its
 draft and the campaign continues to a partial bundle; it does not abort the
@@ -138,8 +155,14 @@ Run the three evaluator scripts over each returned draft, using the derived
 pack root so the pack-relative script and asset paths resolve:
 
 - `bash "$PACK_ROOT/evaluators/factual-check.sh" <draft> <product-truth-path>`
-- `bash "$PACK_ROOT/evaluators/brand-check.sh" <draft>`
+- `bash "$PACK_ROOT/evaluators/brand-check.sh" <draft> <brand-identity-path>`
 - `bash "$PACK_ROOT/evaluators/accessibility-check.sh" <draft>` (design role only)
+
+`<product-truth-path>` and `<brand-identity-path>` are the PROJECT-resolved
+paths from the catalog (step 2), never the pack's bundled defaults: passing
+`$PACK_ROOT/assets/brand-identity.md` would enforce Footnote's founder-name
+rule on a second consumer's draft. The pack root is only for the evaluator
+scripts and the voice contract.
 
 Write each verdict as a JSON evidence file beside its draft, for example
 `campaign-plan.factual.json` and `campaign-plan.brand.json`, recording
