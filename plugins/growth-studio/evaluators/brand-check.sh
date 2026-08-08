@@ -51,7 +51,7 @@ fi
 # 3. One sentence per physical line. A prose line that does not end in terminal
 #    punctuation (. ! ? : ;) is a sentence split across lines, because a
 #    complete sentence on one line always terminates. Skip headings, list
-#    items, tables, code fences, and blank lines.
+#    items, tables, code fences, image lines, and blank lines.
 wrapped="$(awk '
   BEGIN { infence = 0 }
   /^[[:space:]]*$/ { next }
@@ -60,6 +60,7 @@ wrapped="$(awk '
   /^[#]/ { next }
   /^[[:space:]]*[-*+][[:space:]]/ { next }
   /^[[:space:]]*\|/ { next }
+  /^[[:space:]]*!\[/ { next }
   {
     last = substr($0, length($0), 1)
     if (last !~ /[.!?:;]/) { print NR }
