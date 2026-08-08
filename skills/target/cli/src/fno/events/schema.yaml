@@ -208,10 +208,13 @@ event_types:
           description: "pass satisfies the gate entry; fail (or an absent attestation) holds it (fail closed)."
         session_id:
           type: string
-          description: "The session that emitted the attestation - the attesting ACTOR. With head_sha this is the authorship join (did the attester author the reviewed head), so an author self-attestation is traceable rather than indistinguishable from an independent review."
+          description: "The target run id of the worktree the attestation was emitted in (fno_id, mirrored). NOT the attesting actor: it is grepped from the worktree manifest, so it equals manifest.session_id for every emitter in that worktree, including a reviewer who is not the author. A join on it returns self by construction; key the authorship join on attester_session_id instead."
         harness:
           type: string
           description: "The harness that ran the attesting session (claude | codex | gemini | opencode | agy), read from the live manifest. Names the session_id namespace."
+        attester_session_id:
+          type: string
+          description: "The harness session of the process that emitted the attestation - the attesting ACTOR. Read from the live process env on the marker precedence CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID > CODEX_SESSION_ID > GEMINI_SESSION_ID (the same one init resolves). Unlike session_id it varies with who emitted, so it is the field the authorship join keys on: equal to the authoring session's manifest harness_session_id means self-attested. Empty when no marker is set (unobserved, never guessed, never fallen back to the manifest - a fallback restores the tautology session_id carries). Every pre-landed attestation has this empty."
         model:
           type: string
           description: "The model the attesting session CLAIMED to be running (read from ANTHROPIC_MODEL at emit). Optional and best-effort: it reports what the environment asserted, not proof of the model that answered. Empty means NOT OBSERVABLE, never proof of the primary model - an unrouted session leaves it unset, and so does a routed codex worker, whose route rides in `-c model=...` config args with only the API key in env. Recorded because a routed worker renders its own verdict on the routed model - role guards are per-spawn and cannot see a verdict emitted later inside an already-routed process. Not read by loop-check; this is the audit trail a capability floor would need."
@@ -252,6 +255,10 @@ event_types:
                 enum: [reviewed, refused, errored, absent]
               human_approval:
                 type: boolean
+              attestation_origin:
+                type: string
+                enum: [self_attested, other_session, unknown]
+                description: "Authorship of a local_attestation review, computed from attester_session_id vs the authoring session's harness_session_id. self_attested = emitted by the authoring session; other_session = emitted by a different session (NOT 'independent' - a self-handoff successor or a second agent in a shared worktree is a different session and still not independent); unknown = attester empty/absent or the author session is unknown (the entire pre-landed backlog). Meaningful only on local_attestation verdicts; github_app/human approvals omit it. Recorded but excluded from reviewed_count - whether self-attested coverage should count is a later gate decision, not this field."
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot)."
