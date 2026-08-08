@@ -19,9 +19,17 @@ Two-factor merge verification:
       <repo>/.fno/artifacts/external-<session_id>.md with
       phase: external and session_id matching the state file.
 
-No single-use flag override for auto-merge: the LLM would have been able
-to self-create it. The two-factor artifact check serves the same
-human-authorization purpose with a much stronger audit trail.
+Merge-gate override: touch ${FNO_HOME:-~/.fno}/merge-gate.disabled
+Checked ONLY after the two-factor path fails, applies ONLY to
+`gh pr merge`, expires after 5 minutes, consumed on use, appended to
+merge-gate-overrides.log. That audit trail is what the old refusal of a
+single-use override was really asking for.
+
+No marker here can open main. The override does NOT reach the
+protected-branch gate or the --no-verify gate, which are one protection
+with two doors: --no-verify skips .git/hooks/pre-push, and that hook IS
+the main-branch guard. Each keeps its own scoped control (the "Push to
+Main" bypass phrase and approve_no_verify.flag).
 
 Megawalk-state.md deliberately does NOT authorize gh pr merge. When
 megawalk is invoked, only target (via its internal Phase 7a pipeline) can
@@ -47,10 +55,26 @@ from pathlib import Path
 FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
 STATE_FILE = FNO_HOME / "git-protection.json"
 APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
-# Opt-out marker: when present, every gate exits 0 immediately. Same
-# auditable-violation trust model as the approve flag - an agent can create it,
-# but doing so unprompted is a visible violation, not a silent bypass.
-DISABLE_MARKER = FNO_HOME / "git-protection.disabled"
+# Merge-gate override, `gh pr merge` ONLY. Deliberately NOT named
+# git-protection.disabled: that file was an unconditional pre-gate exit(0), so
+# one touch dropped main-branch protection for every session on every harness
+# lane. The rename leaves any stale old marker inert - fail-safe, no migration.
+MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
+OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
+# Both markers expire and are consumed: a forgotten sentinel must not linger.
+MARKER_TTL_SECONDS = 300
+
+# Substitution forms that run a command without being a separate segment. Any of
+# them disqualifies an authorization: a command substitution IS a second
+# command, whatever its delimiter, and a PreToolUse allow would cover it.
+_SUBSTITUTION_FORMS = ("`", "$(", "<(", ">(")
+
+# Output redirection, matched as WHOLE operator tokens. `any(">" in tok)` also
+# matched quoted argument text, so `-m "a > b"` and a message containing a
+# markdown code span were refused with a message about several actions. `<` is
+# absent on purpose: input redirection cannot run a command, and `<<` is the
+# recommended escape.
+_REDIRECT_TOKENS = {">", ">>", ">|", ">&", "&>", "&>>"}
 
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
@@ -81,22 +105,13 @@ NO_VERIFY_PATTERNS = [
 # ==========================================
 # ALLOWED GIT COMMANDS
 # ==========================================
-ALLOWED_GIT_PATTERNS = [
-    r'git\s+status',
-    r'git\s+log',
-    r'git\s+diff',
-    r'git\s+branch',
-    r'git\s+checkout',
-    r'git\s+fetch',
-    r'git\s+pull',
-    r'git\s+add',
-    r'git\s+commit(?!.*--no-verify)',  # Allow commit but NOT with --no-verify
-    r'git\s+stash',
-    r'git\s+show',
-    r'git\s+config',
-    r'git\s+remote',
-    r'git\s+tag',
-]
+# Subcommands this hook does not gate, matched POSITIONALLY (token[1]) rather
+# than by regex over the segment text - see is_allowed_git_command for why the
+# regex form was a bypass in one direction and a false refusal in the other.
+ALLOWED_GIT_SUBCOMMANDS = {
+    "status", "log", "diff", "branch", "checkout", "fetch", "pull", "add",
+    "commit", "stash", "show", "config", "remote", "tag",
+}
 
 def _default_state():
     return {
@@ -124,10 +139,18 @@ def load_state():
         return _default_state()
 
 def save_state(state):
-    """Save approval state."""
-    FNO_HOME.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2)
+    """Save approval state. Never raises: this runs on the protected-push deny
+    path, and an unguarded OSError (read-only FNO_HOME, a directory at
+    git-protection.json, a full disk) would propagate out of main() and exit
+    non-zero, which a PreToolUse hook treats as a non-blocking error - so the
+    push to main would proceed. Recording the attempt is best-effort; refusing
+    is not. load_state already degrades to defaults for the same reason."""
+    try:
+        FNO_HOME.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except OSError:
+        pass
 
 def has_recent_approval(state):
     """Check if we have recent approval."""
@@ -172,14 +195,31 @@ def extract_branch_from_push(command):
     cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', command)
 
     # Match: git push [optional remote] [branch-or-refspec]
-    match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned)
+    # IGNORECASE: GIT_PUSH_PATTERNS already matches case-insensitively, so a
+    # case-SENSITIVE parse here made `GIT push origin main` look like a push with
+    # no named branch - which fell through to the current-branch check and was
+    # allowed from a feature branch. `GIT` resolves on a case-insensitive
+    # filesystem (macOS), so that was a live hole, and fixing it at the parse
+    # covers both the tokenized and the unbalanced-quote fallback path.
+    match = re.search(r'git\s+push\s+(?:\S+\s+)?(\S+)', cleaned, re.IGNORECASE)
     if match:
         refspec = match.group(1)
         # Handle refspecs like `feature:main` by extracting the destination
         # branch (right side of the colon). Without this, `git push origin
         # feature:main` bypasses the protected-branch check because
         # `feature:main` is not literally in PROTECTED_BRANCHES.
-        return refspec.split(':')[-1] if ':' in refspec else refspec
+        dest = refspec.split(':')[-1] if ':' in refspec else refspec
+        # Normalize the destination before the membership test. Only the `:`
+        # form was handled, so a fully-qualified or force-prefixed destination
+        # never compared equal to a protected branch: `git push origin +main`
+        # (a FORCE push to main from any branch) and
+        # `git push origin refs/heads/main` were both allowed through.
+        dest = dest.lstrip('+')
+        for prefix in ("refs/heads/", "heads/"):
+            if dest.startswith(prefix):
+                dest = dest[len(prefix):]
+                break
+        return dest
 
     return None
 
@@ -195,7 +235,7 @@ def push_names_explicit_dest(command):
     # Drop flags including an attached =value, so `--force-with-lease=origin/x`
     # leaves no positional token to miscount.
     cleaned = re.sub(r'\s+(-[a-zA-Z]+|--[a-zA-Z-]+)(=\S+)?', ' ', cleaned)
-    m = re.search(r'git\s+push\b(.*)$', cleaned)
+    m = re.search(r'git\s+push\b(.*)$', cleaned, re.IGNORECASE)
     if not m:
         return False
     args = m.group(1).split()
@@ -228,6 +268,13 @@ def is_push_to_protected_branch(command):
     if not is_push:
         return False, None
 
+    # `--all` / `--mirror` push every local ref, so they update a protected
+    # branch without ever naming one. They named no branch, so the refspec parse
+    # read the REMOTE as the destination and the push sailed through from any
+    # feature branch.
+    if re.search(r'\s--(all|mirror)\b', command):
+        return True, "all refs (--all/--mirror)"
+
     # Extract explicit branch from command
     explicit_branch = extract_branch_from_push(command)
 
@@ -258,14 +305,29 @@ def is_push_to_protected_branch(command):
 
 def is_using_no_verify(command):
     """Check if command uses --no-verify flag."""
-    return bool(re.search(r'--no-verify', command))
+    return bool(re.search(r'--no-verify', command, re.IGNORECASE))
 
 def is_allowed_git_command(command):
-    """Check if git command is in allowed list."""
-    for pattern in ALLOWED_GIT_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return True
-    return False
+    """True when this segment is an ungated git verb.
+
+    POSITIONAL, not regex-over-the-string. Segments arrive shlex-rejoined with
+    QUOTES STRIPPED, so a regex allowlist read argument text as if it were the
+    command: `git commit --no-verify -m "see git log"` matched the `git log`
+    pattern and waved the --no-verify commit straight through, while dropping the
+    allowlist entirely made `git commit -m "fix: block git push origin main"`
+    deny as a push to main. Both directions are the same root cause, and looking
+    at the verb's POSITION rather than its text fixes both: token[1] is the
+    subcommand no matter what the message says.
+
+    A --no-verify token anywhere disqualifies, so an allowlisted verb cannot
+    carry it past the gate below (the old pattern's negative lookahead).
+    """
+    parts = command.split()
+    if len(parts) < 2:
+        return False
+    if any(p.lower() == "--no-verify" for p in parts):
+        return False
+    return parts[1].lower() in ALLOWED_GIT_SUBCOMMANDS
 
 def _candidate_repo_roots():
     """Return repo roots to search for an active target session, in priority
@@ -451,7 +513,12 @@ def _parse_merge_pr(command):
     tokens = command.split()
     start = None
     for i in range(len(tokens) - 2):
-        if (tokens[i].lower() == "gh" and tokens[i + 1].lower() == "pr"
+        # basename, to match _find_merge_segments: `/usr/bin/gh pr merge 42`
+        # reached the merge gate but parsed no PR number here, and a None
+        # prefer_pr authorizes against whichever single session is active rather
+        # than against PR 42 - silently dropping the wrong-PR protection.
+        if (tokens[i].rsplit("/", 1)[-1].lower() == "gh"
+                and tokens[i + 1].lower() == "pr"
                 and tokens[i + 2].lower() == "merge"):
             start = i + 3
             break
@@ -547,8 +614,24 @@ def _check_pr_merge_allowed(command=""):
 # silently eats a newline as whitespace, so it can never be a separator token -
 # a `git status\ngh pr merge` two-liner would otherwise collapse into one
 # segment and hide the merge on line 2.
-_SEGMENT_SEPARATORS = {";", "&&", "||", "|", "&"}
-_SEGMENT_KEYWORDS = {"then", "do"}
+# `|&` is one token under punctuation_chars=True, so omitting it collapsed
+# `true |& git push origin main` into a single segment whose argv[0] was `true` -
+# the push gate never saw it. `;;` ends a case arm the same way `;` ends a
+# command.
+# `)` terminates a case arm pattern, so without it `case x in *) git push origin
+# main;; esac` kept the arm body in the same segment as the case word and both
+# gates saw nothing. Harmless for `(subshell)`: _effective_argv already strips a
+# leading `(`.
+_SEGMENT_SEPARATORS = {";", ";;", "&&", "||", "|", "|&", "&", ")"}
+# Keywords and prefixes that occupy command position, so the REAL command is the
+# next token. With only {then, do} here, every other shell construct hid a
+# command from both gates and the hook emitted no decision at all:
+# `! git push origin main`, `if git push origin main; then true; fi`,
+# `{ git push origin main; }`, `while/until git push origin main; do ...`.
+# Each is one token away from a bare push to main.
+_SEGMENT_KEYWORDS = {"then", "do", "if", "elif", "else", "while", "until",
+                     "!", "{", "}", "fi", "done", "esac", "case", "in",
+                     "select", "for"}
 
 # Command wrappers and env-assignment prefixes that precede the real executable.
 # Stripped before identifying a segment's command so `sudo gh pr merge`,
@@ -556,7 +639,25 @@ _SEGMENT_KEYWORDS = {"then", "do"}
 # and `(gh pr merge)` are all still recognized (the old regex-anywhere matcher
 # caught them; command-position matching must not silently drop them).
 _CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
-                 "xargs", "nohup", "stdbuf"}
+                 "xargs", "nohup", "stdbuf", "eval", "coproc", "timeout",
+                 "gtimeout", "setsid", "doas"}
+# Shells that take the real command as the argument of `-c`.
+_SHELL_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh"}
+# A wrapper option's value that is not dash-prefixed: `timeout 10`, `timeout 5m`.
+_DURATION_RE = re.compile(r'^\d+(\.\d+)?[smhd]?$')
+# Wrapper options whose value is a separate token, so the value is not the verb:
+# `sudo -u x git ...`, `nice -n 5 git ...`.
+_WRAPPER_VALUE_OPTS = {"-u", "-g", "-n", "-C", "-s", "-k", "-p", "--user",
+                       "--group", "--chdir", "--signal", "--kill-after"}
+
+
+_SHELL_RUNNER_RE = re.compile(r'\b(sh|bash|zsh|dash|ksh)\b[^|;&]*\s-\w*c\b')
+
+
+def _is_dash_c(tok):
+    """True for `-c` and the clustered short forms (`-lc`, `-cx`, `-ic`)."""
+    return (tok.startswith("-") and not tok.startswith("--")
+            and "c" in tok[1:])
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -836,38 +937,220 @@ def _effective_argv(seg):
     command wrappers (sudo/env/...) so the real executable token lands at
     argv[0]. Keeps a wrapper prefix from hiding a gated verb."""
     i, n = 0, len(seg)
+    saw_wrapper = False
     while i < n:
         tok = seg[i]
         if tok == "(" or _ASSIGN_RE.match(tok):
             i += 1
             continue
-        if tok.rsplit("/", 1)[-1] in _CMD_WRAPPERS:
+        # Lowercased for the same reason the segment finders are: on a
+        # case-insensitive filesystem `ENV git push origin main` and
+        # `SUDO git push ...` resolve and run, and a case-sensitive wrapper test
+        # left the real verb buried at argv[1] so no gate ever saw it.
+        if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
+            i += 1
+            saw_wrapper = True
+            continue
+        # `sh -c "..."`, and the clustered forms people actually type: `bash -lc`,
+        # `sh -cx`, `bash -ic`. Matching only the exact token `-c` covered the
+        # one spelling nobody uses.
+        if tok.rsplit("/", 1)[-1].lower() in _SHELL_RUNNERS:
+            # Scan past the runner's OWN options for its -c: testing only the
+            # very next token missed `zsh -f -c ...` and `bash -l -c ...`.
+            j = i + 1
+            while j < n and seg[j].startswith("-") and not _is_dash_c(seg[j]):
+                j += 1
+            if j < n and _is_dash_c(seg[j]) and j + 1 < n:
+                i = j + 1
+                continue
+        # A wrapper's OWN options, and their values: `env -i`, `nice -n 5`,
+        # `timeout 10`, `sudo -u x`. Stopping at the first non-wrapper token let
+        # any optioned wrapper hide the verb entirely.
+        if saw_wrapper and tok in _WRAPPER_VALUE_OPTS and i + 1 < n:
+            i += 2          # option plus its value: `sudo -u x`, `nice -n 5`
+            continue
+        if saw_wrapper and (tok.startswith("-") or _DURATION_RE.match(tok)):
             i += 1
             continue
         break
-    return seg[i:]
+    argv = seg[i:]
+    # A wrapper's argument is one quoted token holding a whole command, so the
+    # verb is inside it rather than at argv[0]: `eval "git push origin main"`
+    # and `bash -c "git push origin main"` were invisible while the UNQUOTED
+    # `eval git push ...` was caught - protection that only covered the form
+    # nobody writes. Re-tokenize so the real verb surfaces.
+    if len(argv) == 1 and any(c.isspace() for c in argv[0]):
+        try:
+            inner = shlex.split(argv[0])
+        except ValueError:
+            inner = argv[0].split()
+        if inner:
+            return _effective_argv(inner)
+    return argv
 
 
-def _find_merge_segment(segments):
-    """Return the joined string of the first segment that is a `gh pr merge`
-    invocation (ignoring any wrapper/assignment prefix), else None."""
+# Git's global options, which sit BEFORE the subcommand. The value-taking ones
+# swallow the next token when written separately (`-C /repo`, `-c a=b`).
+_GIT_GLOBAL_VALUE_OPTS = {"-C", "-c", "--git-dir", "--work-tree", "--namespace",
+                          "--exec-path", "--super-prefix"}
+_GIT_GLOBAL_FLAGS = {"-p", "--paginate", "--no-pager", "--bare", "--no-replace-objects",
+                     "--literal-pathspecs", "--glob-pathspecs", "--noglob-pathspecs",
+                     "--icase-pathspecs", "--no-optional-locks"}
+
+
+def _strip_git_global_opts(argv):
+    """Drop git's global options so argv[1] is the real subcommand.
+
+    Returns argv[0] followed by the subcommand onward. A hooksPath override is
+    detected separately by _sets_hooks_path, from the ORIGINAL argv - carrying
+    its value through in the returned string made the push parsers read
+    `core.hooksPath=x` as a named destination branch.
+    """
+    head, rest = argv[:1], argv[1:]
+    i, n = 0, len(rest)
+    while i < n:
+        tok = rest[i]
+        if tok in _GIT_GLOBAL_VALUE_OPTS:
+            i += 2          # option plus its value
+            continue
+        if tok in _GIT_GLOBAL_FLAGS or (
+                tok.startswith("--") and "=" in tok
+                and tok.split("=", 1)[0] in _GIT_GLOBAL_VALUE_OPTS):
+            i += 1
+            continue
+        break
+    return head + rest[i:]
+
+
+def _sets_hooks_path(argv):
+    """True when this git invocation points core.hooksPath elsewhere, which
+    disables .git/hooks/pre-push - and that hook IS the protected-branch guard,
+    so it is a --no-verify by another name.
+
+    POSITIONAL, over argv: a substring scan of the rejoined segment refused
+    `git commit -m "docs: explain core.hooksPath guard"`, re-creating the exact
+    quote-stripped false refusal this file fixed for the allowlist. Covers both
+    spellings - the per-command `-c core.hooksPath=x` and the PERSISTENT
+    `git config core.hooksPath x`, after which every later commit and push in
+    the repo is unguarded with no flag on them at all.
+    """
+    for idx, tok in enumerate(argv):
+        low = tok.lower()
+        if low.startswith("core.hookspath="):
+            return True                      # -c core.hooksPath=x
+        if low == "core.hookspath":
+            prev = argv[idx - 1].lower() if idx else ""
+            if prev == "-c" or "config" in [a.lower() for a in argv[1:idx]]:
+                return True                  # git config core.hooksPath x
+    return False
+
+
+def _writes_a_file(tokens):
+    """True when a redirection would WRITE somewhere, as whole operator tokens.
+
+    `2>&1` and `>&2` duplicate a file descriptor and write no file, so they are
+    not disqualifying - refusing them denied an ordinary
+    `git commit --no-verify -m ok 2>&1`. An `>&` followed by anything that is not
+    a bare fd number is a write.
+    """
+    for idx, tok in enumerate(tokens):
+        if tok not in _REDIRECT_TOKENS:
+            continue
+        if tok in (">&", "&>"):
+            nxt = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+            if nxt.isdigit() or nxt.rstrip("-").isdigit():
+                continue        # fd duplication, not a file write
+        return True
+    return False
+
+
+def _has_unquoted_heredoc(command):
+    """True when a REAL heredoc opener uses an UNQUOTED delimiter, whose body the
+    shell expands (so a substitution can hide there). Quoted (<<'EOF') is
+    literal, which is what makes the recommended `-F - <<'EOF'` escape work.
+
+    Uses the quote-aware opener scan rather than a raw regex over the command:
+    the raw form matched `<<` inside an ARGUMENT, so a commit message reading
+    "shift << 2" was refused - the same raw-scan mistake _REDIRECT_TOKENS exists
+    to avoid for `>`.
+
+    Body lines are SKIPPED, exactly as _command_segments skips them: a body is
+    data, so a message reading "fix <<EOF parsing" is not an opener. Without
+    that, the recommended escape broke whenever the commit message happened to
+    mention a heredoc.
+    """
+    lines = _split_lines_outside_quotes(command)
+    i, n = 0, len(lines)
+    while i < n:
+        opener = _find_heredoc_opener(lines[i])
+        if opener is None:
+            i += 1
+            continue
+        delim, is_dash = opener
+        # Derived from THIS opener's own delimiter, not a fresh scan of the whole
+        # line: a line carrying a quoted `<<'X'` inside an argument plus a real
+        # `<<EOF` later read as quoted and skipped the disqualifier.
+        unquoted = bool(re.search(r"<<-?[ \t]*" + re.escape(delim) + r"(\s|$)",
+                                  lines[i]))
+        # Skip this heredoc's body: it is data, not command text.
+        i += 1
+        while i < n:
+            term = lines[i].lstrip("\t") if is_dash else lines[i]
+            i += 1
+            if term == delim:
+                break
+        if unquoted:
+            return True
+    return False
+
+
+def _find_merge_segments(segments):
+    """Every `gh pr merge` segment, not just the first. One override consume
+    must not authorize `gh pr merge 1 && gh pr merge 2 && gh pr merge 3`, which
+    an only-the-first search allowed while logging one of the three."""
+    out = []
     for seg in segments:
         argv = _effective_argv(seg)
         if (len(argv) >= 3 and argv[0].rsplit("/", 1)[-1].lower() == "gh"
                 and argv[1].lower() == "pr" and argv[2].lower() == "merge"):
-            return " ".join(seg)
-    return None
+            out.append(" ".join(seg))
+    return out
+
+
+def _find_merge_segment(segments):
+    """First `gh pr merge` segment, else None. TEST-FACING convenience only:
+    main() needs the full list to count them, so it calls the plural directly.
+    Kept so the segment-matching tests can assert one match readably."""
+    found = _find_merge_segments(segments)
+    return found[0] if found else None
 
 
 def _find_git_segments(segments):
     """Return the executable-onward string of every segment whose command is
     `git` (wrapper/assignment prefix stripped). Catches compound commands a bare
-    startswith('git') would miss, and git behind sudo/env/an assignment."""
+    startswith('git') would miss, and git behind sudo/env/an assignment.
+
+    Case-insensitive, to match _find_merge_segments: on a case-insensitive
+    filesystem (macOS) `GIT push origin main` resolves and ran, while the
+    lowercase-only comparison here handed the gate nothing at all.
+
+    Git's own global options are dropped before the subcommand, so every
+    downstream matcher sees a canonical `git <subcommand> ...`. Both gates key
+    on the subcommand - one by `git\\s+push` adjacency, the other by token
+    position - so `git -C /repo push origin main` and
+    `git -c core.hooksPath=/dev/null push origin main` were invisible to both.
+    """
     out = []
     for seg in segments:
         argv = _effective_argv(seg)
-        if argv and argv[0].rsplit("/", 1)[-1] == "git":
-            out.append(" ".join(argv))
+        if argv and argv[0].rsplit("/", 1)[-1].lower() == "git":
+            normalized = _strip_git_global_opts(argv)
+            # Encoded as a --no-verify flag rather than carried as a value: it
+            # IS a --no-verify by another name, and a `--`-prefixed token is
+            # stripped by the push parsers instead of read as a branch.
+            if _sets_hooks_path(argv):
+                normalized = normalized + ["--no-verify"]
+            out.append(" ".join(normalized))
     return out
 
 
@@ -882,18 +1165,62 @@ def _emit(decision, reason):
     }))
 
 
-def _check_approval_flag():
-    """True if a fresh (<5 min) --no-verify approval flag exists. An expired
-    flag is removed. Guarded so a filesystem hiccup never crashes the gate."""
+def _fresh_marker(path, ttl_seconds=MARKER_TTL_SECONDS):
+    """True if `path` exists and is younger than ttl_seconds. An expired marker
+    is removed, so a forgotten sentinel cannot silently hold a gate open.
+    Guarded so a filesystem hiccup never crashes the gate."""
     try:
-        if APPROVAL_FLAG.exists():
-            age_seconds = time.time() - APPROVAL_FLAG.stat().st_mtime
-            if age_seconds < 300:
+        if path.exists():
+            if time.time() - path.stat().st_mtime < ttl_seconds:
                 return True
-            APPROVAL_FLAG.unlink(missing_ok=True)  # expired
+            path.unlink(missing_ok=True)  # expired
     except OSError:
         pass
     return False
+
+
+def _claim_marker(path):
+    """Atomically claim `path`; True only for the caller that removed it.
+
+    unlink() IS the claim, not a cleanup afterwards. Two concurrent hook
+    processes both pass a plain exists()/stat check, so `missing_ok=True` would
+    let both authorize a merge from one operator approval - the loser here gets
+    ENOENT instead. Guarded because an unguarded raise out of a PreToolUse hook
+    fails OPEN on the very gate it was protecting."""
+    try:
+        os.unlink(path)
+        return True
+    except OSError:
+        return False
+
+
+def _audit(message):
+    """Append-only record of a consumed merge-gate override; the log file is the
+    durable trail (a PreToolUse hook's stderr is debug output, not user-facing -
+    permissionDecisionReason is what the operator reads). One line per entry:
+    `message` carries a command, so its newlines are flattened - a trail an
+    embedded newline can forge entries into is not a trail. Records cwd as the
+    caller, since the marker is global while the merge it authorizes belongs to
+    one worktree.
+
+    Returns True only if the trail was actually recorded. The caller REFUSES on
+    False rather than allowing unrecorded: the trail is the whole justification
+    for reintroducing an override, and an unwritable log (a directory at the log
+    path, a read-only FNO_HOME) is the one case an agent could arrange. Never
+    raises - an unguarded raise out of a PreToolUse hook fails open."""
+    flat = " ".join(message.split())
+    try:
+        print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
+    except OSError:
+        pass
+    try:
+        OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().isoformat(timespec="seconds")
+        with OVERRIDE_LOG.open("a") as fh:
+            fh.write(f"{stamp} cwd={os.getcwd()} {flat}\n")
+        return True
+    except OSError:
+        return False
 
 
 def _no_verify_deny_message(command):
@@ -927,8 +1254,10 @@ Run this command:
 Then I'll retry the commit automatically.
 Approval expires after 5 minutes and is single-use.
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+There is no marker that turns this gate off. --no-verify skips
+.git/hooks/pre-push, and that hook is the protected-branch guard, so
+this gate and the branch gate are one protection with two doors.
+The merge-gate override does not reach either of them.
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -974,8 +1303,58 @@ The proper workflow:
 
 ═══════════════════════════════════════════════════════════════════
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+No marker turns this gate off, and the merge-gate override does not
+apply here. For an agent session there is deliberately no bypass: push
+a branch and open a PR. A human pushing from their own shell is not
+gated by this hook at all.
+
+═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _compound_authorization_deny_message(command):
+    return f"""╔════════════════════════════════════════════════════════════════╗
+║  🚫 BLOCKED: one approval cannot authorize several actions
+╚════════════════════════════════════════════════════════════════╝
+
+Command: {command}
+
+An approval here authorizes exactly ONE action, and a PreToolUse allow
+applies to the WHOLE Bash call - so `gh pr merge 1 && <anything>` would
+approve the anything too. This command carries more than the one action:
+
+  • several `gh pr merge` or `--no-verify` segments, or both kinds
+  • another command joined by && / ; / | (a leading `cd` counts too)
+  • a command substitution: $(...), `...`, <(...) or >(...)
+    A substitution IS a second command, so it disqualifies the
+    approval even though it sits inside one segment.
+  • an output redirection (>, >>) or an unquoted heredoc (<<EOF),
+    which would ride the approval into a file write or an expansion
+
+Run the approved action as its own substitution-free command. To pass a
+long commit message without $(cat ...), use stdin instead:
+
+  git commit --no-verify -F - <<'EOF'
+  your message
+  EOF
+
+═══════════════════════════════════════════════════════════════════
+"""
+
+
+def _unrecordable_override_deny_message():
+    return f"""╔════════════════════════════════════════════════════════════════╗
+║  🚫 BLOCKED: merge-gate override could not be recorded
+╚════════════════════════════════════════════════════════════════╝
+
+The marker was valid but the trail could not be written, and the trail
+is what justifies having an override at all - so this is refused rather
+than allowed unrecorded. Check that this path is an appendable file (not
+a directory) with a writable parent:
+  {OVERRIDE_LOG}
+
+The marker was consumed; fix the path, then touch it again:
+  touch {MERGE_GATE_MARKER}
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1005,46 +1384,81 @@ Auto-merge directly from Claude Code requires ALL of:
 The artifact proves /pr check actually ran for this session. A stale
 or missing artifact blocks the merge even if the state flag is true.
 
-There is NO single-use override flag. If /pr check was skipped or failed,
-the correct recovery is to run it again or explicitly configure
---no-external. Do not forge the artifact.
+If /pr check was skipped or failed, the correct recovery is to run it
+again or explicitly configure --no-external. Do not forge the artifact.
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+⚠️  Operator escape hatch, when the two-factor path is genuinely broken
+    (e.g. an immutable manifest carrying the wrong value):
+
+  touch {MERGE_GATE_MARKER}
+
+    `gh pr merge` only: it cannot open a push to a protected branch and
+    cannot open --no-verify. Expires in 5 minutes, consumed on use, every
+    use appended to {OVERRIDE_LOG}. An agent must not create this
+    unprompted - that is a logged violation, not a silent bypass.
 
 ═══════════════════════════════════════════════════════════════════
 """
 
 
-def _evaluate_git_segment(command, has_approval):
+def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
     """Evaluate one command-position git segment.
 
     Returns ('deny', reason) | ('allow', reason) | None (safe / no opinion).
     None means the segment is fine (explicitly-allowed git command, a
     feature-branch push, or a bypass-approved protected push).
     """
-    # --no-verify (checked first: an allowed verb like `git commit` must still
-    # be denied when it carries --no-verify)
-    for pattern in NO_VERIFY_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            if has_approval:
-                return ("allow", "[Approved] User approved --no-verify commit")
-            return ("deny", _no_verify_deny_message(command))
-
-    if is_allowed_git_command(command):
+    # The protected-branch gate is checked FIRST, because it outranks the
+    # --no-verify approval. The two are one protection with two doors:
+    # --no-verify skips .git/hooks/pre-push, and that hook IS the branch guard,
+    # so an approval for one door must never open the other. Checking
+    # --no-verify first returned ("allow", ...) for
+    # `git push --no-verify origin main` and never reached this check at all -
+    # a single segment, so no cross-segment rule can catch it.
+    # The allowlist runs FIRST, and it is NOT a no-op: _find_git_segments hands
+    # this function a shlex-rejoined argv with QUOTES STRIPPED, so argument text
+    # is re-exposed to the regex matchers below. Without it,
+    # `git commit -m "fix: block git push origin main"` and
+    # `git log --grep "git push origin main"` were denied as pushes to main -
+    # a read-only command refused with a wrong explanation. `git push` is not on
+    # the allowlist, so a real push still reaches the gate, and
+    # `git commit --no-verify` is excluded by the pattern's own lookahead.
+    # allowlist_ok is False on the unbalanced-quote fallback, where the "segment"
+    # is the WHOLE multi-command string: token[1] there is the first command's
+    # subcommand, so `git status && git push origin main 'unbal` was allowlisted
+    # by `status` and the push was never evaluated. A fallback that is supposed
+    # to be deny-leaning must not consult an allowlist it cannot position.
+    if allowlist_ok and is_allowed_git_command(command):
         return None
 
     is_protected, branch = is_push_to_protected_branch(command)
     if is_protected:
         state = load_state()
-        if has_recent_approval(state) or check_for_bypass_phrase(state):
-            print(f"[Git Protection: Approved] Emergency push to {branch}: "
-                  f"{command}", file=sys.stderr)
-            return None
-        state["last_blocked_command"] = command
-        save_state(state)
-        return ("deny", _push_deny_message(command, branch,
-                                           is_using_no_verify(command)))
+        if not (has_recent_approval(state) or check_for_bypass_phrase(state)):
+            state["last_blocked_command"] = command
+            save_state(state)
+            return ("deny", _push_deny_message(command, branch,
+                                               is_using_no_verify(command)))
+        # Approved for the BRANCH only, so this deliberately falls through to
+        # the --no-verify check rather than returning safe. "One approval must
+        # not open the other door" has to hold in BOTH directions: returning
+        # here let one bypass-phrase push also skip .git/hooks/pre-push and
+        # every pre-commit hook.
+        print(f"[Git Protection: Approved] Emergency push to {branch}: "
+              f"{command}", file=sys.stderr)
+
+    # --no-verify, matched as a WHOLE TOKEN and for ANY subcommand. The old
+    # patterns only covered commit/push, so the synthetic flag standing in for a
+    # core.hooksPath override (`git config core.hooksPath ...`) never fired. This
+    # sits AFTER the branch gate, which outranks it: an approval for the
+    # hooks door must never open the branch door, in either direction.
+    if any(p.lower() == "--no-verify" for p in command.split()):
+        if has_approval:
+            return ("allow", "[Approved] User approved --no-verify commit")
+        return ("deny", _no_verify_deny_message(command))
+
+    # A git verb this hook does not gate is not this hook's business: it declines
+    # to opine and the normal permission system decides.
     return None
 
 
@@ -1066,9 +1480,10 @@ def main():
     if not command:
         sys.exit(0)
 
-    # Opt-out marker: a disabled gate exits immediately (AC1-EDGE).
-    if DISABLE_MARKER.exists():
-        sys.exit(0)
+    # No pre-gate opt-out marker lives here. One used to, and being ahead of
+    # every gate made it an unconditional allow: while it existed, a bare
+    # `git push origin main` passed. The merge gate's scoped override is
+    # checked inside the merge branch below, where it can only affect merges.
 
     # Tokenize into command-position segments. On unbalanced quotes shlex
     # raises ValueError; fall back to legacy whole-command matching per gate so
@@ -1084,48 +1499,169 @@ def main():
     # two-factor (state + artifact) verification.
     # ==========================================
     if segments is not None:
-        merge_seg = _find_merge_segment(segments)
+        merge_segs = _find_merge_segments(segments)
+        git_segs = _find_git_segments(segments)
     else:
-        # legacy fallback (deny-leaning): loose match on the whole command
-        merge_seg = command if re.search(r'gh\s+pr\s+merge', command,
-                                          re.IGNORECASE) else None
+        # legacy fallback (deny-leaning): loose match on the whole command.
+        # Deny-leaning for git too: on unbalanced quotes we cannot tell command
+        # position from prose, so ANY `git` in the string hands the whole
+        # command to the gate. `startswith` was fail-OPEN - an unterminated
+        # quote in a command not literally beginning with `git`
+        # (`echo "oops<newline>git push origin main`) dropped the push gate
+        # entirely, while the merge gate below still fired on the same input.
+        # findall, not search: the whole malformed string is one "segment", so a
+        # length-1 list would make the multi-merge guard below unfirable on
+        # exactly the input this deny-leaning fallback exists to catch.
+        merge_segs = [command] * len(re.findall(r'gh\s+pr\s+merge', command,
+                                                re.IGNORECASE))
+        git_segs = ([command] if re.search(r'\bgit\b', command, re.IGNORECASE)
+                    else [])
+
+    merge_seg = merge_segs[0] if merge_segs else None
+    has_approval = _fresh_marker(APPROVAL_FLAG)
+
+    # ==========================================
+    # Git gates, evaluated per command-position segment so a compound command
+    # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
+    # startswith('git') check. Evaluated exactly once - a deny writes state -
+    # and the verdict is then applied in a fixed precedence below.
+    # ==========================================
+    # Stops at the first deny: a deny writes state (`last_blocked_command`), so
+    # evaluating past it would persist a later segment while the message names
+    # the first, making the state file an unreliable record of what was refused.
+    git_decisions = []
+    for seg in git_segs:
+        decision = _evaluate_git_segment(seg, has_approval,
+                                         allowlist_ok=segments is not None)
+        git_decisions.append((seg, decision))
+        if decision is not None and decision[0] == "deny":
+            break
+
+    # A DENY ANYWHERE OUTRANKS AN ALLOW ANYWHERE. The loop used to
+    # short-circuit on the first decision of either kind, which made the verdict
+    # depend on segment order: `git commit --no-verify && git push origin main`
+    # returned the approval's allow and carried the push to main with it, while
+    # the reverse order denied. One authorization must never cover a sibling
+    # segment another gate would refuse - the whole point of scoping the
+    # merge-gate marker, applied to every gate rather than just that one.
+    for seg, decision in git_decisions:
+        if decision is not None and decision[0] == "deny":
+            _emit("deny", decision[1])
+            sys.exit(0)
+
+    # Which segments, if any, rely on the single-use --no-verify approval.
+    # Nothing is CLAIMED yet: a claim before the outcome is known burns the
+    # operator's approval on a command that then gets denied anyway.
+    git_allows = [(seg, d[1]) for seg, d in git_decisions
+                  if d is not None and d[0] == "allow"]
+    git_allow = git_allows[0] if git_allows else None
+
+    # ONE AUTHORIZATION AUTHORIZES ONE ACTION. Refuse a command carrying more
+    # than one thing a single-use approval would have to cover: several merges
+    # rode one marker consume (logging only the first), several approved
+    # --no-verify segments rode one flag consume, and an approved --no-verify
+    # segment beside a merge would need two independent single-use claims
+    # committed atomically within one tool call. All are the compound-smuggling
+    # shape this gate exists to refuse, so they are refused rather than
+    # half-honored. Keeping them mutually exclusive is also what lets each
+    # branch below claim without a two-phase commit.
+    if (len(merge_segs) > 1 or len(git_allows) > 1
+            or (merge_seg is not None and git_allow is not None)):
+        _emit("deny", _compound_authorization_deny_message(command))
+        sys.exit(0)
+
+    # A PreToolUse allow is NOT segment-scoped: it approves the whole Bash call.
+    # So anything this hook AUTHORIZES must stand alone, or the authorization
+    # silently covers its siblings - `gh pr merge 1 && gh api -X PATCH
+    # .../refs/heads/main` and `git commit --no-verify -m x && rm -rf ...` were
+    # each allowed whole, and neither sibling is a git segment any gate
+    # inspects. Applied to EVERY authorizing path, including the two-factor
+    # merge: a leading `cd` is deliberately not carved out, because the allow
+    # covers a prefix exactly as it covers a suffix, so tolerating one reopens
+    # the hole from the other side. Only a DENY may be emitted for a compound
+    # command. Verified: no production caller compounds `gh pr merge` through
+    # the Bash tool - the fno/gh call sites all go through subprocess, which
+    # this hook never sees.
+    # A `$(...)` body is re-segmented and so already trips the count, but
+    # _substitution_bodies deliberately skips backticks, and `<(`/`>(` are not
+    # separators, so both stay inside ONE segment. That made the rule decorative
+    # on two live forms: `gh pr merge 12 --body "`id > /tmp/pwn`"` counted as a
+    # lone command and ran the backtick body under the override. Any
+    # substitution form disqualifies an authorization - a command substitution
+    # IS a second command, whatever its delimiter.
+    # Scanned over the parsed TOKENS, not the raw command. A raw substring scan
+    # also matched a backtick inside a heredoc body, which broke the very
+    # `-F - <<'EOF'` escape the refusal message recommends - a markdown code span
+    # in a commit message was enough. Tokens exclude heredoc bodies, so the
+    # quoted-delimiter form works while a double-quoted or unquoted `$(...)` /
+    # backtick still lands in a token and is caught.
+    #
+    # A `>` disqualifies too: an authorization covers the whole Bash call, so
+    # `git commit --no-verify -m ok > /tmp/log` also approved an arbitrary file
+    # overwrite that no gate inspected. `<` is deliberately NOT listed - input
+    # redirection cannot run a command, and `<<` is the recommended escape.
+    tokens = [tok for seg in (segments or []) for tok in seg]
+    carries_substitution = (
+        any(f in tok for tok in tokens for f in _SUBSTITUTION_FORMS)
+        or _writes_a_file(tokens)
+        or _has_unquoted_heredoc(command))
+    # Only enforceable when shlex actually parsed the command. On the
+    # unbalanced-quote fallback there is one pseudo-segment, so requiring
+    # len == 1 there refused EVERY fallback merge before the two-factor check
+    # ran - a routine apostrophe in `--body "it's ready"` was enough to block a
+    # legitimate auto-merge, with a wrong reason. The two-factor path keeps its
+    # prior behaviour there; the marker override does not, since it needs parsed
+    # segments to prove the merge stands alone (see its own guard below).
+    # A shell runner disqualifies outright: _effective_argv re-tokenizes its
+    # quoted argument so the inner verb IS gated, but the outer command is still
+    # ONE segment, so `bash -c "gh pr merge 42 && rm -rf /tmp/x"` counted as
+    # standing alone while the unwrapped form was refused.
+    wrapped = bool(_SHELL_RUNNER_RE.search(command))
+    if segments is None:
+        # Nothing can be counted on the unparseable fallback, so nothing may be
+        # authorized there. The merge gate keeps its own path (it is
+        # evidence-backed and pre-existing); a single-use approval does not.
+        if git_allow is not None:
+            _emit("deny", _compound_authorization_deny_message(command))
+            sys.exit(0)
+    else:
+        authorizes_alone = (len(segments) == 1 and not carries_substitution
+                            and not wrapped)
+        if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
+            _emit("deny", _compound_authorization_deny_message(command))
+            sys.exit(0)
+
     if merge_seg is not None:
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
             sys.exit(0)
+        # Scoped override, reached only after the legitimate two-factor path
+        # failed and every git segment cleared, so the marker is claimed only
+        # when it is actually the thing authorizing the merge.
+        # `segments is not None` is load-bearing: the lone-command rule above is
+        # skipped on the unparseable fallback, so without it the override could
+        # authorize a command whose siblings were never counted.
+        if (segments is not None and _fresh_marker(MERGE_GATE_MARKER)
+                and _claim_marker(MERGE_GATE_MARKER)):
+            if not _audit("two-factor check failed, merge allowed by "
+                          f"marker: {merge_seg}"):
+                _emit("deny", _unrecordable_override_deny_message())
+                sys.exit(0)
+            _emit("allow", "[fno merge-gate override] marker consumed; "
+                           "recorded in merge-gate-overrides.log")
+            sys.exit(0)
         _emit("deny", _merge_deny_message(merge_seg))
         sys.exit(0)
 
-    # ==========================================
-    # Git gates, evaluated per command-position segment so a compound command
-    # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
-    # startswith('git') check. Non-git commands fall through to allow.
-    # ==========================================
-    if segments is not None:
-        git_segs = _find_git_segments(segments)
-    else:
-        # Deny-leaning, matching the merge fallback above: on unbalanced quotes
-        # we cannot tell command position from prose, so ANY `git` in the string
-        # hands the whole command to the gate. `startswith` was fail-OPEN - an
-        # unterminated quote in a command not literally beginning with `git`
-        # (`echo "oops<newline>git push origin main`) dropped the push gate
-        # entirely, while the merge gate above still fired on the same input.
-        git_segs = [command] if re.search(r'\bgit\b', command) else []
-    if not git_segs:
-        sys.exit(0)
-
-    has_approval = _check_approval_flag()
-    for seg in git_segs:
-        decision = _evaluate_git_segment(seg, has_approval)
-        if decision is None:
-            continue
-        kind, reason = decision
-        if kind == "allow":
-            APPROVAL_FLAG.unlink(missing_ok=True)  # one-time consume, race-safe
-            _emit("allow", reason)
+    if git_allow is not None:
+        # The claim must WIN, not merely find a fresh flag: has_approval above
+        # is a plain stat, so two concurrent hooks both see it and only the one
+        # that removes it is authorized.
+        if not _claim_marker(APPROVAL_FLAG):
+            _emit("deny", _no_verify_deny_message(git_allow[0]))
             sys.exit(0)
-        _emit("deny", reason)
+        _emit("allow", git_allow[1])
         sys.exit(0)
 
     # All git segments safe, allow it
