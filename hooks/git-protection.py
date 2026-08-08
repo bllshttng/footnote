@@ -19,9 +19,17 @@ Two-factor merge verification:
       <repo>/.fno/artifacts/external-<session_id>.md with
       phase: external and session_id matching the state file.
 
-No single-use flag override for auto-merge: the LLM would have been able
-to self-create it. The two-factor artifact check serves the same
-human-authorization purpose with a much stronger audit trail.
+Merge-gate override: touch ${FNO_HOME:-~/.fno}/merge-gate.disabled
+Checked ONLY after the two-factor path fails, applies ONLY to
+`gh pr merge`, expires after 5 minutes, consumed on use, appended to
+merge-gate-overrides.log. That audit trail is what the old refusal of a
+single-use override was really asking for.
+
+No marker here can open main. The override does NOT reach the
+protected-branch gate or the --no-verify gate, which are one protection
+with two doors: --no-verify skips .git/hooks/pre-push, and that hook IS
+the main-branch guard. Each keeps its own scoped control (the "Push to
+Main" bypass phrase and approve_no_verify.flag).
 
 Megawalk-state.md deliberately does NOT authorize gh pr merge. When
 megawalk is invoked, only target (via its internal Phase 7a pipeline) can
@@ -47,10 +55,14 @@ from pathlib import Path
 FNO_HOME = Path(os.environ.get("FNO_HOME") or (Path.home() / ".fno"))
 STATE_FILE = FNO_HOME / "git-protection.json"
 APPROVAL_FLAG = FNO_HOME / "approve_no_verify.flag"
-# Opt-out marker: when present, every gate exits 0 immediately. Same
-# auditable-violation trust model as the approve flag - an agent can create it,
-# but doing so unprompted is a visible violation, not a silent bypass.
-DISABLE_MARKER = FNO_HOME / "git-protection.disabled"
+# Merge-gate override, `gh pr merge` ONLY. Deliberately NOT named
+# git-protection.disabled: that file was an unconditional pre-gate exit(0), so
+# one touch dropped main-branch protection for every session on every harness
+# lane. The rename leaves any stale old marker inert - fail-safe, no migration.
+MERGE_GATE_MARKER = FNO_HOME / "merge-gate.disabled"
+OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
+# Both markers expire and are consumed: a forgotten sentinel must not linger.
+MARKER_TTL_SECONDS = 300
 
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
@@ -882,18 +894,37 @@ def _emit(decision, reason):
     }))
 
 
-def _check_approval_flag():
-    """True if a fresh (<5 min) --no-verify approval flag exists. An expired
-    flag is removed. Guarded so a filesystem hiccup never crashes the gate."""
+def _fresh_marker(path, ttl_seconds=MARKER_TTL_SECONDS):
+    """True if `path` exists and is younger than ttl_seconds. An expired marker
+    is removed, so a forgotten sentinel cannot silently hold a gate open.
+    Guarded so a filesystem hiccup never crashes the gate."""
     try:
-        if APPROVAL_FLAG.exists():
-            age_seconds = time.time() - APPROVAL_FLAG.stat().st_mtime
-            if age_seconds < 300:
+        if path.exists():
+            if time.time() - path.stat().st_mtime < ttl_seconds:
                 return True
-            APPROVAL_FLAG.unlink(missing_ok=True)  # expired
+            path.unlink(missing_ok=True)  # expired
     except OSError:
         pass
     return False
+
+
+def _audit(message):
+    """Append-only record of a consumed merge-gate override, plus a stderr line
+    so it is visible in the transcript. One line per entry: `message` carries a
+    command, so its newlines are flattened - a trail that can be forged with an
+    embedded newline is not a trail. Records cwd as the caller, since the marker
+    is global while the merge it authorizes belongs to one worktree.
+    Best-effort: an unwritable log must never crash the gate or block the merge
+    it is recording."""
+    flat = " ".join(message.split())
+    print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
+    try:
+        OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().isoformat(timespec="seconds")
+        with OVERRIDE_LOG.open("a") as fh:
+            fh.write(f"{stamp} cwd={os.getcwd()} {flat}\n")
+    except OSError:
+        pass
 
 
 def _no_verify_deny_message(command):
@@ -927,8 +958,10 @@ Run this command:
 Then I'll retry the commit automatically.
 Approval expires after 5 minutes and is single-use.
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+There is no marker that turns this gate off. --no-verify skips
+.git/hooks/pre-push, and that hook is the protected-branch guard, so
+this gate and the branch gate are one protection with two doors.
+The merge-gate override does not reach either of them.
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -974,8 +1007,10 @@ The proper workflow:
 
 ═══════════════════════════════════════════════════════════════════
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+No marker turns this gate off. A genuine emergency push needs the
+bypass phrase "Push to Main" in recent command history - a human
+signal, not a file an agent can touch. The merge-gate override does
+not apply here.
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1005,12 +1040,18 @@ Auto-merge directly from Claude Code requires ALL of:
 The artifact proves /pr check actually ran for this session. A stale
 or missing artifact blocks the merge even if the state flag is true.
 
-There is NO single-use override flag. If /pr check was skipped or failed,
-the correct recovery is to run it again or explicitly configure
---no-external. Do not forge the artifact.
+If /pr check was skipped or failed, the correct recovery is to run it
+again or explicitly configure --no-external. Do not forge the artifact.
 
-To disable git protection entirely on this machine:
-  touch {DISABLE_MARKER}
+⚠️  Operator escape hatch, when the two-factor path is genuinely broken
+    (e.g. an immutable manifest carrying the wrong value):
+
+  touch {MERGE_GATE_MARKER}
+
+    `gh pr merge` only: it cannot open a push to a protected branch and
+    cannot open --no-verify. Expires in 5 minutes, consumed on use, every
+    use appended to {OVERRIDE_LOG}. An agent must not create this
+    unprompted - that is a logged violation, not a silent bypass.
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1066,9 +1107,10 @@ def main():
     if not command:
         sys.exit(0)
 
-    # Opt-out marker: a disabled gate exits immediately (AC1-EDGE).
-    if DISABLE_MARKER.exists():
-        sys.exit(0)
+    # No pre-gate opt-out marker lives here. One used to, and being ahead of
+    # every gate made it an unconditional allow: while it existed, a bare
+    # `git push origin main` passed. The merge gate's scoped override is
+    # checked inside the merge branch below, where it can only affect merges.
 
     # Tokenize into command-position segments. On unbalanced quotes shlex
     # raises ValueError; fall back to legacy whole-command matching per gate so
@@ -1094,6 +1136,14 @@ def main():
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
             sys.exit(0)
+        # Scoped override, checked only after the legitimate two-factor path
+        # has failed so the marker is consumed only when actually needed.
+        if _fresh_marker(MERGE_GATE_MARKER):
+            MERGE_GATE_MARKER.unlink(missing_ok=True)  # single-use, race-safe
+            _audit(f"two-factor check failed, merge allowed by marker: {merge_seg}")
+            _emit("allow", "[fno merge-gate override] marker consumed; "
+                           "recorded in merge-gate-overrides.log")
+            sys.exit(0)
         _emit("deny", _merge_deny_message(merge_seg))
         sys.exit(0)
 
@@ -1115,7 +1165,7 @@ def main():
     if not git_segs:
         sys.exit(0)
 
-    has_approval = _check_approval_flag()
+    has_approval = _fresh_marker(APPROVAL_FLAG)
     for seg in git_segs:
         decision = _evaluate_git_segment(seg, has_approval)
         if decision is None:

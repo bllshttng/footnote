@@ -19,6 +19,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent
@@ -377,15 +378,94 @@ def test_state_writes_land_under_fno_home():
         assert not (Path(td) / ".claude").exists()
 
 
-def test_disable_marker_short_circuits():
-    """$FNO_HOME/git-protection.disabled -> exit 0, no decision (AC1-EDGE)."""
+def _with_marker(td, name="merge-gate.disabled", age_seconds=0):
+    """Create $FNO_HOME and a marker file, optionally backdated."""
+    fno = Path(td) / ".fno"
+    fno.mkdir(parents=True, exist_ok=True)
+    marker = fno / name
+    marker.write_text("")
+    if age_seconds:
+        past = time.time() - age_seconds
+        os.utime(marker, (past, past))
+    return fno, marker
+
+
+# --- The merge-gate marker must NOT reach the branch / --no-verify gates ----
+# These encode the operator policy stated 2026-08-07: auto-merge after the
+# gates pass is fine, disabling main-push protection never is. The marker used
+# to sit ahead of every gate as an unconditional exit(0), so one touch opened
+# a direct push to main on every harness lane on the machine.
+
+def test_merge_marker_does_not_open_push_to_main():
+    """Marker present -> `git push origin main` is STILL DENIED."""
     with tempfile.TemporaryDirectory() as td:
-        fno = Path(td) / ".fno"
-        fno.mkdir(parents=True)
-        (fno / "git-protection.disabled").write_text("")
-        out, rc = _run_hook_subprocess("git push origin main", fno)
-        assert out.strip() == ""
-        assert rc == 0
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess("git push origin main", fno)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists(), "branch gate must not consume the merge marker"
+
+
+def test_merge_marker_does_not_open_no_verify_push_to_main():
+    """The second door to the same protection: --no-verify skips
+    .git/hooks/pre-push, which IS the protected-branch guard. Excluding the
+    marker from the branch check alone would leave this path open."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td)
+        out, _ = _run_hook_subprocess("git push --no-verify origin main", fno)
+        assert '"permissionDecision": "deny"' in out
+
+
+def test_merge_marker_does_not_open_no_verify_commit():
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td)
+        out, _ = _run_hook_subprocess("git commit --no-verify -m x", fno)
+        assert '"permissionDecision": "deny"' in out
+
+
+def test_legacy_disable_marker_is_inert():
+    """A stale git-protection.disabled from before the rename must no longer
+    bypass anything. The rename is the migration: fail-safe, no cleanup."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="git-protection.disabled")
+        out, _ = _run_hook_subprocess("git push origin main", fno)
+        assert '"permissionDecision": "deny"' in out
+
+
+# --- ...but it IS the merge gate's scoped override -------------------------
+
+def test_merge_marker_allows_merge_and_is_consumed():
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out1, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out1
+        assert not marker.exists(), "marker must be single-use"
+        log = fno / "merge-gate-overrides.log"
+        assert log.exists() and "123" in log.read_text()
+        out2, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out2
+
+
+def test_override_log_entry_cannot_be_forged_with_a_newline():
+    """One consumed override = exactly one log line. A trail that an embedded
+    newline can forge extra entries into is not a trail."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            'gh pr merge 123 --body "x\n2099-01-01 forged entry"', fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+        lines = [ln for ln in (fno / "merge-gate-overrides.log")
+                 .read_text().splitlines() if ln.strip()]
+        assert len(lines) == 1, f"expected 1 log line, got {lines}"
+        assert "forged entry" in lines[0], "content kept, just flattened"
+
+
+def test_expired_merge_marker_denies_and_is_removed():
+    """A forgotten sentinel must not silently hold the merge boundary open."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td, age_seconds=600)
+        out, _ = _run_hook_subprocess("gh pr merge 123 --squash", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert not marker.exists(), "expired marker must be reaped"
 
 
 def test_no_verify_flag_consumed_once_and_missing_is_safe():
