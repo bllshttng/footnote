@@ -487,6 +487,40 @@ def test_shell_keywords_do_not_hide_a_push_to_main():
             assert '"permissionDecision": "deny"' in out, cmd
 
 
+def test_case_arm_does_not_hide_the_verb():
+    """`)` terminates a case arm pattern. Without it as a separator the arm body
+    stayed in the case word's segment and both gates saw nothing."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("case x in *) git push origin main;; esac",
+                    "case x in *) gh pr merge 42 --admin;; esac",
+                    "eval git push origin main",
+                    "coproc git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_quoted_argument_text_is_not_read_as_the_command():
+    """Segments arrive shlex-rejoined with quotes stripped, so a regex allowlist
+    read argument text as the command. In one direction that waved a --no-verify
+    commit through because its message said "git log"; in the other, dropping the
+    allowlist denied a read-only command as a push to main. The check is
+    positional (token[1]), so the message text cannot decide either way."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        # A message naming a protected push must not be refused as one.
+        for cmd in ('git commit -m "fix: block git push origin main"',
+                    'git log --grep "git push origin main"'):
+            out, rc = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' not in out and rc == 0, cmd
+        # ...and an allowlisted word in a message must not smuggle --no-verify.
+        out2, _ = _run_hook_subprocess(
+            'git commit --no-verify -m "see git log"', fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out2, "gated, not waved through"
+        assert not flag.exists(), "the approval was actually consumed"
+
+
 def test_redirection_disqualifies_an_authorization():
     """An authorization covers the whole Bash call, so a `>` rides it into an
     arbitrary file overwrite no gate inspects."""

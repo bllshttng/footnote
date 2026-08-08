@@ -76,6 +76,13 @@ _SUBSTITUTION_FORMS = ("`", "$(", "<(", ">(")
 # rather than by scanning text the segmenter never produces.
 _UNQUOTED_HEREDOC_RE = re.compile(r'<<-?[ \t]*(?![\'"])\w')
 
+# Output redirection, matched as WHOLE operator tokens. `any(">" in tok)` also
+# matched quoted argument text, so `-m "a > b"` and a message containing a
+# markdown code span were refused with a message about several actions. `<` is
+# absent on purpose: input redirection cannot run a command, and `<<` is the
+# recommended escape.
+_REDIRECT_TOKENS = {">", ">>", ">|", ">&", "&>", "&>>"}
+
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
 
@@ -105,22 +112,13 @@ NO_VERIFY_PATTERNS = [
 # ==========================================
 # ALLOWED GIT COMMANDS
 # ==========================================
-ALLOWED_GIT_PATTERNS = [
-    r'git\s+status',
-    r'git\s+log',
-    r'git\s+diff',
-    r'git\s+branch',
-    r'git\s+checkout',
-    r'git\s+fetch',
-    r'git\s+pull',
-    r'git\s+add',
-    r'git\s+commit(?!.*--no-verify)',  # Allow commit but NOT with --no-verify
-    r'git\s+stash',
-    r'git\s+show',
-    r'git\s+config',
-    r'git\s+remote',
-    r'git\s+tag',
-]
+# Subcommands this hook does not gate, matched POSITIONALLY (token[1]) rather
+# than by regex over the segment text - see is_allowed_git_command for why the
+# regex form was a bypass in one direction and a false refusal in the other.
+ALLOWED_GIT_SUBCOMMANDS = {
+    "status", "log", "diff", "branch", "checkout", "fetch", "pull", "add",
+    "commit", "stash", "show", "config", "remote", "tag",
+}
 
 def _default_state():
     return {
@@ -299,11 +297,26 @@ def is_using_no_verify(command):
     return bool(re.search(r'--no-verify', command, re.IGNORECASE))
 
 def is_allowed_git_command(command):
-    """Check if git command is in allowed list."""
-    for pattern in ALLOWED_GIT_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            return True
-    return False
+    """True when this segment is an ungated git verb.
+
+    POSITIONAL, not regex-over-the-string. Segments arrive shlex-rejoined with
+    QUOTES STRIPPED, so a regex allowlist read argument text as if it were the
+    command: `git commit --no-verify -m "see git log"` matched the `git log`
+    pattern and waved the --no-verify commit straight through, while dropping the
+    allowlist entirely made `git commit -m "fix: block git push origin main"`
+    deny as a push to main. Both directions are the same root cause, and looking
+    at the verb's POSITION rather than its text fixes both: token[1] is the
+    subcommand no matter what the message says.
+
+    A --no-verify token anywhere disqualifies, so an allowlisted verb cannot
+    carry it past the gate below (the old pattern's negative lookahead).
+    """
+    parts = command.split()
+    if len(parts) < 2:
+        return False
+    if any(p.lower() == "--no-verify" for p in parts):
+        return False
+    return parts[1].lower() in ALLOWED_GIT_SUBCOMMANDS
 
 def _candidate_repo_roots():
     """Return repo roots to search for an active target session, in priority
@@ -594,7 +607,11 @@ def _check_pr_merge_allowed(command=""):
 # `true |& git push origin main` into a single segment whose argv[0] was `true` -
 # the push gate never saw it. `;;` ends a case arm the same way `;` ends a
 # command.
-_SEGMENT_SEPARATORS = {";", ";;", "&&", "||", "|", "|&", "&"}
+# `)` terminates a case arm pattern, so without it `case x in *) git push origin
+# main;; esac` kept the arm body in the same segment as the case word and both
+# gates saw nothing. Harmless for `(subshell)`: _effective_argv already strips a
+# leading `(`.
+_SEGMENT_SEPARATORS = {";", ";;", "&&", "||", "|", "|&", "&", ")"}
 # Keywords and prefixes that occupy command position, so the REAL command is the
 # next token. With only {then, do} here, every other shell construct hid a
 # command from both gates and the hook emitted no decision at all:
@@ -611,7 +628,7 @@ _SEGMENT_KEYWORDS = {"then", "do", "if", "elif", "else", "while", "until",
 # and `(gh pr merge)` are all still recognized (the old regex-anywhere matcher
 # caught them; command-position matching must not silently drop them).
 _CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
-                 "xargs", "nohup", "stdbuf"}
+                 "xargs", "nohup", "stdbuf", "eval", "coproc"}
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -1118,6 +1135,8 @@ approve the anything too. This command carries more than the one action:
   • a command substitution: $(...), `...`, <(...) or >(...)
     A substitution IS a second command, so it disqualifies the
     approval even though it sits inside one segment.
+  • an output redirection (>, >>) or an unquoted heredoc (<<EOF),
+    which would ride the approval into a file write or an expansion
 
 Run the approved action as its own substitution-free command. To pass a
 long commit message without $(cat ...), use stdin instead:
@@ -1203,6 +1222,17 @@ def _evaluate_git_segment(command, has_approval):
     # --no-verify first returned ("allow", ...) for
     # `git push --no-verify origin main` and never reached this check at all -
     # a single segment, so no cross-segment rule can catch it.
+    # The allowlist runs FIRST, and it is NOT a no-op: _find_git_segments hands
+    # this function a shlex-rejoined argv with QUOTES STRIPPED, so argument text
+    # is re-exposed to the regex matchers below. Without it,
+    # `git commit -m "fix: block git push origin main"` and
+    # `git log --grep "git push origin main"` were denied as pushes to main -
+    # a read-only command refused with a wrong explanation. `git push` is not on
+    # the allowlist, so a real push still reaches the gate, and
+    # `git commit --no-verify` is excluded by the pattern's own lookahead.
+    if is_allowed_git_command(command):
+        return None
+
     is_protected, branch = is_push_to_protected_branch(command)
     if is_protected:
         state = load_state()
@@ -1227,10 +1257,8 @@ def _evaluate_git_segment(command, has_approval):
                 return ("allow", "[Approved] User approved --no-verify commit")
             return ("deny", _no_verify_deny_message(command))
 
-    # No allowlist check here: with the branch and --no-verify gates above, both
-    # branches of an is_allowed_git_command() test returned None, so it was a
-    # no-op. A git verb this hook does not gate is simply not this hook's
-    # business - it declines to opine and the normal permission system decides.
+    # A git verb this hook does not gate is not this hook's business: it declines
+    # to opine and the normal permission system decides.
     return None
 
 
@@ -1374,7 +1402,7 @@ def main():
     tokens = [tok for seg in (segments or []) for tok in seg]
     carries_substitution = (
         any(f in tok for tok in tokens for f in _SUBSTITUTION_FORMS)
-        or any(">" in tok for tok in tokens)
+        or any(tok in _REDIRECT_TOKENS for tok in tokens)
         or bool(_UNQUOTED_HEREDOC_RE.search(command)))
     authorizes_alone = (segments is not None and len(segments) == 1
                         and not carries_substitution)
