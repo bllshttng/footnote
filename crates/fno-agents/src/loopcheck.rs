@@ -3256,13 +3256,10 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 // a reader learns the vocabulary even when two are zero; `other`
                 // is a different session, NOT "independent".
                 //
-                // "all counted" is load-bearing. Readers took the bare tally for
-                // a subtraction - `self N` next to a review count reads as N
-                // dropped - and refused to merge green PRs over it. The fix is a
-                // positive claim, not a disclaimer: a denial ("not a gate")
-                // answers the question by raising it, while stating that the
-                // buckets sum to `n` closes it. The claim is true by
-                // construction, since this fold and `n` filter identically.
+                // "all counted" is load-bearing: readers took the bare tally for
+                // a subtraction and refused to merge green PRs over it. A
+                // positive claim, not a disclaimer - a denial ("not a gate")
+                // answers the question by raising it.
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
