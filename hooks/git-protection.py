@@ -64,6 +64,11 @@ OVERRIDE_LOG = FNO_HOME / "merge-gate-overrides.log"
 # Both markers expire and are consumed: a forgotten sentinel must not linger.
 MARKER_TTL_SECONDS = 300
 
+# Substitution forms that run a command without being a separate segment. Any of
+# them disqualifies an authorization: a command substitution IS a second
+# command, whatever its delimiter, and a PreToolUse allow would cover it.
+_SUBSTITUTION_FORMS = ("`", "$(", "<(", ">(")
+
 # Protected branches - NO COWBOY CODING
 PROTECTED_BRANCHES = ["main", "master", "develop", "dev"]
 
@@ -136,10 +141,18 @@ def load_state():
         return _default_state()
 
 def save_state(state):
-    """Save approval state."""
-    FNO_HOME.mkdir(parents=True, exist_ok=True)
-    with open(STATE_FILE, 'w') as f:
-        json.dump(state, f, indent=2)
+    """Save approval state. Never raises: this runs on the protected-push deny
+    path, and an unguarded OSError (read-only FNO_HOME, a directory at
+    git-protection.json, a full disk) would propagate out of main() and exit
+    non-zero, which a PreToolUse hook treats as a non-blocking error - so the
+    push to main would proceed. Recording the attempt is best-effort; refusing
+    is not. load_state already degrades to defaults for the same reason."""
+    try:
+        FNO_HOME.mkdir(parents=True, exist_ok=True)
+        with open(STATE_FILE, 'w') as f:
+            json.dump(state, f, indent=2)
+    except OSError:
+        pass
 
 def has_recent_approval(state):
     """Check if we have recent approval."""
@@ -859,7 +872,11 @@ def _effective_argv(seg):
         if tok == "(" or _ASSIGN_RE.match(tok):
             i += 1
             continue
-        if tok.rsplit("/", 1)[-1] in _CMD_WRAPPERS:
+        # Lowercased for the same reason the segment finders are: on a
+        # case-insensitive filesystem `ENV git push origin main` and
+        # `SUDO git push ...` resolve and run, and a case-sensitive wrapper test
+        # left the real verb buried at argv[1] so no gate ever saw it.
+        if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
             i += 1
             continue
         break
@@ -1068,13 +1085,22 @@ def _compound_authorization_deny_message(command):
 
 Command: {command}
 
-This carries more than one thing a single-use approval can cover
-(several `gh pr merge` or `--no-verify` segments, or both kinds at
-once), or rides the merge-gate override alongside other commands.
-
 An approval here authorizes exactly ONE action, and a PreToolUse allow
 applies to the WHOLE Bash call - so `gh pr merge 1 && <anything>` would
-approve the anything too. Run the approved action as its own command.
+approve the anything too. This command carries more than the one action:
+
+  • several `gh pr merge` or `--no-verify` segments, or both kinds
+  • another command joined by && / ; / | (a leading `cd` counts too)
+  • a command substitution: $(...), `...`, <(...) or >(...)
+    A substitution IS a second command, so it disqualifies the
+    approval even though it sits inside one segment.
+
+Run the approved action as its own substitution-free command. To pass a
+long commit message without $(cat ...), use stdin instead:
+
+  git commit --no-verify -F - <<'EOF'
+  your message
+  EOF
 
 ═══════════════════════════════════════════════════════════════════
 """
@@ -1301,7 +1327,16 @@ def main():
     # command. Verified: no production caller compounds `gh pr merge` through
     # the Bash tool - the fno/gh call sites all go through subprocess, which
     # this hook never sees.
-    authorizes_alone = segments is not None and len(segments) == 1
+    # A `$(...)` body is re-segmented and so already trips the count, but
+    # _substitution_bodies deliberately skips backticks, and `<(`/`>(` are not
+    # separators, so both stay inside ONE segment. That made the rule decorative
+    # on two live forms: `gh pr merge 12 --body "`id > /tmp/pwn`"` counted as a
+    # lone command and ran the backtick body under the override. Any
+    # substitution form disqualifies an authorization - a command substitution
+    # IS a second command, whatever its delimiter.
+    carries_substitution = any(f in command for f in _SUBSTITUTION_FORMS)
+    authorizes_alone = (segments is not None and len(segments) == 1
+                        and not carries_substitution)
     if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
         _emit("deny", _compound_authorization_deny_message(command))
         sys.exit(0)

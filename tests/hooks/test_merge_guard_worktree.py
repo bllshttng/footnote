@@ -464,6 +464,59 @@ def test_merge_mixed_with_no_verify_approval_is_refused():
         assert marker.exists(), "a refused command must not consume the marker"
 
 
+_BT = chr(96)  # backtick, kept out of the f-strings below for readability
+
+
+def test_substitution_disqualifies_an_authorization():
+    """A `$(...)` body is re-segmented and trips the count, but backticks are
+    skipped by _substitution_bodies and `<(` is not a separator, so both stayed
+    inside ONE segment and passed the lone-command rule while running arbitrary
+    code under the authorization."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        for cmd in (f'gh pr merge 12 --squash --body "{_BT}id{_BT}"',
+                    "gh pr merge 12 --squash --body-file <(id)"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+            assert marker.exists(), cmd
+
+
+def test_heredoc_stdin_commit_is_still_allowed():
+    """The refusal message points at `-F -` with a heredoc as the way to pass a
+    long message without $(cat ...), so that form must actually work."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -F - <<'EOF'\nmsg\nEOF", fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+        assert not flag.exists(), "the approval is consumed on the allow"
+
+
+def test_uppercase_wrapper_does_not_hide_the_verb():
+    """`ENV`/`SUDO` resolve on a case-insensitive filesystem. _effective_argv's
+    wrapper test was case-sensitive, so the real verb stayed at argv[1] and no
+    gate ever saw the push."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("ENV git push origin main", "SUDO git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_unwritable_state_does_not_crash_the_deny_path():
+    """save_state runs first on every protected push. An unguarded OSError would
+    exit non-zero, which a PreToolUse hook treats as non-blocking - so the push
+    to main would proceed. A crash here fails OPEN."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        (fno / "git-protection.json").mkdir()   # a directory where a file goes
+        out, _ = _run_hook_subprocess("git push origin main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert "Traceback" not in out
+
+
 def test_branch_bypass_does_not_also_open_no_verify():
     """"One approval must not open the other door" has to hold in BOTH
     directions. Checking the branch gate first and returning safe on an approved
