@@ -1233,10 +1233,20 @@ def test_genuine_zero_prescribes_the_verb_when_nobody_is_outstanding():
     assert "waiting on" not in reason
 
 
-def test_refusal_reason_unchanged_when_no_coverage_event():
-    """The two non-covered branches keep their wording, and `head` is optional
-    so every existing caller still type-checks."""
-    assert "no gate evaluated" in _merge._coverage_refused_reason(None)
+def test_refusal_reason_names_where_it_searched():
+    """x-f43c: the absence branch names the logs it read.
+
+    It used to assert "no gate evaluated this PR", a conclusion the code cannot
+    support - the gate may well have evaluated it, into a different worktree's
+    events log. Two workers read that line as a policy problem and set about
+    designing around a gate that was already green.
+    """
+    reason = _merge._coverage_refused_reason(None, None, ["/a/.fno/events.jsonl"])
+    assert "no review_coverage event" in reason
+    assert "/a/.fno/events.jsonl" in reason
+    assert "no gate evaluated" not in reason
+    # sources is optional: every existing caller still type-checks.
+    assert "no review_coverage event" in _merge._coverage_refused_reason(None)
     assert "unknown" in _merge._coverage_refused_reason({"coverage": "unknown"})
 
 
@@ -1253,3 +1263,123 @@ def test_stale_head_blocked_receipt_carries_the_cause(enabled, monkeypatch, caps
     reason = _last_json(capsys, stream="err")["reason"]
     assert "0 reviewed" not in reason
     assert "oldhead0" in reason and "newhead0" in reason
+
+
+# ---- x-f43c: coverage attested in a worktree, merge run from canonical ----
+
+
+def _git_repo(root, remote):
+    """A checkout with a remote, so the coverage reader can resolve its slug."""
+    import subprocess
+
+    root.mkdir(parents=True, exist_ok=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(root), check=True)
+    subprocess.run(["git", "remote", "add", "origin", remote], cwd=str(root), check=True)
+    (root / ".fno").mkdir(exist_ok=True)
+    return root
+
+
+def _global_events_at(monkeypatch, root):
+    """Point ``paths.state_dir()`` at a tmp dir and return it.
+
+    Patches the resolver rather than an env var: ``FNO_STATE_DIR`` is not a knob
+    ``state_dir()`` reads, so setting it leaves these tests pointed at the
+    developer's real ``~/.fno`` - where the absence of any matching event makes
+    a negative assertion pass for the wrong reason.
+    """
+    from fno import paths
+
+    root.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(paths, "state_dir", lambda: root)
+    return root
+
+
+def _write_coverage(events_path, pr, *, repo=None, ts="2026-08-08T02:35:30Z", count=1):
+    data = {"pr": pr, "coverage": "covered", "reviewed_count": count, "head_sha": "a3f4b413b"}
+    if repo is not None:
+        data["repo"] = repo
+    events_path.parent.mkdir(parents=True, exist_ok=True)
+    with open(events_path, "a", encoding="utf-8") as fh:
+        fh.write(
+            json.dumps({"ts": ts, "type": "review_coverage", "source": "hook", "data": data})
+            + "\n"
+        )
+
+
+def test_worktree_attestation_is_visible_from_canonical(monkeypatch, tmp_path):
+    """THE REPRO (PR #781). A worker attests coverage inside a worktree, then
+    runs the merge gate from canonical. That refused, because the stop hook
+    writes the events file of the directory it runs in while the gate reads the
+    events file of the directory the merge runs in - so a satisfied gate read as
+    an unsatisfiable one, and the worker escalated a green PR.
+    """
+    remote = "git@github.com:bllshttng/footnote.git"
+    canonical = _git_repo(tmp_path / "canonical", remote)
+    worktree = _git_repo(tmp_path / "wt-x-4c98", remote)
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    # The review ran in the worktree; emit_to_both writes its project log and
+    # the one global log.
+    _write_coverage(worktree / ".fno" / "events.jsonl", 781, repo="footnote")
+    _write_coverage(global_dir / "events.jsonl", 781, repo="footnote")
+
+    # Canonical's own log never saw it. That absence is the whole specimen.
+    assert not (canonical / ".fno" / "events.jsonl").exists()
+
+    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    assert cov is not None, "coverage attested in a worktree must be visible from canonical"
+    assert cov["coverage"] == "covered"
+    assert cov["reviewed_count"] == 1
+
+
+def test_global_coverage_is_scoped_to_this_repo(monkeypatch, tmp_path):
+    """~/.fno/events.jsonl is cross-project, so `pr` alone is not a key: another
+    repo's PR 781 must not satisfy this repo's gate."""
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    _write_coverage(global_dir / "events.jsonl", 781, repo="some-other-repo")
+    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+
+
+def test_global_coverage_without_repo_field_is_not_matched(monkeypatch, tmp_path):
+    """Events predating the `repo` field carry no attribution, so they cannot be
+    claimed by any repo scanning the shared log. Fail closed, not by guess."""
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    _write_coverage(global_dir / "events.jsonl", 781, repo=None)
+    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+
+
+def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
+    """A project-only event from an older binary must not be shadowed by a stale
+    global one: newest ts wins across the two logs."""
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    _write_coverage(
+        global_dir / "events.jsonl", 781, repo="footnote", ts="2026-08-08T01:00:00Z", count=1
+    )
+    _write_coverage(
+        canonical / ".fno" / "events.jsonl", 781, ts="2026-08-08T02:00:00Z", count=5
+    )
+
+    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    assert cov is not None and cov["reviewed_count"] == 5
+
+
+def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
+    """A malformed line in a months-old append-only log must not hide a real
+    attestation: read_events raised on the first bad line, and every caller
+    turns an exception into a refusal, so one corrupt byte would have wedged
+    merges permanently and without explanation."""
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
+    _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    events = canonical / ".fno" / "events.jsonl"
+    events.write_text('{"type": "review_coverage", TRUNCATED\n', encoding="utf-8")
+    _write_coverage(events, 781)
+
+    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    assert cov is not None and cov["coverage"] == "covered"

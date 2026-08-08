@@ -1593,7 +1593,12 @@ fn slug_from_remote_url(url: &str) -> Option<String> {
 /// `remote.origin.url` slug for `cwd` - stable across worktrees and clones.
 /// Best-effort: any git failure or missing remote returns None so the caller
 /// falls through to the basename.
-fn slug_from_git_remote(cwd: &Path) -> Option<String> {
+///
+/// pub(crate): loop-check scopes its `review_coverage` event by this slug so
+/// the event is safe to write into the cross-project global log, and "stable
+/// across worktrees" is precisely the property that lets a merge run from
+/// canonical read coverage attested inside a worktree (x-f43c).
+pub(crate) fn slug_from_git_remote(cwd: &Path) -> Option<String> {
     let url = git_capture(cwd, &["config", "--get", "remote.origin.url"])?;
     slug_from_remote_url(&url)
 }

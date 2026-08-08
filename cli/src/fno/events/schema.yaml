@@ -262,7 +262,10 @@ event_types:
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot)."
-    consumers: [fno-agents loop-check, fno pr]
+        repo:
+          type: string
+          description: "Git-remote slug of the repo the PR belongs to (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. Omitted (never null) when no remote resolves; a reader must then decline to match the event in the global log rather than guess. The slug is stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree."
+    consumers: [fno-agents loop-check, fno pr, fno backlog reconcile]
 
   - name: review_gate_bot_usage_limited
     description: "A required/optional review bot posted a usage-limit comment (quota exhausted) and was dropped from missing_bots so the gate proceeds on remaining evidence rather than wedging until budget death (PR #214). Registered (x-0eaf) so the standard audit tooling sees a drop that was previously written to an unregistered stream. Distinct from review_coverage: this names bots that refused; coverage is the count that reviewed."
