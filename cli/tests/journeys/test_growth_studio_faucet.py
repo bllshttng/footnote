@@ -163,3 +163,16 @@ def test_evaluators_run_over_a_sample_draft(tmp_path: Path) -> None:
     assert run("factual-check.sh", good, truth) == 0
     assert run("factual-check.sh", bad, truth) != 0
     assert run("brand-check.sh", good) == 0
+
+    identity = PACK_DIR / "assets" / "brand-identity.md"
+
+    # A standalone byline line (the declared `byline` founder form) is a
+    # signature, not wrapped prose: brand-check with the identity skips it.
+    signed = tmp_path / "signed.md"
+    signed.write_text("# Plan\n\nA cited plan.\n\nJ.N. Choi\n", encoding="utf-8")
+    assert run("brand-check.sh", signed, identity) == 0
+
+    # A draft carrying a declared `never` founder-name form fails brand review.
+    banned_name = tmp_path / "banned_name.md"
+    banned_name.write_text("# Plan\n\nSigned, Jason Choi.\n", encoding="utf-8")
+    assert run("brand-check.sh", banned_name, identity) != 0

@@ -7,13 +7,15 @@
 # (U+2014), or a prose paragraph that wraps one sentence across physical lines.
 # When a brand-identity path is given, also fails on a founder-name form
 # declared `never:` under its `## Founder` block: the per-project name rule,
-# enforced rather than left to prose.
+# enforced rather than left to prose. Omitting brand-identity skips the
+# founder-name check and warns, so the skip is visible rather than silent.
 #
 # POSIX-portable: no mapfile (bash 3.2), no grep -P (BSD grep). The em dash is
 # matched by its UTF-8 byte sequence so no literal em dash appears in source.
+# Empty arrays are guarded so expansion under `set -u` does not crash bash 3.2.
 set -euo pipefail
 
-draft="${1:?usage: brand-check.sh <draft>}"
+draft="${1:?usage: brand-check.sh <draft> [brand-identity]}"
 [[ -f "$draft" ]] || { echo "brand-check: draft not found: $draft" >&2; exit 2; }
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -23,8 +25,11 @@ voice="$script_dir/../assets/brand-voice.md"
 identity="${2:-}"
 never_names=()
 allowed_names=()
-if [[ -n "$identity" ]]; then
-  [[ -f "$identity" ]] || { echo "brand-check: brand-identity not found: $identity" >&2; exit 2; }
+if [[ -z "$identity" ]]; then
+  echo "brand-check: no brand-identity given; founder-name forms not enforced" >&2
+elif [[ ! -f "$identity" ]]; then
+  echo "brand-check: brand-identity not found: $identity" >&2; exit 2
+else
   while IFS=$'\t' read -r kind val; do
     [[ -z "$val" ]] && continue
     case "$kind" in
@@ -45,6 +50,23 @@ if [[ -n "$identity" ]]; then
       if (val != "") print kind "\t" val
     }
   ' "$identity")
+  # A never-form that is a substring of a declared allowed-form would
+  # false-positive on valid drafts; warn and drop it rather than arm the trap.
+  if [ "${#never_names[@]}" -gt 0 ] && [ "${#allowed_names[@]}" -gt 0 ]; then
+    cleaned=()
+    for nv in "${never_names[@]}"; do
+      clash=0
+      for av in "${allowed_names[@]}"; do
+        case "$av" in *"$nv"*) clash=1; break ;; esac
+      done
+      if [ "$clash" -eq 1 ]; then
+        echo "brand-check: never form '$nv' is a substring of an allowed form; not enforced" >&2
+      else
+        cleaned+=("$nv")
+      fi
+    done
+    never_names=("${cleaned[@]+"${cleaned[@]}"}")
+  fi
 fi
 
 fail=0
@@ -81,12 +103,18 @@ fi
 # 3. One sentence per physical line. A prose line that does not end in terminal
 #    punctuation (. ! ? : ;) is a sentence split across lines, because a
 #    complete sentence on one line always terminates. Skip headings, list
-#    items, tables, code fences, image lines, and blank lines.
-#    A standalone founder-name line (a byline) is a signature, not a wrapped
-#    sentence, so declared formal/byline forms are skipped too.
-allowed_csv="$(IFS=,; printf '%s' "${allowed_names[*]}")"
-wrapped="$(awk -v allowed="$allowed_csv" '
-  BEGIN { infence = 0; n = split(allowed, a, ","); for (i=1; i<=n; i++) if (a[i] != "") allowed_set[a[i]] = 1 }
+#    items, tables, code fences, image lines, blank lines, and a standalone
+#    founder-name line (a byline is a signature, not a wrapped sentence). The
+#    comparison is case-insensitive so a byline emitted in different case from
+#    the declared form is still skipped. allowed names are newline-delimited
+#    (a comma in a form would corrupt a CSV join).
+allowed_nl=""
+if [ "${#allowed_names[@]}" -gt 0 ]; then
+  allowed_nl="$(printf '%s\n' "${allowed_names[@]}")"
+fi
+export allowed_nl
+wrapped="$(awk '
+  BEGIN { infence = 0; n = split(ENVIRON["allowed_nl"], a, "\n"); for (i=1; i<=n; i++) if (a[i] != "") allowed_set[tolower(a[i])] = 1 }
   /^[[:space:]]*$/ { next }
   /^```/ { infence = !infence; next }
   infence { next }
@@ -97,7 +125,7 @@ wrapped="$(awk -v allowed="$allowed_csv" '
   {
     trimmed = $0
     gsub(/^[[:space:]]+|[[:space:]]+$/, "", trimmed)
-    if (trimmed in allowed_set) next
+    if (tolower(trimmed) in allowed_set) next
     last = substr($0, length($0), 1)
     if (last !~ /[.!?:;]/) { print NR }
   }
