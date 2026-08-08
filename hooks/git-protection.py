@@ -651,6 +651,9 @@ _WRAPPER_VALUE_OPTS = {"-u", "-g", "-n", "-C", "-s", "-k", "-p", "--user",
                        "--group", "--chdir", "--signal", "--kill-after"}
 
 
+_SHELL_RUNNER_RE = re.compile(r'\b(sh|bash|zsh|dash|ksh)\b[^|;&]*\s-\w*c\b')
+
+
 def _is_dash_c(tok):
     """True for `-c` and the clustered short forms (`-lc`, `-cx`, `-ic`)."""
     return (tok.startswith("-") and not tok.startswith("--")
@@ -951,10 +954,15 @@ def _effective_argv(seg):
         # `sh -c "..."`, and the clustered forms people actually type: `bash -lc`,
         # `sh -cx`, `bash -ic`. Matching only the exact token `-c` covered the
         # one spelling nobody uses.
-        if (tok.rsplit("/", 1)[-1].lower() in _SHELL_RUNNERS
-                and i + 1 < n and _is_dash_c(seg[i + 1])):
-            i += 2
-            continue
+        if tok.rsplit("/", 1)[-1].lower() in _SHELL_RUNNERS:
+            # Scan past the runner's OWN options for its -c: testing only the
+            # very next token missed `zsh -f -c ...` and `bash -l -c ...`.
+            j = i + 1
+            while j < n and seg[j].startswith("-") and not _is_dash_c(seg[j]):
+                j += 1
+            if j < n and _is_dash_c(seg[j]) and j + 1 < n:
+                i = j + 1
+                continue
         # A wrapper's OWN options, and their values: `env -i`, `nice -n 5`,
         # `timeout 10`, `sudo -u x`. Stopping at the first non-wrapper token let
         # any optioned wrapper hide the verb entirely.
@@ -993,30 +1001,48 @@ _GIT_GLOBAL_FLAGS = {"-p", "--paginate", "--no-pager", "--bare", "--no-replace-o
 def _strip_git_global_opts(argv):
     """Drop git's global options so argv[1] is the real subcommand.
 
-    Returns argv[0] followed by the subcommand onward. A `-c core.hooksPath=...`
-    value is PRESERVED in the output rather than dropped, so the caller can see
-    it: setting hooksPath elsewhere disables .git/hooks/pre-push, which IS the
-    protected-branch guard.
+    Returns argv[0] followed by the subcommand onward. A hooksPath override is
+    detected separately by _sets_hooks_path, from the ORIGINAL argv - carrying
+    its value through in the returned string made the push parsers read
+    `core.hooksPath=x` as a named destination branch.
     """
     head, rest = argv[:1], argv[1:]
-    keep = []
     i, n = 0, len(rest)
     while i < n:
         tok = rest[i]
         if tok in _GIT_GLOBAL_VALUE_OPTS:
-            if i + 1 < n and "core.hookspath" in rest[i + 1].lower():
-                keep.append(rest[i + 1])
             i += 2          # option plus its value
             continue
-        if "core.hookspath" in tok.lower():
-            keep.append(tok)
         if tok in _GIT_GLOBAL_FLAGS or (
                 tok.startswith("--") and "=" in tok
                 and tok.split("=", 1)[0] in _GIT_GLOBAL_VALUE_OPTS):
             i += 1
             continue
         break
-    return head + rest[i:] + keep
+    return head + rest[i:]
+
+
+def _sets_hooks_path(argv):
+    """True when this git invocation points core.hooksPath elsewhere, which
+    disables .git/hooks/pre-push - and that hook IS the protected-branch guard,
+    so it is a --no-verify by another name.
+
+    POSITIONAL, over argv: a substring scan of the rejoined segment refused
+    `git commit -m "docs: explain core.hooksPath guard"`, re-creating the exact
+    quote-stripped false refusal this file fixed for the allowlist. Covers both
+    spellings - the per-command `-c core.hooksPath=x` and the PERSISTENT
+    `git config core.hooksPath x`, after which every later commit and push in
+    the repo is unguarded with no flag on them at all.
+    """
+    for idx, tok in enumerate(argv):
+        low = tok.lower()
+        if low.startswith("core.hookspath="):
+            return True                      # -c core.hooksPath=x
+        if low == "core.hookspath":
+            prev = argv[idx - 1].lower() if idx else ""
+            if prev == "-c" or "config" in [a.lower() for a in argv[1:idx]]:
+                return True                  # git config core.hooksPath x
+    return False
 
 
 def _writes_a_file(tokens):
@@ -1061,7 +1087,11 @@ def _has_unquoted_heredoc(command):
             i += 1
             continue
         delim, is_dash = opener
-        unquoted = not re.search(r"<<-?[ \t]*['\"]", lines[i])
+        # Derived from THIS opener's own delimiter, not a fresh scan of the whole
+        # line: a line carrying a quoted `<<'X'` inside an argument plus a real
+        # `<<EOF` later read as quoted and skipped the disqualifier.
+        unquoted = bool(re.search(r"<<-?[ \t]*" + re.escape(delim) + r"(\s|$)",
+                                  lines[i]))
         # Skip this heredoc's body: it is data, not command text.
         i += 1
         while i < n:
@@ -1114,7 +1144,13 @@ def _find_git_segments(segments):
     for seg in segments:
         argv = _effective_argv(seg)
         if argv and argv[0].rsplit("/", 1)[-1].lower() == "git":
-            out.append(" ".join(_strip_git_global_opts(argv)))
+            normalized = _strip_git_global_opts(argv)
+            # Encoded as a --no-verify flag rather than carried as a value: it
+            # IS a --no-verify by another name, and a `--`-prefixed token is
+            # stripped by the push parsers instead of read as a branch.
+            if _sets_hooks_path(argv):
+                normalized = normalized + ["--no-verify"]
+            out.append(" ".join(normalized))
     return out
 
 
@@ -1392,19 +1428,6 @@ def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
     # subcommand, so `git status && git push origin main 'unbal` was allowlisted
     # by `status` and the push was never evaluated. A fallback that is supposed
     # to be deny-leaning must not consult an allowlist it cannot position.
-    # Ahead of the allowlist, because `config` IS allowlisted. core.hooksPath
-    # points git at a different hooks directory, which disables
-    # .git/hooks/pre-push - and that hook IS the protected-branch guard. So it is
-    # a --no-verify by another name in BOTH spellings: the per-command
-    # `git -c core.hooksPath=/dev/null ...` and the PERSISTENT
-    # `git config core.hooksPath /dev/null`, after which every later commit and
-    # push in the repo is unguarded with no flag on them at all. Closing the
-    # first door and leaving the second is a guard on one of two paths.
-    if "core.hookspath" in command.lower():
-        if has_approval:
-            return ("allow", "[Approved] User approved a hooks-path override")
-        return ("deny", _no_verify_deny_message(command))
-
     if allowlist_ok and is_allowed_git_command(command):
         return None
 
@@ -1424,13 +1447,15 @@ def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
         print(f"[Git Protection: Approved] Emergency push to {branch}: "
               f"{command}", file=sys.stderr)
 
-    # --no-verify before is_allowed_git_command: an allowed verb like
-    # `git commit` must still be denied when it carries --no-verify.
-    for pattern in NO_VERIFY_PATTERNS:
-        if re.search(pattern, command, re.IGNORECASE):
-            if has_approval:
-                return ("allow", "[Approved] User approved --no-verify commit")
-            return ("deny", _no_verify_deny_message(command))
+    # --no-verify, matched as a WHOLE TOKEN and for ANY subcommand. The old
+    # patterns only covered commit/push, so the synthetic flag standing in for a
+    # core.hooksPath override (`git config core.hooksPath ...`) never fired. This
+    # sits AFTER the branch gate, which outranks it: an approval for the
+    # hooks door must never open the branch door, in either direction.
+    if any(p.lower() == "--no-verify" for p in command.split()):
+        if has_approval:
+            return ("allow", "[Approved] User approved --no-verify commit")
+        return ("deny", _no_verify_deny_message(command))
 
     # A git verb this hook does not gate is not this hook's business: it declines
     # to opine and the normal permission system decides.
@@ -1587,8 +1612,21 @@ def main():
     # legitimate auto-merge, with a wrong reason. The two-factor path keeps its
     # prior behaviour there; the marker override does not, since it needs parsed
     # segments to prove the merge stands alone (see its own guard below).
-    if segments is not None:
-        authorizes_alone = len(segments) == 1 and not carries_substitution
+    # A shell runner disqualifies outright: _effective_argv re-tokenizes its
+    # quoted argument so the inner verb IS gated, but the outer command is still
+    # ONE segment, so `bash -c "gh pr merge 42 && rm -rf /tmp/x"` counted as
+    # standing alone while the unwrapped form was refused.
+    wrapped = bool(_SHELL_RUNNER_RE.search(command))
+    if segments is None:
+        # Nothing can be counted on the unparseable fallback, so nothing may be
+        # authorized there. The merge gate keeps its own path (it is
+        # evidence-backed and pre-existing); a single-use approval does not.
+        if git_allow is not None:
+            _emit("deny", _compound_authorization_deny_message(command))
+            sys.exit(0)
+    else:
+        authorizes_alone = (len(segments) == 1 and not carries_substitution
+                            and not wrapped)
         if (merge_seg is not None or git_allow is not None) and not authorizes_alone:
             _emit("deny", _compound_authorization_deny_message(command))
             sys.exit(0)

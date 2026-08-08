@@ -487,6 +487,57 @@ def test_shell_keywords_do_not_hide_a_push_to_main():
             assert '"permissionDecision": "deny"' in out, cmd
 
 
+def test_hooks_path_override_cannot_open_the_branch_gate():
+    """The hooks door must not open the branch door, in either direction. With
+    the approval flag present, a hooksPath override on a push to main returned
+    allow - the exact inversion the branch-gate-first ordering exists to stop."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git -c core.hooksPath=/dev/null push origin main", fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+
+
+def test_hooks_path_check_is_positional():
+    """A substring scan over quote-stripped text refused a commit whose MESSAGE
+    named core.hooksPath - the same false refusal the allowlist fix removed."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        out, rc = _run_hook_subprocess(
+            'git commit -m "docs: explain core.hooksPath guard"', fno, cwd=td)
+        assert '"permissionDecision": "deny"' not in out and rc == 0
+
+
+def test_shell_runner_cannot_smuggle_a_sibling_past_an_authorization():
+    """_effective_argv re-tokenizes a runner's quoted argument so the inner verb
+    is gated, but the OUTER command is still one segment - so the wrapped form
+    counted as standing alone while the unwrapped form was refused."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        out, _ = _run_hook_subprocess(
+            'bash -c "gh pr merge 42 && rm -rf /tmp/zzz"', fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert marker.exists()
+        for cmd in ('zsh -f -c "git push origin main"',
+                    'bash -l -c "git push origin main"'):
+            out2, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out2, cmd
+
+
+def test_fallback_does_not_authorize_a_no_verify_allow():
+    """Nothing can be counted on the unparseable fallback, so nothing may be
+    authorized there either - the guard had been reasoned about for the merge
+    path only, leaving the approval path to cover an arbitrary sibling."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -m 'it's ready' && rm -rf /tmp/zzz",
+            fno, cwd=td)
+        assert '"permissionDecision": "deny"' in out
+        assert flag.exists()
+
+
 def test_wrapper_options_do_not_hide_the_verb():
     """A wrapper that takes its own option pushed the verb past argv[0], and
     matching only the exact token `-c` covered the one `bash -c` spelling nobody
