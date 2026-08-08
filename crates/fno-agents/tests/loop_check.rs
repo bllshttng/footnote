@@ -5592,7 +5592,10 @@ fn coverage_receipt_states_the_tally_is_not_a_subtraction() {
 
 /// Pull `<label><n>` out of the receipt line for the sum check above.
 fn line_bucket(line: &str, label: &str) -> usize {
-    let tail = line.split(label).nth(1).unwrap_or_else(|| panic!("no {label:?} in {line}"));
+    let tail = line
+        .split(label)
+        .nth(1)
+        .unwrap_or_else(|| panic!("no {label:?} in {line}"));
     tail.chars()
         .take_while(|c| c.is_ascii_digit())
         .collect::<String>()
