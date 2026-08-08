@@ -165,9 +165,9 @@ def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
 def _coverage_sources(repo: str) -> list[str]:
     """The events logs a coverage read consults, for the refusal text."""
     try:
-        from fno.pr._reviews import latest_review_coverage
+        from fno.pr._reviews import coverage_sources
 
-        return latest_review_coverage(0, repo)[1]
+        return coverage_sources(repo)
     except Exception:  # noqa: BLE001 - naming the location is best-effort
         return []
 

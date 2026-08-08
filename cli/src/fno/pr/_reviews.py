@@ -155,6 +155,41 @@ def _scan_coverage(
     return latest, latest_ts
 
 
+def _coverage_logs(
+    cwd: Optional[str] = None, project_events: Optional["Path"] = None
+) -> tuple["Path", "Optional[Path]", Optional[str]]:
+    """The logs a coverage read consults: ``(project, global_or_None, slug)``.
+
+    The global log is None when it cannot be scanned safely - no ``~/.fno``, the
+    same file as the project log, or no resolvable git-remote slug. Without a
+    slug nothing in the cross-project log can be attributed to this repo, so
+    scanning it could only produce a cross-repo false positive.
+
+    Separate from the scan so a caller that only wants to NAME the logs (the
+    refusal text) does not read tens of MB of JSONL to learn two filenames.
+    """
+    root = _repo_root(cwd)
+    project_path = (
+        project_events if project_events is not None else root / ".fno" / "events.jsonl"
+    )
+    try:
+        from fno import paths as _paths
+
+        global_path = _paths.state_dir() / "events.jsonl"
+        slug = _paths._slug_from_git_remote(root)
+    except Exception:  # noqa: BLE001 - no global log -> project log alone
+        return project_path, None, None
+    if global_path == project_path or not slug:
+        return project_path, None, slug
+    return project_path, global_path, slug
+
+
+def coverage_sources(cwd: Optional[str] = None) -> list[str]:
+    """The event logs a coverage read would consult, for a refusal message."""
+    project_path, global_path, _ = _coverage_logs(cwd)
+    return [str(project_path)] + ([str(global_path)] if global_path is not None else [])
+
+
 def latest_review_coverage(
     pr_number: int,
     cwd: Optional[str] = None,
@@ -181,25 +216,12 @@ def latest_review_coverage(
     ``project_events`` overrides the derived project log for callers that hold
     an explicit path (the post-merge gate-escape detector, and its tests).
     """
-    root = _repo_root(cwd)
-    project_path = project_events if project_events is not None else root / ".fno" / "events.jsonl"
-
-    global_path = None
-    slug = None
-    try:
-        from fno import paths as _paths
-
-        global_path = _paths.state_dir() / "events.jsonl"
-        slug = _paths._slug_from_git_remote(root)
-    except Exception:  # noqa: BLE001 - no global log -> project log alone
-        global_path = None
+    project_path, global_path, slug = _coverage_logs(cwd, project_events)
 
     consulted = [str(project_path)]
     best, best_ts = _scan_coverage(project_path, pr_number)
 
-    # No slug means nothing in the global log can be attributed to this repo, so
-    # scanning it could only produce a cross-repo false positive. Skip it.
-    if global_path is not None and global_path != project_path and slug:
+    if global_path is not None:
         consulted.append(str(global_path))
         other, other_ts = _scan_coverage(global_path, pr_number, repo_slug=slug)
         if other is not None and (best is None or other_ts > best_ts):
