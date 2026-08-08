@@ -3255,6 +3255,14 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 // origin, not its verdict). All three buckets are always shown so
                 // a reader learns the vocabulary even when two are zero; `other`
                 // is a different session, NOT "independent".
+                //
+                // "all counted" is load-bearing. Readers took the bare tally for
+                // a subtraction - `self N` next to a review count reads as N
+                // dropped - and refused to merge green PRs over it. The fix is a
+                // positive claim, not a disclaimer: a denial ("not a gate")
+                // answers the question by raising it, while stating that the
+                // buckets sum to `n` closes it. The claim is true by
+                // construction, since this fold and `n` filter identically.
                 let (self_n, other_n, unknown_n) = rep
                     .verdicts
                     .iter()
@@ -3265,7 +3273,7 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                         AttestationOrigin::Unknown => (s, o, u + 1),
                     });
                 return format!(
-                    "review coverage: {} reviewed ({}) - self {}, other {}, unknown {}",
+                    "review coverage: {} reviewed ({}) - all counted; origin self {}, other {}, unknown {}",
                     n,
                     reviewed_names.join(", "),
                     self_n,
@@ -3290,7 +3298,7 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .filter(|v| v.verdict == CoverageVerdict::Absent)
                 .count();
             format!(
-                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. Nothing reviewed this diff.",
+                "review coverage: 0 reviewed, {} refused ({}), {} errored, {} absent. No head-pinned pass attestation for this head - run the review verb at HEAD.",
                 refused.len(),
                 refused.join(", "),
                 errored,
