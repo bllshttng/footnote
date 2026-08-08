@@ -176,3 +176,13 @@ def test_evaluators_run_over_a_sample_draft(tmp_path: Path) -> None:
     banned_name = tmp_path / "banned_name.md"
     banned_name.write_text("# Plan\n\nSigned, Jason Choi.\n", encoding="utf-8")
     assert run("brand-check.sh", banned_name, identity) != 0
+
+    # A never-form that is a case-variant substring of an allowed form is
+    # dropped, so a draft using the allowed formal form is not false-positived.
+    sub_identity = tmp_path / "sub-identity.md"
+    sub_identity.write_text(
+        "## Founder\n\nformal: Jason Noah Choi\nnever: jason\n", encoding="utf-8"
+    )
+    formal_draft = tmp_path / "formal.md"
+    formal_draft.write_text("By Jason Noah Choi.\n", encoding="utf-8")
+    assert run("brand-check.sh", formal_draft, sub_identity) == 0

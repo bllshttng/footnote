@@ -56,8 +56,10 @@ else
     cleaned=()
     for nv in "${never_names[@]}"; do
       clash=0
+      nvl="$(printf '%s' "$nv" | tr '[:upper:]' '[:lower:]')"
       for av in "${allowed_names[@]}"; do
-        case "$av" in *"$nv"*) clash=1; break ;; esac
+        avl="$(printf '%s' "$av" | tr '[:upper:]' '[:lower:]')"
+        case "$avl" in *"$nvl"*) clash=1; break ;; esac
       done
       if [ "$clash" -eq 1 ]; then
         echo "brand-check: never form '$nv' is a substring of an allowed form; not enforced" >&2
