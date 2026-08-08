@@ -83,6 +83,11 @@ pub enum TerminationReason {
 #[derive(Debug)]
 struct Manifest {
     session_id: Option<String>,
+    /// The harness session that ran `fno target init` in this worktree
+    /// (claude UUID / codex thread / etc). Distinct from `session_id`, which is
+    /// the target run id: the two differ, and this is the value an attestation's
+    /// attester_session_id is compared against to detect self-attestation.
+    harness_session_id: Option<String>,
     created_at: Option<String>,
     attended: bool, // default true when absent
     advisory: bool,
@@ -106,6 +111,7 @@ impl Default for Manifest {
     fn default() -> Self {
         Self {
             session_id: None,
+            harness_session_id: None,
             created_at: None,
             attended: true, // spec: attended defaults to true
             advisory: false,
@@ -171,6 +177,17 @@ fn parse_manifest(content: &str) -> Option<Manifest> {
                 "session_id" => {
                     if m.session_id.is_none() {
                         m.session_id = Some(v.to_string());
+                    }
+                }
+                "harness_session_id" => {
+                    // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`,
+                    // so an unresolvable session lands as the literal string "null"
+                    // (and an empty value as ""). Treat both as absent - the shell
+                    // side (target-stop-hook.sh) strips "null" the same way - or a
+                    // real attester compared against Some("null") mislabels as
+                    // other_session instead of unknown.
+                    if v != "null" && !v.is_empty() {
+                        m.harness_session_id = Some(v.to_string());
                     }
                 }
                 "created_at" => m.created_at = Some(v.to_string()),
@@ -1379,6 +1396,7 @@ fn read_pr_info(
     nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
+    author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
     // Read 1: PR state + number + head OID + mergeability
     let pr_view_out = Command::new(gh_bin)
@@ -1559,7 +1577,8 @@ fn read_pr_info(
         // unaffected. Coverage's github axis is empty here (no logins read),
         // so coverage is the local axis alone - which is exactly how a
         // worker-run /code-review counts even on a no-required-bots config.
-        let coverage = classify_coverage(&[], &[], &events_text, head_sha, &[], false);
+        let coverage =
+            classify_coverage(&[], &[], &events_text, head_sha, &[], false, author_session);
         (
             "none".to_string(),
             reviewers_ok,
@@ -1743,6 +1762,7 @@ fn read_pr_info(
             head_sha,
             &gh_logins,
             true,
+            author_session,
         );
         (
             activity_ts,
@@ -2867,6 +2887,24 @@ impl Coverage {
     }
 }
 
+/// Authorship of a local attestation: did the authoring session emit it, did a
+/// different session, or is that unknowable. Computed from the attestation's
+/// `attester_session_id` against the manifest's `harness_session_id` and
+/// EXCLUDED from the coverage count, mirroring `human_approval`.
+///
+/// The middle state is deliberately not `Independent`. The manifest names the
+/// session that ran `fno target init` in the worktree, so a self-handoff
+/// successor or a second agent in a shared worktree is a different session and
+/// is still not independent. A match is strong evidence of self-attestation; a
+/// mismatch is weak evidence of anything.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AttestationOrigin {
+    SelfAttested,
+    OtherSession,
+    Unknown,
+}
+
 /// One reviewer's classification, for the `review_coverage` event and receipts.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerVerdict {
@@ -2879,6 +2917,16 @@ pub struct ReviewerVerdict {
     /// One predicate flip in `CoverageReport::coverage_count` includes it.
     #[serde(skip_serializing_if = "is_false")]
     pub human_approval: bool,
+    /// Whether a local attestation was emitted by the authoring session
+    /// (`SelfAttested`), a different one (`OtherSession`), or that is
+    /// unknowable (`Unknown`). Excluded from `coverage_count`: whether
+    /// self-attested coverage should count is a later gate decision, not this
+    /// field. Only meaningful on `local_attestation` verdicts; github_app and
+    /// human approvals carry `Unknown` (omitted on serialize) since a GitHub
+    /// login has no session to compare. Defaults to `Unknown` so every
+    /// pre-existing attestation lands there unchanged.
+    #[serde(skip_serializing_if = "is_attestation_origin_unknown")]
+    pub attestation_origin: AttestationOrigin,
 }
 
 /// The coverage over a PR plus the per-reviewer verdicts that produced it.
@@ -2909,14 +2957,34 @@ fn is_false(b: &bool) -> bool {
     !b
 }
 
-/// Distinct local reviewers whose LATEST head-pinned attestation is `pass`
-/// (events.jsonl is append-ordered; a later `fail` revokes, a later `pass`
-/// restores - mirrors `unattested_reviewers_scan`'s retraction handling). Pure:
-/// scans text, no IO. Presence-based: counts any reviewer regardless of the
-/// configured `reviewers` list, so a worker-run `/code-review` counts even when
-/// `reviewers: []`.
-fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<String> {
-    let mut latest_at_head: std::collections::HashMap<String, bool> =
+fn is_attestation_origin_unknown(o: &AttestationOrigin) -> bool {
+    matches!(o, AttestationOrigin::Unknown)
+}
+
+/// Label a local attestation's authorship from its emitting session vs the
+/// worktree's authoring session. A match is `SelfAttested`; a non-empty
+/// mismatch is `OtherSession` (NOT "independent" - a self-handoff successor or
+/// a shared-worktree sibling is a different session and still not independent);
+/// an empty/absent attester, or an unknown author, is `Unknown`. Failing open
+/// on unknown authorship keeps the pre-change verdict set byte-identical.
+fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> AttestationOrigin {
+    match (attester, author) {
+        (Some(a), Some(auth)) if a == auth => AttestationOrigin::SelfAttested,
+        (Some(_), Some(_)) => AttestationOrigin::OtherSession,
+        _ => AttestationOrigin::Unknown,
+    }
+}
+
+/// Distinct local reviewers whose LATEST head-pinned attestation is `pass`,
+/// each paired with that pass's `attester_session_id` (the harness session that
+/// emitted it, or None when the event predates the field). events.jsonl is
+/// append-ordered; a later `fail` revokes, a later `pass` restores - mirrors
+/// `unattested_reviewers_scan`'s retraction handling. Pure: scans text, no IO.
+/// Presence-based: counts any reviewer regardless of the configured `reviewers`
+/// list, so a worker-run `/code-review` counts even when `reviewers: []`.
+fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, Option<String>)> {
+    // reviewer -> (is_pass, attester_session_id of the latest-at-head event).
+    let mut latest_at_head: std::collections::HashMap<String, (bool, Option<String>)> =
         std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -2939,14 +3007,23 @@ fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<String> {
             continue;
         }
         let is_pass = val.pointer("/data/verdict").and_then(|v| v.as_str()) == Some("pass");
-        latest_at_head.insert(r.trim_start_matches('/').to_string(), is_pass);
+        // attester_session_id is the live session that emitted; None on events
+        // that predate the field (the whole backlog), which classifies as
+        // Unknown downstream. Empty string is treated as None so the producer's
+        // "unobservable" sentinel and the field's absence read identically.
+        let attester = val
+            .pointer("/data/attester_session_id")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .filter(|s| !s.is_empty());
+        latest_at_head.insert(r.trim_start_matches('/').to_string(), (is_pass, attester));
     }
-    let mut out: Vec<String> = latest_at_head
+    let mut out: Vec<(String, Option<String>)> = latest_at_head
         .into_iter()
-        .filter(|(_, pass)| *pass)
-        .map(|(r, _)| r)
+        .filter(|(_, (pass, _))| *pass)
+        .map(|(r, (_, attester))| (r, attester))
         .collect();
-    out.sort();
+    out.sort_by(|a, b| a.0.cmp(&b.0));
     out
 }
 
@@ -2975,6 +3052,13 @@ fn author_is_bot(author: &str, github_app_logins: &[String]) -> bool {
 /// positive local evidence survives a bot outage, because the local lane is
 /// never rate-limited by the bot's quota (the PR #214 failure in a new hat,
 /// which this node exists to escape). (x-0eaf)
+///
+/// `author_session` is the manifest's `harness_session_id` (the session that ran
+/// `fno target init` in this worktree). Each local attestation's
+/// `attester_session_id` is compared against it to label `attestation_origin`;
+/// `None` (no manifest / unparseable) leaves every local verdict `Unknown`,
+/// failing open on unknown authorship so the coverage verdict is byte-identical
+/// to the pre-change behavior. The origin is excluded from the coverage count.
 pub fn classify_coverage(
     reviews: &[Value],
     comments: &[Value],
@@ -2982,6 +3066,7 @@ pub fn classify_coverage(
     head_sha: &str,
     github_app_logins: &[String],
     github_read_ok: bool,
+    author_session: Option<&str>,
 ) -> CoverageReport {
     let local_passes = local_head_pinned_passes(events_text, head_sha);
     let mut verdicts: Vec<ReviewerVerdict> = Vec::new();
@@ -3048,6 +3133,7 @@ pub fn classify_coverage(
                 name: login.to_string(),
                 verdict,
                 human_approval: false,
+                attestation_origin: AttestationOrigin::Unknown,
             });
         }
         // (3) Known-App reviewers NOT in the configured list still count
@@ -3059,6 +3145,7 @@ pub fn classify_coverage(
                     name: author.clone(),
                     verdict: CoverageVerdict::Reviewed,
                     human_approval: false,
+                    attestation_origin: AttestationOrigin::Unknown,
                 });
             }
         }
@@ -3086,18 +3173,21 @@ pub fn classify_coverage(
                     name: author.to_string(),
                     verdict: CoverageVerdict::Reviewed,
                     human_approval: true,
+                    attestation_origin: AttestationOrigin::Unknown,
                 });
             }
         }
     }
 
-    // local_attestation axis: one `reviewed` per distinct head-pinned pass.
-    for name in &local_passes {
+    // local_attestation axis: one `reviewed` per distinct head-pinned pass,
+    // labeled with whether the authoring session emitted it.
+    for (name, attester) in &local_passes {
         verdicts.push(ReviewerVerdict {
             producer: CoverageProducer::LocalAttestation,
             name: name.clone(),
             verdict: CoverageVerdict::Reviewed,
             human_approval: false,
+            attestation_origin: classify_attestation_origin(attester.as_deref(), author_session),
         });
     }
 
@@ -3153,10 +3243,30 @@ pub fn coverage_receipt_line(rep: &CoverageReport) -> String {
                 .map(|v| v.name.as_str())
                 .collect();
             if *n > 0 {
+                // Origin breakdown over EVERY reviewed (non-human) verdict, folded
+                // by its attestation_origin, so the three buckets sum to `n`. The
+                // self-attestation hazard lives on the local lane; a GitHub App
+                // review has no session to compare and reads `unknown` here (it is
+                // named above, so a reader sees it reviewed - "unknown" is its
+                // origin, not its verdict). All three buckets are always shown so
+                // a reader learns the vocabulary even when two are zero; `other`
+                // is a different session, NOT "independent".
+                let (self_n, other_n, unknown_n) = rep
+                    .verdicts
+                    .iter()
+                    .filter(|v| v.verdict == CoverageVerdict::Reviewed && !v.human_approval)
+                    .fold((0, 0, 0), |(s, o, u), v| match v.attestation_origin {
+                        AttestationOrigin::SelfAttested => (s + 1, o, u),
+                        AttestationOrigin::OtherSession => (s, o + 1, u),
+                        AttestationOrigin::Unknown => (s, o, u + 1),
+                    });
                 return format!(
-                    "review coverage: {} reviewed ({})",
+                    "review coverage: {} reviewed ({}) - self {}, other {}, unknown {}",
                     n,
-                    reviewed_names.join(", ")
+                    reviewed_names.join(", "),
+                    self_n,
+                    other_n,
+                    unknown_n
                 );
             }
             let refused: Vec<&str> = rep
@@ -4713,6 +4823,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &nudge_configs,
             &head_sha,
             &project_events,
+            manifest.harness_session_id.as_deref(),
         );
 
         match done_result {
@@ -5425,6 +5536,7 @@ fn run_done(
     nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
+    author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
     read_pr_info(
         gh_bin,
@@ -5438,6 +5550,7 @@ fn run_done(
         nudge_configs,
         head_sha,
         events_path,
+        author_session,
     )
 }
 
@@ -6501,6 +6614,31 @@ mod tests {
         assert_eq!(m.created_at.as_deref(), Some("2026-06-05T00:00:00Z"));
         assert!(m.attended);
         assert!(m.legacy_status.is_none());
+    }
+
+    #[test]
+    fn parse_manifest_harness_session_id_null_sentinel_is_none() {
+        // init writes `harness_session_id: ${_HARNESS_SESSION:-null}`, so an
+        // unresolvable session lands as the literal "null" and an empty value as
+        // "". Both must read as None or a real attester compared against
+        // Some("null") mislabels a self-attestation as other_session.
+        for raw in ["null", ""] {
+            let content = format!("---\nsession_id: abc\nharness_session_id: {raw}\n---\n");
+            let m = parse_manifest(&content).unwrap();
+            assert_eq!(
+                m.harness_session_id, None,
+                "harness_session_id: {raw:?} must parse as None"
+            );
+        }
+        // A real id parses through unchanged.
+        let m = parse_manifest(
+            "---\nsession_id: abc\nharness_session_id: 3abddea3-ad19-481f-b0c1-af19043c95fe\n---\n",
+        )
+        .unwrap();
+        assert_eq!(
+            m.harness_session_id.as_deref(),
+            Some("3abddea3-ad19-481f-b0c1-af19043c95fe")
+        );
     }
 
     #[test]

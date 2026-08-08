@@ -4911,8 +4911,8 @@ fn nudge_awaiting_defers_the_backstop() {
 // ── coverage classifier (x-0eaf task 1.1) ────────────────────────────────────
 
 use fno_agents::loopcheck::{
-    classify_coverage, coverage_receipt_line, Coverage, CoverageProducer, CoverageReport,
-    CoverageVerdict,
+    classify_coverage, coverage_receipt_line, AttestationOrigin, Coverage, CoverageProducer,
+    CoverageReport, CoverageVerdict,
 };
 
 const COV_HEAD: &str = "abc1234567890abcdef1234567890abcdef1234";
@@ -4960,6 +4960,7 @@ fn coverage_classify_quota_refusal_is_zero_coverage_refused() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
+        None,
     );
     assert_eq!(rep.coverage, Coverage::Covered(0));
     let bot = rep
@@ -4982,6 +4983,7 @@ fn coverage_classify_real_review_counts() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
+        None,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
@@ -4990,7 +4992,7 @@ fn coverage_classify_real_review_counts() {
 /// error and not vacuous success.
 #[test]
 fn coverage_classify_zero_configured_is_covered_zero() {
-    let rep = classify_coverage(&[], &[], "", COV_HEAD, &[], true);
+    let rep = classify_coverage(&[], &[], "", COV_HEAD, &[], true, None);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5004,6 +5006,7 @@ fn coverage_classify_github_read_failure_is_unknown_without_local() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         false,
+        None,
     );
     assert_eq!(rep.coverage, Coverage::Unknown);
     assert_eq!(rep.coverage_count(), None);
@@ -5022,6 +5025,7 @@ fn coverage_classify_local_pass_survives_github_outage() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         false,
+        None,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
@@ -5049,6 +5053,7 @@ fn coverage_classify_bot_refused_plus_local_is_covered() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
+        None,
     );
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
@@ -5076,6 +5081,7 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
         COV_HEAD,
         &["gemini-code-assist".to_string()],
         true,
+        None,
     );
     let g = rep
         .verdicts
@@ -5091,7 +5097,7 @@ fn coverage_classify_unrecognized_response_is_absent_never_reviewed() {
 #[test]
 fn coverage_classify_human_approval_excluded() {
     let reviews = vec![gh_review("jason", "APPROVED")];
-    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &[], true);
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &[], true, None);
     let human = rep.verdicts.iter().find(|v| v.name == "jason").unwrap();
     assert!(human.human_approval);
     assert_eq!(human.verdict, CoverageVerdict::Reviewed);
@@ -5107,7 +5113,7 @@ fn coverage_classify_duplicate_login_one_verdict() {
         "chatgpt-codex-connector".to_string(),
         "chatgpt-codex-connector".to_string(),
     ];
-    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &logins, true);
+    let rep = classify_coverage(&reviews, &[], "", COV_HEAD, &logins, true, None);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     assert_eq!(
         rep.verdicts
@@ -5126,7 +5132,7 @@ fn coverage_classify_local_fail_then_pass_latest_wins() {
         attestation_line("code-review", COV_HEAD, "fail"),
         attestation_line("code-review", COV_HEAD, "pass"),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
     assert_eq!(rep.coverage, Coverage::Covered(1));
 }
 
@@ -5138,7 +5144,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
         attestation_line("code-review", COV_HEAD, "pass"),
         attestation_line("code-review", COV_HEAD, "fail"),
     );
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5147,7 +5153,7 @@ fn coverage_classify_local_pass_then_fail_revokes() {
 fn coverage_classify_stale_head_does_not_count() {
     let old_head = "0000000000000000000000000000000000000000";
     let events = attestation_line("code-review", old_head, "pass");
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
     assert_eq!(rep.coverage, Coverage::Covered(0));
 }
 
@@ -5164,7 +5170,7 @@ fn coverage_classify_local_pass_unconfigured_name_counts() {
     // the same display name as the github_app bot - the producer axis field is
     // what keeps them distinct, and an unconfigured name still counts.
     let events = attestation_line("codex", COV_HEAD, "pass");
-    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
     assert_eq!(rep.coverage, Coverage::Covered(1));
     let local = rep
         .verdicts
@@ -5372,6 +5378,7 @@ fn coverage_receipt_covered_names_reviewers() {
         COV_HEAD,
         &["chatgpt-codex-connector".to_string()],
         true,
+        None,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.starts_with("review coverage: 1 reviewed ("), "{line}");
@@ -5394,6 +5401,7 @@ fn coverage_receipt_zero_names_refused_and_absent() {
             "gemini-code-assist".to_string(),
         ],
         true,
+        None,
     );
     let line = coverage_receipt_line(&rep);
     assert!(line.contains("0 reviewed"), "{line}");
@@ -5417,4 +5425,128 @@ fn coverage_receipt_unknown_says_unknown() {
         !line.contains("reviewed:"),
         "unknown must not present a count: {line}"
     );
+}
+
+// ── attestation origin (producer records the emitting process) ───────────────
+
+/// Like `attestation_line` but stamps the harness session that emitted the
+/// attestation - the field the authorship join keys on.
+fn attestation_line_attested(reviewer: &str, head: &str, verdict: &str, attester: &str) -> String {
+    serde_json::json!({
+        "type": "review_attestation",
+        "data": {"reviewer": reviewer, "head_sha": head, "verdict": verdict, "attester_session_id": attester}
+    })
+    .to_string()
+}
+
+const AUTHOR: &str = "author-session-aaaa";
+const OTHER: &str = "reviewer-session-bbbb";
+
+/// attester == authoring session -> SelfAttested, and the count is UNCHANGED.
+/// This is the test that turns red the day someone adds
+/// `&& origin != SelfAttested` to coverage_count: such a flip would drop every
+/// self-attested review from the count, flipping every open PR to DoneUnreviewed
+/// in one deploy. The count must not move with the origin.
+#[test]
+fn coverage_origin_self_attested_does_not_change_count() {
+    let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.attestation_origin, AttestationOrigin::SelfAttested);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
+/// attester != authoring session -> OtherSession, count UNCHANGED. The middle
+/// state is deliberately NOT "independent": a different session may be a
+/// self-handoff successor or a shared-worktree sibling, still not independent.
+#[test]
+fn coverage_origin_other_session_is_not_independent_count_unchanged() {
+    let events = attestation_line_attested("code-review", COV_HEAD, "pass", OTHER);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.attestation_origin, AttestationOrigin::OtherSession);
+    assert_eq!(rep.coverage, Coverage::Covered(1));
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
+/// An attestation with no attester_session_id (the entire pre-landed backlog,
+/// or a session with no env marker) -> Unknown, count UNCHANGED.
+#[test]
+fn coverage_origin_unknown_when_attester_empty_count_unchanged() {
+    // attestation_line omits attester_session_id entirely, modeling the backlog.
+    let events = attestation_line("code-review", COV_HEAD, "pass");
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.attestation_origin, AttestationOrigin::Unknown);
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
+/// No authoring session known (no manifest / unparseable) -> every local
+/// verdict Unknown, failing open so the verdict set is byte-identical to the
+/// pre-change behavior on unknown authorship. A present attester with an absent
+/// author is Unknown, not Other: the comparison is never guessed.
+#[test]
+fn coverage_origin_author_unknown_is_unknown_fail_open() {
+    let events = format!(
+        "{}\n",
+        attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR)
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, None);
+    let local = rep
+        .verdicts
+        .iter()
+        .find(|v| v.producer == CoverageProducer::LocalAttestation)
+        .unwrap();
+    assert_eq!(local.attestation_origin, AttestationOrigin::Unknown);
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
+/// The receipt names all three buckets so a reader learns the vocabulary even
+/// when two are zero.
+#[test]
+fn coverage_receipt_names_origin_buckets() {
+    let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("self 1"), "{line}");
+    assert!(line.contains("other 0"), "{line}");
+    assert!(line.contains("unknown 0"), "{line}");
+}
+
+/// The origin tally folds EVERY reviewed (non-human) verdict by its
+/// attestation_origin, so the three buckets sum to the reviewed count. A GitHub
+/// App review has no session to compare and reads `unknown`; it is named in the
+/// reviewed list, so "unknown" there is its origin, not its verdict.
+#[test]
+fn coverage_receipt_origin_tally_sums_to_reviewed_count() {
+    let reviews = vec![gh_review("chatgpt-codex-connector[bot]", "COMMENTED")];
+    let events = attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR);
+    let rep = classify_coverage(
+        &reviews,
+        &[],
+        &events,
+        COV_HEAD,
+        &["chatgpt-codex-connector".to_string()],
+        true,
+        Some(AUTHOR),
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(2));
+    let line = coverage_receipt_line(&rep);
+    assert!(line.contains("self 1"), "{line}");
+    assert!(line.contains("other 0"), "{line}");
+    assert!(line.contains("unknown 1"), "{line}");
+    assert!(line.contains("2 reviewed"), "{line}");
 }

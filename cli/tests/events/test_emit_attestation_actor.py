@@ -104,3 +104,103 @@ def test_attestation_model_is_empty_not_guessed_when_unrouted(tmp_path: Path) ->
     data = _last_event(repo)["data"]
     assert data["model"] == ""
     assert data["provider"] == ""
+
+
+def test_attestation_attester_session_from_env_marker(tmp_path: Path) -> None:
+    """CLAUDE_CODE_SESSION_ID set -> attester_session_id carries it, and it is
+    NOT the manifest session_id. session_id is the worktree run id (grepped from
+    the manifest), so it equals manifest.session_id for every emitter including a
+    reviewer who is not the author; attester_session_id is the live process's
+    session and is the one field that varies with who emitted. Asserting the two
+    differ is the test that would have caught the tautology the join was built
+    on."""
+    manifest = (
+        "session_id: 20260806T225503Z-cl84104-d4f619\n"
+        "harness: claude\n"
+    )
+    repo = _temp_git_repo(tmp_path, manifest)
+    env = {
+        **os.environ,
+        "FNO": "fno-py",
+        "CLAUDE_CODE_SESSION_ID": "3abddea3-ad19-481f-b0c1-af19043c95fe",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    data = _last_event(repo)["data"]
+    assert data["attester_session_id"] == "3abddea3-ad19-481f-b0c1-af19043c95fe"
+    assert data["session_id"] == "20260806T225503Z-cl84104-d4f619"
+    # The two differ: a join on attester_session_id is not the tautology the
+    # session_id join is.
+    assert data["attester_session_id"] != data["session_id"]
+
+
+def test_attestation_attester_session_empty_without_marker(tmp_path: Path) -> None:
+    """No session marker in env -> attester_session_id is empty, never fallen
+    back to the manifest session_id. A fallback would restore the tautology
+    session_id already carries, so the producer must NOT default it."""
+    manifest = (
+        "session_id: 20260806T225503Z-cl84104-d4f619\n"
+        "harness: claude\n"
+    )
+    repo = _temp_git_repo(tmp_path, manifest)
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k
+        not in (
+            "CODEX_THREAD_ID",
+            "CLAUDE_CODE_SESSION_ID",
+            "CODEX_SESSION_ID",
+            "GEMINI_SESSION_ID",
+            "OPENCODE_SESSION_ID",
+        )
+    }
+    env["FNO"] = "fno-py"
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    data = _last_event(repo)["data"]
+    assert data["attester_session_id"] == ""
+    # The manifest value did NOT leak in as a fallback.
+    assert data["session_id"] == "20260806T225503Z-cl84104-d4f619"
+
+
+def test_attestation_attester_session_marker_precedence(tmp_path: Path) -> None:
+    """The marker precedence matches init: CODEX_THREAD_ID > CLAUDE_CODE_SESSION_ID
+    > CODEX_SESSION_ID > GEMINI_SESSION_ID. First non-blank wins."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: claude\n")
+    env = {
+        **os.environ,
+        "FNO": "fno-py",
+        "CODEX_THREAD_ID": "codex-thread-wins",
+        "CLAUDE_CODE_SESSION_ID": "claude-loses",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _last_event(repo)["data"]["attester_session_id"] == "codex-thread-wins"
+
+
+def test_attestation_attester_session_reads_opencode_marker(tmp_path: Path) -> None:
+    """OPENCODE_SESSION_ID is a first-class harness marker (harness_identity.py);
+    an opencode-authored review must carry it, or the whole opencode lane reads
+    attester_session_id empty and can never classify as self_attested."""
+    repo = _temp_git_repo(tmp_path, "session_id: s\nharness: opencode\n")
+    env = {
+        **os.environ,
+        "FNO": "fno-py",
+        "OPENCODE_SESSION_ID": "opencode-session-cccc",
+    }
+    r = subprocess.run(
+        ["bash", str(_SCRIPT), "code-review", "pass"],
+        cwd=repo, env=env, capture_output=True, text=True,
+    )
+    assert r.returncode == 0, r.stderr
+    assert _last_event(repo)["data"]["attester_session_id"] == "opencode-session-cccc"

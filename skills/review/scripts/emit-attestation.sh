@@ -59,15 +59,39 @@ if [[ -n "${ANTHROPIC_BASE_URL:-}" ]]; then
   provider="${provider##*@}"              # drop userinfo: a key in the URL must not land in the log
 fi
 
+# Record the harness session of the EMITTING PROCESS. This is the only field
+# that can tell an author-attested review from an independent one: session_id
+# (above) is grepped from the worktree manifest, so it equals manifest.session_id
+# for every emitter in this worktree - including a reviewer who is genuinely not
+# the author - and a join on it returns 'self' 100% of the time by construction.
+# The live process env is what makes this field vary with who emitted.
+#
+# Read on the HARNESS_SESSION_MARKERS precedence (cli/src/fno/harness_identity.py)
+# - the same list the owned-identity resolver stamps as manifest.harness_session_id
+# on the common path - so attester and author stay in one namespace. NEVER fall
+# back to the manifest: a fallback would restore the tautology under a new name.
+# Empty when no marker is set, never guessed. Narrow caveat: init's bash fail-open
+# prefers TARGET_TRANSCRIPT_ID for a claude driver session, which this loop does
+# not mirror; on a stale fno where owned-identity did not run, such a session's
+# self-attestation can read as other_session rather than self_attested.
+attester_session_id=""
+for _marker in CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID; do
+  if [[ "${!_marker:-}" == *[![:space:]]* ]]; then
+    attester_session_id="${!_marker}"
+    break
+  fi
+done
+
 # Build the data object with jq so a reviewer/verdict value can never break the
 # JSON (codex peer review P2). fno event emit then validates envelope + required
 # fields + the verdict enum before writing.
 data="$(jq -cn --arg reviewer "$reviewer" --arg head_sha "$head_sha" --arg verdict "$verdict" \
   --arg session_id "$session_id" --arg harness "$harness" \
   --arg model "$model" --arg provider "$provider" \
-  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider}')"
+  --arg attester_session_id "$attester_session_id" \
+  '{reviewer:$reviewer,head_sha:$head_sha,verdict:$verdict,session_id:$session_id,harness:$harness,model:$model,provider:$provider,attester_session_id:$attester_session_id}')"
 # FNO overrides the binary (defaults to the mux); tests point it at fno-py,
 # which is on PATH in the uv test env where the mux is not installed.
 "${FNO:-fno}" event emit -t review_attestation -s target -d "$data"
 
-echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} harness=${harness:-unknown} model=${model:-unobserved} provider=${provider:-unobserved}" >&2
+echo "review_attestation emitted: reviewer=$reviewer head_sha=${head_sha:0:8} verdict=$verdict session=${session_id:-none} attester=${attester_session_id:-none} harness=${harness:-unknown} model=${model:-unobserved} provider=${provider:-unobserved}" >&2
