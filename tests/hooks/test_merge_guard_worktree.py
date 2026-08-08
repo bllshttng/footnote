@@ -487,6 +487,80 @@ def test_shell_keywords_do_not_hide_a_push_to_main():
             assert '"permissionDecision": "deny"' in out, cmd
 
 
+def test_wrapper_options_do_not_hide_the_verb():
+    """A wrapper that takes its own option pushed the verb past argv[0], and
+    matching only the exact token `-c` covered the one `bash -c` spelling nobody
+    types. `timeout` is installed on this machine, so `timeout 10 git push
+    origin main` was a live one-word bypass."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("bash -lc 'git push origin main'",
+                    "sh -cx 'git push origin main'",
+                    "bash -lc 'gh pr merge 42'",
+                    "env -i git push origin main",
+                    "nice -n 5 git push origin main",
+                    "sudo -u x git push origin main",
+                    "timeout 10 git push origin main"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+        # ...without turning an ordinary wrapped push into a refusal.
+        out2, rc2 = _run_hook_subprocess("timeout 10 git push origin feature/x",
+                                         fno, cwd=td)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_hooks_path_override_is_a_no_verify_by_another_name():
+    """core.hooksPath disables .git/hooks/pre-push, which IS the branch guard.
+    The `git config` spelling is PERSISTENT - every later commit and push is
+    unguarded with no flag on them - and `config` is on the allowlist, so the
+    check has to run ahead of it."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git config core.hooksPath /dev/null",
+                    "git -c core.hooksPath=/dev/null push origin main",
+                    "git -c core.hooksPath=/dev/null commit -m x"):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+        out2, rc2 = _run_hook_subprocess("git config user.name", fno, cwd=td)
+        assert '"permissionDecision": "deny"' not in out2 and rc2 == 0
+
+
+def test_unparseable_fallback_is_not_allowlisted_by_its_first_command():
+    """On the unbalanced-quote fallback the "segment" is the WHOLE string, so a
+    positional allowlist read the FIRST command's subcommand and waved the rest
+    through. The fallback is meant to be deny-leaning."""
+    with tempfile.TemporaryDirectory() as td:
+        fno = Path(td) / ".fno"
+        fno.mkdir(parents=True)
+        for cmd in ("git status && git push origin main 'unbal",
+                    'git log --oneline && git push origin main --message "unbal'):
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+
+
+def test_fd_duplication_is_not_a_file_write():
+    """`2>&1` duplicates a descriptor and writes no file, so refusing it denied
+    an ordinary gated command for nothing."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess("git commit --no-verify -m ok 2>&1",
+                                      fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
+def test_heredoc_body_mentioning_a_heredoc_is_still_allowed():
+    """The opener scan walked BODY lines too, so a message that merely mentioned
+    <<EOF broke the escape the refusal message recommends."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, _ = _with_marker(td, name="approve_no_verify.flag")
+        out, _ = _run_hook_subprocess(
+            "git commit --no-verify -F - <<'EOF'\nfix <<EOF parsing\nEOF",
+            fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+
+
 def test_refspec_forms_that_reach_main_are_denied():
     """Only the `feature:main` form was normalized, so a force-prefixed or
     fully-qualified destination never compared equal to a protected branch.

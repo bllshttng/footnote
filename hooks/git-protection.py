@@ -639,9 +639,22 @@ _SEGMENT_KEYWORDS = {"then", "do", "if", "elif", "else", "while", "until",
 # and `(gh pr merge)` are all still recognized (the old regex-anywhere matcher
 # caught them; command-position matching must not silently drop them).
 _CMD_WRAPPERS = {"sudo", "env", "command", "time", "nice", "builtin", "exec",
-                 "xargs", "nohup", "stdbuf", "eval", "coproc"}
+                 "xargs", "nohup", "stdbuf", "eval", "coproc", "timeout",
+                 "gtimeout", "setsid", "doas"}
 # Shells that take the real command as the argument of `-c`.
 _SHELL_RUNNERS = {"sh", "bash", "zsh", "dash", "ksh"}
+# A wrapper option's value that is not dash-prefixed: `timeout 10`, `timeout 5m`.
+_DURATION_RE = re.compile(r'^\d+(\.\d+)?[smhd]?$')
+# Wrapper options whose value is a separate token, so the value is not the verb:
+# `sudo -u x git ...`, `nice -n 5 git ...`.
+_WRAPPER_VALUE_OPTS = {"-u", "-g", "-n", "-C", "-s", "-k", "-p", "--user",
+                       "--group", "--chdir", "--signal", "--kill-after"}
+
+
+def _is_dash_c(tok):
+    """True for `-c` and the clustered short forms (`-lc`, `-cx`, `-ic`)."""
+    return (tok.startswith("-") and not tok.startswith("--")
+            and "c" in tok[1:])
 _ASSIGN_RE = re.compile(r'^[A-Za-z_][A-Za-z0-9_]*=')
 
 
@@ -921,6 +934,7 @@ def _effective_argv(seg):
     command wrappers (sudo/env/...) so the real executable token lands at
     argv[0]. Keeps a wrapper prefix from hiding a gated verb."""
     i, n = 0, len(seg)
+    saw_wrapper = False
     while i < n:
         tok = seg[i]
         if tok == "(" or _ASSIGN_RE.match(tok):
@@ -932,11 +946,23 @@ def _effective_argv(seg):
         # left the real verb buried at argv[1] so no gate ever saw it.
         if tok.rsplit("/", 1)[-1].lower() in _CMD_WRAPPERS:
             i += 1
+            saw_wrapper = True
             continue
-        # `sh -c "..."` / `bash -c "..."`: the command lives in the NEXT token.
+        # `sh -c "..."`, and the clustered forms people actually type: `bash -lc`,
+        # `sh -cx`, `bash -ic`. Matching only the exact token `-c` covered the
+        # one spelling nobody uses.
         if (tok.rsplit("/", 1)[-1].lower() in _SHELL_RUNNERS
-                and i + 1 < n and seg[i + 1] == "-c"):
+                and i + 1 < n and _is_dash_c(seg[i + 1])):
             i += 2
+            continue
+        # A wrapper's OWN options, and their values: `env -i`, `nice -n 5`,
+        # `timeout 10`, `sudo -u x`. Stopping at the first non-wrapper token let
+        # any optioned wrapper hide the verb entirely.
+        if saw_wrapper and tok in _WRAPPER_VALUE_OPTS and i + 1 < n:
+            i += 2          # option plus its value: `sudo -u x`, `nice -n 5`
+            continue
+        if saw_wrapper and (tok.startswith("-") or _DURATION_RE.match(tok)):
+            i += 1
             continue
         break
     argv = seg[i:]
@@ -968,32 +994,48 @@ def _strip_git_global_opts(argv):
     """Drop git's global options so argv[1] is the real subcommand.
 
     Returns argv[0] followed by the subcommand onward. A `-c core.hooksPath=...`
-    is deliberately KEPT as a synthetic `--no-verify` token: setting hooksPath to
-    a bogus path disables .git/hooks/pre-push, which IS the protected-branch
-    guard, so it is a --no-verify by another name and must reach that gate.
+    value is PRESERVED in the output rather than dropped, so the caller can see
+    it: setting hooksPath elsewhere disables .git/hooks/pre-push, which IS the
+    protected-branch guard.
     """
     head, rest = argv[:1], argv[1:]
-    hooks_path_override = False
+    keep = []
     i, n = 0, len(rest)
     while i < n:
         tok = rest[i]
-        if "core.hookspath" in tok.lower():
-            hooks_path_override = True
         if tok in _GIT_GLOBAL_VALUE_OPTS:
-            if tok == "-c" and i + 1 < n and "core.hookspath" in rest[i + 1].lower():
-                hooks_path_override = True
+            if i + 1 < n and "core.hookspath" in rest[i + 1].lower():
+                keep.append(rest[i + 1])
             i += 2          # option plus its value
             continue
+        if "core.hookspath" in tok.lower():
+            keep.append(tok)
         if tok in _GIT_GLOBAL_FLAGS or (
                 tok.startswith("--") and "=" in tok
                 and tok.split("=", 1)[0] in _GIT_GLOBAL_VALUE_OPTS):
             i += 1
             continue
         break
-    out = head + rest[i:]
-    if hooks_path_override:
-        out = out + ["--no-verify"]
-    return out
+    return head + rest[i:] + keep
+
+
+def _writes_a_file(tokens):
+    """True when a redirection would WRITE somewhere, as whole operator tokens.
+
+    `2>&1` and `>&2` duplicate a file descriptor and write no file, so they are
+    not disqualifying - refusing them denied an ordinary
+    `git commit --no-verify -m ok 2>&1`. An `>&` followed by anything that is not
+    a bare fd number is a write.
+    """
+    for idx, tok in enumerate(tokens):
+        if tok not in _REDIRECT_TOKENS:
+            continue
+        if tok in (">&", "&>"):
+            nxt = tokens[idx + 1] if idx + 1 < len(tokens) else ""
+            if nxt.isdigit() or nxt.rstrip("-").isdigit():
+                continue        # fd duplication, not a file write
+        return True
+    return False
 
 
 def _has_unquoted_heredoc(command):
@@ -1005,11 +1047,29 @@ def _has_unquoted_heredoc(command):
     the raw form matched `<<` inside an ARGUMENT, so a commit message reading
     "shift << 2" was refused - the same raw-scan mistake _REDIRECT_TOKENS exists
     to avoid for `>`.
+
+    Body lines are SKIPPED, exactly as _command_segments skips them: a body is
+    data, so a message reading "fix <<EOF parsing" is not an opener. Without
+    that, the recommended escape broke whenever the commit message happened to
+    mention a heredoc.
     """
-    for line in _split_lines_outside_quotes(command):
-        if _find_heredoc_opener(line) is None:
+    lines = _split_lines_outside_quotes(command)
+    i, n = 0, len(lines)
+    while i < n:
+        opener = _find_heredoc_opener(lines[i])
+        if opener is None:
+            i += 1
             continue
-        if not re.search(r"<<-?[ \t]*['\"]", line):
+        delim, is_dash = opener
+        unquoted = not re.search(r"<<-?[ \t]*['\"]", lines[i])
+        # Skip this heredoc's body: it is data, not command text.
+        i += 1
+        while i < n:
+            term = lines[i].lstrip("\t") if is_dash else lines[i]
+            i += 1
+            if term == delim:
+                break
+        if unquoted:
             return True
     return False
 
@@ -1305,7 +1365,7 @@ again or explicitly configure --no-external. Do not forge the artifact.
 """
 
 
-def _evaluate_git_segment(command, has_approval):
+def _evaluate_git_segment(command, has_approval, allowlist_ok=True):
     """Evaluate one command-position git segment.
 
     Returns ('deny', reason) | ('allow', reason) | None (safe / no opinion).
@@ -1327,7 +1387,25 @@ def _evaluate_git_segment(command, has_approval):
     # a read-only command refused with a wrong explanation. `git push` is not on
     # the allowlist, so a real push still reaches the gate, and
     # `git commit --no-verify` is excluded by the pattern's own lookahead.
-    if is_allowed_git_command(command):
+    # allowlist_ok is False on the unbalanced-quote fallback, where the "segment"
+    # is the WHOLE multi-command string: token[1] there is the first command's
+    # subcommand, so `git status && git push origin main 'unbal` was allowlisted
+    # by `status` and the push was never evaluated. A fallback that is supposed
+    # to be deny-leaning must not consult an allowlist it cannot position.
+    # Ahead of the allowlist, because `config` IS allowlisted. core.hooksPath
+    # points git at a different hooks directory, which disables
+    # .git/hooks/pre-push - and that hook IS the protected-branch guard. So it is
+    # a --no-verify by another name in BOTH spellings: the per-command
+    # `git -c core.hooksPath=/dev/null ...` and the PERSISTENT
+    # `git config core.hooksPath /dev/null`, after which every later commit and
+    # push in the repo is unguarded with no flag on them at all. Closing the
+    # first door and leaving the second is a guard on one of two paths.
+    if "core.hookspath" in command.lower():
+        if has_approval:
+            return ("allow", "[Approved] User approved a hooks-path override")
+        return ("deny", _no_verify_deny_message(command))
+
+    if allowlist_ok and is_allowed_git_command(command):
         return None
 
     is_protected, branch = is_push_to_protected_branch(command)
@@ -1428,7 +1506,8 @@ def main():
     # the first, making the state file an unreliable record of what was refused.
     git_decisions = []
     for seg in git_segs:
-        decision = _evaluate_git_segment(seg, has_approval)
+        decision = _evaluate_git_segment(seg, has_approval,
+                                         allowlist_ok=segments is not None)
         git_decisions.append((seg, decision))
         if decision is not None and decision[0] == "deny":
             break
@@ -1499,7 +1578,7 @@ def main():
     tokens = [tok for seg in (segments or []) for tok in seg]
     carries_substitution = (
         any(f in tok for tok in tokens for f in _SUBSTITUTION_FORMS)
-        or any(tok in _REDIRECT_TOKENS for tok in tokens)
+        or _writes_a_file(tokens)
         or _has_unquoted_heredoc(command))
     # Only enforceable when shlex actually parsed the command. On the
     # unbalanced-quote fallback there is one pseudo-segment, so requiring
