@@ -158,6 +158,12 @@ pack root so the pack-relative script and asset paths resolve:
 - `bash "$PACK_ROOT/evaluators/brand-check.sh" <draft> <brand-identity-path>`
 - `bash "$PACK_ROOT/evaluators/accessibility-check.sh" <draft>` (design role only)
 
+`<product-truth-path>` and `<brand-identity-path>` are the PROJECT-resolved
+paths from the catalog (step 2), never the pack's bundled defaults: passing
+`$PACK_ROOT/assets/brand-identity.md` would enforce Footnote's founder-name
+rule on a second consumer's draft. The pack root is only for the evaluator
+scripts and the voice contract.
+
 Write each verdict as a JSON evidence file beside its draft, for example
 `campaign-plan.factual.json` and `campaign-plan.brand.json`, recording
 `{"evaluator": ..., "passed": true|false, "detail": "..."}`.
