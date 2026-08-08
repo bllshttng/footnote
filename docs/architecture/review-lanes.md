@@ -196,8 +196,8 @@ No lane today can produce a non-self attestation: `emit-attestation.sh` runs in
 whichever session invokes the review verb, and the king-mediated lane (Lane 3)
 fires the verb at the worker's prompt line, so the author always emits and
 nothing spawns a separate reviewing session.
-Holding a green PR until someone else attests therefore waits on something this
-pipeline cannot emit at all.
+Holding a green PR until someone else attests therefore waits on something no
+dispatched lane emits today.
 Two workers did exactly that on 2026-08-07, on separate PRs, and escalated to
 the operator to merge on their behalf; neither was blocked.
 
