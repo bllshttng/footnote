@@ -433,6 +433,35 @@ def test_merge_marker_does_not_open_push_to_main_in_a_compound_command():
         assert marker.exists(), "a denied command must not consume the marker"
 
 
+def test_no_verify_approval_does_not_open_push_to_main_compound():
+    """A deny anywhere outranks an allow anywhere, in EITHER segment order. The
+    loop used to short-circuit on the first allow, so the approve flag carried
+    a push to main whenever the --no-verify segment came first."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, flag = _with_marker(td, name="approve_no_verify.flag")
+        for cmd in ("git commit --no-verify -m x && git push origin main",
+                    "git push origin main && git commit --no-verify -m x"):
+            flag.write_text("")
+            out, _ = _run_hook_subprocess(cmd, fno, cwd=td)
+            assert '"permissionDecision": "deny"' in out, cmd
+            assert flag.exists(), f"denied command must not consume: {cmd}"
+
+
+def test_merge_path_still_consumes_the_no_verify_approval():
+    """The single-use invariant must not depend on which gate emits. A merge
+    segment used to emit first and skip the approval consume entirely, leaving
+    one operator approval reusable by a later standalone --no-verify."""
+    with tempfile.TemporaryDirectory() as td:
+        fno, marker = _with_marker(td)
+        flag = fno / "approve_no_verify.flag"
+        flag.write_text("")
+        out, _ = _run_hook_subprocess(
+            "gh pr merge 1 --squash && git commit --no-verify -m x", fno, cwd=td)
+        assert '"permissionDecision": "allow"' in out
+        assert not flag.exists(), "approval must be consumed on the merge path"
+        assert not marker.exists(), "merge marker consumed too"
+
+
 def test_legacy_disable_marker_is_inert():
     """A stale git-protection.disabled from before the rename must no longer
     bypass anything. The rename is the migration: fail-safe, no cleanup."""

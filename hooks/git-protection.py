@@ -933,8 +933,8 @@ def _audit(message):
     one worktree. Best-effort: an unwritable log must never crash the gate or
     block the merge it is recording."""
     flat = " ".join(message.split())
-    print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
     try:
+        print(f"[Git Protection: merge-gate override] {flat}", file=sys.stderr)
         OVERRIDE_LOG.parent.mkdir(parents=True, exist_ok=True)
         stamp = datetime.now().isoformat(timespec="seconds")
         with OVERRIDE_LOG.open("a") as fh:
@@ -1158,24 +1158,46 @@ def main():
 
     has_approval = _fresh_marker(APPROVAL_FLAG)
 
+    # ==========================================
+    # Git gates, evaluated per command-position segment so a compound command
+    # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
+    # startswith('git') check. Evaluated exactly once - a deny writes state -
+    # and the verdict is then applied in a fixed precedence below.
+    # ==========================================
+    git_decisions = [(seg, _evaluate_git_segment(seg, has_approval))
+                     for seg in git_segs]
+
+    # A DENY ANYWHERE OUTRANKS AN ALLOW ANYWHERE. Both loops used to
+    # short-circuit on the first decision they met, which made the verdict
+    # depend on segment order: `git commit --no-verify && git push origin main`
+    # returned the approval's allow and carried the push to main with it, while
+    # the reverse order denied. One authorization must never cover a sibling
+    # segment another gate would refuse - the whole point of scoping the
+    # merge-gate marker, applied to every gate rather than just that one.
+    for seg, decision in git_decisions:
+        if decision is not None and decision[0] == "deny":
+            _emit("deny", decision[1])
+            sys.exit(0)
+
+    # A segment that relies on the single-use --no-verify approval consumes it
+    # here, before any other gate can emit the decision and skip the consume.
+    # The claim must WIN: has_approval above is a plain stat, so two concurrent
+    # hook processes both see the fresh flag, and only the one that removes it
+    # is authorized.
+    git_allow = next(((seg, d[1]) for seg, d in git_decisions
+                      if d is not None and d[0] == "allow"), None)
+    if git_allow is not None and not _claim_marker(APPROVAL_FLAG):
+        _emit("deny", _no_verify_deny_message(git_allow[0]))
+        sys.exit(0)
+
     if merge_seg is not None:
-        # A merge decision covers the merge segment ONLY. Without this, a
-        # compound `gh pr merge 1 && git push origin main` rode the merge allow
-        # straight past every git gate - which is exactly the unconditional
-        # allow the scoped marker exists to avoid.
-        for seg in git_segs:
-            decision = _evaluate_git_segment(seg, has_approval)
-            if decision is not None and decision[0] == "deny":
-                _emit("deny", decision[1])
-                sys.exit(0)
         allow_reason = _check_pr_merge_allowed(merge_seg)
         if allow_reason:
             _emit("allow", f"[fno auto-merge] {allow_reason}")
             sys.exit(0)
-        # Scoped override, checked only after the legitimate two-factor path
-        # has failed so the marker is consumed only when actually needed. The
-        # claim must win, not merely find the marker present: only the process
-        # that removed it is authorized.
+        # Scoped override, reached only after the legitimate two-factor path
+        # failed and every git segment cleared, so the marker is claimed only
+        # when it is actually the thing authorizing the merge.
         if _fresh_marker(MERGE_GATE_MARKER) and _claim_marker(MERGE_GATE_MARKER):
             _audit(f"two-factor check failed, merge allowed by marker: {merge_seg}")
             _emit("allow", "[fno merge-gate override] marker consumed; "
@@ -1184,24 +1206,8 @@ def main():
         _emit("deny", _merge_deny_message(merge_seg))
         sys.exit(0)
 
-    # ==========================================
-    # Git gates, evaluated per command-position segment so a compound command
-    # (`cd /tmp && git push origin main`) can't smuggle a git verb past a
-    # startswith('git') check. Non-git commands fall through to allow.
-    # ==========================================
-    if not git_segs:
-        sys.exit(0)
-
-    for seg in git_segs:
-        decision = _evaluate_git_segment(seg, has_approval)
-        if decision is None:
-            continue
-        kind, reason = decision
-        if kind == "allow":
-            _claim_marker(APPROVAL_FLAG)  # one-time consume; best-effort, guarded
-            _emit("allow", reason)
-            sys.exit(0)
-        _emit("deny", reason)
+    if git_allow is not None:
+        _emit("allow", git_allow[1])
         sys.exit(0)
 
     # All git segments safe, allow it
