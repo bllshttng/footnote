@@ -13,6 +13,7 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -102,6 +103,72 @@ def _repo_root(cwd: Optional[str] = None) -> Path:
     return base
 
 
+def _repo_identity_from_remote_url(url: str) -> Optional[str]:
+    """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
+
+    Deliberately NOT ``paths._remote_url_to_slug``, which yields only the last
+    path segment. That is fine for a path token, but this keys ``review_coverage``
+    in the cross-project global log, and there a collision is a correctness hole:
+    ``org-a/widget`` and ``org-b/widget`` both reduce to ``widget``, so with a
+    shared PR number one repo's coverage could satisfy the other's auto-merge
+    review guard - and a fork shares head SHAs, so the staleness check that would
+    otherwise catch it does not fire.
+
+    Mirrors ``repo_identity_from_remote_url`` in ``crates/fno-agents/src/finalize.rs``.
+    The two MUST agree or the reader stops finding the writer's events; the
+    parity cases are covered by tests on both sides.
+    """
+    s = (url or "").strip().rstrip("/")
+    if not s:
+        return None
+    idx = s.find("://")
+    if idx != -1:
+        s = s[idx + 3:]
+    idx = s.find("@")
+    if idx != -1:
+        s = s[idx + 1:]
+    m = re.search(r"[/:]", s)
+    if not m:
+        return None
+    host_port, path = s[: m.start()], s[m.start() + 1:]
+    # `ssh://host:22/o/r` glues a numeric port to the host; a non-numeric suffix
+    # is part of the host and must survive.
+    host = host_port
+    if ":" in host_port:
+        h, _, p = host_port.partition(":")
+        if p.isdigit():
+            host = h
+    path = path.lstrip("/")
+    first, _, rest = path.partition("/")
+    if first.isdigit() and rest:
+        path = rest
+    path = path.rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not host or "\\" in path:
+        return None
+    segments = [p for p in path.split("/") if p]
+    if len(segments) < 2 or any(p in (".", "..") for p in segments):
+        return None
+    return f"{host}/{'/'.join(segments)}".lower()
+
+
+def _repo_identity(root: "Path") -> Optional[str]:
+    """``host/owner/repo`` for the checkout at ``root``, or None."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 - no git -> no identity -> no global read
+        return None
+    if getattr(out, "returncode", 1) != 0:
+        return None
+    return _repo_identity_from_remote_url(out.stdout or "")
+
+
 def _scan_coverage(
     path: Path, pr_number: int, repo_slug: Optional[str] = None
 ) -> tuple[Optional[dict], str]:
@@ -180,7 +247,7 @@ def _coverage_logs(
         # Rust writer hardcodes. Reading state_dir() directly would scan a file
         # nobody writes on exactly those configs, silently restoring the bug.
         global_path = _paths.global_events_json()
-        slug = _paths._slug_from_git_remote(root)
+        slug = _repo_identity(root)
     except Exception:  # noqa: BLE001 - no global log -> project log alone
         return project_path, None, None
     if global_path == project_path or not slug:
@@ -226,10 +293,30 @@ def latest_review_coverage(
 
     if global_path is not None:
         other, other_ts = _scan_coverage(global_path, pr_number, repo_slug=slug)
-        if other is not None and (best is None or other_ts > best_ts):
+        if other is not None and (
+            best is None
+            or other_ts > best_ts
+            # Equal timestamps are common, not exotic: these are second-precision
+            # and emit_to_both writes the two logs in the same instant. Strict
+            # `>` would make "project log wins" the silent tiebreak, so a stale
+            # covered event could outrank a same-second unknown and walk right
+            # through a guard that exists to fail closed. On a tie take the
+            # SAFER verdict instead of the arbitrary one.
+            or (other_ts == best_ts and not _is_covered(other) and _is_covered(best))
+        ):
             best, best_ts = other, other_ts
 
     return best
+
+
+def _is_covered(data: Optional[dict]) -> bool:
+    """Whether a coverage event reports a real pass (covered AND count > 0)."""
+    if not data or data.get("coverage") != "covered":
+        return False
+    try:
+        return int(data.get("reviewed_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
 
 
 def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:

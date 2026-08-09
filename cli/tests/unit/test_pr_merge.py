@@ -1320,8 +1320,8 @@ def test_worktree_attestation_is_visible_from_canonical(monkeypatch, tmp_path):
 
     # The review ran in the worktree; emit_to_both writes its project log and
     # the one global log.
-    _write_coverage(worktree / ".fno" / "events.jsonl", 781, repo="footnote")
-    _write_coverage(global_dir / "events.jsonl", 781, repo="footnote")
+    _write_coverage(worktree / ".fno" / "events.jsonl", 781, repo="github.com/bllshttng/footnote")
+    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote")
 
     # Canonical's own log never saw it. That absence is the whole specimen.
     assert not (canonical / ".fno" / "events.jsonl").exists()
@@ -1338,7 +1338,7 @@ def test_global_coverage_is_scoped_to_this_repo(monkeypatch, tmp_path):
     canonical = _git_repo(tmp_path / "canonical", "git@github.com:bllshttng/footnote.git")
     global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
-    _write_coverage(global_dir / "events.jsonl", 781, repo="some-other-repo")
+    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/other/repo")
     assert _merge._review_coverage_for_pr(781, str(canonical)) is None
 
 
@@ -1359,7 +1359,7 @@ def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
     global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
 
     _write_coverage(
-        global_dir / "events.jsonl", 781, repo="footnote", ts="2026-08-08T01:00:00Z", count=1
+        global_dir / "events.jsonl", 781, repo="github.com/bllshttng/footnote", ts="2026-08-08T01:00:00Z", count=1
     )
     _write_coverage(
         canonical / ".fno" / "events.jsonl", 781, ts="2026-08-08T02:00:00Z", count=5
@@ -1367,6 +1367,74 @@ def test_project_log_still_wins_when_it_is_newer(monkeypatch, tmp_path):
 
     cov = _merge._review_coverage_for_pr(781, str(canonical))
     assert cov is not None and cov["reviewed_count"] == 5
+
+
+def test_same_named_repos_under_different_owners_do_not_share_coverage(monkeypatch, tmp_path):
+    """codex P1: the global log key must be the FULL repo identity.
+
+    `org-a/widget` and `org-b/widget` both reduce to `widget` under a last-path-
+    segment slug. With a shared PR number that let one repo's coverage satisfy
+    the other's auto-merge guard, and a fork shares head SHAs so the staleness
+    check would not catch it either.
+    """
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:org-a/widget.git")
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-b/widget")
+    assert _merge._review_coverage_for_pr(781, str(canonical)) is None
+
+    # The same repo's own identity still resolves.
+    _write_coverage(global_dir / "events.jsonl", 781, repo="github.com/org-a/widget")
+    assert _merge._review_coverage_for_pr(781, str(canonical)) is not None
+
+
+def test_repo_identity_agrees_across_remote_forms():
+    """Every clone form of one repo must produce one key, or the reader stops
+    finding the writer's events. Mirrors the Rust parity test."""
+    from fno.pr._reviews import _repo_identity_from_remote_url as ident
+
+    want = "github.com/org-a/widget"
+    for url in (
+        "git@github.com:org-a/widget.git",
+        "https://github.com/org-a/widget",
+        "https://github.com/org-a/widget.git/",
+        "ssh://git@github.com:22/org-a/widget.git",
+        "https://user:token@github.com/org-a/widget.git",
+        "GIT@GitHub.com:Org-A/Widget.git",
+    ):
+        assert ident(url) == want, url
+
+    # Too few segments, or no host: unusable as a cross-project key.
+    assert ident("/local/path/widget.git") is None
+    assert ident("git@github.com:widget.git") is None
+    assert ident("") is None
+
+
+def test_equal_timestamps_take_the_safer_verdict(monkeypatch, tmp_path):
+    """codex P2: timestamps are second-precision and emit_to_both writes both
+    logs in the same instant, so a strict `>` made "project log wins" a silent
+    tiebreak - letting a stale covered event outrank a same-second unknown and
+    clear a guard whose whole job is to fail closed."""
+    canonical = _git_repo(tmp_path / "canonical", "git@github.com:org-a/widget.git")
+    global_dir = _global_events_at(monkeypatch, tmp_path / "home" / ".fno")
+
+    ts = "2026-08-08T02:35:30Z"
+    _write_coverage(canonical / ".fno" / "events.jsonl", 781, ts=ts, count=1)
+    events = global_dir / "events.jsonl"
+    events.write_text(
+        json.dumps({
+            "ts": ts,
+            "type": "review_coverage",
+            "data": {
+                "pr": 781, "coverage": "unknown", "head_sha": "a3f4b413b",
+                "repo": "github.com/org-a/widget",
+            },
+        }) + "\n",
+        encoding="utf-8",
+    )
+
+    cov = _merge._review_coverage_for_pr(781, str(canonical))
+    assert cov is not None and cov["coverage"] == "unknown"
 
 
 def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):

@@ -231,7 +231,7 @@ def test_coverage_read_spans_the_global_log(tmp_path, monkeypatch):
             "type": "review_coverage",
             "data": {
                 "pr": 218, "coverage": "covered", "reviewed_count": 0,
-                "head_sha": "a3f4b413b", "repo": "footnote",
+                "head_sha": "a3f4b413b", "repo": "github.com/bllshttng/footnote",
             },
         }) + "\n")
 

@@ -4132,11 +4132,14 @@ pub fn decide(args: &[String]) -> (i32, String) {
         .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
 
     // Scopes the review_coverage event written into the cross-project global
-    // log. The git-remote slug is the one identifier canonical and every one of
-    // its worktrees agree on, which is exactly the agreement the coverage
-    // reader needs (x-f43c). Empty when there is no remote; the payload then
-    // omits `repo` and readers decline to match it in the global log.
-    let repo_slug = crate::finalize::slug_from_git_remote(&cwd).unwrap_or_default();
+    // log. The git remote is the one identifier canonical and every one of its
+    // worktrees agree on, which is exactly the agreement the coverage reader
+    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
+    // segment: this key gates auto-merge, so `org-a/widget` aliasing
+    // `org-b/widget` would let one repo's coverage clear the other's guard.
+    // Empty when there is no remote; the payload then omits `repo` and no
+    // reader will claim the event.
+    let repo_slug = crate::finalize::repo_identity_from_git_remote(&cwd).unwrap_or_default();
 
     let ledger_path = parsed
         .ledger_path
@@ -6539,8 +6542,11 @@ mod tests {
             coverage: Coverage::Covered(1),
             verdicts: vec![],
         };
-        let data = coverage_event_data(781, &rep, "a3f4b413b", "footnote");
-        assert_eq!(data["repo"], serde_json::json!("footnote"));
+        let data = coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote");
+        assert_eq!(
+            data["repo"],
+            serde_json::json!("github.com/bllshttng/footnote")
+        );
         assert_eq!(data["pr"], serde_json::json!(781));
         assert_eq!(data["reviewed_count"], serde_json::json!(1));
     }
@@ -6575,13 +6581,13 @@ mod tests {
             &project,
             &global,
             "review_coverage",
-            coverage_event_data(781, &rep, "a3f4b413b", "footnote"),
+            coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote"),
         );
         for path in [&project, &global] {
             let text = std::fs::read_to_string(path).unwrap();
             assert!(text.contains("review_coverage"), "missing in {path:?}");
             assert!(
-                text.contains("\"repo\":\"footnote\""),
+                text.contains("\"repo\":\"github.com/bllshttng/footnote\""),
                 "unscoped in {path:?}"
             );
         }
