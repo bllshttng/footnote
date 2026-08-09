@@ -1124,6 +1124,48 @@ def test_a_discovered_row_with_a_dead_pid_is_condemned():
     assert session.to_row()["status"] == "orphaned"
 
 
+def test_a_discovered_row_carries_its_evidence_not_just_a_word():
+    """Every row on this lane is DERIVED, so the basis matters most here.
+
+    Reducing the verdict to a bare ``status`` left a reader unable to tell a
+    transcript-derived ``live`` from an ``orphaned`` produced by a fired
+    falsifier -- and the age was hardcoded to None, which threw away the one
+    number that makes ``unknown`` actionable. The Rust list path re-serves these
+    rows verbatim, so the omission reached both runtimes.
+    """
+    live = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+        last_activity_age_s=32,
+    ).to_row()
+    assert live["reachability"] == "reachable"
+    assert live["basis"] == "transcript"
+    assert live["last_activity_age_s"] == 32
+
+    condemned = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=1,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+        last_activity_age_s=32,
+    ).to_row()
+    # Same word on the wire as a quiet row would once have produced; only the
+    # basis says a falsifier actually fired.
+    assert condemned["status"] == "orphaned"
+    assert condemned["reachability"] == "unreachable"
+    assert condemned["basis"] == "process-gone"
+
+
 def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     sid = "019f4d0c-1111-2222-3333-444444444444"
