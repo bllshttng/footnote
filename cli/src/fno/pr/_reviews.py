@@ -136,11 +136,16 @@ def _repo_identity_from_remote_url(url: str) -> Optional[str]:
     host = host_port
     if ":" in host_port:
         h, _, p = host_port.partition(":")
-        if p.isdigit():
+        # `isascii()` guard: Rust uses `is_ascii_digit`, and `str.isdigit()` is
+        # true for non-ASCII digits ("²", "٣"). Without it the two sides
+        # disagree on a remote nobody sane writes, and the reader silently
+        # stops finding the writer's events - the one failure this parity
+        # exists to prevent.
+        if p.isascii() and p.isdigit():
             host = h
     path = path.lstrip("/")
     first, _, rest = path.partition("/")
-    if first.isdigit() and rest:
+    if first.isascii() and first.isdigit() and rest:
         path = rest
     path = path.rstrip("/")
     if path.endswith(".git"):
@@ -223,8 +228,12 @@ def _scan_coverage(
 
 def _coverage_logs(
     cwd: Optional[str] = None, project_events: Optional[Path] = None
-) -> tuple[Path, Optional[Path], Optional[str]]:
-    """The logs a coverage read consults: ``(project, global_or_None, slug)``.
+) -> tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """The logs a coverage read consults: ``(project, global, slug)``, either None.
+
+    The project entry is read UNSCOPED (a repo-local file needs no scoping) and
+    the global entry SCOPED by ``slug``. Both can be None; see the same-file case
+    below, which is why the project entry is optional rather than always present.
 
     The global log is None when it cannot be scanned safely - no ``~/.fno``, the
     same file as the project log, or no resolvable git-remote slug. Without a
@@ -250,15 +259,23 @@ def _coverage_logs(
         slug = _repo_identity(root)
     except Exception:  # noqa: BLE001 - no global log -> project log alone
         return project_path, None, None
-    if global_path == project_path or not slug:
+    if global_path == project_path:
+        # The two resolve to ONE file when the git top-level is $HOME (a
+        # `git init ~` dotfiles checkout). The project log is normally read
+        # unscoped because it is repo-local; here it IS the cross-project
+        # journal, so an unscoped read would let any repo's PR N satisfy this
+        # repo's guard. Drop the unscoped read and keep only the scoped one -
+        # and with no identity to scope by, nothing here is safe to read.
+        return None, (global_path if slug else None), slug
+    if not slug:
         return project_path, None, slug
     return project_path, global_path, slug
 
 
 def coverage_sources(cwd: Optional[str] = None) -> list[str]:
     """The event logs a coverage read would consult, for a refusal message."""
-    project_path, global_path, _ = _coverage_logs(cwd)
-    return [str(project_path)] + ([str(global_path)] if global_path is not None else [])
+    paths = _coverage_logs(cwd)[:2]
+    return [str(p) for p in paths if p is not None]
 
 
 def latest_review_coverage(
@@ -277,7 +294,8 @@ def latest_review_coverage(
     file both stand in, so it is the tiebreaker rather than a fallback.
 
     The project log is scanned unscoped (it is already repo-local); the global
-    log is scoped by git-remote slug. Newest ``ts`` wins across the two, so a
+    log is scoped by the full ``host/owner/repo`` identity. Newest ``ts`` wins
+    across the two, so a
     project-only event from an older binary still beats a stale global one.
 
     A caller that refuses on a None names those logs with :func:`coverage_sources`:
@@ -289,7 +307,10 @@ def latest_review_coverage(
     """
     project_path, global_path, slug = _coverage_logs(cwd, project_events)
 
-    best, best_ts = _scan_coverage(project_path, pr_number)
+    best: Optional[dict] = None
+    best_ts = ""
+    if project_path is not None:
+        best, best_ts = _scan_coverage(project_path, pr_number)
 
     if global_path is not None:
         other, other_ts = _scan_coverage(global_path, pr_number, repo_slug=slug)

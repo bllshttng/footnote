@@ -1437,6 +1437,27 @@ def test_equal_timestamps_take_the_safer_verdict(monkeypatch, tmp_path):
     assert cov is not None and cov["coverage"] == "unknown"
 
 
+def test_repo_rooted_at_the_global_log_still_scopes(monkeypatch, tmp_path):
+    """When the git top-level IS the state dir (a `git init ~` dotfiles
+    checkout), the project log and the global journal are ONE file. The project
+    read is normally unscoped because it is repo-local; here that would let any
+    repo's PR N satisfy this repo's guard, so the unscoped read must drop out."""
+    from fno import paths
+
+    root = _git_repo(tmp_path / "home", "git@github.com:org-a/widget.git")
+    events = root / ".fno" / "events.jsonl"
+    monkeypatch.setattr(paths, "global_events_json", lambda: events)
+
+    _write_coverage(events, 781, repo="github.com/org-b/widget")
+    assert _merge._review_coverage_for_pr(781, str(root)) is None, (
+        "a foreign repo's event must not satisfy the guard even when the two "
+        "logs are the same file"
+    )
+
+    _write_coverage(events, 781, repo="github.com/org-a/widget")
+    assert _merge._review_coverage_for_pr(781, str(root)) is not None
+
+
 def test_corrupt_line_does_not_wedge_the_gate(monkeypatch, tmp_path):
     """A malformed line in a months-old append-only log must not hide a real
     attestation: read_events raised on the first bad line, and every caller
