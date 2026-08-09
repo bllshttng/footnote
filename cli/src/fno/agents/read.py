@@ -20,6 +20,14 @@ from typing import Optional
 
 from fno.agents import format as fmt
 from fno.agents import truth_status
+from fno.agents.reachability import (
+    REACHABLE,
+    UNKNOWN,
+    UNREACHABLE,
+    classify_reachability,
+    pid_falsifier,
+    reachability,
+)
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -27,6 +35,23 @@ from fno.agents.registry import (
     load_registry,
     resolve_agent_across_sources,
 )
+
+#: The wire vocabulary `--status` filters on and the Rust table renders. Kept
+#: stable so this change stays additive for every existing consumer; the
+#: reachability verdict, its basis, and its age ride alongside in their own
+#: fields rather than by redefining a word other code already parses.
+#:
+#: Note UNKNOWN, not UNREACHABLE, is where a quiet row lands: silence is absence
+#: of evidence, and only an affirmative falsifier condemns a row. The visible
+#: effect is that rows which used to read `orphaned` purely for being quiet now
+#: read `unknown` with their age attached.
+_WIRE_STATUS = {
+    REACHABLE: "live",
+    UNREACHABLE: "orphaned",
+    UNKNOWN: "unknown",
+}
+
+__all__ = ["reachability", "list_agents", "ListResult"]
 
 
 @dataclass
@@ -135,11 +160,16 @@ def list_agents(
         # Read off the SAME call, before `truth` is rebound below to the
         # unrelated node-claim reading; no second transcript read is paid.
         observed_model = truth.get("observed_model")
-        rendered_status = "unknown"
-        if truth_state in {"working", "watching", "your-move"}:
-            rendered_status = "live"
-        elif truth_state in {"done", "stalled"}:
-            rendered_status = "orphaned"
+        # One shared derivation, reached from the truth reading already in hand
+        # so no second transcript read is paid. The pid is the only falsifier a
+        # registry row carries; a row without one contributes no falsifier at
+        # all, never a death sentence.
+        reach = classify_reachability(
+            truth_state=truth_state,
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=pid_falsifier(entry.pid, getattr(entry, "pid_start_time", None)),
+        )
+        rendered_status = _WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:
             continue
         live_status: Optional[str] = None
@@ -167,6 +197,13 @@ def list_agents(
             entry, live_status=live_status, observed_model=observed_model
         )
         row["status"] = rendered_status
+        # The verdict travels with the evidence it was reached from. `status`
+        # keeps the wire vocabulary its consumers already parse; these three
+        # carry what `status` alone cannot say, which is WHICH question was
+        # answered and how old the answer is.
+        row["reachability"] = reach.verdict
+        row["basis"] = reach.basis
+        row["last_activity_age_s"] = reach.age_s
         rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort

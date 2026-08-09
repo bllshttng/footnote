@@ -190,11 +190,18 @@ def test_list_agents_filter_by_status(
         },
     )
 
-    result = list_agents(status="orphaned", json_out=True, tty=True)
+    # `done` means the worker declared its MISSION complete, which says nothing
+    # about whether it is still up (x-16d8). It is UNKNOWN, not orphaned; only
+    # an affirmative falsifier condemns a row.
+    result = list_agents(status="unknown", json_out=True, tty=True)
     parsed = json.loads(result.output)
 
     assert parsed["count"] == 1
     assert parsed["agents"][0]["name"] == "dead"
+
+    assert json.loads(
+        list_agents(status="orphaned", json_out=True, tty=True).output
+    )["count"] == 0
 
 
 def test_list_agents_filter_by_cwd_resolves_relative(

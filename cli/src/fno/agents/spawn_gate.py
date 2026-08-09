@@ -193,6 +193,12 @@ class LiveWorker:
     substrate: str
     pid: Optional[int]
     status: str
+    #: The full session uuid, so a display row can be joined back to its registry
+    #: handle. Without it the two views name the SAME session differently -- this
+    #: row is labelled with the FIRST 8 hex of the uuid while the registry handle
+    #: is the LAST 8 -- and an operator comparing them by eye finds no overlap.
+    #: That is how a census once got read as "all agents are dead".
+    session_id: Optional[str] = None
 
 
 @dataclass
@@ -271,6 +277,7 @@ def census() -> LiveCensus:
                     substrate="(foreign)",
                     pid=pid,
                     status="live",
+                    session_id=session_id,
                 )
             )
 
@@ -339,6 +346,7 @@ def census() -> LiveCensus:
                 substrate=substrate,
                 pid=row.pid,
                 status=str(row.status),
+                session_id=row.harness_session_id,
             )
         )
 

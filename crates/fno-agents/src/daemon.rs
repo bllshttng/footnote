@@ -2828,8 +2828,27 @@ fn reap_zombies() {
     }
 }
 
-fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
-    match truth {
+/// Map a truth probe onto the wire status `list` renders.
+///
+/// Prefers the shared reachability verdict, which is derived once (Python-side,
+/// `fno/agents/reachability.py`) with the falsifiers applied. The `state` arm
+/// below is a COMPATIBILITY FALLBACK for a `fno` too old to emit the verdict,
+/// not a second opinion: it maps transcript activity alone, so a session whose
+/// process died forty minutes ago still reads `working` there and renders live.
+///
+/// Note the fallback and the verdict disagree deliberately on quiet rows. The
+/// fallback calls a silent row `orphaned`; the verdict calls it `unknown`,
+/// because silence is absence of evidence and this registry lists REACHABLE
+/// agents rather than live processes -- a row is never condemned for being
+/// quiet, only for an affirmative falsification.
+fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
+    match probe.and_then(|p| p.reachability.as_deref()) {
+        Some("reachable") => return "live",
+        Some("unreachable") => return "orphaned",
+        Some("unknown") => return "unknown",
+        _ => {}
+    }
+    match probe.map(|p| p.state.as_str()) {
         Some("working" | "watching" | "your-move") => "live",
         Some("done" | "stalled") => "orphaned",
         _ => "unknown",
@@ -2937,8 +2956,7 @@ where
         .map(|e| {
             let truth_handle = registry_truth_handle(e);
             let truth = truth_fn(&truth_handle);
-            let rendered_status =
-                rendered_status_from_truth(truth.as_ref().map(|t| t.state.as_str()));
+            let rendered_status = rendered_status_from_truth(truth.as_ref());
             // A probe that did not answer is the same situation Python's
             // resolver reports as `no-transcript` (its dominant cause here is
             // the routine exit-13 miss), so both emitters say the same thing
@@ -3107,6 +3125,18 @@ where
 /// The shape is the contract Wave 7's `status-v1.json` schema + CI parity check
 /// codify; keep additions backward-compatible. `daemon.state` is always
 /// `serving` here because a served RPC implies the daemon got past recovery.
+///
+/// `agents.by_status` is a histogram of the STORED lifecycle enum -- what was
+/// last WRITTEN to each registry row -- and NOT a reachability census. It will
+/// not match `fno agents list`, and that is correct rather than a bug: they
+/// answer different questions. Because the daemon reconciles once at startup,
+/// these values can be stale for its entire uptime, so an `exited` here means
+/// "we recorded exited at some point", not "unreachable now". For reachability,
+/// read `fno agents list` (its `reachability` + `basis` fields), which derives
+/// from `cli/src/fno/agents/reachability.py`.
+///
+/// Deliberately NOT renamed to say so: the field name is pinned by the schema
+/// and its CI parity check, and a breaking rename would buy wording alone.
 async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // load_registry does blocking flock I/O; offload it from the async worker
     // thread (Gemini review). The drive-table read below stays async.
@@ -6589,11 +6619,53 @@ mod tests {
     /// A stub family-1 probe answer for the tests that only pin the state.
     /// `observed_model` null here stands for "this probe did not answer it",
     /// which the row renders as `no-transcript` rather than inventing a model.
+    ///
+    /// `reachability: None` deliberately exercises the COMPATIBILITY FALLBACK in
+    /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
+    /// is what keeps these pre-existing state-mapping assertions meaningful.
+    /// `probe_reachable` below covers the current wire.
     fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
         Some(crate::claude_ask::TruthProbe {
             state: state.into(),
+            reachability: None,
             observed_model: Value::Null,
         })
+    }
+
+    /// A probe carrying the shared verdict, as a current `fno` emits it.
+    fn probe_with_verdict(
+        state: &str,
+        reachability: &str,
+    ) -> Option<crate::claude_ask::TruthProbe> {
+        Some(crate::claude_ask::TruthProbe {
+            state: state.into(),
+            reachability: Some(reachability.into()),
+            observed_model: Value::Null,
+        })
+    }
+
+    /// The verdict OUTRANKS the transcript state, which is the whole point of
+    /// putting it on the wire: a session whose process died forty minutes ago
+    /// still reads `working` from its transcript, and mapping that state is how
+    /// `list` reported a dead worker live. Same input state, opposite render.
+    #[test]
+    fn the_reachability_verdict_outranks_the_transcript_state() {
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
+            "orphaned",
+            "a falsified row must not render live merely because its transcript is recent"
+        );
+        // And silence is not death: the verdict says unknown where the legacy
+        // state mapping said orphaned.
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
+            "unknown"
+        );
+        assert_eq!(
+            rendered_status_from_truth(probe("stalled").as_ref()),
+            "orphaned",
+            "the fallback keeps its old meaning for a fno too old to send a verdict"
+        );
     }
 
     fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
@@ -6827,6 +6899,7 @@ done
         let response = handle_list_with_truth(&ctx, &req, |_handle| {
             Some(crate::claude_ask::TruthProbe {
                 state: "working".into(),
+                reachability: Some("reachable".into()),
                 observed_model: json!({
                     "kind": "observed", "model": "glm-5.2", "samples": 300
                 }),

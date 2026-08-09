@@ -46,13 +46,38 @@ def _crown_map() -> dict[str, str]:
         return {}
 
 
+def _registry_handles() -> dict[str, str]:
+    """session uuid -> registry handle. Best-effort, like :func:`_crown_map`.
+
+    `top` labels a foreign claude row with the FIRST 8 hex of the session uuid;
+    the registry handle for that same session is the LAST 8. Same session, two
+    identities, and nothing on screen relates them -- which is how a grep across
+    the two views returned nothing and got read as "all agents are dead".
+    """
+    try:
+        from fno.agents.registry import load_registry
+
+        return {
+            e.harness_session_id: e.name
+            for e in load_registry()
+            if e.harness_session_id and e.name
+        }
+    except Exception:  # noqa: BLE001 — top is a debug view, never fail on it
+        return {}
+
+
 def _rows(workers: list[LiveWorker], crowns: dict[str, str]) -> list[dict]:
+    handles = _registry_handles()
     rows = []
     for w in workers:
+        # Null when this session has no registry row (a foreign claude session
+        # that fno never adopted), which is a real answer, not a lookup miss.
+        handle = handles.get(w.session_id or "")
         rows.append(
             {
                 "source": w.source,
                 "name": w.name,
+                "handle": handle if handle != w.name else None,
                 # HARNESS, not PROVIDER: the value is `row.harness` (the CLI),
                 # so the old name made a claude-hosted worker on a z.ai route
                 # read as running on claude. Same rename as the list row.
@@ -162,7 +187,12 @@ def render_top(as_json: bool = False, include_subagents: bool = False) -> str:
         out.append("no live workers")
     for r in rows:
         # US9: mark a crowned worker in the name cell (ASCII, alignment-safe).
+        # The registry handle rides along when it differs from this view's own
+        # label, so `top` and `list` can be joined by eye instead of by guessing
+        # which end of the uuid each one truncated.
         name_cell = r["name"] + (f" [{r['crown']}]" if r["crown"] else "")
+        if r.get("handle"):
+            name_cell += f" ={r['handle']}"
         out.append(
             f"{r['source']:<7} {name_cell:<24} {r['harness']:<9} "
             f"{r['substrate']:<10} {r['pid'] or '-':>7} "

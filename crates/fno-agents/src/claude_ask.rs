@@ -108,6 +108,14 @@ impl OrphanReason {
 #[derive(Debug, Clone)]
 pub struct TruthProbe {
     pub state: String,
+    /// The shared reachability verdict (`reachable` / `unreachable` /
+    /// `unknown`), derived Python-side with the falsifiers applied. `None` on a
+    /// truth build that predates the field.
+    ///
+    /// Prefer this over mapping [`Self::state`]: `state` is transcript activity
+    /// alone, so a session whose process died minutes ago still reads
+    /// `working` and renders live. That two-hour blind spot is the whole bug.
+    pub reachability: Option<String>,
     pub observed_model: serde_json::Value,
 }
 
@@ -218,6 +226,13 @@ fn family1_truth_probe_with_command(
         Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => {
             Some(TruthProbe {
                 state: state.unwrap_or_default(),
+                // The shared reachability verdict, derived Python-side with the
+                // falsifiers applied. Absent on a truth build that predates the
+                // field, and callers then fall back to mapping `state` — which
+                // is transcript activity only, so it cannot see a dead process.
+                reachability: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
                 // Absent on a truth build that predates the field: null rather
                 // than a fabricated variant, so a stale `fno` reads as "this
                 // probe did not answer" instead of asserting no transcript.
