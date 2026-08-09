@@ -2828,7 +2828,7 @@ fn reap_zombies() {
     }
 }
 
-/// Map a truth probe onto the wire status `list` renders.
+/// Map a truth probe onto the wire value `list` renders.
 ///
 /// Prefers the shared reachability verdict, which is derived once (Python-side,
 /// `fno/agents/reachability.py`) with the falsifiers applied. The `state` arm
