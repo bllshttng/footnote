@@ -1569,27 +1569,30 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
 
     session_id = getattr(entry, "harness_session_id", None) or ""
 
-    # 5. Self-send: refuse unless --self. NOT justified by impossibility
-    #    (self-injection demonstrably works) -- by the capability boundary:
-    #    self-injection supplies the very user-shaped trigger a model-invocation
-    #    refusal exists to require. Cross-session injection is the sanctioned
-    #    king-mediated path (a distinct actor stands in the user's position).
-    #    Fail closed on an unknown session id: _self_recipient compares the
-    #    RESOLVED id, and session_handle_tier returns None for an empty token, so
-    #    a row carrying no harness_session_id (legacy/unmigrated) would sail past
-    #    the self-check even when it IS this session. No id, no soundness.
+    # 5. Self-send redirect. The transport is send-keys: an unwrapped payload is
+    #    text typed at a prompt line, so nothing here can be a capability
+    #    boundary - downstream of the keystroke nothing distinguishes an operator
+    #    typing a slash from an agent injecting it. The check below is a usability
+    #    redirect: a caller who addressed this own session positionally almost
+    #    certainly meant --to-self (the opt-in that parks the payload in
+    #    positional #1 and derives the recipient). Fail closed on an unknown
+    #    session id: _self_recipient compares the RESOLVED id, and
+    #    session_handle_tier returns None for an empty token, so a row carrying
+    #    no harness_session_id (legacy/unmigrated) would sail past the self-check
+    #    even when it IS this session. No id, no soundness.
     if not session_id and not self_ok:
         _refused(
             f"{name!r} resolves to a registry row with no harness_session_id, so "
-            "the self-injection check cannot be decided; re-register the row "
-            "(`fno agents register`) or pass --self if you intend a self-inject"
+            "the self-send check cannot be decided; re-register the row "
+            "(`fno agents register`), or if this IS your session address it with "
+            "--to-self instead of a positional id"
         )
     if _self_recipient(name, resolved_session_id=session_id) and not self_ok:
         _refused(
-            "self-injection supplies the user-shaped trigger a model-invocation "
-            "refusal exists to require; cross-session injection (mail a peer) is "
-            "the sanctioned path. Pass --self only for a verb carrying no "
-            "model-invocation refusal (e.g. /compact rescue)."
+            "you addressed this session. For a plain self-note the envelope is "
+            "fine:\n    fno mail send <own-id> \"text\"\n"
+            "To fire a verb at your own prompt line (no envelope, so the slash "
+            "parses):\n    fno mail send '<payload>' --to-self --raw"
         )
 
     # 4. Keystroke lane: a raw slash payload fires only where it reaches a prompt
@@ -1737,7 +1740,7 @@ def cmd_send(
             "REPL slash parser fires it - the only way to make a verb the model "
             "is barred from invoking actually run. One axis binds it: an actor "
             "OTHER than the model must supply the trigger (cross-session, the "
-            "king-mediated path; self-injection is barred unless --self). Keeping "
+            "king-mediated path; self-injection is barred unless --to-self). Keeping "
             "the reviewer off the author is the aim of this lane, not a second "
             "axis it enforces: a self-attested review counts as coverage and "
             "merges. Payload must start with / and be "
@@ -1745,11 +1748,14 @@ def cmd_send(
             "two-variable experiment - report any refusal verbatim and stop."
         ),
     ),
-    self_send: bool = typer.Option(
-        False, "--self",
+    to_self: bool = typer.Option(
+        False, "--to-self",
         help=(
-            "With --raw: opt in to self-injection. Use only for a verb carrying "
-            "no model-invocation refusal (e.g. /compact rescue)."
+            "Address this session as the recipient (no <id> needed). With --raw "
+            "the envelope is stripped so a slash command parses at your own "
+            "prompt line - this is how an agent reaches a verb the harness serves "
+            "to a typed invocation. The audit event records the sender, since an "
+            "unwrapped payload carries no `from`."
         ),
     ),
 ) -> None:
@@ -1779,6 +1785,39 @@ def cmd_send(
 
     workdir = Path(cwd).resolve() if cwd else Path(os.getcwd())
 
+    # --to-self: the recipient is THIS session, derived from ambient identity, so
+    # the positional parks the payload (positional #1) exactly as under
+    # --to-project. Fail loud without identity - never a silent floor - and refuse
+    # alongside --to-project or a second positional (which reads as a named
+    # recipient, contradicting a self address). After this the rest of cmd_send
+    # sees name=<self handle>, message=<payload>, indistinguishable from a typed
+    # `send <own-id> <payload>`.
+    if to_self:
+        if to_project is not None:
+            print(
+                "error: --to-self and --to-project are mutually exclusive",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        if message is not None:
+            print(
+                "error: --to-self derives the recipient from this session; drop "
+                "the positional <id>/<name>",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        from fno.harness_identity import canonical_handle, resolve_harness_identity
+
+        ident = resolve_harness_identity()
+        if not (ident.session_id and ident.harness):
+            print(
+                "error: --to-self: no ambient harness identity - cannot self-address",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        message = name
+        name = canonical_handle(ident.session_id)
+
     # --raw: fire a verb in a peer by injecting the payload UNWRAPPED at the
     # prompt line (no <fno_mail> envelope, so the REPL slash parser runs it).
     # Separate flow: never wraps, never queues durable, four-state receipt.
@@ -1786,7 +1825,7 @@ def cmd_send(
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)
-        _raw_send(name, message, self_ok=self_send)
+        _raw_send(name, message, self_ok=to_self)
         return
 
     # --from-self resolves this session's own canonical handle and threads it as
