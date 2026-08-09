@@ -254,6 +254,7 @@ notify
 observer replay
 observer sweep
 paths emit-shell
+paths handoff
 paths shell-stub
 paths verify
 phase
