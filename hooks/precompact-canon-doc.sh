@@ -75,7 +75,7 @@ case "$_ci" in
   *.md) DOC_PATH="$_ci" ;;
 esac
 if [[ -z "$DOC_PATH" ]]; then
-  DOC_PATH="$(fno paths handoff --session "$SID" 2>/dev/null || true)"
+  DOC_PATH="$(fno paths handoff --session-id "$SID" 2>/dev/null || true)"
 fi
 # No resolvable doc path -> a bare discard list with no pointer is worth little.
 [[ -n "$DOC_PATH" ]] || exit 0

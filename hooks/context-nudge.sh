@@ -276,7 +276,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         else
             CANON_DOC=""
             if command -v fno >/dev/null 2>&1; then
-                CANON_DOC=$(with_timeout 3 fno paths handoff --session "${SESSION_ID}" 2>/dev/null | head -1 || true)
+                CANON_DOC=$(with_timeout 3 fno paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
             fi
             if [[ -n "$CANON_DOC" ]]; then
                 REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
