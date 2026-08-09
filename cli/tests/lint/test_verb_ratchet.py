@@ -216,7 +216,7 @@ def _check_with(monkeypatch, tmp_path, baseline_text):
 def test_check_ok_when_baseline_matches_live(monkeypatch, tmp_path):
     report = _check_with(monkeypatch, tmp_path, vr.generate(_LIVE))
     assert report.ok is True
-    assert "ok (5 leaves)" in report.message
+    assert "ok (5 leaves, 0 hidden options - fno-py only" in report.message
 
 
 def test_check_fails_naming_added_verb(monkeypatch, tmp_path):
@@ -257,3 +257,97 @@ def test_generate_parse_baseline_roundtrip():
     # comments and blanks are ignored
     noisy = "# header\n\nalpha\n  # mid\nbeta\n"
     assert vr.parse_baseline(noisy) == ["alpha", "beta"]
+
+
+# --------------------------------------------------------------------------- #
+# Hidden-option emission + flag ratchet (Wave 1)
+# --------------------------------------------------------------------------- #
+def test_visible_options_are_not_emitted_only_hidden():
+    # a visible option never reaches the baseline; only .hidden ones do
+    import click
+
+    @click.command()
+    @click.option("--visible", is_flag=True)
+    @click.option("--secret", is_flag=True, hidden=True)
+    def cmd(visible, secret):
+        pass
+
+    assert vr._hidden_option_tokens(cmd) == ["!--secret"]
+    # the long form is the token when an option carries a secondary opt
+    @click.command()
+    @click.option("--self/--no-self", default=False, hidden=True)
+    def cmd2(self):
+        pass
+
+    assert vr._hidden_option_tokens(cmd2) == ["!--self"]
+
+
+def test_format_leaf_is_bare_without_hidden_options():
+    import click
+
+    @click.command()
+    @click.option("--visible", is_flag=True)
+    def cmd(visible):
+        pass
+
+    assert vr._format_leaf("foo bar", cmd) == "foo bar"
+
+
+def test_split_leaf_separates_path_and_flags():
+    path, flags = vr._split_leaf("mail send !--self !--no-self")
+    assert path == "mail send"
+    assert flags == frozenset({"!--self", "!--no-self"})
+    # a bare leaf carries an empty flag set
+    path, flags = vr._split_leaf("agents adopt")
+    assert path == "agents adopt"
+    assert flags == frozenset()
+
+
+def test_generate_parse_baseline_roundtrip_with_flags():
+    text = vr.generate(["mail send !--self", "alpha", "mux pane ls"])
+    assert vr.parse_baseline(text) == ["mail send !--self", "alpha", "mux pane ls"]
+
+
+_LIVE_F = ["backlog done !--tag", "help", "mux pane ls", "version", "whoami"]
+_LIVE_F_BARE = ["backlog done", "help", "mux pane ls", "version", "whoami"]
+
+
+def _check_live(monkeypatch, tmp_path, live, baseline_text):
+    monkeypatch.setattr(vr, "enumerate_all_leaves", lambda: list(live))
+    monkeypatch.setattr(vr, "baseline_path", lambda: tmp_path / "verb-baseline.txt")
+    (tmp_path / "verb-baseline.txt").write_text(baseline_text, encoding="utf-8")
+    return vr.check()
+
+
+def test_check_ok_message_names_scope_and_hidden_count(monkeypatch, tmp_path):
+    report = _check_live(monkeypatch, tmp_path, _LIVE_F, vr.generate(_LIVE_F))
+    assert report.ok is True
+    assert "fno-py only" in report.message
+    assert "Rust front is constant-listed" in report.message
+    assert "5 leaves" in report.message
+    assert "1 hidden options" in report.message
+
+
+def test_check_fails_naming_added_hidden_flag(monkeypatch, tmp_path):
+    # baseline predates the hidden option; live carries it on an existing verb
+    report = _check_live(monkeypatch, tmp_path, _LIVE_F, vr.generate(_LIVE_F_BARE))
+    assert report.ok is False
+    assert "flag-exception" in report.message
+    assert "backlog done !--tag" in report.message
+    assert "Added hidden options" in report.message
+
+
+def test_check_passes_when_hidden_flag_is_baselined(monkeypatch, tmp_path):
+    # the flag lives in both -> ok (the PR carried flag-exception + a regen)
+    report = _check_live(monkeypatch, tmp_path, _LIVE_F, vr.generate(_LIVE_F))
+    assert report.ok is True
+
+
+def test_check_removed_hidden_flag_needs_no_exception(monkeypatch, tmp_path):
+    # live dropped the flag, baseline still has it -> fails naming it, but the
+    # message asks only for a regenerate, NOT a flag-exception (removals are free)
+    report = _check_live(monkeypatch, tmp_path, _LIVE_F_BARE, vr.generate(_LIVE_F))
+    assert report.ok is False
+    assert "backlog done !--tag" in report.message
+    assert "Removed hidden options" in report.message
+    assert "flag-exception" not in report.message

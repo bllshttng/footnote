@@ -9,18 +9,31 @@
 # (mirrors `loc-exception:` so contributors learn one idiom, not two).
 # Two PRs that each add a verb both edit this file; the merge conflict is the
 # intended review moment, not tooling noise.
+#
+# A leaf carrying hidden options lists them inline as `!--flag` tokens
+# (e.g. `mail send !--self`); leaves with none stay single-token. Hidden options
+# and deprecated aliases are the ungated axis this ratchet guards, so a new
+# hidden option on an existing verb carries its own PR-body line:
+#   flag-exception: <rationale>
+# (same shape as `verb-exception:`; removals are free and need no line).
+#
+# Scope: the hidden-option coverage is fno-py only. The Rust front is
+# constant-listed in lint_verb_ratchet.py (RUST_FRONT_VERBS), not introspected,
+# so a clap `hide = true` option on it is invisible to this gate - and to
+# `fno mux --help`, which is how it stays hidden. The lint output names this
+# boundary on every green run.
 agents adopt
-agents ask
+agents ask !--provider
 agents attach
 agents crown
 agents digest
-agents discovered-json
+agents discovered-json !--provider
 agents drive-authority
 agents finalize
-agents gate
-agents heal-token
+agents gate !--notes !--probe !--record
+agents heal-token !--all-sources
 agents kill-check
-agents list
+agents list !--provider
 agents logs
 agents loop
 agents loop-check
@@ -40,7 +53,7 @@ agents report
 agents restart
 agents resume
 agents rm
-agents spawn
+agents spawn !--output-format !--squad
 agents spawn-guard
 agents status
 agents stop
@@ -56,11 +69,11 @@ agents whoami
 annotate add
 annotate list
 annotate resolve
-approvals decide
-approvals ls
-approvals show
-backlog add
-backlog advance
+approvals decide !--db
+approvals ls !--db
+approvals show !--db
+backlog add !--tag
+backlog advance !--continuation
 backlog archive
 backlog backfill-slugs
 backlog bases
@@ -85,7 +98,7 @@ backlog capture promote
 backlog capture scan
 backlog capture tidy
 backlog collisions check
-backlog cost
+backlog cost !--session
 backlog decompose
 backlog defer
 backlog dispatch-lanes
@@ -95,7 +108,7 @@ backlog exec-graph
 backlog find
 backlog get
 backlog groom
-backlog idea
+backlog idea !--tag
 backlog inbox add
 backlog inbox archive
 backlog inbox capture-pass
@@ -105,7 +118,7 @@ backlog inbox list
 backlog inbox promote
 backlog inbox scan
 backlog inbox tidy
-backlog intake
+backlog intake !--batch
 backlog lane-fill
 backlog lanes
 backlog maintain
@@ -147,7 +160,7 @@ backlog unclaim
 backlog undefer
 backlog unqueue
 backlog unsupersede
-backlog update
+backlog update !--tag !--untag
 backlog validate
 backlog view
 bundle check
@@ -221,7 +234,7 @@ mail migrate-bus
 mail notify-self
 mail rebuild-render
 mail reply
-mail send
+mail send !--provider
 mail status
 mail triage
 mail unread
@@ -254,7 +267,7 @@ notify
 observer replay
 observer sweep
 paths emit-shell
-paths handoff
+paths handoff !--session
 paths shell-stub
 paths verify
 phase
@@ -292,17 +305,17 @@ pr-watch refresh
 pr-watch status
 pr-watch tick
 pr-watch uninstall
-reality-check gh
+reality-check gh !--pr
 reality-check notion
 reality-check sheets
 research
 restart
 resume receipt show
-resume receipt validate
+resume receipt validate !--session
 resume receipt version
-resume receipt write
+resume receipt write !--session
 retro drain-postmortems
-retro run
+retro run !--pr !--session
 review
 roles context
 roles ls
@@ -328,7 +341,7 @@ setup wizard
 skill-diff reconcile
 skill-diff tick
 state archive
-state init
+state init !--allow-stub
 state list-fields
 state path
 state set
@@ -344,11 +357,11 @@ stub-manifest write
 target blast-check
 target check-contained
 target check-review-gate
-target init
-target resolve-model
+target init !--provider
+target resolve-model !--provider
 target resolve-owned-identity
 target resume-bind
-target start
+target start !--provider
 target status
 test
 think dispatch
@@ -362,9 +375,9 @@ wake drop
 wake list
 whoami
 worker blueprint
-worker external
+worker external !--pr
 worker reconcile
-worker review
+worker review !--session
 worker ship
 worktree archive
 worktree cleanup

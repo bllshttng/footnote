@@ -105,11 +105,36 @@ def baseline_path(repo_root: Optional[Path] = None) -> Path:
     return (repo_root or _repo_root()) / BASELINE_REL
 
 
+def _hidden_option_tokens(cmd) -> list[str]:
+    """Hidden Option names on a leaf command, as ``!--flag`` baseline tokens.
+
+    Visible options appear in ``--help`` (already reviewed at the menu); only
+    ``.hidden`` options are the ungated axis this ratchet guards. Each is emitted
+    as its first opt string (the long form) so one option is one token and the
+    baseline line stays readable. ``_flag_aliases`` makes every deprecated alias
+    its own hidden Option, so one rule covers hidden flags and aliases both.
+    """
+    tokens: list[str] = []
+    for param in getattr(cmd, "params", []):
+        if getattr(param, "hidden", False):
+            opts = [o for o in getattr(param, "opts", []) if o.startswith("-")]
+            if opts:
+                tokens.append("!" + opts[0])
+    return sorted(tokens)
+
+
+def _format_leaf(path: str, cmd) -> str:
+    """A baseline leaf line: the verb path plus its hidden options, if any."""
+    toks = _hidden_option_tokens(cmd)
+    return f"{path} {' '.join(toks)}" if toks else path
+
+
 def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
     """Recurse a Click group to its leaf command paths (hidden included).
 
     A group with no resolvable children collapses to its own path, so an empty
-    or all-stub group still counts as one invocable verb.
+    or all-stub group still counts as one invocable verb. Hidden options on a
+    leaf ride along as ``!--flag`` tokens on that leaf's line.
     """
     import click
 
@@ -124,9 +149,9 @@ def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
         if hasattr(sub, "list_commands"):
             child_ctx = click.Context(sub, info_name=name, parent=ctx)
             children = _group_leaves(sub, child_ctx, path, depth + 1)
-            leaves.extend(children if children else [path])
+            leaves.extend(children if children else [_format_leaf(path, sub)])
         else:
-            leaves.append(path)
+            leaves.append(_format_leaf(path, sub))
     return leaves
 
 
@@ -183,11 +208,11 @@ def enumerate_python_leaves() -> list[str]:
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
                 children = _group_leaves(cmd, ctx, name)
-                leaves.extend(children if children else [name])
+                leaves.extend(children if children else [_format_leaf(name, cmd)])
             else:
-                leaves.append(name)
+                leaves.append(_format_leaf(name, cmd))
         else:
-            leaves.append(name)
+            leaves.append(_format_leaf(name, obj))
     return sorted(set(leaves))
 
 
@@ -350,6 +375,19 @@ _HEADER = """\
 # (mirrors `loc-exception:` so contributors learn one idiom, not two).
 # Two PRs that each add a verb both edit this file; the merge conflict is the
 # intended review moment, not tooling noise.
+#
+# A leaf carrying hidden options lists them inline as `!--flag` tokens
+# (e.g. `mail send !--self`); leaves with none stay single-token. Hidden options
+# and deprecated aliases are the ungated axis this ratchet guards, so a new
+# hidden option on an existing verb carries its own PR-body line:
+#   flag-exception: <rationale>
+# (same shape as `verb-exception:`; removals are free and need no line).
+#
+# Scope: the hidden-option coverage is fno-py only. The Rust front is
+# constant-listed in lint_verb_ratchet.py (RUST_FRONT_VERBS), not introspected,
+# so a clap `hide = true` option on it is invisible to this gate - and to
+# `fno mux --help`, which is how it stays hidden. The lint output names this
+# boundary on every green run.
 """
 
 
@@ -366,6 +404,19 @@ def parse_baseline(text: str) -> list[str]:
     ]
 
 
+def _split_leaf(line: str) -> tuple[str, frozenset[str]]:
+    """Split a baseline line into ``(verb path, hidden-option tokens)``.
+
+    Verb tokens never start with ``!``; hidden options are emitted as ``!--flag``
+    by :func:`_format_leaf`, so the split is unambiguous. A bare leaf (no hidden
+    options) returns an empty flag set.
+    """
+    parts = line.split()
+    path = " ".join(p for p in parts if not p.startswith("!"))
+    flags = frozenset(p for p in parts if p.startswith("!"))
+    return path, flags
+
+
 @dataclass
 class CheckReport:
     ok: bool
@@ -373,25 +424,72 @@ class CheckReport:
 
 
 def check() -> CheckReport:
-    """Diff the live surface against the checked-in baseline."""
-    live = set(enumerate_all_leaves())  # raises VerbRatchetError on failure
+    """Diff the live surface against the checked-in baseline.
+
+    Separates two drift kinds so each carries its own escape hatch: an added
+    VERB needs a ``verb-exception:`` line, an added HIDDEN OPTION on an existing
+    verb needs a ``flag-exception:`` line. Removals (verbs or options) are free;
+    they pass once the baseline is regenerated and need no exception line.
+
+    The hidden-option coverage is fno-py only - the Rust front is
+    constant-listed (:data:`RUST_FRONT_VERBS`), not introspected, so a clap
+    ``hide = true`` option on it is invisible here. The ok line states that
+    boundary so it is visible in CI output, not only in the source.
+    """
+    live_lines = enumerate_all_leaves()  # raises VerbRatchetError on failure
+    live: dict[str, tuple[frozenset[str], str]] = {}
+    for line in live_lines:
+        lpath, lflags = _split_leaf(line)
+        live[lpath] = (lflags, line)
+
     path = baseline_path()
-    baseline = set(parse_baseline(path.read_text(encoding="utf-8") if path.exists() else ""))
-    added = sorted(live - baseline)
-    removed = sorted(baseline - live)
-    if not added and not removed:
-        return CheckReport(ok=True, message=f"verb-ratchet: ok ({len(live)} leaves)")
+    baseline_text = path.read_text(encoding="utf-8") if path.exists() else ""
+    baseline: dict[str, tuple[frozenset[str], str]] = {}
+    for line in parse_baseline(baseline_text):
+        bpath, bflags = _split_leaf(line)
+        baseline[bpath] = (bflags, line)
+
+    added_verbs = [live[p][1] for p in sorted(set(live) - set(baseline))]
+    removed_verbs = [baseline[p][1] for p in sorted(set(baseline) - set(live))]
+    added_flags: list[str] = []
+    removed_flags: list[str] = []
+    for p in sorted(set(live) & set(baseline)):
+        lf = live[p][0]
+        bf = baseline[p][0]
+        added_flags.extend(f"{p} {f}" for f in sorted(lf - bf))
+        removed_flags.extend(f"{p} {f}" for f in sorted(bf - lf))
+
+    n_hidden = sum(len(v[0]) for v in live.values())
+    if not added_verbs and not removed_verbs and not added_flags and not removed_flags:
+        return CheckReport(
+            ok=True,
+            message=(
+                f"verb-ratchet: ok ({len(live)} leaves, {n_hidden} hidden options "
+                f"- fno-py only; the Rust front is constant-listed and not introspected)"
+            ),
+        )
+
     parts = ["verb-ratchet: FAIL - live surface drifted from scripts/ci/verb-baseline.txt"]
-    if added:
-        parts.append("  Added (in the code, not the baseline): " + ", ".join(added))
+    if added_verbs:
+        parts.append("  Added (in the code, not the baseline): " + ", ".join(added_verbs))
         parts.append("    A verb cannot be added silently. Regenerate with")
         parts.append("    `fno lint verb-ratchet --update`, commit this file in the PR,")
         parts.append("    and add a PR-body line:  verb-exception: <rationale>")
-    if removed:
-        parts.append("  Removed (in the baseline, not the code): " + ", ".join(removed))
+    if added_flags:
+        parts.append("  Added hidden options (in the code, not the baseline): " + ", ".join(added_flags))
+        parts.append("    A hidden option cannot be added silently. Regenerate with")
+        parts.append("    `fno lint verb-ratchet --update`, commit this file in the PR,")
+        parts.append("    and add a PR-body line:  flag-exception: <rationale>")
+    if removed_verbs:
+        parts.append("  Removed (in the baseline, not the code): " + ", ".join(removed_verbs))
         parts.append(
             "    Regenerate with `fno lint verb-ratchet --update` and commit the baseline."
         )
-    parts.append("  If two PRs each add a verb, both edit this file; the merge conflict is")
-    parts.append("  the intended review moment, not tooling noise.")
+    if removed_flags:
+        parts.append("  Removed hidden options (in the baseline, not the code): " + ", ".join(removed_flags))
+        parts.append(
+            "    Regenerate with `fno lint verb-ratchet --update` and commit the baseline."
+        )
+    parts.append("  If two PRs each add a verb or hidden option, both edit this file; the")
+    parts.append("  merge conflict is the intended review moment, not tooling noise.")
     return CheckReport(ok=False, message="\n".join(parts))
