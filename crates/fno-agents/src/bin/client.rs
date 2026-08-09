@@ -2151,10 +2151,12 @@ fn fetch_discovered_sessions(
 ) -> Vec<Value> {
     use std::process::Command;
 
-    if matches!(status_filter, Some(status) if status != "live") {
-        return Vec::new();
-    }
-
+    // No live-only early return. It encoded "a discovered session is live by
+    // definition", which the shared reachability verdict retired: a discovered
+    // row whose process is provably gone now comes back `orphaned`, so the
+    // early return made `--status orphaned` drop through Rust a row that Python
+    // prints -- one runtime-dependent answer to one question. The row-level
+    // filter at the bottom is the single place status is applied.
     let mut cmd = Command::new("fno");
     cmd.args(["agents", "discovered-json"]);
     cmd.env("FNO_AGENTS_RUNTIME", "python");
@@ -2181,11 +2183,10 @@ fn fetch_discovered_sessions(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    // Filter on the ROW's own verdict, not just on the early return above. A
-    // discovered session whose process is provably gone now comes back
-    // `orphaned` (the shared reachability verdict), so a live-only run that
-    // checked the FILTER alone would print an orphaned row under a banner that
-    // says LIVE.
+    // Filter on the ROW's own verdict. A discovered session whose process is
+    // provably gone now comes back `orphaned` (the shared reachability
+    // verdict), so a live-only run that trusted the CALLER's filter alone would
+    // print an orphaned row under a banner that says LIVE.
     if let Some(want) = status_filter {
         rows.retain(|r| r.get("status").and_then(Value::as_str) == Some(want));
     }
