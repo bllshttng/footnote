@@ -220,8 +220,11 @@ SB2="$(_session_block 2 "$DEFAULT_DECISIONS")"
 
 # ---------------------------------------------------------------------------
 # Assemble the doc. Auto block fully regenerated; the two session blocks are
-# preserved-or-defaulted.
+# preserved-or-defaulted. Ensure the parent dir exists (handoffs_dir may resolve
+# to a path that does not yet exist, e.g. the state-dir fallback on a fresh
+# setup); without this the write fails silently and the pointer below would lie.
 # ---------------------------------------------------------------------------
+mkdir -p "$(dirname "$DOC_PATH")" 2>/dev/null || true
 {
   echo "# Canon doc: session ${SHORT}"
   echo ""

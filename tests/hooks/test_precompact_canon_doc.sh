@@ -136,6 +136,17 @@ else
   fail "prose-as-path case: rc=$PROSE_RC stdout_len=${#PROSE_OUT}"
 fi
 
+# ---------------------------------------------------------------------------
+# 6. Creates a doc in a not-yet-existing nested dir (mkdir -p the parent).
+# ---------------------------------------------------------------------------
+NESTED="$TMP/nested/deep/canon.md"
+run_hook "{\"trigger\":\"manual\",\"custom_instructions\":\"$NESTED\"}" >/dev/null 2>&1
+if [[ -f "$NESTED" ]]; then
+  pass "doc written into a freshly created nested dir"
+else
+  fail "nested-dir doc not written (parent not created)"
+fi
+
 echo
 echo "results: PASS=$PASS FAIL=$FAIL"
 [[ "$FAIL" == 0 ]]
