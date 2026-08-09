@@ -11,6 +11,10 @@ from typer.testing import CliRunner
 
 from fno.agents.registry import register_existing_session
 from fno.cli import app
+from fno.harness_identity import (
+    HARNESS_SESSION_MARKERS,
+    LEGACY_HARNESS_SESSION_MARKERS,
+)
 from fno.paths_testing import use_tmpdir
 
 SID_CLAUDE = "9a063cd3-69d4-415a-ada5-649b0164189c"
@@ -31,11 +35,11 @@ def runner():
     return CliRunner()
 
 
-_HARNESS_MARKERS = (
-    "CLAUDE_CODE_SESSION_ID",
-    "CODEX_SESSION_ID",
-    "GEMINI_SESSION_ID",
-    "OPENCODE_SESSION_ID",
+# The canonical marker set, not a hand-maintained copy: a stale list here
+# silently turns env-leak tests green for the wrong reason. Covers modern and
+# legacy, since current_session_id() reads both.
+_HARNESS_MARKERS = tuple(
+    m for m, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
 )
 
 
