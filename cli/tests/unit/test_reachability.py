@@ -24,6 +24,7 @@ only a histogram (``agents: {total, by_status}``, daemon.rs), with no per-agent
 rows to compare. Congruence is therefore asserted over the derivation the
 surfaces consult, not over ``status`` output.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -136,12 +137,9 @@ def test_a_falsifier_never_raises_a_verdict(truth_state: str) -> None:
     "the pane is alive, therefore live" rule fails here instead of shipping.
     """
     without = classify_reachability(truth_state=truth_state, age_s=10, falsifier=None)
-    with_ = classify_reachability(
-        truth_state=truth_state, age_s=10, falsifier="process-gone"
-    )
+    with_ = classify_reachability(truth_state=truth_state, age_s=10, falsifier="process-gone")
     assert _rank(with_.verdict) <= _rank(without.verdict), (
-        f"falsifier RAISED the verdict for {truth_state}: "
-        f"{without.verdict} -> {with_.verdict}"
+        f"falsifier RAISED the verdict for {truth_state}: {without.verdict} -> {with_.verdict}"
     )
     assert with_.verdict == UNREACHABLE
 
@@ -154,9 +152,7 @@ def test_an_erroring_falsifier_probe_fails_toward_unknown_never_unreachable() ->
     sentence. ``None`` means "did not falsify"; an error must arrive here the
     same way, never as a falsification.
     """
-    got = classify_reachability(
-        truth_state="stalled", age_s=99999, falsifier=None
-    )
+    got = classify_reachability(truth_state="stalled", age_s=99999, falsifier=None)
     assert got.verdict != UNREACHABLE
 
 
@@ -301,7 +297,14 @@ def test_truth_json_carries_the_reachability_verdict_for_rust_callers() -> None:
     assert payload["state"] == "working"
 
 
-def test_a_mux_pane_row_carries_no_pid_falsifier() -> None:
+def _pane_row():
+    """A mux row whose recorded pid is confidently dead (pid 1 is never a worker)."""
+    from types import SimpleNamespace
+
+    return SimpleNamespace(pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 0})
+
+
+def test_a_mux_pane_row_carries_no_pid_falsifier(monkeypatch) -> None:
     """A pane row's recorded pid is not the authority on that pane.
 
     ``reconcile`` re-derives the pane's current child on every pass, because a
@@ -313,13 +316,54 @@ def test_a_mux_pane_row_carries_no_pid_falsifier() -> None:
     """
     from types import SimpleNamespace
 
+    from fno.agents import mux_spawn
     from fno.agents.reachability import registry_falsifier
 
-    # pid 1 is never a worker, so `_pid_alive` returns a confident False.
-    pane_row = SimpleNamespace(
-        pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 0}
-    )
-    bare_row = SimpleNamespace(pid=1, pid_start_time=None, mux=None)
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda mux: True)
+    assert registry_falsifier(_pane_row()) is None
 
-    assert registry_falsifier(pane_row) is None
+    bare_row = SimpleNamespace(pid=1, pid_start_time=None, mux=None)
     assert registry_falsifier(bare_row) == "process-gone"
+
+
+def test_an_exited_pane_falsifies_the_row(monkeypatch) -> None:
+    """Suppressing the stale pid must not discard the AUTHORITATIVE pane signal.
+
+    ``_mux_pane_alive`` is exactly the authority the recorded pid is not: it
+    answers about the pane itself, and a ``False`` from it is the mux stating
+    the pane exited. Dropping every falsifier for a mux row -- rather than
+    swapping the wrong one for the right one -- leaves a dead pane rendering
+    ``unknown`` (or ``reachable``, while its transcript is still under the
+    staleness window) for as long as that transcript stays warm.
+    """
+    from fno.agents import mux_spawn
+    from fno.agents.reachability import registry_falsifier
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda mux: False)
+    assert registry_falsifier(_pane_row()) == "pane-gone"
+
+
+def test_unreadable_pane_liveness_never_condemns(monkeypatch) -> None:
+    """``None`` from the mux is "cannot answer", which is not evidence of death.
+
+    Same rule as an unreadable pid: only a confident gone falsifies. ``reconcile``
+    treats this case as ``mux-pane-liveness-unavailable`` and declines to act,
+    and a row must not be condemned here for what reconcile refuses to condemn.
+    """
+    from fno.agents import mux_spawn
+    from fno.agents.reachability import registry_falsifier
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", lambda mux: None)
+    assert registry_falsifier(_pane_row()) is None
+
+
+def test_a_broken_pane_probe_never_condemns(monkeypatch) -> None:
+    """A raising probe is an unreadable probe, not a dead pane."""
+    from fno.agents import mux_spawn
+    from fno.agents.reachability import registry_falsifier
+
+    def _boom(mux):
+        raise RuntimeError("mux binary missing")
+
+    monkeypatch.setattr(mux_spawn, "_mux_pane_alive", _boom)
+    assert registry_falsifier(_pane_row()) is None

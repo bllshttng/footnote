@@ -42,6 +42,13 @@ remembered: absence of a pane, absence of a pid, and absence of recent output
 all contribute exactly NOTHING here, so "no pane means safe to reap" cannot be
 reconstructed by editing a threshold.
 
+Note the asymmetry that keeps this honest. A row with no pane recorded, or a mux
+that cannot answer, is an ABSENCE and condemns nothing. A mux affirmatively
+reporting that a pane exited is EVIDENCE, and does condemn -- the retired rule
+falsified on the first and this one falsifies only on the second. Which is also
+why suppressing a falsifier is never the fix for a wrong falsifier: the answer
+is to consult the right authority, not to stop asking.
+
 Why transcript age is necessary but never sufficient
 ----------------------------------------------------
 It is the only surface that never lied (argv, pid, the daemon record, and
@@ -55,6 +62,7 @@ the sole POSITIVE term rather than the whole answer:
 * It measures FILE WRITES, not conversation. A transcript can be touched by a
   stub write, a resume attempt, or a tool result with no live session behind it.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -148,9 +156,7 @@ def classify_reachability(
     return Reachability(UNKNOWN, SILENT, age_s)
 
 
-def pid_falsifier(
-    pid: Optional[int], pid_start_time: Optional[int] = None
-) -> Optional[str]:
+def pid_falsifier(pid: Optional[int], pid_start_time: Optional[int] = None) -> Optional[str]:
     """``"process-gone"`` when a recorded process is provably gone, else None.
 
     A row with NO pid is not a row with a dead process. 89 percent of registry
@@ -172,27 +178,50 @@ def pid_falsifier(
     return "process-gone" if alive is False else None
 
 
+def pane_falsifier(mux: Any) -> Optional[str]:
+    """``"pane-gone"`` when the mux states the pane exited, else None.
+
+    The tri-state matters: ``_mux_pane_alive`` answers True (up), False (exited)
+    and None (the mux cannot answer). Only False is evidence. ``reconcile``
+    records the None case as ``mux-pane-liveness-unavailable`` and declines to
+    act on it, and a row must not be condemned here for what reconcile refuses
+    to condemn.
+    """
+    from fno.agents.mux_spawn import _mux_pane_alive
+
+    try:
+        alive = _mux_pane_alive(mux)
+    except Exception:  # noqa: BLE001 -- a broken probe must never condemn a row
+        return None
+    return "pane-gone" if alive is False else None
+
+
 def registry_falsifier(entry: Any) -> Optional[str]:
     """The falsifier a registry ROW carries, or None when it carries none.
 
-    A mux-pane row carries none. Its recorded pid is not the authority on that
-    pane: ``reconcile`` re-derives the pane's current child on every pass because
-    a mux restart can hand ``(session, pane_id)`` to a new child while the
-    recorded pid dies, and it treats a live pane with no usable pid as
-    INCONCLUSIVE, never dead. Falsifying such a row off the stale pid would
-    condemn a healthy pane worker -- `list` renders it orphaned and `resume`
-    refuses to attach it -- which is the reaping hazard this module exists to
-    prevent, rebuilt one field over.
+    A mux-pane row is falsified by its PANE, never by its recorded pid. That pid
+    is not the authority on the pane: ``reconcile`` re-derives the pane's current
+    child on every pass because a mux restart can hand ``(session, pane_id)`` to
+    a new child while the recorded pid dies, and it treats a live pane with no
+    usable pid as INCONCLUSIVE, never dead. Falsifying such a row off the stale
+    pid would condemn a healthy pane worker -- `list` renders it orphaned and
+    `resume` refuses to attach it -- which is the reaping hazard this module
+    exists to prevent, rebuilt one field over.
+
+    Suppressing the stale pid is only half the rule, and stopping there trades
+    one wrong answer for another: an exited pane IS provable, so dropping every
+    falsifier leaves a dead pane reading ``unknown`` for as long as its
+    transcript stays under the staleness window. Swap the wrong authority for
+    the right one rather than removing it.
 
     Lives here rather than at either caller because BOTH ``fno agents list`` and
     ``fno agents truth`` read a registry row, and a second copy of this rule is
     how one of them ends up with a decorative guard.
     """
-    if getattr(entry, "mux", None):
-        return None
-    return pid_falsifier(
-        getattr(entry, "pid", None), getattr(entry, "pid_start_time", None)
-    )
+    mux = getattr(entry, "mux", None)
+    if mux:
+        return pane_falsifier(mux)
+    return pid_falsifier(getattr(entry, "pid", None), getattr(entry, "pid_start_time", None))
 
 
 def reachability(
@@ -209,9 +238,7 @@ def reachability(
     re-mint a session id while the handle stays put; a join key a re-attach can
     change is not a join key.
     """
-    truth = resolve_session_truth(
-        handle, stalled_after_s=stalled_after_s, **resolve_kwargs
-    )
+    truth = resolve_session_truth(handle, stalled_after_s=stalled_after_s, **resolve_kwargs)
     return classify_reachability(
         truth_state=truth.get("state"),
         age_s=truth.get("last_activity_age_s"),
