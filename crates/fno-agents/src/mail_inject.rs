@@ -377,6 +377,45 @@ pub fn deliver_via_control_sock(
 /// the durable fallback. The claude delivery stays sync ([`deliver_via_control_sock`]);
 /// codex awaits [`crate::codex_inject::deliver_via_codex_daemon`] on the caller's
 /// runtime (no nested runtime).
+/// Read a brevity-cap env knob as an int, falling back to `default` when unset or
+/// non-numeric. Mirrors Python `_cap_env_int` (cli/src/fno/mail/cli.py): the SAME
+/// knob name governs BOTH front doors onto this transport, so the thresholds
+/// cannot drift between the Python `fno mail send --raw` entry and this binary.
+fn cap_env_int(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.parse().ok())
+        .unwrap_or(default)
+}
+
+/// Two-tier brevity cap on the injected turn, mirroring Python `_enforce_body_cap`
+/// (cli/src/fno/mail/cli.py). This binary is the second front door onto the one
+/// transport (`fno mail send --raw` is the first, capping in Python before
+/// shelling out here); capping only one door reads as protection and ships green
+/// while the other stays open, so both enforce. `n` is UTF-8 byte length (Rust
+/// `String::len`), matching Python's `len(body.encode("utf-8"))`. Returns
+/// `Some(exit_code)` to refuse (caller returns it without injecting); `None` to
+/// proceed. The warn tier is a stderr note only and does not block, matching
+/// Python. A tier <= 0 disables it (fail-open); both doors read the same knob, so
+/// disabling one disables both.
+fn enforce_body_cap(n: usize, warn: i64, refuse: i64) -> Option<i32> {
+    if refuse > 0 && n > refuse as usize {
+        eprintln!(
+            "error: mail body is {n} bytes (cap {refuse}). Relay mail is re-read every turn; \
+             put the detail in a node or doc and send a short pointer. \
+             Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0."
+        );
+        return Some(1);
+    }
+    if warn > 0 && n > warn as usize {
+        eprintln!(
+            "note: mail body is {n} bytes (over the {warn}-byte brevity guide); \
+             prefer a short pointer with the detail in a node/doc."
+        );
+    }
+    None
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -390,6 +429,18 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     if let Err(e) = std::io::stdin().read_to_string(&mut text) {
         eprintln!("mail-inject: reading stdin: {e}");
         return emit(false, "io-error");
+    }
+
+    // Brevity cap, same two tiers as the Python front door. Refuses BEFORE any
+    // delivery attempt, so an over-cap body never lands and is not audited as a
+    // raw inject. Reads the shared knobs so the direct binary cannot be used to
+    // bypass `fno mail send --raw`'s cap.
+    if let Some(code) = enforce_body_cap(
+        text.len(),
+        cap_env_int("FNO_MAIL_BODY_WARN", 3000),
+        cap_env_int("FNO_MAIL_BODY_REFUSE", 5000),
+    ) {
+        return code;
     }
 
     let result = match args.provider {
@@ -577,6 +628,23 @@ mod tests {
         let err = inject_with_submit(&mut t, DETACH_SENTINELS[0], Duration::ZERO);
         assert!(matches!(err, Err(DriveError::UnsafeText)));
         assert!(t.sent.is_empty(), "unsafe envelope must not paste or CR");
+    }
+
+    #[test]
+    fn body_cap_refuses_over_refuse_tier_and_passes_below_it() {
+        // Defaults: warn 3000, refuse 5000. `String::len` is UTF-8 byte length,
+        // matching Python's len(body.encode("utf-8")); the repro for the gap this
+        // closes is an over-refuse body sailing through the direct binary.
+        // Below both tiers: proceeds.
+        assert_eq!(enforce_body_cap(100, 3000, 5000), None);
+        // Over warn, under refuse: proceeds (warn is a non-blocking note).
+        assert_eq!(enforce_body_cap(3001, 3000, 5000), None);
+        // At the refuse cap exactly: allowed (strictly greater refuses).
+        assert_eq!(enforce_body_cap(5000, 3000, 5000), None);
+        // Over refuse: refused with exit 1, the same code Python's typer.Exit(1) yields.
+        assert_eq!(enforce_body_cap(5001, 3000, 5000), Some(1));
+        // A disabled cap (both knobs 0) fail-opens, matching Python.
+        assert_eq!(enforce_body_cap(999_999, 0, 0), None);
     }
 
     #[test]
