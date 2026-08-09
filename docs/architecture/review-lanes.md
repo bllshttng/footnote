@@ -42,14 +42,10 @@ correctly and reviews the right diff without an extra move.
 
 ## Lane 2: raw-inject via `fno mail send --raw`
 
-The front door for triggering a verb in another session (or your own) is
-`fno mail send --raw`, which injects the payload UNWRAPPED at the
-recipient's prompt line - no `<fno_mail>` envelope, so the slash sits at
-character 0 and parses as if a human typed it.
-That sidesteps any model-invocation refusal entirely: this IS the
-user-invocation path.
-Use it to fire a verb in a live worker (a king firing `/code-review`
-into a minion) or, with `--to-self`, at your own prompt line.
+The front door for triggering a verb in another session (or your own) is `fno mail send --raw`.
+It injects the payload UNWRAPPED at the recipient's prompt line: no `<fno_mail>` envelope, so the slash sits at character 0 and parses as if a human typed it.
+That sidesteps any model-invocation refusal entirely, because this IS the user-invocation path.
+Use it to fire a verb in a live worker (a king firing `/code-review` into a minion), or with `--to-self` to fire one at your own prompt line.
 
 ```bash
 # Into a peer:
@@ -58,42 +54,25 @@ fno mail send <peer> '/code-review medium --fix' --raw
 fno mail send '/code-review medium --fix' --to-self --raw
 ```
 
-`fno-agents mail-inject` is the transport underneath this lane, not a
-parallel lane to choose between.
-`fno mail send --raw` shells out to the `fno-agents mail-inject` binary
-(`cli/src/fno/agents/dispatch.py`), so the two are one path with two
-entry points.
-Reach for the front door: it is in `fno mail send --help` and runs the
-same single-line payload validation.
-The binary verb remains available directly when you need its STDIN form
-(for a payload too large for argv) or are scripting outside the Python
-CLI:
+`fno mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
+A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
+A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.
+So the front door is the single entry point; `mail-inject` is the transport for the daemon lane only, and it cannot target a mux pane.
+The binary verb is still useful directly when you need its STDIN form (for a payload too large for argv) or are scripting against a daemon session outside the Python CLI:
 
 ```bash
 printf '/code-review medium --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
-The binary reads the turn text from STDIN (this sidesteps the argv size
-limit for large envelopes).
-`--session` takes the full session UUID or its 8-hex short id (the
-roster accepts either); `--harness` is `claude` (the default) or `codex`.
-It delivers over the daemon `control.sock` to a live `claude --bg`
-session, so the target must be an adopted live session - it never
-lazy-starts one.
+It reads the turn text from STDIN, which sidesteps the argv size limit for large envelopes.
+`--session` takes the full session UUID or its 8-hex short id (the roster accepts either); `--harness` is `claude` (the default) or `codex`.
+It delivers over the daemon `control.sock` to a live `claude --bg` session, so the target must be an adopted live session: it never lazy-starts one.
 
-**Discoverability note.** `mail-inject` is a `fno-agents` *binary* verb,
-not a `fno mail` or `fno agents` (Python CLI) verb.
-It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`,
-deliberately, so the routable-verb parity guard does not see it; that
-keeps it out of `--help` and `CLIENT_VERB_USAGE`.
-So `fno mail --help`, `fno agents --help`, and a grep of the Python tree
-all report nothing, and a "does this exist?" probe against any of them
-answers false.
-That is fine now that `fno mail send --raw` is the documented front door:
-reach for the front door, and the hidden binary verb only matters if you
-need its STDIN form directly.
-Do not conclude the lane is absent from an empty `--help` or an empty
-Python-tree search; the binary verb is there.
+**Discoverability note.** `mail-inject` is a `fno-agents` *binary* verb, not a `fno mail` or `fno agents` (Python CLI) verb.
+It is matched with `matches!` in `crates/fno-agents/src/bin/client.rs`, deliberately, so the routable-verb parity guard does not see it; that keeps it out of `--help` and `CLIENT_VERB_USAGE`.
+So `fno mail --help`, `fno agents --help`, and a grep of the Python tree all report nothing, and a "does this exist?" probe against any of them answers false.
+That is fine now that `fno mail send --raw` is the documented front door: reach for the front door, and the hidden binary verb only matters if you need its STDIN form directly.
+Do not conclude the lane is absent from an empty `--help` or an empty Python-tree search; the binary verb is there.
 
 ## Lane 3: king-mediated mail (fallback)
 
@@ -109,13 +88,9 @@ verb by hand.
 ## Why (wrapped) mail cannot carry a verb
 
 A wrapped `fno mail send` cannot carry a verb.
-It writes an `<fno_mail ...>` envelope at character 0 of the recipient's
-input, so the slash command is never at the start of the input and
-never parses.
-Mail therefore carries **instructions** ("review my diff"), not
-invocations ("/code-review medium --fix").
-`--raw` (Lane 2) is the deliberate exception: it strips the envelope so
-the slash parses, which is exactly the cost the wrapper exists to impose.
+It writes an `<fno_mail ...>` envelope at character 0 of the recipient's input, so the slash command is never at the start of the input and never parses.
+Mail therefore carries **instructions** ("review my diff"), not invocations ("/code-review medium --fix").
+`--raw` (Lane 2) is the deliberate exception: it strips the envelope so the slash parses, which is exactly the cost the wrapper exists to impose.
 
 ## Do not assert a cause for a refusal
 
