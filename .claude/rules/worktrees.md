@@ -8,7 +8,7 @@ The single place that says where git worktrees go and what to do after creating 
 
 - **Unset (OSS-neutral default):** harness-native `<repo>/.claude/worktrees/<name>` (gitignored, search-clean). No config needed.
 - **`config.paths.worktrees_base: <dir>`:** worktrees land at `<dir>/<repo>/<name>` (`<repo>` = `basename $(git rev-parse --show-toplevel)`).
-- **`worktree.use_conductor_canonical: true` is DEPRECATED:** behaves as `worktrees_base = ~/conductor/workspaces`; prefer the single `worktrees_base` knob.
+- **`worktree.use_conductor_canonical: true` is DEPRECATED:** acts as `worktrees_base = ~/conductor/workspaces`; prefer `worktrees_base`.
 
 After `git worktree add`, always run the setup script from inside the worktree:
 
@@ -18,9 +18,11 @@ cd <location>/<name>
 bash scripts/setup/setup-worktree.sh
 ```
 
-The setup script links shared state from canonical: `internal/` (absolute symlink to the vault), per-file `.fno/` state (config, tasks, ledger, codemap, wake-signals), the gitignored `.claude/` subdirs (agents/commands/skills/settings.local.json/scheduled_tasks/plans/local notes), and the `.agents/`/`.codex/`/`.gemini/` per-CLI config roots (skip-if-missing). It warns and skips any real (non-symlink) file at a target; it never overwrites real state. Tracked files come from git checkout, never copied.
+The setup script links shared state from canonical: `internal/` (absolute symlink to the vault), per-file `.fno/` state (config, tasks, ledger, codemap, wake-signals), the gitignored `.claude/` subdirs (agents/commands/skills/settings.local.json/scheduled_tasks/plans/local notes), and the `.agents/`/`.codex/`/`.gemini/` config roots (skip-if-missing). It warns and skips any real (non-symlink) file at a target, never overwriting real state. Tracked files come from git checkout.
 
-**Enter the worktree in-session.** A shell `cd` does not persist across tool calls; a `/target` cold-start reads the worktree path from the `fno target start` receipt and calls the harness **EnterWorktree** tool with that path. Any path in `git worktree list` is enterable on first entry.
+**Enter in-session.** A shell `cd` does not persist across tool calls; a `/target` cold-start reads the path from the `fno target start` receipt and calls **EnterWorktree** with it. Any path in `git worktree list` is enterable on first entry.
+
+**`EnterWorktree` by NAME fails here** (verified 2026-08-09): the hook defers, and the caller gets a hard failure with no worktree, NOT the documented fallback. So always `git worktree add .claude/worktrees/<name> -b <name> origin/main` first, then enter by path, then run the setup script.
 
 ## Per-project worktree policy
 
@@ -35,7 +37,12 @@ The per-project policy outranks `worktrees_base`: setting the base alone does NO
 
 Both creation paths honor `never`: the `WorktreeCreate` hook resolves the policy through `fno worktree policy` (one resolver, no second precedence impl) and refuses.
 
-The refusal SHAPE is load-bearing and counter-intuitive. Per the hook contract, a **non-zero exit falls back to Claude Code's default worktree flow**, so exiting non-zero creates the very worktree you meant to block. The supported abort is **exit 0 with nothing on stdout**, which CC reports as "no successful output". Pre-creation is shape-dependent: **path-present** (CC sends `.path`) pre-creates and is reaped; **name-only** (no `.path`, e.g. EnterWorktree) does NOT pre-create (`test -d` absent at fire, observed) and defers (non-zero). The gate runs before the hook's own `cd`, because an absent path would fail there first and take the fallback branch. It fails open on anything but an affirmative `never`, since a stale `fno` must not break interactive `claude --worktree`. An in-session `claude --worktree` spawn is a child (`CLAUDE_CODE_CHILD_SESSION`) and never fires WorktreeCreate; test with a top-level run or EnterWorktree.
+The refusal SHAPE is load-bearing and counter-intuitive, and it differs by payload shape:
+
+- **path-present** (CC sends `.path`): pre-creates and is reaped. A **non-zero exit falls back to CC's default flow**, so exiting non-zero creates the very worktree you meant to block. The supported abort is **exit 0 with empty stdout** ("no successful output").
+- **name-only** (no `.path`, e.g. EnterWorktree): does NOT pre-create (`test -d` absent at fire) and defers non-zero -- but that fallback does NOT hold here; the caller gets a hard failure and no worktree (see above).
+
+The gate runs before the hook's own `cd` (an absent path would fail there first and take the fallback branch), and fails open on anything but an affirmative `never`, since a stale `fno` must not break interactive `claude --worktree`. An in-session `claude --worktree` spawn is a child (`CLAUDE_CODE_CHILD_SESSION`) and never fires WorktreeCreate; test with a top-level run.
 
 The paths still diverge on WHERE, when `worktrees_base` is set: autonomous dispatch (`fno worktree ensure`) stays harness-native unless `policy = "external"`, while the hook relocates off `worktrees_base` directly.
 
@@ -45,7 +52,7 @@ The paths still diverge on WHERE, when `worktrees_base` is set: autonomous dispa
 bash scripts/setup/archive-worktree.sh <name|path>   # checks: clean tree, no unpushed commits, no live session
 ```
 
-Flags: `--force`, `--yes` (skip process-kill prompt), `--delete-branch`. Or `git worktree remove <path>`; NEVER `rm -rf` (dangling refs). Pruning after merge is automated: `/fno:pr merged` archives the merged PR's worktree, and `fno worktree cleanup --merged --apply` sweeps already-landed worktrees.
+Flags: `--force`, `--yes` (skip kill prompt), `--delete-branch`. Or `git worktree remove <path>`; NEVER `rm -rf` (dangling refs). Post-merge pruning is automated: `/fno:pr merged` archives the PR's worktree; `fno worktree cleanup --merged --apply` sweeps landed ones.
 
 ## Forbidden locations (regardless of config)
 
@@ -61,9 +68,9 @@ Three mechanisms share one read-only verdict helper, `hooks/helpers/check-impl-l
 
 - **SessionStart heads-up** (`hooks/session-start.sh`): non-blocking note when on the canonical protected branch.
 - **Implementation-entry refusal** (`/target`, `/do`, `/fix`): on `canonical-protected` they refuse before the first write, with the `TARGET_LOCATION_OK=main-acknowledged` escape.
-- **Config-driven relocation:** the `WorktreeCreate` hook (`hooks/worktree-setup.sh`) refuses outright on `policy = "never"`, else relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>` when the knob is set; unset leaves harness-native. `scripts/setup/worktree-create-hook.sh` (the user-global wiring for non-footnote repos) does the same and reads its base from config rather than hardcoding one.
+- **Config-driven relocation:** the `WorktreeCreate` hook (`hooks/worktree-setup.sh`) refuses outright on `policy = "never"`, else relocates `claude --worktree` to `<worktrees_base>/<repo>/<name>` when the knob is set; unset leaves harness-native. `scripts/setup/worktree-create-hook.sh` (user-global wiring for non-footnote repos) does the same, reading its base from config.
 
-Do not wire BOTH the plugin `WorktreeCreate` hook AND a user-global one for the same repo (hooks merge across levels and race). For non-footnote projects, wire `scripts/setup/worktree-create-hook.sh` into `~/.claude/settings.json` `WorktreeCreate`.
+Never wire both the plugin `WorktreeCreate` hook and a user-global one for one repo (they merge across levels and race). For non-footnote repos, wire `scripts/setup/worktree-create-hook.sh` into `~/.claude/settings.json`.
 
 ## Override semantics
 
