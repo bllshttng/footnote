@@ -274,7 +274,15 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         if [[ -n "$PLAN_PATH" ]]; then
             REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
         else
-            REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
+            CANON_DOC=""
+            if command -v fno >/dev/null 2>&1; then
+                CANON_DOC=$(with_timeout 3 fno paths handoff --session-id "${SESSION_ID}" 2>/dev/null | head -1 || true)
+            fi
+            if [[ -n "$CANON_DOC" ]]; then
+                REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc at ${CANON_DOC} - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off. The PreCompact hook keeps that doc's mechanical sections fresh; you fill its merge-order and open-decisions sections."
+            else
+                REASON="${_compact_core} You have no plan and no crown, so nothing about this session's work survives a compact unless you write it down. Before you compact, write a brief canon doc - a markdown file with what you are doing, the key decisions, and the open threads - and commit it, so a fresh session or a successor can pick up where you left off."
+            fi
         fi
     fi
 fi

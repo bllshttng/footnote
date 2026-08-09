@@ -155,6 +155,26 @@ SKILLS_SH_HITS=$(
 )
 add_violation "skills/ bare \$HOME/.fno/ violations:" "$SKILLS_SH_HITS"
 
+# ---------------------------------------------------------------------------
+# handoffs/ path joins: the canon handoff doc location is configured via
+# paths.handoffs_dir() and surfaced by `fno paths handoff`. A skill or hook
+# that composes a `handoffs/` path by hand re-hardcodes the convention the verb
+# exists to retire. The verb (`fno paths handoff`) and the
+# worktree-local succession brief (`.fno/artifacts/handoff/`, singular) do not
+# match this plural-slash form, so there are no legitimate hits to exclude.
+# ---------------------------------------------------------------------------
+HANDOFFS_HITS=$(
+    grep -rn 'handoffs/' \
+        "$REPO_ROOT/skills/" \
+        "$REPO_ROOT/hooks/" \
+        --include='*.sh' \
+        --include='*.py' \
+        2>/dev/null \
+    | grep -v '^[^:]*:[0-9]*:[[:space:]]*#' \
+    || true
+)
+add_violation "skills/ + hooks/ hardcoded handoffs/ joins (use 'fno paths handoff'):" "$HANDOFFS_HITS"
+
 # scripts/ directory: exclude scripts/tests/ (sandboxed) and scripts/ci/ (this script)
 # also exclude scripts/lib/paths.sh
 SCRIPTS_SH_HITS=$(

@@ -114,3 +114,49 @@ def verify_cmd(
             err=True,
         )
         raise typer.Exit(code=1)
+
+
+@app.command(name="handoff")
+def handoff(
+    session_id: Optional[str] = typer.Option(
+        None,
+        "--session-id",
+        help=(
+            "Session id (full uuid or 8-hex short id). Names the canon "
+            "handoff doc unless --slug overrides."
+        ),
+    ),
+    session_legacy: Optional[str] = typer.Option(
+        None, "--session", hidden=True, help="[DEPRECATED] alias for --session-id."
+    ),
+    slug: str = typer.Option(
+        "",
+        "--slug",
+        help="Human-readable slug; overrides the session-derived short id in the filename.",
+    ),
+    name_only: bool = typer.Option(
+        False, "--name-only", help="Print just the rendered filename, no directory."
+    ),
+) -> None:
+    """Print the save path for a session's canon handoff doc.
+
+    Backed by ``paths.handoffs_dir()``. The filename key is the session's mail
+    handle (``canonical_handle``, the last-8 of the session id) unless --slug
+    overrides. The PreCompact canon-doc hook and any session writing a handoff
+    doc shell this instead of composing a path, so the configured location is
+    the one door.
+    """
+    import datetime as _dt
+
+    from fno._flag_aliases import merge_deprecated_alias
+    from fno.harness_identity import canonical_handle
+    from fno.paths import handoffs_dir
+
+    session_id = merge_deprecated_alias(
+        session_id, session_legacy, canonical_flag="--session-id", legacy_flag="--session"
+    )
+    if not session_id:
+        raise typer.BadParameter("a session id is required (--session-id)")
+    key = slug or canonical_handle(session_id)
+    filename = f"{_dt.datetime.now().strftime('%Y%m%d')}-{key}.md"
+    typer.echo(filename if name_only else str(handoffs_dir() / filename))
