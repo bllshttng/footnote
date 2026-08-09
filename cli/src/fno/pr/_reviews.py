@@ -13,6 +13,8 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Callable, Optional
 
 from fno.graph._reconcile import repo_slug_from_url
@@ -84,45 +86,271 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
 _UNKNOWN_COVERAGE = {"coverage": "unknown", "reviewed_count": None}
 
 
+def _repo_root(cwd: Optional[str] = None) -> Path:
+    """Git top-level for ``cwd``, so coverage is found from a subdirectory."""
+    base = Path(cwd) if cwd else Path.cwd()
+    try:
+        import subprocess
+
+        root = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, cwd=str(base), timeout=5,
+        ).stdout.strip()
+        if root:
+            base = Path(root)
+    except Exception:  # noqa: BLE001 - no git -> the caller's dir is the root
+        pass
+    return base
+
+
+def _repo_identity_from_remote_url(url: str) -> Optional[str]:
+    """Full repository identity ``host/owner/repo`` from a git remote, lowercased.
+
+    Deliberately NOT ``paths._remote_url_to_slug``, which yields only the last
+    path segment. That is fine for a path token, but this keys ``review_coverage``
+    in the cross-project global log, and there a collision is a correctness hole:
+    ``org-a/widget`` and ``org-b/widget`` both reduce to ``widget``, so with a
+    shared PR number one repo's coverage could satisfy the other's auto-merge
+    review guard - and a fork shares head SHAs, so the staleness check that would
+    otherwise catch it does not fire.
+
+    Mirrors ``repo_identity_from_remote_url`` in ``crates/fno-agents/src/finalize.rs``.
+    The two MUST agree or the reader stops finding the writer's events; the
+    parity cases are covered by tests on both sides.
+    """
+    s = (url or "").strip().rstrip("/")
+    if not s:
+        return None
+    idx = s.find("://")
+    if idx != -1:
+        s = s[idx + 3:]
+    idx = s.find("@")
+    if idx != -1:
+        s = s[idx + 1:]
+    m = re.search(r"[/:]", s)
+    if not m:
+        return None
+    host_port, path = s[: m.start()], s[m.start() + 1:]
+    # `ssh://host:22/o/r` glues a numeric port to the host; a non-numeric suffix
+    # is part of the host and must survive.
+    host = host_port
+    if ":" in host_port:
+        h, _, p = host_port.partition(":")
+        # `isascii()` guard: Rust uses `is_ascii_digit`, and `str.isdigit()` is
+        # true for non-ASCII digits ("²", "٣"). Without it the two sides
+        # disagree on a remote nobody sane writes, and the reader silently
+        # stops finding the writer's events - the one failure this parity
+        # exists to prevent.
+        if p.isascii() and p.isdigit():
+            host = h
+    path = path.lstrip("/")
+    first, _, rest = path.partition("/")
+    if first.isascii() and first.isdigit() and rest:
+        path = rest
+    path = path.rstrip("/")
+    if path.endswith(".git"):
+        path = path[:-4]
+    if not host or "\\" in path:
+        return None
+    segments = [p for p in path.split("/") if p]
+    if len(segments) < 2 or any(p in (".", "..") for p in segments):
+        return None
+    return f"{host}/{'/'.join(segments)}".lower()
+
+
+def _repo_identity(root: "Path") -> Optional[str]:
+    """``host/owner/repo`` for the checkout at ``root``, or None."""
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["git", "-C", str(root), "config", "--get", "remote.origin.url"],
+            capture_output=True, text=True, timeout=5,
+        )
+    except Exception:  # noqa: BLE001 - no git -> no identity -> no global read
+        return None
+    if getattr(out, "returncode", 1) != 0:
+        return None
+    return _repo_identity_from_remote_url(out.stdout or "")
+
+
+def _scan_coverage(
+    path: Path, pr_number: int, repo_slug: Optional[str] = None
+) -> tuple[Optional[dict], str]:
+    """Latest ``review_coverage`` data for ``pr_number`` in one events log.
+
+    Returns ``(data, ts)``; ``(None, "")`` when the log has no match.
+
+    Streams with a substring prefilter rather than using
+    ``fno.events.log.read_events``: these logs reach tens of MB (34.7 MB in this
+    repo at time of writing), and read_events slurps the whole file AND raises
+    on the first malformed line. Since every caller here wraps the read in a
+    fail-closed ``except``, one corrupt byte anywhere in the log would wedge the
+    merge gate permanently and silently. Skipping a bad line is the honest
+    behavior for an append-only log written by several processes.
+
+    ``repo_slug``, when given, must equal the event's ``repo``. Callers pass it
+    for the CROSS-PROJECT global log, where ``pr`` is a bare integer and another
+    repo's PR of the same number would otherwise satisfy this gate. Events
+    predating the ``repo`` field never match a scoped scan, by design.
+    """
+    latest: Optional[dict] = None
+    latest_ts = ""
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as fh:
+            for raw in fh:
+                # Cheap reject before the JSON parse; 99.99% of lines are other
+                # event types and the logs are large enough for this to matter.
+                if "review_coverage" not in raw:
+                    continue
+                try:
+                    ev = json.loads(raw)
+                except ValueError:
+                    continue
+                if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
+                    continue
+                data = ev.get("data") or {}
+                if not isinstance(data, dict):
+                    continue
+                try:
+                    if int(data.get("pr", -1)) != pr_number:
+                        continue
+                except (TypeError, ValueError):
+                    continue
+                if repo_slug is not None and data.get("repo") != repo_slug:
+                    continue
+                latest = data
+                latest_ts = str(ev.get("ts") or "")
+    except OSError:
+        return None, ""
+    return latest, latest_ts
+
+
+def _coverage_logs(
+    cwd: Optional[str] = None, project_events: Optional[Path] = None
+) -> tuple[Optional[Path], Optional[Path], Optional[str]]:
+    """The logs a coverage read consults: ``(project, global, slug)``, either None.
+
+    The project entry is read UNSCOPED (a repo-local file needs no scoping) and
+    the global entry SCOPED by ``slug``. Both can be None; see the same-file case
+    below, which is why the project entry is optional rather than always present.
+
+    The global log is None when it cannot be scanned safely - no ``~/.fno``, the
+    same file as the project log, or no resolvable git-remote slug. Without a
+    slug nothing in the cross-project log can be attributed to this repo, so
+    scanning it could only produce a cross-repo false positive.
+
+    Separate from the scan so a caller that only wants to NAME the logs (the
+    refusal text) does not read tens of MB of JSONL to learn two filenames.
+    """
+    root = _repo_root(cwd)
+    project_path = (
+        project_events if project_events is not None else root / ".fno" / "events.jsonl"
+    )
+    try:
+        from fno import paths as _paths
+
+        # global_events_json(), not state_dir()/"events.jsonl": a RELATIVE
+        # config.state_dir resolves into the repo checkout, while the global
+        # journal deliberately falls back to ~/.fno - which is also the path the
+        # Rust writer hardcodes. Reading state_dir() directly would scan a file
+        # nobody writes on exactly those configs, silently restoring the bug.
+        global_path = _paths.global_events_json()
+        slug = _repo_identity(root)
+    except Exception:  # noqa: BLE001 - no global log -> project log alone
+        return project_path, None, None
+    if global_path == project_path:
+        # The two resolve to ONE file when the git top-level is $HOME (a
+        # `git init ~` dotfiles checkout). The project log is normally read
+        # unscoped because it is repo-local; here it IS the cross-project
+        # journal, so an unscoped read would let any repo's PR N satisfy this
+        # repo's guard. Drop the unscoped read and keep only the scoped one -
+        # and with no identity to scope by, nothing here is safe to read.
+        return None, (global_path if slug else None), slug
+    if not slug:
+        return project_path, None, slug
+    return project_path, global_path, slug
+
+
+def coverage_sources(cwd: Optional[str] = None) -> list[str]:
+    """The event logs a coverage read would consult, for a refusal message."""
+    paths = _coverage_logs(cwd)[:2]
+    return [str(p) for p in paths if p is not None]
+
+
+def latest_review_coverage(
+    pr_number: int,
+    cwd: Optional[str] = None,
+    project_events: Optional[Path] = None,
+) -> Optional[dict]:
+    """Latest ``review_coverage`` data for a PR, or None.
+
+    Reads BOTH logs loop-check writes, because which one holds the attestation
+    depends on where the reviewing session happened to stand. The stop hook
+    writes into the events file of the directory it runs in, so a review
+    attested inside a worktree lands in that worktree's project log; a merge run
+    from canonical reads canonical's. They agreed only by luck, and the
+    disagreement read as "nobody reviewed this" (x-f43c). ``~/.fno`` is the one
+    file both stand in, so it is the tiebreaker rather than a fallback.
+
+    The project log is scanned unscoped (it is already repo-local); the global
+    log is scoped by the full ``host/owner/repo`` identity. Newest ``ts`` wins
+    across the two, so a
+    project-only event from an older binary still beats a stale global one.
+
+    A caller that refuses on a None names those logs with :func:`coverage_sources`:
+    a gate that reports a count and not a location is what taught two workers to
+    design around a green gate instead of looking at where it read.
+
+    ``project_events`` overrides the derived project log for callers that hold
+    an explicit path (the post-merge gate-escape detector, and its tests).
+    """
+    project_path, global_path, slug = _coverage_logs(cwd, project_events)
+
+    best: Optional[dict] = None
+    best_ts = ""
+    if project_path is not None:
+        best, best_ts = _scan_coverage(project_path, pr_number)
+
+    if global_path is not None:
+        other, other_ts = _scan_coverage(global_path, pr_number, repo_slug=slug)
+        if other is not None and (
+            best is None
+            or other_ts > best_ts
+            # Equal timestamps are common, not exotic: these are second-precision
+            # and emit_to_both writes the two logs in the same instant. Strict
+            # `>` would make "project log wins" the silent tiebreak, so a stale
+            # covered event could outrank a same-second unknown and walk right
+            # through a guard that exists to fail closed. On a tie take the
+            # SAFER verdict instead of the arbitrary one.
+            or (other_ts == best_ts and not _is_covered(other) and _is_covered(best))
+        ):
+            best, best_ts = other, other_ts
+
+    return best
+
+
+def _is_covered(data: Optional[dict]) -> bool:
+    """Whether a coverage event reports a real pass (covered AND count > 0)."""
+    if not data or data.get("coverage") != "covered":
+        return False
+    try:
+        return int(data.get("reviewed_count") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
-    """The latest ``review_coverage`` verdict for a PR, read from the project
-    events log (loop-check emits it every gate eval). Additive and fail-open:
-    any failure degrades to the unknown sentinel. Python consumes the event
-    rather than recomputing (Ownership: Rust computes, Python reads), so a
-    human and the loop see one number for the same PR.
+    """The latest ``review_coverage`` verdict for a PR (loop-check emits it every
+    gate eval). Additive and fail-open: any failure degrades to the unknown
+    sentinel. Python consumes the event rather than recomputing (Ownership: Rust
+    computes, Python reads), so a human and the loop see one number for the same
+    PR.
     """
     try:
-        from pathlib import Path
-
-        from fno.events.log import read_events
-
-        # Resolve git top-level so coverage is found from a subdirectory.
-        base = Path(cwd) if cwd else Path.cwd()
-        try:
-            import subprocess
-
-            root = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, cwd=str(base), timeout=5,
-            ).stdout.strip()
-            if root:
-                base = Path(root)
-        except Exception:
-            pass
-        events_path = base / ".fno" / "events.jsonl"
-        events = read_events(events_path)
+        latest = latest_review_coverage(pr_number, cwd)
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
-    latest = None
-    for ev in events:
-        if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
-            continue
-        data = ev.get("data") or {}
-        try:
-            if int(data.get("pr", -1)) == pr_number:
-                latest = data
-        except (TypeError, ValueError):
-            continue
     if latest is None:
         return dict(_UNKNOWN_COVERAGE)
     return {

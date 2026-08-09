@@ -179,14 +179,16 @@ def test_placeholder_pr_number_no_emit_no_fetch(tmp_path):
 
 # ---- zero-coverage escape (x-0eaf) ----
 #
-# CAVEAT (x-0eaf finding 3): these tests pass events_path EXPLICITLY (the same
-# path loop-check writes to). In the DEFAULT worktree workflow, loop-check writes
+# These tests pass events_path EXPLICITLY (the same path loop-check writes to).
+#
+# The x-0eaf finding-3 caveat that used to sit here - loop-check writes
 # review_coverage to the SESSION worktree's .fno/events.jsonl while reconcile
-# reads the CANONICAL (repo-root) events.jsonl - they are separate files (the
-# worktree events.jsonl is NOT symlinked). So the zero-coverage escape does NOT
-# fire in the default workflow until loop-check emits review_coverage to both
-# logs. These tests stay green because they inject the path; they do NOT cover
-# the default worktree workflow. That plumbing is a follow-up.
+# reads the CANONICAL one, so the escape never fires in the default worktree
+# workflow - was real, and it was the same divergence that made `fno pr merge`
+# refuse a PR that had been reviewed. x-f43c closed it: loop-check emits
+# review_coverage to BOTH logs (repo-scoped), and every reader consults the
+# global one alongside its project log. `test_coverage_read_spans_the_global_log`
+# below covers the default worktree workflow the caveat said was uncovered.
 
 
 def _write_event(cwd: Path, ev: dict) -> None:
@@ -194,6 +196,55 @@ def _write_event(cwd: Path, ev: dict) -> None:
     p.parent.mkdir(parents=True, exist_ok=True)
     with p.open("a", encoding="utf-8") as fh:
         fh.write(json.dumps(ev) + "\n")
+
+
+def test_coverage_read_spans_the_global_log(tmp_path, monkeypatch):
+    """x-f43c: the default worktree workflow the old caveat said was uncovered.
+
+    The gate eval ran in a worktree, so canonical's own events log never saw the
+    coverage event; reconcile runs from canonical, found nothing, and fell
+    through its fail-open branch. Asserted on a ZERO-coverage event so the test
+    discriminates: reading only canonical's log yields None and emits NOTHING,
+    which an "assert no escape" test would have called a pass.
+    """
+    import subprocess
+
+    from fno import paths
+
+    canonical = tmp_path / "canonical"
+    (canonical / ".fno").mkdir(parents=True)
+    subprocess.run(["git", "init", "-q"], cwd=str(canonical), check=True)
+    subprocess.run(
+        ["git", "remote", "add", "origin", "git@github.com:bllshttng/footnote.git"],
+        cwd=str(canonical), check=True,
+    )
+
+    global_dir = tmp_path / "home" / ".fno"
+    global_dir.mkdir(parents=True)
+    monkeypatch.setattr(paths, "global_events_json", lambda: global_dir / "events.jsonl")
+
+    # The gate evaluated in a worktree -> emit_to_both put it in the global log,
+    # which is all canonical can see. Zero reviewers: this PR IS autonomy debt.
+    with (global_dir / "events.jsonl").open("w", encoding="utf-8") as fh:
+        fh.write(json.dumps({
+            "ts": "2026-08-08T02:35:30Z",
+            "type": "review_coverage",
+            "data": {
+                "pr": 218, "coverage": "covered", "reviewed_count": 0,
+                "head_sha": "a3f4b413b", "repo": "github.com/bllshttng/footnote",
+            },
+        }) + "\n")
+
+    rec = _record(canonical)
+    emit_gate_escape_for_record(
+        rec,
+        required_bots=[],
+        reviews_fetcher=lambda *a, **k: set(),
+        events_path=_epath(canonical),
+    )
+    escapes = _gate_escapes(canonical)
+    assert len(escapes) == 1, "coverage recorded in the global log must be seen from canonical"
+    assert escapes[0]["data"]["reason"] == "zero-coverage"
 
 
 def test_zero_coverage_escape_fires_with_no_required_bots(tmp_path):

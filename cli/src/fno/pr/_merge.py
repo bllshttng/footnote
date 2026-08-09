@@ -152,27 +152,24 @@ def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
     and refuses - never a pass.
     """
     try:
-        from fno.events.log import read_events
+        from fno.pr._reviews import latest_review_coverage
     except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
         return None
-    from pathlib import Path
-
-    events_path = Path(_repo_state_dir(repo)) / "events.jsonl"
     try:
-        events = read_events(events_path)
+        data = latest_review_coverage(pr_number, repo)
     except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
         return None
-    latest = None
-    for ev in events:
-        if ev.get("type") != "review_coverage":
-            continue
-        data = ev.get("data") or {}
-        try:
-            if int(data.get("pr", -1)) == pr_number:
-                latest = data
-        except (TypeError, ValueError):
-            continue
-    return latest
+    return data
+
+
+def _coverage_sources(repo: str) -> list[str]:
+    """The events logs a coverage read consults, for the refusal text."""
+    try:
+        from fno.pr._reviews import coverage_sources
+
+        return coverage_sources(repo)
+    except Exception:  # noqa: BLE001 - naming the location is best-effort
+        return []
 
 
 def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
@@ -189,7 +186,11 @@ def _pr_head_oid(pr_number: int, repo: str) -> Optional[str]:
     return oid or None
 
 
-def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) -> str:
+def _coverage_refused_reason(
+    cov: Optional[dict],
+    head: Optional[str] = None,
+    sources: Optional[list[str]] = None,
+) -> str:
     """Why a coverage guard refused, for the blocked receipt line.
 
     Names the CAUSE and the next action, not just the count. A refusal that
@@ -204,7 +205,12 @@ def _coverage_refused_reason(cov: Optional[dict], head: Optional[str] = None) ->
     on a *confirmed* mismatch, so ``0 reviewed`` stays true wherever it prints.
     """
     if cov is None:
-        return "no review_coverage event (no gate evaluated this PR)"
+        # Name WHERE it looked, not just that it found nothing. The absence is
+        # the one refusal a reader cannot diagnose from a count, and two workers
+        # read the bare count as a policy problem and set about designing around
+        # a gate that was already green somewhere else (x-f43c).
+        where = f" (searched: {', '.join(sources)})" if sources else ""
+        return f"no review_coverage event for this PR{where}"
     if cov.get("coverage") != "covered":
         return f"coverage {cov.get('coverage')}"
     ev_head = cov.get("head_sha")
@@ -928,7 +934,8 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         _emit(
             pr_number,
             "blocked",
-            f"unreviewed merge refused: {_coverage_refused_reason(cov, head)}",
+            "unreviewed merge refused: "
+            f"{_coverage_refused_reason(cov, head, _coverage_sources(repo) if cov is None else None)}",
             "none",
             err=True,
         )

@@ -1590,6 +1590,75 @@ fn slug_from_remote_url(url: &str) -> Option<String> {
     Some(tail.to_string())
 }
 
+/// Full repository identity `host/owner/repo` from a git remote URL, lowercased.
+///
+/// Distinct from `slug_from_remote_url`, which yields only the last path segment
+/// and is a PATH TOKEN (`internal/<project>/`) where collisions are cosmetic.
+/// This one keys `review_coverage` events in the cross-project global log, where
+/// a collision is a correctness hole: `org-a/widget` and `org-b/widget` both
+/// reduce to `widget`, so with a shared PR number one repo's coverage can
+/// satisfy the other's auto-merge review guard - and a fork shares head SHAs,
+/// which defeats the staleness check that would otherwise catch it.
+///
+/// Normalizes the forms git accepts so every clone of one repo agrees: scheme,
+/// credentials, and port are stripped, `:` after the host is treated as the
+/// path separator (scp form), one trailing `.git` and trailing slashes go, and
+/// the result is lowercased (hosts are case-insensitive and the forge treats
+/// owner/repo that way). Requires at least three segments (host + two path
+/// parts), so a local or degenerate remote returns None rather than a key that
+/// could alias another repo. Mirrored by `_repo_identity_from_remote_url` in
+/// `fno/pr/_reviews.py`; the two MUST agree or the reader stops finding the
+/// writer's events.
+pub(crate) fn repo_identity_from_remote_url(url: &str) -> Option<String> {
+    let mut s = url.trim().trim_end_matches('/');
+    if s.is_empty() {
+        return None;
+    }
+    if let Some(idx) = s.find("://") {
+        s = &s[idx + 3..];
+    }
+    if let Some(idx) = s.find('@') {
+        s = &s[idx + 1..];
+    }
+    // Split host from path on the first `/` or `:` (scp form uses `:`).
+    let (host_port, path) = match s.find(['/', ':']) {
+        Some(i) => (&s[..i], &s[i + 1..]),
+        None => return None,
+    };
+    // `ssh://host:22/o/r` leaves a numeric port glued to the host; drop it, but
+    // never drop a non-numeric suffix that is part of the host.
+    let host = match host_port.split_once(':') {
+        Some((h, p)) if p.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => host_port,
+    };
+    // An scp remote may still carry a leading port segment (`host:22/o/r`).
+    let path = path.trim_start_matches('/');
+    let path = match path.split_once('/') {
+        Some((first, rest)) if !first.is_empty() && first.chars().all(|c| c.is_ascii_digit()) => {
+            rest
+        }
+        _ => path,
+    };
+    let path = path.trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    if host.is_empty() || path.contains('\\') {
+        return None;
+    }
+    let segments: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    if segments.len() < 2 || segments.iter().any(|p| *p == "." || *p == "..") {
+        return None;
+    }
+    Some(format!("{}/{}", host, segments.join("/")).to_lowercase())
+}
+
+/// `host/owner/repo` for `cwd` - stable across worktrees and clones, and unique
+/// across repos. Best-effort: any git failure or missing remote returns None,
+/// and the caller then omits the field so no reader can claim the event.
+pub(crate) fn repo_identity_from_git_remote(cwd: &Path) -> Option<String> {
+    let url = git_capture(cwd, &["config", "--get", "remote.origin.url"])?;
+    repo_identity_from_remote_url(&url)
+}
+
 /// `remote.origin.url` slug for `cwd` - stable across worktrees and clones.
 /// Best-effort: any git failure or missing remote returns None so the caller
 /// falls through to the basename.
@@ -3396,6 +3465,52 @@ mod tests {
             ("   ", None),
         ] {
             assert_eq!(slug_from_remote_url(url).as_deref(), want, "url={url:?}");
+        }
+    }
+
+    #[test]
+    fn repo_identity_agrees_across_remote_forms() {
+        // Parity with `_repo_identity_from_remote_url` in fno/pr/_reviews.py.
+        // Every clone form of one repo must produce ONE key: the writer is Rust
+        // and the reader is Python, so a disagreement means the reader silently
+        // stops finding coverage and the merge gate refuses a reviewed PR.
+        for url in [
+            "git@github.com:org-a/widget.git",
+            "https://github.com/org-a/widget",
+            "https://github.com/org-a/widget.git/",
+            "ssh://git@github.com:22/org-a/widget.git",
+            "https://user:token@github.com/org-a/widget.git",
+            "GIT@GitHub.com:Org-A/Widget.git",
+        ] {
+            assert_eq!(
+                repo_identity_from_remote_url(url).as_deref(),
+                Some("github.com/org-a/widget"),
+                "url={url:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn repo_identity_separates_same_named_repos() {
+        // The whole point of the full identity: a last-path-segment slug keys
+        // both of these as "widget", and the global log is cross-project.
+        assert_ne!(
+            repo_identity_from_remote_url("git@github.com:org-a/widget.git"),
+            repo_identity_from_remote_url("git@github.com:org-b/widget.git"),
+        );
+    }
+
+    #[test]
+    fn repo_identity_rejects_unusable_remotes() {
+        // No host or fewer than two path segments cannot identify a repo across
+        // projects; None makes the writer omit `repo`, and no reader claims it.
+        for url in [
+            "/local/path/widget.git",
+            "git@github.com:widget.git",
+            "",
+            "   ",
+        ] {
+            assert_eq!(repo_identity_from_remote_url(url), None, "url={url:?}");
         }
     }
 

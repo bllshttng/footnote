@@ -262,7 +262,10 @@ event_types:
         head_sha:
           type: string
           description: "The HEAD the coverage was computed against (coverage is a snapshot)."
-    consumers: [fno-agents loop-check, fno pr]
+        repo:
+          type: string
+          description: "Full repository identity `host/owner/repo`, lowercased, from the git remote (x-f43c). This event is written to BOTH the project log and the cross-project global log, and `pr` is a bare integer, so a reader scanning ~/.fno/events.jsonl needs this to tell repo A's PR 781 from repo B's. It is the FULL identity, never the last path segment: `org-a/widget` and `org-b/widget` would otherwise share a key, and since this gates auto-merge one repo's coverage could clear the other's guard (a fork shares head SHAs, so the staleness check would not catch it). Omitted (never null) when no remote resolves or it has fewer than two path segments; a reader must then decline to match the event in the global log rather than guess. Stable across a repo's worktrees, which is the property that lets a merge run from canonical see coverage attested inside a worktree. Producer: crates/fno-agents/src/finalize.rs `repo_identity_from_remote_url`; reader: fno/pr/_reviews.py `_repo_identity_from_remote_url`. The two must agree."
+    consumers: [fno-agents loop-check, fno pr, fno backlog reconcile]
 
   - name: review_gate_bot_usage_limited
     description: "A required/optional review bot posted a usage-limit comment (quota exhausted) and was dropped from missing_bots so the gate proceeds on remaining evidence rather than wedging until budget death (PR #214). Registered (x-0eaf) so the standard audit tooling sees a drop that was previously written to an unregistered stream. Distinct from review_coverage: this names bots that refused; coverage is the count that reviewed."

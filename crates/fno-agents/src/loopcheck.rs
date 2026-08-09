@@ -1396,6 +1396,8 @@ fn read_pr_info(
     nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
+    global_events_path: &Path,
+    repo_slug: &str,
     author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
     // Read 1: PR state + number + head OID + mergeability
@@ -1779,11 +1781,20 @@ fn read_pr_info(
     // and the polling command) and audit see one coherent, fresh number rather
     // than recomputing it (the Ownership rule: loopcheck computes, Python
     // reads). Skipped for the no-PR early returns above.
+    //
+    // BOTH logs, like every other loop-check event. This one used to write only
+    // the project log, and since the stop hook runs wherever the session runs,
+    // that put the attestation in `<worktree>/.fno/events.jsonl` while a merge
+    // run from canonical read `<canonical>/.fno/events.jsonl` - a satisfied
+    // gate reading as an unsatisfiable one, silently, with a refusal that
+    // named a count and not a location. The global log is the one file both
+    // stand in; `repo` in the payload keeps it scoped (x-f43c).
     if number > 0 {
-        append_loop_event(
+        emit_to_both(
             events_path,
+            global_events_path,
             "review_coverage",
-            coverage_event_data(number, &coverage, head_sha),
+            coverage_event_data(number, &coverage, head_sha, repo_slug),
         );
     }
 
@@ -3217,7 +3228,18 @@ pub fn classify_coverage(
 /// serialize via their serde derives (producer/verdict snake_cased);
 /// `reviewed_count` is included only when coverage is `Covered` (omitted, not
 /// null, when Unknown, matching the schema).
-fn coverage_event_data(pr: i64, rep: &CoverageReport, head_sha: &str) -> serde_json::Value {
+///
+/// `repo` is the git-remote slug, and it is what makes this event safe to write
+/// into the CROSS-PROJECT `~/.fno/events.jsonl`: `pr` alone is a bare integer,
+/// so a reader scanning the global log for PR 781 would otherwise accept
+/// another repo's PR 781 as coverage for this one. Omitted (not null) when the
+/// slug is unresolvable, and a reader must then decline to match it globally.
+fn coverage_event_data(
+    pr: i64,
+    rep: &CoverageReport,
+    head_sha: &str,
+    repo: &str,
+) -> serde_json::Value {
     let coverage_str = match &rep.coverage {
         Coverage::Unknown => "unknown",
         Coverage::Covered(_) => "covered",
@@ -3230,6 +3252,9 @@ fn coverage_event_data(pr: i64, rep: &CoverageReport, head_sha: &str) -> serde_j
     });
     if let Coverage::Covered(n) = &rep.coverage {
         data["reviewed_count"] = serde_json::json!(n);
+    }
+    if !repo.is_empty() {
+        data["repo"] = serde_json::json!(repo);
     }
     data
 }
@@ -4106,6 +4131,16 @@ pub fn decide(args: &[String]) -> (i32, String) {
         .clone()
         .unwrap_or_else(|| PathBuf::from(&home).join(".fno/events.jsonl"));
 
+    // Scopes the review_coverage event written into the cross-project global
+    // log. The git remote is the one identifier canonical and every one of its
+    // worktrees agree on, which is exactly the agreement the coverage reader
+    // needs (x-f43c). It is the FULL `host/owner/repo`, not the last path
+    // segment: this key gates auto-merge, so `org-a/widget` aliasing
+    // `org-b/widget` would let one repo's coverage clear the other's guard.
+    // Empty when there is no remote; the payload then omits `repo` and no
+    // reader will claim the event.
+    let repo_slug = crate::finalize::repo_identity_from_git_remote(&cwd).unwrap_or_default();
+
     let ledger_path = parsed
         .ledger_path
         .clone()
@@ -4858,6 +4893,8 @@ pub fn decide(args: &[String]) -> (i32, String) {
             &nudge_configs,
             &head_sha,
             &project_events,
+            &global_events,
+            &repo_slug,
             manifest.harness_session_id.as_deref(),
         );
 
@@ -5014,7 +5051,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                                 "reviewed": pr_info.reviewed,
                                 "review_skipped": pr_info.review_skipped,
                                 "unaddressed_blocking": pr_info.unaddressed_findings.len(),
-                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha),
+                                "coverage": coverage_event_data(pr_info.number, &pr_info.coverage, &head_sha, &repo_slug),
                                 "done_probes": probe_results,
                                 "fp_read_failed": fp_read_failed,
                             }),
@@ -5571,6 +5608,8 @@ fn run_done(
     nudge_configs: &[NudgeConfig],
     head_sha: &str,
     events_path: &Path,
+    global_events_path: &Path,
+    repo_slug: &str,
     author_session: Option<&str>,
 ) -> Result<PrInfo, (String, String)> {
     read_pr_info(
@@ -5585,6 +5624,8 @@ fn run_done(
         nudge_configs,
         head_sha,
         events_path,
+        global_events_path,
+        repo_slug,
         author_session,
     )
 }
@@ -6492,6 +6533,65 @@ pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── review_coverage reaches BOTH logs, scoped by repo (x-f43c) ───────────
+
+    #[test]
+    fn coverage_event_carries_the_repo_slug() {
+        let rep = CoverageReport {
+            coverage: Coverage::Covered(1),
+            verdicts: vec![],
+        };
+        let data = coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote");
+        assert_eq!(
+            data["repo"],
+            serde_json::json!("github.com/bllshttng/footnote")
+        );
+        assert_eq!(data["pr"], serde_json::json!(781));
+        assert_eq!(data["reviewed_count"], serde_json::json!(1));
+    }
+
+    #[test]
+    fn coverage_event_omits_repo_when_unresolvable() {
+        // Omitted, not null: a reader scanning the shared cross-project log
+        // must be able to tell "not attributed" from "attributed to nothing",
+        // and decline to match it either way.
+        let rep = CoverageReport {
+            coverage: Coverage::Unknown,
+            verdicts: vec![],
+        };
+        let data = coverage_event_data(781, &rep, "a3f4b413b", "");
+        assert!(data.get("repo").is_none());
+    }
+
+    #[test]
+    fn coverage_emit_reaches_the_global_log() {
+        // The specimen: the stop hook writes the events file of whatever
+        // directory the session ran in, so an attestation made inside a
+        // worktree never reached the log a merge from canonical reads. Every
+        // other loop-check event already went to both.
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("worktree-events.jsonl");
+        let global = dir.path().join("global-events.jsonl");
+        let rep = CoverageReport {
+            coverage: Coverage::Covered(1),
+            verdicts: vec![],
+        };
+        emit_to_both(
+            &project,
+            &global,
+            "review_coverage",
+            coverage_event_data(781, &rep, "a3f4b413b", "github.com/bllshttng/footnote"),
+        );
+        for path in [&project, &global] {
+            let text = std::fs::read_to_string(path).unwrap();
+            assert!(text.contains("review_coverage"), "missing in {path:?}");
+            assert!(
+                text.contains("\"repo\":\"github.com/bllshttng/footnote\""),
+                "unscoped in {path:?}"
+            );
+        }
+    }
 
     /// The list half of the scan. Production reads the count too, so this
     /// wrapper lives here rather than as an unused function in the binary.

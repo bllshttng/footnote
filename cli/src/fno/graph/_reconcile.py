@@ -1083,24 +1083,23 @@ def _latest_review_coverage(pr_number: int, events_path: Path) -> Optional[dict]
 
     Fail-open: a missing/unreadable log or a parse error returns None (the
     caller under-reports rather than crashes). (x-0eaf)
+
+    Reads the global log alongside ``events_path`` for the same reason the merge
+    gate does: reconcile runs from canonical while the review that produced the
+    event ran wherever the session stood, usually a worktree. Scanning one log
+    left this detector reasoning about coverage it could not see (x-f43c).
     """
     try:
-        from fno.events.log import read_events
+        from fno.pr._reviews import latest_review_coverage
 
-        events = read_events(events_path)
+        data = latest_review_coverage(
+            pr_number,
+            cwd=str(Path(events_path).parent.parent),
+            project_events=Path(events_path),
+        )
     except Exception:  # noqa: BLE001 - telemetry must never abort reconcile
         return None
-    latest: Optional[dict] = None
-    for ev in events:
-        if not isinstance(ev, dict) or ev.get("type") != "review_coverage":
-            continue
-        data = ev.get("data") or {}
-        try:
-            if int(data.get("pr", -1)) == pr_number:
-                latest = data
-        except (TypeError, ValueError):
-            continue
-    return latest
+    return data
 
 
 def _emit_zero_coverage_escape(record: "MergeDriftRecord", events_path: Path) -> bool:
