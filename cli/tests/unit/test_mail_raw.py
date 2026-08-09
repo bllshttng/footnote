@@ -7,8 +7,14 @@ from __future__ import annotations
 
 import pytest
 import typer
+from typer.testing import CliRunner
 
 from fno.agents.registry import register_existing_session
+from fno.cli import app
+from fno.harness_identity import (
+    HARNESS_SESSION_MARKERS,
+    LEGACY_HARNESS_SESSION_MARKERS,
+)
 from fno.paths_testing import use_tmpdir
 
 SID_CLAUDE = "9a063cd3-69d4-415a-ada5-649b0164189c"
@@ -22,6 +28,24 @@ def mailbox(tmp_path, monkeypatch):
     monkeypatch.setenv("FNO_INBOX_ROOT", str(tmp_path))
     use_tmpdir(monkeypatch, tmp_path)
     return tmp_path
+
+
+@pytest.fixture
+def runner():
+    return CliRunner()
+
+
+# The canonical marker set, not a hand-maintained copy: a stale list here
+# silently turns env-leak tests green for the wrong reason. Covers modern and
+# legacy, since current_session_id() reads both.
+_HARNESS_MARKERS = tuple(
+    m for m, _ in (*HARNESS_SESSION_MARKERS, *LEGACY_HARNESS_SESSION_MARKERS)
+)
+
+
+def _clear_harness_markers(monkeypatch):
+    for marker in _HARNESS_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
 
 
 def _seed_claude(mailbox, monkeypatch):
@@ -123,9 +147,10 @@ def test_raw_unconfirmed_never_durable(mailbox, monkeypatch, capsys):
 
 
 def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):
-    """The self-send refusal is the PR's capability boundary: self-injection
-    supplies the very user-shaped trigger a model-invocation refusal requires.
-    Untested, an inverted `and not self_ok` ships green."""
+    """The self-send refusal is a redirect, not a prohibition: a caller who
+    addressed this own session positionally is told the --to-self retry line.
+    A refusal that stops reading as an instruction is the dead-end specimen 1
+    hit, so pin the retry string."""
     from fno.mail.cli import _raw_send
 
     injected = _seed_claude(mailbox, monkeypatch)
@@ -133,13 +158,16 @@ def test_raw_refuses_self_send_without_self_flag(mailbox, monkeypatch, capsys):
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "/code-review medium --fix", self_ok=False)
     assert exc.value.exit_code != 0
-    assert "self-injection" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "addressed this session" in err
+    assert "--to-self --raw" in err, "refusal must name the retry line"
     assert not injected, "a refused self-send must not reach the transport"
 
 
-def test_raw_self_flag_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
-    """--self is the documented opt-in for a verb carrying no model-invocation
-    refusal (the /compact rescue)."""
+def test_raw_self_ok_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
+    """self_ok (wired by --to-self) is the opt-in: a self-inject proceeds and
+    records the sender, since an unwrapped payload carries no `from` in the
+    recipient transcript (AC27)."""
     from fno.mail.cli import _raw_send
 
     injected = _seed_claude(mailbox, monkeypatch)
@@ -147,9 +175,6 @@ def test_raw_self_flag_lifts_the_self_refusal(mailbox, monkeypatch, capsys):
     with pytest.raises(typer.Exit) as exc:
         _raw_send("claudepeer", "/compact", self_ok=True)
     assert exc.value.exit_code == 0
-    # AC27: a self-injection records sender == the recipient handle, so the
-    # ledger identifies it permanently -- the only place it can be recorded, since
-    # an unwrapped payload carries no `from` in the recipient transcript.
     assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[-8:])]
     assert "/compact" in capsys.readouterr().out
 
@@ -164,7 +189,7 @@ def test_raw_self_refusal_fires_on_the_canonical_handle(mailbox, monkeypatch, ca
     with pytest.raises(typer.Exit) as exc:
         _raw_send(SID_CLAUDE[-8:], "/code-review", self_ok=False)
     assert exc.value.exit_code != 0
-    assert "self-injection" in capsys.readouterr().err
+    assert "addressed this session" in capsys.readouterr().err
     assert not injected
 
 
@@ -206,3 +231,63 @@ def test_raw_injects_the_stripped_payload(mailbox, monkeypatch, capsys):
         _raw_send("claudepeer", "  /code-review medium --fix  ", self_ok=False)
     assert exc.value.exit_code == 0
     assert injected == [(SID_CLAUDE, "/code-review medium --fix", None)]
+
+
+# --- --to-self (replaces the deleted --self): recipient derived from ambient
+# identity, positional parks the payload, mirrors --to-project's shift. ---
+
+
+def test_to_self_raw_derives_recipient_with_no_positional(runner, mailbox, monkeypatch):
+    """`fno mail send '<payload>' --to-self --raw`: one positional (the payload),
+    recipient derived from ambient identity, no <id> lookup. The self-ok path
+    stamps the sender handle as sole provenance (AC27)."""
+    injected = _seed_claude(mailbox, monkeypatch)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    assert res.exit_code == 0, res.output + (res.stderr or "")
+    assert "injected" in res.output
+    assert injected == [(SID_CLAUDE, "/compact", SID_CLAUDE[-8:])]
+
+
+def test_to_self_no_ambient_identity_exits_2(runner, mailbox, monkeypatch):
+    """No ambient harness identity -> exit 2, never a silent floor. Mirrors the
+    --from-self fail-closed branch."""
+    _clear_harness_markers(monkeypatch)
+    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    assert res.exit_code == 2
+    assert "no ambient harness identity" in (res.output + (res.stderr or ""))
+
+
+def test_to_self_and_to_project_mutually_exclusive(runner, mailbox, monkeypatch):
+    """--to-self and --to-project both claim the recipient; refuse rather than
+    silently preferring one."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    res = runner.invoke(
+        app, ["mail", "send", "/x", "--to-self", "--to-project", "web", "--raw"]
+    )
+    assert res.exit_code == 2
+    assert "mutually exclusive" in (res.output + (res.stderr or ""))
+
+
+def test_to_self_refuses_contaminated_identity(runner, mailbox, monkeypatch):
+    """An inherited foreign marker (e.g. CODEX_THREAD_ID from a codex parent in a
+    claude worker) makes the precedence resolver pick the PARENT session; --to-self
+    must refuse rather than inject into the parent."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
+    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    assert res.exit_code == 2
+    assert "multiple harness markers" in (res.output + (res.stderr or ""))
+
+
+def test_raw_refuses_from_self(runner, mailbox, monkeypatch):
+    """Regression: the raw branch returns before the from_self block, so --from-self
+    was silently swallowed on the --raw path. Refuse the combination at exit 2
+    naming the envelope reason - silently dropping a provenance flag is worse
+    than rejecting it."""
+    _seed_claude(mailbox, monkeypatch)
+    res = runner.invoke(
+        app, ["mail", "send", "claudepeer", "/x", "--from-self", "--raw"]
+    )
+    assert res.exit_code == 2
+    assert "envelope" in (res.output + (res.stderr or ""))
