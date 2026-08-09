@@ -116,6 +116,16 @@ pub struct TruthProbe {
     /// alone, so a session whose process died minutes ago still reads
     /// `working` and renders live. That two-hour blind spot is the whole bug.
     pub reachability: Option<String>,
+    /// The evidence [`Self::reachability`] was reached from (`transcript` /
+    /// `process-gone` / `pane-gone` / `silent` / `no-evidence`), and how old that
+    /// evidence is.
+    ///
+    /// Carried so the daemon's row can re-emit the whole triple. A verdict
+    /// without its basis is the shape this module exists to retire: it renders
+    /// as a bare word and a reader cannot tell a positive transcript reading
+    /// from a fired falsifier.
+    pub basis: Option<String>,
+    pub last_activity_age_s: Option<f64>,
     pub observed_model: serde_json::Value,
 }
 
@@ -255,6 +265,12 @@ fn family1_truth_probe_with_command(
                 reachability: parsed
                     .as_ref()
                     .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
+                basis: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
+                last_activity_age_s: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("last_activity_age_s")?.as_f64()),
                 // Absent on a truth build that predates the field: null rather
                 // than a fabricated variant, so a stale `fno` reads as "this
                 // probe did not answer" instead of asserting no transcript.
@@ -3989,6 +4005,38 @@ mod tests {
         let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert!(stale.observed_model.is_null());
+    }
+
+    /// The whole reachability triple comes off the wire, not just the verdict.
+    ///
+    /// The daemon row re-emits all three, and a parser that lifted only the
+    /// verdict would leave `basis` and `last_activity_age_s` permanently null
+    /// there -- a key that is always null being the same lie as a missing one.
+    /// `last_activity_age_s` crosses as a JSON integer from Python, so the
+    /// float parse has to accept one.
+    #[test]
+    fn family1_truth_probe_carries_the_reachability_triple() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '{\"state\":\"working\",\"reachability\":\"unreachable\",\
+             \"basis\":\"pane-gone\",\"last_activity_age_s\":143255}'",
+        ]);
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
+        assert_eq!(probe.basis.as_deref(), Some("pane-gone"));
+        assert_eq!(probe.last_activity_age_s, Some(143255.0));
+
+        // A truth build too old to emit them reads as absent, never as a
+        // fabricated `no-evidence` -- which is a VERDICT, not a missing field.
+        let mut old = std::process::Command::new("sh");
+        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
+        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert!(stale.reachability.is_none());
+        assert!(stale.basis.is_none());
+        assert!(stale.last_activity_age_s.is_none());
     }
 
     #[test]
