@@ -2181,11 +2181,11 @@ fn fetch_discovered_sessions(
         .and_then(|v| v.as_array())
         .cloned()
         .unwrap_or_default();
-    // Filter on the ROW's own status, not just on the early return above. A
+    // Filter on the ROW's own verdict, not just on the early return above. A
     // discovered session whose process is provably gone now comes back
-    // `orphaned` (the shared reachability verdict), so a `--status live` run
-    // that only checked the FILTER would print an orphaned row under a banner
-    // that says LIVE.
+    // `orphaned` (the shared reachability verdict), so a live-only run that
+    // checked the FILTER alone would print an orphaned row under a banner that
+    // says LIVE.
     if let Some(want) = status_filter {
         rows.retain(|r| r.get("status").and_then(Value::as_str) == Some(want));
     }
