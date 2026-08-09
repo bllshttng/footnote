@@ -2635,7 +2635,7 @@ def cmd_top(
     print(render_top(as_json=as_json, include_subagents=show_subagents))
 
 
-def _registry_falsifier(handle: str) -> Optional[str]:
+def _registry_falsifier(handle: str) -> str | None:
     """The falsifier for ``handle``, read off its registry row. Never raises.
 
     A handle with no registry row (a discovered-but-unadopted session) carries
@@ -2669,7 +2669,7 @@ def _registry_falsifier(handle: str) -> Optional[str]:
     return pid_falsifier(row.pid, getattr(row, "pid_start_time", None))
 
 
-def _truth_payload(result: dict, *, falsifier: Optional[str] = None) -> dict:
+def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
     """The ``truth --json`` wire shape.
 
     This is the Python/Rust boundary: ``family1_truth_probe`` in
