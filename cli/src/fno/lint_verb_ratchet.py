@@ -377,7 +377,7 @@ _HEADER = """\
 # intended review moment, not tooling noise.
 #
 # A leaf carrying hidden options lists them inline as `!--flag` tokens
-# (e.g. `mail send !--self`); leaves with none stay single-token. Hidden options
+# (e.g. `mail send !--provider`); leaves with none stay single-token. Hidden options
 # and deprecated aliases are the ungated axis this ratchet guards, so a new
 # hidden option on an existing verb carries its own PR-body line:
 #   flag-exception: <rationale>
@@ -464,8 +464,9 @@ def check() -> CheckReport:
         return CheckReport(
             ok=True,
             message=(
-                f"verb-ratchet: ok ({len(live)} leaves, {n_hidden} hidden options "
-                f"- fno-py only; the Rust front is constant-listed and not introspected)"
+                f"verb-ratchet: ok ({len(live)} leaves, {n_hidden} hidden "
+                f"option{'s' if n_hidden != 1 else ''} - fno-py only; the Rust front "
+                f"is constant-listed and not introspected)"
             ),
         )
 

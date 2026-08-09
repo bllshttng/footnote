@@ -325,7 +325,7 @@ def test_check_ok_message_names_scope_and_hidden_count(monkeypatch, tmp_path):
     assert "fno-py only" in report.message
     assert "Rust front is constant-listed" in report.message
     assert "5 leaves" in report.message
-    assert "1 hidden options" in report.message
+    assert "1 hidden option " in report.message
 
 
 def test_check_fails_naming_added_hidden_flag(monkeypatch, tmp_path):

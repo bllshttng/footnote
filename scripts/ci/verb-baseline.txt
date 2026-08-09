@@ -11,7 +11,7 @@
 # intended review moment, not tooling noise.
 #
 # A leaf carrying hidden options lists them inline as `!--flag` tokens
-# (e.g. `mail send !--self`); leaves with none stay single-token. Hidden options
+# (e.g. `mail send !--provider`); leaves with none stay single-token. Hidden options
 # and deprecated aliases are the ungated axis this ratchet guards, so a new
 # hidden option on an existing verb carries its own PR-body line:
 #   flag-exception: <rationale>
