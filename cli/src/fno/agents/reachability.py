@@ -172,6 +172,29 @@ def pid_falsifier(
     return "process-gone" if alive is False else None
 
 
+def registry_falsifier(entry: Any) -> Optional[str]:
+    """The falsifier a registry ROW carries, or None when it carries none.
+
+    A mux-pane row carries none. Its recorded pid is not the authority on that
+    pane: ``reconcile`` re-derives the pane's current child on every pass because
+    a mux restart can hand ``(session, pane_id)`` to a new child while the
+    recorded pid dies, and it treats a live pane with no usable pid as
+    INCONCLUSIVE, never dead. Falsifying such a row off the stale pid would
+    condemn a healthy pane worker -- `list` renders it orphaned and `resume`
+    refuses to attach it -- which is the reaping hazard this module exists to
+    prevent, rebuilt one field over.
+
+    Lives here rather than at either caller because BOTH ``fno agents list`` and
+    ``fno agents truth`` read a registry row, and a second copy of this rule is
+    how one of them ends up with a decorative guard.
+    """
+    if getattr(entry, "mux", None):
+        return None
+    return pid_falsifier(
+        getattr(entry, "pid", None), getattr(entry, "pid_start_time", None)
+    )
+
+
 def reachability(
     handle: str,
     *,

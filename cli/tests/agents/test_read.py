@@ -386,13 +386,23 @@ def test_list_agents_unknown_truth_never_inherits_registry_death(
 class _Discovered:
     """Minimal DiscoveredSession stand-in (list_agents calls .to_row())."""
 
-    def __init__(self, agent: str, short_id: str):
+    def __init__(self, agent: str, short_id: str, status: str = "live"):
         self.agent = agent
         self.short_id = short_id
         self.cwd = ""
+        self.status = status
 
     def to_row(self) -> dict:
-        return {"agent": self.agent, "short_id": self.short_id, "handle": self.short_id}
+        # `status` is not optional on a real row: the shared reachability verdict
+        # is applied inside `DiscoveredSession.to_row`, and the lane filters on
+        # what the ROW says rather than re-deriving it. A stub that omitted the
+        # key made the whole lane vanish behind the broad except.
+        return {
+            "agent": self.agent,
+            "short_id": self.short_id,
+            "handle": self.short_id,
+            "status": self.status,
+        }
 
 
 @pytest.fixture
@@ -467,3 +477,25 @@ def test_discovered_live_rows_honor_status_filter(
     result = list_agents(status=status, json_out=True)
 
     assert _discovered_agents(result.output) == expected
+
+
+def test_a_falsified_discovered_row_is_surfaced_orphaned_not_dropped(
+    tmp_path, monkeypatch, _patch_claude_agents_json, _patch_discovery
+):
+    """One session, one answer, whichever runtime rendered the lane.
+
+    `fno agents discovered-json` (what the Rust `list` shells out to) emits a
+    pid-falsified session with `status: orphaned`. This lane must agree instead
+    of dropping the row, or `fno agents list --json` and `list_agents(...)`
+    disagree about whether the session exists at all.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    _patch_claude_agents_json([])
+    write_registry([], path=tmp_path / "registry.json")
+    _patch_discovery([_Discovered("claude", "aaaa1111", status="orphaned")])
+
+    assert _discovered_agents(list_agents(json_out=True).output) == ["claude"]
+    assert _discovered_agents(
+        list_agents(status="orphaned", json_out=True).output
+    ) == ["claude"]
+    assert _discovered_agents(list_agents(status="live", json_out=True).output) == []

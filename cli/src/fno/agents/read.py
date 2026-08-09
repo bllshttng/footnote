@@ -23,8 +23,8 @@ from fno.agents import truth_status
 from fno.agents.reachability import (
     WIRE_STATUS,
     classify_reachability,
-    pid_falsifier,
     reachability,
+    registry_falsifier,
 )
 from fno.agents.registry import (
     AgentEntry,
@@ -144,13 +144,13 @@ def list_agents(
         # unrelated node-claim reading; no second transcript read is paid.
         observed_model = truth.get("observed_model")
         # One shared derivation, reached from the truth reading already in hand
-        # so no second transcript read is paid. The pid is the only falsifier a
-        # registry row carries; a row without one contributes no falsifier at
-        # all, never a death sentence.
+        # so no second transcript read is paid. `registry_falsifier` owns which
+        # falsifier a row actually carries (a mux-pane row carries none); a row
+        # without one contributes no falsifier at all, never a death sentence.
         reach = classify_reachability(
             truth_state=truth_state,
             age_s=truth.get("last_activity_age_s"),
-            falsifier=pid_falsifier(entry.pid, getattr(entry, "pid_start_time", None)),
+            falsifier=registry_falsifier(entry),
         )
         rendered_status = WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:
@@ -218,15 +218,15 @@ def list_agents(
             for sess in sessions:
                 if not getattr(sess, "is_alive", True):
                     continue
-                # `is_alive` is transcript-only, so this lane had the SAME blind
-                # spot the registry lane just closed: a session dead forty
-                # minutes still classifies `working` and lists as live. Apply the
-                # one falsifier a discovered row carries. `or None` because the
-                # projection writes pid 0 as "not recorded", and absence of a pid
-                # is absence of evidence, never a death sentence.
-                if pid_falsifier(getattr(sess, "pid", None) or None) is not None:
-                    continue
-                if status is not None and status != "live":
+                # Filter on the ROW's own derived status, not on the literal
+                # "live": `is_alive` is transcript-only, so a session whose
+                # process is provably gone still classifies `working` here, and
+                # `to_row` is where the falsifier is applied. Reading the status
+                # back off the row keeps this lane and the `discovered-json` verb
+                # (which the Rust `list` shells out to) emitting ONE answer for
+                # one session instead of two.
+                row = sess.to_row()
+                if status is not None and row.get("status") != status:
                     continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so
@@ -245,7 +245,7 @@ def list_agents(
                         sess_cwd = sess.cwd
                     if sess_cwd != resolved_cwd:
                         continue
-                discovered_rows.append(sess.to_row())
+                discovered_rows.append(row)
         except Exception as exc:  # noqa: BLE001 — robustness over precision here
             warnings.append(f"live-session discovery skipped: {exc}")
 

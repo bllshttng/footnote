@@ -754,7 +754,7 @@ class DiscoveredSession:
             # absence of evidence, never a death sentence.
             "status": WIRE_STATUS[
                 classify_reachability(
-                    truth_state="working" if self.is_alive else self.truth_state,
+                    truth_state=self.truth_state,
                     age_s=None,
                     falsifier=pid_falsifier(self.pid or None),
                 ).verdict

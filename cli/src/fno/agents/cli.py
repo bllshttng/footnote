@@ -2648,8 +2648,10 @@ def _registry_falsifier(handle: str) -> str | None:
     which reads exactly like a healthy process and is how a guard ends up
     decorative on one of two reachable paths.
     """
-    from fno.agents.reachability import pid_falsifier
+    from fno.agents.reachability import registry_falsifier
 
+    if not handle:
+        return None
     try:
         from fno.agents.registry import load_registry
 
@@ -2658,7 +2660,6 @@ def _registry_falsifier(handle: str) -> str | None:
                 r
                 for r in load_registry()
                 if handle in {r.name, r.harness_session_id, r.short_id}
-                and handle
             ),
             None,
         )
@@ -2666,7 +2667,7 @@ def _registry_falsifier(handle: str) -> str | None:
         return None
     if row is None:
         return None
-    return pid_falsifier(row.pid, getattr(row, "pid_start_time", None))
+    return registry_falsifier(row)
 
 
 def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:

@@ -299,3 +299,27 @@ def test_truth_json_carries_the_reachability_verdict_for_rust_callers() -> None:
     # The raw transcript state stays on the wire unchanged: existing Rust
     # consumers parse it, and overloading it would be a silent contract break.
     assert payload["state"] == "working"
+
+
+def test_a_mux_pane_row_carries_no_pid_falsifier() -> None:
+    """A pane row's recorded pid is not the authority on that pane.
+
+    ``reconcile`` re-derives the pane's current child on every pass, because a
+    mux restart can hand ``(session, pane_id)`` to a new child while the recorded
+    pid dies -- and it treats a live pane with no usable pid as INCONCLUSIVE,
+    never dead. Falsifying off the stale pid would render a healthy pane worker
+    ``orphaned`` in `list` and make `resume` refuse to attach it: the reaping
+    hazard, rebuilt one field over.
+    """
+    from types import SimpleNamespace
+
+    from fno.agents.reachability import registry_falsifier
+
+    # pid 1 is never a worker, so `_pid_alive` returns a confident False.
+    pane_row = SimpleNamespace(
+        pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 0}
+    )
+    bare_row = SimpleNamespace(pid=1, pid_start_time=None, mux=None)
+
+    assert registry_falsifier(pane_row) is None
+    assert registry_falsifier(bare_row) == "process-gone"

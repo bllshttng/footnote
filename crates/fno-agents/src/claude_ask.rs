@@ -3958,7 +3958,12 @@ mod tests {
         timeout: Duration,
         handle: &str,
     ) -> Option<String> {
-        family1_truth_probe_with_command(command, timeout, handle).map(|p| p.state)
+        // Lowered by the verdict, exactly as `family1_truth_state` does. A raw
+        // `.map(|p| p.state)` here would exercise a path production no longer
+        // takes, and every state assertion below would pin the pre-verdict
+        // reading forever.
+        family1_truth_probe_with_command(command, timeout, handle)
+            .map(|p| lower_state_with_verdict(&p.state, p.reachability.as_deref()).to_string())
     }
 
     #[test]
