@@ -77,6 +77,26 @@ NO_EVIDENCE = "no-evidence"
 #: Basis when a transcript resolved but has gone quiet. NOT a death sentence.
 SILENT = "silent"
 
+#: The older wire vocabulary `--status` filters on and the Rust table renders.
+#: Kept stable so this derivation stays additive for every existing consumer; the
+#: verdict, its basis, and its age ride alongside in their own fields rather than
+#: by redefining a word other code already parses.
+#:
+#: Note UNKNOWN, not UNREACHABLE, is where a quiet row lands: silence is absence
+#: of evidence, and only an affirmative falsifier condemns a row. The visible
+#: effect is that rows which used to read `orphaned` purely for being quiet now
+#: read `unknown` with their age attached.
+#:
+#: Lives here rather than beside either caller because BOTH lanes of
+#: ``fno agents list`` render into it -- registry rows and the discovered
+#: live-sessions lane -- and a second copy is how the two lanes ended up
+#: disagreeing inside one payload.
+WIRE_STATUS = {
+    REACHABLE: "live",
+    UNREACHABLE: "orphaned",
+    UNKNOWN: "unknown",
+}
+
 #: Truth states that are positive evidence of activity. ``done`` is deliberately
 #: absent: a worker that emitted <promise> finished its MISSION, which says
 #: nothing about whether it is still up, and conflating the two is how a

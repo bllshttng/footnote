@@ -21,9 +21,7 @@ from typing import Optional
 from fno.agents import format as fmt
 from fno.agents import truth_status
 from fno.agents.reachability import (
-    REACHABLE,
-    UNKNOWN,
-    UNREACHABLE,
+    WIRE_STATUS,
     classify_reachability,
     pid_falsifier,
     reachability,
@@ -35,21 +33,6 @@ from fno.agents.registry import (
     load_registry,
     resolve_agent_across_sources,
 )
-
-#: The wire vocabulary `--status` filters on and the Rust table renders. Kept
-#: stable so this change stays additive for every existing consumer; the
-#: reachability verdict, its basis, and its age ride alongside in their own
-#: fields rather than by redefining a word other code already parses.
-#:
-#: Note UNKNOWN, not UNREACHABLE, is where a quiet row lands: silence is absence
-#: of evidence, and only an affirmative falsifier condemns a row. The visible
-#: effect is that rows which used to read `orphaned` purely for being quiet now
-#: read `unknown` with their age attached.
-_WIRE_STATUS = {
-    REACHABLE: "live",
-    UNREACHABLE: "orphaned",
-    UNKNOWN: "unknown",
-}
 
 __all__ = ["reachability", "list_agents", "ListResult"]
 
@@ -169,7 +152,7 @@ def list_agents(
             age_s=truth.get("last_activity_age_s"),
             falsifier=pid_falsifier(entry.pid, getattr(entry, "pid_start_time", None)),
         )
-        rendered_status = _WIRE_STATUS[reach.verdict]
+        rendered_status = WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:
             continue
         live_status: Optional[str] = None
@@ -193,17 +176,19 @@ def list_agents(
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
                     live_status = rendered
+        # The verdict travels with the evidence it was reached from. `status`
+        # keeps the wire vocabulary its consumers already parse; the three
+        # reachability fields carry what `status` alone cannot say, which is
+        # WHICH question was answered and how old the answer is.
         row = fmt.serialize_entry(
-            entry, live_status=live_status, observed_model=observed_model
+            entry,
+            live_status=live_status,
+            observed_model=observed_model,
+            reachability=reach.verdict,
+            basis=reach.basis,
+            last_activity_age_s=reach.age_s,
         )
         row["status"] = rendered_status
-        # The verdict travels with the evidence it was reached from. `status`
-        # keeps the wire vocabulary its consumers already parse; these three
-        # carry what `status` alone cannot say, which is WHICH question was
-        # answered and how old the answer is.
-        row["reachability"] = reach.verdict
-        row["basis"] = reach.basis
-        row["last_activity_age_s"] = reach.age_s
         rows.append(row)
 
     # P1 (ab-098967b4): the discovered-live-sessions lane. Best-effort
@@ -232,6 +217,14 @@ def list_agents(
             )
             for sess in sessions:
                 if not getattr(sess, "is_alive", True):
+                    continue
+                # `is_alive` is transcript-only, so this lane had the SAME blind
+                # spot the registry lane just closed: a session dead forty
+                # minutes still classifies `working` and lists as live. Apply the
+                # one falsifier a discovered row carries. `or None` because the
+                # projection writes pid 0 as "not recorded", and absence of a pid
+                # is absence of evidence, never a death sentence.
+                if pid_falsifier(getattr(sess, "pid", None) or None) is not None:
                     continue
                 if status is not None and status != "live":
                     continue

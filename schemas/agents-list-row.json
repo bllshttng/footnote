@@ -30,7 +30,7 @@
     "keys": ["pid", "last_reconciled_at", "project_root"]
   },
   "python_only": {
-    "$comment": "Keys the Python serializer emits on top of `required`. Empty today.",
-    "keys": []
+    "$comment": "Keys the Python serializer emits on top of `required`. The reachability triple is the one derivation with a declared basis (cli/src/fno/agents/reachability.py): `reachability` is the verdict (reachable | unreachable | unknown), `basis` is the evidence it was reached from (transcript | process-gone | silent | no-evidence), and `last_activity_age_s` is how old that evidence is. `status` keeps the older wire vocabulary its consumers already parse; the triple says WHICH question was answered, which `status` alone cannot. The Rust daemon projection has no equivalent source field - it consumes the same verdict via `fno agents truth --json` to pick `status`, but does not re-emit it - so these stay Python-only rather than `required`.",
+    "keys": ["reachability", "basis", "last_activity_age_s"]
   }
 }

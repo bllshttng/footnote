@@ -127,8 +127,31 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     family1_truth_probe_with_command(command, Duration::from_secs(5), handle)
 }
 
+/// The transcript state, LOWERED to `"unreachable"` when the shared verdict
+/// affirmatively falsified the row.
+///
+/// `resume` and the attach pointer read this and match on `working | watching |
+/// your-move` to decide "is live - attaching". Transcript state alone cannot see
+/// a dead process, so a session whose process died forty minutes ago still reads
+/// `working` and resume attaches to nothing. Passing the falsified case through
+/// as a state neither arm matches drops both callers into their inconclusive
+/// branch (refuse / no pointer), which is the safe answer.
+///
+/// The override is MONOTONE, matching `fno.agents.reachability`: it only ever
+/// lowers a would-be-live reading, never raises `done`/`stalled` toward live and
+/// never invents a verdict when the probe did not carry one.
 pub fn family1_truth_state(handle: &str) -> Option<String> {
-    family1_truth_probe(handle).map(|probe| probe.state)
+    let probe = family1_truth_probe(handle)?;
+    Some(lower_state_with_verdict(&probe.state, probe.reachability.as_deref()).to_string())
+}
+
+fn lower_state_with_verdict<'a>(state: &'a str, reachability: Option<&str>) -> &'a str {
+    if reachability == Some("unreachable")
+        && matches!(state, "working" | "watching" | "your-move")
+    {
+        return "unreachable";
+    }
+    state
 }
 
 /// Diagnostic for a failed family-1 truth probe. truth writes its refusal
@@ -2790,6 +2813,29 @@ fn create(
 mod tests {
     use super::*;
     use std::fs;
+
+    /// `resume` matches on the STATE, so the verdict has to reach it through
+    /// that channel or the falsifier is decorative on this path: a session whose
+    /// process died forty minutes ago still reads `working` and resume prints
+    /// "is live - attaching" at nothing.
+    #[test]
+    fn an_unreachable_verdict_lowers_a_would_be_live_state() {
+        assert_eq!(
+            lower_state_with_verdict("working", Some("unreachable")),
+            "unreachable"
+        );
+        // Monotone: a verdict never raises, and never rewrites a terminal state
+        // (resume's relaunch arm keys on `done`/`stalled` and must keep working).
+        assert_eq!(lower_state_with_verdict("done", Some("unreachable")), "done");
+        assert_eq!(lower_state_with_verdict("stalled", Some("unknown")), "stalled");
+        // No verdict on the wire (a truth build that predates the field) leaves
+        // the pre-existing mapping exactly as it was.
+        assert_eq!(lower_state_with_verdict("working", None), "working");
+        assert_eq!(
+            lower_state_with_verdict("working", Some("reachable")),
+            "working"
+        );
+    }
 
     // A spawn must NEVER hand bg_create a `None` timeout: the create wait then
     // falls into the unbounded `rx.recv()` arm and a `claude --bg` that holds

@@ -1082,7 +1082,11 @@ def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
 
 @pytest.mark.parametrize(
     "truth_state,expected",
-    [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],
+    # `done` is UNKNOWN, not orphaned: a worker that declared its mission complete
+    # says nothing about whether it is still up, and this row carries no falsifier
+    # (pid 0 is the "not recorded" placeholder). Only an affirmative falsifier
+    # condemns a row, in this lane exactly as in the registry lane.
+    [("working", "live"), ("done", "unknown"), ("unknown", "unknown")],
 )
 def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     session = discover.DiscoveredSession(
@@ -1097,6 +1101,27 @@ def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     )
 
     assert session.to_row()["status"] == expected
+
+
+def test_a_discovered_row_with_a_dead_pid_is_condemned():
+    """The falsifier reaches this lane too, which is the point of sharing it.
+
+    pid 1 is never a claude session, so `_pid_alive` returns a confident False
+    and the row is orphaned even though its transcript says `working` -- the
+    43-minute specimen, in the discovered lane.
+    """
+    session = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=1,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+    )
+
+    assert session.to_row()["status"] == "orphaned"
 
 
 def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):

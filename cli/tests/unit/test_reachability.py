@@ -36,6 +36,7 @@ from fno.agents.reachability import (
     REACHABLE,
     UNKNOWN,
     UNREACHABLE,
+    WIRE_STATUS,
     Reachability,
     classify_reachability,
 )
@@ -217,6 +218,33 @@ def test_python_surfaces_share_one_derivation() -> None:
     assert getattr(mod, "reachability", None) is reach.reachability, (
         "fno.agents.read does not consult the shared derivation"
     )
+
+
+def test_both_list_lanes_render_through_the_same_wire_mapping() -> None:
+    """`fno agents list` has TWO lanes and they share one payload.
+
+    Registry rows and the discovered live-sessions lane are rendered by different
+    code, and the discovered lane kept a private `done|stalled -> orphaned` map.
+    So one silent session read `orphaned` there while an equivalent registry row
+    read `unknown` -- this PR's own defect, one lane over, inside a single
+    `--json` response. Pinned by identity, not by equal values, so a copied dict
+    fails here too.
+    """
+    from fno.agents import discover as discover_mod
+    from fno.agents import read as read_mod
+    from fno.agents.reachability import WIRE_STATUS
+
+    assert read_mod.WIRE_STATUS is WIRE_STATUS
+    assert discover_mod.WIRE_STATUS is WIRE_STATUS
+
+
+def test_a_quiet_discovered_session_is_unknown_not_orphaned() -> None:
+    """The same silence rule the registry lane follows, in the other lane."""
+    got = classify_reachability(truth_state="stalled", age_s=9000, falsifier=None)
+    assert WIRE_STATUS[got.verdict] == "unknown"
+    # And a falsified one is condemned in both lanes alike.
+    gone = classify_reachability(truth_state="working", age_s=60, falsifier="process-gone")
+    assert WIRE_STATUS[gone.verdict] == "orphaned"
 
 
 def test_the_spawn_gate_asks_occupancy_not_reachability() -> None:

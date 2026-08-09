@@ -31,6 +31,11 @@ from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
+from fno.agents.reachability import (
+    WIRE_STATUS,
+    classify_reachability,
+    pid_falsifier,
+)
 from fno.harness_identity import (
     canonical_handle,
     legacy_prefix_handle,
@@ -740,13 +745,20 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": (
-                "live"
-                if self.is_alive
-                else "orphaned"
-                if self.truth_state in {"done", "stalled"}
-                else "unknown"
-            ),
+            # Routed through the one derivation rather than mapped here, because
+            # this lane and the registry lane render into the SAME payload: with
+            # a private mapping, one silent session read `orphaned` here while an
+            # equivalent registry row read `unknown`, which is the incongruence
+            # the shared derivation exists to end. `or None` because pid 0 is this
+            # projection's "not recorded" placeholder, and absence of a pid is
+            # absence of evidence, never a death sentence.
+            "status": WIRE_STATUS[
+                classify_reachability(
+                    truth_state="working" if self.is_alive else self.truth_state,
+                    age_s=None,
+                    falsifier=pid_falsifier(self.pid or None),
+                ).verdict
+            ],
             "agent": self.agent,
         }
 
