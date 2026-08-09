@@ -1806,12 +1806,29 @@ def cmd_send(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.harness_identity import canonical_handle, resolve_harness_identity
+        from fno.harness_identity import (
+            canonical_handle,
+            present_harness_markers,
+            resolve_harness_identity,
+        )
 
         ident = resolve_harness_identity()
         if not (ident.session_id and ident.harness):
             print(
                 "error: --to-self: no ambient harness identity - cannot self-address",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
+        # Refuse a contaminated env: an inherited marker from a parent harness
+        # (e.g. a claude worker carrying CODEX_THREAD_ID from a codex spawner)
+        # makes the precedence-only resolver pick the PARENT session, so --to-self
+        # would target the parent rather than this caller. Fail closed on >1
+        # family present; a clean single-harness session sails through.
+        families = {h for _, h, _ in present_harness_markers()}
+        if len(families) > 1:
+            print(
+                "error: --to-self: multiple harness markers present (inherited "
+                "env?) - cannot decide which session is 'self'",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)

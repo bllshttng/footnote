@@ -269,6 +269,17 @@ def test_to_self_and_to_project_mutually_exclusive(runner, mailbox, monkeypatch)
     assert "mutually exclusive" in (res.output + (res.stderr or ""))
 
 
+def test_to_self_refuses_contaminated_identity(runner, mailbox, monkeypatch):
+    """An inherited foreign marker (e.g. CODEX_THREAD_ID from a codex parent in a
+    claude worker) makes the precedence resolver pick the PARENT session; --to-self
+    must refuse rather than inject into the parent."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", SID_CLAUDE)
+    monkeypatch.setenv("CODEX_THREAD_ID", SID_CODEX)
+    res = runner.invoke(app, ["mail", "send", "/compact", "--to-self", "--raw"])
+    assert res.exit_code == 2
+    assert "multiple harness markers" in (res.output + (res.stderr or ""))
+
+
 def test_raw_refuses_from_self(runner, mailbox, monkeypatch):
     """Regression: the raw branch returns before the from_self block, so --from-self
     was silently swallowed on the --raw path. Refuse the combination at exit 2
