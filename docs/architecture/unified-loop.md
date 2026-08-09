@@ -247,8 +247,9 @@ The reachable merge paths it governs:
 One source also has to mean one *location*.
 The stop hook writes the events file of whatever directory the session ran in, so an attestation made inside a worktree landed in that worktree's `.fno/events.jsonl` while a merge or reconcile run from canonical read canonical's.
 They agreed only when the merge happened to run where the review had; every other invocation read a file the writer never touched, and the refusal named a count rather than a location, so it read as "nobody reviewed this" instead of "I looked in the wrong place".
-`review_coverage` therefore goes to **both** logs like every other loop-check event, carrying a `repo` git-remote slug so the cross-project `~/.fno/events.jsonl` stays scoped, and every reader consults the global log alongside its project one.
+`review_coverage` therefore goes to **both** logs like every other loop-check event, carrying a `repo` git-remote slug so the cross-project `~/.fno/events.jsonl` stays scoped, and every reader that can run somewhere other than the writer - `fno pr merge`, `fno backlog reconcile`, `fno pr status` - consults the global log alongside its project one.
 `~/.fno` is the one file canonical and all its worktrees stand in, which makes writer and reader agree by construction rather than by the caller remembering where to stand.
+`finalize.rs` reads the project log alone (`coverage_satisfied_in_latest_event`, `covered_head_from_event`) because finalize is invoked by the loop-check that just wrote the event, in that same directory; if finalize ever gains a caller that can stand elsewhere, those two become the same bug.
 
 There is no environment override.
 A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.

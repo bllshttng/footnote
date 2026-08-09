@@ -13,6 +13,7 @@ The read is strictly additive and time-boxed: any failure degrades to the
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Callable, Optional
 
 from fno.graph._reconcile import repo_slug_from_url
@@ -84,10 +85,8 @@ def optional_reviewer_names(cwd: Optional[str] = None) -> list[str]:
 _UNKNOWN_COVERAGE = {"coverage": "unknown", "reviewed_count": None}
 
 
-def _repo_root(cwd: Optional[str] = None) -> "Path":
+def _repo_root(cwd: Optional[str] = None) -> Path:
     """Git top-level for ``cwd``, so coverage is found from a subdirectory."""
-    from pathlib import Path
-
     base = Path(cwd) if cwd else Path.cwd()
     try:
         import subprocess
@@ -104,7 +103,7 @@ def _repo_root(cwd: Optional[str] = None) -> "Path":
 
 
 def _scan_coverage(
-    path: "Path", pr_number: int, repo_slug: Optional[str] = None
+    path: Path, pr_number: int, repo_slug: Optional[str] = None
 ) -> tuple[Optional[dict], str]:
     """Latest ``review_coverage`` data for ``pr_number`` in one events log.
 
@@ -156,8 +155,8 @@ def _scan_coverage(
 
 
 def _coverage_logs(
-    cwd: Optional[str] = None, project_events: Optional["Path"] = None
-) -> tuple["Path", "Optional[Path]", Optional[str]]:
+    cwd: Optional[str] = None, project_events: Optional[Path] = None
+) -> tuple[Path, Optional[Path], Optional[str]]:
     """The logs a coverage read consults: ``(project, global_or_None, slug)``.
 
     The global log is None when it cannot be scanned safely - no ``~/.fno``, the
@@ -175,7 +174,12 @@ def _coverage_logs(
     try:
         from fno import paths as _paths
 
-        global_path = _paths.state_dir() / "events.jsonl"
+        # global_events_json(), not state_dir()/"events.jsonl": a RELATIVE
+        # config.state_dir resolves into the repo checkout, while the global
+        # journal deliberately falls back to ~/.fno - which is also the path the
+        # Rust writer hardcodes. Reading state_dir() directly would scan a file
+        # nobody writes on exactly those configs, silently restoring the bug.
+        global_path = _paths.global_events_json()
         slug = _paths._slug_from_git_remote(root)
     except Exception:  # noqa: BLE001 - no global log -> project log alone
         return project_path, None, None
@@ -193,9 +197,9 @@ def coverage_sources(cwd: Optional[str] = None) -> list[str]:
 def latest_review_coverage(
     pr_number: int,
     cwd: Optional[str] = None,
-    project_events: Optional["Path"] = None,
-) -> tuple[Optional[dict], list[str]]:
-    """Latest ``review_coverage`` data for a PR, plus the logs consulted.
+    project_events: Optional[Path] = None,
+) -> Optional[dict]:
+    """Latest ``review_coverage`` data for a PR, or None.
 
     Reads BOTH logs loop-check writes, because which one holds the attestation
     depends on where the reviewing session happened to stand. The stop hook
@@ -209,25 +213,23 @@ def latest_review_coverage(
     log is scoped by git-remote slug. Newest ``ts`` wins across the two, so a
     project-only event from an older binary still beats a stale global one.
 
-    The returned path list is for the caller's refusal text: a gate that names a
-    count and not a location is what taught two workers to design around a green
-    gate instead of looking at where it read.
+    A caller that refuses on a None names those logs with :func:`coverage_sources`:
+    a gate that reports a count and not a location is what taught two workers to
+    design around a green gate instead of looking at where it read.
 
     ``project_events`` overrides the derived project log for callers that hold
     an explicit path (the post-merge gate-escape detector, and its tests).
     """
     project_path, global_path, slug = _coverage_logs(cwd, project_events)
 
-    consulted = [str(project_path)]
     best, best_ts = _scan_coverage(project_path, pr_number)
 
     if global_path is not None:
-        consulted.append(str(global_path))
         other, other_ts = _scan_coverage(global_path, pr_number, repo_slug=slug)
         if other is not None and (best is None or other_ts > best_ts):
             best, best_ts = other, other_ts
 
-    return best, consulted
+    return best
 
 
 def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
@@ -238,7 +240,7 @@ def read_review_coverage(pr_number: int, cwd: Optional[str] = None) -> dict:
     PR.
     """
     try:
-        latest, _ = latest_review_coverage(pr_number, cwd)
+        latest = latest_review_coverage(pr_number, cwd)
     except Exception:  # noqa: BLE001 - additive signal, never hard-fails
         return dict(_UNKNOWN_COVERAGE)
     if latest is None:

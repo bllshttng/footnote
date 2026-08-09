@@ -1092,7 +1092,7 @@ def _latest_review_coverage(pr_number: int, events_path: Path) -> Optional[dict]
     try:
         from fno.pr._reviews import latest_review_coverage
 
-        data, _ = latest_review_coverage(
+        data = latest_review_coverage(
             pr_number,
             cwd=str(Path(events_path).parent.parent),
             project_events=Path(events_path),

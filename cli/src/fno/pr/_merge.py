@@ -156,7 +156,7 @@ def _review_coverage_for_pr(pr_number: int, repo: str) -> Optional[dict]:
     except Exception:  # noqa: BLE001 - events module unavailable -> Unknown
         return None
     try:
-        data, _ = latest_review_coverage(pr_number, repo)
+        data = latest_review_coverage(pr_number, repo)
     except Exception:  # noqa: BLE001 - corrupt log -> Unknown, not a crash
         return None
     return data

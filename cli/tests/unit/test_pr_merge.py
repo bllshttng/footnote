@@ -1280,17 +1280,17 @@ def _git_repo(root, remote):
 
 
 def _global_events_at(monkeypatch, root):
-    """Point ``paths.state_dir()`` at a tmp dir and return it.
+    """Point the global events journal at a tmp dir and return it.
 
-    Patches the resolver rather than an env var: ``FNO_STATE_DIR`` is not a knob
-    ``state_dir()`` reads, so setting it leaves these tests pointed at the
-    developer's real ``~/.fno`` - where the absence of any matching event makes
-    a negative assertion pass for the wrong reason.
+    Patches the resolver the code actually calls rather than an env var:
+    ``FNO_STATE_DIR`` is not a knob anything here reads, so setting it leaves
+    these tests pointed at the developer's real ``~/.fno`` - where the absence
+    of any matching event makes a negative assertion pass for the wrong reason.
     """
     from fno import paths
 
     root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(paths, "state_dir", lambda: root)
+    monkeypatch.setattr(paths, "global_events_json", lambda: root / "events.jsonl")
     return root
 
 

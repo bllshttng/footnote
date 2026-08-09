@@ -221,7 +221,7 @@ def test_coverage_read_spans_the_global_log(tmp_path, monkeypatch):
 
     global_dir = tmp_path / "home" / ".fno"
     global_dir.mkdir(parents=True)
-    monkeypatch.setattr(paths, "state_dir", lambda: global_dir)
+    monkeypatch.setattr(paths, "global_events_json", lambda: global_dir / "events.jsonl")
 
     # The gate evaluated in a worktree -> emit_to_both put it in the global log,
     # which is all canonical can see. Zero reviewers: this PR IS autonomy debt.
