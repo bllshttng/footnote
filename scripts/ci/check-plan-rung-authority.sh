@@ -143,7 +143,7 @@ echo "--- Rust: no plan-status reader ---"
 EXPECTED_RUST_STATUS_IDENTIFIERS="crates/fno-agents/build.rs:2
 crates/fno-agents/src/active_backlog.rs:23
 crates/fno-agents/src/agents_config.rs:1
-crates/fno-agents/src/bin/client.rs:61
+crates/fno-agents/src/bin/client.rs:62
 crates/fno-agents/src/claims.rs:9
 crates/fno-agents/src/claude_adopt.rs:3
 crates/fno-agents/src/claude_ask.rs:9
