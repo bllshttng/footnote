@@ -304,6 +304,47 @@ def _pane_row():
     return SimpleNamespace(pid=1, pid_start_time=None, mux={"session": "s", "pane_id": 0})
 
 
+def test_a_reconciled_exit_survives_the_pid_being_cleared(monkeypatch) -> None:
+    """Reconcile PROVES a worker gone and then destroys the proof.
+
+    ``apply_reconcile_change`` nulls ``pid`` and ``pid_start_time`` on the
+    terminal ``Exited`` transition (deliberately -- a stale pid is itself a
+    misleading liveness signal). The row is then a no-pid row, and no-pid is
+    absence of evidence here, so a worker whose transcript is still warm
+    classifies ``reachable`` and ``resume`` picks the dead attach path: the
+    original 43-minute false-live, re-entered through a different door.
+
+    A recorded ``exited`` is not the stored-enum guess this derivation refuses
+    to trust. It is an affirmative probe RESULT, written only after reconcile
+    confirmed the child was gone, and re-stamped ``live`` by any later
+    successful interaction -- so it falsifies, and nothing else stored does.
+    """
+    from types import SimpleNamespace
+
+    from fno.agents.reachability import registry_falsifier
+
+    reconciled_dead = SimpleNamespace(pid=None, pid_start_time=None, mux=None, status="exited")
+    assert registry_falsifier(reconciled_dead) == "exit-recorded"
+
+
+def test_no_other_stored_status_falsifies(monkeypatch) -> None:
+    """Only ``exited`` is a probe result. The rest are guesses or the opposite.
+
+    ``orphaned`` is the sharp case and it must NEVER falsify: reconcile keeps
+    the pid on an orphaned row precisely because that process is still LIVE but
+    unowned (daemon.rs), so condemning it from the stored word would reap a
+    running worker. Falsifying on every terminal-sounding value is how the
+    stored enum becomes the answer again.
+    """
+    from types import SimpleNamespace
+
+    from fno.agents.reachability import registry_falsifier
+
+    for stored in ("orphaned", "live", "spawning", "failed", "unknown", None):
+        row = SimpleNamespace(pid=None, pid_start_time=None, mux=None, status=stored)
+        assert registry_falsifier(row) is None, f"stored {stored!r} must not condemn a row"
+
+
 def test_a_mux_pane_row_carries_no_pid_falsifier(monkeypatch) -> None:
     """A pane row's recorded pid is not the authority on that pane.
 

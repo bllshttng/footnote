@@ -196,6 +196,36 @@ def pane_falsifier(mux: Any) -> Optional[str]:
     return "pane-gone" if alive is False else None
 
 
+#: The ONE stored status that is a probe RESULT rather than a guess. Reconcile
+#: writes it only after confirming the child was gone, and any later successful
+#: interaction re-stamps the row ``live``, so it cannot strand a worker that
+#: came back.
+#:
+#: Every other terminal-sounding value is excluded, and ``orphaned`` is the
+#: sharp one: reconcile KEEPS the pid on an orphaned row precisely because that
+#: process is still live but unowned, so condemning it from the stored word
+#: would reap a running worker.
+_STORED_EXITED = "exited"
+
+
+def exit_falsifier(entry: Any) -> Optional[str]:
+    """``"exit-recorded"`` when reconcile already proved this row's child gone.
+
+    Needed because reconcile DESTROYS its own proof: the terminal ``Exited``
+    transition nulls ``pid`` and ``pid_start_time`` (rightly -- a stale pid is
+    itself a misleading liveness signal), which leaves a no-pid row that
+    :func:`pid_falsifier` cannot condemn. A worker whose transcript is still
+    warm would then classify ``reachable`` and ``resume`` would pick the dead
+    attach path, which is the original false-live through a different door.
+
+    This is not the stored enum becoming the answer. It is one affirmative
+    probe result among the falsifiers, subject to the same rules: it can only
+    lower a verdict, and only this single value qualifies.
+    """
+    stored = getattr(entry, "status", None)
+    return "exit-recorded" if stored == _STORED_EXITED else None
+
+
 def registry_falsifier(entry: Any) -> Optional[str]:
     """The falsifier a registry ROW carries, or None when it carries none.
 
@@ -214,6 +244,13 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     transcript stays under the staleness window. Swap the wrong authority for
     the right one rather than removing it.
 
+    A non-pane row has two falsifiers, not one, because reconcile destroys the
+    first when it fires: proving the child gone nulls the pid, so the recorded
+    exit is the only surviving evidence of a death this registry already
+    observed. The exit tombstone is deliberately NOT consulted for a pane row --
+    the pane is that row's authority, and a live pane must not be condemned by a
+    stored word.
+
     Lives here rather than at either caller because BOTH ``fno agents list`` and
     ``fno agents truth`` read a registry row, and a second copy of this rule is
     how one of them ends up with a decorative guard.
@@ -221,7 +258,9 @@ def registry_falsifier(entry: Any) -> Optional[str]:
     mux = getattr(entry, "mux", None)
     if mux:
         return pane_falsifier(mux)
-    return pid_falsifier(getattr(entry, "pid", None), getattr(entry, "pid_start_time", None))
+    return pid_falsifier(
+        getattr(entry, "pid", None), getattr(entry, "pid_start_time", None)
+    ) or exit_falsifier(entry)
 
 
 def reachability(
