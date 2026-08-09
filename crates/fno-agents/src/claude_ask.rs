@@ -146,8 +146,7 @@ pub fn family1_truth_state(handle: &str) -> Option<String> {
 }
 
 fn lower_state_with_verdict<'a>(state: &'a str, reachability: Option<&str>) -> &'a str {
-    if reachability == Some("unreachable")
-        && matches!(state, "working" | "watching" | "your-move")
+    if reachability == Some("unreachable") && matches!(state, "working" | "watching" | "your-move")
     {
         return "unreachable";
     }
@@ -2826,8 +2825,14 @@ mod tests {
         );
         // Monotone: a verdict never raises, and never rewrites a terminal state
         // (resume's relaunch arm keys on `done`/`stalled` and must keep working).
-        assert_eq!(lower_state_with_verdict("done", Some("unreachable")), "done");
-        assert_eq!(lower_state_with_verdict("stalled", Some("unknown")), "stalled");
+        assert_eq!(
+            lower_state_with_verdict("done", Some("unreachable")),
+            "done"
+        );
+        assert_eq!(
+            lower_state_with_verdict("stalled", Some("unknown")),
+            "stalled"
+        );
         // No verdict on the wire (a truth build that predates the field) leaves
         // the pre-existing mapping exactly as it was.
         assert_eq!(lower_state_with_verdict("working", None), "working");
