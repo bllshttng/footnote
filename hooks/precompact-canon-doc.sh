@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# precompact-canon-doc.sh - PreCompact mechanical backstop (PR2, x-0498).
+# precompact-canon-doc.sh - PreCompact mechanical backstop.
 #
 # Writes and refreshes the MECHANICAL sections of this session's canon handoff
 # doc (identity, live workers, node pointers, open PRs) and prints a pointer so
@@ -9,7 +9,7 @@
 # What it is NOT: the writer. It cannot run a model (PreCompact supports only
 # command/http/mcp_tool, not prompt/agent), so the two judgment sections -
 # merge order, open decisions - are left as empty headings filled by the
-# session at full context (the PR1 context-nudge asks for that). This is a
+# session at full context (the context-nudge asks for that). This is a
 # backstop that reaches every compacting session, including the king passes and
 # non-target sessions that the manifest-gated arm-handoff hook never reaches.
 #
@@ -71,8 +71,13 @@ DOC_PATH=""
 _ci="$(_json_field custom_instructions)"
 _ci="$(printf '%s' "$_ci" | tr -d '\r\n')"
 _ci="${_ci#"${_ci%%[![:space:]]*}"}"  # trim leading whitespace
+# Only treat custom_instructions as a doc path when it plainly IS one: a
+# path-anchored .md route the session deliberately chose, or an existing file.
+# Bare prose that happens to end in .md ("remember to update README.md") must
+# fall through to fno paths handoff, not become a junk filename in the cwd.
 case "$_ci" in
-  *.md) DOC_PATH="$_ci" ;;
+  /*.md|./*.md|../*.md) DOC_PATH="$_ci" ;;
+  *.md) [[ -f "$_ci" ]] && DOC_PATH="$_ci" ;;
 esac
 if [[ -z "$DOC_PATH" ]]; then
   DOC_PATH="$(fno paths handoff --session-id "$SID" 2>/dev/null || true)"

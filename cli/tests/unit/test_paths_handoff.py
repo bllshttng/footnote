@@ -1,4 +1,4 @@
-"""Tests for `fno paths handoff` (PR2, x-0498).
+"""Tests for `fno paths handoff`.
 
 The verb surfaces paths.handoffs_dir() so a session or hook resolves the canon
 handoff doc through one door instead of composing a path. Filename key is the
@@ -55,7 +55,7 @@ def test_name_only_uses_canonical_handle_tail() -> None:
     result = runner.invoke(app, ["paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV)
     assert result.exit_code == 0, result.output
     name = result.output.strip()
-    # Date prefix + tail-8 handle. Guards the x-6c47 hazard: the key must be the
+    # Date prefix + tail-8 handle. Guards the both-ends truncation hazard: the key must be the
     # tail (8baa7eea), never the head (c35abbca).
     assert re.fullmatch(r"\d{8}-[0-9a-f]{8}\.md", name), name
     assert name.endswith(f"-{HANDLE}.md"), name

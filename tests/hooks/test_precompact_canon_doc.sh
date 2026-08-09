@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # test_precompact_canon_doc.sh
 #
-# Tests for hooks/precompact-canon-doc.sh (PR2, x-0498): the PreCompact
+# Tests for hooks/precompact-canon-doc.sh: the PreCompact
 # mechanical backstop that writes/refreshes a session's canon handoff doc.
 #
 # Verifies: always exits 0 (never blocks compaction); writes the mechanical
@@ -87,7 +87,7 @@ s = s.replace(
 )
 s = s.replace(
     "_Open decisions awaiting the operator. Nothing external knows this; the session fills it at full context._",
-    "x-6c47 ordering question\nSENTINEL_DEC_7",
+    "dependency ordering question\nSENTINEL_DEC_7",
 )
 open(p, "w").write(s)
 PY
@@ -134,6 +134,27 @@ if [[ "$PROSE_RC" == "0" && -z "$PROSE_OUT" ]]; then
   pass "prose custom_instructions not treated as a path (degrades clean)"
 else
   fail "prose-as-path case: rc=$PROSE_RC stdout_len=${#PROSE_OUT}"
+fi
+
+# ---------------------------------------------------------------------------
+# 5b. Prose that HAPPENS to end in .md is not mis-classified as a doc path.
+#     Regression guard: a bare *.md suffix test would write a junk file named
+#     after the whole prose string. Requires the path anchor / existing-file
+#     check. Run from a clean cwd so a stray junk file is detectable.
+# ---------------------------------------------------------------------------
+JUNK_DIR="$(mktemp -d -t canon-junk-XXXXXX)"
+PROSE_MD_OUT="$(
+  cd "$JUNK_DIR" \
+  && printf '{"trigger":"manual","custom_instructions":"remember to update README.md"}' \
+  | env -u CLAUDE_CODE_SESSION_ID CLAUDE_CODE_SESSION_ID="$SID" PATH="/usr/bin:/bin" bash "$HOOK" 2>/dev/null
+)"
+PROSE_MD_RC=$?
+JUNK_CREATED="$(ls -A "$JUNK_DIR" 2>/dev/null)"
+rm -rf "$JUNK_DIR"
+if [[ "$PROSE_MD_RC" == "0" && -z "$PROSE_MD_OUT" && -z "$JUNK_CREATED" ]]; then
+  pass "prose ending in .md not treated as a path (no junk file)"
+else
+  fail "prose-.md case: rc=$PROSE_MD_RC out=${#PROSE_MD_OUT} junk=[${JUNK_CREATED}]"
 fi
 
 # ---------------------------------------------------------------------------
