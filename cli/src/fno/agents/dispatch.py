@@ -49,6 +49,7 @@ from fno.agents.registry import (
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
+    TERMINAL_STATUSES,
     load_registry,
     resolve_registered_agent_across_sources,
     update_registry,
@@ -1194,6 +1195,8 @@ def _claude_create_path(
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
 ) -> DispatchAskResult:
     """Spawn a new claude agent under the per-agent flock.
 
@@ -1406,6 +1409,12 @@ def _claude_create_path(
     # Best-effort: never raises, degrades to (None, None, None) when absent.
     spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
+    # Crown stamp (US9), same contract as the pane path: the grantor is the
+    # spawning session captured just above, or "human" for a direct human spawn
+    # with no session env. Never a caller-supplied value - a row that could name
+    # its own grantor proves nothing.
+    crown_grantor_val = (spawned_by_session or "human") if crown_level is not None else None
+
     # Registry write.
     log_path = _derive_log_path(name)
     new_entry = AgentEntry(
@@ -1428,19 +1437,52 @@ def _claude_create_path(
         # leaves the account behind. Resolved before the launch (above) so its
         # I/O cannot strand a live supervisor.
         route_settings_path=route_settings_path,
+        crown_level=crown_level,
+        crown_scope=crown_scope,
+        crown_grantor=crown_grantor_val,
     )
+
+    crown_declined = False
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
+        nonlocal crown_declined
+        entry = new_entry
+        # One-live-crown guard (x-7685), inside the write lock so the check and
+        # the stamp are atomic against a racing spawn. Same rule and same idiom
+        # as the pane path: if a non-terminal row already reigns over this scope,
+        # decline the crown and spawn UNCROWNED rather than refuse the spawn. An
+        # uncrowned worker is recoverable by `fno agents crown`; two live crowns
+        # over one scope are not.
+        #
+        # A revive is checked the same way, with the row being replaced excluded:
+        # a king reviving its own exited session must not be blocked by the
+        # corpse it is about to overwrite.
+        if crown_level is not None and crown_scope:
+            contenders = [e for e in entries if not (revive and e.name == name)]
+            if any(
+                e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
+                for e in contenders
+            ):
+                entry = replace(
+                    new_entry, crown_level=None, crown_scope=None, crown_grantor=None
+                )
+                crown_declined = True
         if revive:
-            return [new_entry if e.name == name else e for e in entries]
-        return entries + [new_entry]
+            return [entry if e.name == name else e for e in entries]
+        return entries + [entry]
 
     try:
         update_registry(_write)
+        if crown_declined:
+            print(
+                f"spawn: crown declined (scope {crown_scope!r} already held by a "
+                "live row); spawned uncrowned. The worker launched without a crown.",
+                file=sys.stderr,
+            )
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit(
             "agent_ask_failed",
@@ -2067,6 +2109,8 @@ def dispatch_spawn(
     output_format: Optional[str] = None,
     resume_session_id: Optional[str] = None,
     account_env: Optional[Mapping[str, str]] = None,
+    crown_level: Optional[int] = None,
+    crown_scope: Optional[str] = None,
 ) -> SpawnResult:
     """Orchestrate ``fno agents spawn``.
 
@@ -2158,6 +2202,28 @@ def dispatch_spawn(
     # claude worker launched under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB stalls on
     # approvals, so warn on every reachable path, not just the CLI seam.
     emit_env_scrub_warning(provider, permission_pinned=bool(permission_mode or yolo))
+
+    # Crown eligibility, checked HERE rather than only at the CLI seam: this
+    # function is the in-process entry point too, and only the claude bg branch
+    # below reaches `_claude_create_path`, the one route that stamps the fields.
+    # Every other route builds its AgentEntry elsewhere and would drop the crown
+    # while reporting a successful spawn - a silently uncrowned king is the
+    # failure this refusal exists to make impossible. Fail closed before anything
+    # is created, so a refusal launches nothing and leaves the node dispatchable.
+    if crown_level is not None:
+        if once or headless:
+            raise DispatchAskError(
+                "--crown needs a session that outlives the grant; a one-shot "
+                "exits after one answer. Use the pane or bg substrate.",
+                exit_code=2,
+            )
+        if provider != "claude":
+            raise DispatchAskError(
+                f"--crown on the bg substrate is claude-only; got provider "
+                f"{provider!r}. Use --substrate pane, which maps every provider.",
+                exit_code=2,
+            )
+
     validate_spawn_name(name)
     _validate_from_name(from_name)
 
@@ -2404,6 +2470,8 @@ def dispatch_spawn(
                         tools=tools,
                         deny_tools=deny_tools,
                         account_env=account_env,
+                        crown_level=crown_level,
+                        crown_scope=crown_scope,
                     )
                     return SpawnResult(
                         kind="created",

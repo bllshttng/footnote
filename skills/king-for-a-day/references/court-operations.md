@@ -37,7 +37,7 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Spawn a teammate pane | `fno agents spawn --name <n> "<payload>" --substrate pane --at current --split <dir> --effort <e>` |
 | Move a running pane into another workspace | `fno mux layout apply` rebinds a bound live pane into a target tab, PTY intact, but needs a full template (or a spec file) plus its whole slot set - see mux-layout-templates. No `fno mux pane` verb does it (`break` only detaches to a new tab in place). A coronation-time move, not a mid-wave shuffle |
 | Arm a wake before you stop | `fno-agents wait --agent <name> --state done --timeout-ms <n>` (harness-tracked, one per unreconciled teammate; never `idle`, never `&`) |
-| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --crown level=<N>,scope=<scope>` (a king running a court belongs in its own mission workspace) |
+| Anoint a sub-king at spawn | `fno agents spawn --name <n> "<payload>" --substrate pane --workspace <w> --split <dir> --crown level=<N>,scope=<scope>` (a king running a court belongs in its own mission workspace). `--crown` also rides `--substrate bg` (claude-only), which drops the placement flags but keeps the crown - use it for a sub-king that will pass rather than hold court. Only `headless` is refused: a one-shot exits before it can reign |
 | Coronate a running session in place | `fno agents crown <handle> --scope <scope> [--level N]` (scope = epic/project/node id; level 0..2) |
 | Read your own crown | `fno whoami` (prints a `crown:` line when your row holds one) |
 | Message a live teammate | `fno mail send <handle> "<msg>" --from-self` |

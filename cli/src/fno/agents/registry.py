@@ -83,6 +83,13 @@ KNOWN_STATUSES = frozenset(
     }
 )
 
+# The statuses that mean "this row will never act again". Lives here, next to the
+# vocabulary it is a subset of, because three call sites need the SAME answer and
+# a drifted copy is a real defect: the one-live-crown guards (spawn --crown on
+# both substrates, and `fno agents crown`) read "not terminal" as "still reigning",
+# so a set that forgets a status mints a second crown over one scope.
+TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
+
 # Valid host_mode values (interactive-drive node). A missing/null key coerces to
 # "exec" in load_registry; any other concrete value is rejected like an alien
 # status, so a typo ("intractive") cannot silently fall back to exec behavior.
