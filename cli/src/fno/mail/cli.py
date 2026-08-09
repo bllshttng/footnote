@@ -1822,6 +1822,13 @@ def cmd_send(
     # prompt line (no <fno_mail> envelope, so the REPL slash parser runs it).
     # Separate flow: never wraps, never queues durable, four-state receipt.
     if raw:
+        if from_self:
+            print(
+                "error: --raw strips the envelope, so --from-self has no `from` "
+                "attribute to stamp; the ledger records the sender instead",
+                file=sys.stderr,
+            )
+            raise typer.Exit(code=2)
         if message is None:
             print("error: --raw needs a payload (the verb invocation)", file=sys.stderr)
             raise typer.Exit(code=2)

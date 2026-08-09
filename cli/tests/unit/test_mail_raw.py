@@ -263,3 +263,16 @@ def test_to_self_and_to_project_mutually_exclusive(runner, mailbox, monkeypatch)
     )
     assert res.exit_code == 2
     assert "mutually exclusive" in (res.output + (res.stderr or ""))
+
+
+def test_raw_refuses_from_self(runner, mailbox, monkeypatch):
+    """Regression: the raw branch returns before the from_self block, so --from-self
+    was silently swallowed on the --raw path. Refuse the combination at exit 2
+    naming the envelope reason - silently dropping a provenance flag is worse
+    than rejecting it."""
+    _seed_claude(mailbox, monkeypatch)
+    res = runner.invoke(
+        app, ["mail", "send", "claudepeer", "/x", "--from-self", "--raw"]
+    )
+    assert res.exit_code == 2
+    assert "envelope" in (res.output + (res.stderr or ""))
