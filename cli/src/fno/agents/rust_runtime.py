@@ -119,6 +119,12 @@ RUST_CLIENT_VERBS = frozenset(
         # the client.rs<->router parity test stays in sync.
         "kill-check",
         "verify-evidence",
+        # Plan-closure outcome probes (x-5d34): the close verbs shell out to
+        # `fno-agents probe-run --key close_probes`, the same runner loop-check
+        # uses for done_probes. Dispatched directly in client.rs before
+        # build_request (no daemon RPC); this entry keeps the client.rs<->router
+        # parity test in sync.
+        "probe-run",
         # Inside-leg state push (inside-out E3.2): a per-turn hook calls
         # `fno agents report --session-id <uuid> --seq <n> --state <s>` and the
         # Rust client sends the agent.report RPC to an already-running daemon
@@ -274,6 +280,7 @@ RUST_ONLY_VERB_HELP: dict[str, str] = {
     "finalize": "Terminal-only side-effect writer: ledger record + (ship) plan stamp/handoff (step 6).",
     "kill-check": "Evaluate a plan's kill_criteria (folded from kill-criteria.sh); usually via `fno phase kill-check`.",
     "verify-evidence": "Verify child-promise event evidence and non-Claude agent presence (folded from verify-event-evidence.sh).",
+    "probe-run": "Evaluate a plan's named probe list (done_probes/close_probes); exit 0 when all pass. Shelled by the close verbs for close_probes.",
     "report": "Inside-leg state push (E3.2): store working|blocked|done on a claude row; called by the per-turn hook.",
     "wait": "Block until an agent's registry row reaches idle|blocked|done: --agent <name> --state <s> [--timeout-ms N] [--json].",
     "subscribe": "Stream registry state transitions + pane exits as NDJSON (follows events.jsonl): [--agent <name>] [--kinds state,exit] [--json].",
