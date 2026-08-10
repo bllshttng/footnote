@@ -94,6 +94,24 @@ def scrub_ambient_identity(environ: Optional[dict] = None) -> tuple[str, ...]:
     return tuple(name for name in AMBIENT_IDENTITY_ENV if target.pop(name, None) is not None)
 
 
+def ambient_identity_env_unset_args() -> list[str]:
+    """``env -u`` flag pairs that strip every ambient identity name, for a child
+    launched through an ``env`` argv (the pane substrate).
+
+    The dict substrate (bg / headless) uses :func:`scrub_ambient_identity`;
+    both read :data:`AMBIENT_IDENTITY_ENV`, so the two shapes cannot drift on
+    which names count as identity. A spawned child inherits its parent's ROUTE
+    but never its parent's IDENTITY - an ambient marker riding through is how a
+    claude reviewer spawned from a codex parent comes to stamp the parent's
+    session (x-f50f) - and each harness re-mints its own, so the scrub is
+    lossless.
+    """
+    flags: list[str] = []
+    for _name in AMBIENT_IDENTITY_ENV:
+        flags += ["-u", _name]
+    return flags
+
+
 # The mailbox handle is the random tail of the session id. The signature takes
 # no harness ON PURPOSE: harness is an envelope attribute, never part of an
 # address, and no code path may recover it from a handle string. A

@@ -377,21 +377,34 @@ def headless_create(
     # apply the route env too (belt-and-suspenders with --settings, matching
     # bg_create). Without either overlay, inherit the parent env untouched.
     spawn_env: Optional[dict[str, str]] = None
-    if account_env or route_env:
-        from fno.agents.account_env import SCRUB_AUTH_VARS
+    # Identity is scrubbed whenever the parent carries a marker: a one-shot
+    # `claude -p` otherwise inherits CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID
+    # and the child resolves as the wrong harness - a claude reviewer spawned
+    # from a codex parent would stamp the parent's thread id (the attestation
+    # lane this node builds, x-f50f). The child re-mints its own, so the scrub
+    # is lossless; identity-only, never routing/auth. Constructing the env only
+    # when an overlay or a marker is present preserves the no-overlay "inherit
+    # parent byte-identical" path and its test.
+    from fno.harness_identity import AMBIENT_IDENTITY_ENV, scrub_ambient_identity
 
+    if account_env or route_env or any(m in os.environ for m in AMBIENT_IDENTITY_ENV):
         spawn_env = dict(os.environ)
-        for _k in SCRUB_AUTH_VARS:
-            spawn_env.pop(_k, None)
-        # Account first (profile + its login), route last: when both are present
-        # the route must win endpoint+auth+model as one unit (x-2af5 atomicity),
-        # or the account overlay splits it (overlay endpoint+auth, route model
-        # -> a foreign model asked of the Anthropic API). CLAUDE_CONFIG_DIR from
-        # the account survives, since the route carries no such key.
-        if account_env:
-            spawn_env.update(account_env)
-        if route_env:
-            spawn_env.update(route_env)
+        scrub_ambient_identity(spawn_env)
+        if account_env or route_env:
+            from fno.agents.account_env import SCRUB_AUTH_VARS
+
+            for _k in SCRUB_AUTH_VARS:
+                spawn_env.pop(_k, None)
+            # Account first (profile + its login), route last: when both are
+            # present the route must win endpoint+auth+model as one unit
+            # (x-2af5 atomicity), or the account overlay splits it (overlay
+            # endpoint+auth, route model -> a foreign model asked of the
+            # Anthropic API). CLAUDE_CONFIG_DIR from the account survives,
+            # since the route carries no such key.
+            if account_env:
+                spawn_env.update(account_env)
+            if route_env:
+                spawn_env.update(route_env)
     started = time.monotonic()
     # Pass env ONLY when set: no --account must inherit the parent env by
     # omitting the kwarg entirely (byte-identical to a bare subprocess.run).
@@ -519,6 +532,16 @@ def bg_create(
     # be set retroactively. The nested-attribution path handles missing
     # SESSION gracefully via caller_kind=nested_agent + from_session_id=None.
     spawn_env = dict(os.environ)
+    # A spawned child inherits its parent's ROUTE (account/model below) but
+    # never its parent's IDENTITY. An ambient marker riding through this seam is
+    # how a claude reviewer spawned from a codex parent comes to carry a foreign
+    # CODEX_THREAD_ID and stamp the parent's session - the attestation lane this
+    # node builds (x-f50f) would then classify a genuinely independent reviewer
+    # as SelfAttested. The child re-mints its own marker, so the scrub is
+    # lossless; identity-only, never routing/auth (separate lists).
+    from fno.harness_identity import scrub_ambient_identity
+
+    scrub_ambient_identity(spawn_env)
     spawn_env["FNO_AGENT_SELF"] = name
     spawn_env["FNO_AGENT_HARNESS"] = "claude"
     # Raise the harness Stop-hook block cap so fno's repeated-block loop is not
