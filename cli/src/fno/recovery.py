@@ -247,7 +247,7 @@ def recovery_sweep(
     liveness_fn: Callable[[str], bool],
     failover_fn: Optional[Callable[["Candidate", object], str]] = None,
     mission_complete_fn: Optional[Callable[["Candidate"], Optional[bool]]] = None,
-    notify_close_fn: Optional[Callable[["Candidate"], None]] = None,
+    notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> None:
     """Classify each candidate and act: failover, close-surface, held-surface, or stay silent.
 
@@ -1085,7 +1085,7 @@ def run_recovery_sweep(
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
     mission_complete_fn: Optional[Callable] = None,
-    notify_close_fn: Optional[Callable[["Candidate"], None]] = None,
+    notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> int:
     """Build the real seams, run one sweep, persist counts. Returns candidate count.
 
