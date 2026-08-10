@@ -33,7 +33,9 @@ from typing import Callable, Iterable, Iterator, Optional
 from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
 from fno.agents.reachability import (
+    REACHABLE,
     WIRE_STATUS,
+    Reachability,
     classify_reachability,
     pid_falsifier,
 )
@@ -737,9 +739,50 @@ class DiscoveredSession:
     # precedence over another candidate.
     identity_provisional: bool = False
 
+    def _reachability(self) -> Reachability:
+        """This session's verdict from the one shared derivation.
+
+        Both the rendered row and every caller that ASKS whether this session
+        is usable resolve through here, so the projection and the decision
+        cannot answer differently about the same session. `or None` because
+        pid 0 is this projection's "not recorded" placeholder, and absence of a
+        pid is absence of evidence, never a death sentence.
+        """
+        return classify_reachability(
+            truth_state=self.truth_state,
+            age_s=self.last_activity_age_s,
+            falsifier=pid_falsifier(self.pid or None),
+        )
+
     @property
     def is_alive(self) -> bool:
+        """Transcript activity only -- an ADDRESSING filter, not a verdict.
+
+        Deliberately NOT the shared verdict, and the distinction is the same one
+        the spawn gate turns on. This property backs
+        ``resolve_or_suggest(require_alive=True)``, which answers "WHICH session
+        does this handle name": a recorded pid can go stale while its session is
+        still resumable, so falsifying here would make that handle resolve to
+        nothing at all. "No such agent" is strictly worse than resolving and
+        then reporting the recipient unreachable, and an unaddressable row
+        cannot even be resumed by hand.
+
+        Ask :attr:`is_reachable` for the reachability question. Anything that
+        decides whether a recipient can be REACHED must use that one.
+        """
         return self.truth_state in {"working", "watching", "your-move"}
+
+    @property
+    def is_reachable(self) -> bool:
+        """The shared verdict, falsifiers included: can this session be reached?
+
+        Split from :attr:`is_alive` because collapsing them breaks one of the
+        two callers whichever way you collapse it. Mail read `is_alive` to set
+        `recipient_live`, so a provably dead session was classed live and its
+        durable fallback went to `live-drain` instead of `wake-daemon`, which
+        strands the message on a worker that is gone.
+        """
+        return self._reachability().verdict == REACHABLE
 
     def to_row(self) -> dict:
         """Canonical dict shape for the JSON/table renderers."""
@@ -747,14 +790,8 @@ class DiscoveredSession:
         # this lane and the registry lane render into the SAME payload: with a
         # private mapping, one silent session read `orphaned` here while an
         # equivalent registry row read `unknown`, which is the incongruence the
-        # shared derivation exists to end. `or None` because pid 0 is this
-        # projection's "not recorded" placeholder, and absence of a pid is
-        # absence of evidence, never a death sentence.
-        reach = classify_reachability(
-            truth_state=self.truth_state,
-            age_s=self.last_activity_age_s,
-            falsifier=pid_falsifier(self.pid or None),
-        )
+        # shared derivation exists to end.
+        reach = self._reachability()
         return {
             "handle": self.handle,
             "short_id": self.short_id,

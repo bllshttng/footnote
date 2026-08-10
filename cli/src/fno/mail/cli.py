@@ -1350,7 +1350,16 @@ def _name_lane_send(
     # durable-only reply (neither resolved nor token) had no live attempt, so
     # the attended lane must not fire for them (Locked Decision 3: live-miss).
     live_attempted = (resolved is not None or token is not None) and not self_send
-    recipient_live = self_send or resolved is not None
+    # Resolving a session proves its IDENTITY, never that it can be reached: the
+    # resolver deliberately accepts a row whose recorded pid is dead, so a handle
+    # stays addressable. Asking `is_reachable` (the shared derivation, falsifiers
+    # applied) is what separates the two. Reading `resolved is not None` alone
+    # classed a provably dead recipient as live, which sent the durable fallback
+    # to `live-drain` -- a turn-boundary drain on a worker that has no turns
+    # left -- instead of `wake-daemon`, stranding the message.
+    recipient_live = self_send or (
+        resolved is not None and getattr(resolved, "is_reachable", True)
+    )
     owner = classify_durable_owner(
         param_forced=False,
         recipient_live=recipient_live,
