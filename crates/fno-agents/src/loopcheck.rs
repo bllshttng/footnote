@@ -1152,11 +1152,24 @@ fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'stati
 /// and never appears in a diff. A config file, a lockfile, and a shell script
 /// all count as code.
 fn is_documentation_path(path: &str) -> bool {
-    let p = path.trim().trim_start_matches("./");
+    // A single leading "./" is stripped once; trim_start_matches would also strip
+    // a char set and lstrip a literal-repeated run, diverging from the Python
+    // mirror (and mangling ".github"). The two classifiers must agree exactly.
+    let trimmed = path.trim();
+    let p = trimmed.strip_prefix("./").unwrap_or(trimmed);
     if p.is_empty() {
         return false;
     }
     p.ends_with(".md") || p.starts_with("docs/")
+}
+
+/// Whether the author harness has a self-review verb (claude `/code-review`,
+/// codex `/review`). The self-review floor only applies on these: gemini/agy/
+/// opencode have no native review verb, so flooring code-review would demand an
+/// attestation nothing produces and wedge the loop. Their path is route 3 (a
+/// spawned reviewer), which is deferred. Pure so a unit test pins the set.
+fn harness_can_self_review(harness: Option<&str>) -> bool {
+    matches!(harness, Some("claude") | Some("codex"))
 }
 
 /// Pure payload classifier: CODE iff any changed path is not documentation.
@@ -4338,6 +4351,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if !local.reviewers.is_empty() {
                 merged.reviewers = local.reviewers;
             }
+            if local.self_review_required.is_some() {
+                // Presence, not value: `self_review_required = false` is the
+                // documented repo opt-out, so a local Some(false) must override
+                // a global Some(true). Same overlay rule as required_bots.
+                merged.self_review_required = local.self_review_required;
+            }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
                 // `enabled = false`) is read from the GLOBAL file only and the
@@ -4387,23 +4406,29 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // rather than waving the obligation away. The floor is additive: an
     // already-configured lane (reviewers, bots, peers) keeps meaning exactly
     // what it meant today, and a lane that already names code-review is a no-op.
-    let payload = classify_payload(&parsed.git_bin, &cwd);
     let lane_configured =
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
-    let self_review_floor = floor_self_review(
-        &required_reviewers,
-        lane_configured,
-        payload.0,
-        self_review_required,
-    );
+    // The floor only applies where a session can satisfy it: a harness with a
+    // self-review verb (claude /code-review, codex /review). Flooring
+    // gemini/agy/opencode would demand an attestation no verb there produces,
+    // wedging the loop; route 3 (a spawned reviewer) is those harnesses' path
+    // and is deferred. classify_payload forks git, so it runs only when the
+    // floor could apply - a configured lane makes it moot, and most fires have one.
+    let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
+    let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
+        let payload = classify_payload(&parsed.git_bin, &cwd);
+        floor_self_review(&required_reviewers, false, payload.0, true)
+    } else {
+        None
+    };
     if let Some(floored) = self_review_floor.clone() {
         required_reviewers.push(floored);
     }
     // x-0eaf: DoneUnreviewed applies only when review is required. A stock
-    // install that opts out (self_review_required=false AND no lane) has zero
-    // coverage as its configured state, not a defect - those green PRs still
-    // reach DonePRGreen (coverage 0 is reported in the receipt).
+    // install that opts out (self_review_required=false AND no lane, or a
+    // harness with no self-review verb) has zero coverage as its configured
+    // state, not a defect - those green PRs still reach DonePRGreen.
     let review_required = lane_configured || self_review_floor.is_some();
 
     // Now timestamp
@@ -6551,7 +6576,20 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                             } else {
                                 ""
                             };
-                            format!("{}{} -> run `{}`{}", r.name, state, inv, mark)
+                            // code-review is a native harness verb that emits
+                            // no attestation on its own; the session must also
+                            // run the emit helper or the gate never clears.
+                            // The fno-skill reviewers (sigma, declare) attest
+                            // inside their own invocation.
+                            let emit_step = if r.name == "code-review" {
+                                format!(
+                                    ", then `bash skills/review/scripts/emit-attestation.sh {}`",
+                                    r.name
+                                )
+                            } else {
+                                String::new()
+                            };
+                            format!("{}{} -> run `{}`{}{}", r.name, state, inv, emit_step, mark)
                         }
                         None => format!("{}{}", r.name, state),
                     }
@@ -8468,6 +8506,19 @@ mod tests {
             out.is_empty(),
             "code-review should clear on a pass: {out:?}"
         );
+    }
+
+    #[test]
+    fn self_review_gate_only_floors_harnesses_with_a_verb() {
+        // The floor wedges a harness whose native verb the session cannot run,
+        // so it applies only where a self-review verb exists. Route 3 (a spawned
+        // reviewer) is the path for harnesses without one and is deferred.
+        assert!(harness_can_self_review(Some("claude")));
+        assert!(harness_can_self_review(Some("codex")));
+        assert!(!harness_can_self_review(Some("gemini")));
+        assert!(!harness_can_self_review(Some("agy")));
+        assert!(!harness_can_self_review(Some("opencode")));
+        assert!(!harness_can_self_review(None));
     }
 
     #[test]

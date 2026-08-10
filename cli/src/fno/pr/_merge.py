@@ -262,8 +262,11 @@ def _is_documentation_path(path: str) -> bool:
 
     Mirrors is_documentation_path in loopcheck.rs - the two must agree on what
     'documentation' means or the merge gate and the stop gate classify the same
-    PR differently."""
-    p = (path or "").strip().lstrip("./")
+    PR differently. A single leading `./` is stripped once (lstrip would strip a
+    char set and mangle `.github`/`.md`)."""
+    p = (path or "").strip()
+    if p.startswith("./"):
+        p = p[2:]
     if not p:
         return False
     return p.endswith(".md") or p.startswith("docs/")
@@ -291,11 +294,13 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
 
 
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
-    """Whether any review lane (required/optional/reviewers/local-peers) is configured.
+    """Whether review is required for this PR: a configured lane, OR a code
+    payload on a stock install (the self-review floor).
 
     Fail-closed (True) on config error: a misread config must not bypass the
-    coverage guard. (x-0eaf boundary: a stock install with no lane opted out of
-    review, so the guard does not apply.)
+    coverage guard. A stock install with no lane opts out of review UNLESS the
+    payload is code and config.review.self_review_required is on (default), in
+    which case the floor engages so the merge gate agrees with the stop gate.
 
     Peers form a local lane only via identity-free entries. A shared
     peer_identity, or a per-peer identity, means the review posts as a GitHub
