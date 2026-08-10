@@ -381,7 +381,7 @@ def headless_create(
     # `claude -p` otherwise inherits CODEX_THREAD_ID / CLAUDE_CODE_SESSION_ID
     # and the child resolves as the wrong harness - a claude reviewer spawned
     # from a codex parent would stamp the parent's thread id (the attestation
-    # lane this node builds, x-f50f). The child re-mints its own, so the scrub
+    # lane this node builds). The child re-mints its own, so the scrub
     # is lossless; identity-only, never routing/auth. Constructing the env only
     # when an overlay or a marker is present preserves the no-overlay "inherit
     # parent byte-identical" path and its test.
@@ -536,7 +536,7 @@ def bg_create(
     # never its parent's IDENTITY. An ambient marker riding through this seam is
     # how a claude reviewer spawned from a codex parent comes to carry a foreign
     # CODEX_THREAD_ID and stamp the parent's session - the attestation lane this
-    # node builds (x-f50f) would then classify a genuinely independent reviewer
+    # node builds would then classify a genuinely independent reviewer
     # as SelfAttested. The child re-mints its own marker, so the scrub is
     # lossless; identity-only, never routing/auth (separate lists).
     from fno.harness_identity import scrub_ambient_identity

@@ -5558,7 +5558,7 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
-// ── pair-key: (reviewer, attester_session_id) (x-f50f task 1.1) ──────────────
+// ── pair-key: (reviewer, attester_session_id) ────────────────────────────────
 
 /// AC1-HP: two passes at the same head under the same reviewer label but from
 /// DIFFERENT attester sessions join instead of replacing. Before the pair key

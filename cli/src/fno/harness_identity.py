@@ -103,7 +103,7 @@ def ambient_identity_env_unset_args() -> list[str]:
     which names count as identity. A spawned child inherits its parent's ROUTE
     but never its parent's IDENTITY - an ambient marker riding through is how a
     claude reviewer spawned from a codex parent comes to stamp the parent's
-    session (x-f50f) - and each harness re-mints its own, so the scrub is
+    session - and each harness re-mints its own, so the scrub is
     lossless.
     """
     flags: list[str] = []
