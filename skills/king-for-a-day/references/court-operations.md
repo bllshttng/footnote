@@ -51,6 +51,13 @@ Every agent-to-agent AUTHORED payload carries the `<fno_mail>` envelope - king t
 | Encode a ruling | `fno backlog update <id> --dispatch-verb /fno:... --dispatch-brief "..." --add-blocker <up>` |
 | Land a green child | `fno pr merge <n>` (only when config permits) |
 
+**Anointing on the bg substrate.**
+`--crown` is not pane-only: it rides `--substrate bg` too (claude-only there), and only `headless` is refused, since a one-shot exits before it can reign.
+What a bg sub-king gives up is placement, not authority.
+The placement flags are mux geometry and refuse outside a pane, and `--at current` resolves the anchor from `FNO_PANE`, which a bg session does not have.
+So a bg sub-king seats its own teammates in fresh tabs and never forms a co-located court.
+Anoint on bg for a sub-king that will pass; anoint on a pane for one that will hold court.
+
 ## Lifecycle state semantics
 
 The runtime serializes three teammate states. Read them precisely - the failure that built a duplicate PR was reading *invisibility* as *death*.

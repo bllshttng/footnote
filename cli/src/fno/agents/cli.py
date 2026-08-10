@@ -358,13 +358,18 @@ def cmd_watch(
 # (1, epic) -> IC (2, node). A level outside 0..2 is not a real crown, so it is
 # refused - this both enforces the ladder and keeps crown_level far inside the
 # Rust registry row's u32 (a fat-fingered arbitrary-precision Python int can't
-# overflow it and poison the shared store).
+# overflow it and poison the shared store). Same literal-not-import reasoning as
+# _TERMINAL_STATUSES below; pinned to registry.MAX_CROWN_LEVEL by the parity test.
 _MAX_CROWN_LEVEL = 2
 
 # Terminal (non-active) registry statuses: a worker in any OTHER state
 # (spawning/ready/idle/busy/live/restarting) is active and may still need its
 # king. Used by the crown transfer + the orphan check so they do not miss a
 # worker that is "busy" or "idle" (only checking literal "live" was a codex P1).
+# Deliberately a literal, not an import of registry.TERMINAL_STATUSES: importing
+# registry at module scope costs ~30ms on every `fno agents` invocation for one
+# frozenset. The two copies are pinned equal by test_crown_terminal_set_parity,
+# so drift is a red test rather than a duplicate crown.
 _TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
 
 
@@ -397,17 +402,15 @@ def _parse_crown(spec: str) -> tuple[int, str]:
     except ValueError:
         print(f"--crown level must be an int >= 0; got {parts['level']!r}", file=sys.stderr)
         raise typer.Exit(code=2)
-    if level < 0:
-        print(f"--crown level must be >= 0; got {level}", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if level > _MAX_CROWN_LEVEL:
-        print(
-            f"--crown level must be <= {_MAX_CROWN_LEVEL}; got {level}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if not parts["scope"]:
-        print("--crown scope must be nonblank", file=sys.stderr)
+    # Range + nonblank-scope live in registry.crown_validation_error, the one
+    # rule every crown writer runs (the spawn dispatchers take (level, scope)
+    # directly and never reach this parser). Imported in-function: cli.py keeps
+    # registry off its module scope, and by here we are already doing real work.
+    from fno.agents.registry import crown_validation_error
+
+    problem = crown_validation_error(level, parts["scope"])
+    if problem is not None:
+        print(f"--crown {problem}", file=sys.stderr)
         raise typer.Exit(code=2)
     return level, parts["scope"]
 
@@ -1058,7 +1061,9 @@ def cmd_spawn(
             "'level=N,scope=X'. scope = the epic / project / node id the crown "
             "rules over (e.g. scope=x-d92e); level = the ladder altitude 0..2 "
             "(VP=0 project, Director=1 epic, IC=2 node). Stamped on the child's "
-            "row with the grantor derived from THIS session - never self-declared."
+            "row with the grantor derived from THIS session - never self-declared. "
+            "Works on --substrate pane and bg (bg is claude-only); refused on "
+            "headless, whose one-shot exits before it can reign."
         ),
     ),
     node: str | None = typer.Option(
@@ -1340,16 +1345,31 @@ def cmd_spawn(
 
     # --crown level=N,scope=X (US9): parse + validate now; the grantor is stamped
     # ambiently at spawn from this session, so the child's row records who
-    # actually bestowed the crown, never a value it could forge. Scoped to the
-    # pane substrate for now (the court's own substrate); a bg/headless crown is
-    # refused fail-closed rather than silently dropped.
+    # actually bestowed the crown, never a value it could forge.
+    #
+    # The substrate axis the crown actually cares about is REIGN LENGTH, not pane
+    # geometry. A crown is three registry fields; nothing in it needs a PTY. What
+    # it needs is a session that outlives the grant, because a king that exits
+    # mid-wave orphans its scope. `pane` and `bg` both qualify - a bg worker is a
+    # full persistent conversation in claude's agent view, attachable, replyable,
+    # and resumable, differing from a pane only in who draws it. `headless` is the
+    # one-shot: it answers once and exits, so a crown on it names a dead ruler
+    # before the grantor's next turn. That one stays refused.
+    #
+    # A bg king does lose the pane-layer PLACEMENT primitive (`--at current`
+    # resolves the calling pane from FNO_PANE, which a bg session has none of), so
+    # it seats minions in fresh tabs rather than beside itself. That degrades the
+    # court's ergonomics, not its authority: mail, peek, top, and wait are all
+    # substrate-blind. Court-mode briefs that need adjacency should ask for a pane
+    # king; the crown itself does not.
     crown_level: int | None = None
     crown_scope: str | None = None
     if crown is not None:
-        if substrate != "pane" or once:
+        if once or substrate == "headless":
             print(
-                "--crown applies only to --substrate pane (the court's substrate); "
-                "bg/headless crowns are not yet supported",
+                "--crown needs a session that outlives the grant; headless is a "
+                "one-shot that exits after one answer, so its crown would be "
+                "orphaned at birth. Use --substrate pane or --substrate bg.",
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
@@ -1720,6 +1740,8 @@ def cmd_spawn(
                 output_format=output_format,
                 resume_session_id=resume,
                 account_env=account_env,
+                crown_level=crown_level,
+                crown_scope=crown_scope,
             )
             spawn_succeeded = result.kind == "created" or bool(
                 result.reply and result.reply.strip()

@@ -407,6 +407,10 @@ def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     the documented grammar reachable only from the path the default route never
     reaches. Same shape and reason as ``--role`` above. Detected here so the call
     falls through to the Python runtime that owns the implementation.
+
+    Load-bearing on ``--substrate bg``, where it is what makes the crown land at
+    all: bg spawns otherwise exec the binary, which has no crown parser. The pane
+    substrate diverts on its own via ``_is_pane_substrate_spawn``.
     """
     if verb != "spawn":
         return False

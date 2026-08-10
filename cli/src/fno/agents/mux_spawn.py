@@ -49,6 +49,7 @@ from fno.agents.registry import (
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
+    crown_validation_error,
     load_registry,
     update_registry,
 )
@@ -1286,6 +1287,15 @@ def dispatch_spawn_pane(
        names the mux session; never a daemon-PTY fallback (AC1-ERR).
     5. registry row with ``mux: {session, pane_id}`` (create-after-spawn).
     """
+    # Crown values, validated on the way in for the same reason the tier-remap
+    # check below is: `cmd_spawn` parses `--crown` before it gets here, but an
+    # in-process caller hands (level, scope) straight to this signature, and a
+    # value that skipped validation is written to the SHARED registry. Fail
+    # closed before the pane exists, so a refusal leaves no worker behind.
+    crown_problem = crown_validation_error(crown_level, crown_scope)
+    if crown_problem is not None:
+        raise DispatchAskError(crown_problem, exit_code=2)
+
     # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
     # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a
     # picker wired only there would cover bg/headless and leave every default

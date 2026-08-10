@@ -69,6 +69,13 @@ fno agents spawn --name king-<epic> "<brief>" --effort high --model <your fronti
 
 `--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `bg` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
 
+What `pane` buys here is the COURT, not the crown.
+The crown itself rides `--substrate bg` equally: a bg worker is a persistent conversation in claude's agent view, attachable and resumable, and only the `headless` one-shot is refused, since it exits before it can reign.
+What a bg king loses is placement.
+The placement flags are mux geometry and refuse outside a pane, and the exact anchor resolves from `FNO_PANE`, which a bg session does not have.
+So a bg king seats teammates in fresh tabs instead of beside itself, and the court stops cohering around one screen.
+Crown a bg king for a pass, which abdicates before layout matters; crown a pane king for a reign that runs a court.
+
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
 **Coronating in place does not place you, and usually you should not care - if you are in a pane.** `fno agents crown <handle>` writes the crown onto an existing row and has no workspace option, so a session coronated where it already sits stays there. When that session IS a mux pane, this is fine: a workspace is an identity, not a location, so declare the one you are already in to be the mission workspace, name it in your opening line, and let teammates anchor to you with `--at current`. The court is then co-located with its king from whatever workspace you woke up in, which is the property that actually matters.
