@@ -765,6 +765,68 @@ def test_append_session_record_unknown_node(tmp_path, monkeypatch):
     assert (found, added) == (False, False)
 
 
+def test_append_session_record_duplicate_fills_missing_ended_at(tmp_path, monkeypatch):
+    """A do row opened (started_at, no ended_at) is CLOSED by a later duplicate
+    stamp carrying ended_at - the completion that makes acquire-time stamping
+    safe. The started_at the first observation set is preserved."""
+    g = _make_graph(tmp_path, [{"id": "ab-fill00001", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    append_session_record(g, "ab-fill00001", phase="do", harness="claude",
+                          session_id="S", started_at="2026-08-10T01:00:00Z")
+    found, added = append_session_record(g, "ab-fill00001", phase="do",
+                                         harness="claude", session_id="S",
+                                         ended_at="2026-08-10T02:00:00Z")
+    assert (found, added) == (True, False)  # no NEW row added
+    rows = _node_sessions(g, "ab-fill00001")
+    assert len(rows) == 1
+    assert rows[0]["started_at"] == "2026-08-10T01:00:00Z"  # first observation owns
+    assert rows[0]["ended_at"] == "2026-08-10T02:00:00Z"  # later stamp filled
+
+
+def test_append_session_record_duplicate_keeps_first_started_at(tmp_path, monkeypatch):
+    """A duplicate never overwrites a started_at the first observation set; only
+    absent fields fill, so first-observation-wins survives the merge."""
+    g = _make_graph(tmp_path, [{"id": "ab-fill00002", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    from fno.graph.store import append_session_record
+
+    append_session_record(g, "ab-fill00002", phase="do", harness="claude",
+                          session_id="S", started_at="2026-08-10T01:00:00Z")
+    append_session_record(g, "ab-fill00002", phase="do", harness="claude",
+                          session_id="S", started_at="2026-08-10T09:00:00Z",
+                          ended_at="2026-08-10T02:00:00Z")
+    rows = _node_sessions(g, "ab-fill00002")
+    assert len(rows) == 1
+    assert rows[0]["started_at"] == "2026-08-10T01:00:00Z"  # not overwritten
+    assert rows[0]["ended_at"] == "2026-08-10T02:00:00Z"  # absent field filled
+
+
+def test_session_add_pr_no_node_names_repair(tmp_path, monkeypatch):
+    """A --pr-number that maps to no node (typical of a session killed before its
+    PR was stamped) names the two repair paths instead of leaving the operator
+    stuck in exactly the state a killed session leaves behind."""
+    from typer.testing import CliRunner
+    import fno.graph.cli as C
+
+    g = _make_graph(tmp_path, [{"id": "ab-nopr0001", "title": "t", "project": "p"}])
+    _patch_graph(monkeypatch, g)
+    monkeypatch.setattr(C, "_graph_path", lambda: g)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-repair")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    r = CliRunner().invoke(
+        C.cli, ["session", "add", "--phase", "do", "--pr-number", "999", "--repo", "foo/bar"]
+    )
+    assert r.exit_code == 0, r.output  # a skip, not an error
+    assert "999" in r.output
+    assert "backlog update" in r.output and "--pr-number" in r.output
+    assert "session add <node-id>" in r.output
+
+
 @pytest.mark.parametrize("phase", ["review", "plan", "", "DO"])
 def test_append_session_record_rejects_bad_phase(tmp_path, monkeypatch, phase):
     g = _make_graph(tmp_path, [{"id": "ab-add00006", "title": "t"}])

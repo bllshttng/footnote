@@ -338,6 +338,77 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     assert do[0]["started_at"] <= do[0]["ended_at"]
 
 
+def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
+    """A node claim acquire opens the do row with started_at from the claim's
+    acquire time and NO ended_at - so a session killed before its release
+    terminal still leaves a started row instead of reading unstarted (the
+    killed-mid-phase specimen: PR open and green while the node showed only a
+    blueprint row)."""
+    import fno.paths
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-acq-1")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "ab-acqtest", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n')
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+
+    acq = runner.invoke(
+        cli, ["acquire", "node:ab-acqtest", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    assert acq.exit_code == 0, acq.output
+    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    do = [x for x in rows if x.get("phase") == "do"]
+    assert len(do) == 1
+    assert do[0]["harness"] == "claude"
+    assert do[0]["session_id"] == "sess-acq-1"
+    assert do[0]["started_at"]
+    assert "ended_at" not in do[0]  # opened, not closed
+
+
+def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
+    """Acquire opens the do row (started_at, no end); release --stamp-do fills
+    ended_at on the SAME row via duplicate-fill - the merge that makes
+    acquire-time stamping safe without losing the release window or adding a
+    second row."""
+    import fno.paths
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "sess-acq-2")
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "ab-acqrel", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n')
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+
+    acq = runner.invoke(
+        cli, ["acquire", "node:ab-acqrel", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    assert acq.exit_code == 0, acq.output
+    rel = runner.invoke(
+        cli, ["release", "node:ab-acqrel", "--holder", "target-session:s", "--stamp-do"]
+    )
+    assert rel.exit_code == 0, rel.output
+    rows = json.loads(g.read_text())["entries"][0].get("sessions", [])
+    do = [x for x in rows if x.get("phase") == "do"]
+    assert len(do) == 1  # one row, not two - release closed the acquire row
+    assert do[0]["started_at"] and do[0]["ended_at"]
+    assert do[0]["started_at"] <= do[0]["ended_at"]
+
+
 def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
     """A bare release (the handoff path) records nothing - the do window would
     mis-attribute the predecessor under the successor's identity."""

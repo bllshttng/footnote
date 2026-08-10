@@ -920,9 +920,12 @@ def append_session_record(
 
     The single graph-owned mutation primitive behind ``fno backlog session add``.
     Idempotent under the graph lock: appends only when ``(phase, harness,
-    session_id)`` is absent, so a retried or concurrent duplicate stamp collapses
-    to one row and the first observation owns the timestamps. Never edits or
-    removes an entry.
+    session_id)`` is absent. A duplicate key collapses to one row whose
+    timestamps the first observation owns, with one completion: a later stamp
+    may FILL a timestamp the first omitted (``started_at`` / ``ended_at``), so a
+    row opened at claim acquire (started_at, no end) closes at release (ended_at
+    filled) without losing either value. A value already set is never
+    overwritten, and no row is ever removed.
 
     ``started_at`` / ``ended_at`` are optional and bound the phase window. Both
     are omitted unless the writer has an honest value: ``ended_at`` is the phase
@@ -991,8 +994,23 @@ def append_session_record(
         result["found"] = True
         rows = node.setdefault("sessions", [])
         key = (phase, harness, session_id)
-        if any((r.get("phase"), r.get("harness"), r.get("session_id")) == key for r in rows):
-            return entries  # duplicate: first observation owns the timestamps
+        prior = next(
+            (r for r in rows
+             if (r.get("phase"), r.get("harness"), r.get("session_id")) == key),
+            None,
+        )
+        if prior is not None:
+            # Duplicate: first observation owns what it set, but a later stamp
+            # can COMPLETE the row by filling a timestamp it left open. A do row
+            # opened at claim acquire (started_at, no ended_at) is closed at
+            # release (ended_at filled); a value already present is never
+            # overwritten, so a retried stamp with a different timestamp is a
+            # no-op and the first observation still wins.
+            if ended_at is not None and "ended_at" not in prior:
+                prior["ended_at"] = ended_at
+            if started_at is not None and "started_at" not in prior:
+                prior["started_at"] = started_at
+            return entries
         row = {"phase": phase, "harness": harness, "session_id": session_id}
         if ended_at is not None:
             row["ended_at"] = ended_at

@@ -158,6 +158,14 @@ def acquire(
         typer.echo(f"transient error: {exc}", err=True)
         raise typer.Exit(code=3)
 
+    # do provenance opens at acquire - the one choke point a session killed
+    # mid-phase still reaches (release/finalize fire only on a clean terminal).
+    # started_at from this claim's own acquire time; ended_at stays open for the
+    # release path to fill. Best-effort and node-keyed, mirroring the release
+    # stamp's contract.
+    if key.startswith("node:"):
+        _stamp_do_on_acquire(key, claim)
+
     if json_output:
         typer.echo(json.dumps(claim.to_yaml_dict()))
     else:
@@ -205,6 +213,63 @@ def release(
         typer.echo(json.dumps({"key": key, "released": True}))
     else:
         typer.echo(f"released: {key}")
+
+
+def _stamp_do_on_acquire(key: str, claim) -> None:
+    """Open the do lifecycle row at claim acquire, recording started_at from the
+    claim's own acquire time and leaving ended_at open for the release path to
+    fill. Best-effort: a graph failure or missing identity is a named stderr
+    skip and never fails the acquire.
+
+    A session killed mid-phase never reaches its release terminal, so the
+    release/finalize stamps never fire and the row would be lost entirely -
+    including a started_at that sat in the claim file the whole time. Opening
+    the row at acquire guarantees it exists from the moment work starts;
+    append_session_record's duplicate-fill lets release close it (ended_at) and
+    is a no-op on a re-acquire or a retried stamp.
+    """
+    from datetime import datetime, timezone
+
+    from fno.graph.store import append_session_record
+    from fno.harness_identity import resolve_harness_identity
+    from fno.paths import graph_json
+
+    node_id = key.split(":", 1)[1] if ":" in key else ""
+    if not node_id:
+        return
+    ident = resolve_harness_identity()
+    if not ident.session_id or not ident.harness:
+        typer.echo(
+            f"claim acquire: no ambient identity to open do provenance for "
+            f"{node_id}; the row is skipped. Skipped.",
+            err=True,
+        )
+        return
+    started = datetime.fromtimestamp(
+        claim.acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    try:
+        found, _added = append_session_record(
+            graph_json(), node_id, phase="do",
+            harness=ident.harness, session_id=ident.session_id,
+            started_at=started,
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"claim acquire: do provenance open skipped for {node_id}: {exc}",
+            err=True,
+        )
+        return
+    # append_session_record returns (found=False, added=False) without raising
+    # when the node id is absent from the graph (a superseded node whose claim
+    # file lingers). The named-skip contract requires an explicit stderr line so
+    # the operator knows provenance was not opened, not silently dropped.
+    if not found:
+        typer.echo(
+            f"claim acquire: do provenance open skipped for {node_id} "
+            f"(node not in graph); the row was not written. Skipped.",
+            err=True,
+        )
 
 
 def _stamp_do_on_release(key: str, claim) -> None:
