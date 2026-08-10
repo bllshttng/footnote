@@ -3034,6 +3034,41 @@ def test_disambiguate_does_not_compound_a_non_unique_short_id():
     assert again == out, f"second render changed the map: {out} -> {again}"
 
 
+def test_disambiguate_never_emits_a_duplicate_even_when_every_suffix_is_taken():
+    """The uniqueness guarantee has to hold on the exhausted path too.
+
+    Reachable only from a hand-edited map that aliases one session to exactly
+    the `<name>-<sid>` another session would escalate to. Falling through would
+    emit a duplicate, and a duplicate alias resolves to two holders on the send
+    path - the precise failure the guarantee exists to prevent.
+    """
+    from fno.agents.discover import _disambiguate, canonical_handle
+
+    # The victim must sort LAST, so every rung of its ladder is already in
+    # `seen` by the time it is processed. Sorting it first would mean no
+    # collision at all and the exhausted path would never run.
+    victim = "zzzzzzzz-1111-2222-3333-999999999999"
+    holders = [
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "bbbbbbbb-1111-2222-3333-555555555555",
+        "cccccccc-1111-2222-3333-666666666666",
+        "dddddddd-1111-2222-3333-777777777777",
+    ]
+    live = [{"session_id": s, "short_id": "dup"} for s in [*holders, victim]]
+    aliases = {
+        holders[0]: "etl-worker",
+        holders[1]: "etl-worker-dup",
+        holders[2]: f"etl-worker-{canonical_handle(victim)}",
+        holders[3]: f"etl-worker-{victim}",
+        victim: "etl-worker",
+    }
+
+    out = _disambiguate(aliases, live)
+
+    assert len(set(out.values())) == len(out), f"duplicate emitted: {out}"
+    assert out[victim] not in [out[s] for s in holders]
+
+
 def test_disambiguate_leaves_already_unique_aliases_untouched():
     """The common case stays byte-identical - no suffix on a unique name."""
     from fno.agents.discover import _disambiguate

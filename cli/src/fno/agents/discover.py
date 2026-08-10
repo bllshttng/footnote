@@ -1389,6 +1389,17 @@ def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
                 if candidate not in seen:
                     name = candidate
                     break
+            else:
+                # Every candidate taken. Only a hand-edited map aliasing another
+                # session to exactly `<name>-<sid>` gets here, but falling
+                # through would emit a DUPLICATE - the one thing this function
+                # promises not to do, and a duplicate alias resolves to two
+                # holders on the send path. Counting terminates because `seen`
+                # is finite.
+                n = 2
+                while f"{name}-{sid}-{n}" in seen:
+                    n += 1
+                name = f"{name}-{sid}-{n}"
         out[sid] = name
         seen.add(name)
     return out
