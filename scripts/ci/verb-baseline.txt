@@ -43,6 +43,7 @@ agents needs
 agents nudge-peek
 agents peek
 agents ping
+agents probe-run
 agents push-channel
 agents reap
 agents reconcile
