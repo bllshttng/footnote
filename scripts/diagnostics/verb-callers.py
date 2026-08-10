@@ -52,7 +52,7 @@ from pathlib import Path
 # Everything a contributor reads, EXCLUDING cli/src (where verbs are defined).
 CORPUS_DIRS = [
     "skills", "docs", "scripts", "hooks", "agents",
-    "commands", "crates", "cli/tests",
+    "commands", "crates", "cli/tests", "tests",
 ]
 CORPUS_FILES = ["AGENTS.md", "README.md"]
 
@@ -133,7 +133,9 @@ def _clean(tok: str) -> str:
 
 
 def _verb_token(tok: str) -> str | None:
-    c = _clean(tok)
+    # Markdown table cells escape the alternation pipe as `\|`; unescape it so a
+    # `spawn\|ask\|peek` token fans out instead of being rejected at the backslash.
+    c = _clean(tok).replace("\\|", "|")
     return c if _VERB_RE.fullmatch(c) else None
 
 
@@ -283,19 +285,24 @@ def main(argv: list[str] | None = None) -> int:
         print("controls:", "PASS" if not failed else "FAIL",
               {k: counts_corr.get(k, 0) for k in CONTROLS})
         print(f"uncorrected zero: {len(zero_unc)}  corrected zero: {len(zero_corr)}  "
-              f"delta from {ORIGINAL_ZERO_BOUND}: {ORIGINAL_ZERO_BOUND - len(zero_corr)}")
+              f"rescued by fixes: {len(zero_unc) - len(zero_corr)}")
+        print(f"vs the original {ORIGINAL_ZERO_BOUND} bound: {len(zero_corr)} now "
+              f"({ORIGINAL_ZERO_BOUND - len(zero_corr)} below; remainder is corpus drift)")
         print(f"subset invariant: {'OK' if not not_subset else 'BROKEN'}")
-        # Parity: every python leaf the registry yields is in the baseline, and
-        # the baseline's python-side count matches (guards a registry regression).
+        # Parity: the sweep's leaf universe (the baseline file) must match the
+        # live registry, else a stale baseline silently drifts the zero count.
+        # Comparing enumerate_python_leaves vs iter_python_leaves would be
+        # tautological (both read the same iterator), so compare the file against
+        # enumerate_all_leaves - the same source the ratchet regenerates from.
         try:
-            from fno.lint_verb_ratchet import enumerate_python_leaves, iter_python_leaves
-            enum = {l.split(' !')[0].strip() for l in enumerate_python_leaves()}
-            it = {p for p, _ in iter_python_leaves()}
-            print(f"registry parity: enumerate={len(enum)} iter={len(it)} "
-                  f"identical={enum == it}")
-            ok = ok and (enum == it)
+            from fno.lint_verb_ratchet import enumerate_all_leaves
+            registry = {l.split(' !')[0].strip() for l in enumerate_all_leaves()}
+            baseline_set = set(leaves_list)
+            print(f"baseline/registry parity: baseline={len(baseline_set)} "
+                  f"registry={len(registry)} identical={baseline_set == registry}")
+            ok = ok and (baseline_set == registry)
         except Exception as e:
-            print(f"registry parity: SKIPPED ({e})")
+            print(f"baseline/registry parity: SKIPPED ({e})")
         # Corpus coverage: skills/target/ is a real skill bundle, not a build
         # dir. A `target` exclusion that swallows it (the rg-glob pitfall) leaves
         # controls green while silently under-counting, so assert it is walked.
@@ -312,8 +319,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"control values: {', '.join(f'{k}={counts_corr.get(k,0)}' for k in CONTROLS)}")
         print(f"uncorrected zero-ref leaves: {len(zero_unc)}")
         print(f"corrected zero-ref leaves:   {len(zero_corr)}")
-        print(f"delta from {ORIGINAL_ZERO_BOUND} (rescued by the two fixes): "
-              f"{ORIGINAL_ZERO_BOUND - len(zero_corr)}")
+        print(f"rescued by the two fixes (uncorrected -> corrected): "
+              f"{len(zero_unc) - len(zero_corr)}")
+        print(f"vs the original {ORIGINAL_ZERO_BOUND} bound: {len(zero_corr)} now "
+              f"({ORIGINAL_ZERO_BOUND - len(zero_corr)} below it; the rest of the gap "
+              f"is corpus drift since that measurement)")
         print("corrected zero-ref by top-level group:")
         for grp, n in cluster_breakdown(zero_corr):
             print(f"  {grp}: {n}")
@@ -333,8 +343,8 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(f"{mark}{leaf:33} {counts_corr.get(leaf, 0):>5}  {fl:28}  {hl}")
     footer = (
         f"\ncorrected zero-ref: {len(zero_corr)}  "
-        f"(uncorrected {len(zero_unc)}, delta from {ORIGINAL_ZERO_BOUND}: "
-        f"{ORIGINAL_ZERO_BOUND - len(zero_corr)})\n"
+        f"(uncorrected {len(zero_unc)}, rescued by fixes: "
+        f"{len(zero_unc) - len(zero_corr)})\n"
         f"* = zero external callers (cull candidate); file:line/help blank if fno env absent"
     )
     lines.append(footer)
