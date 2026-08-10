@@ -36,6 +36,11 @@ def _registry_home(tmp_path, monkeypatch):
     # resolution path production does.
     monkeypatch.setenv(discover.PROJECTS_DIR_ENV, str(projects))
     monkeypatch.setenv(discover.CODEX_SESSIONS_DIR_ENV, str(codex))
+    # Run from a cwd that is NOT a known project: project confinement (defect 1)
+    # is N/A outside a project, so these adoption/ambiguity-mechanic tests
+    # proceed as before. The confined path (same-project adopt, foreign refuse)
+    # is covered by test_store_fallback_confinement.py.
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
