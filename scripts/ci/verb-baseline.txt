@@ -198,7 +198,7 @@ cost
 delivery
 dispatch one
 dispatch resolve
-doctor
+doctor !--context-audit !--context-budget !--context-entry !--context-harness !--context-host
 done
 evals grade
 evals graduate
@@ -316,7 +316,7 @@ resume receipt version
 resume receipt write !--session
 retro drain-postmortems
 retro run !--pr !--session
-review
+review !--session !--sigma-current-head !--sigma-head !--sigma-node !--sigma-pr !--sigma-project !--sigma-reviews-root !--sigma-round
 roles context
 roles ls
 roles resolve

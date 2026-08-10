@@ -31,7 +31,7 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, cast
 
 from fno.paths import resolve_repo_root
 
@@ -168,6 +168,10 @@ def enumerate_python_leaves() -> list[str]:
     ``backlog`` alias shape). A single command that shares its import target
     with another name (``update`` / ``upgrade``) is two distinct invocable verbs
     and both appear.
+
+    Plain-function entries (``doctor``) and eager inline commands (``review``)
+    are resolved to real Click commands, not bare names, so their hidden options
+    ride into the baseline like any group leaf.
     """
     import importlib
 
@@ -175,9 +179,16 @@ def enumerate_python_leaves() -> list[str]:
     import typer
     import typer.main
 
-    from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP
+    from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as _root_app
 
-    leaves: list[str] = list(_EAGER_COMMAND_HELP)  # help, cost, review (inline)
+    # Eager inline commands (help, cost, review) are seeded on the main app, not
+    # LAZY_SUBCOMMANDS, so resolve each from the root Click tree rather than emit
+    # a bare name: a bare name would miss hidden options (review carries --sigma-*).
+    _root_cmd = cast(click.Group, typer.main.get_command(_root_app))
+    _root_ctx = click.Context(_root_cmd)
+    leaves: list[str] = [
+        _format_leaf(n, _root_cmd.get_command(_root_ctx, n)) for n in _EAGER_COMMAND_HELP
+    ]
 
     seen_groups: set[str] = set()
     for name, entry in LAZY_SUBCOMMANDS.items():
@@ -211,8 +222,16 @@ def enumerate_python_leaves() -> list[str]:
                 leaves.extend(children if children else [_format_leaf(name, cmd)])
             else:
                 leaves.append(_format_leaf(name, cmd))
-        else:
+        elif isinstance(obj, click.Command):
             leaves.append(_format_leaf(name, obj))
+        else:
+            # Plain function with Typer-style params: the live CLI wraps it as a
+            # single-command Typer app (cli/_lazy_group.py). A bare function has
+            # no .params, so mirror that wrap or its hidden options (doctor
+            # --context-*) are silently missed.
+            sub = typer.Typer(add_completion=False)
+            sub.command(name=name)(obj)
+            leaves.append(_format_leaf(name, typer.main.get_command(sub)))
     return sorted(set(leaves))
 
 
