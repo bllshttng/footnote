@@ -288,3 +288,22 @@ def test_post_merge_model_empty_coerces_default(
         'schema_version: 1\nconfig:\n  post_merge:\n    model: ""\n',
     )
     assert settings.post_merge.model == "claude-opus-5"
+
+
+def test_maintainer_marker_default_empty_and_validated() -> None:
+    """maintainer_marker defaults to None (the OSS-safe 'omit the tag' state) and
+    validates to a single whitespace-free token. The default is the load-bearing
+    part: a fresh install must ship no one's initials."""
+    from fno.config import PostMergeBlock
+
+    assert PostMergeBlock().maintainer_marker is None
+    assert PostMergeBlock(maintainer_marker="#maintainer").maintainer_marker == "#maintainer"
+    # whitespace-only / empty / non-str coerce to None (safe direction = no marker)
+    assert PostMergeBlock(maintainer_marker="   ").maintainer_marker is None
+    assert PostMergeBlock(maintainer_marker="").maintainer_marker is None
+    assert PostMergeBlock(maintainer_marker=123).maintainer_marker is None
+    # leading/trailing whitespace is stripped, not rejected
+    assert PostMergeBlock(maintainer_marker="  #maintainer  ").maintainer_marker == "#maintainer"
+    # an internal space is a real config error: a tag is one token
+    with pytest.raises(Exception):
+        PostMergeBlock(maintainer_marker="#two words")
