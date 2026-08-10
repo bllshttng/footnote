@@ -306,8 +306,6 @@ pr-watch status
 pr-watch tick
 pr-watch uninstall
 reality-check gh !--pr
-reality-check notion
-reality-check sheets
 research
 restart
 resume receipt show

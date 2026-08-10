@@ -50,29 +50,3 @@ def gh(
     typer.echo(json.dumps(result))
     if not result["ok"]:
         raise typer.Exit(code=1)
-
-
-@cli.command()
-def notion(
-    ctx: typer.Context,
-    target: Optional[str] = typer.Option(None, "--target", help="target identifier"),
-) -> None:
-    """Check Notion reality (stub - not yet implemented)."""
-    from fno.reality_check.notion import check_notion
-
-    result = check_notion(target=target)
-    typer.echo(json.dumps(result))
-    # Exit 0 intentionally - structured "not yet" is not a failure
-
-
-@cli.command()
-def sheets(
-    ctx: typer.Context,
-    target: Optional[str] = typer.Option(None, "--target", help="target identifier"),
-) -> None:
-    """Check Google Sheets reality (stub - not yet implemented)."""
-    from fno.reality_check.sheets import check_sheets
-
-    result = check_sheets(target=target)
-    typer.echo(json.dumps(result))
-    # Exit 0 intentionally - structured "not yet" is not a failure
