@@ -50,6 +50,7 @@ from fno.agents.registry import (
     AgentStatus,
     RegistryVersionError,
     TERMINAL_STATUSES,
+    crown_validation_error,
     load_registry,
     resolve_registered_agent_across_sources,
     update_registry,
@@ -2210,6 +2211,9 @@ def dispatch_spawn(
     # while reporting a successful spawn - a silently uncrowned king is the
     # failure this refusal exists to make impossible. Fail closed before anything
     # is created, so a refusal launches nothing and leaves the node dispatchable.
+    crown_problem = crown_validation_error(crown_level, crown_scope)
+    if crown_problem is not None:
+        raise DispatchAskError(crown_problem, exit_code=2)
     if crown_level is not None:
         if once or headless:
             raise DispatchAskError(

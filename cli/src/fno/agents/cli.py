@@ -358,7 +358,8 @@ def cmd_watch(
 # (1, epic) -> IC (2, node). A level outside 0..2 is not a real crown, so it is
 # refused - this both enforces the ladder and keeps crown_level far inside the
 # Rust registry row's u32 (a fat-fingered arbitrary-precision Python int can't
-# overflow it and poison the shared store).
+# overflow it and poison the shared store). Same literal-not-import reasoning as
+# _TERMINAL_STATUSES below; pinned to registry.MAX_CROWN_LEVEL by the parity test.
 _MAX_CROWN_LEVEL = 2
 
 # Terminal (non-active) registry statuses: a worker in any OTHER state
@@ -401,17 +402,15 @@ def _parse_crown(spec: str) -> tuple[int, str]:
     except ValueError:
         print(f"--crown level must be an int >= 0; got {parts['level']!r}", file=sys.stderr)
         raise typer.Exit(code=2)
-    if level < 0:
-        print(f"--crown level must be >= 0; got {level}", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if level > _MAX_CROWN_LEVEL:
-        print(
-            f"--crown level must be <= {_MAX_CROWN_LEVEL}; got {level}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if not parts["scope"]:
-        print("--crown scope must be nonblank", file=sys.stderr)
+    # Range + nonblank-scope live in registry.crown_validation_error, the one
+    # rule every crown writer runs (the spawn dispatchers take (level, scope)
+    # directly and never reach this parser). Imported in-function: cli.py keeps
+    # registry off its module scope, and by here we are already doing real work.
+    from fno.agents.registry import crown_validation_error
+
+    problem = crown_validation_error(level, parts["scope"])
+    if problem is not None:
+        print(f"--crown {problem}", file=sys.stderr)
         raise typer.Exit(code=2)
     return level, parts["scope"]
 

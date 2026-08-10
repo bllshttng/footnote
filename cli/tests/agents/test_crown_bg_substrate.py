@@ -240,15 +240,94 @@ def test_dispatch_spawn_refuses_a_one_shot_crown(tmp_path: Path, monkeypatch) ->
     assert "outlives the grant" in str(exc.value)
 
 
-# --- the two terminal-status copies must not drift ---------------------------
+# --- crown values are validated on every writer, not just the CLI ------------
+#
+# The CLI parses `--crown` through _parse_crown, but both spawn dispatchers take
+# (level, scope) directly from in-process callers. A value that skips validation
+# is written to the SHARED registry: Rust's crown_level is Option<u32>
+# (crates/fno-agents/src/state.rs), so a negative or boolean level breaks
+# registry reads for every reader, not just the caller that wrote it.
 
 
-def test_crown_terminal_set_parity() -> None:
-    """cli.py keeps a literal copy rather than importing registry at module scope
-    (~30ms on every `fno agents` invocation for one frozenset). That is only safe
-    while the copies agree: a set that forgets a status reads a dead king as
-    reigning, or a live one as dead, and mints a second crown over one scope."""
-    from fno.agents.cli import _TERMINAL_STATUSES
-    from fno.agents.registry import TERMINAL_STATUSES
+@pytest.mark.parametrize(
+    "level,scope",
+    [
+        (-1, "epic-x"),        # negative: cannot deserialize into u32
+        (3, "epic-x"),         # over the 0..2 ladder ceiling
+        (10**20, "epic-x"),    # arbitrary-precision int, overflows u32
+        (True, "epic-x"),      # bool is an int subclass; serializes as JSON true
+        ("1", "epic-x"),       # str that looks like a level
+        (1, ""),               # blank scope
+        (1, "   "),            # whitespace-only scope
+        (1, None),             # level with no scope: rules nothing, unguardable
+        (None, "epic-x"),      # scope with no level
+    ],
+)
+def test_dispatch_spawn_refuses_invalid_crown_values(
+    tmp_path: Path, monkeypatch, level, scope
+) -> None:
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError, dispatch_spawn
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn(
+            name="bad-king",
+            message="reign",
+            provider="claude",
+            cwd=tmp_path,
+            crown_level=level,
+            crown_scope=scope,
+        )
+    assert exc.value.exit_code == 2
+    assert not load_registry(), "a refused crown must write no registry row"
+
+
+def test_dispatch_spawn_pane_refuses_invalid_crown_values(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The pane path takes the same pair from the same in-process callers, so it
+    needs the same guard - the CLI seam is not the only door to either."""
+    use_tmpdir(monkeypatch, tmp_path)
+    from fno.agents.dispatch import DispatchAskError
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    def _explode(*a, **k):
+        raise AssertionError("a refused crown must not reach the pane runner")
+
+    with pytest.raises(DispatchAskError) as exc:
+        dispatch_spawn_pane(
+            name="bad-king",
+            message="reign",
+            provider="claude",
+            cwd=tmp_path,
+            runner=_explode,
+            crown_level=-1,
+            crown_scope="epic-x",
+        )
+    assert exc.value.exit_code == 2
+
+
+def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:
+    """The validator must not reject the two shapes that are legal: a real crown
+    at each ladder rung, and both-None (an ordinary uncrowned spawn)."""
+    from fno.agents.registry import crown_validation_error
+
+    assert crown_validation_error(None, None) is None
+    for lvl in (0, 1, 2):
+        assert crown_validation_error(lvl, "epic-x") is None
+
+
+# --- the literal copies in cli.py must not drift from registry ---------------
+
+
+def test_crown_constant_parity() -> None:
+    """cli.py keeps literal copies rather than importing registry at module scope
+    (~30ms on every `fno agents` invocation). That is only safe while the copies
+    agree: a status set that forgets a variant reads a dead king as reigning and
+    mints a second crown over one scope, and a drifted ceiling lets the CLI admit
+    a level the shared validator rejects."""
+    from fno.agents.cli import _MAX_CROWN_LEVEL, _TERMINAL_STATUSES
+    from fno.agents.registry import MAX_CROWN_LEVEL, TERMINAL_STATUSES
 
     assert _TERMINAL_STATUSES == TERMINAL_STATUSES
+    assert _MAX_CROWN_LEVEL == MAX_CROWN_LEVEL
