@@ -64,6 +64,38 @@ session's `graduate` call sees `len(urls) >= expected_url_count` and flips
 to `done`. Between the first and last sub-repo ships, the plan is genuinely
 `in_review` - real code is in review, just not everywhere yet.
 
+## The promise gate (node closure)
+
+A plan reaching `done` and a node closing are gated separately. The merge gate
+asks "is a PR merged" (a fact about an artifact); the promise gate asks "did
+the plan's declared work all ship". One verdict function,
+`resolve_promise_evidence`, is consulted by all three close verbs
+(`fno backlog done`, `fno backlog reconcile`, `fno done`) so a node can never
+close through a second, ungated path.
+
+Three conditions, first refusal wins:
+
+- **Unasserted multi-wave promise.** The plan declares >= 2 `## Wave N`
+  headings and carries neither `close_probes` nor `expected_url_count >= 2`.
+  This is the condition that catches a plan that promised two waves and shipped
+  one.
+- **Outcome probes.** Any `close_probes` entry exits non-zero. Probes run via
+  `fno-agents probe-run` (the same runner `loop-check` uses for `done_probes`).
+- **Ship count.** `expected_url_count: N` (N >= 2) and fewer than N of the
+  node's PR refs are MERGED.
+
+A refusal exits **6** from `backlog done` / `done`. `reconcile` (an unattended
+sweep) holds the node open in a `promise_unmet` bucket and names it in the
+summary rather than exiting. `--force --reason` bypasses the gate on
+`backlog done` so a deliberate half-ship is a recorded line, not silence. The
+Rust loop closer needs no change: its catch-all maps any non-zero, non-5 exit
+to `Parked` with the refusal text intact.
+
+The gate fails open on an absent/unreadable/unparseable plan (a stale
+`plan_path` never wedges a close) and it cannot see work a plan never declared,
+so a plan that under-declared still closes clean. Those limits are stated in
+the refusal text itself.
+
 ## Invocation Points
 
 Three call sites write stamps. Each has a different role:

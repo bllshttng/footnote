@@ -156,7 +156,7 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Plan completion stamp
 
-At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) - inline-list syntax only. `in_review` = first PR created; `done` = all expected ships.
+At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) - inline-list syntax only. `in_review` = first PR created; `done` = all expected ships. A separate **promise gate** guards node closure: all three close verbs (`backlog done`, `done`, `reconcile`) refuse (exit 6) when a plan promised more than shipped (>= 2 `## Wave N` headings asserting nothing, a failed `close_probes`, or fewer merged ships than `expected_url_count`). `--force --reason` records a deliberate half-ship; the limits land in the refusal text. [plan-completion-stamp](docs/architecture/plan-completion-stamp.md).
 
 ### Multi-repo features
 
