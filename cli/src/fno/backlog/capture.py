@@ -297,9 +297,9 @@ def parse_managed_items(
     section: Optional[str] = None
     marker_re = _marker_tag_re(marker)
     for lineno, line in enumerate(text.splitlines(), start=1):
-        marker = _POST_MERGE_MARKER_RE.match(line)
-        if marker:
-            section = marker.group(1)
+        pm_match = _POST_MERGE_MARKER_RE.match(line)
+        if pm_match:
+            section = pm_match.group(1)
             continue
         heading = _SECTION_HEADING_RE.match(line)
         if heading:
