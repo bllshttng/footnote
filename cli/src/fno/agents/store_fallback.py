@@ -322,18 +322,19 @@ def _project_identity(cwd: Optional[str]) -> "tuple[Optional[str], Optional[str]
     return (pid, gdir)
 
 
-def _same_project(scope_cwd: Optional[str], hit_cwd: Optional[str]) -> Optional[bool]:
-    """True if ``hit_cwd`` is in ``scope_cwd``'s project; False if a different one;
-    None if membership is unresolvable (the caller refuses).
+def _membership(
+    s_ident: "tuple[Optional[str], Optional[str]]",
+    h_ident: "tuple[Optional[str], Optional[str]]",
+) -> Optional[bool]:
+    """True if two project identities match; False if a different project; None
+    if membership is unresolvable (cannot be proven either way).
 
     Settings project id compared first; when one or both lack it, the git
     common-dir decides. Two foreign repos differ; a canonical checkout and its
     worktree match (same common-dir). Unresolvable on both axes -> None.
     """
-    if not scope_cwd or not hit_cwd:
-        return None
-    s_pid, s_gdir = _project_identity(scope_cwd)
-    h_pid, h_gdir = _project_identity(hit_cwd)
+    s_pid, s_gdir = s_ident
+    h_pid, h_gdir = h_ident
     if s_pid is not None and h_pid is not None:
         return s_pid == h_pid
     if s_gdir is not None and h_gdir is not None:
@@ -341,6 +342,19 @@ def _same_project(scope_cwd: Optional[str], hit_cwd: Optional[str]) -> Optional[
     # One resolved by settings, the other only by git (or not at all). A settings
     # project id cannot be cross-compared to a git dir, so we cannot prove a match.
     return None
+
+
+def _same_project(scope_cwd: Optional[str], hit_cwd: Optional[str]) -> Optional[bool]:
+    """True if ``hit_cwd`` is in ``scope_cwd``'s project; False if a different one;
+    None if membership is unresolvable (the caller refuses).
+
+    Thin two-cwd wrapper over :func:`_membership`; callers that resolve one side
+    once across many hits ( confinement ) should call ``_membership`` directly
+    with the precomputed scope identity rather than re-spawning git per hit.
+    """
+    if not scope_cwd or not hit_cwd:
+        return None
+    return _membership(_project_identity(scope_cwd), _project_identity(hit_cwd))
 
 
 def _confine_to_project(
@@ -362,21 +376,50 @@ def _confine_to_project(
     if cross_project:
         return hits
     scope = scope_cwd or os.getcwd()
-    s_pid, s_gdir = _project_identity(scope)
-    if s_pid is None and s_gdir is None:
+    # ponytail: compute the scope identity ONCE here, not per hit. The scope is
+    # invariant across the loop, and _project_identity spawns a git subprocess;
+    # re-resolving it per hit (via _same_project) was N redundant fork+exec calls.
+    s_ident = _project_identity(scope)
+    if s_ident == (None, None):
         return hits
-    in_project = [h for h in hits if _same_project(scope, h.cwd) is True]
+    in_project: list[StoreHit] = []
+    cross: list[StoreHit] = []
+    unknown: list[StoreHit] = []
+    for h in hits:
+        verdict = _membership(s_ident, _project_identity(h.cwd))
+        if verdict is True:
+            in_project.append(h)
+        elif verdict is False:
+            cross.append(h)
+        else:
+            unknown.append(h)
     if in_project:
         return in_project
     from fno.agents.registry import AgentResolutionError
 
+    refused = sorted(cross + unknown, key=lambda h: (h.harness, h.session_id))
     cands = ", ".join(
         f"{h.session_id} ({h.harness}, cwd={h.cwd or '?'})"
-        for h in sorted(hits, key=lambda h: (h.harness, h.session_id))
+        for h in refused
     )
+    # Name the real reason: confirmed foreign, unresolvable (e.g. a transcript
+    # that never recorded a cwd, or a since-deleted worktree), or both. Calling
+    # an unresolvable hit "cross-project" sends the operator looking in the wrong
+    # place.
+    if cross and unknown:
+        reason = (
+            "cross-project and project-unresolvable candidate(s) refused"
+        )
+    elif cross:
+        reason = "cross-project candidate(s) refused"
+    else:
+        reason = (
+            "candidate(s) whose project membership could not be determined "
+            "(cwd unset or no longer resolvable)"
+        )
     raise AgentResolutionError(
         f"token {token!r} matches no session in this project; "
-        f"cross-project candidate(s) refused: {cands}. "
+        f"{reason}: {cands}. "
         f"Disambiguate with the full session id in scope, or pass cross-project.",
         ambiguous=True,
     )

@@ -129,6 +129,32 @@ def test_heal_cross_project_flag_adopts_foreign(two_repos, monkeypatch, tmp_path
     assert entry.harness_session_id == sid
 
 
+def test_heal_unresolvable_hit_named_honestly_not_cross_project(
+    two_repos, monkeypatch, tmp_path
+):
+    """A hit whose cwd never resolved (empty) is refused, but the message must
+    NOT call it cross-project: membership was undeterminable, not foreign.
+    Calling an unresolvable hit cross-project sends the operator looking in the
+    wrong place."""
+    from fno.agents.registry import AgentResolutionError
+
+    main, _, _ = two_repos
+    sid = "ab12cdef-0000-0000-0000-000000000002"
+    # Empty cwd: a transcript that never recorded one, or a reaped worktree.
+    _stub_hits(monkeypatch, [StoreHit("claude", sid, "")])
+    with pytest.raises(AgentResolutionError) as exc:
+        heal_from_harness_store(
+            "ab12cdef", scope_cwd=str(main),
+            registry_path=tmp_path / "registry.json",
+        )
+    msg = str(exc.value).lower()
+    assert "could not be determined" in msg
+    # The REASON must not mislabel an undeterminable hit as cross-project. (The
+    # trailing "pass cross-project" hint legitimately contains the substring, so
+    # assert against the reason phrase, not the whole message.)
+    assert "cross-project candidate" not in msg
+
+
 # ---------------------------------------------------------------------------
 # Binary: the exec'd `fno agents heal-token` refuses cross-project (defect 1
 # ruling: prove the guard on the exec'd path, not only in-process)
