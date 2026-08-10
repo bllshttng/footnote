@@ -25,7 +25,6 @@
 agents adopt
 agents ask !--provider
 agents attach
-agents crown
 agents digest
 agents discovered-json !--provider
 agents drive-authority
