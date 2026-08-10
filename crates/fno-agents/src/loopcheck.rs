@@ -288,6 +288,12 @@ struct Settings {
     /// Resolvability is validated Python-side; Rust fails closed by matching
     /// evidence, so an unresolvable name is simply never satisfied.
     reviewers: Vec<String>,
+    /// config.review.self_review_required (default true): floor the
+    /// harness-resolved self-review reviewer onto `reviewers` when a code
+    /// payload would otherwise ship unreviewed on a stock install. None means
+    /// absent, normalized to true (the obligation defaults ON); `false` is the
+    /// documented escape hatch.
+    self_review_required: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -717,6 +723,11 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
         }
+        if let Some(v) = review.get("self_review_required") {
+            // A malformed value stays None -> normalized to true (obligation on,
+            // fail-closed); only an explicit bool reaches the field.
+            s.self_review_required = v.as_bool();
+        }
         if let Some(v) = review.get("nudge") {
             s.nudge_overrides = value_as_nudge_overrides(v);
         }
@@ -1110,13 +1121,6 @@ fn reviewer_entry(name: &str) -> Option<(&'static str, bool, &'static str)> {
         .map(|(_, inv, self_cert, per)| (*inv, *self_cert, *per))
 }
 
-/// Scalar invocation for a reviewer: the unknown-harness default. Use
-/// `reviewer_invocation_for` when the author harness is known, so a codex
-/// session is told `/review` rather than the claude-only `/code-review`.
-fn reviewer_invocation(name: &str) -> Option<(&'static str, bool)> {
-    reviewer_entry(name).map(|(inv, sc, _)| (inv, sc))
-}
-
 /// The harness-correct verb. Falls back to the scalar default when the harness
 /// is unknown or the reviewer declares no override. `harness` is the author
 /// harness from `claims::resolve_harness`, threaded rather than re-read so a
@@ -1155,6 +1159,30 @@ fn is_documentation_path(path: &str) -> bool {
 /// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
 fn payload_is_code(paths: &[String]) -> bool {
     paths.iter().any(|p| !is_documentation_path(p))
+}
+
+/// The self-review reviewer to floor onto the required set, or None. Pure so a
+/// unit test can pin the floor without git: a code payload on a lane-less stock
+/// install gets `code-review`; a configured lane, an opt-out, a docs payload,
+/// and a lane that already names code-review all get None. Returning the name
+/// (not a bool) keeps "should floor" and "what to floor" in one place - the
+/// reviewer name is the gate input, and splitting them invites drift.
+fn floor_self_review(
+    required_reviewers: &[String],
+    lane_configured: bool,
+    is_code: bool,
+    self_review_required: bool,
+) -> Option<String> {
+    if !self_review_required || !is_code || lane_configured {
+        return None;
+    }
+    let already = required_reviewers
+        .iter()
+        .any(|r| r.trim_start_matches('/') == "code-review");
+    if already {
+        return None;
+    }
+    Some("code-review".to_string())
 }
 
 /// `(is_code, assumed)`: classifies the branch's payload, failing CLOSED. An
@@ -4345,14 +4373,29 @@ pub fn decide(args: &[String]) -> (i32, String) {
     }
     let optional_bots = resolved_optional_bots(&settings);
     let nudge_configs = resolved_nudge_configs(&settings);
-    // x-0eaf: DoneUnreviewed applies only when a review lane is configured. A
-    // stock install (no required_bots, no optional_apps, no reviewers, no peers)
-    // has opted out of review, so zero coverage is its configured state, not a
-    // defect - those green PRs still reach DonePRGreen (coverage 0 is reported
-    // in the receipt). Without this boundary every out-of-the-box fire is
-    // DoneUnreviewed (not a ship reason), so the node never closes.
-    let review_lane_configured =
-        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
+    // A code payload carries its own review obligation on a stock install:
+    // when no lane is configured, the harness-resolved self-review reviewer is
+    // floored onto `required_reviewers` so the existing unattested_reviewers_scan
+    // holds the session for a head-pinned attestation instead of the run asking
+    // an epic leader. Opt out with config.review.self_review_required = false.
+    // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
+    // rather than waving the obligation away. The floor is additive: an
+    // already-configured lane (reviewers, bots, peers) keeps meaning exactly
+    // what it meant today, and a lane that already names code-review is a no-op.
+    let payload = classify_payload(&parsed.git_bin, &cwd);
+    let lane_configured = !required_bots.is_empty()
+        || !optional_bots.is_empty()
+        || !required_reviewers.is_empty();
+    let self_review_required = settings.self_review_required.unwrap_or(true);
+    let self_review_floor = floor_self_review(&required_reviewers, lane_configured, payload.0, self_review_required);
+    if let Some(floored) = self_review_floor.clone() {
+        required_reviewers.push(floored);
+    }
+    // x-0eaf: DoneUnreviewed applies only when review is required. A stock
+    // install that opts out (self_review_required=false AND no lane) has zero
+    // coverage as its configured state, not a defect - those green PRs still
+    // reach DonePRGreen (coverage 0 is reported in the receipt).
+    let review_required = lane_configured || self_review_floor.is_some();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -5098,7 +5141,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
-                    if review_lane_configured
+                    if review_required
                         && pr_info.state != PrState::Merged
                         && !pr_info.coverage.coverage.is_covered()
                     {
@@ -6461,6 +6504,12 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             // file refuses to idle is the code contradicting itself, and a
             // session did comply with it roughly ten times.
             let head = short_sha(local_head);
+            // The verb a wedged session is told to run is harness-correct:
+            // codex gets `/review`, claude `/code-review`. Resolved here from the
+            // ambient author markers (the same `resolve_harness` the gate uses)
+            // rather than threaded through every caller, so the 20+ build_block_reason
+            // call sites stay single-arg.
+            let author_harness = crate::claims::resolve_harness();
             let items: Vec<String> = pr
                 .unattested_reviewers
                 .iter()
@@ -6486,7 +6535,7 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     if r.name == LOCAL_PEER_REVIEWER {
                         return format!("peer{} -> run `/fno:review peer --attest`", state);
                     }
-                    match reviewer_invocation(&r.name) {
+                    match reviewer_invocation_for(&r.name, author_harness.as_deref()) {
                         Some((inv, self_cert)) => {
                             let mark = if self_cert {
                                 " [self-cert: asserts no review evidence]"
@@ -8263,12 +8312,12 @@ mod tests {
         // keeps the Rust half self-consistent at unit-test speed.
         for (name, inv, self_cert, _per) in REVIEWER_INVOCATIONS {
             assert!(!inv.is_empty(), "{name} has no invocation");
-            assert_eq!(reviewer_invocation(name), Some((*inv, *self_cert)));
+            assert_eq!(reviewer_invocation_for(name, None), Some((*inv, *self_cert)));
         }
-        assert_eq!(reviewer_invocation("teleport"), None);
+        assert_eq!(reviewer_invocation_for("teleport", None), None);
         // AC5: the ONE self-cert must stay visibly marked on this surface too.
-        assert_eq!(reviewer_invocation("declare").map(|(_, sc)| sc), Some(true));
-        assert_eq!(reviewer_invocation("sigma").map(|(_, sc)| sc), Some(false));
+        assert_eq!(reviewer_invocation_for("declare", None).map(|(_, sc)| sc), Some(true));
+        assert_eq!(reviewer_invocation_for("sigma", None).map(|(_, sc)| sc), Some(false));
     }
 
     #[test]
@@ -8334,6 +8383,64 @@ mod tests {
         let (is_code, assumed) = classify_payload("definitely-not-a-real-git-binary", Path::new("."));
         assert!(is_code);
         assert!(assumed);
+    }
+
+    #[test]
+    fn self_review_gate_floors_code_review_for_a_code_payload() {
+        // AC1 floor: a code payload on a lane-less stock install floors
+        // code-review onto the required set.
+        assert_eq!(
+            floor_self_review(&[], false, true, true),
+            Some("code-review".to_string())
+        );
+    }
+
+    #[test]
+    fn self_review_gate_floor_respects_opt_out_lanes_docs_and_existing() {
+        // AC6-CON: opt-out -> None.
+        assert_eq!(floor_self_review(&[], false, true, false), None);
+        // A configured lane -> None: the lane already expresses review intent.
+        assert_eq!(floor_self_review(&[], true, true, true), None);
+        // A docs payload -> None: nothing to review.
+        assert_eq!(floor_self_review(&[], false, false, true), None);
+        // code-review already named -> None: no double-add.
+        assert_eq!(
+            floor_self_review(&["code-review".to_string()], false, true, true),
+            None
+        );
+        // A leading slash on an existing entry is still recognized as present.
+        assert_eq!(
+            floor_self_review(&["/code-review".to_string()], false, true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn self_review_gate_held_reason_names_code_review_and_its_verb() {
+        // AC1-HP: a code payload that reaches the stop gate with no head-pinned
+        // code-review attestation is held, and the reason names the reviewer
+        // and a verb its harness serves (claude ambient -> /code-review).
+        let mut pr = reviewers_gate_pr();
+        pr.unattested_reviewers[0].name = "code-review".to_string();
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
+        assert!(reason.contains("code-review"), "got: {reason}");
+        assert!(reason.contains("/code-review"), "got: {reason}");
+    }
+
+    #[test]
+    fn self_review_gate_pass_attestation_clears_code_review() {
+        // AC2-HP: once a head-pinned code-review pass lands, the scan no longer
+        // holds it - the floor is satisfiable by the self-serve route, not a wait.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["code-review".to_string()], "h");
+        assert!(out.is_empty(), "code-review should clear on a pass: {out:?}");
     }
 
     #[test]

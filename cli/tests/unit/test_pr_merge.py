@@ -88,7 +88,7 @@ def enabled(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
     )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -645,6 +645,34 @@ def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
     assert _merge._review_lane_configured(str(repo / "sub")) is True
 
 
+def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
+    """A code payload on a lane-less stock install requires review (the
+    self-review floor), so the merge coverage guard engages for the same PR the
+    stop gate holds. Mirrors floor_self_review in loopcheck.rs."""
+    # Stock install: no lane. A code payload + pr_number -> floored to True.
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is True
+    # Opt-out: self_review_required=false restores unreviewed code-PR shipping.
+    _point_lane_read_at(monkeypatch, self_review_required=False)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+    # A docs payload -> no floor.
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: False)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+
+
+def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatch):
+    """The merge-side classifier matches loopcheck's notion of documentation and
+    fails closed on a missing gh (a degraded probe must not bypass the guard)."""
+    assert _merge._is_documentation_path("docs/a.md") is True
+    assert _merge._is_documentation_path("README.md") is True
+    assert _merge._is_documentation_path("src/lib.rs") is False
+    assert _merge._is_documentation_path(".fno/config.toml") is False
+    monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
+    assert _merge._pr_payload_is_code("/nope", 42) is True
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
@@ -1137,7 +1165,7 @@ def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
     )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", "coveredSHA"), toplevel=str(tmp_path)
     )

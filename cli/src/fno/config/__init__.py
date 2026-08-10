@@ -779,6 +779,12 @@ class ReviewBlock(BaseModel):
     # name fails LOUD here (a typo must never silently become no-gate) and is
     # unsatisfiable at loop-check (Rust, fail closed).
     reviewers: list[str] = Field(default_factory=list)
+    # Whether a code payload floors the harness-resolved self-review reviewer
+    # onto `reviewers` on a stock install (no lane configured). Default true:
+    # the obligation to review one's own diff ships ON, and `false` is the
+    # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
+    # into the merge primitive so the two agree.
+    self_review_required: bool = True
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before

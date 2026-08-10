@@ -257,7 +257,40 @@ def _peer_is_identity_free(entry: Any) -> bool:
     return isinstance(entry, dict) and not entry.get("identity")
 
 
-def _review_lane_configured(repo: str) -> bool:
+def _is_documentation_path(path: str) -> bool:
+    """A documentation path: `*.md` anywhere or anything under `docs/`.
+
+    Mirrors is_documentation_path in loopcheck.rs - the two must agree on what
+    'documentation' means or the merge gate and the stop gate classify the same
+    PR differently."""
+    p = (path or "").strip().lstrip("./")
+    if not p:
+        return False
+    return p.endswith(".md") or p.startswith("docs/")
+
+
+def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
+    """Whether the PR's diff carries a code payload.
+
+    CODE iff any changed file is not documentation. Fails CLOSED - a missing gh,
+    a failed view, or an unparseable file list all classify as code, so a
+    degraded probe cannot bypass the coverage guard. An empty file list (no diff
+    surfaced) is not code: nothing to review, no gate."""
+    if not shutil.which("gh"):
+        return True
+    res = _gh(["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], repo)
+    if not res.ok:
+        return True
+    try:
+        names = [str(p) for p in json.loads(res.stdout)]
+    except (ValueError, TypeError):
+        return True
+    if not names:
+        return False
+    return any(not _is_documentation_path(p) for p in names)
+
+
+def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
     """Whether any review lane (required/optional/reviewers/local-peers) is configured.
 
     Fail-closed (True) on config error: a misread config must not bypass the
@@ -290,7 +323,19 @@ def _review_lane_configured(repo: str) -> bool:
             return True
         if r.peer_identity:
             return False
-        return any(_peer_is_identity_free(p) for p in (r.peers or []))
+        if any(_peer_is_identity_free(p) for p in (r.peers or [])):
+            return True
+        # No configured lane: a code payload still requires review (the
+        # self-review floor), unless the install opted out with
+        # config.review.self_review_required = false. Mirrors the loop-check
+        # floor so the merge gate and the stop gate cannot disagree.
+        if (
+            getattr(r, "self_review_required", True)
+            and pr_number
+            and _pr_payload_is_code(repo, pr_number)
+        ):
+            return True
+        return False
     except Exception:
         return True
 
@@ -907,7 +952,7 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # configured (x-0eaf boundary: a stock install opted out of review).
     # Cache the lane check: it loads config from disk, and three reads below
     # would re-parse the same TOML three times.
-    review_lane = _review_lane_configured(repo)
+    review_lane = _review_lane_configured(repo, pr_number)
     cov = _review_coverage_for_pr(pr_number, repo)
     covered = (
         not review_lane

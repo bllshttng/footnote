@@ -174,6 +174,9 @@ FIELD_META: dict[str, Meta] = {
     "review.reviewers": Meta(
         "advanced", "Local-attestation reviewers (sigma | /code-review | declare, or a name from review.reviewer_registry) that produce no GitHub review: loop-check accepts a head-pinned review_attestation event as gate evidence. Lets a solo/claude-only harness express a real gate with no App bot.",
     ),
+    "review.self_review_required": Meta(
+        "advanced", "When true (default), a code payload floors the harness-resolved self-review reviewer (claude /code-review, codex /review) onto the required set on a stock install, so a /target that ships code is held for a head-pinned attestation instead of asking an epic leader. Set false to opt out and restore unreviewed code-PR shipping.",
+    ),
     "review.peers": Meta(
         "advanced", "Harness peers run locally and gate on a head-pinned clean verdict. Scalar or {provider, model} entries need no second GitHub account; adding identity opts into legacy posted-review mode.",
     ),
