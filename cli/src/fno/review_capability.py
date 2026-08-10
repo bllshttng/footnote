@@ -311,6 +311,32 @@ def _resolve_one(
         return ReviewerVerdict(name, descriptor, status, reason)
 
     if descriptor.requires == "none":
+        # A self-serve verb whose `invocations` map scopes it to specific
+        # harnesses (code-review: claude /code-review, codex /review) draws the
+        # same line the subagent-dispatch branch draws below: a known harness
+        # outside the map (agy/opencode/gemini) has no verb, so resolving it
+        # satisfiable would floor the stop gate onto a reviewer whose
+        # attestation nothing there produces, wedging the loop. The invocations
+        # map IS the allowlist; the scalar `invocation` stays the
+        # unknown-harness default, not a fallback that asserts a claude verb
+        # works everywhere.
+        per_harness = descriptor.invocations
+        if per_harness:
+            verb = per_harness.get(session.harness)
+            if verb is not None:
+                return verdict("satisfiable", f"run `{verb}`")
+            if session.harness == "unknown":
+                return verdict(
+                    "unverifiable",
+                    f"needs a {name} verb; no harness marker in this "
+                    f"environment, so capability cannot be verified. Proceeding "
+                    f"- if the gate does go unmet, run `{descriptor.invocation}`",
+                )
+            return verdict(
+                "unavailable",
+                f"no {name} verb for {session.describe()}; scoped to "
+                f"{sorted(per_harness)}",
+            )
         return verdict("satisfiable", f"run `{descriptor.invocation}`")
 
     if descriptor.requires == "operator":

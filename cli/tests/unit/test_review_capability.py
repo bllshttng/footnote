@@ -251,3 +251,22 @@ def test_self_review_invocation_names_the_harness_verb():
     assert rc.self_review_invocation("unknown") == "/code-review medium --comment --fix"
     # Codex stays bare even though claude carries args - no prose suffix leaks.
     assert " " not in rc.self_review_invocation("codex")
+
+
+def test_code_review_is_scoped_to_harnesses_with_a_verb():
+    """code-review resolves per its invocations map, mirroring subagent-dispatch:
+    satisfiable on claude/codex (the only verbs that exist), unavailable on a
+    known harness with no verb (gemini/agy/opencode), unverifiable on unknown.
+    Resolving it satisfiable everywhere would floor the stop gate onto a reviewer
+    whose attestation nothing produces on three harnesses, wedging the loop."""
+    def on(harness: str):
+        s = SessionCapability(harness=harness, substrate="pane", attended=True)
+        return resolve_reviewers(["code-review"], s)[0]
+
+    assert on("claude").status == "satisfiable"
+    assert on("codex").status == "satisfiable"
+    for unsupported in ("gemini", "agy", "opencode"):
+        v = on(unsupported)
+        assert v.status == "unavailable", f"{unsupported}: {v.reason}"
+        assert "scoped to" in v.reason
+    assert on("unknown").status == "unverifiable"
