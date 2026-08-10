@@ -2402,6 +2402,10 @@ def cmd_drain_self(
         if _m.id not in _seen:
             _seen.add(_m.id)
             msgs.append(_m)
+    # Render chronologically: the three forms are scanned in address-order, not
+    # log-order, so without this a legacy (pre-flip) message would render after a
+    # newer canonical one. Cursor advance below is per-form and unaffected.
+    msgs.sort(key=lambda _m: _m.ts)
 
     if json_out:
         print(

@@ -608,10 +608,12 @@ def test_rust_identity_mirror_matches_python_addressing_rule():
     client cannot import Python, and a divergence strands mail silently: a
     durable send addresses one handle while its recipient drains another.
 
-    Pins the two load-bearing facts in the Rust source: canonical_handle takes
-    the FIRST eight chars and the tier order is [full, canonical(first-8),
-    legacy_suffix(last-8)]. A Python-only or Rust-only change to the addressing
-    rule fails here rather than shipping a silent parity break.
+    Pins the load-bearing facts in the Rust source: canonical_handle takes
+    the FIRST eight chars, the ses_ branch preserves case while the UUID branch
+    lowercases (matching Python's session_identity_key), and the tier order is
+    [full, canonical(first-8), legacy_suffix(last-8)]. A Python-only or Rust-only
+    change to the addressing rule fails here rather than shipping a silent
+    parity break.
     """
     import re
     from pathlib import Path
@@ -627,6 +629,15 @@ def test_rust_identity_mirror_matches_python_addressing_rule():
     assert canonical_body, "no canonical_handle fn in identity.rs"
     assert ".chars().take(8)" in canonical_body.group(0), (
         "Rust canonical_handle must take the FIRST eight chars to match Python"
+    )
+    # Case rule: Python's session_identity_key preserves ses_ case and
+    # lowercases the UUID family. Rust must mirror both branches or a mixed-case
+    # ses_ id (ses_AbCd...) addresses one handle in Python and another in Rust.
+    assert 'starts_with("ses_")' in canonical_body.group(0), (
+        "Rust canonical_handle must preserve ses_ case (the ses_ branch) to match Python"
+    )
+    assert "to_ascii_lowercase" in canonical_body.group(0), (
+        "Rust canonical_handle must lowercase the non-ses_ branch to match Python"
     )
 
     suffix_body = re.search(r"fn legacy_suffix_handle.*?\n\}", source, re.S)
