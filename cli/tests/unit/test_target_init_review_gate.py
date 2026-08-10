@@ -17,7 +17,7 @@ import pytest
 import typer
 from typer.testing import CliRunner
 
-from fno.config import load_settings
+from fno.config import ReviewerDescriptor, load_settings
 from fno.review_capability import (
     SessionCapability,
     detect_session,
@@ -32,6 +32,19 @@ CODEX_HEADLESS = SessionCapability(harness="codex", substrate="headless", attend
 # sequential fallback that still attests), so gemini is the one that cannot.
 GEMINI_HEADLESS = SessionCapability(harness="gemini", substrate="headless", attended=False)
 CLAUDE_BG = SessionCapability(harness="claude", substrate="bg", attended=False)
+
+# `code-review` was the only built-in on the operator path; it moved to
+# self-serve (x-6d9c), so the needs-operator branch has no built-in left. This
+# registry-only reviewer keeps that branch under test without re-introducing a
+# built-in whose whole point was that a session cannot run it unattended.
+OPERATOR_REVIEWER = {
+    "operator-only": ReviewerDescriptor(
+        kind="human",
+        requires="operator",
+        invocation="/human-review",
+        asserts="review-evidence",
+    )
+}
 
 
 def _config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reviewers: str) -> None:
@@ -69,7 +82,7 @@ def test_refusal_names_reviewer_capability_harness_substrate_and_remedies():
 def test_needs_operator_keeps_the_run_attended_remedy():
     """The other half of the split: attendedness IS the fix for an operator
     reviewer, so that remedy must survive."""
-    verdicts = resolve_reviewers(["code-review"], CLAUDE_BG)
+    verdicts = resolve_reviewers(["operator-only"], CLAUDE_BG, registry=OPERATOR_REVIEWER)
     msg = refusal_message(verdicts, CLAUDE_BG)
     assert msg is not None
     assert "run attended" in msg
@@ -148,16 +161,27 @@ def test_unreadable_config_degrades_to_a_no_op(
 # --- AC4: correctly-unsatisfiable is not misconfigured -----------------------
 
 
-def test_human_reviewer_unattended_is_needs_operator_not_unavailable():
-    (v,) = resolve_reviewers(["code-review"], CLAUDE_BG)
+def test_operator_reviewer_unattended_is_needs_operator_not_unavailable():
+    (v,) = resolve_reviewers(["operator-only"], CLAUDE_BG, registry=OPERATOR_REVIEWER)
     assert v.status == "needs-operator"
     assert v.descriptor.kind == "human"
     assert "Not a misconfiguration" in v.reason
 
 
-def test_human_reviewer_attended_is_satisfiable():
-    (v,) = resolve_reviewers(["code-review"], CLAUDE_PANE)
+def test_operator_reviewer_attended_is_satisfiable():
+    (v,) = resolve_reviewers(["operator-only"], CLAUDE_PANE, registry=OPERATOR_REVIEWER)
     assert v.status == "satisfiable"
+
+
+def test_code_review_is_self_servable_even_unattended():
+    """AC9-UI: the self-review reviewer is self-servable, so an unattended run
+    is not refused at init for naming it. The operator path it used to live on
+    is covered by the operator-only fixture above."""
+    for session in (CLAUDE_BG, CODEX_HEADLESS, CLAUDE_PANE):
+        (v,) = resolve_reviewers(["code-review"], session)
+        assert v.status == "satisfiable", session
+        assert v.descriptor.requires == "none"
+        assert v.blocks_autonomy is False
 
 
 def test_unknown_reviewer_is_distinct_from_both():
@@ -169,7 +193,7 @@ def test_unknown_reviewer_is_distinct_from_both():
 def test_needs_operator_still_blocks_an_unattended_run():
     """Distinct from unavailable in wording, identical in consequence: an
     unattended run with a human reviewer wedges exactly like #618."""
-    verdicts = resolve_reviewers(["code-review"], CLAUDE_BG)
+    verdicts = resolve_reviewers(["operator-only"], CLAUDE_BG, registry=OPERATOR_REVIEWER)
     assert refusal_message(verdicts, CLAUDE_BG) is not None
 
 
@@ -256,7 +280,7 @@ def test_config_unattended_reaches_the_operator_verdict():
     wedged at the stop gate instead."""
     s = detect_session({"CLAUDE_CODE_SESSION_ID": "s1"}, unattended_configured=True)
     assert s.attended is False
-    (v,) = resolve_reviewers(["code-review"], s)
+    (v,) = resolve_reviewers(["operator-only"], s, registry=OPERATOR_REVIEWER)
     assert v.status == "needs-operator"
     assert v.blocks_autonomy is True
 

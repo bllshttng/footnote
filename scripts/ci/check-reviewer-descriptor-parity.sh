@@ -11,8 +11,10 @@
 #   - Rust  : REVIEWER_INVOCATIONS   in crates/fno-agents/src/loopcheck.rs
 #             (the stop gate's blocked reason)
 #
-# Compared per reviewer: the invocation string, and whether it is a self-cert
-# (Python `asserts == "self-cert"`, Rust's third tuple element).
+# Compared per reviewer: the invocation string, whether it is a self-cert
+# (Python `asserts == "self-cert"`, Rust's third tuple element), and the
+# per-harness verb overrides (Python `invocations` map, Rust's fourth element
+# encoded `"harness=verb;..."`).
 #
 # A name added on one side is a reviewer the other cannot explain. A drifted
 # invocation is worse: the blocked reason then tells a wedged session to run a
@@ -76,8 +78,15 @@ def read(path, label):
         fail(f"{label} source not readable: {path} ({exc})")
 
 
+def _normalize_per_harness(value):
+    """Coerce a per-harness map to a plain {harness: verb} dict, {} if absent."""
+    if not isinstance(value, dict):
+        return {}
+    return {str(k): str(v) for k, v in value.items()}
+
+
 def extract_python(src, path):
-    """{name: (invocation, is_self_cert)} from the _RESOLVABLE_REVIEWERS dict."""
+    """{name: (invocation, is_self_cert, per_harness)} from _RESOLVABLE_REVIEWERS."""
     try:
         tree = ast.parse(src)
     except SyntaxError as exc:
@@ -103,7 +112,7 @@ def extract_python(src, path):
                 fail(f"reviewer {key.value!r} in {path} is not a ReviewerDescriptor(...)")
             fields = {}
             for kw in val.keywords:
-                if kw.arg in ("invocation", "asserts"):
+                if kw.arg in ("invocation", "asserts", "invocations"):
                     try:
                         fields[kw.arg] = ast.literal_eval(kw.value)
                     except ValueError:
@@ -114,15 +123,30 @@ def extract_python(src, path):
                 fail(f"reviewer {key.value!r} in {path} declares no invocation")
             if asserts not in ("review-evidence", "self-cert"):
                 fail(f"reviewer {key.value!r} in {path} declares no valid asserts")
-            out[key.value] = (invocation, asserts == "self-cert")
+            per = _normalize_per_harness(fields.get("invocations"))
+            out[key.value] = (invocation, asserts == "self-cert", per)
         return out
     fail(f"_RESOLVABLE_REVIEWERS not found in {path}")
 
 
+def _parse_per_harness(s):
+    """Parse Rust's `"harness=verb;harness=verb"` encoding to a {harness: verb} dict."""
+    out = {}
+    for pair in s.split(";"):
+        pair = pair.strip()
+        if not pair:
+            continue
+        if "=" not in pair:
+            fail(f"per-harness pair {pair!r} has no '='")
+        h, _, v = pair.partition("=")
+        out[h.strip()] = v.strip()
+    return out
+
+
 def extract_rust(src, path):
-    """{name: (invocation, is_self_cert)} from the REVIEWER_INVOCATIONS slice."""
+    """{name: (invocation, is_self_cert, per_harness)} from REVIEWER_INVOCATIONS."""
     m = re.search(
-        r"const\s+REVIEWER_INVOCATIONS\s*:\s*&\[\(&str,\s*&str,\s*bool\)\]\s*=\s*&\[(.*?)\n\];",
+        r"const\s+REVIEWER_INVOCATIONS\s*:\s*&\[\(&str,\s*&str,\s*bool,\s*&str\)\]\s*=\s*&\[(.*?)\n\];",
         src,
         re.S,
     )
@@ -132,12 +156,12 @@ def extract_rust(src, path):
     # of quoted strings would silently mis-align the moment a field is added,
     # and reporting false parity is the one outcome worse than no check.
     entries = re.findall(
-        r'\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(true|false)\s*,?\s*\)',
+        r'\(\s*"((?:[^"\\]|\\.)*)"\s*,\s*"((?:[^"\\]|\\.)*)"\s*,\s*(true|false)\s*,\s*"((?:[^"\\]|\\.)*)"\s*,?\s*\)',
         m.group(1),
         re.S,
     )
     if not entries:
-        fail(f"REVIEWER_INVOCATIONS in {path} did not extract as (name, invocation, bool)")
+        fail(f"REVIEWER_INVOCATIONS in {path} did not extract as (name, invocation, bool, per)")
     # A PARTIAL extraction is the false-parity path: an entry whose formatting
     # the regex misses is skipped, and if it is Rust-only it produces no problem
     # at all - silently hiding the exact "declared in Rust, missing from Python"
@@ -152,13 +176,14 @@ def extract_rust(src, path):
             f"REVIEWER_INVOCATIONS in {path}: {opened} entries present but only "
             f"{len(entries)} parsed; an unmatched entry would be compared as absent"
         )
-    return {
-        name.encode().decode("unicode_escape"): (
+    out = {}
+    for name, inv, flag, per in entries:
+        out[name.encode().decode("unicode_escape")] = (
             inv.encode().decode("unicode_escape"),
             flag == "true",
+            _parse_per_harness(per.encode().decode("unicode_escape")),
         )
-        for name, inv, flag in entries
-    }
+    return out
 
 
 py = extract_python(read(python_path, "Python"), python_path)
@@ -184,6 +209,12 @@ for name in sorted(set(py) | set(rs)):
             f"  {name}: self-cert flag differs\n"
             f"    Python asserts self-cert: {py[name][1]}\n"
             f"    Rust  self-cert        : {rs[name][1]}"
+        )
+    elif py[name][2] != rs[name][2]:
+        problems.append(
+            f"  {name}: per-harness verbs differ\n"
+            f"    Python: {py[name][2]!r}\n"
+            f"    Rust  : {rs[name][2]!r}"
         )
 
 if problems:
@@ -211,14 +242,15 @@ run_selftest() {
     tmp=$(mktemp -d "${TMPDIR:-/tmp}/reviewer-parity-selftest.XXXXXX")
     trap 'rm -rf "$tmp"' RETURN
 
-    _rust() { # file, sigma-invocation, declare-self-cert-flag
+    _rust() { # file, sigma-invocation, declare-self-cert-flag, sigma-per-harness
         cat > "$1" <<EOF
-const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
-    ("sigma", "$2", false),
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
+    ("sigma", "$2", false, "${4:-}"),
     (
         "declare",
         "/fno:review declare",
         ${3:-true},
+        "",
     ),
 ];
 EOF
@@ -299,6 +331,28 @@ EOF
     _rust "$tmp/nopy.rs" "/fno:review sigma"
     printf '# no table here\n' > "$tmp/nopy.py"
     _case "missing Python table rejected" 1 "$tmp/nopy.rs" "$tmp/nopy.py"
+
+    # Case 6: per-harness verbs declared on one side only -> reject. A
+    # positional literal-pairing extractor would never see the map at all.
+    _rust "$tmp/per.rs" "/fno:review sigma"
+    cat > "$tmp/per.py" <<'EOF'
+_RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
+    "sigma": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="subagent-dispatch",
+        invocation="/fno:review sigma",
+        invocations={"codex": "/review"},
+        asserts="review-evidence",
+    ),
+    "declare": ReviewerDescriptor(
+        kind="local-attestation",
+        requires="none",
+        invocation="/fno:review declare",
+        asserts="self-cert",
+    ),
+}
+EOF
+    _case "drifted per-harness verbs rejected" 1 "$tmp/per.rs" "$tmp/per.py"
 
     if [[ "$fails" -gt 0 ]]; then
         echo "reviewer-descriptor-parity selftest: $fails failure(s)" >&2

@@ -1085,24 +1085,57 @@ struct PrInfo {
 /// Two languages, one table: kept honest by
 /// `scripts/ci/check-reviewer-descriptor-parity.sh`, not by a comment asking a
 /// human to remember.
-const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
-    ("sigma", "/fno:review sigma", false),
-    (
-        "code-review",
-        "/code-review, then bash skills/review/scripts/emit-attestation.sh code-review",
-        false,
-    ),
-    ("declare", "/fno:review declare", true),
+/// The fourth element encodes per-harness verb overrides as
+/// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
+/// rendering. The self-review verb is the one case: `/code-review` on claude,
+/// `/review` bare on codex. The codex value must stay bare - prose after the
+/// verb flips codex to a no-merge-base review target - so a no-whitespace
+/// check on the codex value is a unit test, not a convention. Kept honest
+/// against the Python descriptor's `invocations` map by
+/// check-reviewer-descriptor-parity.sh.
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
+    ("sigma", "/fno:review sigma", false, ""),
+    ("code-review", "/code-review", false, "claude=/code-review;codex=/review"),
+    ("declare", "/fno:review declare", true, ""),
 ];
 
-/// `(invocation, is_self_cert)`. The flag mirrors the Python descriptor's
-/// `asserts` field: a surface that names `declare` without saying it asserts
-/// nothing invites an operator to clear the gate with no review behind it.
-fn reviewer_invocation(name: &str) -> Option<(&'static str, bool)> {
+/// `(invocation, is_self_cert, per_harness)`. The flag mirrors the Python
+/// descriptor's `asserts` field: a surface that names `declare` without saying
+/// it asserts nothing invites an operator to clear the gate with no review
+/// behind it.
+fn reviewer_entry(name: &str) -> Option<(&'static str, bool, &'static str)> {
     REVIEWER_INVOCATIONS
         .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, inv, self_cert)| (*inv, *self_cert))
+        .find(|(n, _, _, _)| *n == name)
+        .map(|(_, inv, self_cert, per)| (*inv, *self_cert, *per))
+}
+
+/// Scalar invocation for a reviewer: the unknown-harness default. Use
+/// `reviewer_invocation_for` when the author harness is known, so a codex
+/// session is told `/review` rather than the claude-only `/code-review`.
+fn reviewer_invocation(name: &str) -> Option<(&'static str, bool)> {
+    reviewer_entry(name).map(|(inv, sc, _)| (inv, sc))
+}
+
+/// The harness-correct verb. Falls back to the scalar default when the harness
+/// is unknown or the reviewer declares no override. `harness` is the author
+/// harness from `claims::resolve_harness`, threaded rather than re-read so a
+/// unit test can pin a harness without touching the environment.
+fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'static str, bool)> {
+    let (inv, sc, per) = reviewer_entry(name)?;
+    if per.is_empty() {
+        return Some((inv, sc));
+    }
+    if let Some(h) = harness {
+        for pair in per.split(';') {
+            if let Some((ph, pv)) = pair.split_once('=') {
+                if ph == h {
+                    return Some((pv, sc));
+                }
+            }
+        }
+    }
+    Some((inv, sc))
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -8181,7 +8214,7 @@ mod tests {
     fn reviewer_invocations_cover_the_descriptor_table() {
         // The parity script enforces this against the Python side in CI; this
         // keeps the Rust half self-consistent at unit-test speed.
-        for (name, inv, self_cert) in REVIEWER_INVOCATIONS {
+        for (name, inv, self_cert, _per) in REVIEWER_INVOCATIONS {
             assert!(!inv.is_empty(), "{name} has no invocation");
             assert_eq!(reviewer_invocation(name), Some((*inv, *self_cert)));
         }
@@ -8189,6 +8222,36 @@ mod tests {
         // AC5: the ONE self-cert must stay visibly marked on this surface too.
         assert_eq!(reviewer_invocation("declare").map(|(_, sc)| sc), Some(true));
         assert_eq!(reviewer_invocation("sigma").map(|(_, sc)| sc), Some(false));
+    }
+
+    #[test]
+    fn reviewer_invocation_resolves_the_author_harness_verb() {
+        // Per-harness: code-review names the harness's own verb. A codex author
+        // is told /review, a claude author /code-review; unknown harness and
+        // override-less reviewers fall back to the scalar default.
+        assert_eq!(
+            reviewer_invocation_for("code-review", Some("codex")),
+            Some(("/review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("code-review", Some("claude")),
+            Some(("/code-review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("code-review", None),
+            Some(("/code-review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("sigma", Some("codex")),
+            Some(("/fno:review sigma", false))
+        );
+        // The codex self-review verb must stay bare: prose after it flips codex
+        // to a no-merge-base review target (a verified constraint, not a style).
+        let (codex_verb, _) = reviewer_invocation_for("code-review", Some("codex")).unwrap();
+        assert!(
+            !codex_verb.chars().any(|c| c.is_whitespace()),
+            "codex self-review verb must be bare, got {codex_verb:?}"
+        );
     }
 
     #[test]
