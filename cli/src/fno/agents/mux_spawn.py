@@ -274,12 +274,17 @@ def happy_pane_argv(
     Be exact here, because the next reader will treat this as the security
     contract: the wrapper is handed to ``mux pane run`` as ``-- env
     ANTHROPIC_AUTH_TOKEN=... happy ...``, so the credential is still on that
-    client process's command line for the spawn RPC plus the readiness gate,
-    and on the pane's own ``env`` command line until it execs. Seconds and
-    microseconds respectively, against a whole worker session before this
-    change. Closing the client-side window needs the assignments to travel over
-    the mux IPC instead of the command line, which is a Rust protocol change
-    and is tracked separately.
+    client process's command line for the ``pane run`` RPC alone, and on the
+    pane's own ``env`` command line until it execs. The readiness gate is NOT
+    part of that window: ``_run_mux`` has returned (and the credential-bearing
+    process exited) before :func:`_await_interactive_readiness` runs, and that
+    gate probes through separate ``pane wait`` / ``pane read`` subprocesses
+    carrying no route at all -- a non-exact spawn does not run it. Both windows
+    are bounded by one subprocess each, against a whole worker session before
+    this change; neither duration is independently measured, so do not restate
+    them as a number. Closing the client-side window needs the assignments to
+    travel over the mux IPC instead of the command line, which is a Rust
+    protocol change and is tracked separately.
 
     These refusals are on the ONLY reachable happy path, so the usual "a guard
     on one of N paths is decorative" audit does not apply here and does not need
