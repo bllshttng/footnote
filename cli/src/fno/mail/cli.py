@@ -19,6 +19,20 @@ Commands:
     lint           - check thread render files for malformed shape
     rebuild-render - regenerate a recipient's render from the bus log
 
+Call shape (one rule, because the verbs used to disagree):
+    The message BODY is uniform across ``send`` and ``reply``. Both take it
+    positionally, or via ``--body``, or via ``--body-file`` -- exactly one of the
+    three, with two-at-once an explicit refusal rather than a precedence rule.
+
+    ``reply`` was flag-only until 2026-08-10, so the positional form that the
+    skills taught (and that ``send`` accepts) exited 2 while click echoed the
+    body back. An echoed body resembles a delivery receipt closely enough that
+    two agents independently concluded the verb was broken, and one of them
+    reported mail as sent that had never left. Keep the two verbs symmetric: a
+    surface whose call shape depends on which verb you happen to be calling is
+    the defect, and correcting the docs alone leaves it live for the next doc
+    written from memory.
+
 Exit codes:
     0  success
     1  user error (invalid input, deprecated kind, typo in recipient)
@@ -142,15 +156,36 @@ def _resolve_from(from_project: Optional[str]) -> str:
         raise typer.Exit(code=1)
 
 
-def _read_body(body: Optional[str], body_file: Optional[Path]) -> str:
-    if body is not None and body_file is not None:
-        typer.echo("error: provide --body or --body-file, not both", err=True)
+def _read_body(
+    body: Optional[str],
+    body_file: Optional[Path],
+    positional: Optional[str] = None,
+) -> str:
+    """The reply body, from whichever of the three forms was used.
+
+    ``positional`` exists so ``reply`` accepts a bare body like ``send`` does.
+    Without it the two verbs disagreed about their own call shape, and the
+    failure was quiet in the worst way: click rejected the stray argument with
+    exit 2 and echoed the body back, which reads like a delivery receipt rather
+    than a refusal.
+    """
+    supplied = [x for x in (positional, body, body_file) if x is not None]
+    if len(supplied) > 1:
+        typer.echo(
+            "error: provide the body once - as a positional argument, --body, or --body-file",
+            err=True,
+        )
         raise typer.Exit(code=1)
     if body_file is not None:
         return body_file.read_text(encoding="utf-8")
     if body is not None:
         return body
-    typer.echo("error: provide --body or --body-file", err=True)
+    if positional is not None:
+        return positional
+    typer.echo(
+        "error: provide a body - as a positional argument, --body, or --body-file",
+        err=True,
+    )
     raise typer.Exit(code=1)
 
 
@@ -496,6 +531,9 @@ def _reply_to_name_handle(
 
 @mail_app.command("reply")
 def cmd_reply(
+    body_arg: Optional[str] = typer.Argument(
+        None, help="Reply body (alternative to --body, matching `send`)."
+    ),
     to_msg: str = typer.Option(..., "--to", help="msg-id to reply to"),
     kind: str = typer.Option("fyi", "--kind", help="Reply kind (default: fyi)"),
     body: Optional[str] = typer.Option(None, "--body", help="Reply body"),
@@ -508,14 +546,26 @@ def cmd_reply(
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
-    Looks ``to_msg`` up on the durable bus. A directed message (``to_kind`` is
-    ``name`` or ``session``) is answered by sending back to its original sender
-    -- no re-typed handle -- with the correlation threaded via ``in_reply_to``
-    (and the wire ``reply_to`` attr). Any other target falls through to the
-    thread-store reply. A ``to_msg`` absent from the bus is a hard error.
+    The id is resolved against the durable bus FIRST. A directed message (to_kind
+    is name or session) goes back to its original sender without you re-typing
+    the handle, correlated via in_reply_to. Any other target falls through to the
+    thread-store reply.
+
+    If the id is not on the bus, this session's own TRANSCRIPT is searched next.
+    That path is the common one, not a fallback for odd cases: a live-confirmed
+    delivery writes no durable thread, so an id that arrived live is absent from
+    the bus by design, and resolve_live_sender recovers the sender from the
+    injected <fno_mail id=...> envelope instead.
+
+    Only an id absent from BOTH is a hard error. This text used to describe the
+    bus step alone, and two agents read that as proof the verb could not answer
+    live mail at all.
+
+    The body is positional, or --body, or --body-file. Exactly one of the three;
+    giving two is refused rather than resolved by precedence.
     """
     kind = _validate_kind(kind)
-    body_text = _read_body(body, body_file)
+    body_text = _read_body(body, body_file, body_arg)
     _enforce_body_cap(body_text)
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
@@ -2313,7 +2363,16 @@ def cmd_bus_ack(
         "fno", "--name", "-n", help="Whose read cursor to advance."
     ),
 ) -> None:
-    """Advance <name>'s read cursor to <msg_id> (marks everything up to it seen)."""
+    """Advance a read cursor to ``msg_id`` (marks everything up to it seen).
+
+    The id is the positional; the cursor's owner is ``--name``/``-n``, NOT a
+    second positional::
+
+        fno mail ack msg-a1b2c3 --name <handle>
+
+    Spelled out because the old one-liner read as if ``<name>`` came first and
+    cost a reader two failed invocations before they resorted to ``--help``.
+    """
     from fno.bus.cursor import advance_cursor
     from fno.bus.log import iter_messages
 

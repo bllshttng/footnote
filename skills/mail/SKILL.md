@@ -187,11 +187,14 @@ Strip the leading `reply`; the rest is `<msg-id> <body>`.
 1. **NORMALIZE.** `bash "${SKILL_DIR}/scripts/normalize.sh" --verb reply --input "<msg-id + body>"`.
    It refuses an empty msg-id or empty body. On `status=error`, STOP and report the
    `error=` line. Capture `msg_id` and `body`.
-2. **RUN.** `fno mail reply` takes the id and body as **flags** (not positionals):
+2. **RUN.** The id is always a flag; the body may be a flag or a bare argument, exactly as on `send`.
 
    ```bash
    fno mail reply --to "<msg_id>" --body "<body>"
+   fno mail reply --to "<msg_id>" "<body>"        # same thing
    ```
+
+   Pass the body once. Giving both forms is a refusal, not a precedence rule.
 
 3. **REPORT.** Relay the real outcome (`fno mail reply` correlates the thread via
    `in_reply_to`). On a nonzero exit, report FAILED with the captured stderr -
