@@ -3047,3 +3047,48 @@ def test_disambiguate_leaves_already_unique_aliases_untouched():
         "bbbbbbbb-1111-2222-3333-555555555555": "etl-e5f6a7b8",
     }
     assert _disambiguate(aliases, live) == aliases
+
+
+def test_already_accreted_alias_is_healed_not_preserved(tmp_path, monkeypatch):
+    """Stopping the growth is not enough: a name already grown must shrink.
+
+    An accreted alias no longer collides with anything, so the stored map hands
+    it back verbatim on every later render and the 224-char name the operator
+    reported would live forever. An over-long stored alias is therefore dropped
+    and regenerated from the default.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    ct = _write_session(sdir, 931, session_id="uuid-grown", job_id="grown001",
+                        cwd="/Users/x/code/proj")
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    accreted = "proj-grown001" + "-grown001" * 13
+    name_map.write_text(json.dumps({"uuid-grown": accreted}), encoding="utf-8")
+
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir, name_map_path=name_map,
+        psutil_mod=_FakePsutil({931: ct}), project_resolver=lambda c: "proj",
+    )
+
+    assert [s.handle for s in sessions] == ["proj-grown001"]
+    assert json.loads(name_map.read_text(encoding="utf-8")) == {
+        "uuid-grown": "proj-grown001"
+    }
+
+
+def test_hand_edited_short_alias_survives_the_heal(tmp_path, monkeypatch):
+    """The heal is keyed on accretion-scale length, so a real alias is kept."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    ct = _write_session(sdir, 932, session_id="uuid-named", job_id="named001",
+                        cwd="/Users/x/code/proj")
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    name_map.write_text(json.dumps({"uuid-named": "billing-worker"}), encoding="utf-8")
+
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir, name_map_path=name_map,
+        psutil_mod=_FakePsutil({932: ct}), project_resolver=lambda c: "proj",
+    )
+    assert [s.handle for s in sessions] == ["billing-worker"]

@@ -54,6 +54,14 @@ _CLAUDE_UUID_RE = re.compile(
 NAME_MAP_FILENAME = "session-names.json"
 _ALIAS_LOCK_TIMEOUT_SECONDS = 1.0
 _ALIAS_LOCK_POLL_SECONDS = 0.02
+# A stored alias longer than this is not a hand edit, it is accretion damage:
+# the pre-fix `_disambiguate` appended the same non-unique suffix on every
+# render (observed at 224 chars, 13 repetitions of one token). Stopping the
+# growth does not shorten a name already grown, because the long name no longer
+# collides and is reused verbatim from the stored map forever. So an over-long
+# stored alias is discarded and regenerated from the default; nobody types an
+# 80-character mailbox address by hand.
+_MAX_STORED_ALIAS_LEN = 80
 
 
 # Test/operator seam: point discovery at a different registry dir. The agents
@@ -1246,8 +1254,12 @@ def resolve_project_for_cwd(cwd: str) -> Optional[str]:
 def _default_alias(project: Optional[str], short_id: str) -> str:
     """Default legible alias: ``<project-basename>-<short-id>``.
 
-    ``short_id`` is the unique hex handle, so the default alias is unique by
-    construction; the disambiguation pass only fires on hand-edited collisions.
+    ``short_id`` is USUALLY the unique hex handle, and then the default alias is
+    unique too - but it can also be a registry-supplied jobId/name, which is only
+    as unique as its writer made it. Two sessions carrying the same one produce
+    the same default alias here, so the disambiguation pass is not reserved for
+    hand-edited collisions; see :func:`_disambiguate`, whose old form trusted the
+    claim in this docstring and grew aliases without bound because of it.
     """
     base = os.path.basename(project) if project else "session"
     alias = f"{base}-{short_id}"
@@ -1326,6 +1338,7 @@ def _resolve_aliases(
                         sid in pruned
                         and isinstance(pruned[sid], str)
                         and pruned[sid]
+                        and len(pruned[sid]) <= _MAX_STORED_ALIAS_LEN
                         and not LEGACY_HANDLE_RE.fullmatch(pruned[sid])
                     ):
                         aliases[sid] = pruned[sid]
