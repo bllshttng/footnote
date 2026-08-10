@@ -735,6 +735,7 @@ validate_wave_section_headers() {
     header_dupes=$(printf '%s\n' "$header_waves_raw" \
         | awk 'NF{printf "%d\n", $0+0}' | sort -n | uniq -d || true)
 
+
     # Duplicate detection runs BEFORE the `-z "$yaml_waves"` early
     # return: a plan with two `## Wave 1:` headers but no Execution
     # Strategy YAML still has ambiguous wikilink-fragment routing that

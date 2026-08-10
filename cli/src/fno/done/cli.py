@@ -50,6 +50,7 @@ from fno.graph._reconcile import (
     pr_url_for_repo,
     repo_slug_from_url,
     resolve_merge_evidence,
+    resolve_promise_evidence,
 )
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
@@ -531,6 +532,14 @@ def done_command(
     # reads them - keying on the argument alone would reopen the original
     # bypass whenever gh auto-detect fails, and let --note close an open PR.
     # A node with no ref anywhere has nothing to gate (--link/--note).
+    #
+    # ASYMMETRY with the promise gate below (~:586), intentional - do not align:
+    # this gate REPLACES the refs with [(pr, node.pr_url)] and asks "is THIS pr
+    # merged" (one ship, scoped to the node's repo). The promise gate UNIONS the
+    # explicit --pr onto the stored refs and uses the pr's OWN url, because it
+    # asks "how many ships landed" and a multi-repo split may put the new PR in
+    # a different repo than the node's prior ship. Replace-vs-union and
+    # node-url-vs-pr-url differ because the two questions differ.
     gate_refs = [(pr, node.get("pr_url"))] if pr is not None else node_pr_refs(node)
 
     # An already-done node is a metadata update, not a close. The close was
@@ -567,6 +576,38 @@ def done_command(
             )
             raise typer.Exit(code=evidence.exit_code)
         merge_status_to_write = "merged"
+
+    # -- promise gate (x-5d34) --
+    # Only on the close path (node not already done): a metadata update on a
+    # done node was gated when it first closed, and re-gating here would let a
+    # gh outage block a --note on a node that closed months ago. fno done has no
+    # --force escape; a deliberate half-ship closes via
+    # `fno backlog done <id> --force --reason`.
+    if not (node.get("status") == "done" or node.get("completed_at")):
+        # An explicit --pr is a ship the merge gate just confirmed but the node
+        # has not stored yet; condition C must count it, else a final multi-PR
+        # close reports its own new PR as missing (P2).
+        #
+        # ASYMMETRY with the merge gate above (~:535), intentional: that gate
+        # REPLACES the refs with the explicit pr scoped to node.pr_url (one ship,
+        # node-scoped); this gate UNIONS the explicit pr onto the stored refs
+        # (all ships) and uses the pr's OWN url, since a multi-repo split may put
+        # the new PR in a different repo than the node's prior ship. The two
+        # resolve the ref url differently because they ask different questions.
+        # The url that belongs to THIS pr number, when the operator named one:
+        # the ref's url is only a repo hint, and the node's stored pr_url points
+        # at the PREVIOUS ship, which in the multi-repo split that
+        # expected_url_count exists for is a different repo entirely.
+        _extra_url = pr_url or auto_url or node.get("pr_url")
+        _extra_refs = [(pr, _extra_url)] if pr is not None else None
+        promise = resolve_promise_evidence(
+            node, cwd=node.get("cwd"), query=_gh_query, extra_refs=_extra_refs
+        )
+        if promise.outcome == "promise_unmet":
+            typer.echo(promise.reason, err=True)
+            raise typer.Exit(code=promise.exit_code)
+        if promise.warning:
+            typer.echo(f"warning: {promise.warning}", err=True)
 
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk
     # I/O stays out of the graph lock.

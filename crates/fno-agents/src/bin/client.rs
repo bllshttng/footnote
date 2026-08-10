@@ -139,6 +139,14 @@ async fn run(args: Vec<String>) -> i32 {
         return fno_agents::loopcheck::run_loop_check(&args[1..]);
     }
 
+    // `probe-run` evaluates one named probe list (done_probes | close_probes)
+    // from a plan doc and exits 0 when every probe passes. The close verbs
+    // shell out to it for close_probes (x-5d34); one runner, shared with
+    // loop-check's done_probes. Direct dispatch; no daemon RPC.
+    if verb == "probe-run" {
+        return fno_agents::loopcheck::run_probe_run(&args[1..]);
+    }
+
     // `loop run` is the unified driver loop (step 5, ab-781b6d17). Direct
     // dispatch like loop-check; no daemon RPC.
     if verb == "loop" {

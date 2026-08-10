@@ -487,6 +487,54 @@ them twice.
 There is no env override: a probe that cannot pass in this environment is
 resolved by editing the plan, which is visible in git.
 
+## close_probes: node-closure outcome assertion (optional declaration)
+
+The node-closure gate fires ONLY on an explicit declaration. A plan that
+declares **neither `close_probes` nor `expected_url_count` closes exactly as it
+does today** - `## Wave N` headings are internal structure, not a promise, so a
+multi-wave single-PR plan (the common `one .md == one PR == one node` case)
+closes clean. The gate does not infer; a promise must be written down.
+
+Two declarations are honored, either or both:
+
+- `expected_url_count: N` - the plan promises N ships; the gate counts merged
+  refs and refuses (exit 6) while fewer than N are merged. This is the natural
+  multi-repo / split-delivery count, and `/blueprint` stamps it going forward so
+  coverage grows as new plans land and nothing retroactively parks.
+- `close_probes` - one or more commands that must exit 0 for the node to close.
+
+`close_probes` is distinct from `done_probes`:
+
+| Key | Read by | Question |
+|-----|---------|----------|
+| `done_probes` | `fno-agents loop-check` | may this SESSION stop? |
+| `close_probes` | the three close verbs (`backlog done`, `done`, `reconcile`) | may this NODE close? |
+
+Session termination and node closure are different questions with different
+right answers: wave 1 ships, its session is finished and should stop, but the
+node promised wave 2 too and must not close.
+Putting wave 2's outcome assertion under `done_probes` would wedge wave 1's
+session; putting it under `close_probes` lets the session end while the node
+stays open until the promise lands.
+
+The close verbs shell out to `fno-agents probe-run --key close_probes`, the
+same runner `loop-check` uses for `done_probes` - one runner, two gates.
+
+```yaml
+close_probes:
+  - "test $(wc -l < scripts/ci/verb-baseline.txt) -lt 364"   # the cull ran
+```
+
+**Assert an observable outcome, not a checkbox.**
+A probe asserts something a reader can check in the world: a count dropped, a
+file gained a section, a leaf verb disappeared.
+Checkboxes are ticked by the party that wants to close, the weakest evidence
+class.
+
+The same shape and fail-closed rules as `done_probes`: block form or
+single-line inline list, at most 3, a 60s native timeout, 127/non-zero/timeout
+all fail closed with the command and code named.
+
 ## Collision check (step 3a; skip with `no-collision-check`)
 
 After writing the plan but before auto-intake, scan pending plans on the
