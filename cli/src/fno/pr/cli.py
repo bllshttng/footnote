@@ -150,6 +150,30 @@ def base_check(
 
 
 @pr_app.command(
+    "base-lineage-check",
+    help=(
+        "Refuse a merge into a base branch that no longer leads to the default "
+        "branch (<pr_number>). Fires when a MERGED PR already carried that base, "
+        "or when the base is already an ancestor of the default branch. Exit 0 "
+        "ok|bypassed, 3 stale (retarget the PR), 4 unknown (a probe failed). "
+        "Bypass with FNO_PR_BASE_LINEAGE_OK=stale-acknowledged (emits gate_escape)."
+    ),
+)
+def base_lineage_check(
+    pr_number: int = typer.Argument(..., help="GitHub PR number"),
+) -> None:
+    from fno.pr import _base_lineage
+    from fno.pr._proc import ToolMissing
+
+    try:
+        rc = _base_lineage.run_base_lineage_check(pr_number)
+    except ToolMissing as exc:
+        typer.echo(f"fno pr base-lineage-check: {exc.tool} not found on PATH", err=True)
+        rc = 127
+    raise typer.Exit(code=rc)
+
+
+@pr_app.command(
     "evidence-check",
     help=(
         "Require a newest exact-HEAD full/passed verification receipt across "

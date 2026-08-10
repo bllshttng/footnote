@@ -1,0 +1,100 @@
+name: stacked-base-guard
+
+# Refuse a PR whose base branch no longer leads to the default branch: GitHub
+# merges it, reports MERGED, and the commits never reach main.
+#
+# Two triggers, because one of them is not enough:
+#
+#   pull_request - re-evaluates on every push to the PR. This alone would have
+#     caught the incident: PR #800's head moved at 18:51:44Z and 19:09:00Z,
+#     both after its base landed on main at 18:05:58Z.
+#   push to the default branch - the sweep. An armed `--auto` merge fires
+#     server-side later, so a base can die with no push to the PR to invalidate
+#     a green check. The sweep re-stamps every open PR whose base is not the
+#     default branch, which is the only way that window closes.
+#
+# Marking this a REQUIRED status check is a repository-settings action nobody
+# can take from code. Until an operator marks the `stacked-base-guard` context
+# required, this workflow reports but does not block: the web merge button and a
+# hand-run `gh pr merge` still ignore it.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  push:
+    branches: [main]
+
+concurrency:
+  group: stacked-base-guard-${{ github.event.pull_request.number || github.sha }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  statuses: write
+  pull-requests: read
+
+jobs:
+  guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # The lineage probe compares the base branch against the default
+          # branch, which a shallow single-branch clone cannot answer.
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - name: Check base lineage
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bash scripts/ci/check-stacked-base.sh "$PR_NUMBER" "$HEAD_SHA"
+
+  sweep:
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v3
+      - name: Re-stamp open PRs stacked on a non-default base
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          default="$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)"
+          # The base is filtered in the shell rather than inside the jq
+          # expression: interpolating $default into a -q string needs nested
+          # quoting, and a branch name with a quote or a shell metacharacter in
+          # it would then decide what the sweep looks at.
+          mapfile -t rows < <(
+            gh pr list --state open --limit 200 \
+              --json number,baseRefName,headRefOid \
+              --jq '.[] | [.number, .baseRefName, .headRefOid] | @tsv'
+          )
+          checked=0
+          flipped=0
+          for row in "${rows[@]}"; do
+            IFS=$'\t' read -r pr base sha <<<"$row"
+            # A PR based on the default branch is what this guard protects the
+            # way TO; only a stacked one can have its base die underneath it.
+            # Spelled as an `if` rather than `[ ... ] && continue`: the runner
+            # invokes this with `bash -e`, and a trailing `&&` whose left side
+            # is false is exactly the shape that reads as safe until it isn't.
+            if [ "$base" = "$default" ]; then
+              continue
+            fi
+            checked=$((checked + 1))
+            if ! bash scripts/ci/check-stacked-base.sh "$pr" "$sha"; then
+              flipped=$((flipped + 1))
+            fi
+          done
+          # The sweep never fails the main build: the signal is the per-PR
+          # status it just wrote, and a red main run would only obscure which PR
+          # is affected. The 200-PR cap is stated rather than silent, so a
+          # truncated sweep cannot read as full coverage.
+          echo "swept ${#rows[@]} open PR(s), checked $checked stacked, $flipped failing (cap: 200)"

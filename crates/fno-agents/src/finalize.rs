@@ -2043,6 +2043,45 @@ fn arm_auto_merge(cwd: &Path) -> bool {
         eprintln!("finalize: no open PR found for branch; auto-merge not armed");
         return false;
     };
+    // Stacked-base guard: a PR merged into a base branch that no longer leads to
+    // the default branch reports MERGED and ships nothing. This arm reaches
+    // `gh pr merge` without passing through `fno pr merge`, so it calls the
+    // shared predicate itself - a guard on one of N reachable merge paths is
+    // decorative.
+    //
+    // The arm is also the one path where the check is a SNAPSHOT: `--auto` fires
+    // server-side later, so the base can die between here and the merge with no
+    // push to invalidate anything. `.github/workflows/stacked-base-guard.yml`
+    // re-stamps on push-to-main to cover that window.
+    //
+    // Exit 3 is a confirmed stale base and refuses the arm. Every other non-zero
+    // (4 unknown, 127 no gh, a spawn error) arms anyway with a breadcrumb:
+    // refusing on an unevaluated probe would turn a gh hiccup into auto-merge
+    // silently never working, which reads exactly like nobody having opted in.
+    let pr_arg = number.to_string();
+    match Command::new("fno")
+        .args(["pr", "base-lineage-check", pr_arg.as_str()])
+        .current_dir(cwd)
+        .output()
+    {
+        Ok(o) if o.status.code() == Some(3) => {
+            eprintln!(
+                "finalize: auto-merge NOT armed for PR {number}: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            );
+            return false;
+        }
+        Ok(o) if !o.status.success() => eprintln!(
+            "finalize: stacked-base probe inconclusive for PR {number} (exit {:?}); \
+             arming anyway: {}",
+            o.status.code(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Ok(_) => {}
+        Err(e) => eprintln!(
+            "finalize: stacked-base probe unavailable for PR {number} ({e}); arming anyway"
+        ),
+    }
     let strategy = crate::agents_config::auto_merge_strategy(cwd);
     let mut args = vec![
         "pr".to_string(),

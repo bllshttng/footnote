@@ -255,6 +255,34 @@ There is no environment override.
 A probe that cannot pass here is fixed by editing the plan, which is visible in git; a wedged one falls to the existing `NoProgress` and `Budget` backstops.
 Authoring guidance (freshness over bare existence) lives in `skills/blueprint/SKILL.md`.
 
+### The stacked-base guard
+
+Coverage answers whether anyone reviewed the PR. It says nothing about whether merging it puts the code anywhere.
+A stacked PR names another feature branch as its base, and when that base lands on main without the stacked PR being retargeted, GitHub merges it into the dead base, reports MERGED, and the commits never reach main.
+Specimen: PR #800 merged into `feature/bg-crown` at 2026-08-10T19:42:32Z, an hour after PR #789 landed that same branch on main; its merge commit `9b665db4` is the tip of `origin/feature/bg-crown` and is not an ancestor of `origin/main`.
+Why the base was never retargeted is unexplained, so the guard asserts nothing about GitHub's retarget behavior and reads observable facts instead.
+
+`cli/src/fno/pr/_base_lineage.py` is the one predicate: for a base that is not the default branch, it refuses if a MERGED PR already carried that base, or if the base tip is already an ancestor of the default branch.
+Both checks are kept because they go blind in opposite directions - under `merge_strategy = "squash"` a landed base is not an ancestor of main, and a base that landed leaving no merged PR is invisible to the first check.
+It tests for a MERGED PR rather than requiring an OPEN one on purpose: stacking onto a base whose PR nobody has opened yet is legitimate work, and a guard that refuses it gets switched off.
+
+Coverage of the seven reachable merge paths, stated honestly rather than implied:
+
+| Merge path | Stacked-base guard |
+|---|---|
+| `fno pr merge` (`_merge.py`), and its worktree API fallback | checked, refuses with `outcome=blocked` |
+| `fno pr verify --kind merged` bounded remediation (`_verify.py`) | checked, refuses the remediation |
+| `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
+| a PR update, via `.github/workflows/stacked-base-guard.yml` | checked; blocks only once marked a required status check |
+| GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
+| the GitHub web / mobile merge button | NOT covered until the context is marked required |
+| a human's bare `gh pr merge` in their own terminal | NOT covered until the context is marked required |
+
+Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
+Until someone does, the workflow reports and does not block.
+The in-process callers fail OPEN on a probe that could not evaluate (a gh outage must not wedge a merge, matching `_merge._behind_by`), while CI fails CLOSED on the same condition, because a check that could not run has verified nothing.
+`FNO_PR_BASE_LINEAGE_OK=stale-acknowledged` bypasses a refusal and records a `gate_escape`.
+
 ---
 
 ## The exec shim (`scripts/run-target-loop.sh`)

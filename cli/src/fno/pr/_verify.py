@@ -377,6 +377,32 @@ def _bounded_remediation(
     pr_number: str, state_file: str, cwd: str, repo_root: str, sleep_fn
 ) -> int:
     """Single gh pr merge --auto attempt + single 30s poll (anti-thrash)."""
+    # Stacked-base guard: this arm reaches `gh pr merge` without passing through
+    # `fno pr merge`, so it needs its own call - a guard on one of N reachable
+    # merge paths is decorative. An unevaluated probe proceeds with a
+    # breadcrumb; only a confirmed stale base refuses, because it needs a
+    # retarget rather than a retry.
+    from fno.pr import _base_lineage
+
+    lineage, why = _base_lineage.lineage_verdict(int(pr_number), cwd)
+    if lineage == "stale" and not _base_lineage.bypassed():
+        _emit_audit(
+            repo_root, state_file, pr_number, "merge_refused_stacked_base", {"reason": why}
+        )
+        sys.stdout.write(f"merge_refused_stacked_base: PR #{pr_number} {why}\n")
+        return 1
+    if lineage == "stale":
+        _base_lineage.emit_bypass_escape(int(pr_number), cwd, why)
+        sys.stderr.write(
+            f"verify-pr-merged: stacked-base guard bypassed "
+            f"({_base_lineage.BYPASS_ENV}); {why}\n"
+        )
+    elif lineage == "unknown":
+        sys.stderr.write(
+            f"verify-pr-merged: stacked-base probe unavailable ({why}); "
+            "remediating without the lineage guard\n"
+        )
+
     auto_merge = _auto_merge()
     strategy = auto_merge.merge_strategy
     cmd = ["gh", "pr", "merge", pr_number, f"--{strategy}", "--auto"]
