@@ -7751,7 +7751,7 @@ def cmd_reconcile(
                 "pr_number": record.pr_number,
                 "pr_url": record.pr_url,
             }
-            verdict = resolve_promise_evidence(gate_node)
+            verdict = resolve_promise_evidence(gate_node, cwd=gate_node.get("cwd"))
             if verdict.outcome == "promise_unmet":
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.

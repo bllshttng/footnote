@@ -576,8 +576,12 @@ def done_command(
     # --force escape; a deliberate half-ship closes via
     # `fno backlog done <id> --force --reason`.
     if not (node.get("status") == "done" or node.get("completed_at")):
+        # An explicit --pr is a ship the merge gate just confirmed but the node
+        # has not stored yet; condition C must count it, else a final multi-PR
+        # close reports its own new PR as missing (P2).
+        _extra_refs = [(pr, node.get("pr_url"))] if pr is not None else None
         promise = resolve_promise_evidence(
-            node, cwd=node.get("cwd"), query=_gh_query
+            node, cwd=node.get("cwd"), query=_gh_query, extra_refs=_extra_refs
         )
         if promise.outcome == "promise_unmet":
             typer.echo(promise.reason, err=True)

@@ -451,6 +451,7 @@ def resolve_promise_evidence(
     cwd: Optional[str] = None,
     query: Optional[Callable[..., PrMergeState]] = None,
     probe_runner: Optional[Callable[[str, Optional[str]], tuple[bool, str]]] = None,
+    extra_refs: Optional[list[tuple[int, Optional[str]]]] = None,
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
@@ -481,8 +482,17 @@ def resolve_promise_evidence(
     # The Python plan readers strip a `#wave-1` fragment; reading the literal
     # name would fail and silently drop the gate.
     plan_path_clean = plan_path.split("#", 1)[0]
+    plan_file = Path(plan_path_clean)
+    if not plan_file.is_absolute():
+        # A repo-relative plan_path belongs to the node's own checkout, not the
+        # caller's CWD: the global reconcile runs from canonical while a node's
+        # plan lives in its owning worktree/vault. Resolve against `cwd` (passed
+        # by every close path) the way the Rust probe parser does - otherwise the
+        # read fails and the gate fails open silently (a decorative no-op).
+        if isinstance(cwd, str) and cwd:
+            plan_file = Path(cwd) / plan_path_clean
     try:
-        text = Path(plan_path_clean).read_text(encoding="utf-8")
+        text = plan_file.read_text(encoding="utf-8")
     except OSError as exc:
         return PromiseVerdict(
             outcome="ok",
@@ -538,6 +548,16 @@ def resolve_promise_evidence(
     # multi-ship plan pays for gh I/O here; a 1-wave / 1-PR plan never reaches it.
     if isinstance(expected, int) and expected >= 2:
         refs = node_pr_refs(node)
+        # `extra_refs` carries an explicit ship the close verb is recording but
+        # has not yet persisted (e.g. `fno done --pr <new-final-pr>`): without it
+        # the second merged PR is counted as missing and exit 6 deadlocks the
+        # command out of ever writing it.
+        if extra_refs:
+            seen = {n for n, _ in refs}
+            for num, url in extra_refs:
+                if isinstance(num, int) and num not in seen:
+                    refs.append((num, url))
+                    seen.add(num)
         merged = _count_merged_refs(refs, ceiling=expected, cwd=cwd, query=query)
         if merged < expected:
             return PromiseVerdict(

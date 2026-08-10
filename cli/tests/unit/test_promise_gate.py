@@ -249,6 +249,43 @@ def test_promise_verdict_exit_code_table():
     assert PromiseVerdict(outcome="promise_unmet").exit_code == 6
 
 
+def test_relative_plan_resolved_against_owning_cwd(tmp_path: Path):
+    """A repo-relative plan_path is read from the node's cwd, not the process
+    CWD - the global reconcile runs from canonical while a node's plan lives in
+    its owning checkout. Without resolution the read fails and the gate fails
+    open silently (P1)."""
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write_plan(repo / "rel.md", waves=2)  # written under the owning checkout
+    v = resolve_promise_evidence({"id": "x-rel", "plan_path": "rel.md"}, cwd=str(repo))
+    assert v.outcome == "promise_unmet"  # found the 2 waves, did not fail open
+
+
+def test_condition_c_counts_extra_refs(tmp_path: Path):
+    """An explicit ship the close verb is recording (extra_refs, e.g. the new
+    --pr on `fno done`) counts toward expected_url_count, so a final multi-PR
+    close is not deadlocked by its own new PR (P2)."""
+    from fno.graph._reconcile import resolve_promise_evidence, PrMergeState
+
+    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=2)
+    node = {
+        "id": "x-c",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+    }
+    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    # Stored ref #1 merged + explicit #2 (extra_refs) merged -> 2 >= 2 -> ok.
+    v = resolve_promise_evidence(
+        node, query=merged, extra_refs=[(2, "https://github.com/o/r/pull/2")]
+    )
+    assert v.outcome == "ok"
+    # Without the extra ref: only 1 merged < 2 -> refuse.
+    assert resolve_promise_evidence(node, query=merged).outcome == "promise_unmet"
+
+
 # ---------------------------------------------------------------------------
 # THE THREE-VERB ASSERTION: condition A refuses on each close path independently
 # ---------------------------------------------------------------------------
