@@ -2031,9 +2031,10 @@ class RecoveryBlock(BaseModel):
         single-tool runtime because a long build can legitimately produce no
         transcript turn while it runs.
     max_nudges:
-        Per-session cap on recovery actions (close-surface notifications)
-        before the sweep gives up and emits ``recovery_capped`` (default 3) so
-        a genuinely wedged session surfaces instead of looping forever.
+        Per-session cap on held-by-design surfaces before the sweep gives up and
+        emits ``recovery_capped`` (default 3) so a genuinely wedged session
+        surfaces instead of looping forever. Close notifications are once-only,
+        tracked separately.
     """
 
     model_config = ConfigDict(extra="ignore")

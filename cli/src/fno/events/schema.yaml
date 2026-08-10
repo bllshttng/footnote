@@ -2694,7 +2694,7 @@ event_types:
           description: "The 8-hex jobId of the bg session that was spared."
         reason:
           type: string
-          description: "Why it was skipped: needs-input | socket-unreachable | send-failed | held-by-design."
+          description: "Why it was skipped: needs-input | socket-unreachable | send-failed | held-by-design | no-notify-channel."
         error:
           type: string
           description: "The send failure detail; present only when reason=send-failed."

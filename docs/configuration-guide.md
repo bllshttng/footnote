@@ -137,9 +137,9 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `pr_watch.retries` | int | `3` | never | PR-watcher consecutive-failure park threshold. |
 | `pr_watch.max_age_days` | int | `14` | never | PR-watcher: park PRs older than N days. |
 | `pr_watch.model` | str | `claude-haiku-4-5` | never | Claude model used for headless PR-watcher skill fires. |
-| `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). |
+| `recovery.enabled` | bool | `true` | advanced | Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed. |
 | `recovery.idle_threshold_seconds` | int | `900` | never | How stale a bg session must be (seconds) before recovery acts on it. |
-| `recovery.max_nudges` | int | `3` | never | Per-session cap on recovery actions (close-surface notifications) before it stops acting on this session. |
+| `recovery.max_nudges` | int | `3` | never | Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately). |
 | `health_monitor.enabled` | bool | `true` | advanced | Enable backlog health monitoring. |
 | `health_monitor.thresholds.idea_pile_depth` | int | `25` | never | Breach threshold: idea pile depth. |
 | `health_monitor.thresholds.stale_ready_days` | int | `30` | never | Breach threshold: stale-ready age (days). |

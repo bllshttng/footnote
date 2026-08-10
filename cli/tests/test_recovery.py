@@ -238,7 +238,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -256,7 +256,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path, node_less=True)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.events == []
@@ -268,7 +268,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -283,7 +283,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.events == []
@@ -297,7 +297,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_capped"]
@@ -314,7 +314,7 @@ class TestSweep:
                 candidates=[_stale_candidate(tmp_path)],
                 counts=counts,
                 emit=h.emit, read_state_fn=h.read_state,
-                truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+                truth_fn=h.truth, liveness_fn=h.liveness,
             )
         assert h.event_types().count("recovery_capped") == 1
 
@@ -327,27 +327,23 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
         assert h.events[0][1]["reason"] == "socket-unreachable"
 
     def test_held_path_does_not_invoke_send_fn(self, tmp_path):
-        # x-d93d: the socket nudge was removed; the held-by-design surface must
-        # NOT call send_fn. A raising send_fn proves it is never invoked: if it
-        # were, the sweep would crash; instead it surfaces held-by-design.
+        # x-d93d: the socket nudge was removed; a stuck node-bound worker is
+        # surfaced held-by-design and no socket send is attempted (the bypass
+        # recipient would hold it). The seam carries no send_fn anymore.
         h = _Harness()
-
-        def boom(sock, content, from_name):
-            raise recovery._SendError("socket gone")
-
         recovery.recovery_sweep(
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=boom,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -413,7 +409,6 @@ class TestRunRecoverySweep:
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
             truth_fn=h.truth, liveness_fn=h.liveness,
-            send_fn=h.send,
             load_counts_fn=lambda: {},
             save_counts_fn=lambda c: saved.update(c),
         )
@@ -439,7 +434,6 @@ class TestRunRecoverySweep:
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
             truth_fn=h.truth, liveness_fn=h.liveness,
-            send_fn=h.send,
             load_counts_fn=lambda: dict(prior),
             save_counts_fn=lambda c: saved.update(c),
         )
@@ -502,7 +496,7 @@ class TestFailoverSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=h.failover,
         )
 
@@ -541,7 +535,7 @@ class TestFailoverSweep:
             ],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=h.failover,
         )
         assert len(h.failover_calls) == 1            # only the first swaps
@@ -613,7 +607,7 @@ class TestFailoverSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             # failover_fn omitted
         )
         assert h.failover_calls == []
@@ -1017,7 +1011,7 @@ class TestMissionAwareTerminalGate:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=failover_fn,
             mission_complete_fn=mission_complete_fn,
         )
@@ -1050,15 +1044,16 @@ class TestMissionAwareTerminalGate:
                 _now(), _Cfg(),
                 candidates=[_stale_candidate(tmp_path)], counts=counts,
                 emit=h.emit, read_state_fn=h.read_state,
-                truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+                truth_fn=h.truth, liveness_fn=h.liveness,
                 mission_complete_fn=lambda c: True,
-                notify_close_fn=notified.append,
+                notify_close_fn=lambda c: notified.append(c) or True,
             )
         assert len(notified) == 1
         assert counts[recovery._close_key("aaaa1111")] is True
 
-    def test_close_notify_miss_is_non_fatal(self, tmp_path):
-        # A notify miss (e.g. notification subsystem down) must never crash.
+    def test_close_notify_undelivered_does_not_claim_surface(self, tmp_path):
+        # A channel that reports not-delivered (no osascript/notify-send, or a
+        # raising seam) must not record a recovery_close_notify it never sent.
         def boom(_c):
             raise RuntimeError("notify down")
 
@@ -1067,11 +1062,12 @@ class TestMissionAwareTerminalGate:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)], counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             mission_complete_fn=lambda c: True,
             notify_close_fn=boom,
         )
-        assert h.event_types() == ["recovery_close_notify"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "no-notify-channel"
 
     def test_sweep_without_seam_is_unchanged(self, tmp_path):
         h, _ = self._sweep(tmp_path, mission_complete_fn=None)
@@ -1084,7 +1080,7 @@ class TestMissionAwareTerminalGate:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)], counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             mission_complete_fn=lambda c: calls.append(c) or False,
         )
         assert calls == []

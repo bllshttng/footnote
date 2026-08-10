@@ -49,11 +49,11 @@ phase metadata only). The socket write is the shipped
 ``providers.claude.send_to_session`` (same transport as ``fno mail`` /
 dispatch); the state read is ``_claude_session_registry``.
 
-ponytail: the held-socket resume is intentionally NOT replaced here by a
-speculative respawn-for-every-stuck-session. ``_redispatch`` / ``_respawn_bg_resume``
-already recover swap-class and node-less deaths via a fresh process; routing the
-plain connection-drop case through them is a separate design call (noted in the
-PR body), not a silent default.
+The held-socket resume is intentionally NOT replaced here by a speculative
+respawn-for-every-stuck-session. ``_redispatch`` / ``_respawn_bg_resume``
+already recover swap-class and node-less deaths via a fresh process; routing
+the plain connection-drop case through them is a separate design call (noted
+in the PR body), not a silent default.
 """
 from __future__ import annotations
 
@@ -245,7 +245,6 @@ def recovery_sweep(
     read_state_fn: Callable,
     truth_fn: Callable[[Candidate], dict],
     liveness_fn: Callable[[str], bool],
-    send_fn: Optional[Callable[[str, str, str], None]] = None,
     failover_fn: Optional[Callable[["Candidate", object], str]] = None,
     mission_complete_fn: Optional[Callable[["Candidate"], Optional[bool]]] = None,
     notify_close_fn: Optional[Callable[["Candidate"], None]] = None,
@@ -265,11 +264,6 @@ def recovery_sweep(
         recipient, so the worker is stuck-but-not-auto-resumable).
     A not-yet-stale / done-and-not-lingering session is silent so healthy ticks
     do not spam the log. All I/O is injected so this is unit-testable offline.
-
-    ``send_fn`` is retained in the signature for the seam's stability but is no
-    longer invoked: the held socket nudge was removed in x-d93d (a
-    bypassPermissions recipient holds every cross-session message by design, so
-    the nudge stacked operator dialogs without recovering anything).
 
     ``failover_fn`` (x-7abe) is the only way the failover branch activates: a
     stale session whose last error is a *swap-class* one (rate-limit / quota /
@@ -303,19 +297,28 @@ def recovery_sweep(
             emit("recovery_skipped", {"short_id": c.short_id, "reason": "needs-input"})
             continue
         if decision == NUDGE_CLOSE:
-            # Finished for real but the process still lingers (x-a76d). Surface
-            # it ONCE to close over an OS notification (not the held socket: the
-            # recipient is bypass). mission_complete==True already implies a
-            # node-bound /target worker, so there is no node-less gate here.
+            # Finished for real but the process still lingers. Surface it ONCE
+            # to close over an OS notification (not the held socket: the
+            # recipient is bypass). mission_complete==True means a resolvable
+            # finished mission (a /target worker, or a think birth pass whose
+            # node is done), so the node-less / human-driven exclusion that
+            # gates the resume path does not apply here.
             ck = _close_key(c.short_id)
             if not counts.get(ck):
-                counts[ck] = True
+                delivered = True
                 if notify_close_fn is not None:
                     try:
-                        notify_close_fn(c)
+                        delivered = bool(notify_close_fn(c))
                     except Exception:  # noqa: BLE001 - a notify miss must never crash the sweep
-                        pass
-                emit("recovery_close_notify", {"short_id": c.short_id})
+                        delivered = False
+                # Record once-only regardless, so a channel-less host does not
+                # retry every tick; but do NOT claim a surface that never reached
+                # the operator (a non-zero channel return is "not delivered").
+                counts[ck] = True
+                if delivered:
+                    emit("recovery_close_notify", {"short_id": c.short_id})
+                else:
+                    emit("recovery_skipped", {"short_id": c.short_id, "reason": "no-notify-channel"})
             continue
         if decision != NUDGE:
             # SKIP_TERMINAL / NOT_STALE: nothing to say.
@@ -1045,20 +1048,27 @@ def _prune_keep(key: str, live: set) -> bool:
     return key in live
 
 
-def _notify_close(candidate: "Candidate") -> None:
+def _notify_close(candidate: "Candidate") -> bool:
     """OS-notify the operator that a finished /target worker is still open, so
-    they run its retro and ``/stop`` it (x-a76d). Best-effort; the caller wraps
-    it in a try too. Uses the working notification channel, not the held socket.
+    they run its retro and ``/stop`` it. Returns True iff a notification was
+    actually delivered.
+
+    Uses the working notification channel, not the held socket. A host with no
+    notification channel (no ``osascript`` / ``notify-send``) makes
+    ``send_notification`` return a non-zero exit code rather than raise, so the
+    caller must treat a False return as "not delivered" and not claim a surface
+    that never reached the operator.
     """
     try:
         from fno.notify._impl import send_notification
 
-        send_notification(
+        code, _msg = send_notification(
             f"footnote: {candidate.short_id} finished but still open",
             CLOSE_MESSAGE,
         )
+        return code == 0
     except Exception:  # noqa: BLE001 - a notify miss must never crash the sweep
-        pass
+        return False
 
 
 def run_recovery_sweep(
@@ -1071,7 +1081,6 @@ def run_recovery_sweep(
     read_state_fn: Optional[Callable] = None,
     truth_fn: Optional[Callable[[Candidate], dict]] = None,
     liveness_fn: Optional[Callable] = None,
-    send_fn: Optional[Callable] = None,
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
@@ -1099,10 +1108,6 @@ def run_recovery_sweep(
         from fno.agents.providers.claude import liveness_probe
 
         liveness_fn = liveness_probe
-    if send_fn is None:
-        from fno.agents.providers.claude import send_to_session
-
-        send_fn = send_to_session
     read_state_fn = read_state_fn or _safe_read_state
     if truth_fn is None:
         from fno.agents.session_truth import resolve_session_truth
@@ -1132,7 +1137,7 @@ def run_recovery_sweep(
         candidates=candidates, counts=counts, emit=emit,
         read_state_fn=read_state_fn,
         truth_fn=truth_fn,
-        liveness_fn=liveness_fn, send_fn=send_fn,
+        liveness_fn=liveness_fn,
         failover_fn=failover_fn,
         mission_complete_fn=mission_complete_fn,
         notify_close_fn=notify_close_fn,
