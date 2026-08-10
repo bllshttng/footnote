@@ -425,11 +425,13 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     skipped to avoid a panel whose attestation any later fix would invalidate.
     The default - no sigma reviewer - is an advisory SELF-REVIEW: the invoking
     agent reads its own changed files and reasons about them on the main thread.
-    It is advisory (never gates the promise on its own), it dispatches no sigma
-    panel, and it invokes no harness built-in review command (Claude
-    `/code-review`, codex `/review` are human-triggered, not callable by the
-    session that wrote the diff). A real automated review is opt-in via
-    `reviewers: [sigma]` or `peers`.
+    It is advisory (never gates the promise on its own) and dispatches no sigma
+    panel. A session that wants a real automated review self-invokes its
+    harness's verb (Claude `/code-review`, codex `/review`) or the
+    `fno mail send '<verb>' --to-self --raw` fallback, both self-servable now;
+    the obligation to run one on a code payload is enforced at the stop gate
+    (loopcheck.rs), not by this pre-ship step. Sigma is opt-in via
+    `reviewers: [sigma]`.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
     if "sigma" in names:
