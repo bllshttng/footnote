@@ -44,6 +44,7 @@ Keys live in a flat `config.toml` (`.fno/config.toml` project-local, `~/.fno/con
 | `batch.max_nodes` | int | `3` | advanced | Nodes per batch before it closes (default 3). |
 | `batch.max_loc` | int (optional) | _(none)_ | advanced | Optional cumulative-diff LOC ceiling for a batch (off by default). |
 | `post_merge.parking_lot_path` | str (optional) | _(none)_ | advanced | Per-repo vault parking-lot path for the post-merge ritual (repo-relative). |
+| `post_merge.maintainer_marker` | str (optional) | _(none)_ | advanced | Discriminator tag for maintainer-only post-merge items (e.g. '#maintainer'). Default empty: omit the tag entirely so a fresh install ships no one's initials. Honored by both the post-merge ritual and the capture parser; set per-repo only when the destination is a shared vault. |
 | `post_merge.enabled` | bool | `true` | advanced | Whether the post-merge ritual runs. |
 | `post_merge.self_reap` | bool | `false` | never | Whether a post-merge watcher self-reaps. |
 | `post_merge.sync_command` | str (optional) | _(none)_ | advanced | Canonical-sync incantation run via `bash -lc` after a merge (e.g. `git checkout main && git pull && fno update && fno restart`). Unset = off. |
