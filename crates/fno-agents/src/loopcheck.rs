@@ -8481,13 +8481,17 @@ mod tests {
     fn self_review_gate_held_reason_names_code_review_and_its_verb() {
         // AC1-HP: a code payload that reaches the stop gate with no head-pinned
         // code-review attestation is held, and the reason names the reviewer
-        // and a verb its harness serves (claude ambient -> /code-review).
+        // and the verb served by the ambient harness.
         let mut pr = reviewers_gate_pr();
         pr.unattested_reviewers[0].name = "code-review".to_string();
         let reason = build_block_reason(&pr, "abc", true);
+        let harness = crate::claims::resolve_harness();
+        let expected = reviewer_invocation_for("code-review", harness.as_deref())
+            .expect("code-review descriptor")
+            .0;
         assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
         assert!(reason.contains("code-review"), "got: {reason}");
-        assert!(reason.contains("/code-review"), "got: {reason}");
+        assert!(reason.contains(&format!("`{expected}`")), "got: {reason}");
     }
 
     #[test]
