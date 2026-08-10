@@ -2415,7 +2415,7 @@ def _reacquire_node_claim(
     except Exception:
         pid = None
     try:
-        acquire_claim(
+        claim = acquire_claim(
             key,
             holder,
             ttl_ms=_claim_ttl_ms(),
@@ -2443,6 +2443,14 @@ def _reacquire_node_claim(
             err=True,
         )
         raise typer.Exit(code=1)
+    # do provenance: this in-process reacquire is the second reachable acquire
+    # path (the first is the CLI `claim acquire` verb the init script calls),
+    # so it must open the do row too, or a successor killed before its terminal
+    # loses its row - the exact lost-provenance defect this fixes. Owned
+    # identity from the claim + holder; best-effort, never fails the takeover.
+    from fno.claims.cli import _stamp_do_on_acquire
+
+    _stamp_do_on_acquire(key, claim, holder)
     return holder
 
 

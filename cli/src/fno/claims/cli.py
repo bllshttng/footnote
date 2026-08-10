@@ -162,9 +162,13 @@ def acquire(
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
     # started_at from this claim's own acquire time; ended_at stays open for the
     # release path to fill. Best-effort and node-keyed, mirroring the release
-    # stamp's contract.
+    # stamp's contract. Known edge: init acquires as a serialization step
+    # BEFORE its post-claim check-contained, so a worker refused on that
+    # re-check keeps an open do-row it earned no work for (a rare adoption
+    # race); the complete fix defers this stamp to init-success, a larger
+    # change to the init script.
     if key.startswith("node:"):
-        _stamp_do_on_acquire(key, claim)
+        _stamp_do_on_acquire(key, claim, holder)
 
     if json_output:
         typer.echo(json.dumps(claim.to_yaml_dict()))
@@ -207,7 +211,7 @@ def release(
     # stamp-fire time. The --stamp-do gate means only a session releasing its
     # own claim (the finished-terminal path) records it.
     if stamp_do and released is not None and key.startswith("node:"):
-        _stamp_do_on_release(key, released)
+        _stamp_do_on_release(key, released, holder)
 
     if json_output:
         typer.echo(json.dumps({"key": key, "released": True}))
@@ -215,7 +219,30 @@ def release(
         typer.echo(f"released: {key}")
 
 
-def _stamp_do_on_acquire(key: str, claim) -> None:
+def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
+    """Resolve the (harness, session_id) a do provenance row should be written
+    under: the OWNED identity, not the ambient env.
+
+    The harness the claim was pinned to (init passes the proven --harness;
+    ``claim.harness`` carries it) and the session encoded in the holder
+    (``target-session:<id>``). Ambient marker precedence would launder an
+    inherited foreign marker into the row (x-0bb9), so ambient is only a
+    fallback when the owned values are absent. Shared by the acquire and
+    release stamps so they always agree on the row key - release must fill the
+    row acquire opened, not open a second one."""
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    harness = (getattr(claim, "harness", None) or ident.harness or "").strip()
+    session_id = ""
+    if holder and holder.startswith("target-session:"):
+        session_id = holder.split(":", 1)[1].strip()
+    if not session_id:
+        session_id = (ident.session_id or "").strip()
+    return harness, session_id
+
+
+def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     """Open the do lifecycle row at claim acquire, recording started_at from the
     claim's own acquire time and leaving ended_at open for the release path to
     fill. Best-effort: a graph failure or missing identity is a named stderr
@@ -227,20 +254,30 @@ def _stamp_do_on_acquire(key: str, claim) -> None:
     the row at acquire guarantees it exists from the moment work starts;
     append_session_record's duplicate-fill lets release close it (ended_at) and
     is a no-op on a re-acquire or a retried stamp.
+
+    Identity is the OWNED one, not the ambient env: the harness the claim was
+    pinned to (init passes the proven --harness; ``claim.harness`` carries it)
+    and the session encoded in the holder (``target-session:<id>``). Ambient
+    marker precedence would launder an inherited foreign marker into the row
+    (x-0bb9), so it is only a fallback when the owned values are absent.
+
+    Two reachable acquire paths both call this: the CLI ``claim acquire`` verb
+    (the init-script cold start) and ``_reacquire_node_claim`` (a target-start
+    takeover that calls ``acquire_claim`` in-process and bypasses this Typer
+    command). Both must stamp, or a killed session on either path loses its row.
     """
     from datetime import datetime, timezone
 
     from fno.graph.store import append_session_record
-    from fno.harness_identity import resolve_harness_identity
     from fno.paths import graph_json
 
     node_id = key.split(":", 1)[1] if ":" in key else ""
     if not node_id:
         return
-    ident = resolve_harness_identity()
-    if not ident.session_id or not ident.harness:
+    harness, session_id = _owned_do_identity(claim, holder)
+    if not harness or not session_id:
         typer.echo(
-            f"claim acquire: no ambient identity to open do provenance for "
+            f"claim acquire: no owned identity to open do provenance for "
             f"{node_id}; the row is skipped. Skipped.",
             err=True,
         )
@@ -251,7 +288,7 @@ def _stamp_do_on_acquire(key: str, claim) -> None:
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase="do",
-            harness=ident.harness, session_id=ident.session_id,
+            harness=harness, session_id=session_id,
             started_at=started,
         )
     except (Exception, SystemExit) as exc:
@@ -272,23 +309,25 @@ def _stamp_do_on_acquire(key: str, claim) -> None:
         )
 
 
-def _stamp_do_on_release(key: str, claim) -> None:
-    """Append the do lifecycle row for the session that just released a node
-    claim. Best-effort: a graph failure or missing identity is a named stderr
-    skip and never fails the release."""
+def _stamp_do_on_release(key: str, claim, holder: str) -> None:
+    """Close the do lifecycle row for the session that just released a node
+    claim: fills ended_at (started_at already set at acquire). Best-effort: a
+    graph failure or missing identity is a named stderr skip and never fails
+    the release. Uses the same owned identity as the acquire stamp
+    (``_owned_do_identity``) so it fills the row acquire opened rather than
+    opening a second one when ambient and owned diverge."""
     from datetime import datetime, timezone
 
     from fno.graph.store import append_session_record
-    from fno.harness_identity import resolve_harness_identity
     from fno.paths import graph_json
 
     node_id = key.split(":", 1)[1] if ":" in key else ""
     if not node_id:
         return
-    ident = resolve_harness_identity()
-    if not ident.session_id or not ident.harness:
+    harness, session_id = _owned_do_identity(claim, holder)
+    if not harness or not session_id:
         typer.echo(
-            f"claim release: no ambient identity to stamp do provenance for "
+            f"claim release: no owned identity to stamp do provenance for "
             f"{node_id}; the row is skipped. Skipped.",
             err=True,
         )
@@ -300,7 +339,7 @@ def _stamp_do_on_release(key: str, claim) -> None:
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase="do",
-            harness=ident.harness, session_id=ident.session_id,
+            harness=harness, session_id=session_id,
             started_at=started, ended_at=ended,
         )
     except (Exception, SystemExit) as exc:

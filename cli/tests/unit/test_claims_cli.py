@@ -333,7 +333,8 @@ def test_release_stamp_do_writes_the_do_window(tmp_path, monkeypatch):
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
-    assert do[0]["session_id"] == "sess-do-1"
+    # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
+    assert do[0]["session_id"] == "s"
     assert do[0]["started_at"] and do[0]["ended_at"]
     assert do[0]["started_at"] <= do[0]["ended_at"]
 
@@ -368,7 +369,8 @@ def test_acquire_opens_do_provenance_row(tmp_path, monkeypatch):
     do = [x for x in rows if x.get("phase") == "do"]
     assert len(do) == 1
     assert do[0]["harness"] == "claude"
-    assert do[0]["session_id"] == "sess-acq-1"
+    # owned (holder) session wins over the ambient CLAUDE_CODE_SESSION_ID
+    assert do[0]["session_id"] == "s"
     assert do[0]["started_at"]
     assert "ended_at" not in do[0]  # opened, not closed
 
