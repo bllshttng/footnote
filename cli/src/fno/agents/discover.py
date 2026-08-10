@@ -38,6 +38,7 @@ from fno.agents.reachability import (
     Reachability,
     classify_reachability,
     pid_falsifier,
+    registry_falsifier,
 )
 from fno.harness_identity import (
     canonical_handle,
@@ -708,6 +709,12 @@ def _discover_from_registry(
                 "agent": harness,
                 "name": getattr(e, "name", None),
                 "identity_provisional": identity_provisional,
+                # `pid` and `status` are dropped above on purpose, but the row's
+                # EVIDENCE must not be dropped with them: a worker the registry
+                # already condemned (dead pid, exited pane, recorded exit) would
+                # otherwise arrive in the discovered lane with nothing to falsify
+                # on and read reachable off a still-warm transcript.
+                "registry_falsifier": registry_falsifier(e),
             }
         )
     return rows
@@ -738,6 +745,16 @@ class DiscoveredSession:
     # participates in short-address ambiguity, but can never claim full-id
     # precedence over another candidate.
     identity_provisional: bool = False
+    #: The falsifier the SOURCE registry row carried, when this session was
+    #: projected from one. ``_discover_from_registry`` cannot forward the row's
+    #: pid or stored status (it projects `pid=0` / `status=None` by design), so
+    #: without this a worker the registry had already condemned arrives here
+    #: with nothing to falsify on and reads reachable off a warm transcript.
+    #:
+    #: Derived ONCE by ``registry_falsifier`` at projection time, which already
+    #: knows about panes, exit tombstones and pids; carried rather than
+    #: re-derived so this lane never grows a second copy of those rules.
+    registry_falsifier: Optional[str] = None
 
     def _reachability(self) -> Reachability:
         """This session's verdict from the one shared derivation.
@@ -751,7 +768,10 @@ class DiscoveredSession:
         return classify_reachability(
             truth_state=self.truth_state,
             age_s=self.last_activity_age_s,
-            falsifier=pid_falsifier(self.pid or None),
+            # Either source may condemn; neither may raise. A registry-projected
+            # row has no usable pid of its own, and a scanned row has no registry
+            # entry, so in practice at most one of these is ever present.
+            falsifier=pid_falsifier(self.pid or None) or self.registry_falsifier,
         )
 
     @property
@@ -2269,6 +2289,7 @@ def discover_live_sessions(
             transcript_path=r.get("transcript_path"),
             name=r.get("name"),
             identity_provisional=bool(r.get("identity_provisional")),
+            registry_falsifier=r.get("registry_falsifier"),
         )
         for r in live
     ]

@@ -1191,6 +1191,38 @@ def test_a_discovered_row_with_a_dead_pid_is_condemned():
     assert session.to_row()["status"] == "orphaned"
 
 
+def test_a_registry_projection_keeps_its_falsifier():
+    """Projecting a registry row into this lane must not launder its evidence.
+
+    ``_discover_from_registry`` hardcodes ``pid=0`` and ``status=None``, so an
+    exited or pid-dead worker arrived here carrying nothing to falsify with and
+    classified reachable off a still-warm transcript. Mail then assigned the
+    durable copy to `live-drain` instead of `wake-daemon`, stranding it.
+
+    The falsifier is derived ONCE, by ``registry_falsifier`` at projection time
+    (which already knows about panes, exit tombstones and pids), and carried -
+    rather than this lane growing a second copy of those rules.
+    """
+    condemned = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,  # the projection's "not recorded" placeholder
+        cwd="/tmp",
+        project=None,
+        status=None,
+        truth_state="working",
+        registry_falsifier="exit-recorded",
+    )
+    assert condemned.is_reachable is False
+    row = condemned.to_row()
+    assert row["status"] == "orphaned"
+    assert row["basis"] == "exit-recorded"
+
+    # Still an addressing filter: the handle must keep resolving.
+    assert condemned.is_alive is True
+
+
 def test_reachability_reaches_the_decision_not_only_the_rendered_row():
     """The verdict has to reach whatever DECIDES, not only what prints.
 
