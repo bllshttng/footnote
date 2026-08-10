@@ -129,18 +129,21 @@ def _format_leaf(path: str, cmd) -> str:
     return f"{path} {' '.join(toks)}" if toks else path
 
 
-def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
-    """Recurse a Click group to its leaf command paths (hidden included).
+def _iter_group_leaves(group, ctx, prefix: str, depth: int = 0):
+    """Yield ``(path, cmd)`` for each leaf under a Click group.
 
-    A group with no resolvable children collapses to its own path, so an empty
-    or all-stub group still counts as one invocable verb. Hidden options on a
-    leaf ride along as ``!--flag`` tokens on that leaf's line.
+    Mirrors :func:`_group_leaves` but yields the command object alongside its
+    path, so a report tool reads help text and callback source off the same walk
+    instead of re-traversing the registry. The collapse rule matches: a group
+    with no resolvable children yields its own ``(path, group)`` pair. The depth
+    cap yields ``(prefix, None)`` (``_format_leaf`` renders ``None`` as a bare
+    path), but the cap never fires at fno's group depth.
     """
     import click
 
     if depth > 8:  # ponytail: safety cap; fno groups never nest this deep
-        return [prefix]
-    leaves: list[str] = []
+        yield prefix, None
+        return
     for name in group.list_commands(ctx):
         sub = group.get_command(ctx, name)
         if sub is None:
@@ -148,30 +151,37 @@ def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
         path = f"{prefix} {name}"
         if hasattr(sub, "list_commands"):
             child_ctx = click.Context(sub, info_name=name, parent=ctx)
-            children = _group_leaves(sub, child_ctx, path, depth + 1)
-            leaves.extend(children if children else [_format_leaf(path, sub)])
+            yielded = False
+            for leaf_path, leaf_cmd in _iter_group_leaves(sub, child_ctx, path, depth + 1):
+                yield leaf_path, leaf_cmd
+                yielded = True
+            if not yielded:
+                yield path, sub
         else:
-            leaves.append(_format_leaf(path, sub))
-    return leaves
+            yield path, sub
 
 
-def enumerate_python_leaves() -> list[str]:
-    """Every leaf verb the fno-py registry exposes, visible and hidden.
+def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
+    """Recurse a Click group to its leaf command paths (hidden included).
 
-    Mirrors the introspection ``fno lint menu-caps`` uses but recurses to leaves
-    instead of stopping at group names, and includes hidden commands. An entry
-    whose module will not import is a HARD failure here, not the skip menu-caps
-    does: a verb must not leave the baseline by breaking.
+    A group with no resolvable children collapses to its own path, so an empty
+    or all-stub group still counts as one invocable verb. Hidden options on a
+    leaf ride along as ``!--flag`` tokens on that leaf's line.
+    """
+    return [_format_leaf(path, cmd) for path, cmd in _iter_group_leaves(group, ctx, prefix, depth)]
 
-    Dedup is by import target ONLY for Typer groups, where two names sharing one
-    app would otherwise double-emit the whole subtree (the former ``graph`` ->
-    ``backlog`` alias shape). A single command that shares its import target
-    with another name (``update`` / ``upgrade``) is two distinct invocable verbs
-    and both appear.
 
-    Plain-function entries (``doctor``) and eager inline commands (``review``)
-    are resolved to real Click commands, not bare names, so their hidden options
-    ride into the baseline like any group leaf.
+def iter_python_leaves():
+    """Yield ``(path, cmd)`` for every fno-py leaf verb, visible and hidden.
+
+    The ``(path, cmd)`` pairs are what :func:`enumerate_python_leaves` formats
+    into baseline strings; a report tool reads ``cmd.help`` and the callback's
+    source location off the same walk instead of re-traversing the registry.
+
+    Import and dedup rules mirror :func:`enumerate_python_leaves` exactly: an
+    unimportable module is a hard failure, Typer alias pairs dedup by import
+    target, and plain-function entries are wrapped so their hidden options are
+    not missed.
     """
     import importlib
 
@@ -186,9 +196,8 @@ def enumerate_python_leaves() -> list[str]:
     # a bare name: a bare name would miss hidden options (review carries --sigma-*).
     _root_cmd = cast(click.Group, typer.main.get_command(_root_app))
     _root_ctx = click.Context(_root_cmd)
-    leaves: list[str] = [
-        _format_leaf(n, _root_cmd.get_command(_root_ctx, n)) for n in _EAGER_COMMAND_HELP
-    ]
+    for n in _EAGER_COMMAND_HELP:
+        yield n, _root_cmd.get_command(_root_ctx, n)
 
     seen_groups: set[str] = set()
     for name, entry in LAZY_SUBCOMMANDS.items():
@@ -218,12 +227,16 @@ def enumerate_python_leaves() -> list[str]:
             cmd = typer.main.get_command(obj)
             if hasattr(cmd, "list_commands"):
                 ctx = click.Context(cmd, info_name=name)
-                children = _group_leaves(cmd, ctx, name)
-                leaves.extend(children if children else [_format_leaf(name, cmd)])
+                yielded = False
+                for path, sub in _iter_group_leaves(cmd, ctx, name):
+                    yield path, sub
+                    yielded = True
+                if not yielded:
+                    yield name, cmd
             else:
-                leaves.append(_format_leaf(name, cmd))
+                yield name, cmd
         elif isinstance(obj, click.Command):
-            leaves.append(_format_leaf(name, obj))
+            yield name, obj
         else:
             # Plain function with Typer-style params: the live CLI wraps it as a
             # single-command Typer app (cli/_lazy_group.py). A bare function has
@@ -231,8 +244,28 @@ def enumerate_python_leaves() -> list[str]:
             # --context-*) are silently missed.
             sub = typer.Typer(add_completion=False)
             sub.command(name=name)(obj)
-            leaves.append(_format_leaf(name, typer.main.get_command(sub)))
-    return sorted(set(leaves))
+            yield name, typer.main.get_command(sub)
+
+
+def enumerate_python_leaves() -> list[str]:
+    """Every leaf verb the fno-py registry exposes, visible and hidden.
+
+    Mirrors the introspection ``fno lint menu-caps`` uses but recurses to leaves
+    instead of stopping at group names, and includes hidden commands. An entry
+    whose module will not import is a HARD failure here, not the skip menu-caps
+    does: a verb must not leave the baseline by breaking.
+
+    Dedup is by import target ONLY for Typer groups, where two names sharing one
+    app would otherwise double-emit the whole subtree (the former ``graph`` ->
+    ``backlog`` alias shape). A single command that shares its import target
+    with another name (``update`` / ``upgrade``) is two distinct invocable verbs
+    and both appear.
+
+    Plain-function entries (``doctor``) and eager inline commands (``review``)
+    are resolved to real Click commands, not bare names, so their hidden options
+    ride into the baseline like any group leaf.
+    """
+    return sorted({_format_leaf(path, cmd) for path, cmd in iter_python_leaves()})
 
 
 def _locate_rust_front() -> Optional[Path]:
