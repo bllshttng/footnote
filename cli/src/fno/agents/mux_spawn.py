@@ -917,10 +917,9 @@ def _mesh_env_wrapper(
     # is identity-only (the resolver tuples plus the direct-read legacy markers
     # like CLAUDECODE_SESSION_ID), never routing, so an account or auth var
     # cannot be swept here. `env -u` on an unset var is a harmless no-op.
-    from fno.harness_identity import AMBIENT_IDENTITY_ENV
+    from fno.harness_identity import ambient_identity_env_unset_args
 
-    for _id_name in AMBIENT_IDENTITY_ENV:
-        unset += ["-u", _id_name]
+    unset += ambient_identity_env_unset_args()
     if provider == "claude":
         # Worker parity: transcripts must persist for resume/adoption.
         pairs.append("CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1")

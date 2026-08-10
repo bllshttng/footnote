@@ -125,3 +125,88 @@ def test_scrub_fires_when_markers_are_actually_present(tree: str) -> None:
         f"{tree} does not scrub every ambient identity marker:\n"
         f"{result.stdout}\n{result.stderr}"
     )
+
+
+# --- spawn substrates (x-f50f AC5) -------------------------------------------
+# A spawned child never inherits its parent's identity. The pane (argv)
+# substrate is covered by test_mesh_env_wrapper_scrubs_inherited_session_identity
+# in test_spawn_pane.py; these cover the bg and headless dict substrates, where
+# the scrub mutates the subprocess env instead of emitting `env -u` flags. This
+# is the load-bearing test for the spawned-reviewer lane: without it, a
+# cross-model reviewer stamps the author's session and the lane's headline
+# (attestation_origin = other_session) is silently unreachable.
+
+
+def _capture_subprocess_env(monkeypatch, module) -> dict:
+    """Record (argv, env) for every `_subprocess_run` call in `module`."""
+    from unittest.mock import MagicMock
+
+    captured: dict = {"calls": []}
+
+    def fake_run(argv, **kwargs):  # type: ignore[no-untyped-def]
+        captured["calls"].append((list(argv), kwargs.get("env")))
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = "backgrounded · 7c5dcf5d · rev\n"
+        result.stderr = ""
+        return result
+
+    monkeypatch.setattr(module, "_subprocess_run", fake_run)
+    return captured
+
+
+def test_bg_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None:
+    """AC5 (bg substrate): a `claude --bg` child sheds every ambient identity
+    marker its parent carried. The operator's spawned-reviewer lane uses
+    `--substrate bg`, so this is the seam a cross-model review crosses."""
+    from fno.agents.providers import claude as claude_mod
+    from fno.agents.providers.claude import bg_create
+
+    for index, marker in enumerate(ALL_MARKERS):
+        monkeypatch.setenv(marker, f"bg-marker-{index:04d}")
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    bg_create(name="rev", message="hi", cwd=cwd, timeout=10)
+
+    bg_envs = [env for argv, env in captured["calls"] if "--bg" in argv]
+    assert bg_envs, "no --bg subprocess env was captured"
+    child_env = bg_envs[-1]
+    for marker in ALL_MARKERS:
+        assert marker not in child_env, f"bg child inherited identity marker {marker}"
+
+
+def test_headless_spawn_scrubs_inherited_identity(tmp_path: Path, monkeypatch) -> None:
+    """AC5 (headless substrate): a one-shot `claude -p` sheds every ambient
+    identity marker. The no-overlay path constructs an env only because a marker
+    is present; identity is gone, the rest of the parent env survives."""
+    from fno.agents.providers import claude as claude_mod
+
+    for index, marker in enumerate(ALL_MARKERS):
+        monkeypatch.setenv(marker, f"hl-marker-{index:04d}")
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+
+    explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
+    assert explicit_envs, "headless spawn inherited the parent env with no scrub"
+    child_env = explicit_envs[-1]
+    for marker in ALL_MARKERS:
+        assert marker not in child_env, f"headless child inherited identity marker {marker}"
+
+
+def test_headless_no_markers_no_overlay_still_inherits(tmp_path: Path, monkeypatch) -> None:
+    """The no-overlay, no-marker path still omits the env kwarg (inherits parent
+    byte-identical). Pins that the identity scrub did not force env construction
+    on every headless spawn - only when there is something to scrub."""
+    from fno.agents.providers import claude as claude_mod
+
+    captured = _capture_subprocess_env(monkeypatch, claude_mod)
+    cwd = tmp_path / "wd"
+    cwd.mkdir()
+    claude_mod.headless_create(message="hi", cwd=cwd)
+    explicit_envs = [env for _argv, env in captured["calls"] if env is not None]
+    assert not explicit_envs, "no-overlay headless spawn passed an explicit env"
