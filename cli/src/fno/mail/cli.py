@@ -1534,6 +1534,10 @@ def _job_lane_send(
             file=sys.stderr,
         )
         raise typer.Exit(code=16)
+    # Bound to a local so the type-checker narrows Optional -> str past the
+    # has_holder guard (a property it cannot track across).
+    session_id = job.session_id
+    assert session_id is not None  # has_holder is True iff session_id is set
 
     msg_id = generate_msg_id()
     # The durable recipient is the JOB (node:<id>), not the holder's session
@@ -1555,11 +1559,11 @@ def _job_lane_send(
     # in another worktree is reachable from this sender's cwd.
     provider = job.harness or "claude"
     if provider == "codex":
-        injected = _mail_inject_codex(job.session_id, wrapped)
+        injected = _mail_inject_codex(session_id, wrapped)
     else:
-        injected = _mail_inject_claude(job.session_id, wrapped)
+        injected = _mail_inject_claude(session_id, wrapped)
 
-    holder_tag = f" [holder {provider} {(job.session_id or '')[:8]}]"
+    holder_tag = f" [holder {provider} {session_id[:8]}]"
     if injected:
         print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
         return
@@ -2692,7 +2696,7 @@ def cmd_drain_self(
                 {
                     "id": m.id, "from": m.from_, "to": m.to,
                     "kind": m.kind, "ts": m.ts, "body": m.body,
-                    "job": job_addr,
+                    "job": job_addr or "",
                 }
             )
         print(json.dumps(out, ensure_ascii=False))

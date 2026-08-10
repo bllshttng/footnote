@@ -145,8 +145,8 @@ def resolve_job_address(token: str) -> Optional[JobHolder]:
                 harness=None,
                 note=f"pr address must be pr:<number> (got {token!r})",
             )
-        node_id = _node_id_for_pr(int(raw))
-        if node_id is None:
+        nid = _node_id_for_pr(int(raw))
+        if nid is None:
             return JobHolder(
                 node_id="",
                 address=token,
@@ -155,7 +155,7 @@ def resolve_job_address(token: str) -> Optional[JobHolder]:
                 harness=None,
                 note=f"no backlog node carries PR {raw}",
             )
-        res = _resolve_node(node_id)
+        res = _resolve_node(nid)
         return JobHolder(
             node_id=res.node_id,
             address=res.address,
