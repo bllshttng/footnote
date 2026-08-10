@@ -38,7 +38,6 @@ cli.add_typer(_triage_cli, name="triage")
 from fno.backlog.capture import cli as _capture_cli  # noqa: E402
 
 cli.add_typer(_capture_cli, name="capture", hidden=True)
-cli.add_typer(_capture_cli, name="inbox", hidden=True)
 
 # Nested batch sub-app: `fno backlog batch <verb>`. Batch-lane state
 # (.fno/batches/<domain>.json) — coalesce same-domain nodes into one PR.

@@ -110,15 +110,6 @@ backlog find
 backlog get
 backlog groom
 backlog idea !--tag
-backlog inbox add
-backlog inbox archive
-backlog inbox capture-pass
-backlog inbox dismiss
-backlog inbox empty-pass
-backlog inbox list
-backlog inbox promote
-backlog inbox scan
-backlog inbox tidy
 backlog intake !--batch
 backlog lane-fill
 backlog lanes

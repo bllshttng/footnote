@@ -16,10 +16,9 @@ legacy em-dash still parses on read:
 Items are addressed by ``fu-id``, never by line number (Obsidian edits shift
 lines). See internal/fno/design/2026-05-22-fno-backlog-inbox.md.
 
-CLI surface: ``fno backlog capture`` (canonical) with ``fno backlog inbox``
-kept as a hidden deprecated alias (same Typer app; see the graph -> backlog
-precedent). The managed data file intentionally keeps its ``inbox.md`` name:
-renaming user data breaks Obsidian links for zero collision relief.
+CLI surface: ``fno backlog capture``. The managed data file keeps its
+``inbox.md`` name: renaming user data breaks Obsidian links for zero collision
+relief.
 """
 from __future__ import annotations
 
