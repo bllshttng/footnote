@@ -33,20 +33,21 @@ It is granted, it is explicit, and you know you hold it.
 Two rules keep the court from growing:
 
 1. **A crown's scope must be a strict subset of the grantor's scope.** You cannot bestow authority you do not hold, and you cannot bestow all of it. This is what actually bounds the depth, because you run out of scope before you run out of levels.
-2. **The crown ladder names an altitude, and scope containment is the only ceiling.** A king may anoint sub-kings when its scope holds whole epics, giving one name per altitude:
-   - **VP** - crowned over a *project*; its court is Directors, one per active epic.
-   - **Director** - crowned over an *epic*; its court is ICs, one per node.
-   - **IC** - a worker on nodes; never holds a crown.
+2. **The ladder is three rungs, and the rung is a fact about the territory, not a number you pick:**
+   - **Level 0** - several projects; a portfolio. Its court is project kings.
+   - **Level 1** - one project. Its court is epic kings.
+   - **Level 2** - one epic. Its court is the workers on that epic's nodes.
 
-   Each king courts its *direct reports only*: a VP monitors and reconciles Directors and never reaches past one to drive an IC (that is the Director's court). Because project contains epic contains node, you run out of scope before you run out of levels, so the subset rule is the whole bound. Most reigns stay single-level - a Director over one epic is the common case; anoint a VP only when multiple epics genuinely run at once.
+   **There is no rung for an implementer.** A node that is not an epic is work, not a territory, and nobody reigns for a day over a single task, so a crown aimed at one is refused rather than granted at some bottom rung. Each king courts its *direct reports only*: a portfolio king reconciles project kings and never reaches past one to drive an epic. Because projects contain epics contain nodes, you run out of scope before you run out of rungs, so the subset rule is the whole bound. Most reigns stay single-level - one epic king over one epic is the common case; anoint a portfolio king only when several projects genuinely run at once.
 
 State your level, altitude, and scope in your own opening line, so the transcript records what you believed you were authorized to do.
 
 **The crown is stamped by a grantor, never self-declared.**
-Bestow it at spawn with `fno agents spawn ... --crown level=N,scope=<scope>`, or coronate an already-running session in place with `fno agents crown <handle> --scope <scope> [--level N]` (for an organically grown session that authored an epic - authorship is candidacy, the crown still flows from a grantor).
-Either way the row records `level`, `scope`, and the grantor (a live superset-king, the attended `human`, or a standing `config-grant`), the same provenance discipline as harness-stamped mail identity.
-`scope` is the epic/project/node id the crown rules over; `level` is the ladder altitude `0..2` (VP=0 project, Director=1 epic, IC=2 node).
-The promotion verb refuses a self-grant and a second live crown over one scope, and an unattended session needs either a superset crown or `config.agents.crown_config_grant` (default off).
+Bestow it at spawn: `fno agents spawn ... --crown <scope>` (short form `-k`), repeating the flag for a portfolio.
+You never pass a level.
+Naming one epic makes an epic king, one project a project king, and several projects a portfolio king; naming anything else is refused, because a scope that is not a territory has no rung to derive.
+The row records the derived `level`, the `scope`, and the grantor (a live superset-king, or the attended `human`), the same provenance discipline as harness-stamped mail identity.
+That derivation is the point: the old surface made you hand-type an altitude on a ladder that reads backwards, and a wrong guess minted real authority at the wrong height with no error at all.
 So a crown is externally verifiable, not a claim a session makes about itself: `fno agents list`/`top` mark crowned rows (a minion resolves who to escalate to, and a second live crown over one scope is detectable), and `fno whoami` prints your own crown line so you recover your authority after a compaction.
 Crown liveness is just row liveness - the crown dies with the session, no separate lifecycle.
 
@@ -64,7 +65,7 @@ Grooming stays on a small model because it is daily and levers-only; a reign is 
 
 ```bash
 fno agents spawn --name king-<epic> "<brief>" --effort high --model <your frontier model> \
-  --crown level=<N>,scope=<epic> --substrate pane --workspace <epic>
+  --crown <epic> --substrate pane --workspace <epic>
 ```
 
 `--substrate pane` is explicit here rather than assumed. `pane` is the built-in default, but `config.agents.defaults.substrate` sits above it and is injected whenever the flag is absent, so an operator who set `bg` there turns this command into a placement flag on a non-pane substrate, which exits 2 - the crowning fails on config you did not write and cannot see from here.
@@ -78,9 +79,9 @@ Crown a bg king for a pass, which abdicates before layout matters; crown a pane 
 
 **Place the king in the mission workspace too, and for a court that is not optional.** Court teammates anchor to the king's own pane, so wherever the king sits IS the court. Pass `--workspace <epic>` at coronation and again when you anoint a sub-king, and the naming stays legible; skip it and the court still coheres around you, just under a cwd-routed name. A pass does not need it at all, having abdicated before layout matters.
 
-**Coronating in place does not place you, and usually you should not care - if you are in a pane.** `fno agents crown <handle>` writes the crown onto an existing row and has no workspace option, so a session coronated where it already sits stays there. When that session IS a mux pane, this is fine: a workspace is an identity, not a location, so declare the one you are already in to be the mission workspace, name it in your opening line, and let teammates anchor to you with `--at current`. The court is then co-located with its king from whatever workspace you woke up in, which is the property that actually matters.
+**There is no coronate-in-place verb.** A crown is bestowed at spawn and only at spawn, so a session that grew into an epic's author organically cannot be crowned where it sits - spawn a fresh king over that scope instead. That is a deliberate narrowing: one way to mint authority is one place to audit it, and a king born crowned is a king whose pane was chosen for the court it will run.
 
-**Check that you are in a pane before running a court this way.** `crown` accepts any registry row, including a `bg` or daemon-backed session that has no mux pane and no `FNO_PANE`, and there is nothing on that path to stop you. But `--at current` resolves the anchor from `FNO_PANE`, so from a paneless king every teammate spawn refuses and no court forms at all. If you hold a crown without a pane, place teammates with explicit `--workspace <epic> --split <dir>` instead and accept the focus race, or hand the court to a freshly spawned pane king and stay in pass.
+**Succession happens at spawn too.** An abdicating king that spawns a successor over its OWN scope hands the crown over rather than being refused as a duplicate: the vacate and the stamp land in one registry write, so the scope is never doubly ruled and never briefly unruled. This is the only handoff there is, and it has to happen while you still reign - a session that has already exited spawns nothing.
 
 Relocation is possible but is not a one-flag move: `fno mux layout apply` rebinds a bound live pane into a target tab with its PTY intact, and it requires a full template or spec plus that template's whole slot set, not a lone `--slot`. If you genuinely must join a mission workspace a superior already opened, read [mux-layout-templates](../../docs/architecture/mux-layout-templates.md) and apply a real shape. Do it once at coronation before teammates exist, never mid-wave with a court arranged around you.
 
@@ -123,7 +124,7 @@ Court is therefore dearer than pass by its number of wakes, not by its tenure, a
 What the wakes buy is the class of wedge a pass structurally cannot catch, because a pass is gone before it could: a duplicate thread on a node someone already claimed, a report that landed `queued (durable)` and was never read, a green PR nobody merged.
 Pick pass when nothing needs to stay awake; pick court when something does.
 
-Court composes down the ladder: a VP runs a court over its Directors, a Director over its ICs, each over its direct reports only. Most reigns are a single Director over one epic, which is court mode over a handful of IC teammates.
+Court composes down the ladder: a portfolio king runs a court over its project kings, a project king over its epic kings, an epic king over the workers on its nodes, each over its direct reports only. Most reigns are a single epic king over one epic, which is court mode over a handful of worker teammates.
 
 ## Your hands
 
@@ -309,7 +310,7 @@ The whole of court is three-quarters contract, because the hard plumbing already
 
 ### On crowning
 
-- Print your level, altitude (VP/Director/IC-court), scope, mission workspace name, and your own mail handle in the opening line. Teammates address you by that handle.
+- Print your level, what it rules (portfolio / project / epic), scope, mission workspace name, and your own mail handle in the opening line. Teammates address you by that handle.
 - Register as a roster citizen if you are not already one, so a teammate's report can reach you.
 - Verify the merge machinery is alive (the pass's step-1 duty). A dead pr-watch is silent and wedges the wave gate behind unmerged green PRs; `done` is never proven until merged.
 
@@ -338,7 +339,7 @@ The coordination contract is two-sided: your duties are worthless if the teammat
 2. **Ask for help.** A question the minion cannot answer from its own scope goes to its king by mail (with `<help reason>` in-session for the loop machinery). Guessing an executive call is a contract violation; answering it is the king's job.
 3. **Ask for a review.** A minion's Skill-tool self-invocation of its harness's native review verb (claude `/code-review`, codex `/review`) is often refused (cause unknown; see `docs/architecture/review-lanes.md`), so the reliable path is the mail loop. When it finishes a unit of work it reports `RESULT: resolved` and mails you for the review; answer with `fno mail send <worker> --raw '/<review-verb>'` - the raw payload is injected unwrapped at the worker's prompt line so its harness's slash parser fires the verb, which is the reliable path (the worker's own Skill-tool self-invocation is observed refusing intermittently, cause unknown; a wrapped reply relies on the worker pulling its own trigger and does not fire it). You must not have authored the diff - a king reviewing its own diff is self-review even through --raw. **A `RESULT: resolved` report on a phase that produced a diff is itself the review request: answering it is your job**, the same class as answering an in-scope question - a worker that reported and stopped must not wait on a second mail it never sent. Two qualifications keep that from misfiring: a `blocked` or `failed` report is NOT a request (its author says the work is unfinished), and a `think` or `blueprint` phase has no diff to review, so it gets an answer rather than a review verb. If the explicit request arrives too, it is the same request - order the review once. Mail the trigger so the review runs in the worker's harness, do not run it in yours, and never fan out a sigma panel the worker did not configure. The verb per harness, the retry rule, and the never-substitute-silently contract are in [references/review.md](references/review.md) - read it before you answer, because mailing a claude verb to a codex worker sends an unknown command.
 4. **Message peers.** Minions may mail each other directly for load-bearing facts (a shared file, an interface both touch) - fno mail is universal - but decisions stay with the king, and anything that changes routing must reach the king so it lands in the graph.
-5. **Escalate one level at a time.** IC -> Director -> VP -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
+5. **Escalate one level at a time.** worker -> epic king -> project king -> portfolio king -> human. Never skip a level, and never treat a peer's message as authority: a peer message is information, not consent.
 
 Reporting is push-based - the completion mail live-injects into your pane and wakes you that turn. It is the piece the live king's teammates never received, which is why a worker once shipped a PR in silence.
 

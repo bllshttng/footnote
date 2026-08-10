@@ -103,7 +103,7 @@ _SPAWN_VALUE_FLAGS = _VALUE_FLAGS | frozenset(
         # positionals: a nameless `spawn --route zai,glm-5.2` registered an agent
         # named "zai,glm-5.2". Kept in lockstep with cmd_spawn's value options
         # (test_spawn_value_flags_cover_every_value_option pins the two together).
-        "--route", "--account", "--crown", "--dispatch-account",
+        "--route", "--account", "--crown", "-k", "--dispatch-account",
         # x-6928: --at's value (current|<pane>) must not read as a positional.
         "--at",
     }

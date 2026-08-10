@@ -50,11 +50,11 @@ from fno.agents.registry import (
     AgentStatus,
     RegistryVersionError,
     TERMINAL_STATUSES,
-    crown_validation_error,
     load_registry,
     resolve_registered_agent_across_sources,
     update_registry,
 )
+from fno.agents.crown import crown_validation_error
 from fno.harness_identity import (
     canonical_handle,
     resolve_harness_identity,
@@ -1444,30 +1444,54 @@ def _claude_create_path(
     )
 
     crown_declined = False
+    crown_succeeded = False
 
     # x-9844 Fix 3: a revival REPLACES the existing exited same-name row in place
     # (never appends a duplicate name). The load-modify-write is atomic under
     # update_registry's own lock, so a concurrent reader sees the old exited row
     # or the new live row, never a torn/absent state.
     def _write(entries: list) -> list:
-        nonlocal crown_declined
+        nonlocal crown_declined, crown_succeeded
         entry = new_entry
         # One-live-crown guard (x-7685), inside the write lock so the check and
-        # the stamp are atomic against a racing spawn. Same rule and same idiom
-        # as the pane path: if a non-terminal row already reigns over this scope,
-        # decline the crown and spawn UNCROWNED rather than refuse the spawn. An
-        # uncrowned worker is recoverable by `fno agents crown`; two live crowns
-        # over one scope are not.
+        # the stamp are atomic against a racing spawn. If a non-terminal row
+        # already reigns over this scope, decline the crown and spawn UNCROWNED
+        # rather than refuse the spawn: an uncrowned worker can still be given the
+        # crown later, two live crowns over one scope cannot be undone.
+        #
+        # UNLESS the sitting king is the caller, which is SUCCESSION. An
+        # abdicating king cannot hand off after it exits (a dead session spawns
+        # nothing), so the handoff has to happen while it still reigns. The crown
+        # moves in this one write: the caller's row is vacated as the heir is
+        # stamped, so no reader sees two live crowns over the scope, and none sees
+        # zero.
         #
         # A revive is checked the same way, with the row being replaced excluded:
         # a king reviving its own exited session must not be blocked by the
         # corpse it is about to overwrite.
         if crown_level is not None and crown_scope:
             contenders = [e for e in entries if not (revive and e.name == name)]
-            if any(
-                e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
+            holders = [
+                e
                 for e in contenders
-            ):
+                if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
+            ]
+
+            def _is_caller(row) -> bool:
+                return bool(
+                    spawned_by_session
+                    and row.harness_session_id == spawned_by_session
+                )
+
+            if holders and all(_is_caller(h) for h in holders):
+                entries = [
+                    replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
+                    if e.crown_scope == crown_scope and _is_caller(e)
+                    else e
+                    for e in entries
+                ]
+                crown_succeeded = True
+            elif holders:
                 entry = replace(
                     new_entry, crown_level=None, crown_scope=None, crown_grantor=None
                 )
@@ -1482,6 +1506,12 @@ def _claude_create_path(
             print(
                 f"spawn: crown declined (scope {crown_scope!r} already held by a "
                 "live row); spawned uncrowned. The worker launched without a crown.",
+                file=sys.stderr,
+            )
+        elif crown_succeeded:
+            print(
+                f"spawn: crown over {crown_scope!r} transferred from this session "
+                f"to {name} (succession). You no longer hold it.",
                 file=sys.stderr,
             )
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
