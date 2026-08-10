@@ -1589,7 +1589,7 @@ mod tests {
             second.harness = Some("codex".into());
             // Different first-eight (canonical) but same last-eight (retired
             // read-only tier) -> allowed: a retired-tier collision never refuses.
-            second.harness_session_id = Some("019fb418-0000-0000-0000-000012223333".into());
+            second.harness_session_id = Some("019fb418-0000-0000-0000-111122223333".into());
             registry.entries.push(second);
         })
         .unwrap();
