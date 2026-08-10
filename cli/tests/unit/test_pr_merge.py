@@ -88,7 +88,7 @@ def enabled(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1},
     )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
 
 
 def _last_json(capsys, *, stream="out") -> dict:
@@ -645,6 +645,72 @@ def test_review_lane_configured_resolves_toplevel_from_a_subdirectory(
     assert _merge._review_lane_configured(str(repo / "sub")) is True
 
 
+def test_review_lane_configured_floors_a_code_payload(monkeypatch, tmp_path):
+    """A code payload on a lane-less stock install requires review (the
+    self-review floor), so the merge coverage guard engages for the same PR the
+    stop gate holds. Mirrors floor_self_review in loopcheck.rs."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-test-session")
+    # Stock install: no lane. A code payload + pr_number -> floored to True.
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is True
+    # Opt-out: self_review_required=false restores unreviewed code-PR shipping.
+    _point_lane_read_at(monkeypatch, self_review_required=False)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+    # A docs payload -> no floor.
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: False)
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+
+
+def test_stock_code_floor_skips_a_harness_without_a_self_review_verb(
+    monkeypatch, tmp_path
+):
+    """Route 3 is deferred, so Gemini must not be given an unsatisfiable floor."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("GEMINI_SESSION_ID", "gemini-test-session")
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+    assert _merge._code_review_attestation_required(str(tmp_path), 42) is False
+
+
+def test_stock_code_floor_does_not_guess_between_mixed_harness_markers(
+    monkeypatch, tmp_path
+):
+    """Match Rust: inherited markers from two harness families are ambiguous."""
+    from fno.harness_identity import HARNESS_SESSION_MARKERS
+
+    for marker, _harness in HARNESS_SESSION_MARKERS:
+        monkeypatch.delenv(marker, raising=False)
+    monkeypatch.setenv("CODEX_THREAD_ID", "foreign-codex-thread")
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "claude-session")
+    _point_lane_read_at(monkeypatch)
+    monkeypatch.setattr(_merge, "_pr_payload_is_code", lambda repo, pr_number: True)
+
+    assert _merge._review_lane_configured(str(tmp_path), 42) is False
+    assert _merge._code_review_attestation_required(str(tmp_path), 42) is False
+
+
+def test_pr_payload_classifier_is_documentation_aware_and_fail_closed(monkeypatch):
+    """The merge-side classifier matches loopcheck's notion of documentation and
+    fails closed on a missing gh (a degraded probe must not bypass the guard)."""
+    assert _merge._is_documentation_path("docs/a.md") is True
+    assert _merge._is_documentation_path("README.md") is True
+    assert _merge._is_documentation_path("src/lib.rs") is False
+    assert _merge._is_documentation_path(".fno/config.toml") is False
+    monkeypatch.setattr(_merge.shutil, "which", lambda _x: None)
+    assert _merge._pr_payload_is_code("/nope", 42) is True
+
+
 def test_up_to_date_head_with_live_lanes_merges(enabled, monkeypatch, capsys, tmp_path):
     monkeypatch.setattr(_merge, "_live_lane_count", lambda: 1)
     fake = FakeRun(
@@ -1113,6 +1179,72 @@ def test_coverage_covered_proceeds(enabled, monkeypatch, capsys, tmp_path):
     assert _last_json(capsys)["outcome"] == "merged"
 
 
+def test_code_review_gate_rejects_unrelated_github_app_coverage(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    """A required local code-review cannot be replaced by an unrelated App review."""
+    state = tmp_path / ".fno"
+    state.mkdir()
+    (state / "config.toml").write_text(
+        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "abc",
+            "verdicts": [
+                {
+                    "name": "chatgpt-codex-connector",
+                    "producer": "github_app",
+                    "verdict": "reviewed",
+                }
+            ],
+        },
+    )
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 2
+    obj = _last_json(capsys, stream="err")
+    assert obj["outcome"] == "blocked"
+    assert "code-review" in obj["reason"]
+    assert not any(c[:3] == ["gh", "pr", "merge"] for c in fake.calls)
+
+
+def test_code_review_gate_accepts_its_head_pinned_local_attestation(
+    enabled, monkeypatch, capsys, tmp_path
+):
+    state = tmp_path / ".fno"
+    state.mkdir()
+    (state / "config.toml").write_text(
+        '[review]\nreviewers = ["code-review"]\n', encoding="utf-8"
+    )
+    fake = FakeRun(gh_merge=Result(0, "Merged pull request", ""), toplevel=str(tmp_path))
+    monkeypatch.setattr(_merge, "run", fake)
+    monkeypatch.setattr(
+        _merge,
+        "_review_coverage_for_pr",
+        lambda pr, repo: {
+            "coverage": "covered",
+            "reviewed_count": 1,
+            "head_sha": "abc",
+            "verdicts": [
+                {
+                    "name": "code-review",
+                    "producer": "local_attestation",
+                    "verdict": "reviewed",
+                }
+            ],
+        },
+    )
+
+    assert _merge.run_merge(["42"], cwd=str(tmp_path)) == 0
+    assert _last_json(capsys)["outcome"] == "merged"
+
+
 def test_coverage_stale_head_refuses(enabled, monkeypatch, capsys, tmp_path):
     """Coverage pinned a head that no longer matches the PR head -> stale -> refuse."""
     monkeypatch.setattr(
@@ -1137,7 +1269,7 @@ def test_covered_head_pins_the_auto_merge_cmd(monkeypatch, tmp_path):
         "_review_coverage_for_pr",
         lambda pr, repo: {"coverage": "covered", "reviewed_count": 1, "head_sha": "coveredSHA"},
     )
-    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo: True)
+    monkeypatch.setattr(_merge, "_review_lane_configured", lambda repo, pr_number=0: True)
     fake = _AutoMergeRejectingRun(
         rollup=_rollup("SUCCESS", "coveredSHA"), toplevel=str(tmp_path)
     )

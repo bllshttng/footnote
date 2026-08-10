@@ -553,6 +553,13 @@ class ReviewerDescriptor:
     # means "is self-cert") and leaves check-reviewer-descriptor-parity.sh
     # reading a two-valued axis.
     asserts: Literal["review-evidence", "self-cert", "invocation"]
+    # Per-harness verb overrides. A reviewer whose verb differs by harness
+    # (the self-review verb: `/code-review` on claude, `/review` on codex)
+    # carries them here; `invocation` stays the unknown-harness default. None
+    # means the scalar invocation is the only rendering. Mirrored into the Rust
+    # REVIEWER_INVOCATIONS per-harness column by the parity script, so the two
+    # tables cannot disagree about which verb a harness serves.
+    invocations: Optional[Mapping[str, str]] = None
 
 
 # Reviewer names that have a `review_attestation` emit path (x-e703 Change 4).
@@ -574,15 +581,17 @@ _RESOLVABLE_REVIEWERS: dict[str, ReviewerDescriptor] = {
         invocation="/fno:review sigma",
         asserts="review-evidence",
     ),
-    # `/code-review` is user-triggered and billed; the model cannot launch it,
-    # so the operator runs the pass and then the emit helper.
+    # `/code-review` is a self-serve local-attestation reviewer: a session that
+    # wrote the diff invokes its own harness's review verb (Skill-tool on
+    # claude, /review on codex) and then the emit helper. `requires="none"`
+    # rather than "operator" is load-bearing - the operator variant made
+    # `blocks_autonomy` true and refused every unattended run at init, which is
+    # the opposite of a gate whose point is that the session serves itself.
     "code-review": ReviewerDescriptor(
-        kind="human",
-        requires="operator",
-        invocation=(
-            "/code-review, then "
-            "bash skills/review/scripts/emit-attestation.sh code-review"
-        ),
+        kind="local-attestation",
+        requires="none",
+        invocation="/code-review",
+        invocations={"claude": "/code-review", "codex": "/review"},
         asserts="review-evidence",
     ),
     "declare": ReviewerDescriptor(
@@ -770,6 +779,12 @@ class ReviewBlock(BaseModel):
     # name fails LOUD here (a typo must never silently become no-gate) and is
     # unsatisfiable at loop-check (Rust, fail closed).
     reviewers: list[str] = Field(default_factory=list)
+    # Whether a code payload floors the harness-resolved self-review reviewer
+    # onto `reviewers` on a stock install (no lane configured). Default true:
+    # the obligation to review one's own diff ships ON, and `false` is the
+    # documented escape hatch. Read by the stop gate (loopcheck.rs) and mirrored
+    # into the merge primitive so the two agree.
+    self_review_required: bool = True
     # The INVOCATION list (Locked Decision 2): which AI reviewers /pr requests a
     # review from (gemini | codex | coderabbit | claude | none). Distinct from
     # required_bots (the GATE: which GitHub bot logins must have reviewed before

@@ -569,6 +569,36 @@ def _local_review_gates(review: Any) -> List[str]:
     return gates
 
 
+def _self_review_clause() -> str:
+    """The self-review verb + fallback clause, or "".
+
+    Names this harness's self-review verb and the ``--to-self --raw`` fallback so
+    a session can satisfy the code-payload review gate itself rather than ask an
+    epic leader. The fallback is a prompt-line injection, so it is omitted on a
+    headless substrate (no prompt line exists there). Never raises."""
+    try:
+        from fno.review_capability import (
+            detect_session,
+            harness_can_self_review,
+            self_review_invocation,
+        )
+
+        s = detect_session()
+        if not harness_can_self_review(s.harness):
+            return ""
+        verb = self_review_invocation(s.harness)
+    except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
+        return ""
+    harness = s.harness or "unknown"
+    clause = (
+        f"self-review required for code ({harness}): run `{verb}`, then "
+        "`bash skills/review/scripts/emit-attestation.sh code-review`"
+    )
+    if s.substrate != "headless":
+        clause += f"; refused? fno mail send '{verb}' --to-self --raw"
+    return clause
+
+
 def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) -> str:
     raw = manifest_raw or {}
 
@@ -627,6 +657,14 @@ def _done_when_line(manifest_raw: Optional[Dict[str, Any]], project_root: Path) 
             line += f" + local attestation [{'; '.join(local)}]"
         if optional:
             line += f" (optional if present: [{', '.join(optional)}])"
+        # Self-review floor: when the obligation is on and no local lane is
+        # configured, name this harness's verb and the --to-self fallback so a
+        # session serves itself instead of asking an epic leader. A configured
+        # local lane already names the reviewer in the line above.
+        if not local and getattr(review, "self_review_required", True):
+            clause = _self_review_clause()
+            if clause:
+                line += f"; {clause}"
     if _is("attended", "false"):
         line += "; bg -> hand off the merge"
     return line

@@ -78,11 +78,15 @@ def test_sigma_needs_subagent_dispatch():
     assert _RESOLVABLE_REVIEWERS["sigma"].asserts == "review-evidence"
 
 
-def test_code_review_is_operator_driven():
-    """`/code-review` is user-triggered and billed; no agent can launch it."""
+def test_code_review_is_self_servable():
+    """`/code-review` is self-servable: a session that wrote the diff runs its
+    own harness's review verb (claude /code-review, codex /review) and attests.
+    requires=none (not operator) is what keeps an unattended run from being
+    refused at init for naming it."""
     d = _RESOLVABLE_REVIEWERS["code-review"]
-    assert d.kind == "human"
-    assert d.requires == "operator"
+    assert d.kind == "local-attestation"
+    assert d.requires == "none"
+    assert d.invocations == {"claude": "/code-review", "codex": "/review"}
 
 
 def test_descriptors_are_frozen():

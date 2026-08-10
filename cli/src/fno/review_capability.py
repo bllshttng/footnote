@@ -311,6 +311,32 @@ def _resolve_one(
         return ReviewerVerdict(name, descriptor, status, reason)
 
     if descriptor.requires == "none":
+        # A self-serve verb whose `invocations` map scopes it to specific
+        # harnesses (code-review: claude /code-review, codex /review) draws the
+        # same line the subagent-dispatch branch draws below: a known harness
+        # outside the map (agy/opencode/gemini) has no verb, so resolving it
+        # satisfiable would floor the stop gate onto a reviewer whose
+        # attestation nothing there produces, wedging the loop. The invocations
+        # map IS the allowlist; the scalar `invocation` stays the
+        # unknown-harness default, not a fallback that asserts a claude verb
+        # works everywhere.
+        per_harness = descriptor.invocations
+        if per_harness:
+            verb = per_harness.get(session.harness)
+            if verb is not None:
+                return verdict("satisfiable", f"run `{verb}`")
+            if session.harness == "unknown":
+                return verdict(
+                    "unverifiable",
+                    f"needs a {name} verb; no harness marker in this "
+                    f"environment, so capability cannot be verified. Proceeding "
+                    f"- if the gate does go unmet, run `{descriptor.invocation}`",
+                )
+            return verdict(
+                "unavailable",
+                f"no {name} verb for {session.describe()}; scoped to "
+                f"{sorted(per_harness)}",
+            )
         return verdict("satisfiable", f"run `{descriptor.invocation}`")
 
     if descriptor.requires == "operator":
@@ -396,6 +422,31 @@ class PreShipReviewPlan:
     reason: str
 
 
+def harness_can_self_review(harness: Optional[str]) -> bool:
+    """Whether this harness exposes a native self-review verb."""
+    return harness in {"claude", "codex"}
+
+
+def self_review_invocation(harness: Optional[str]) -> str:
+    """The recommended self-review invocation for a harness.
+
+    Codex is `/review` bare - prose after the verb flips it to a no-merge-base
+    review target, so nothing is appended. Claude is `/code-review medium
+    --comment --fix`: it takes its own argument grammar, and that form actually
+    posts comments and applies findings. The base verb is read from the
+    `code-review` descriptor's per-harness map (the parity-checked source of
+    truth), so this is not a third copy of the verbs; only the claude arg
+    grammar is hardcoded here."""
+    from fno.config import _RESOLVABLE_REVIEWERS
+
+    desc = _RESOLVABLE_REVIEWERS.get("code-review")
+    invocations = desc.invocations if desc and desc.invocations else {}
+    base = invocations.get(harness or "", invocations.get("claude", "/code-review"))
+    if harness == "codex":
+        return base
+    return f"{base} medium --comment --fix"
+
+
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     """Decide the target spine's pre-ship review step from `config.review.reviewers`.
 
@@ -405,11 +456,13 @@ def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     skipped to avoid a panel whose attestation any later fix would invalidate.
     The default - no sigma reviewer - is an advisory SELF-REVIEW: the invoking
     agent reads its own changed files and reasons about them on the main thread.
-    It is advisory (never gates the promise on its own), it dispatches no sigma
-    panel, and it invokes no harness built-in review command (Claude
-    `/code-review`, codex `/review` are human-triggered, not callable by the
-    session that wrote the diff). A real automated review is opt-in via
-    `reviewers: [sigma]` or `peers`.
+    It is advisory (never gates the promise on its own) and dispatches no sigma
+    panel. A session that wants a real automated review self-invokes its
+    harness's verb (Claude `/code-review`, codex `/review`) or the
+    `fno mail send '<verb>' --to-self --raw` fallback, both self-servable now;
+    the obligation to run one on a code payload is enforced at the stop gate
+    (loopcheck.rs), not by this pre-ship step. Sigma is opt-in via
+    `reviewers: [sigma]`.
     """
     names = {str(r).strip().lstrip("/") for r in reviewers}
     if "sigma" in names:

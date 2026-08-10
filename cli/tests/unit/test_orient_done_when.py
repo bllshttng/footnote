@@ -36,7 +36,11 @@ def repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 def test_no_gate_config_still_reads_pr_and_ci_only(repo):
     root = repo("")
-    assert _done_when_line({}, root) == "PR + CI green + reviewed by [none (PR + CI only)]"
+    # A stock install carries PR + CI; the self-review floor for a code payload
+    # appends after it (tested below), so assert the base as a prefix.
+    assert _done_when_line({}, root).startswith(
+        "PR + CI green + reviewed by [none (PR + CI only)]"
+    )
 
 
 def test_identity_free_peers_announce_the_local_peer_gate_and_its_producer(repo):
@@ -89,9 +93,53 @@ def test_provider_less_peer_arms_nothing(repo):
     # identity, so it holds no gate; printing one would also print a producer
     # command with no provider to run.
     root = repo('[review]\npeers = [""]\n')
-    assert _done_when_line({}, root) == (
+    assert _done_when_line({}, root).startswith(
         "PR + CI green + reviewed by [none (PR + CI only)]"
     )
+
+
+def test_stock_install_announces_the_self_review_floor(repo, monkeypatch):
+    # A code payload on a lane-less stock install carries the self-review
+    # obligation: the done-when line names it and a verb this harness serves.
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="claude", substrate="interactive", attended=True
+        ),
+    )
+    root = repo("")
+    line = _done_when_line({}, root)
+    assert "self-review required for code" in line
+    assert "--to-self --raw" in line
+    # Opting out restores the plain stock line (no clause).
+    root = repo("[review]\nself_review_required = false\n")
+    line = _done_when_line({}, root)
+    assert "self-review required for code" not in line
+    assert line.startswith("PR + CI green + reviewed by [none (PR + CI only)]")
+    # A configured local lane already names the reviewer, so no floor clause.
+    root = repo('[review]\nreviewers = ["code-review"]\n')
+    line = _done_when_line({}, root)
+    assert "self-review required for code" not in line
+
+
+def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
+    repo, monkeypatch
+):
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="gemini", substrate="interactive", attended=True
+        ),
+    )
+    line = _done_when_line({}, repo(""))
+    assert "self-review required for code" not in line
+    assert "/code-review" not in line
 
 
 def test_unreadable_review_config_reads_unknown_not_no_gate(repo):

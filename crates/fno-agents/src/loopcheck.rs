@@ -288,6 +288,12 @@ struct Settings {
     /// Resolvability is validated Python-side; Rust fails closed by matching
     /// evidence, so an unresolvable name is simply never satisfied.
     reviewers: Vec<String>,
+    /// config.review.self_review_required (default true): floor the
+    /// harness-resolved self-review reviewer onto `reviewers` when a code
+    /// payload would otherwise ship unreviewed on a stock install. None means
+    /// absent, normalized to true (the obligation defaults ON); `false` is the
+    /// documented escape hatch.
+    self_review_required: Option<bool>,
     /// config.review.nudge (x-b167): per-login overrides for the bot-review
     /// nudge, resolved against BOT_PROFILES by `resolved_nudge_configs`. Empty =
     /// no overrides (the built-in profiles alone decide nudgeability). A
@@ -717,6 +723,11 @@ fn parse_settings_result(content: &str) -> Result<Settings, String> {
         if let Some(v) = review.get("reviewers") {
             s.reviewers = value_as_reviewers(v);
         }
+        if let Some(v) = review.get("self_review_required") {
+            // A malformed value stays None -> normalized to true (obligation on,
+            // fail-closed); only an explicit bool reaches the field.
+            s.self_review_required = v.as_bool();
+        }
         if let Some(v) = review.get("nudge") {
             s.nudge_overrides = value_as_nudge_overrides(v);
         }
@@ -1085,24 +1096,139 @@ struct PrInfo {
 /// Two languages, one table: kept honest by
 /// `scripts/ci/check-reviewer-descriptor-parity.sh`, not by a comment asking a
 /// human to remember.
-const REVIEWER_INVOCATIONS: &[(&str, &str, bool)] = &[
-    ("sigma", "/fno:review sigma", false),
+/// The fourth element encodes per-harness verb overrides as
+/// `"harness=verb;harness=verb"`, empty when the scalar invocation is the only
+/// rendering. The self-review verb is the one case: `/code-review` on claude,
+/// `/review` bare on codex. The codex value must stay bare - prose after the
+/// verb flips codex to a no-merge-base review target - so a no-whitespace
+/// check on the codex value is a unit test, not a convention. Kept honest
+/// against the Python descriptor's `invocations` map by
+/// check-reviewer-descriptor-parity.sh.
+const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
+    ("sigma", "/fno:review sigma", false, ""),
     (
         "code-review",
-        "/code-review, then bash skills/review/scripts/emit-attestation.sh code-review",
+        "/code-review",
         false,
+        "claude=/code-review;codex=/review",
     ),
-    ("declare", "/fno:review declare", true),
+    ("declare", "/fno:review declare", true, ""),
 ];
 
-/// `(invocation, is_self_cert)`. The flag mirrors the Python descriptor's
-/// `asserts` field: a surface that names `declare` without saying it asserts
-/// nothing invites an operator to clear the gate with no review behind it.
-fn reviewer_invocation(name: &str) -> Option<(&'static str, bool)> {
+/// `(invocation, is_self_cert, per_harness)`. The flag mirrors the Python
+/// descriptor's `asserts` field: a surface that names `declare` without saying
+/// it asserts nothing invites an operator to clear the gate with no review
+/// behind it.
+fn reviewer_entry(name: &str) -> Option<(&'static str, bool, &'static str)> {
     REVIEWER_INVOCATIONS
         .iter()
-        .find(|(n, _, _)| *n == name)
-        .map(|(_, inv, self_cert)| (*inv, *self_cert))
+        .find(|(n, _, _, _)| *n == name)
+        .map(|(_, inv, self_cert, per)| (*inv, *self_cert, *per))
+}
+
+/// The harness-correct verb. Falls back to the scalar default when the harness
+/// is unknown or the reviewer declares no override. `harness` is the author
+/// harness from `claims::resolve_harness`, threaded rather than re-read so a
+/// unit test can pin a harness without touching the environment.
+fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'static str, bool)> {
+    let (inv, sc, per) = reviewer_entry(name)?;
+    if per.is_empty() {
+        return Some((inv, sc));
+    }
+    if let Some(h) = harness {
+        for pair in per.split(';') {
+            if let Some((ph, pv)) = pair.split_once('=') {
+                if ph == h {
+                    return Some((pv, sc));
+                }
+            }
+        }
+    }
+    Some((inv, sc))
+}
+
+/// Documentation is `*.md` anywhere and anything under `docs/`. Plan files are
+/// markdown, so the `.md` rule covers them; the `internal/` vault is gitignored
+/// and never appears in a diff. A config file, a lockfile, and a shell script
+/// all count as code.
+fn is_documentation_path(path: &str) -> bool {
+    // A single leading "./" is stripped once; trim_start_matches would also strip
+    // a char set and lstrip a literal-repeated run, diverging from the Python
+    // mirror (and mangling ".github"). The two classifiers must agree exactly.
+    let trimmed = path.trim();
+    let p = trimmed.strip_prefix("./").unwrap_or(trimmed);
+    if p.is_empty() {
+        return false;
+    }
+    p.ends_with(".md") || p.starts_with("docs/")
+}
+
+/// Whether the author harness has a self-review verb (claude `/code-review`,
+/// codex `/review`). The self-review floor only applies on these: gemini/agy/
+/// opencode have no native review verb, so flooring code-review would demand an
+/// attestation nothing produces and wedge the loop. Their path is route 3 (a
+/// spawned reviewer), which is deferred. Pure so a unit test pins the set.
+fn harness_can_self_review(harness: Option<&str>) -> bool {
+    matches!(harness, Some("claude") | Some("codex"))
+}
+
+/// Pure payload classifier: CODE iff any changed path is not documentation.
+/// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
+/// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
+fn payload_is_code(paths: &[String]) -> bool {
+    paths.iter().any(|p| !is_documentation_path(p))
+}
+
+/// The self-review reviewer to floor onto the required set, or None. Pure so a
+/// unit test can pin the floor without git: a code payload on a lane-less stock
+/// install gets `code-review`; a configured lane, an opt-out, a docs payload,
+/// and a lane that already names code-review all get None. Returning the name
+/// (not a bool) keeps "should floor" and "what to floor" in one place - the
+/// reviewer name is the gate input, and splitting them invites drift.
+fn floor_self_review(
+    required_reviewers: &[String],
+    lane_configured: bool,
+    is_code: bool,
+    self_review_required: bool,
+) -> Option<String> {
+    if !self_review_required || !is_code || lane_configured {
+        return None;
+    }
+    let already = required_reviewers
+        .iter()
+        .any(|r| r.trim_start_matches('/') == "code-review");
+    if already {
+        return None;
+    }
+    Some("code-review".to_string())
+}
+
+/// `(is_code, assumed)`: classifies the branch's payload, failing CLOSED. An
+/// unreadable diff (no `origin/main`, git missing, any non-zero exit) classifies
+/// as code with `assumed=true`, so a degraded probe can never silently disable
+/// the obligation the way failing open would. `origin/main...HEAD` is the
+/// three-dot diff, so it names the branch's own changes (the PR diff), not
+/// changes that landed on main since the branch point.
+fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
+    let out = Command::new(git_bin)
+        .args(["diff", "--name-only", "origin/main...HEAD"])
+        .current_dir(cwd)
+        .output();
+    let (paths, readable) = match out {
+        Ok(o) if o.status.success() => {
+            let paths = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>();
+            (paths, true)
+        }
+        _ => (Vec::new(), false),
+    };
+    if !readable {
+        return (true, true);
+    }
+    (payload_is_code(&paths), false)
 }
 
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
@@ -4250,6 +4376,12 @@ pub fn decide(args: &[String]) -> (i32, String) {
             if !local.reviewers.is_empty() {
                 merged.reviewers = local.reviewers;
             }
+            if local.self_review_required.is_some() {
+                // Presence, not value: `self_review_required = false` is the
+                // documented repo opt-out, so a local Some(false) must override
+                // a global Some(true). Same overlay rule as required_bots.
+                merged.self_review_required = local.self_review_required;
+            }
             if !local.nudge_overrides.is_empty() {
                 // Without this line a project-local `[review.nudge]` (including
                 // `enabled = false`) is read from the GLOBAL file only and the
@@ -4290,14 +4422,39 @@ pub fn decide(args: &[String]) -> (i32, String) {
     }
     let optional_bots = resolved_optional_bots(&settings);
     let nudge_configs = resolved_nudge_configs(&settings);
-    // x-0eaf: DoneUnreviewed applies only when a review lane is configured. A
-    // stock install (no required_bots, no optional_apps, no reviewers, no peers)
-    // has opted out of review, so zero coverage is its configured state, not a
-    // defect - those green PRs still reach DonePRGreen (coverage 0 is reported
-    // in the receipt). Without this boundary every out-of-the-box fire is
-    // DoneUnreviewed (not a ship reason), so the node never closes.
-    let review_lane_configured =
+    // A code payload carries its own review obligation on a stock install:
+    // when no lane is configured, the harness-resolved self-review reviewer is
+    // floored onto `required_reviewers` so the existing unattested_reviewers_scan
+    // holds the session for a head-pinned attestation instead of the run asking
+    // an epic leader. Opt out with config.review.self_review_required = false.
+    // classify_payload fails CLOSED, so an unreadable diff floors the reviewer
+    // rather than waving the obligation away. The floor is additive: an
+    // already-configured lane (reviewers, bots, peers) keeps meaning exactly
+    // what it meant today, and a lane that already names code-review is a no-op.
+    let lane_configured =
         !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
+    let self_review_required = settings.self_review_required.unwrap_or(true);
+    // The floor only applies where a session can satisfy it: a harness with a
+    // self-review verb (claude /code-review, codex /review). Flooring
+    // gemini/agy/opencode would demand an attestation no verb there produces,
+    // wedging the loop; route 3 (a spawned reviewer) is those harnesses' path
+    // and is deferred. classify_payload forks git, so it runs only when the
+    // floor could apply - a configured lane makes it moot, and most fires have one.
+    let harness_can_self_review = harness_can_self_review(author_harness.as_deref());
+    let self_review_floor = if !lane_configured && self_review_required && harness_can_self_review {
+        let payload = classify_payload(&parsed.git_bin, &cwd);
+        floor_self_review(&required_reviewers, false, payload.0, true)
+    } else {
+        None
+    };
+    if let Some(floored) = self_review_floor.clone() {
+        required_reviewers.push(floored);
+    }
+    // x-0eaf: DoneUnreviewed applies only when review is required. A stock
+    // install that opts out (self_review_required=false AND no lane, or a
+    // harness with no self-review verb) has zero coverage as its configured
+    // state, not a defect - those green PRs still reach DonePRGreen.
+    let review_required = lane_configured || self_review_floor.is_some();
 
     // Now timestamp
     let now: DateTime<Utc> = if let Some(ref s) = parsed.now_override {
@@ -5043,7 +5200,7 @@ pub fn decide(args: &[String]) -> (i32, String) {
                     // loop-check must not re-litigate review on an already-merged
                     // PR - the coverage fix prevents the autonomous MERGE (arming),
                     // not the post-merge terminal.
-                    if review_lane_configured
+                    if review_required
                         && pr_info.state != PrState::Merged
                         && !pr_info.coverage.coverage.is_covered()
                     {
@@ -6463,6 +6620,12 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             // file refuses to idle is the code contradicting itself, and a
             // session did comply with it roughly ten times.
             let head = short_sha(local_head);
+            // The verb a wedged session is told to run is harness-correct:
+            // codex gets `/review`, claude `/code-review`. Resolved here from the
+            // ambient author markers (the same `resolve_harness` the gate uses)
+            // rather than threaded through every caller, so the 20+ build_block_reason
+            // call sites stay single-arg.
+            let author_harness = crate::claims::resolve_harness();
             let items: Vec<String> = pr
                 .unattested_reviewers
                 .iter()
@@ -6488,14 +6651,27 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
                     if r.name == LOCAL_PEER_REVIEWER {
                         return format!("peer{} -> run `/fno:review peer --attest`", state);
                     }
-                    match reviewer_invocation(&r.name) {
+                    match reviewer_invocation_for(&r.name, author_harness.as_deref()) {
                         Some((inv, self_cert)) => {
                             let mark = if self_cert {
                                 " [self-cert: asserts no review evidence]"
                             } else {
                                 ""
                             };
-                            format!("{}{} -> run `{}`{}", r.name, state, inv, mark)
+                            // code-review is a native harness verb that emits
+                            // no attestation on its own; the session must also
+                            // run the emit helper or the gate never clears.
+                            // The fno-skill reviewers (sigma, declare) attest
+                            // inside their own invocation.
+                            let emit_step = if r.name == "code-review" {
+                                format!(
+                                    ", then `bash skills/review/scripts/emit-attestation.sh {}`",
+                                    r.name
+                                )
+                            } else {
+                                String::new()
+                            };
+                            format!("{}{} -> run `{}`{}{}", r.name, state, inv, emit_step, mark)
                         }
                         None => format!("{}{}", r.name, state),
                     }
@@ -8451,14 +8627,172 @@ mod tests {
     fn reviewer_invocations_cover_the_descriptor_table() {
         // The parity script enforces this against the Python side in CI; this
         // keeps the Rust half self-consistent at unit-test speed.
-        for (name, inv, self_cert) in REVIEWER_INVOCATIONS {
+        for (name, inv, self_cert, _per) in REVIEWER_INVOCATIONS {
             assert!(!inv.is_empty(), "{name} has no invocation");
-            assert_eq!(reviewer_invocation(name), Some((*inv, *self_cert)));
+            assert_eq!(
+                reviewer_invocation_for(name, None),
+                Some((*inv, *self_cert))
+            );
         }
-        assert_eq!(reviewer_invocation("teleport"), None);
+        assert_eq!(reviewer_invocation_for("teleport", None), None);
         // AC5: the ONE self-cert must stay visibly marked on this surface too.
-        assert_eq!(reviewer_invocation("declare").map(|(_, sc)| sc), Some(true));
-        assert_eq!(reviewer_invocation("sigma").map(|(_, sc)| sc), Some(false));
+        assert_eq!(
+            reviewer_invocation_for("declare", None).map(|(_, sc)| sc),
+            Some(true)
+        );
+        assert_eq!(
+            reviewer_invocation_for("sigma", None).map(|(_, sc)| sc),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn reviewer_invocation_resolves_the_author_harness_verb() {
+        // Per-harness: code-review names the harness's own verb. A codex author
+        // is told /review, a claude author /code-review; unknown harness and
+        // override-less reviewers fall back to the scalar default.
+        assert_eq!(
+            reviewer_invocation_for("code-review", Some("codex")),
+            Some(("/review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("code-review", Some("claude")),
+            Some(("/code-review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("code-review", None),
+            Some(("/code-review", false))
+        );
+        assert_eq!(
+            reviewer_invocation_for("sigma", Some("codex")),
+            Some(("/fno:review sigma", false))
+        );
+        // The codex self-review verb must stay bare: prose after it flips codex
+        // to a no-merge-base review target (a verified constraint, not a style).
+        let (codex_verb, _) = reviewer_invocation_for("code-review", Some("codex")).unwrap();
+        assert!(
+            !codex_verb.chars().any(|c| c.is_whitespace()),
+            "codex self-review verb must be bare, got {codex_verb:?}"
+        );
+    }
+
+    #[test]
+    fn code_payload_classifies_code_and_docs() {
+        // Code: source, config, lockfile, script. Docs: markdown, docs/.
+        assert!(payload_is_code(&["cli/src/fno/x.py".into()]));
+        assert!(payload_is_code(&["crates/fno-agents/src/lib.rs".into()]));
+        assert!(payload_is_code(&[".fno/config.toml".into()]));
+        assert!(payload_is_code(&["Cargo.lock".into()]));
+        assert!(payload_is_code(&["scripts/ci/gate.sh".into()]));
+        assert!(!payload_is_code(&["README.md".into()]));
+        assert!(!payload_is_code(&[
+            "docs/architecture/review-lanes.md".into()
+        ]));
+        assert!(!payload_is_code(&["docs/preflight.txt".into()]));
+    }
+
+    #[test]
+    fn code_payload_empty_or_docs_only_diff_is_not_code() {
+        // No diff -> no ship -> no gate. Docs-only -> unchanged behavior.
+        assert!(!payload_is_code(&[]));
+        assert!(!payload_is_code(&[
+            "docs/a.md".into(),
+            "CHANGELOG.md".into()
+        ]));
+    }
+
+    #[test]
+    fn code_payload_mixed_diff_is_code() {
+        // One code file among docs is enough to carry a code payload.
+        assert!(payload_is_code(&["docs/a.md".into(), "src/lib.rs".into()]));
+    }
+
+    #[test]
+    fn self_review_gate_classifies_unreadable_diff_as_code() {
+        // AC4-ERR: a git that cannot produce a diff fails CLOSED - code with
+        // assumed=true - so a degraded probe cannot wave the obligation away.
+        let (is_code, assumed) =
+            classify_payload("definitely-not-a-real-git-binary", Path::new("."));
+        assert!(is_code);
+        assert!(assumed);
+    }
+
+    #[test]
+    fn self_review_gate_floors_code_review_for_a_code_payload() {
+        // AC1 floor: a code payload on a lane-less stock install floors
+        // code-review onto the required set.
+        assert_eq!(
+            floor_self_review(&[], false, true, true),
+            Some("code-review".to_string())
+        );
+    }
+
+    #[test]
+    fn self_review_gate_floor_respects_opt_out_lanes_docs_and_existing() {
+        // AC6-CON: opt-out -> None.
+        assert_eq!(floor_self_review(&[], false, true, false), None);
+        // A configured lane -> None: the lane already expresses review intent.
+        assert_eq!(floor_self_review(&[], true, true, true), None);
+        // A docs payload -> None: nothing to review.
+        assert_eq!(floor_self_review(&[], false, false, true), None);
+        // code-review already named -> None: no double-add.
+        assert_eq!(
+            floor_self_review(&["code-review".to_string()], false, true, true),
+            None
+        );
+        // A leading slash on an existing entry is still recognized as present.
+        assert_eq!(
+            floor_self_review(&["/code-review".to_string()], false, true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn self_review_gate_held_reason_names_code_review_and_its_verb() {
+        // AC1-HP: a code payload that reaches the stop gate with no head-pinned
+        // code-review attestation is held, and the reason names the reviewer
+        // and the verb served by the ambient harness.
+        let mut pr = reviewers_gate_pr();
+        pr.unattested_reviewers[0].name = "code-review".to_string();
+        let reason = build_block_reason(&pr, "abc", true);
+        let harness = crate::claims::resolve_harness();
+        let expected = reviewer_invocation_for("code-review", harness.as_deref())
+            .expect("code-review descriptor")
+            .0;
+        assert!(reason.contains("reviewers gate unmet"), "got: {reason}");
+        assert!(reason.contains("code-review"), "got: {reason}");
+        assert!(reason.contains(&format!("`{expected}`")), "got: {reason}");
+    }
+
+    #[test]
+    fn self_review_gate_pass_attestation_clears_code_review() {
+        // AC2-HP: once a head-pinned code-review pass lands, the scan no longer
+        // holds it - the floor is satisfiable by the self-serve route, not a wait.
+        let tmp = tempfile::tempdir().unwrap();
+        let p = tmp.path().join("e.jsonl");
+        std::fs::write(
+            &p,
+            r#"{"type":"review_attestation","data":{"reviewer":"code-review","head_sha":"h","verdict":"pass"}}"#,
+        )
+        .unwrap();
+        let out = unattested_reviewers(&p, &["code-review".to_string()], "h");
+        assert!(
+            out.is_empty(),
+            "code-review should clear on a pass: {out:?}"
+        );
+    }
+
+    #[test]
+    fn self_review_gate_only_floors_harnesses_with_a_verb() {
+        // The floor wedges a harness whose native verb the session cannot run,
+        // so it applies only where a self-review verb exists. Route 3 (a spawned
+        // reviewer) is the path for harnesses without one and is deferred.
+        assert!(harness_can_self_review(Some("claude")));
+        assert!(harness_can_self_review(Some("codex")));
+        assert!(!harness_can_self_review(Some("gemini")));
+        assert!(!harness_can_self_review(Some("agy")));
+        assert!(!harness_can_self_review(Some("opencode")));
+        assert!(!harness_can_self_review(None));
     }
 
     #[test]

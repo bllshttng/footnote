@@ -257,12 +257,59 @@ def _peer_is_identity_free(entry: Any) -> bool:
     return isinstance(entry, dict) and not entry.get("identity")
 
 
-def _review_lane_configured(repo: str) -> bool:
-    """Whether any review lane (required/optional/reviewers/local-peers) is configured.
+def _is_documentation_path(path: str) -> bool:
+    """A documentation path: `*.md` anywhere or anything under `docs/`.
+
+    Mirrors is_documentation_path in loopcheck.rs - the two must agree on what
+    'documentation' means or the merge gate and the stop gate classify the same
+    PR differently. A single leading `./` is stripped once (lstrip would strip a
+    char set and mangle `.github`/`.md`)."""
+    p = (path or "").strip()
+    if p.startswith("./"):
+        p = p[2:]
+    if not p:
+        return False
+    return p.endswith(".md") or p.startswith("docs/")
+
+
+def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
+    """Whether the PR's diff carries a code payload.
+
+    CODE iff any changed file is not documentation. Fails CLOSED - a missing gh,
+    a failed view, or an unparseable file list all classify as code, so a
+    degraded probe cannot bypass the coverage guard. An empty file list (no diff
+    surfaced) is not code: nothing to review, no gate."""
+    if not shutil.which("gh"):
+        return True
+    res = _gh(["pr", "view", str(pr_number), "--json", "files", "--jq", "[.files[].path]"], repo)
+    if not res.ok:
+        return True
+    try:
+        names = [str(p) for p in json.loads(res.stdout)]
+    except (ValueError, TypeError):
+        return True
+    if not names:
+        return False
+    return any(not _is_documentation_path(p) for p in names)
+
+
+def _harness_can_self_review() -> bool:
+    """Mirror loop-check's floor boundary for the ambient harness."""
+    from fno.harness_identity import present_harness_markers
+    from fno.review_capability import harness_can_self_review
+
+    families = {harness for _marker, harness, _value in present_harness_markers()}
+    return len(families) == 1 and harness_can_self_review(next(iter(families)))
+
+
+def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
+    """Whether review is required for this PR: a configured lane, OR a code
+    payload on a stock install (the self-review floor).
 
     Fail-closed (True) on config error: a misread config must not bypass the
-    coverage guard. (x-0eaf boundary: a stock install with no lane opted out of
-    review, so the guard does not apply.)
+    coverage guard. A stock install with no lane opts out of review UNLESS the
+    payload is code and config.review.self_review_required is on (default), in
+    which case the floor engages so the merge gate agrees with the stop gate.
 
     Peers form a local lane only via identity-free entries. A shared
     peer_identity, or a per-peer identity, means the review posts as a GitHub
@@ -290,9 +337,76 @@ def _review_lane_configured(repo: str) -> bool:
             return True
         if r.peer_identity:
             return False
-        return any(_peer_is_identity_free(p) for p in (r.peers or []))
+        if any(_peer_is_identity_free(p) for p in (r.peers or [])):
+            return True
+        # No configured lane: a code payload still requires review (the
+        # self-review floor), unless the install opted out with
+        # config.review.self_review_required = false. Mirrors the loop-check
+        # floor so the merge gate and the stop gate cannot disagree.
+        if (
+            getattr(r, "self_review_required", True)
+            and pr_number
+            and _harness_can_self_review()
+            and _pr_payload_is_code(repo, pr_number)
+        ):
+            return True
+        return False
     except Exception:
         return True
+
+
+def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
+    """Whether this PR specifically requires a local ``code-review`` pass.
+
+    Coverage answers whether anyone reviewed; it does not prove that a required
+    local reviewer ran. Keep that second requirement explicit so an unrelated
+    GitHub App review cannot satisfy the self-review gate on a direct merge.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        root = Path(_repo_state_dir(repo)).parent
+        review = load_settings_for_repo(root).review
+        configured = {
+            str(name).strip().lstrip("/") for name in (review.reviewers or [])
+        }
+        if "code-review" in configured:
+            return True
+        lane_configured = bool(
+            review.required_bots
+            or review.optional_apps
+            or review.reviewers
+            or review.peer_identity
+            or any(_peer_is_identity_free(p) for p in (review.peers or []))
+        )
+        return bool(
+            not lane_configured
+            and getattr(review, "self_review_required", True)
+            and pr_number
+            and _harness_can_self_review()
+            and _pr_payload_is_code(repo, pr_number)
+        )
+    except Exception:
+        return True
+
+
+def _coverage_has_local_pass(cov: Optional[dict], reviewer: str) -> bool:
+    """Whether coverage carries this head-pinned local reviewer pass."""
+    if not isinstance(cov, dict):
+        return False
+    verdicts = cov.get("verdicts")
+    if not isinstance(verdicts, list):
+        return False
+    target = reviewer.strip().lstrip("/")
+    return any(
+        isinstance(v, dict)
+        and str(v.get("name") or "").strip().lstrip("/") == target
+        and v.get("producer") == "local_attestation"
+        and v.get("verdict") == "reviewed"
+        for v in verdicts
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -905,9 +1019,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # discriminator is auto_merge.enabled, not attendance. After the gh check so
     # a missing gh still reports its own exit 127. Skipped when no review lane is
     # configured (x-0eaf boundary: a stock install opted out of review).
-    # Cache the lane check: it loads config from disk, and three reads below
-    # would re-parse the same TOML three times.
-    review_lane = _review_lane_configured(repo)
+    # Cache both checks: coverage answers whether anyone reviewed, while the
+    # local-attestation check preserves a specifically required code-review.
+    review_lane = _review_lane_configured(repo, pr_number)
+    code_review_required = _code_review_attestation_required(repo, pr_number)
     cov = _review_coverage_for_pr(pr_number, repo)
     covered = (
         not review_lane
@@ -915,6 +1030,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             cov is not None
             and cov.get("coverage") == "covered"
             and _safe_int(cov.get("reviewed_count"), 0) > 0
+            and (
+                not code_review_required
+                or _coverage_has_local_pass(cov, "code-review")
+            )
         )
     )
     # Carried into the refusal reason so a stale-head block says so. Stays None
@@ -931,11 +1050,19 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         if head and ev_head and head != ev_head:
             covered = False
     if not covered:
+        if code_review_required and not _coverage_has_local_pass(cov, "code-review"):
+            refusal = (
+                "required code-review has no head-pinned local pass attestation; "
+                "run the harness review verb at HEAD, then emit the code-review attestation"
+            )
+        else:
+            refusal = _coverage_refused_reason(
+                cov, head, _coverage_sources(repo) if cov is None else None
+            )
         _emit(
             pr_number,
             "blocked",
-            "unreviewed merge refused: "
-            f"{_coverage_refused_reason(cov, head, _coverage_sources(repo) if cov is None else None)}",
+            f"unreviewed merge refused: {refusal}",
             "none",
             err=True,
         )

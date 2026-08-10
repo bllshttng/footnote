@@ -233,3 +233,40 @@ def test_a_login_with_no_account_stays_unverifiable_not_absent(
     assert rc._app_ever_acted("reviewer") is None
     # And it must not have gone looking for an exact account to decide that.
     assert not any("users/" in c for c in calls)
+
+
+def test_self_review_invocation_names_the_harness_verb():
+    import fno.review_capability as rc
+
+    assert rc.harness_can_self_review("claude") is True
+    assert rc.harness_can_self_review("codex") is True
+    assert rc.harness_can_self_review("gemini") is False
+    assert rc.harness_can_self_review(None) is False
+    # AC5-UI: each harness is told its own verb. Codex is bare (prose after it
+    # flips codex to a no-merge-base target); claude carries its arg grammar.
+    assert rc.self_review_invocation("codex") == "/review"
+    assert rc.self_review_invocation("claude") == "/code-review medium --comment --fix"
+    # Unknown harness falls back to the claude default, not a guess.
+    assert rc.self_review_invocation(None) == "/code-review medium --comment --fix"
+    assert rc.self_review_invocation("unknown") == "/code-review medium --comment --fix"
+    # Codex stays bare even though claude carries args - no prose suffix leaks.
+    assert " " not in rc.self_review_invocation("codex")
+
+
+def test_code_review_is_scoped_to_harnesses_with_a_verb():
+    """code-review resolves per its invocations map, mirroring subagent-dispatch:
+    satisfiable on claude/codex (the only verbs that exist), unavailable on a
+    known harness with no verb (gemini/agy/opencode), unverifiable on unknown.
+    Resolving it satisfiable everywhere would floor the stop gate onto a reviewer
+    whose attestation nothing produces on three harnesses, wedging the loop."""
+    def on(harness: str):
+        s = SessionCapability(harness=harness, substrate="pane", attended=True)
+        return resolve_reviewers(["code-review"], s)[0]
+
+    assert on("claude").status == "satisfiable"
+    assert on("codex").status == "satisfiable"
+    for unsupported in ("gemini", "agy", "opencode"):
+        v = on(unsupported)
+        assert v.status == "unavailable", f"{unsupported}: {v.reason}"
+        assert "scoped to" in v.reason
+    assert on("unknown").status == "unverifiable"
