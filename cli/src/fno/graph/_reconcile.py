@@ -371,6 +371,11 @@ class PromiseVerdict:
 
     outcome: Literal["ok", "promise_unmet"]
     reason: Optional[str] = None  # multi-line refusal text; None when ok
+    # Why a fail-open happened (unreadable plan, unparseable frontmatter), naming
+    # the path. Returned, not printed: the close verbs emit it on stderr, but a
+    # raw stderr write here would pollute the `reconcile --json` stream (JSON on
+    # stdout) and break the JSON-only contract of that path.
+    warning: Optional[str] = None
 
     @property
     def exit_code(self) -> int:
@@ -479,11 +484,13 @@ def resolve_promise_evidence(
     try:
         text = Path(plan_path_clean).read_text(encoding="utf-8")
     except OSError as exc:
-        sys.stderr.write(
-            f"warning: promise gate could not read plan {plan_path_clean} "
-            f"({exc}); gate skipped for this close\n"
+        return PromiseVerdict(
+            outcome="ok",
+            warning=(
+                f"promise gate could not read plan {plan_path_clean} ({exc}); "
+                f"gate skipped for this close"
+            ),
         )
-        return PromiseVerdict(outcome="ok")
 
     from fno.plan._doc import FrontmatterError, _parse_frontmatter, _split_frontmatter
 
@@ -491,11 +498,13 @@ def resolve_promise_evidence(
     try:
         frontmatter = _parse_frontmatter(yaml_text) if yaml_text.strip() else {}
     except FrontmatterError as exc:
-        sys.stderr.write(
-            f"warning: promise gate skipped {plan_path_clean}; plan frontmatter "
-            f"would not parse ({exc})\n"
+        return PromiseVerdict(
+            outcome="ok",
+            warning=(
+                f"promise gate skipped {plan_path_clean}; plan frontmatter "
+                f"would not parse ({exc})"
+            ),
         )
-        return PromiseVerdict(outcome="ok")
 
     close_probes = frontmatter.get("close_probes")
     expected_raw = frontmatter.get("expected_url_count")

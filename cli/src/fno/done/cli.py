@@ -582,6 +582,8 @@ def done_command(
         if promise.outcome == "promise_unmet":
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
+        if promise.warning:
+            typer.echo(f"warning: {promise.warning}", err=True)
 
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk
     # I/O stays out of the graph lock.

@@ -7294,6 +7294,8 @@ def cmd_done(
         if promise.outcome == "promise_unmet":
             typer.echo(promise.reason, err=True)
             raise typer.Exit(code=promise.exit_code)
+        if promise.warning:
+            typer.echo(f"warning: {promise.warning}", err=True)
 
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]

@@ -756,7 +756,6 @@ validate_wave_section_headers() {
         fi
     fi
 
-
     # Duplicate detection runs BEFORE the `-z "$yaml_waves"` early
     # return: a plan with two `## Wave 1:` headers but no Execution
     # Strategy YAML still has ambiguous wikilink-fragment routing that

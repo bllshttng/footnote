@@ -162,14 +162,14 @@ def test_no_plan_path_passes():
     assert resolve_promise_evidence({"id": "x-a"}).outcome == "ok"
 
 
-def test_unreadable_plan_fails_open_with_named_warning(tmp_path: Path, capsys):
+def test_unreadable_plan_fails_open_with_named_warning(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence
 
     missing = tmp_path / "nope.md"
     v = resolve_promise_evidence({"id": "x-a", "plan_path": str(missing)})
     assert v.outcome == "ok"
-    err = capsys.readouterr().err
-    assert str(missing) in err  # the path is named, not just "plan unreadable"
+    assert v.warning is not None
+    assert str(missing) in v.warning  # the path is named, not just "plan unreadable"
 
 
 def test_condition_b_passing_probes_pass(tmp_path: Path):
