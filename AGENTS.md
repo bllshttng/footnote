@@ -156,7 +156,7 @@ Paths resolve via `fno.paths`; override under `config.paths.*`; check with `fno 
 
 ### Plan completion stamp
 
-At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`) - inline-list syntax only. `in_review` = first PR created; `done` = all expected ships. A separate **promise gate** guards node closure: all three close verbs (`backlog done`, `done`, `reconcile`) refuse (exit 6) when a plan promised more than shipped (>= 2 `## Wave N` headings asserting nothing, a failed `close_probes`, or fewer merged ships than `expected_url_count`). `--force --reason` records a deliberate half-ship; the limits land in the refusal text. [plan-completion-stamp](docs/architecture/plan-completion-stamp.md).
+At the ship gate `/target` stamps plan frontmatter (`status: in_review|done`, `shipped_at`, `urls`, `session_ids`). `in_review` = first PR created; `done` = all expected ships. Node closure also clears a **promise gate** (exit 6).
 
 ### Multi-repo features
 
@@ -184,7 +184,7 @@ Bug in plan -> fix inline, note in SUMMARY.md. Minor enhancement (<15 min) -> im
 - **`fno target start <node>`** - one-verb worktree cold-start (worktree ensure off `origin/main` -> heal `.fno` symlink -> `fno target init`), idempotent. [target-start-verb](docs/architecture/target-start-verb.md).
 - **Spawn substrate axis** - `fno agents spawn --substrate <pane|bg|headless>`: `pane` (default), `bg` (`claude --bg`, claude-only), `headless` (one-shot `-p`/`--exec`). Never default to `-p`; it is reachable only via explicit `headless`.
 - **`fno doctor`** - detects stale deployed `fno` vs source; `--fix` delegates to `fno update`. Compares against merged source only. [installed-fno-staleness](docs/architecture/installed-fno-staleness.md).
-- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: harness (the binary, `-H`), provider (the model vendor, `-P`), model (`-m`), account (`--account`). `opencode` is legally both a harness and a provider, so never infer the axis from a value. Definitions and the allowlist procedure live in [docs/architecture/four-axis-vocabulary.md](docs/architecture/four-axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`. [provider-rotation](docs/provider-rotation.md).
+- **Accounts + rotation** - `fno config accounts`: records, failover, lockout, routing, combos. Four axes share one neighbourhood and must not be confused: harness (the binary, `-H`), provider (the model vendor, `-P`), model (`-m`), account (`--account`). `opencode` is legally both a harness and a provider, so never infer the axis from a value. Definitions and the allowlist procedure live in [docs/architecture/four-axis-vocabulary.md](docs/architecture/four-axis-vocabulary.md), enforced by `scripts/ci/check-axis-vocabulary.sh`.
 - **Curated CLI menu** - `fno --help` shows ~9 verbs; most commands are hidden but invocable. `fno help --all` / `fno help <group> --all` list everything. New verbs default hidden; `fno lint menu-caps` gates the advertised surface (10 top-level / 12 per sub-app).
 - **Control-plane LOC ratchet** - positive line-count delta across control-plane paths fails CI unless the PR body has a `loc-exception:` line. [loc-ratchet](docs/architecture/loc-ratchet.md).
 - **Post-merge ritual** - `/fno:pr merged` runs reconcile + retro, writes follow-ups to `config.post_merge.parking_lot_path`.

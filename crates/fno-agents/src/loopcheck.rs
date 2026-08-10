@@ -6615,9 +6615,7 @@ fn decide_probe_run(args: &[String]) -> (i32, String) {
     };
 
     let probes = match parse_probes_for(&content, &key) {
-        ProbeDecl::None => {
-            return probe_run_payload(0, &key, false, vec![], "no probes declared")
-        }
+        ProbeDecl::None => return probe_run_payload(0, &key, false, vec![], "no probes declared"),
         ProbeDecl::Unparseable => {
             return probe_run_payload(
                 2,
@@ -10842,10 +10840,7 @@ mod done_probe_tests {
             vec!["exit 0".to_string()],
             "close_probes must read the close_probes list, not done_probes"
         );
-        assert_eq!(
-            probes_for(&doc, "done_probes"),
-            vec!["exit 1".to_string()]
-        );
+        assert_eq!(probes_for(&doc, "done_probes"), vec!["exit 1".to_string()]);
     }
 
     /// `probe-run` exit contract: 0 passes, 1 fails a probe, 2 is undeterminable
@@ -10870,7 +10865,10 @@ mod done_probe_tests {
             "--json".into(),
         ]);
         assert_eq!(code, 0);
-        assert_eq!(serde_json::from_str::<Value>(&json).unwrap()["passed"], true);
+        assert_eq!(
+            serde_json::from_str::<Value>(&json).unwrap()["passed"],
+            true
+        );
 
         let (code, json) = decide_probe_run(&[
             "--plan".into(),
@@ -10910,7 +10908,6 @@ mod done_probe_tests {
             other => panic!("expected probes for {key}, got {other:?}"),
         }
     }
-
 
     #[test]
     fn hanging_probe_is_killed_within_the_timeout_budget() {
