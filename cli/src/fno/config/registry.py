@@ -108,6 +108,13 @@ FIELD_META: dict[str, Meta] = {
     "post_merge.parking_lot_path": Meta(
         "advanced", "Per-repo vault parking-lot path for the post-merge ritual (repo-relative).",
     ),
+    "post_merge.maintainer_marker": Meta(
+        "advanced",
+        "Discriminator tag for maintainer-only post-merge items (e.g. '#maintainer'). "
+        "Default empty: omit the tag entirely so a fresh install ships no one's "
+        "initials. Honored by both the post-merge ritual and the capture parser; "
+        "set per-repo only when the destination is a shared vault.",
+    ),
     "post_merge.enabled": Meta("advanced", "Whether the post-merge ritual runs."),
     "post_merge.self_reap": Meta("never", "Whether a post-merge watcher self-reaps."),
     "post_merge.sync_command": Meta(

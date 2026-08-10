@@ -4,7 +4,7 @@ Covers the one-idempotent-pass contract:
   - AC3: eject filed ``ab-*`` lines whose node completed (read concrete fields,
     not ``status``); incomplete filed nodes stay.
   - AC5: ``tidy`` is idempotent (a second run is byte-identical to the first
-    run's output) and the pinned digest lists every open ``#jc`` action exactly
+    run's output) and the pinned digest lists every open ``#maintainer`` action exactly
     once, dated items ascending by date then undated in stable source order.
   - Separator migration (em-dash -> hyphen) is owned by ``tidy`` and only
     rewrites the item separator, never em-dashes inside prose.
@@ -218,9 +218,9 @@ def test_tidy_is_idempotent(tmp_path: Path) -> None:
         + "  why: needs hardening\n"
         + "- [ ] cv-deadbeef — a carveout (p2)\n"
         + "- [ ] ab-12345678 — filed + done (p2)\n"
-        + f"- [ ] act on the review #jc {CAL} 2026-06-10\n"
-        + f"- [ ] earlier action #jc {CAL} 2026-06-05\n"
-        + "- [ ] undated action #jc\n",
+        + f"- [ ] act on the review #maintainer {CAL} 2026-06-10\n"
+        + f"- [ ] earlier action #maintainer {CAL} 2026-06-05\n"
+        + "- [ ] undated action #maintainer\n",
         encoding="utf-8",
     )
 
@@ -231,8 +231,8 @@ def test_tidy_is_idempotent(tmp_path: Path) -> None:
     assert first == second, "tidy must be idempotent on its own output"
 
 
-def test_tidy_digest_jc_ordering_and_dedup(tmp_path: Path) -> None:
-    """AC5: the #jc digest lists each open action once, dated ascending by date,
+def test_tidy_digest_marker_ordering_and_dedup(tmp_path: Path) -> None:
+    """AC5: the #maintainer digest lists each open action once, dated ascending by date,
     then undated in stable source order."""
     from fno.backlog.capture import tidy
 
@@ -242,17 +242,17 @@ def test_tidy_digest_jc_ordering_and_dedup(tmp_path: Path) -> None:
     inbox.write_text(
         _header()
         + "## h\n\n"
-        + f"- [ ] later thing #jc {CAL} 2026-06-20\n"
-        + f"- [ ] earlier thing #jc {CAL} 2026-06-01\n"
-        + "- [ ] zeta undated #jc\n"
-        + "- [ ] alpha undated #jc\n"
-        + f"- [ ] earlier thing #jc {CAL} 2026-06-01\n",  # duplicate of earlier
+        + f"- [ ] later thing #maintainer {CAL} 2026-06-20\n"
+        + f"- [ ] earlier thing #maintainer {CAL} 2026-06-01\n"
+        + "- [ ] zeta undated #maintainer\n"
+        + "- [ ] alpha undated #maintainer\n"
+        + f"- [ ] earlier thing #maintainer {CAL} 2026-06-01\n",  # duplicate of earlier
         encoding="utf-8",
     )
-    tidy(inbox, graph_path=graph)
+    tidy(inbox, graph_path=graph, marker="#maintainer")
     body = inbox.read_text(encoding="utf-8")
 
-    start = body.index("## Open #jc actions")
+    start = body.index("## Open #maintainer actions")
     end = body.index("## Open followups by priority")
     digest = body[start:end]
 
@@ -302,8 +302,8 @@ def test_tidy_refuses_on_duplicate_digest_markers(tmp_path: Path) -> None:
     _write_graph(graph, [])
     inbox.write_text(
         _header()
-        + "<!-- inbox-digest:start -->\n## Open #jc actions\n<!-- inbox-digest:end -->\n\n"
-        + "<!-- inbox-digest:start -->\n## Open #jc actions\n<!-- inbox-digest:end -->\n\n"
+        + "<!-- inbox-digest:start -->\n## Open #maintainer actions\n<!-- inbox-digest:end -->\n\n"
+        + "<!-- inbox-digest:start -->\n## Open #maintainer actions\n<!-- inbox-digest:end -->\n\n"
         + "## h\n\n- [ ] fu-abc123 — x (p1)\n",
         encoding="utf-8",
     )

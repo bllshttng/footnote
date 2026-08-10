@@ -587,18 +587,30 @@ class Ritual:
 
     def _judgment_prompt(self, deferred: int, files: int, lines: int) -> str:
         pr = self.ctx.pr
-        pl = self.ctx.parking_lot or "<unset>"
+        marker = getattr(self.ctx.pm, "maintainer_marker", None) or ""
+        if self.ctx.parking_lot is not None:
+            # Shared/vault destination: maintainer-only items live alongside the
+            # narrative in the parking-lot file, tagged ONLY when a marker is
+            # configured (the discriminator is earned by a shared destination).
+            dest = str(self.ctx.parking_lot)
+            tag = f" tagged `{marker}`" if marker else ""
+            maint = f"plus maintainer-only items (a decision/sign-off/manual setup){tag}"
+        else:
+            # Default: no shared lot, so maintainer-only items get a dedicated
+            # repo-local file. A dedicated file needs no discriminator tag.
+            dest = ".fno/tasks/user.md (under the canonical repo root)"
+            maint = "plus maintainer-only items (a decision/sign-off/manual setup), no tag"
         return (
             f"Post-merge judgment for PR #{pr} (autonomous; do not prompt). "
             f"(a) Triage {deferred} deferral-born node(s) filed from this PR: "
             f"run `fno backlog find 'deferred from PR #{pr}'` and for each open "
             f"node decide promote/keep/defer/supersede via the matching "
             f"`fno backlog` verb, logging undecided ones. "
-            f"(b) Parking-lot prose: read `gh pr diff {pr}`, and if the diff "
+            f"(b) Follow-up capture: read `gh pr diff {pr}`, and if the diff "
             f"(files={files}, lines={lines}) carries genuine follow-up context, "
             f"append ONE dated section keyed `<!-- post-merge:pr-{pr} -->` to "
-            f"{pl} (append-only, never overwrite), keeping narrative + #jc "
-            f"items only the maintainer can do. Skip prose if below the bar. "
+            f"{dest} via an append-only redirect (never overwrite): narrative "
+            f"{maint}. Skip if below the bar. "
             f"Self-end when done; never spawn further work."
         )
 

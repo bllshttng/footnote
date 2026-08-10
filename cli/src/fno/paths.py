@@ -1031,6 +1031,18 @@ def inbox_path(project_root: Optional[Path] = None) -> Path:
     return _resolve(raw, project_root=root)
 
 
+def maintainer_marker() -> Optional[str]:
+    """The configured maintainer-only action tag (``post_merge.maintainer_marker``).
+
+    Default ``None``: the capture parser's human/maintainer arm stays inactive
+    and no tag is appended to post-merge items, so a fresh install tags nobody's
+    todos with someone else's initials. Reads the same ``post_merge`` block as
+    ``inbox_path`` reads ``parking_lot_path`` - the post-merge ritual (producer)
+    and capture parser (consumer) of maintainer-only items share one key.
+    """
+    return _settings().post_merge.maintainer_marker
+
+
 def config_file() -> Path:
     """Return the path to the active config file (config.toml on a flat install;
     a legacy settings.yaml when that is what loaded).
