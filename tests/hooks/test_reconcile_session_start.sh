@@ -177,6 +177,26 @@ echo "$OUT" | grep -q "drifted node" \
 pass "render: empty sweep is silent and consumed"
 
 # ============================================================================
+# AC: render — promise-gate held-open nodes surface a reminder (condition D +
+# #794). Surfacing only .closed left these silent; the hook reads
+# .promise_unmet too, ahead of the consume-after-show move.
+# ============================================================================
+log "render: promise_unmet nodes -> held-open reminder emitted"
+REPO_PM="$WORK/repo-pm"; mkdir -p "$REPO_PM/.fno"
+RESULT_PM="$REPO_PM/.fno/.reconcile-result.json"
+touch "$REPO_PM/.fno/.reconcile-stamp"
+cat > "$RESULT_PM" <<'JSON'
+{"dry_run": false, "candidates": [], "closed": [], "failures": [], "promise_unmet": [{"node_id":"x-dd1","reason":"deferred carve-out cv-99"},{"node_id":"x-dd2","reason":"close_probe failed"}]}
+JSON
+OUT=$(CLAUDE_PROJECT_DIR="$REPO_PM" RECONCILE_THROTTLE_SECONDS=900 bash "$HOOK" 2>/dev/null)
+echo "$OUT" | grep -q "held 2 node(s) open on the promise gate" \
+    || fail "render: missing promise-gate held-open reminder (got: $OUT)"
+echo "$OUT" | grep -q "x-dd1" || fail "render: reminder missing node id x-dd1"
+echo "$OUT" | grep -q "x-dd2" || fail "render: reminder missing node id x-dd2"
+[[ ! -f "$RESULT_PM" ]] || fail "render: promise_unmet result not consumed to .shown"
+pass "render: promise-gate held-open reminder emitted; result consumed"
+
+# ============================================================================
 # AC: render — a legacy result (no `sync_catchup` key) must not kill the hook.
 # The render block runs under `set -euo pipefail` ABOVE the load-bearing
 # reconcile trigger, so a jq type error there took out both the consume and
