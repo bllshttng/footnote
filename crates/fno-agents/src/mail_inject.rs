@@ -689,7 +689,10 @@ mod tests {
         );
         assert_eq!(body_cap_decision(&big_relay, 3000, 5000), None);
         // Leading whitespace before the envelope tag is still framed.
-        assert_eq!(body_cap_decision(&format!("  \n{big_mail}"), 3000, 5000), None);
+        assert_eq!(
+            body_cap_decision(&format!("  \n{big_mail}"), 3000, 5000),
+            None
+        );
         // An over-cap UNWRAPPED body is still refused (both front doors stay capped).
         assert_eq!(body_cap_decision(&"x".repeat(6000), 3000, 5000), Some(1));
     }
