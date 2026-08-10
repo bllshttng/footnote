@@ -58,13 +58,16 @@ fno mail send '/code-review medium --fix' --to-self --raw
 A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
 A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.
 So the front door is the single entry point; `mail-inject` is the transport for the daemon lane only, and it cannot target a mux pane.
-The binary verb is still useful directly when you need its STDIN form (for a payload too large for argv) or are scripting against a daemon session outside the Python CLI:
+The binary verb is still reachable directly for scripting against a daemon session outside the Python CLI, where its STDIN form suits a pipe:
 
 ```bash
 printf '/code-review medium --fix' | fno-agents mail-inject --harness claude --session <full-session-uuid>
 ```
 
-It reads the turn text from STDIN, which sidesteps the argv size limit for large envelopes.
+It reads the turn text from STDIN and enforces the brevity cap for the raw/direct lane: `fno mail send --raw` does not cap in Python, so this binary is where that lane, and a direct binary call, get capped.
+A shared `FNO_MAIL_BODY_WARN` / `FNO_MAIL_BODY_REFUSE` knob pair keeps the threshold identical to the wrapped-mail cap, so the direct binary is not a way around it.
+The cap skips framed envelopes: a `<fno_mail>` body is already capped in Python before it reaches here, and a `<cross-session-message>` relay hop is internal traffic, not authored mail, so neither is refused here.
+An over-cap unwrapped body is refused before it is delivered; the STDIN form is for piping the turn, not for moving a verbose payload.
 `--session` takes the full session UUID or its 8-hex short id (the roster accepts either); `--harness` is `claude` (the default) or `codex`.
 It delivers over the daemon `control.sock` to a live `claude --bg` session, so the target must be an adopted live session: it never lazy-starts one.
 

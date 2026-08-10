@@ -185,8 +185,7 @@ pub fn emit_raw_inject_audit(
     provider: MailInjectProvider,
     confirmed: bool,
 ) {
-    let head = text.trim_start();
-    if head.starts_with("<fno_mail") || head.starts_with("<cross-session-message") {
+    if is_framed_envelope(text) {
         return;
     }
     let (harness, lane) = match provider {
@@ -377,6 +376,71 @@ pub fn deliver_via_control_sock(
 /// the durable fallback. The claude delivery stays sync ([`deliver_via_control_sock`]);
 /// codex awaits [`crate::codex_inject::deliver_via_codex_daemon`] on the caller's
 /// runtime (no nested runtime).
+/// Read a brevity-cap env knob as an int, falling back to `default` when unset or
+/// non-numeric. Mirrors Python `_cap_env_int` (cli/src/fno/mail/cli.py): the SAME
+/// knob name governs BOTH front doors onto this transport, so the thresholds
+/// cannot drift between the Python `fno mail send --raw` entry and this binary.
+/// Trims surrounding whitespace because Python `int()` does (`int(" 4000 ")` ==
+/// 4000); without it, a value with stray whitespace would parse on one door and
+/// fall back to the default on the other, drifting the threshold.
+fn cap_env_int(name: &str, default: i64) -> i64 {
+    std::env::var(name)
+        .ok()
+        .and_then(|raw| raw.trim().parse().ok())
+        .unwrap_or(default)
+}
+
+/// Two-tier brevity cap on an UNWRAPPED body's byte length, mirroring Python
+/// `_enforce_body_cap` (cli/src/fno/mail/cli.py). `n` is UTF-8 byte length (Rust
+/// `String::len`), matching Python's `len(body.encode("utf-8"))`. Returns
+/// `Some(exit_code)` to refuse (caller returns it without injecting); `None` to
+/// proceed. The warn tier is a stderr note only and does not block, matching
+/// Python. A tier <= 0 disables it (fail-open); both doors read the same knob, so
+/// disabling one disables both. Pure numeric core; [`body_cap_decision`] scopes
+/// it to unwrapped bodies so framed relay/mail traffic is never refused.
+fn enforce_body_cap(n: usize, warn: i64, refuse: i64) -> Option<i32> {
+    if refuse > 0 && n > refuse as usize {
+        eprintln!(
+            "error: mail body is {n} bytes (cap {refuse}). Relay mail is re-read every turn; \
+             put the detail in a node or doc and send a short pointer. \
+             Disable with FNO_MAIL_BODY_REFUSE=0 (warn-only) or both knobs 0."
+        );
+        return Some(1);
+    }
+    if warn > 0 && n > warn as usize {
+        eprintln!(
+            "note: mail body is {n} bytes (over the {warn}-byte brevity guide); \
+             prefer a short pointer with the detail in a node/doc."
+        );
+    }
+    None
+}
+
+/// A payload carrying a known agent-authored envelope (`<fno_mail>` for relayed
+/// mail, `<cross-session-message>` for the ask-lane peer relay) is INTERNAL
+/// framed traffic, not a direct/raw authored body. [`emit_raw_inject_audit`] and
+/// the brevity cap share this one predicate so the envelope set has a single
+/// source of truth. `submit_via_control_reply` delivers `<cross-session-message>`
+/// hops through this same binary; an over-cap reject there is read as
+/// INJECT_NOT_SENT (empty stdout), the daemon drops the hop and advances its
+/// cursor, so the cap must never fire on framed traffic.
+fn is_framed_envelope(text: &str) -> bool {
+    let head = text.trim_start();
+    head.starts_with("<fno_mail") || head.starts_with("<cross-session-message")
+}
+
+/// The cap decision for an injected body: `Some(exit_code)` to refuse (caller
+/// returns it without injecting), `None` to proceed. Scoped to UNWRAPPED bodies:
+/// a `<fno_mail>` body is already Python-capped before wrapping, and a
+/// `<cross-session-message>` hop is internal relay traffic (see
+/// [`is_framed_envelope`]), so framed envelopes are skipped.
+fn body_cap_decision(text: &str, warn: i64, refuse: i64) -> Option<i32> {
+    if is_framed_envelope(text) {
+        return None;
+    }
+    enforce_body_cap(text.len(), warn, refuse)
+}
+
 pub async fn run_mail_inject(rest: &[String]) -> i32 {
     let args = match parse_args(rest) {
         Ok(a) => a,
@@ -390,6 +454,21 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
     if let Err(e) = std::io::stdin().read_to_string(&mut text) {
         eprintln!("mail-inject: reading stdin: {e}");
         return emit(false, "io-error");
+    }
+
+    // Brevity cap on UNWRAPPED bodies only (body_cap_decision). `fno mail send
+    // --raw` does not cap in Python, so this binary is its sole cap; a direct
+    // binary call is the other unwrapped door. Framed envelopes are skipped: a
+    // `<fno_mail>` body is already Python-capped before wrapping, and a
+    // `<cross-session-message>` relay hop must not be refused or the daemon drops
+    // it. Refuses before any delivery, so an over-cap body never lands and is not
+    // audited as a raw inject.
+    if let Some(code) = body_cap_decision(
+        &text,
+        cap_env_int("FNO_MAIL_BODY_WARN", 3000),
+        cap_env_int("FNO_MAIL_BODY_REFUSE", 5000),
+    ) {
+        return code;
     }
 
     let result = match args.provider {
@@ -577,6 +656,57 @@ mod tests {
         let err = inject_with_submit(&mut t, DETACH_SENTINELS[0], Duration::ZERO);
         assert!(matches!(err, Err(DriveError::UnsafeText)));
         assert!(t.sent.is_empty(), "unsafe envelope must not paste or CR");
+    }
+
+    #[test]
+    fn body_cap_refuses_over_refuse_tier_and_passes_below_it() {
+        // Defaults: warn 3000, refuse 5000. `String::len` is UTF-8 byte length,
+        // matching Python's len(body.encode("utf-8")); the repro for the gap this
+        // closes is an over-refuse body sailing through the direct binary.
+        // Below both tiers: proceeds.
+        assert_eq!(enforce_body_cap(100, 3000, 5000), None);
+        // Over warn, under refuse: proceeds (warn is a non-blocking note).
+        assert_eq!(enforce_body_cap(3001, 3000, 5000), None);
+        // At the refuse cap exactly: allowed (strictly greater refuses).
+        assert_eq!(enforce_body_cap(5000, 3000, 5000), None);
+        // Over refuse: refused with exit 1, the same code Python's typer.Exit(1) yields.
+        assert_eq!(enforce_body_cap(5001, 3000, 5000), Some(1));
+        // A disabled cap (both knobs 0) fail-opens, matching Python.
+        assert_eq!(enforce_body_cap(999_999, 0, 0), None);
+    }
+
+    #[test]
+    fn body_cap_skips_framed_envelopes_but_caps_unwrapped() {
+        // An over-cap framed envelope is NOT refused: the cap is scoped to
+        // unwrapped bodies so it cannot drop a `<cross-session-message>` relay hop
+        // (data loss) or spuriously reject a `<fno_mail>` body Python already
+        // capped before wrapping it.
+        let big_mail = format!("<fno_mail from=\"a\">\n{}\n</fno_mail>", "x".repeat(6000));
+        assert_eq!(body_cap_decision(&big_mail, 3000, 5000), None);
+        let big_relay = format!(
+            "<cross-session-message from-name=\"p\">\n{}\n</cross-session-message>",
+            "x".repeat(6000)
+        );
+        assert_eq!(body_cap_decision(&big_relay, 3000, 5000), None);
+        // Leading whitespace before the envelope tag is still framed.
+        assert_eq!(
+            body_cap_decision(&format!("  \n{big_mail}"), 3000, 5000),
+            None
+        );
+        // An over-cap UNWRAPPED body is still refused (both front doors stay capped).
+        assert_eq!(body_cap_decision(&"x".repeat(6000), 3000, 5000), Some(1));
+    }
+
+    #[test]
+    fn cap_env_int_parses_whitespace_padded_values_like_python() {
+        // Python `int(" 4000 ")` == 4000; Rust's bare `.parse()` rejects it and
+        // would fall back to the default, drifting the threshold between doors.
+        std::env::set_var("FNO_TEST_CAP_INT", " 4000 ");
+        assert_eq!(cap_env_int("FNO_TEST_CAP_INT", 5000), 4000);
+        std::env::set_var("FNO_TEST_CAP_INT", "not-an-int");
+        assert_eq!(cap_env_int("FNO_TEST_CAP_INT", 5000), 5000);
+        std::env::remove_var("FNO_TEST_CAP_INT");
+        assert_eq!(cap_env_int("FNO_TEST_CAP_INT", 5000), 5000);
     }
 
     #[test]
