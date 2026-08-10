@@ -2996,3 +2996,54 @@ def test_subagent_unreadable_root_emits_one_warning(tmp_path, monkeypatch):
     assert rows == []
     assert len(warnings) == 1
     assert "unreadable" in warnings[0]
+
+
+def test_disambiguate_does_not_compound_a_non_unique_short_id():
+    """A repeated ``short_id`` must not grow the alias on every render.
+
+    ``_disambiguate`` used to append ``short_id`` unconditionally, trusting it
+    to be unique. When it was not, every colliding session got the SAME suffix,
+    the name still collided, and the next render appended another copy -
+    observed in the wild at 13 repetitions inside a 224-char alias. The suffix
+    has to be checked before it is accepted.
+    """
+    from fno.agents.discover import _disambiguate
+
+    live = [
+        {"session_id": "aaaaaaaa-1111-2222-3333-444444444444", "short_id": "dup"},
+        {"session_id": "bbbbbbbb-1111-2222-3333-555555555555", "short_id": "dup"},
+        {"session_id": "cccccccc-1111-2222-3333-666666666666", "short_id": "dup"},
+    ]
+    # Base carries no "dup" of its own, so counting the suffix measures the
+    # escalation rather than the name it was appended to.
+    aliases = {r["session_id"]: "etl-worker" for r in live}
+
+    out = _disambiguate(aliases, live)
+
+    assert len(set(out.values())) == 3, f"aliases must be unique, got {out}"
+    # The defect was unbounded GROWTH, not merely a duplicate: the shared
+    # short_id may be appended at most once, and the third session must escalate
+    # past it to something actually unique.
+    for name in out.values():
+        assert name.count("-dup") <= 1, f"suffix compounded: {name}"
+
+    # Idempotent: feeding the result back in must not grow anything. This is the
+    # property that actually failed in production, where the map is re-rendered
+    # from its own stored output on every pass.
+    again = _disambiguate(out, live)
+    assert again == out, f"second render changed the map: {out} -> {again}"
+
+
+def test_disambiguate_leaves_already_unique_aliases_untouched():
+    """The common case stays byte-identical - no suffix on a unique name."""
+    from fno.agents.discover import _disambiguate
+
+    live = [
+        {"session_id": "aaaaaaaa-1111-2222-3333-444444444444", "short_id": "a1b2c3d4"},
+        {"session_id": "bbbbbbbb-1111-2222-3333-555555555555", "short_id": "e5f6a7b8"},
+    ]
+    aliases = {
+        "aaaaaaaa-1111-2222-3333-444444444444": "etl-a1b2c3d4",
+        "bbbbbbbb-1111-2222-3333-555555555555": "etl-e5f6a7b8",
+    }
+    assert _disambiguate(aliases, live) == aliases

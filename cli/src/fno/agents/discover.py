@@ -1346,19 +1346,38 @@ def _resolve_aliases(
 def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     """Guarantee aliases are unique within a render (Invariant).
 
-    Default aliases embed the unique hex, so this only fires when a hand-edited
-    map maps two sessions to the same name; the loser gets its short-id
-    appended deterministically (sorted by session_id, never silently dropped).
+    The loser of a collision gets a suffix appended deterministically (sorted by
+    session_id, never silently dropped).
+
+    The suffix is TRIED, not trusted. This used to append ``short_id``
+    unconditionally on the reasoning that default aliases embed a unique hex -
+    but ``short_id`` is only unique when whatever wrote it honored that, and
+    when it did not, the appended token was the SAME string for every colliding
+    session. The name then still collided, gained another copy on the next
+    render, and grew without bound: observed at 13 repetitions of one 16-char
+    token in a 224-char alias, on 20 of 194 entries. The guard meant to catch a
+    non-unique short_id was the thing amplifying it.
+
+    So each candidate is checked before it is accepted, ending at the full
+    session id, which is the map's own key and therefore unique by
+    construction. A non-unique ``short_id`` upstream is still a bug; this only
+    stops it from compounding here.
     """
-    seen: dict[str, str] = {}
+    seen: set[str] = set()
     short_by_sid = {r["session_id"]: r["short_id"] for r in live}
     out: dict[str, str] = {}
     for sid in sorted(aliases):
         name = aliases[sid]
-        if name in seen.values():
-            name = f"{name}-{short_by_sid.get(sid, canonical_handle(sid))}"
+        if name in seen:
+            for suffix in (short_by_sid.get(sid), canonical_handle(sid), sid):
+                if not suffix:
+                    continue
+                candidate = f"{name}-{suffix}"
+                if candidate not in seen:
+                    name = candidate
+                    break
         out[sid] = name
-        seen[sid] = name
+        seen.add(name)
     return out
 
 
