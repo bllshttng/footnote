@@ -24,6 +24,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -62,6 +63,28 @@ _ALIAS_LOCK_POLL_SECONDS = 0.02
 # stored alias is discarded and regenerated from the default; nobody types an
 # 80-character mailbox address by hand.
 _MAX_STORED_ALIAS_LEN = 80
+
+
+def _is_accreted(alias: str) -> bool:
+    """Whether ``alias`` carries the pre-fix disambiguator's damage signature.
+
+    The old ``_disambiguate`` appended the SAME suffix once per render, so the
+    damage is a trailing token-group repeated back to back: ``etl-dup-dup``,
+    ``etl-handoff-siera-lm-handoff-siera-lm``. Detecting that shape rather than
+    only a length lets the heal reach a name that stopped growing after two or
+    three renders, which a length cap alone leaves stored - and therefore
+    handed back verbatim - forever.
+
+    Length stays a second, independent trigger: an alias long enough to be a
+    mailbox nuisance is discarded whatever produced it.
+    """
+    if len(alias) > _MAX_STORED_ALIAS_LEN:
+        return True
+    parts = alias.split("-")
+    # Two identical adjacent k-token blocks at the tail is the accretion shape.
+    return any(
+        parts[-2 * k : -k] == parts[-k:] for k in range(1, len(parts) // 2 + 1)
+    )
 
 
 # Test/operator seam: point discovery at a different registry dir. The agents
@@ -1338,11 +1361,21 @@ def _resolve_aliases(
                         sid in pruned
                         and isinstance(pruned[sid], str)
                         and pruned[sid]
-                        and len(pruned[sid]) <= _MAX_STORED_ALIAS_LEN
+                        and not _is_accreted(pruned[sid])
                         and not LEGACY_HANDLE_RE.fullmatch(pruned[sid])
                     ):
                         aliases[sid] = pruned[sid]
                     else:
+                        # Discarding a stored alias is destructive - anything
+                        # addressed to it stops resolving - so say so rather
+                        # than doing it silently. Only the heal path can
+                        # surprise a user; a first-fill has nothing to lose.
+                        if sid in pruned and isinstance(pruned[sid], str) and pruned[sid]:
+                            print(
+                                f"fno: discarding damaged session alias "
+                                f"{pruned[sid]!r}; regenerating from the default",
+                                file=sys.stderr,
+                            )
                         aliases[sid] = _default_alias(r.get("project"), r["short_id"])
                 aliases = _disambiguate(aliases, live)
                 if aliases != stored:

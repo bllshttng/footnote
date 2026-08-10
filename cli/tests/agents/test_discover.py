@@ -3069,6 +3069,34 @@ def test_disambiguate_never_emits_a_duplicate_even_when_every_suffix_is_taken():
     assert out[victim] not in [out[s] for s in holders]
 
 
+def test_accretion_detector_catches_short_damage_and_spares_real_names():
+    """The heal must not key on length alone.
+
+    Accretion added one token-group per render, so a session that rendered two
+    or three times before the fix is stored as `etl-dup-dup` - well under any
+    length cap, never growing again, and never healed either. That is the same
+    "preserved, not healed" failure the length guard was added to prevent, just
+    below the cutoff.
+    """
+    from fno.agents.discover import _is_accreted
+
+    for damaged in (
+        "etl-dup-dup",
+        "etl-dup-dup-dup",
+        "etl-handoff-siera-lm-handoff-siera-lm",
+        "etl-" + "handoff-siera-lm-" * 13 + "x",  # the observed 224-char case
+    ):
+        assert _is_accreted(damaged), f"missed accretion: {damaged[:60]}"
+
+    for healthy in (
+        "etl-worker-a1b2c3d4",
+        "session-9f3a2b1c",
+        "my-long-descriptive-name",
+        "etl-a1b2c3d4",
+    ):
+        assert not _is_accreted(healthy), f"false positive on: {healthy}"
+
+
 def test_disambiguate_leaves_already_unique_aliases_untouched():
     """The common case stays byte-identical - no suffix on a unique name."""
     from fno.agents.discover import _disambiguate
