@@ -5888,6 +5888,14 @@ enum ProbeDecl {
 /// (`done_probes:\n  - "cmd"`) and the single-line inline form
 /// (`done_probes: ["cmd"]`); anything else declared is `Unparseable`.
 fn parse_done_probes(content: &str) -> ProbeDecl {
+    parse_probes_for(content, "done_probes")
+}
+
+/// Key-parameterized probe-list parser. `done_probes` (loop-check's
+/// session-termination gate) and `close_probes` (the close verbs' node-closure
+/// gate) share one parser so the two gates cannot drift on what counts as a
+/// declared probe list. Anything else declared under `key` is `Unparseable`.
+fn parse_probes_for(content: &str, key: &str) -> ProbeDecl {
     let content = content.trim_start();
     if !content.starts_with("---") {
         return ProbeDecl::None;
@@ -5897,13 +5905,14 @@ fn parse_done_probes(content: &str) -> ProbeDecl {
         return ProbeDecl::None;
     };
 
+    let key_prefix = format!("{key}:");
     let mut out = Vec::new();
     let mut declared = false;
     let mut in_block = false;
     for line in after_first[..end].lines() {
         let trimmed = line.trim();
         if !in_block {
-            let Some(rest) = trimmed.strip_prefix("done_probes:") else {
+            let Some(rest) = trimmed.strip_prefix(&key_prefix) else {
                 continue;
             };
             declared = true;
@@ -6526,6 +6535,166 @@ pub fn run_loop_check(args: &[String]) -> i32 {
 /// Used by integration tests in tests/loop_check.rs.
 pub fn run_loop_check_capture(args: &[String]) -> (i32, String) {
     decide(args)
+}
+
+/// `fno-agents probe-run --plan <path> --key <name> --cwd <root> --json`.
+///
+/// Evaluates one named probe list (`done_probes` or `close_probes`) from a plan
+/// doc and exits 0 when every probe passes. The close verbs shell out to this
+/// for `close_probes`, mirroring how `active_backlog` shells out to
+/// `fno backlog done`: the node-closure gate and the session-termination gate
+/// share ONE runner. The process-group kill, the pipe-buffer drain, and
+/// 127-as-failure all live in `run_probe` and are NOT reimplemented here.
+///
+/// Exit contract: 0 = every probe passed (or none declared under `key`);
+/// 1 = at least one probe failed; 2 = undeterminable (plan unreadable,
+/// declaration unparseable, over cap). stdout is always one JSON object.
+pub fn run_probe_run(args: &[String]) -> i32 {
+    let (code, json) = decide_probe_run(args);
+    println!("{json}");
+    code
+}
+
+fn decide_probe_run(args: &[String]) -> (i32, String) {
+    let mut plan: Option<String> = None;
+    let mut key = String::from("done_probes");
+    let mut cwd: Option<String> = None;
+    let mut want_json = false;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--plan" => {
+                i += 1;
+                if i < args.len() {
+                    plan = Some(args[i].clone());
+                }
+            }
+            "--key" => {
+                i += 1;
+                if i < args.len() {
+                    key = args[i].clone();
+                }
+            }
+            "--cwd" => {
+                i += 1;
+                if i < args.len() {
+                    cwd = Some(args[i].clone());
+                }
+            }
+            "--json" => want_json = true,
+            _ => {}
+        }
+        i += 1;
+    }
+    // JSON is always emitted; the flag is accepted so callers stay explicit.
+    let _ = want_json;
+
+    let Some(plan_raw) = plan else {
+        return probe_run_payload(2, &key, false, vec![], "--plan is required");
+    };
+    // A plan_path may carry a `#wave-1` fragment; reading the literal name
+    // would fail, degrading an asserted gate to absent.
+    let plan_clean = plan_raw.split('#').next().unwrap_or(&plan_raw);
+    let plan_path = std::path::Path::new(plan_clean);
+    let abs = if plan_path.is_absolute() {
+        plan_path.to_path_buf()
+    } else {
+        std::path::Path::new(cwd.as_deref().unwrap_or(".")).join(plan_path)
+    };
+    let content = match std::fs::read_to_string(&abs) {
+        Ok(c) => c,
+        Err(e) => {
+            return probe_run_payload(
+                2,
+                &key,
+                false,
+                vec![],
+                &format!("plan {plan_clean} unreadable: {e}"),
+            )
+        }
+    };
+
+    let probes = match parse_probes_for(&content, &key) {
+        ProbeDecl::None => {
+            return probe_run_payload(0, &key, false, vec![], "no probes declared")
+        }
+        ProbeDecl::Unparseable => {
+            return probe_run_payload(
+                2,
+                &key,
+                true,
+                vec![],
+                &format!("`{key}` declared but no probe could be read from it"),
+            )
+        }
+        ProbeDecl::Probes(p) => p,
+    };
+    if probes.len() > PROBE_CAP {
+        return probe_run_payload(
+            2,
+            &key,
+            true,
+            vec![],
+            &format!("{} probes declared; cap is {PROBE_CAP}", probes.len()),
+        );
+    }
+
+    let work_dir = std::path::Path::new(cwd.as_deref().unwrap_or("."));
+    let mut results: Vec<Value> = Vec::new();
+    let mut failed_reason: Option<String> = None;
+    for cmd in &probes {
+        let outcome = run_probe(cmd, work_dir, PROBE_TIMEOUT);
+        let entry = match outcome {
+            ProbeOutcome::Pass => serde_json::json!({"cmd": cmd, "outcome": "pass"}),
+            ProbeOutcome::Timeout => {
+                if failed_reason.is_none() {
+                    failed_reason = Some(format!("`{cmd}` timed out"));
+                }
+                serde_json::json!({"cmd": cmd, "outcome": "timeout"})
+            }
+            ProbeOutcome::Fail { code, stderr } => {
+                let c = code
+                    .map(|n| n.to_string())
+                    .unwrap_or_else(|| "signal".to_string());
+                if failed_reason.is_none() {
+                    failed_reason = Some(format!("`{cmd}` exited {c}"));
+                }
+                serde_json::json!({
+                    "cmd": cmd,
+                    "outcome": format!("fail:{c}"),
+                    "code": code,
+                    "stderr": stderr,
+                })
+            }
+        };
+        results.push(entry);
+    }
+
+    let (code, reason) = match failed_reason {
+        Some(r) => (1, r),
+        None => (0, "every probe passed".to_string()),
+    };
+    probe_run_payload(code, &key, true, results, &reason)
+}
+
+fn probe_run_payload(
+    code: i32,
+    key: &str,
+    declared: bool,
+    results: Vec<Value>,
+    reason: &str,
+) -> (i32, String) {
+    let payload = serde_json::json!({
+        "key": key,
+        "declared": declared,
+        "passed": code == 0,
+        "results": results,
+        "reason": reason,
+    });
+    (
+        code,
+        serde_json::to_string(&payload).unwrap_or_else(|_| "{}".to_string()),
+    )
 }
 
 // ── unit tests ────────────────────────────────────────────────────────────────
@@ -10661,6 +10830,87 @@ mod done_probe_tests {
             "a missing binary must fail closed as 127, never pass"
         );
     }
+
+    /// The close-probe gate reads its OWN key, not done_probes. One parser,
+    /// two keys; this pins that the parameterization did not silently collapse
+    /// both onto done_probes.
+    #[test]
+    fn parse_probes_for_reads_close_probes_key() {
+        let doc = fm("close_probes:\n  - \"exit 0\"\ndone_probes:\n  - \"exit 1\"\nstatus: ready");
+        assert_eq!(
+            probes_for(&doc, "close_probes"),
+            vec!["exit 0".to_string()],
+            "close_probes must read the close_probes list, not done_probes"
+        );
+        assert_eq!(
+            probes_for(&doc, "done_probes"),
+            vec!["exit 1".to_string()]
+        );
+    }
+
+    /// `probe-run` exit contract: 0 passes, 1 fails a probe, 2 is undeterminable
+    /// (unparseable / unreadable). stdout is always JSON.
+    #[test]
+    fn probe_run_exit_contract() {
+        let tmp = tempfile::tempdir().unwrap();
+        let passing = tmp.path().join("pass.md");
+        std::fs::write(&passing, fm("close_probes:\n  - \"exit 0\"")).unwrap();
+        let failing = tmp.path().join("fail.md");
+        std::fs::write(&failing, fm("close_probes:\n  - \"exit 7\"")).unwrap();
+        let bad = tmp.path().join("bad.md");
+        std::fs::write(&bad, fm("close_probes: [unterminated")).unwrap();
+
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            passing.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+            "--json".into(),
+        ]);
+        assert_eq!(code, 0);
+        assert_eq!(serde_json::from_str::<Value>(&json).unwrap()["passed"], true);
+
+        let (code, json) = decide_probe_run(&[
+            "--plan".into(),
+            failing.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+            "--cwd".into(),
+            tmp.path().to_string_lossy().into(),
+        ]);
+        assert_eq!(code, 1);
+        let body = serde_json::from_str::<Value>(&json).unwrap();
+        assert_eq!(body["passed"], false);
+        assert!(body["reason"].as_str().unwrap().contains("exited 7"));
+
+        // Unparseable declaration: undeterminable, fail closed.
+        let (code, _) = decide_probe_run(&[
+            "--plan".into(),
+            bad.to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+        ]);
+        assert_eq!(code, 2);
+
+        // Unreadable plan: undeterminable, fail closed.
+        let (code, _) = decide_probe_run(&[
+            "--plan".into(),
+            tmp.path().join("nope.md").to_string_lossy().into(),
+            "--key".into(),
+            "close_probes".into(),
+        ]);
+        assert_eq!(code, 2);
+    }
+
+    fn probes_for(doc: &str, key: &str) -> Vec<String> {
+        match parse_probes_for(doc, key) {
+            ProbeDecl::Probes(p) => p,
+            other => panic!("expected probes for {key}, got {other:?}"),
+        }
+    }
+
 
     #[test]
     fn hanging_probe_is_killed_within_the_timeout_budget() {

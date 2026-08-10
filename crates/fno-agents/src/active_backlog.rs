@@ -1585,6 +1585,54 @@ mod tests {
     }
 
     #[test]
+    fn resolve_dispatch_done_exit6_is_parked_with_refusal_intact() {
+        // x-5d34: the promise gate refuses with exit 6. The loop closer must NOT
+        // need a new arm - the catch-all (non-zero, non-5) maps it to Parked with
+        // the stderr intact, so an unmet promise parks the node with its refusal
+        // as the recorded reason rather than closing it.
+        let _env = env_guard();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let bin = tmp.path().join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let fno = bin.join("fno");
+        std::fs::write(
+            &fno,
+            "#!/usr/bin/env bash\nif [[ \"$1\" == backlog && \"$2\" == done ]]; then\n  echo 'Refused: x-5d34 promised 2 waves and asserts none of them.' >&2\n  exit 6\nfi\nexit 0\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fno, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // failure_limit 1 so a single exit-6 trips and emits the parked event.
+        let cfg = test_cfg(tmp.path(), fno.display().to_string(), 1);
+        let (journal, project_journal) = test_journal(tmp.path());
+        let mut breaker = CircuitBreaker::new(1);
+
+        resolve_dispatch(
+            &cfg,
+            &mut breaker,
+            &journal,
+            "x-prom6001",
+            Evidence {
+                reason: TerminationReason::DonePRGreen,
+                message: "done".to_string(),
+            },
+        );
+
+        // Exit 6 is a failure (unlike exit 5's awaiting-merge success): the
+        // streak tripped at limit 1, so the node is parked, not closed.
+        let parked = journal_lines(&project_journal)
+            .into_iter()
+            .find(|l| l.contains("active_backlog_parked") && l.contains("x-prom6001"))
+            .expect("a promise-gate refusal (exit 6) must park, not close");
+        // The refusal text rode through the catch-all arm intact - an operator
+        // reading the journal sees WHY the close was refused, not a bare code.
+        assert!(
+            parked.contains("promised 2 waves"),
+            "refusal text must survive into the parked detail: {parked}"
+        );
+    }
+
+
+    #[test]
     fn resolve_crash_at_limit_defers_and_parks() {
         let _env = env_guard();
         // AC1-FR: a worker death (no termination event) counts as a failure; the

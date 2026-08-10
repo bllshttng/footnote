@@ -50,6 +50,7 @@ from fno.graph._reconcile import (
     pr_url_for_repo,
     repo_slug_from_url,
     resolve_merge_evidence,
+    resolve_promise_evidence,
 )
 from fno.graph.fuzzy import resolve_id
 from fno.graph.store import locked_mutate_graph, normalize_plan_path, read_graph
@@ -567,6 +568,20 @@ def done_command(
             )
             raise typer.Exit(code=evidence.exit_code)
         merge_status_to_write = "merged"
+
+    # -- promise gate (x-5d34) --
+    # Only on the close path (node not already done): a metadata update on a
+    # done node was gated when it first closed, and re-gating here would let a
+    # gh outage block a --note on a node that closed months ago. fno done has no
+    # --force escape; a deliberate half-ship closes via
+    # `fno backlog done <id> --force --reason`.
+    if not (node.get("status") == "done" or node.get("completed_at")):
+        promise = resolve_promise_evidence(
+            node, cwd=node.get("cwd"), query=_gh_query
+        )
+        if promise.outcome == "promise_unmet":
+            typer.echo(promise.reason, err=True)
+            raise typer.Exit(code=promise.exit_code)
 
     # Resolve pr_url + ledger rollup outside the mutator so subprocess / disk
     # I/O stays out of the graph lock.

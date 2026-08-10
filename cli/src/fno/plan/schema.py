@@ -93,6 +93,12 @@ class PlanFrontmatter(BaseModel):
     # would graduate a plan with no URLs; the stamp/set-expected writers already
     # reject < 1, and this makes validate catch the same corrupt frontmatter.
     expected_url_count: int | None = Field(default=None, ge=1)
+    # Node-closure outcome probes (x-5d34), read by the three close verbs via
+    # resolve_promise_evidence. Sibling to loop-check's `done_probes` (which
+    # gates session termination); this gates node closure. Scalar or list, the
+    # same permissive shape as `kill_criteria`, since the Rust runner parses the
+    # raw frontmatter itself.
+    close_probes: str | list[Any] | None = None
     company_work: CompanyWorkRefs | None = None
 
     @field_validator("status", mode="before")

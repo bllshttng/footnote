@@ -7142,6 +7142,10 @@ def cmd_done(
         4  gh outage: subprocess failure / timeout / parse error; retryable
         5  awaiting merge: PR OPEN, not merged; node stays in_review
            (success-shaped; close lands via reconcile/advance at merge)
+        6  promise unmet: plan promised work that has not all shipped
+           (multi-wave with no assertion, a failed close_probe, or fewer
+           merged ships than expected_url_count). Use --force --reason to
+           record a deliberate half-ship.
     """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
@@ -7150,6 +7154,7 @@ def cmd_done(
         node_pr_refs,
         repo_slug_from_url,
         resolve_merge_evidence,
+        resolve_promise_evidence,
     )
 
     if not has_node_id_prefix(task_id):
@@ -7277,6 +7282,18 @@ def cmd_done(
             f"Warning: force flag set on advisory node {task_id} (reason: {reason}); no PR refs to check.",
             err=True,
         )
+
+    # -- Step 3b: promise gate (x-5d34) --
+    # The merge gate asked "is a PR merged"; this asks "did the plan's declared
+    # work all ship". Skipped under --force so a deliberate half-ship stays a
+    # journaled line (the backlog_done_forced event above) rather than silence.
+    if not force:
+        promise = resolve_promise_evidence(
+            node, cwd=node.get("cwd"), query=_done_gh_query
+        )
+        if promise.outcome == "promise_unmet":
+            typer.echo(promise.reason, err=True)
+            raise typer.Exit(code=promise.exit_code)
 
     # -- Step 4: Mutation under the lock --
     plan_path_out: list = [None]
@@ -7702,6 +7719,7 @@ def cmd_reconcile(
         emit_gate_escape_for_record,
         emit_human_touch_for_record,
         emit_session_satisfied_for_record,
+        resolve_promise_evidence,
         scan_merge_drift,
         write_retro_sentinel,
     )
@@ -7712,6 +7730,31 @@ def cmd_reconcile(
 
     closeable = [r for r in records if r.closeable]
     failures = [r for r in records if r.error is not None]
+
+    # Promise gate (x-5d34): a merged PR is not enough when the plan promised
+    # more. Partition the closeable set so an unmet-promise node stays open
+    # rather than closing silently on the unattended sweep. Reconcile is the
+    # MAINSTREAM close (auto-fires on SessionStart), so without this leg a node
+    # that cmd_done refused would close here on the next session anyway.
+    promise_unmet: list[tuple[str, str]] = []
+    if closeable:
+        gated: list = []
+        for record in closeable:
+            node_obj = _find_node(entries, record.node_id) or {
+                "id": record.node_id,
+                "plan_path": record.plan_path,
+                "pr_number": record.pr_number,
+                "pr_url": record.pr_url,
+            }
+            verdict = resolve_promise_evidence(node_obj)
+            if verdict.outcome == "promise_unmet":
+                # First refusal line only: the full reason belongs to the verb
+                # the operator runs to resolve it, not this one-line sweep roll.
+                first_line = (verdict.reason or "").splitlines()[0]
+                promise_unmet.append((record.node_id, first_line))
+            else:
+                gated.append(record)
+        closeable = gated
 
     # Pre-existing stranded all-done epics to self-heal this sweep (codex P2 on
     # PR #69). Read-only check so a reconcile with no drift AND nothing to heal
@@ -8230,6 +8273,13 @@ def cmd_reconcile(
                 {"node_id": r.node_id, "pr_number": r.pr_number, "error": r.error}
                 for r in failures
             ],
+            # Closeable records held open by the promise gate (x-5d34): a merged
+            # PR whose plan promised work that has not all shipped. In the JSON
+            # payload because the SessionStart hook reads --json and discards
+            # stderr - a held-open node that prints only to stderr is invisible.
+            "promise_unmet": [
+                {"node_id": nid, "reason": reason} for nid, reason in promise_unmet
+            ],
         }
         typer.echo(json.dumps(payload, indent=2))
         # Unresolved PR queries are a partial failure: signal it so unattended
@@ -8246,6 +8296,7 @@ def cmd_reconcile(
         and not healed_epics
         and not contained_closed
         and not reverted_stamped
+        and not promise_unmet
     ):
         typer.echo("No merged-PR drift found. Backlog is in sync.")
         return
@@ -8299,6 +8350,18 @@ def cmd_reconcile(
                 f"Auto-closed {len(healed_epics)} container epic(s) "
                 f"(all children complete): " + ", ".join(healed_epics)
             )
+
+    if promise_unmet:
+        # Held open, not failed: the PR merged but the plan promised more. The
+        # operator resolves it through `fno backlog done <id> --force --reason`
+        # (a deliberate half-ship) or by shipping/filing the remainder.
+        held = "Holding" if dry_run else "Held"
+        typer.echo(
+            f"{held} {len(promise_unmet)} node(s) open (merged PR, unmet plan promise):",
+            err=True,
+        )
+        for nid, reason in promise_unmet:
+            typer.echo(f"  {nid}: {reason}", err=True)
 
     if reverted_stamped:
         verb = "Would stamp" if dry_run else "Stamped"

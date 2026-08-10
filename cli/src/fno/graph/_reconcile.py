@@ -346,6 +346,275 @@ def resolve_merge_evidence(
     )
 
 
+# The promise-gate refusal code. 3/4/5 are taken and load-bearing
+# (REFUSAL_EXIT_CODES above; the loop runtime keys on 5), so this is the next
+# free slot across graph/cli.py and done/cli.py. Do not renumber.
+PROMISE_REFUSAL_EXIT_CODE = 6
+
+# Wall clock for the fno-agents probe-run subprocess (3 probes * 60s native
+# timeout + overhead). resolve_promise_evidence runs outside the graph lock,
+# same as the gh cross-check, so a slow probe holds no other mutation.
+PROBE_RUN_TIMEOUT_S = 240.0
+
+
+@dataclass
+class PromiseVerdict:
+    """The plan-closure promise decision for a node, shared by every close verb.
+
+    Sibling to :class:`MergeEvidence`: the merge gate asks "is a PR merged" (a
+    fact about an artifact); this asks "did the plan's declared work all ship".
+    One verdict, three callers (``cmd_done``, ``cmd_reconcile``, ``fno done``)
+    so a node can never close through a second, ungated path. Fails open
+    (``outcome="ok"``) on an absent/unreadable/unparseable plan so a stale
+    ``plan_path`` never wedges a close; the warning names the path.
+    """
+
+    outcome: Literal["ok", "promise_unmet"]
+    reason: Optional[str] = None  # multi-line refusal text; None when ok
+
+    @property
+    def exit_code(self) -> int:
+        return PROMISE_REFUSAL_EXIT_CODE if self.outcome == "promise_unmet" else 0
+
+
+# The human promise, not the machine schedule. Matches the canonical
+# `## Wave N: name` (skills/blueprint/references/section-headers.md) and the
+# `## Wave N - name` the specimen wrote. The digit is required so
+# `## Wave rationale` is not a wave; dedupe by number so a repeated header
+# counts once. The YAML `Execution Strategy` wave list is deliberately NOT
+# read: two counters that can disagree is worse than one that undercounts.
+_WAVE_HEADING_RE = re.compile(r"(?m)^##\s+Wave\s+(\d+)\b")
+
+
+def count_plan_waves(body: str) -> int:
+    """Distinct ``## Wave N`` heading numbers in a plan body."""
+    return len({int(n) for n in _WAVE_HEADING_RE.findall(body)})
+
+
+def _close_probe_runner_shellout(
+    plan_path: str, cwd: Optional[str]
+) -> tuple[bool, str]:
+    """Default ``probe_runner``: shell out to ``fno-agents probe-run``.
+
+    Returns ``(passed, detail)``. ``detail`` is empty on pass and a single-line
+    reason on fail. Fail-closed: a binary absent or a verb too old to know
+    ``probe-run`` refuses rather than reading a declared gate as no gate.
+    """
+    exe = shutil.which("fno-agents")
+    if not exe:
+        return (
+            False,
+            "close_probes declared but the fno-agents binary was not found; "
+            "the gate cannot be evaluated",
+        )
+    cmd = [exe, "probe-run", "--plan", plan_path, "--key", "close_probes", "--json"]
+    if cwd:
+        cmd += ["--cwd", cwd]
+    try:
+        proc = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=PROBE_RUN_TIMEOUT_S,
+            cwd=cwd or None,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return (False, f"close_probes runner timed out after {PROBE_RUN_TIMEOUT_S}s")
+    except OSError as exc:
+        return (False, f"close_probes runner failed to launch: {exc}")
+    if proc.returncode == 0:
+        return (True, "")
+    # Non-zero: prefer the structured reason; fall back to fail-closed when the
+    # verb itself errored (clap writes an unrecognized-subcommand notice to
+    # stderr and emits no JSON).
+    try:
+        payload = json.loads(proc.stdout or "{}")
+        reason = payload.get("reason") or "a declared close_probe exited non-zero"
+    except json.JSONDecodeError:
+        stderr_tail = (proc.stderr or "").strip()
+        reason = (
+            f"close_probes declared but `fno-agents probe-run` did not evaluate "
+            f"them (rc={proc.returncode}): {stderr_tail[:200] or 'no diagnostic'}"
+        )
+    return (False, reason)
+
+
+def resolve_promise_evidence(
+    node: dict,
+    *,
+    cwd: Optional[str] = None,
+    query: Optional[Callable[..., PrMergeState]] = None,
+    probe_runner: Optional[Callable[[str, Optional[str]], tuple[bool, str]]] = None,
+) -> PromiseVerdict:
+    """Decide whether a node's plan promised work that has not all shipped.
+
+    Three conditions, first refusal wins; all read the plan at
+    ``node["plan_path"]``:
+
+      A. Unasserted multi-wave promise. The plan declares >= 2 ``## Wave N``
+         headings and carries neither ``close_probes`` nor
+         ``expected_url_count >= 2``. This is the condition that catches a plan
+         that promised two waves and shipped one: it refuses with no cooperation
+         from the plan's author.
+      B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
+         delegated to ``fno-agents probe-run`` (the same runner the loop uses for
+         ``done_probes``); a declared gate that cannot be evaluated fails closed.
+      C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
+         node's PR refs are MERGED. The right check for multi-repo / split
+         deliveries; it does NOT catch the specimen (which promised one PR), so
+         it is the droppable one if the surface ever shrinks.
+
+    Fails open on an absent/unreadable plan or unparseable frontmatter: a stale
+    ``plan_path`` must not wedge a close, but the warning names the unreadable
+    path so the gap is visible, not silent.
+    """
+    plan_path = node.get("plan_path")
+    if not isinstance(plan_path, str) or not plan_path:
+        return PromiseVerdict(outcome="ok")
+
+    # The Python plan readers strip a `#wave-1` fragment; reading the literal
+    # name would fail and silently drop the gate.
+    plan_path_clean = plan_path.split("#", 1)[0]
+    try:
+        text = Path(plan_path_clean).read_text(encoding="utf-8")
+    except OSError as exc:
+        sys.stderr.write(
+            f"warning: promise gate could not read plan {plan_path_clean} "
+            f"({exc}); gate skipped for this close\n"
+        )
+        return PromiseVerdict(outcome="ok")
+
+    from fno.plan._doc import FrontmatterError, _parse_frontmatter, _split_frontmatter
+
+    yaml_text, body = _split_frontmatter(text)
+    try:
+        frontmatter = _parse_frontmatter(yaml_text) if yaml_text.strip() else {}
+    except FrontmatterError as exc:
+        sys.stderr.write(
+            f"warning: promise gate skipped {plan_path_clean}; plan frontmatter "
+            f"would not parse ({exc})\n"
+        )
+        return PromiseVerdict(outcome="ok")
+
+    close_probes = frontmatter.get("close_probes")
+    expected_raw = frontmatter.get("expected_url_count")
+    expected = expected_raw if isinstance(expected_raw, int) else None
+    waves = count_plan_waves(body)
+    node_id = node.get("id", "(unknown)")
+    plan_display = node.get("plan_path", plan_path_clean)
+
+    # Condition A: a multi-wave promise that asserts nothing. close_probes OR a
+    # multi-ship count both count as "the plan asserted an outcome", so neither
+    # alone trips A; together their absence on a >= 2-wave plan is the refusal.
+    if waves >= 2 and not close_probes and not (isinstance(expected, int) and expected >= 2):
+        return PromiseVerdict(
+            outcome="promise_unmet",
+            reason=_promise_refusal_a(node_id, plan_display, waves),
+        )
+
+    # Condition B: run the declared outcome probes. Opt-in by construction (only
+    # fires when the plan declared the field), so it never adds subprocess work
+    # to a plan that asserted nothing - A already refused those.
+    if close_probes:
+        runner = probe_runner or _close_probe_runner_shellout
+        passed, detail = runner(plan_path_clean, cwd)
+        if not passed:
+            return PromiseVerdict(
+                outcome="promise_unmet",
+                reason=_promise_refusal_b(node_id, plan_display, detail),
+            )
+
+    # Condition C: the promised ship count vs. merged refs. Only the rare
+    # multi-ship plan pays for gh I/O here; a 1-wave / 1-PR plan never reaches it.
+    if isinstance(expected, int) and expected >= 2:
+        refs = node_pr_refs(node)
+        merged = _count_merged_refs(refs, ceiling=expected, cwd=cwd, query=query)
+        if merged < expected:
+            return PromiseVerdict(
+                outcome="promise_unmet",
+                reason=_promise_refusal_c(node_id, plan_display, expected, merged),
+            )
+
+    return PromiseVerdict(outcome="ok")
+
+
+def _count_merged_refs(
+    refs: list[tuple[int, Optional[str]]],
+    *,
+    ceiling: int,
+    cwd: Optional[str] = None,
+    query: Optional[Callable[..., PrMergeState]] = None,
+) -> int:
+    """Count MERGED refs, stopping once ``ceiling`` merges are found.
+
+    Mirrors :func:`resolve_merge_evidence`'s per-ref resolution so the two agree
+    on what counts as merged. Stops early at ``ceiling``: once enough ships are
+    confirmed to satisfy the promise, the remaining refs cannot change the
+    verdict and are not queried.
+    """
+    query = query or query_pr_merge_state
+    merged = 0
+    repo: Optional[str] = None
+    for pr_number, pr_url in refs:
+        pr_repo = repo_slug_from_url(pr_url) or repo
+        if repo is None:
+            repo = pr_repo
+        pr_cwd = cwd if pr_repo is None else None
+        try:
+            state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
+        except ReconcileError:
+            continue
+        if state.state == "MERGED":
+            merged += 1
+            if merged >= ceiling:
+                break
+    return merged
+
+
+def _promise_refusal_a(node_id: str, plan_display: str, waves: int) -> str:
+    headings = ", ".join(f"## Wave {n}" for n in range(1, waves + 1))
+    return (
+        f"Refused: {node_id} promised {waves} waves and asserts none of them.\n"
+        f"  plan: {plan_display}\n"
+        f"  waves declared: {waves} ({headings})\n"
+        f"  close_probes: none    expected_url_count: unset\n"
+        f"\n"
+        f"  Two legal exits:\n"
+        f"    ship the rest, then close; or\n"
+        f"    file the remainder (`fno backlog idea`) and close with\n"
+        f"      --force --reason \"wave N filed as <id>\"\n"
+        f"\n"
+        f"  This checks what the plan wrote down. It cannot see work the plan\n"
+        f"  never declared, and a plan that under-declared still closes clean."
+    )
+
+
+def _promise_refusal_b(node_id: str, plan_display: str, detail: str) -> str:
+    return (
+        f"Refused: {node_id} declared close_probes and at least one failed.\n"
+        f"  plan: {plan_display}\n"
+        f"  {detail}\n"
+        f"\n"
+        f"  Two legal exits:\n"
+        f"    make every close_probe pass, then close; or\n"
+        f"    close with --force --reason \"<why the unmet probe is acceptable>\""
+    )
+
+
+def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: int) -> str:
+    return (
+        f"Refused: {node_id} promised {expected} ships; only {merged} merged.\n"
+        f"  plan: {plan_display}\n"
+        f"  expected_url_count: {expected}    merged refs: {merged}\n"
+        f"\n"
+        f"  Two legal exits:\n"
+        f"    ship the rest, then close; or\n"
+        f"    file the remainder (`fno backlog idea`) and close with\n"
+        f"      --force --reason \"remaining ships filed as <id>\""
+    )
+
+
 def query_pr_merge_state(
     pr_number: int,
     *,
