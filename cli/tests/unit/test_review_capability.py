@@ -233,3 +233,17 @@ def test_a_login_with_no_account_stays_unverifiable_not_absent(
     assert rc._app_ever_acted("reviewer") is None
     # And it must not have gone looking for an exact account to decide that.
     assert not any("users/" in c for c in calls)
+
+
+def test_self_review_invocation_names_the_harness_verb():
+    import fno.review_capability as rc
+
+    # AC5-UI: each harness is told its own verb. Codex is bare (prose after it
+    # flips codex to a no-merge-base target); claude carries its arg grammar.
+    assert rc.self_review_invocation("codex") == "/review"
+    assert rc.self_review_invocation("claude") == "/code-review medium --comment --fix"
+    # Unknown harness falls back to the claude default, not a guess.
+    assert rc.self_review_invocation(None) == "/code-review medium --comment --fix"
+    assert rc.self_review_invocation("unknown") == "/code-review medium --comment --fix"
+    # Codex stays bare even though claude carries args - no prose suffix leaks.
+    assert " " not in rc.self_review_invocation("codex")

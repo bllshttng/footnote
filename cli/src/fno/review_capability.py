@@ -396,6 +396,26 @@ class PreShipReviewPlan:
     reason: str
 
 
+def self_review_invocation(harness: Optional[str]) -> str:
+    """The recommended self-review invocation for a harness.
+
+    Codex is `/review` bare - prose after the verb flips it to a no-merge-base
+    review target, so nothing is appended. Claude is `/code-review medium
+    --comment --fix`: it takes its own argument grammar, and that form actually
+    posts comments and applies findings. The base verb is read from the
+    `code-review` descriptor's per-harness map (the parity-checked source of
+    truth), so this is not a third copy of the verbs; only the claude arg
+    grammar is hardcoded here."""
+    from fno.config import _RESOLVABLE_REVIEWERS
+
+    desc = _RESOLVABLE_REVIEWERS.get("code-review")
+    invocations = desc.invocations if desc and desc.invocations else {}
+    base = invocations.get(harness or "", invocations.get("claude", "/code-review"))
+    if harness == "codex":
+        return base
+    return f"{base} medium --comment --fix"
+
+
 def preship_review_plan(reviewers: list[str]) -> PreShipReviewPlan:
     """Decide the target spine's pre-ship review step from `config.review.reviewers`.
 
