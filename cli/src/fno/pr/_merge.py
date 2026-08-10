@@ -293,6 +293,15 @@ def _pr_payload_is_code(repo: str, pr_number: int) -> bool:
     return any(not _is_documentation_path(p) for p in names)
 
 
+def _harness_can_self_review() -> bool:
+    """Mirror loop-check's floor boundary for the ambient harness."""
+    from fno.harness_identity import present_harness_markers
+    from fno.review_capability import harness_can_self_review
+
+    families = {harness for _marker, harness, _value in present_harness_markers()}
+    return len(families) == 1 and harness_can_self_review(next(iter(families)))
+
+
 def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
     """Whether review is required for this PR: a configured lane, OR a code
     payload on a stock install (the self-review floor).
@@ -337,12 +346,67 @@ def _review_lane_configured(repo: str, pr_number: int = 0) -> bool:
         if (
             getattr(r, "self_review_required", True)
             and pr_number
+            and _harness_can_self_review()
             and _pr_payload_is_code(repo, pr_number)
         ):
             return True
         return False
     except Exception:
         return True
+
+
+def _code_review_attestation_required(repo: str, pr_number: int = 0) -> bool:
+    """Whether this PR specifically requires a local ``code-review`` pass.
+
+    Coverage answers whether anyone reviewed; it does not prove that a required
+    local reviewer ran. Keep that second requirement explicit so an unrelated
+    GitHub App review cannot satisfy the self-review gate on a direct merge.
+    """
+    try:
+        from pathlib import Path
+
+        from fno.config import load_settings_for_repo
+
+        root = Path(_repo_state_dir(repo)).parent
+        review = load_settings_for_repo(root).review
+        configured = {
+            str(name).strip().lstrip("/") for name in (review.reviewers or [])
+        }
+        if "code-review" in configured:
+            return True
+        lane_configured = bool(
+            review.required_bots
+            or review.optional_apps
+            or review.reviewers
+            or review.peer_identity
+            or any(_peer_is_identity_free(p) for p in (review.peers or []))
+        )
+        return bool(
+            not lane_configured
+            and getattr(review, "self_review_required", True)
+            and pr_number
+            and _harness_can_self_review()
+            and _pr_payload_is_code(repo, pr_number)
+        )
+    except Exception:
+        return True
+
+
+def _coverage_has_local_pass(cov: Optional[dict], reviewer: str) -> bool:
+    """Whether coverage carries this head-pinned local reviewer pass."""
+    if not isinstance(cov, dict):
+        return False
+    verdicts = cov.get("verdicts")
+    if not isinstance(verdicts, list):
+        return False
+    target = reviewer.strip().lstrip("/")
+    return any(
+        isinstance(v, dict)
+        and str(v.get("name") or "").strip().lstrip("/") == target
+        and v.get("producer") == "local_attestation"
+        and v.get("verdict") == "reviewed"
+        for v in verdicts
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -955,9 +1019,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
     # discriminator is auto_merge.enabled, not attendance. After the gh check so
     # a missing gh still reports its own exit 127. Skipped when no review lane is
     # configured (x-0eaf boundary: a stock install opted out of review).
-    # Cache the lane check: it loads config from disk, and three reads below
-    # would re-parse the same TOML three times.
+    # Cache both checks: coverage answers whether anyone reviewed, while the
+    # local-attestation check preserves a specifically required code-review.
     review_lane = _review_lane_configured(repo, pr_number)
+    code_review_required = _code_review_attestation_required(repo, pr_number)
     cov = _review_coverage_for_pr(pr_number, repo)
     covered = (
         not review_lane
@@ -965,6 +1030,10 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
             cov is not None
             and cov.get("coverage") == "covered"
             and _safe_int(cov.get("reviewed_count"), 0) > 0
+            and (
+                not code_review_required
+                or _coverage_has_local_pass(cov, "code-review")
+            )
         )
     )
     # Carried into the refusal reason so a stale-head block says so. Stays None
@@ -981,11 +1050,19 @@ def run_merge(argv: Sequence[str], cwd: Optional[str] = None) -> int:
         if head and ev_head and head != ev_head:
             covered = False
     if not covered:
+        if code_review_required and not _coverage_has_local_pass(cov, "code-review"):
+            refusal = (
+                "required code-review has no head-pinned local pass attestation; "
+                "run the harness review verb at HEAD, then emit the code-review attestation"
+            )
+        else:
+            refusal = _coverage_refused_reason(
+                cov, head, _coverage_sources(repo) if cov is None else None
+            )
         _emit(
             pr_number,
             "blocked",
-            "unreviewed merge refused: "
-            f"{_coverage_refused_reason(cov, head, _coverage_sources(repo) if cov is None else None)}",
+            f"unreviewed merge refused: {refusal}",
             "none",
             err=True,
         )

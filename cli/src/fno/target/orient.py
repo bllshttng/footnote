@@ -577,9 +577,15 @@ def _self_review_clause() -> str:
     epic leader. The fallback is a prompt-line injection, so it is omitted on a
     headless substrate (no prompt line exists there). Never raises."""
     try:
-        from fno.review_capability import detect_session, self_review_invocation
+        from fno.review_capability import (
+            detect_session,
+            harness_can_self_review,
+            self_review_invocation,
+        )
 
         s = detect_session()
+        if not harness_can_self_review(s.harness):
+            return ""
         verb = self_review_invocation(s.harness)
     except Exception:  # noqa: BLE001 - advisory; the stop gate is the backstop
         return ""

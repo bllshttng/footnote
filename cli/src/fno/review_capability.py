@@ -396,6 +396,11 @@ class PreShipReviewPlan:
     reason: str
 
 
+def harness_can_self_review(harness: Optional[str]) -> bool:
+    """Whether this harness exposes a native self-review verb."""
+    return harness in {"claude", "codex"}
+
+
 def self_review_invocation(harness: Optional[str]) -> str:
     """The recommended self-review invocation for a harness.
 

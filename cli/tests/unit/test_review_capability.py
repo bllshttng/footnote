@@ -238,6 +238,10 @@ def test_a_login_with_no_account_stays_unverifiable_not_absent(
 def test_self_review_invocation_names_the_harness_verb():
     import fno.review_capability as rc
 
+    assert rc.harness_can_self_review("claude") is True
+    assert rc.harness_can_self_review("codex") is True
+    assert rc.harness_can_self_review("gemini") is False
+    assert rc.harness_can_self_review(None) is False
     # AC5-UI: each harness is told its own verb. Codex is bare (prose after it
     # flips codex to a no-merge-base target); claude carries its arg grammar.
     assert rc.self_review_invocation("codex") == "/review"

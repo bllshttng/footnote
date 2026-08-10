@@ -98,9 +98,18 @@ def test_provider_less_peer_arms_nothing(repo):
     )
 
 
-def test_stock_install_announces_the_self_review_floor(repo):
+def test_stock_install_announces_the_self_review_floor(repo, monkeypatch):
     # A code payload on a lane-less stock install carries the self-review
     # obligation: the done-when line names it and a verb this harness serves.
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="claude", substrate="interactive", attended=True
+        ),
+    )
     root = repo("")
     line = _done_when_line({}, root)
     assert "self-review required for code" in line
@@ -114,6 +123,23 @@ def test_stock_install_announces_the_self_review_floor(repo):
     root = repo('[review]\nreviewers = ["code-review"]\n')
     line = _done_when_line({}, root)
     assert "self-review required for code" not in line
+
+
+def test_stock_install_does_not_announce_an_unsatisfiable_self_review_floor(
+    repo, monkeypatch
+):
+    import fno.review_capability as rc
+
+    monkeypatch.setattr(
+        rc,
+        "detect_session",
+        lambda: rc.SessionCapability(
+            harness="gemini", substrate="interactive", attended=True
+        ),
+    )
+    line = _done_when_line({}, repo(""))
+    assert "self-review required for code" not in line
+    assert "/code-review" not in line
 
 
 def test_unreadable_review_config_reads_unknown_not_no_gate(repo):
