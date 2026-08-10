@@ -124,8 +124,8 @@ gh pr diff "<n>"
 gh pr view "<n>" --json title,body,mergedAt
 ```
 
-The judgment line's `bar=above|below` (files/lines vs the parking-lot bar) tells
-you whether prose is warranted; read the diff regardless and decide with judgment.
+The judgment line's `bar=above|below` (diff size: files/lines) tells you whether
+follow-up capture is warranted; read the diff regardless and decide with judgment.
 
 **(a) Follow-up capture.** Two item classes, each with its own home:
 
@@ -253,7 +253,7 @@ rule), never as `backlog idea` nodes.
   the `<!-- post-merge:pr-<N> -->` marker guards the judgment prose/triage. Do
   not re-run 3b if the marker already exists.
 - **Empty diff (merge commit with no file changes)** - the verb reports
-  `bar=below`; treat as below the parking-lot bar, never an error.
+  `bar=below`; treat as below the bar (no capture work), never an error.
 - **Run from inside the merged PR's own worktree** - the archive leg defers to
   `fno worktree cleanup --merged --apply` (run from canonical); it never
   self-removes.
