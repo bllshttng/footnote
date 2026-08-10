@@ -32,7 +32,7 @@ import sys
 import tempfile
 import time
 import uuid as _uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Mapping, Optional
 
@@ -49,10 +49,11 @@ from fno.agents.registry import (
     AgentResolutionError,
     AgentStatus,
     RegistryVersionError,
-    crown_validation_error,
+    TERMINAL_STATUSES,
     load_registry,
     update_registry,
 )
+from fno.agents.crown import crown_validation_error
 
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
@@ -1673,9 +1674,10 @@ def dispatch_spawn_pane(
         stored_session_uuid: Optional[str] = None
         row_status: AgentStatus = "live"
         crown_declined = False
+        crown_succeeded = False
 
         def _append(rows: list[AgentEntry]) -> list[AgentEntry]:
-            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined
+            nonlocal stored_session_uuid, row_status, crown_level, crown_scope, crown_grantor_val, crown_declined, crown_succeeded
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
             # candidate (the second pane's session may not exist yet when both
@@ -1688,13 +1690,38 @@ def dispatch_spawn_pane(
             stored_session_uuid = None if claimed else session_uuid
             # One-live-crown guard (x-7685): if another non-terminal row already
             # holds this scope, decline the crown and spawn uncrowned. Same lock,
-            # same rows, same idiom as the claim check above. spawn --crown was
-            # made reachable by the _is_crown_bearing_spawn routing fix; without
-            # this guard it stamps a duplicate crown. A worker without a crown is
-            # recoverable; a duplicate crown over one scope is not.
+            # same rows, same idiom as the claim check above. A worker without a
+            # crown is recoverable; a duplicate crown over one scope is not.
+            #
+            # UNLESS the holder is the caller: that is SUCCESSION, and it is the
+            # only way an abdicating king hands off, since a session that has
+            # already exited cannot spawn its heir. The vacate and the stamp land
+            # in this one write, so the scope is never doubly nor un-ruled.
             if crown_level is not None and crown_scope:
-                _terminal = {"exited", "orphaned", "failed", "permanent_dead"}
-                if any(r.crown_scope == crown_scope and r.status not in _terminal for r in rows):
+                holders = [
+                    r
+                    for r in rows
+                    if r.crown_scope == crown_scope
+                    and r.status not in TERMINAL_STATUSES
+                ]
+
+                def _is_caller(row) -> bool:
+                    return bool(
+                        spawned_by_session
+                        and row.harness_session_id == spawned_by_session
+                    )
+
+                if holders and all(_is_caller(h) for h in holders):
+                    for idx, r in enumerate(rows):
+                        if r.crown_scope == crown_scope and _is_caller(r):
+                            rows[idx] = replace(
+                                r,
+                                crown_level=None,
+                                crown_scope=None,
+                                crown_grantor=None,
+                            )
+                    crown_succeeded = True
+                elif holders:
                     crown_level = None
                     crown_scope = None
                     crown_grantor_val = None
@@ -1742,6 +1769,13 @@ def dispatch_spawn_pane(
                 print(
                     f"spawn: crown declined (scope {_declined_scope!r} already held "
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
+                    file=sys.stderr,
+                )
+            elif crown_succeeded and _declined_scope:
+                import sys
+                print(
+                    f"spawn: crown over {_declined_scope!r} transferred from this "
+                    f"session to {name} (succession). You no longer hold it.",
                     file=sys.stderr,
                 )
         except (AgentResolutionError, OSError, ValueError, RegistryVersionError) as exc:
