@@ -20,6 +20,12 @@ from typing import Optional
 
 from fno.agents import format as fmt
 from fno.agents import truth_status
+from fno.agents.reachability import (
+    WIRE_STATUS,
+    classify_reachability,
+    reachability,
+    registry_falsifier,
+)
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -27,6 +33,8 @@ from fno.agents.registry import (
     load_registry,
     resolve_agent_across_sources,
 )
+
+__all__ = ["reachability", "list_agents", "ListResult"]
 
 
 @dataclass
@@ -135,11 +143,16 @@ def list_agents(
         # Read off the SAME call, before `truth` is rebound below to the
         # unrelated node-claim reading; no second transcript read is paid.
         observed_model = truth.get("observed_model")
-        rendered_status = "unknown"
-        if truth_state in {"working", "watching", "your-move"}:
-            rendered_status = "live"
-        elif truth_state in {"done", "stalled"}:
-            rendered_status = "orphaned"
+        # One shared derivation, reached from the truth reading already in hand
+        # so no second transcript read is paid. `registry_falsifier` owns which
+        # falsifier a row actually carries (a mux-pane row carries none); a row
+        # without one contributes no falsifier at all, never a death sentence.
+        reach = classify_reachability(
+            truth_state=truth_state,
+            age_s=truth.get("last_activity_age_s"),
+            falsifier=registry_falsifier(entry),
+        )
+        rendered_status = WIRE_STATUS[reach.verdict]
         if status is not None and rendered_status != status:
             continue
         live_status: Optional[str] = None
@@ -163,8 +176,17 @@ def list_agents(
                 rendered = truth_status.render_truth_status(truth)
                 if rendered is not None:
                     live_status = rendered
+        # The verdict travels with the evidence it was reached from. `status`
+        # keeps the wire vocabulary its consumers already parse; the three
+        # reachability fields carry what `status` alone cannot say, which is
+        # WHICH question was answered and how old the answer is.
         row = fmt.serialize_entry(
-            entry, live_status=live_status, observed_model=observed_model
+            entry,
+            live_status=live_status,
+            observed_model=observed_model,
+            reachability=reach.verdict,
+            basis=reach.basis,
+            last_activity_age_s=reach.age_s,
         )
         row["status"] = rendered_status
         rows.append(row)
@@ -196,7 +218,15 @@ def list_agents(
             for sess in sessions:
                 if not getattr(sess, "is_alive", True):
                     continue
-                if status is not None and status != "live":
+                # Filter on the ROW's own derived status, not on the literal
+                # "live": `is_alive` is transcript-only, so a session whose
+                # process is provably gone still classifies `working` here, and
+                # `to_row` is where the falsifier is applied. Reading the status
+                # back off the row keeps this lane and the `discovered-json` verb
+                # (which the Rust `list` shells out to) emitting ONE answer for
+                # one session instead of two.
+                row = sess.to_row()
+                if status is not None and row.get("status") != status:
                     continue
                 # Filter by the row's own harness rather than gating the whole
                 # lane on it. The old gate ran discovery only for claude, so
@@ -215,7 +245,7 @@ def list_agents(
                         sess_cwd = sess.cwd
                     if sess_cwd != resolved_cwd:
                         continue
-                discovered_rows.append(sess.to_row())
+                discovered_rows.append(row)
         except Exception as exc:  # noqa: BLE001 — robustness over precision here
             warnings.append(f"live-session discovery skipped: {exc}")
 

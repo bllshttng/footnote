@@ -29,6 +29,9 @@ def serialize_entry(
     entry: AgentEntry,
     live_status: Optional[str],
     observed_model: Optional[dict] = None,
+    reachability: Optional[str] = None,
+    basis: Optional[str] = None,
+    last_activity_age_s: Optional[int] = None,
 ) -> dict:
     """Produce the canonical dict shape for one agent.
 
@@ -94,6 +97,14 @@ def serialize_entry(
         # teammate with `fno mux pane kill <session>:<pane_id>` (a mux row's
         # short_id is empty, so `fno agents stop` refuses it).
         "mux": entry.mux,
+        # The shared reachability verdict and the evidence it was reached from
+        # (fno.agents.reachability). Emitted here rather than bolted onto the row
+        # by the caller so the key set stays pinned by the shared contract file —
+        # a key that exists only on the path that happened to answer is the drift
+        # this contract was written to stop.
+        "reachability": reachability,
+        "basis": basis,
+        "last_activity_age_s": last_activity_age_s,
     }
 
 

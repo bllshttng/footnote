@@ -8,6 +8,7 @@ not-live), AC5-FR (all-malformed -> zero rows, no crash).
 Liveness is controlled via a fake psutil so the suite is deterministic and
 host-independent.
 """
+
 from __future__ import annotations
 
 import fcntl
@@ -102,12 +103,30 @@ def test_ac1_hp_three_live_sessions(tmp_path, monkeypatch):
     """AC1-HP: each live session appears with a legible handle + status."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct1 = _write_session(sdir, 101, session_id="uuid-target", job_id="aaaa1111",
-                          cwd="/Users/x/code/proj", status="busy")
-    ct2 = _write_session(sdir, 102, session_id="uuid-think", job_id="bbbb2222",
-                          cwd="/Users/x/code/proj", status="idle")
-    ct3 = _write_session(sdir, 103, session_id="uuid-plain", job_id="cccc3333",
-                          cwd="/Users/x/code/proj", status="waiting")
+    ct1 = _write_session(
+        sdir,
+        101,
+        session_id="uuid-target",
+        job_id="aaaa1111",
+        cwd="/Users/x/code/proj",
+        status="busy",
+    )
+    ct2 = _write_session(
+        sdir,
+        102,
+        session_id="uuid-think",
+        job_id="bbbb2222",
+        cwd="/Users/x/code/proj",
+        status="idle",
+    )
+    ct3 = _write_session(
+        sdir,
+        103,
+        session_id="uuid-plain",
+        job_id="cccc3333",
+        cwd="/Users/x/code/proj",
+        status="waiting",
+    )
     sessions = _run(sdir, {101: ct1, 102: ct2, 103: ct3}, tmp_path)
     assert len(sessions) == 3
     by_short = {s.short_id: s for s in sessions}
@@ -123,8 +142,9 @@ def test_ac1_err_malformed_skipped(tmp_path, monkeypatch):
     """AC1-ERR: a malformed <pid>.json is skipped; the rest list normally."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 201, session_id="uuid-ok", job_id="ok111111",
-                        cwd="/Users/x/code/proj")
+    ct = _write_session(
+        sdir, 201, session_id="uuid-ok", job_id="ok111111", cwd="/Users/x/code/proj"
+    )
     sdir.mkdir(parents=True, exist_ok=True)
     (sdir / "202.json").write_text("{ this is not json", encoding="utf-8")
     sessions = _run(sdir, {201: ct, 202: time.time()}, tmp_path)
@@ -135,13 +155,15 @@ def test_ac1_edge_strict_pattern_and_sync_conflicts(tmp_path, monkeypatch):
     """AC1-EDGE: only ^\\d+\\.json$ live rows; sync-conflicts + .md ignored."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 301, session_id="uuid-real", job_id="real1234",
-                        cwd="/Users/x/code/proj")
+    ct = _write_session(
+        sdir, 301, session_id="uuid-real", job_id="real1234", cwd="/Users/x/code/proj"
+    )
     sdir.mkdir(parents=True, exist_ok=True)
     # noise files that must never be parsed
     (sdir / "301.sync-conflict-20260609.json").write_text(
-        json.dumps({"pid": 999, "sessionId": "uuid-conflict", "jobId": "noise",
-                    "procStart": time.ctime()}),
+        json.dumps(
+            {"pid": 999, "sessionId": "uuid-conflict", "jobId": "noise", "procStart": time.ctime()}
+        ),
         encoding="utf-8",
     )
     (sdir / "abc-def-transcript.md").write_text("# transcript", encoding="utf-8")
@@ -154,22 +176,24 @@ def test_dead_pid_is_enumerated_but_family1_decides_routing(tmp_path, monkeypatc
     """A stale process sidecar remains an identity candidate, never a verdict."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000",
-                   cwd="/Users/x/code/proj")
+    _write_session(sdir, 401, session_id="uuid-dead", job_id="dead0000", cwd="/Users/x/code/proj")
     # 401 is NOT in the alive map -> dead.
     sessions = _run(sdir, {}, tmp_path)
     assert [s.short_id for s in sessions] == ["dead0000"]
     assert sessions[0].is_alive is False
     resolved, _ = discover.resolve_or_suggest(
-        "dead0000", sessions_dir=sdir,
+        "dead0000",
+        sessions_dir=sdir,
         name_map_path=tmp_path / ".fno" / "session-names.json",
-        psutil_mod=_FakePsutil({}), project_resolver=lambda _cwd: None,
+        psutil_mod=_FakePsutil({}),
+        project_resolver=lambda _cwd: None,
         truth_fn=lambda _session: {"state": "working"},
     )
     assert resolved is not None
     # And a live one alongside survives.
-    ct2 = _write_session(sdir, 402, session_id="uuid-live", job_id="live0000",
-                         cwd="/Users/x/code/proj")
+    ct2 = _write_session(
+        sdir, 402, session_id="uuid-live", job_id="live0000", cwd="/Users/x/code/proj"
+    )
     sessions = _run(sdir, {402: ct2}, tmp_path)
     assert [s.short_id for s in sessions] == ["dead0000", "live0000"]
 
@@ -181,8 +205,14 @@ def test_pid_reuse_rejected_by_proc_start_mismatch(tmp_path, monkeypatch):
     # File records procStart for an OLD create time; the PID is alive now but
     # with a DIFFERENT (newer) create time -> reused -> not live.
     old_ct = time.time() - 10_000
-    _write_session(sdir, 501, session_id="uuid-reused", job_id="reuse000",
-                   cwd="/Users/x/code/proj", proc_start=time.ctime(old_ct))
+    _write_session(
+        sdir,
+        501,
+        session_id="uuid-reused",
+        job_id="reuse000",
+        cwd="/Users/x/code/proj",
+        proc_start=time.ctime(old_ct),
+    )
     new_ct = time.time() - 5  # different process now holds pid 501
     sessions = _run(sdir, {501: new_ct}, tmp_path)
     assert [s.short_id for s in sessions] == ["reuse000"]
@@ -195,9 +225,15 @@ def test_utc_proc_start_matches_live(tmp_path, monkeypatch):
     sdir = tmp_path / "sessions"
     ct = time.time() - 42
     # procStart written as UTC asctime, like the real registry.
-    _write_session(sdir, 555, session_id="uuid-utc", job_id="utc00001",
-                   cwd="/Users/x/code/proj", proc_start=time.asctime(time.gmtime(ct)),
-                   create_time=ct)
+    _write_session(
+        sdir,
+        555,
+        session_id="uuid-utc",
+        job_id="utc00001",
+        cwd="/Users/x/code/proj",
+        proc_start=time.asctime(time.gmtime(ct)),
+        create_time=ct,
+    )
     sessions = _run(sdir, {555: ct}, tmp_path)
     assert [s.short_id for s in sessions] == ["utc00001"]
 
@@ -224,10 +260,12 @@ def test_dedup_on_session_id_not_pid(tmp_path, monkeypatch):
     """Invariant: two live files sharing a sessionId yield one row."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct1 = _write_session(sdir, 701, session_id="uuid-same", job_id="same0001",
-                         cwd="/Users/x/code/proj")
-    ct2 = _write_session(sdir, 702, session_id="uuid-same", job_id="same0002",
-                         cwd="/Users/x/code/proj")
+    ct1 = _write_session(
+        sdir, 701, session_id="uuid-same", job_id="same0001", cwd="/Users/x/code/proj"
+    )
+    ct2 = _write_session(
+        sdir, 702, session_id="uuid-same", job_id="same0002", cwd="/Users/x/code/proj"
+    )
     sessions = _run(sdir, {701: ct1, 702: ct2}, tmp_path)
     assert len(sessions) == 1
 
@@ -236,12 +274,13 @@ def test_exclude_registered_short_ids(tmp_path, monkeypatch):
     """A session already in the fno registry is excluded (no double-listing)."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct1 = _write_session(sdir, 801, session_id="uuid-adopted", job_id="adopted1",
-                         cwd="/Users/x/code/proj")
-    ct2 = _write_session(sdir, 802, session_id="uuid-free", job_id="free0001",
-                         cwd="/Users/x/code/proj")
-    sessions = _run(sdir, {801: ct1, 802: ct2}, tmp_path,
-                    exclude_short_ids={"adopted1"})
+    ct1 = _write_session(
+        sdir, 801, session_id="uuid-adopted", job_id="adopted1", cwd="/Users/x/code/proj"
+    )
+    ct2 = _write_session(
+        sdir, 802, session_id="uuid-free", job_id="free0001", cwd="/Users/x/code/proj"
+    )
+    sessions = _run(sdir, {801: ct1, 802: ct2}, tmp_path, exclude_short_ids={"adopted1"})
     assert [s.short_id for s in sessions] == ["free0001"]
 
 
@@ -250,15 +289,19 @@ def test_ac1_edge2_alias_stable_and_pid_miss_does_not_retire(tmp_path, monkeypat
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     name_map = tmp_path / ".fno" / "session-names.json"
-    ct1 = _write_session(sdir, 901, session_id="uuid-keep", job_id="keep0001",
-                         cwd="/Users/x/code/proj")
-    ct2 = _write_session(sdir, 902, session_id="uuid-stay", job_id="stay0001",
-                         cwd="/Users/x/code/proj")
+    ct1 = _write_session(
+        sdir, 901, session_id="uuid-keep", job_id="keep0001", cwd="/Users/x/code/proj"
+    )
+    ct2 = _write_session(
+        sdir, 902, session_id="uuid-stay", job_id="stay0001", cwd="/Users/x/code/proj"
+    )
 
     def run(alive):
         return discover.discover_live_sessions(
-            sessions_dir=sdir, name_map_path=name_map,
-            psutil_mod=_FakePsutil(alive), project_resolver=lambda c: "proj",
+            sessions_dir=sdir,
+            name_map_path=name_map,
+            psutil_mod=_FakePsutil(alive),
+            project_resolver=lambda c: "proj",
         )
 
     first = {s.short_id: s.handle for s in run({901: ct1, 902: ct2})}
@@ -279,13 +322,14 @@ def test_empty_scan_preserves_alias_map(tmp_path, monkeypatch):
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
     name_map = tmp_path / ".fno" / "session-names.json"
-    ct = _write_session(sdir, 911, session_id="uuid-a", job_id="aaaa0001",
-                        cwd="/Users/x/code/proj")
+    ct = _write_session(sdir, 911, session_id="uuid-a", job_id="aaaa0001", cwd="/Users/x/code/proj")
 
     def run(alive):
         return discover.discover_live_sessions(
-            sessions_dir=sdir, name_map_path=name_map,
-            psutil_mod=_FakePsutil(alive), project_resolver=lambda c: "proj",
+            sessions_dir=sdir,
+            name_map_path=name_map,
+            psutil_mod=_FakePsutil(alive),
+            project_resolver=lambda c: "proj",
         )
 
     run({911: ct})
@@ -380,8 +424,13 @@ def _resolve(handle, sdir, alive, tmp_path):
 
 def test_unclassified_discovered_session_is_not_alive():
     session = discover.DiscoveredSession(
-        session_id="feedface", short_id="feedface", handle="feedface",
-        pid=0, cwd="/tmp", project=None, status=None,
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status=None,
     )
     assert session.truth_state == "unknown"
     assert session.is_alive is False
@@ -391,8 +440,9 @@ def test_us2_resolve_by_hex_and_alias(tmp_path, monkeypatch):
     """US2: a send handle resolves by hex short-id AND by friendly alias."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 321, session_id="uuid-tgt", job_id="tgt00001",
-                        cwd="/Users/x/code/proj", status="idle")
+    ct = _write_session(
+        sdir, 321, session_id="uuid-tgt", job_id="tgt00001", cwd="/Users/x/code/proj", status="idle"
+    )
     # by hex
     match, sugg = _resolve("tgt00001", sdir, {321: ct}, tmp_path)
     assert match is not None and match.short_id == "tgt00001"
@@ -406,8 +456,9 @@ def test_us2_resolve_unknown_returns_suggestions(tmp_path, monkeypatch):
     """AC2-ERR: an unknown handle resolves to None + closest live handles."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 654, session_id="uuid-think", job_id="think001",
-                        cwd="/Users/x/code/proj")
+    ct = _write_session(
+        sdir, 654, session_id="uuid-think", job_id="think001", cwd="/Users/x/code/proj"
+    )
     match, sugg = _resolve("think00X", sdir, {654: ct}, tmp_path)
     assert match is None
     # The close match is the alias or the hex, both carry "think001".
@@ -428,7 +479,10 @@ def test_ac1_edge2_worktree_resolves_to_parent_repo(tmp_path, monkeypatch):
 
     monkeypatch.setattr(intake, "detect_project_from_settings", fake_detect)
     ct = _write_session(
-        sdir, 111, session_id="uuid-wt", job_id="wt000001",
+        sdir,
+        111,
+        session_id="uuid-wt",
+        job_id="wt000001",
         cwd="/Users/x/code/me/fno/.claude/worktrees/feat-x",
     )
     sessions = discover.discover_live_sessions(
@@ -559,8 +613,9 @@ def test_x_a1d5_session_id_from_newest_transcript_not_argv(tmp_path, monkeypatch
     """
     use_tmpdir(monkeypatch, tmp_path)
     projects = tmp_path / "projects"
-    _write_transcript(projects, cwd="/Users/x/code/proj",
-                      session_id="real-transcript-id", mtime_age=2)
+    _write_transcript(
+        projects, cwd="/Users/x/code/proj", session_id="real-transcript-id", mtime_age=2
+    )
     procs = [_claude_proc(4242, "/Users/x/code/proj", session_id="argv-only-id")]
     sessions = _run_projects(tmp_path, projects, procs)
     assert [s.session_id for s in sessions] == ["real-transcript-id"]
@@ -570,8 +625,9 @@ def test_x_a1d5_sidecar_and_projects_candidates_are_unioned(tmp_path, monkeypatc
     """A stale sidecar candidate cannot hide a projects-only live session."""
     use_tmpdir(monkeypatch, tmp_path)
     sdir = tmp_path / "sessions"
-    ct = _write_session(sdir, 770, session_id="uuid-sidecar", job_id="side0001",
-                        cwd="/Users/x/code/proj")
+    ct = _write_session(
+        sdir, 770, session_id="uuid-sidecar", job_id="side0001", cwd="/Users/x/code/proj"
+    )
     projects = tmp_path / "projects"
     _write_transcript(projects, cwd="/Users/x/code/other", session_id="ghost-sid")
     sessions = discover.discover_live_sessions(
@@ -591,8 +647,12 @@ def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
     """Transcript age alone is neither discovery exclusion nor proof of death."""
     use_tmpdir(monkeypatch, tmp_path)
     projects = tmp_path / "projects"
-    _write_transcript(projects, cwd="/Users/x/code/proj", session_id="stale-sid",
-                      mtime_age=discover._DEFAULT_RECENCY_SECONDS + 120)
+    _write_transcript(
+        projects,
+        cwd="/Users/x/code/proj",
+        session_id="stale-sid",
+        mtime_age=discover._DEFAULT_RECENCY_SECONDS + 120,
+    )
     procs = [_claude_proc(4242, "/Users/x/code/proj")]
     sessions = _run_projects(tmp_path, projects, procs)
     assert [s.session_id for s in sessions] == ["stale-sid"]
@@ -603,8 +663,9 @@ def test_x_a1d5_noise_ignored(tmp_path, monkeypatch):
     """sync-conflict copies, non-jsonl files, and subdirs never become sessions."""
     use_tmpdir(monkeypatch, tmp_path)
     projects = tmp_path / "projects"
-    real = _write_transcript(projects, cwd="/Users/x/code/proj",
-                             session_id="real-sid", mtime_age=20)
+    real = _write_transcript(
+        projects, cwd="/Users/x/code/proj", session_id="real-sid", mtime_age=20
+    )
     pdir = real.parent
     # A FRESHER sync-conflict copy must still lose to name-based skipping.
     conflict = pdir / "real-sid.sync-conflict-20260626.jsonl"
@@ -632,8 +693,7 @@ def test_x_a1d5_bg_infra_proc_excluded(tmp_path, monkeypatch):
     _write_transcript(projects, cwd="/Users/x/code/proj", session_id="real-sid")
     procs = {
         16637: (
-            ["/Users/x/.local/share/claude/versions/2.1.193", "--bg-pty-host",
-             "/tmp/x.sock"],
+            ["/Users/x/.local/share/claude/versions/2.1.193", "--bg-pty-host", "/tmp/x.sock"],
             "/Users/x/code/proj",
         ),
     }
@@ -726,8 +786,10 @@ def _run_codex(tmp_path, codex_dir, **kw):
 def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     codex = tmp_path / "codex"
     _write_codex_rollout(
-        codex, session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
-        cwd="/Users/x/proj", mtime_age=5.0,
+        codex,
+        session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+        cwd="/Users/x/proj",
+        mtime_age=5.0,
     )
     sessions = _run_codex(tmp_path, codex)
     assert len(sessions) == 1
@@ -742,16 +804,25 @@ def test_us2_codex_old_watching_rollout_is_not_bulk_enumerated(tmp_path):
     codex = tmp_path / "codex"
     session_id = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     rollout = _write_codex_rollout(
-        codex, session_id=session_id, cwd="/x", mtime_age=10_000.0,
+        codex,
+        session_id=session_id,
+        cwd="/x",
+        mtime_age=10_000.0,
     )
     with rollout.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "type": "response_item",
-            "payload": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
-            },
-        }) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+                    },
+                }
+            )
+            + "\n"
+        )
     stale = time.time() - 10_000.0
     os.utime(rollout, (stale, stale))
 
@@ -783,17 +854,21 @@ def test_us2_codex_old_watching_rollout_is_not_bulk_enumerated(tmp_path):
 def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
     """One discovery scan serves tail content and mtime classification."""
     codex = tmp_path / "codex"
-    rollout = _write_codex_rollout(
-        codex, session_id="019f48e1-direct", cwd="/x", mtime_age=5.0
-    )
+    rollout = _write_codex_rollout(codex, session_id="019f48e1-direct", cwd="/x", mtime_age=5.0)
     with rollout.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "type": "response_item",
-            "payload": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "<watching pr=7>"}],
-            },
-        }) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "<watching pr=7>"}],
+                    },
+                }
+            )
+            + "\n"
+        )
     from fno.agents import peek
 
     monkeypatch.setattr(
@@ -808,9 +883,7 @@ def test_codex_truth_reuses_discovered_rollout_path(tmp_path, monkeypatch):
     assert sessions[0].transcript_path == str(rollout)
 
 
-def test_resolver_only_discovery_does_not_classify_every_candidate(
-    tmp_path, monkeypatch
-):
+def test_resolver_only_discovery_does_not_classify_every_candidate(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     _write_codex_rollout(codex, session_id="019f48e1-target", cwd="/x")
 
@@ -850,9 +923,7 @@ def test_resolver_only_full_session_id_uses_bare_fast_path(tmp_path):
     assert match.session_id == session_id
 
 
-def test_resolver_only_registered_id_skips_transcript_store_scan(
-    tmp_path, monkeypatch
-):
+def test_resolver_only_registered_id_skips_transcript_store_scan(tmp_path, monkeypatch):
     from fno.agents.registry import AgentEntry, write_registry
 
     registry = tmp_path / "registry.json"
@@ -903,9 +974,7 @@ def test_resolver_only_registered_claude_carries_exact_transcript(tmp_path):
         ],
         path=registry,
     )
-    transcript = _write_transcript(
-        tmp_path / "projects", cwd="/repo/one", session_id=session_id
-    )
+    transcript = _write_transcript(tmp_path / "projects", cwd="/repo/one", session_id=session_id)
 
     match, _suggestions = discover.resolve_or_suggest(
         session_id,
@@ -920,9 +989,7 @@ def test_resolver_only_registered_claude_carries_exact_transcript(tmp_path):
 
 def test_resolver_only_full_claude_id_needs_no_registry(tmp_path):
     session_id = "c655c326-1111-2222-3333-444455556666"
-    transcript = _write_transcript(
-        tmp_path / "projects", cwd="/repo/one", session_id=session_id
-    )
+    transcript = _write_transcript(tmp_path / "projects", cwd="/repo/one", session_id=session_id)
 
     match, _suggestions = discover.resolve_or_suggest(
         session_id,
@@ -961,13 +1028,15 @@ def test_resolver_only_registered_claude_prefers_conversational_copy(tmp_path):
     real.parent.mkdir(parents=True)
     stub.write_text(json.dumps({"type": "summary"}) + "\n", encoding="utf-8")
     real.write_text(
-        json.dumps({
-            "type": "assistant",
-            "message": {
-                "role": "assistant",
-                "content": [{"type": "text", "text": "still working"}],
-            },
-        })
+        json.dumps(
+            {
+                "type": "assistant",
+                "message": {
+                    "role": "assistant",
+                    "content": [{"type": "text", "text": "still working"}],
+                },
+            }
+        )
         + "\n",
         encoding="utf-8",
     )
@@ -1019,9 +1088,7 @@ def test_resolver_only_short_collision_checks_every_store(tmp_path):
         path=registry,
     )
     codex = tmp_path / "codex"
-    _write_codex_rollout(
-        codex, session_id="deadbeef-transcript", cwd="/transcript"
-    )
+    _write_codex_rollout(codex, session_id="deadbeef-transcript", cwd="/transcript")
 
     match, suggestions = discover.resolve_or_suggest(
         "deadbeef",
@@ -1082,7 +1149,11 @@ def test_resolver_only_provisional_registry_id_cannot_hide_canonical_owner(
 
 @pytest.mark.parametrize(
     "truth_state,expected",
-    [("working", "live"), ("done", "orphaned"), ("unknown", "unknown")],
+    # `done` is UNKNOWN, not orphaned: a worker that declared its mission complete
+    # says nothing about whether it is still up, and this row carries no falsifier
+    # (pid 0 is the "not recorded" placeholder). Only an affirmative falsifier
+    # condemns a row, in this lane exactly as in the registry lane.
+    [("working", "live"), ("done", "unknown"), ("unknown", "unknown")],
 )
 def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     session = discover.DiscoveredSession(
@@ -1099,20 +1170,162 @@ def test_discovered_row_status_projects_family1_truth(truth_state, expected):
     assert session.to_row()["status"] == expected
 
 
+def test_a_discovered_row_with_a_dead_pid_is_condemned():
+    """The falsifier reaches this lane too, which is the point of sharing it.
+
+    pid 1 is never a claude session, so `_pid_alive` returns a confident False
+    and the row is orphaned even though its transcript says `working` -- the
+    43-minute specimen, in the discovered lane.
+    """
+    session = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=1,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+    )
+
+    assert session.to_row()["status"] == "orphaned"
+
+
+def test_a_registry_projection_keeps_its_falsifier():
+    """Projecting a registry row into this lane must not launder its evidence.
+
+    ``_discover_from_registry`` hardcodes ``pid=0`` and ``status=None``, so an
+    exited or pid-dead worker arrived here carrying nothing to falsify with and
+    classified reachable off a still-warm transcript. Mail then assigned the
+    durable copy to `live-drain` instead of `wake-daemon`, stranding it.
+
+    The falsifier is derived ONCE, by ``registry_falsifier`` at projection time
+    (which already knows about panes, exit tombstones and pids), and carried -
+    rather than this lane growing a second copy of those rules.
+    """
+    condemned = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,  # the projection's "not recorded" placeholder
+        cwd="/tmp",
+        project=None,
+        status=None,
+        truth_state="working",
+        registry_falsifier="exit-recorded",
+    )
+    assert condemned.is_reachable is False
+    row = condemned.to_row()
+    assert row["status"] == "orphaned"
+    assert row["basis"] == "exit-recorded"
+
+    # Still an addressing filter: the handle must keep resolving.
+    assert condemned.is_alive is True
+
+
+def test_reachability_reaches_the_decision_not_only_the_rendered_row():
+    """The verdict has to reach whatever DECIDES, not only what prints.
+
+    Applying the falsifier in ``to_row`` alone left every caller that asks the
+    question rather than printing the answer on the old behaviour -- mail read
+    a transcript-only property to set `recipient_live`, so a provably dead
+    session was classed live and its durable fallback went to `live-drain`
+    instead of `wake-daemon`, stranding the message.
+
+    The two properties stay SPLIT on purpose. `is_alive` backs address
+    resolution, which must keep resolving a handle whose recorded pid went
+    stale -- an unaddressable row cannot even be resumed by hand. Only
+    `is_reachable` carries the falsifiers.
+    """
+    dead = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=1,  # never a worker: `_pid_alive` returns a confident False
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+    )
+    assert dead.is_reachable is False
+    assert dead.is_alive is True, "addressing must not lose the handle"
+
+    # A row with no recorded pid stays reachable on both: absence of a pid is
+    # absence of evidence, never a death sentence.
+    unknown_pid = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+    )
+    assert unknown_pid.is_reachable is True
+    assert unknown_pid.is_alive is True
+
+
+def test_a_discovered_row_carries_its_evidence_not_just_a_word():
+    """Every row on this lane is DERIVED, so the basis matters most here.
+
+    Reducing the verdict to a bare ``status`` left a reader unable to tell a
+    transcript-derived ``live`` from an ``orphaned`` produced by a fired
+    falsifier -- and the age was hardcoded to None, which threw away the one
+    number that makes ``unknown`` actionable. The Rust list path re-serves these
+    rows verbatim, so the omission reached both runtimes.
+    """
+    live = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=0,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+        last_activity_age_s=32,
+    ).to_row()
+    assert live["reachability"] == "reachable"
+    assert live["basis"] == "transcript"
+    assert live["last_activity_age_s"] == 32
+
+    condemned = discover.DiscoveredSession(
+        session_id="feedface",
+        short_id="feedface",
+        handle="feedface",
+        pid=1,
+        cwd="/tmp",
+        project=None,
+        status="busy",
+        truth_state="working",
+        last_activity_age_s=32,
+    ).to_row()
+    # Same word on the wire as a quiet row would once have produced; only the
+    # basis says a falsifier actually fired.
+    assert condemned["status"] == "orphaned"
+    assert condemned["reachability"] == "unreachable"
+    assert condemned["basis"] == "process-gone"
+
+
 def test_loaded_daemon_thread_does_not_override_stalled_transcript(tmp_path, monkeypatch):
     codex = tmp_path / "codex"
     sid = "019f4d0c-1111-2222-3333-444444444444"
-    rollout = _write_codex_rollout(
-        codex, session_id=sid, cwd="/old/repo", mtime_age=10_000.0
-    )
+    rollout = _write_codex_rollout(codex, session_id=sid, cwd="/old/repo", mtime_age=10_000.0)
     with rollout.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps({
-            "type": "response_item",
-            "payload": {
-                "type": "message", "role": "assistant",
-                "content": [{"type": "output_text", "text": "still working"}],
-            },
-        }) + "\n")
+        fh.write(
+            json.dumps(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "still working"}],
+                    },
+                }
+            )
+            + "\n"
+        )
     stale = time.time() - 10_000.0
     os.utime(rollout, (stale, stale))
     monkeypatch.setattr(
@@ -1176,17 +1389,13 @@ def test_daemon_row_is_enriched_by_recent_rollout(tmp_path, monkeypatch):
         subprocess.CompletedProcess(
             [], 0, stdout='{"available":false,"reason":"no-daemon"}', stderr=""
         ),
-        subprocess.CompletedProcess(
-            [], 0, stdout='{"available":true,"threads":[]}', stderr=""
-        ),
+        subprocess.CompletedProcess([], 0, stdout='{"available":true,"threads":[]}', stderr=""),
     ],
 )
 def test_daemon_probe_failure_or_empty_is_lenient(monkeypatch, completed):
     from fno import rust_binary
 
-    monkeypatch.setattr(
-        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
-    )
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents"))
     monkeypatch.setattr(discover.subprocess, "run", lambda *a, **kw: completed)
 
     assert discover._discover_from_codex_daemon() == []
@@ -1204,15 +1413,11 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
             {"session_id": 7, "cwd": "/bad"},
         ],
     }
-    monkeypatch.setattr(
-        rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents")
-    )
+    monkeypatch.setattr(rust_binary, "resolve_installed_binary", lambda: Path("/fake/fno-agents"))
     monkeypatch.setattr(
         discover.subprocess,
         "run",
-        lambda *a, **kw: subprocess.CompletedProcess(
-            [], 0, stdout=json.dumps(output), stderr=""
-        ),
+        lambda *a, **kw: subprocess.CompletedProcess([], 0, stdout=json.dumps(output), stderr=""),
     )
 
     rows = discover._discover_from_codex_daemon()
@@ -1227,7 +1432,10 @@ def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
     codex = tmp_path / "codex"
     _write_codex_rollout(codex, session_id="019f48e1-nometa", cwd="/x", meta=False)
     _write_codex_rollout(
-        codex, session_id="019abcde-good", cwd="/y", mtime_age=3.0,
+        codex,
+        session_id="019abcde-good",
+        cwd="/y",
+        mtime_age=3.0,
     )
     sessions = _run_codex(tmp_path, codex)
     assert [s.short_id for s in sessions] == ["cde-good"]
@@ -1239,7 +1447,9 @@ def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
     and the refusal leads with the bare id so the caller can fix what it built."""
     codex = tmp_path / "codex"
     _write_codex_rollout(
-        codex, session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4", cwd="/x",
+        codex,
+        session_id="019f48e1-5b09-72a0-9bc8-6b364bcf4ae4",
+        cwd="/x",
     )
     seams = dict(
         sessions_dir=tmp_path / "no-sessions",
@@ -1374,9 +1584,7 @@ def test_us1_torn_roster_yields_zero_rows(tmp_path, monkeypatch):
     daemon.mkdir(parents=True, exist_ok=True)
     (daemon / "roster.json").write_text("{not json", encoding="utf-8")
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
-    resolved, suggestions = discover.resolve_or_suggest(
-        "9a063cd3", **_empty_seams(tmp_path)
-    )
+    resolved, suggestions = discover.resolve_or_suggest("9a063cd3", **_empty_seams(tmp_path))
     assert resolved is None
     assert suggestions == []
 
@@ -1509,9 +1717,7 @@ def test_us2_peek_resolves_codex_name(tmp_path, monkeypatch):
     assert match.name == "codex-x2af5"
 
 
-def test_repaired_codex_identity_resolves_by_name_short_and_full_id(
-    tmp_path, monkeypatch
-):
+def test_repaired_codex_identity_resolves_by_name_short_and_full_id(tmp_path, monkeypatch):
     """Every public handle reaches one peer, GIVEN an already-repaired row.
 
     Scope note: this seeds the repaired state and performs no repair, so it pins
@@ -1587,9 +1793,7 @@ def test_ac1_err_name_miss_suggests_registered_names(tmp_path, monkeypatch):
     assert "codex-x2af5" in suggestions
 
 
-def test_us2_registered_name_matching_retired_shape_resolves_for_peek(
-    tmp_path, monkeypatch
-):
+def test_us2_registered_name_matching_retired_shape_resolves_for_peek(tmp_path, monkeypatch):
     """Codex P2 (#603): a registered name that matches the retired
     <harness>-<short8> syntax (codex-deadbeef, which validate_spawn_name
     permits) must resolve via peek too. Exact names take precedence over the
@@ -1647,9 +1851,7 @@ def test_us2_registered_name_and_colliding_alias_are_ambiguous(monkeypatch):
         agent="claude",
         truth_state="working",
     )
-    monkeypatch.setattr(
-        discover, "discover_live_sessions", lambda **_k: [named, aliased]
-    )
+    monkeypatch.setattr(discover, "discover_live_sessions", lambda **_k: [named, aliased])
     match, suggestions = discover.resolve_or_suggest("dup-name")
     assert match is None
     assert sorted(suggestions) == ["sid-alias", "sid-named"]
@@ -1727,8 +1929,11 @@ def test_opencode_row_without_captured_id_yields_no_live_recipient(tmp_path, mon
     write_registry(
         [
             AgentEntry(
-                name="oc-live-only", harness="opencode", cwd="/x",
-                log_path="/tmp/oc.log", harness_session_id=None,
+                name="oc-live-only",
+                harness="opencode",
+                cwd="/x",
+                log_path="/tmp/oc.log",
+                harness_session_id=None,
             )
         ],
         path=reg,
@@ -1752,8 +1957,11 @@ def test_opencode_row_with_captured_id_resolves_live(tmp_path, monkeypatch):
     write_registry(
         [
             AgentEntry(
-                name="oc", harness="opencode", cwd="/x",
-                log_path="/tmp/oc.log", harness_session_id=sid,
+                name="oc",
+                harness="opencode",
+                cwd="/x",
+                log_path="/tmp/oc.log",
+                harness_session_id=sid,
             )
         ],
         path=reg,
@@ -1772,8 +1980,12 @@ def test_us2_registry_dead_status_rows_excluded(tmp_path, monkeypatch):
     write_registry(
         [
             AgentEntry(
-                name="x-dead", harness="claude", cwd="/x", log_path="/tmp/d.log",
-                short_id="deadd00d", harness_session_id="deadd00d-1111-2222-3333-444444444444",
+                name="x-dead",
+                harness="claude",
+                cwd="/x",
+                log_path="/tmp/d.log",
+                short_id="deadd00d",
+                harness_session_id="deadd00d-1111-2222-3333-444444444444",
                 status="orphaned",
             )
         ],
@@ -1796,8 +2008,13 @@ def test_registry_orphaned_status_cannot_hide_family1_live_session(tmp_path, mon
     write_registry(
         [
             AgentEntry(
-                name="x-live", harness="claude", cwd="/x", log_path="/tmp/live.log",
-                short_id="feedface", harness_session_id=sid, status="orphaned",
+                name="x-live",
+                harness="claude",
+                cwd="/x",
+                log_path="/tmp/live.log",
+                short_id="feedface",
+                harness_session_id=sid,
+                status="orphaned",
             )
         ],
         path=reg,
@@ -1824,7 +2041,10 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     write_registry(
         [
             AgentEntry(
-                name="x-foo", harness="claude", cwd="/x", log_path="/tmp/f.log",
+                name="x-foo",
+                harness="claude",
+                cwd="/x",
+                log_path="/tmp/f.log",
                 short_id="j0b1d001",  # jobId
                 harness_session_id="aaaabbbb-1111-2222-3333-444444444444",  # uuid[:8]=aaaabbbb
             )
@@ -1833,9 +2053,7 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
     # Resolves by the jobId short handle...
-    by_job, _ = discover.resolve_or_suggest(
-        "j0b1d001", registry_path=reg, **_empty_seams(tmp_path)
-    )
+    by_job, _ = discover.resolve_or_suggest("j0b1d001", registry_path=reg, **_empty_seams(tmp_path))
     assert by_job is not None
     assert by_job.short_id == "j0b1d001"
     assert by_job.session_id == "aaaabbbb-1111-2222-3333-444444444444"
@@ -1857,9 +2075,7 @@ def test_ac2_fr_codex_and_opencode_discovery_rows_use_canonical_tail(tmp_path):
     storage = tmp_path / "opencode"
     opencode_sid = "ses_7f3a9b2cAbCd1234"
     _write_opencode_session(storage, session_id=opencode_sid, cwd="/opencode", mtime_age=1)
-    opencode_rows = discover._discover_from_opencode(
-        storage, recency_seconds=60, now=time.time()
-    )
+    opencode_rows = discover._discover_from_opencode(storage, recency_seconds=60, now=time.time())
     assert opencode_rows[0]["short_id"] == "AbCd1234"
 
 
@@ -1940,9 +2156,7 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
 def test_us6_opencode_stale_session_is_enumerated_for_family1(tmp_path):
     """Age is classification evidence, never an enumeration exclusion."""
     storage = tmp_path / "opencode"
-    _write_opencode_session(
-        storage, session_id="ses_dead", cwd="/x", mtime_age=10_000.0
-    )
+    _write_opencode_session(storage, session_id="ses_dead", cwd="/x", mtime_age=10_000.0)
     sessions = _run_opencode(tmp_path, storage)
     assert [s.session_id for s in sessions] == ["ses_dead"]
     assert sessions[0].truth_state == "unknown"
@@ -1953,9 +2167,7 @@ def test_us6_opencode_fresh_messages_keep_stale_info_live(tmp_path):
     file has not been rewritten (why discovery maxes the two mtimes)."""
     storage = tmp_path / "opencode"
     sid = "ses_talking"
-    f = _write_opencode_session(
-        storage, session_id=sid, cwd="/x", mtime_age=10_000.0
-    )
+    f = _write_opencode_session(storage, session_id=sid, cwd="/x", mtime_age=10_000.0)
     mdir = storage / "message" / sid
     fresh = time.time() - 5.0
     os.utime(mdir, (fresh, fresh))
@@ -1967,9 +2179,7 @@ def test_us6_opencode_fresh_messages_keep_stale_info_live(tmp_path):
 def test_us6_opencode_malformed_info_skipped_not_fatal(tmp_path):
     """AC-ERR: an info file with no ``id`` contributes no row and never raises."""
     storage = tmp_path / "opencode"
-    _write_opencode_session(
-        storage, session_id="ses_bad", cwd="/x", mtime_age=5.0, info=False
-    )
+    _write_opencode_session(storage, session_id="ses_bad", cwd="/x", mtime_age=5.0, info=False)
     (storage / "session" / "proj0001" / "torn.json").write_text("{not json", encoding="utf-8")
     assert _run_opencode(tmp_path, storage) == []
 
@@ -1990,9 +2200,7 @@ def test_us6_opencode_streaming_turn_stays_live_via_part_mtime(tmp_path):
     of discovery and becomes unaddressable while still alive."""
     storage = tmp_path / "opencode"
     sid = "ses_streaming"
-    info = _write_opencode_session(
-        storage, session_id=sid, cwd="/x", mtime_age=1800.0, messages=1
-    )
+    info = _write_opencode_session(storage, session_id=sid, cwd="/x", mtime_age=1800.0, messages=1)
     # Both cheap signals are stale (well past the 600s window)...
     assert info.stat().st_mtime < time.time() - 600
     assert (storage / "message" / sid).stat().st_mtime < time.time() - 600
@@ -2008,9 +2216,7 @@ def test_us6_opencode_old_session_with_fresh_part_reaches_family1(tmp_path):
     """Enumeration cannot hide a content signal written after stale metadata."""
     storage = tmp_path / "opencode"
     sid = "ses_ancient"
-    _write_opencode_session(
-        storage, session_id=sid, cwd="/x", mtime_age=86_400.0 * 30, messages=1
-    )
+    _write_opencode_session(storage, session_id=sid, cwd="/x", mtime_age=86_400.0 * 30, messages=1)
     pdir = storage / "part" / "msg_0"
     pdir.mkdir(parents=True)
     (pdir / "prt_000.json").write_text('{"type":"text","text":"x"}', encoding="utf-8")
@@ -2026,12 +2232,8 @@ def test_us6_opencode_dedups_and_honors_exclusions(tmp_path):
     storage = tmp_path / "opencode"
     sid = "ses_dupe"
     # Same session id recorded under two project dirs -> one row, not two.
-    _write_opencode_session(
-        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projA"
-    )
-    _write_opencode_session(
-        storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projB"
-    )
+    _write_opencode_session(storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projA")
+    _write_opencode_session(storage, session_id=sid, cwd="/x", mtime_age=5.0, project_id="projB")
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == [sid]
     # An already-adopted session is excluded from the discovered lane.
     assert _run_opencode(tmp_path, storage, exclude_session_ids={sid}) == []
@@ -2053,26 +2255,18 @@ def _write_opencode_db(storage: Path, sessions, messages=(), parts=()) -> Path:
     db = storage.parent / "opencode.db"
     con = sqlite3.connect(db)
     con.execute(
-        "CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER,"
-        " time_updated INTEGER)"
+        "CREATE TABLE session (id TEXT, directory TEXT, time_created INTEGER, time_updated INTEGER)"
     )
-    con.execute(
-        "CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER,"
-        " data TEXT)"
-    )
+    con.execute("CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT)")
     con.execute(
         "CREATE TABLE part (id TEXT, message_id TEXT, session_id TEXT,"
         " time_created INTEGER, data TEXT)"
     )
     for sid, directory, age in sessions:
         updated = int((time.time() - age) * 1000)
-        con.execute(
-            "INSERT INTO session VALUES (?,?,?,?)", (sid, directory, updated, updated)
-        )
+        con.execute("INSERT INTO session VALUES (?,?,?,?)", (sid, directory, updated, updated))
     for mid, sid, created, data in messages:
-        con.execute(
-            "INSERT INTO message VALUES (?,?,?,?)", (mid, sid, created, json.dumps(data))
-        )
+        con.execute("INSERT INTO message VALUES (?,?,?,?)", (mid, sid, created, json.dumps(data)))
     for pid, mid, created, data in parts:
         con.execute(
             "INSERT INTO part VALUES (?,?,?,?,?)",
@@ -2103,9 +2297,7 @@ def test_opencode_db_wins_over_legacy_tree(tmp_path):
     """A host mid-migration has both; the database is authoritative because the
     JSON tree stops being written once opencode moves to SQLite."""
     storage = tmp_path / "opencode" / "storage"
-    _write_opencode_session(
-        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
-    )
+    _write_opencode_session(storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0)
     _write_opencode_db(storage, [("ses_db", "/current", 5.0)])
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_db"]
 
@@ -2113,9 +2305,7 @@ def test_opencode_db_wins_over_legacy_tree(tmp_path):
 def test_opencode_legacy_tree_used_when_no_db(tmp_path):
     """An install old enough to have no database still resolves."""
     storage = tmp_path / "opencode" / "storage"
-    _write_opencode_session(
-        storage, session_id="ses_old", cwd="/legacy", mtime_age=5.0
-    )
+    _write_opencode_session(storage, session_id="ses_old", cwd="/legacy", mtime_age=5.0)
     assert [s.session_id for s in _run_opencode(tmp_path, storage)] == ["ses_old"]
 
 
@@ -2132,9 +2322,7 @@ def test_opencode_empty_db_does_not_resurrect_legacy_sessions(tmp_path):
     "no database". Falling back here would surface the legacy tree's long-dead
     sessions as live."""
     storage = tmp_path / "opencode" / "storage"
-    _write_opencode_session(
-        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
-    )
+    _write_opencode_session(storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0)
     _write_opencode_db(storage, [])  # real store, no live sessions
     assert _run_opencode(tmp_path, storage) == []
 
@@ -2143,9 +2331,7 @@ def test_opencode_broken_db_does_not_resurrect_legacy_sessions(tmp_path):
     """Same for a locked/corrupt/schema-drifted store: an error reads as empty,
     and must not be mistaken for "this host has no database"."""
     storage = tmp_path / "opencode" / "storage"
-    _write_opencode_session(
-        storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0
-    )
+    _write_opencode_session(storage, session_id="ses_legacy", cwd="/legacy", mtime_age=5.0)
     storage.mkdir(parents=True, exist_ok=True)
     (storage.parent / "opencode.db").write_text("not a database", encoding="utf-8")
     assert _run_opencode(tmp_path, storage) == []
@@ -2224,11 +2410,16 @@ def test_resolve_reachable_reads_backlog_session_stamps(tmp_path, monkeypatch):
     sid = "ccdd1122-3344-5566-7788-99aabbccddee"
     graph = tmp_path / "graph.json"
     graph.write_text(
-        json.dumps({"entries": [
-            {"id": "x-0001", "sessions": [
-                {"phase": "ship", "harness": "claude", "session_id": sid}
-            ]}
-        ]}),
+        json.dumps(
+            {
+                "entries": [
+                    {
+                        "id": "x-0001",
+                        "sessions": [{"phase": "ship", "harness": "claude", "session_id": sid}],
+                    }
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
@@ -2394,9 +2585,7 @@ def test_registry_source_yields_the_resumable_uuid_not_the_job_id(tmp_path, monk
         def session_id(self):  # what the buggy version read
             return self.short_id
 
-    monkeypatch.setattr(
-        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
-    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()])
     projects = tmp_path / "projects"
     projects.mkdir()
 
@@ -2422,9 +2611,7 @@ def test_registry_source_carries_a_non_claude_harness_through(tmp_path, monkeypa
         harness_session_id = sid
         short_id = "cc33dd44"
 
-    monkeypatch.setattr(
-        "fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()]
-    )
+    monkeypatch.setattr("fno.agents.registry.load_registry", lambda *_a, **_k: [_Row()])
     projects = tmp_path / "projects"
     projects.mkdir()
 
@@ -2439,9 +2626,7 @@ def test_registry_source_carries_a_non_claude_harness_through(tmp_path, monkeypa
 # ---------------------------------------------------------------------------
 
 
-def test_short_id_colliding_across_two_stores_is_ambiguous_not_unique(
-    tmp_path, monkeypatch
-):
+def test_short_id_colliding_across_two_stores_is_ambiguous_not_unique(tmp_path, monkeypatch):
     """Returning on the first source that answers is itself a guess.
 
     A transcript hit plus a DIFFERENT uuid in the registry sharing the same
@@ -2474,9 +2659,7 @@ def test_short_id_colliding_across_two_stores_is_ambiguous_not_unique(
     assert sorted(ambiguous) == sorted([a, b])
 
 
-def test_friendly_alias_still_resolves_once_the_session_is_asleep(
-    tmp_path, monkeypatch
-):
+def test_friendly_alias_still_resolves_once_the_session_is_asleep(tmp_path, monkeypatch):
     """An address that worked while live must not vanish when the session sleeps."""
     from fno.agents import discover
 
@@ -2516,9 +2699,7 @@ def test_token_matching_is_case_insensitive(tmp_path):
     assert found is not None and found.session_id == sid
 
 
-def test_roster_cwd_is_carried_so_a_wake_resumes_in_the_right_repo(
-    tmp_path, monkeypatch
-):
+def test_roster_cwd_is_carried_so_a_wake_resumes_in_the_right_repo(tmp_path, monkeypatch):
     """Claude resume is cwd-scoped: waking a cross-repo recipient from the
     sender's directory would fail to revive the resolved session."""
     from fno.agents import discover
@@ -2527,9 +2708,12 @@ def test_roster_cwd_is_carried_so_a_wake_resumes_in_the_right_repo(
     daemon = tmp_path / "daemon"
     daemon.mkdir()
     (daemon / "roster.json").write_text(
-        json.dumps({"proto": 1, "workers": {
-            sid[:8]: {"sessionId": sid, "pid": 1, "cwd": "/Users/x/other-repo"}
-        }}),
+        json.dumps(
+            {
+                "proto": 1,
+                "workers": {sid[:8]: {"sessionId": sid, "pid": 1, "cwd": "/Users/x/other-repo"}},
+            }
+        ),
         encoding="utf-8",
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(daemon))
@@ -2571,9 +2755,7 @@ def test_malformed_graph_is_reported_unreadable_not_empty(tmp_path, monkeypatch)
     from fno.agents import discover
 
     graph = tmp_path / "graph.json"
-    graph.write_text(
-        json.dumps({"entries": [{"id": "x-0001", "sessions": 42}]}), encoding="utf-8"
-    )
+    graph.write_text(json.dumps({"entries": [{"id": "x-0001", "sessions": 42}]}), encoding="utf-8")
     monkeypatch.setattr("fno.graph.load.GRAPH_JSON", graph)
     daemon = tmp_path / "daemon"
     daemon.mkdir()
@@ -2607,9 +2789,7 @@ def test_opencode_ids_keep_their_case_while_hex_folds(tmp_path):
     assert not _token_matches("ses_abc123", "ses_AbC123")
 
 
-def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
-    tmp_path, monkeypatch
-):
+def test_resolve_reachable_keeps_case_distinct_opencode_sessions(tmp_path, monkeypatch):
     """Two case-distinct OpenCode ids must remain an ambiguity, not deduplicate."""
     from fno.agents import discover
 
@@ -2618,15 +2798,16 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
     monkeypatch.setattr(
         discover,
         "_reachable_from_transcripts",
-        lambda *_a: ([(upper, "opencode", "/upper", True), (lower, "opencode", "/lower", True)], True),
+        lambda *_a: (
+            [(upper, "opencode", "/upper", True), (lower, "opencode", "/lower", True)],
+            True,
+        ),
     )
     monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
     monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
     monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
 
-    found, ambiguous = discover.resolve_reachable(
-        "SAMEtail", projects_dir=tmp_path / "projects"
-    )
+    found, ambiguous = discover.resolve_reachable("SAMEtail", projects_dir=tmp_path / "projects")
 
     assert found is None
     assert ambiguous == sorted([upper, lower])
@@ -2640,9 +2821,7 @@ def test_resolve_reachable_keeps_case_distinct_opencode_sessions(
 _SHARED_SID = "019fb417-2222-7333-8444-5555cafebabe"
 
 
-def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(
-    tmp_path, monkeypatch
-):
+def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(tmp_path, monkeypatch):
     """One uuid string under two harnesses is two sessions, never one."""
     from fno.agents import discover
 
@@ -2661,9 +2840,7 @@ def test_resolve_reachable_keeps_same_id_under_different_harnesses_distinct(
     monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
     monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
 
-    found, ambiguous = discover.resolve_reachable(
-        _SHARED_SID, projects_dir=tmp_path / "projects"
-    )
+    found, ambiguous = discover.resolve_reachable(_SHARED_SID, projects_dir=tmp_path / "projects")
 
     assert found is None, "a cross-harness id collision must never resolve uniquely"
     assert ambiguous == [_SHARED_SID, _SHARED_SID]
@@ -2702,9 +2879,7 @@ def test_reachable_from_registry_keeps_cross_harness_rows_distinct(tmp_path):
     assert sorted(harness for _sid, harness, _cwd, _v in hits) == ["claude", "codex"]
 
 
-def test_discover_live_sessions_keeps_cross_harness_rows_distinct(
-    tmp_path, monkeypatch
-):
+def test_discover_live_sessions_keeps_cross_harness_rows_distinct(tmp_path, monkeypatch):
     """Candidates are the union of every harness's source; the merge must not
     fold two of them into one row that absorbs the other's cwd."""
     from fno.agents.registry import AgentEntry, write_registry
@@ -2732,9 +2907,7 @@ def test_discover_live_sessions_keeps_cross_harness_rows_distinct(
     )
     monkeypatch.setenv("FNO_CLAUDE_DAEMON_DIR", str(tmp_path / "no-daemon"))
 
-    sessions = discover.discover_live_sessions(
-        registry_path=reg, **_empty_seams(tmp_path)
-    )
+    sessions = discover.discover_live_sessions(registry_path=reg, **_empty_seams(tmp_path))
 
     assert sorted((s.agent, s.cwd) for s in sessions) == [
         ("claude", "/claude-cwd"),
@@ -2742,9 +2915,7 @@ def test_discover_live_sessions_keeps_cross_harness_rows_distinct(
     ]
 
 
-def test_resolve_reachable_includes_complete_harness_store_hits(
-    tmp_path, monkeypatch
-):
+def test_resolve_reachable_includes_complete_harness_store_hits(tmp_path, monkeypatch):
     """Codex/OpenCode stores participate below the liveness listing."""
     sid = "019fb417-1111-7222-8333-4444deadbeef"
     monkeypatch.setattr(discover, "_reachable_from_transcripts", lambda *_a: ([], True))
@@ -2757,9 +2928,7 @@ def test_resolve_reachable_includes_complete_harness_store_hits(
         lambda _token: ([(sid, "codex", "/repo", True)], True),
     )
 
-    found, ambiguous = discover.resolve_reachable(
-        "deadbeef", projects_dir=tmp_path / "projects"
-    )
+    found, ambiguous = discover.resolve_reachable("deadbeef", projects_dir=tmp_path / "projects")
 
     assert ambiguous == []
     assert found is not None
@@ -2795,9 +2964,7 @@ def test_resolve_or_suggest_rechecks_live_short_against_durable_namespace(
     assert ambiguous == [visible.session_id, hidden]
 
 
-def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
-    tmp_path, monkeypatch
-):
+def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(tmp_path, monkeypatch):
     """A persisted alias cannot silently displace or be displaced by a handle."""
     alias_sid = "11111111-0000-0000-0000-11111111"
     canonical_sid = "22222222-0000-0000-0000-deadbeef"
@@ -2818,9 +2985,7 @@ def test_resolve_reachable_alias_and_canonical_collision_fails_ambiguous(
     assert sorted(ambiguous) == sorted([alias_sid, canonical_sid])
 
 
-def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(
-    tmp_path, monkeypatch
-):
+def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(tmp_path, monkeypatch):
     legacy_sid = "deadbeef-0000-0000-0000-11111111"
     canonical_sid = "22222222-0000-0000-0000-deadbeef"
     project = tmp_path / "projects" / "-tmp-project"
@@ -2830,9 +2995,7 @@ def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(
     monkeypatch.setattr(discover, "_reachable_from_registry", lambda *_a: ([], True))
     monkeypatch.setattr(discover, "_reachable_from_roster", lambda *_a: ([], True))
     monkeypatch.setattr(discover, "_reachable_from_graph", lambda *_a: ([], True))
-    found, ambiguous = discover.resolve_reachable(
-        "deadbeef", projects_dir=project.parent
-    )
+    found, ambiguous = discover.resolve_reachable("deadbeef", projects_dir=project.parent)
     assert found is None
     assert sorted(ambiguous) == sorted([legacy_sid, canonical_sid])
 
@@ -2840,21 +3003,23 @@ def test_resolve_reachable_canonical_and_legacy_collision_fails_ambiguous(
 # --------------------------------------------------------------------------
 # Harness-native subagent discovery (x-af92): read-only sidechain visibility
 # --------------------------------------------------------------------------
-def _write_subagent(
-    projects_dir, *, enc_cwd, parent_sid, agent_id, mtime_age=5.0, record=None
-):
+def _write_subagent(projects_dir, *, enc_cwd, parent_sid, agent_id, mtime_age=5.0, record=None):
     """Sidechain transcript at <enc-cwd>/<session>/subagents/agent-*.jsonl."""
     sdir = projects_dir / enc_cwd / parent_sid / "subagents"
     sdir.mkdir(parents=True, exist_ok=True)
     f = sdir / f"agent-{agent_id}.jsonl"
-    rec = record if record is not None else {
-        "isSidechain": True,
-        "agentId": agent_id,
-        "sessionId": parent_sid,
-        "cwd": "/Users/x/code/proj",
-        "gitBranch": "main",
-        "type": "user",
-    }
+    rec = (
+        record
+        if record is not None
+        else {
+            "isSidechain": True,
+            "agentId": agent_id,
+            "sessionId": parent_sid,
+            "cwd": "/Users/x/code/proj",
+            "gitBranch": "main",
+            "type": "user",
+        }
+    )
     f.write_text(json.dumps(rec) + "\n", encoding="utf-8")
     mt = time.time() - mtime_age
     os.utime(f, (mt, mt))
@@ -2919,9 +3084,7 @@ def test_subagent_aged_out_past_scan_window(tmp_path):
         agent_id="aged00000000000",
         mtime_age=3 * 3600.0,
     )
-    rows, warnings = discover.discover_subagents(
-        projects_dir=projects, scan_window_seconds=7200.0
-    )
+    rows, warnings = discover.discover_subagents(projects_dir=projects, scan_window_seconds=7200.0)
     assert rows == []
     assert warnings == []  # pruned by mtime, not a read failure
 
@@ -2929,9 +3092,7 @@ def test_subagent_aged_out_past_scan_window(tmp_path):
 def test_subagent_malformed_first_record_skipped(tmp_path):
     """AC5-EDGE: a malformed first record is skipped; the sweep continues."""
     projects = tmp_path / "projects"
-    _write_subagent(
-        projects, enc_cwd="-c", parent_sid="p-1-2-3-4-5", agent_id="good00000000001"
-    )
+    _write_subagent(projects, enc_cwd="-c", parent_sid="p-1-2-3-4-5", agent_id="good00000000001")
     sdir = projects / "-c" / "p-1-2-3-4-5" / "subagents"
     sdir.mkdir(parents=True, exist_ok=True)
     (sdir / "agent-bad00000000002.jsonl").write_text("{not json\n", encoding="utf-8")
@@ -2964,12 +3125,18 @@ def test_subagent_dedups_on_agent_id_across_sessions(tmp_path):
     """Two session dirs holding the same agentId collapse to one row."""
     projects = tmp_path / "projects"
     _write_subagent(
-        projects, enc_cwd="-c", parent_sid="sess-1-1-1-1-1",
-        agent_id="share0000000000a", mtime_age=60.0,
+        projects,
+        enc_cwd="-c",
+        parent_sid="sess-1-1-1-1-1",
+        agent_id="share0000000000a",
+        mtime_age=60.0,
     )
     _write_subagent(
-        projects, enc_cwd="-c", parent_sid="sess-2-2-2-2-2",
-        agent_id="share0000000000a", mtime_age=10.0,
+        projects,
+        enc_cwd="-c",
+        parent_sid="sess-2-2-2-2-2",
+        agent_id="share0000000000a",
+        mtime_age=10.0,
     )
     rows, _ = discover.discover_subagents(projects_dir=projects)
     assert len(rows) == 1

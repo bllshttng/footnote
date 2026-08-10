@@ -179,12 +179,21 @@ def test_list_filter_by_status_orphaned(
         },
     )
 
-    result = runner.invoke(agents_app, ["list", "--status", "orphaned", "--json"])
+    # A quiet row is UNKNOWN, not orphaned (x-16d8): this registry lists
+    # reachable agents rather than live processes, so silence is absence of
+    # evidence and never a death sentence. `orphaned` now means a falsifier
+    # affirmatively fired -- see the process-gone case below.
+    result = runner.invoke(agents_app, ["list", "--status", "unknown", "--json"])
 
     assert result.exit_code == 0, result.output
     parsed = json.loads(result.output)
     assert parsed["count"] == 1
     assert parsed["agents"][0]["name"] == "dead"
+    assert parsed["agents"][0]["basis"] == "silent"
+
+    # And nothing is orphaned, because no row was actually falsified.
+    result = runner.invoke(agents_app, ["list", "--status", "orphaned", "--json"])
+    assert json.loads(result.output)["count"] == 0
 
 
 def test_list_non_tty_defaults_to_json(

@@ -2151,10 +2151,12 @@ fn fetch_discovered_sessions(
 ) -> Vec<Value> {
     use std::process::Command;
 
-    if matches!(status_filter, Some(status) if status != "live") {
-        return Vec::new();
-    }
-
+    // No live-only early return. It encoded "a discovered session is live by
+    // definition", which the shared reachability verdict retired: a discovered
+    // row whose process is provably gone now comes back `orphaned`, so the
+    // early return made `--status orphaned` drop through Rust a row that Python
+    // prints -- one runtime-dependent answer to one question. The row-level
+    // filter at the bottom is the single place status is applied.
     let mut cmd = Command::new("fno");
     cmd.args(["agents", "discovered-json"]);
     cmd.env("FNO_AGENTS_RUNTIME", "python");
@@ -2176,11 +2178,30 @@ fn fetch_discovered_sessions(
         Ok(v) => v,
         Err(_) => return Vec::new(),
     };
-    parsed
+    let mut rows: Vec<Value> = parsed
         .get("discovered_sessions")
         .and_then(|v| v.as_array())
         .cloned()
-        .unwrap_or_default()
+        .unwrap_or_default();
+    retain_discovered_by_status(&mut rows, status_filter);
+    rows
+}
+
+/// Keep only the discovered rows whose OWN verdict matches the requested one.
+///
+/// Split out so it is assertable without the shellout above. The test that
+/// used to cover this pinned the early return (`a non-live filter yields
+/// nothing`), and once that return was gone the same assertion still passed --
+/// vacuously, because the subprocess answers with nothing under test. An
+/// assertion that survives the behavior it describes is not covering it.
+fn retain_discovered_by_status(rows: &mut Vec<Value>, status_filter: Option<&str>) {
+    // A discovered session whose process is provably gone now comes back
+    // `orphaned` (the shared reachability verdict), so a live-only run that
+    // trusted the CALLER's filter alone would print an orphaned row under a
+    // banner that says LIVE.
+    if let Some(want) = status_filter {
+        rows.retain(|r| r.get("status").and_then(Value::as_str) == Some(want));
+    }
 }
 
 /// Compact single-unit age for the CHECKED column: the largest whole unit of
@@ -3869,10 +3890,38 @@ mod tests {
         assert_eq!(params["provider"], Value::String("codex".to_string()));
     }
 
+    /// A non-live filter reaches the discovered rows instead of discarding the
+    /// whole lane.
+    ///
+    /// The lane used to return empty for any filter other than `live`, which
+    /// encoded "a discovered session is live by definition". The shared
+    /// reachability verdict retired that: a discovered row whose process is
+    /// provably gone comes back `orphaned`, and dropping the lane made a filter
+    /// for orphaned rows answer differently through Rust than through Python
+    /// for the same registry.
     #[test]
-    fn discovered_live_lane_is_empty_for_non_live_status_filters() {
-        assert!(fetch_discovered_sessions(None, None, Some("orphaned")).is_empty());
-        assert!(fetch_discovered_sessions(None, None, Some("unknown")).is_empty());
+    fn discovered_rows_are_filtered_by_their_own_verdict() {
+        let row = |name: &str, verdict: &str| json!({"name": name, "status": verdict});
+        let all = vec![
+            row("live-one", "live"),
+            row("gone-one", "orphaned"),
+            row("quiet-one", "unknown"),
+        ];
+
+        let mut orphaned = all.clone();
+        retain_discovered_by_status(&mut orphaned, Some("orphaned"));
+        assert_eq!(orphaned.len(), 1, "an orphaned discovered row must survive");
+        assert_eq!(orphaned[0]["name"], "gone-one");
+
+        let mut live = all.clone();
+        retain_discovered_by_status(&mut live, Some("live"));
+        assert_eq!(live.len(), 1);
+        assert_eq!(live[0]["name"], "live-one");
+
+        // No filter keeps every row: the caller asked no question.
+        let mut unfiltered = all.clone();
+        retain_discovered_by_status(&mut unfiltered, None);
+        assert_eq!(unfiltered.len(), 3);
     }
 
     /// AC1-HP: --json is NOT forwarded to daemon params (it is a client-side rendering flag)

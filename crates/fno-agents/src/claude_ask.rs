@@ -108,6 +108,24 @@ impl OrphanReason {
 #[derive(Debug, Clone)]
 pub struct TruthProbe {
     pub state: String,
+    /// The shared reachability verdict (`reachable` / `unreachable` /
+    /// `unknown`), derived Python-side with the falsifiers applied. `None` on a
+    /// truth build that predates the field.
+    ///
+    /// Prefer this over mapping [`Self::state`]: `state` is transcript activity
+    /// alone, so a session whose process died minutes ago still reads
+    /// `working` and renders live. That two-hour blind spot is the whole bug.
+    pub reachability: Option<String>,
+    /// The evidence [`Self::reachability`] was reached from (`transcript` /
+    /// `process-gone` / `pane-gone` / `silent` / `no-evidence`), and how old that
+    /// evidence is.
+    ///
+    /// Carried so the daemon's row can re-emit the whole triple. A verdict
+    /// without its basis is the shape this module exists to retire: it renders
+    /// as a bare word and a reader cannot tell a positive transcript reading
+    /// from a fired falsifier.
+    pub basis: Option<String>,
+    pub last_activity_age_s: Option<f64>,
     pub observed_model: serde_json::Value,
 }
 
@@ -119,8 +137,30 @@ pub fn family1_truth_probe(handle: &str) -> Option<TruthProbe> {
     family1_truth_probe_with_command(command, Duration::from_secs(5), handle)
 }
 
+/// The transcript state, LOWERED to `"unreachable"` when the shared verdict
+/// affirmatively falsified the row.
+///
+/// `resume` and the attach pointer read this and match on `working | watching |
+/// your-move` to decide "is live - attaching". Transcript state alone cannot see
+/// a dead process, so a session whose process died forty minutes ago still reads
+/// `working` and resume attaches to nothing. Passing the falsified case through
+/// as a state neither arm matches drops both callers into their inconclusive
+/// branch (refuse / no pointer), which is the safe answer.
+///
+/// The override is MONOTONE, matching `fno.agents.reachability`: it only ever
+/// lowers a would-be-live reading, never raises `done`/`stalled` toward live and
+/// never invents a verdict when the probe did not carry one.
 pub fn family1_truth_state(handle: &str) -> Option<String> {
-    family1_truth_probe(handle).map(|probe| probe.state)
+    let probe = family1_truth_probe(handle)?;
+    Some(lower_state_with_verdict(&probe.state, probe.reachability.as_deref()).to_string())
+}
+
+fn lower_state_with_verdict<'a>(state: &'a str, reachability: Option<&str>) -> &'a str {
+    if reachability == Some("unreachable") && matches!(state, "working" | "watching" | "your-move")
+    {
+        return "unreachable";
+    }
+    state
 }
 
 /// Diagnostic for a failed family-1 truth probe. truth writes its refusal
@@ -218,6 +258,19 @@ fn family1_truth_probe_with_command(
         Some("done" | "watching" | "your-move" | "working" | "stalled" | "unknown") => {
             Some(TruthProbe {
                 state: state.unwrap_or_default(),
+                // The shared reachability verdict, derived Python-side with the
+                // falsifiers applied. Absent on a truth build that predates the
+                // field, and callers then fall back to mapping `state` — which
+                // is transcript activity only, so it cannot see a dead process.
+                reachability: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("reachability")?.as_str().map(str::to_owned)),
+                basis: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("basis")?.as_str().map(str::to_owned)),
+                last_activity_age_s: parsed
+                    .as_ref()
+                    .and_then(|value| value.get("last_activity_age_s")?.as_f64()),
                 // Absent on a truth build that predates the field: null rather
                 // than a fabricated variant, so a stale `fno` reads as "this
                 // probe did not answer" instead of asserting no transcript.
@@ -2776,6 +2829,35 @@ mod tests {
     use super::*;
     use std::fs;
 
+    /// `resume` matches on the STATE, so the verdict has to reach it through
+    /// that channel or the falsifier is decorative on this path: a session whose
+    /// process died forty minutes ago still reads `working` and resume prints
+    /// "is live - attaching" at nothing.
+    #[test]
+    fn an_unreachable_verdict_lowers_a_would_be_live_state() {
+        assert_eq!(
+            lower_state_with_verdict("working", Some("unreachable")),
+            "unreachable"
+        );
+        // Monotone: a verdict never raises, and never rewrites a terminal state
+        // (resume's relaunch arm keys on `done`/`stalled` and must keep working).
+        assert_eq!(
+            lower_state_with_verdict("done", Some("unreachable")),
+            "done"
+        );
+        assert_eq!(
+            lower_state_with_verdict("stalled", Some("unknown")),
+            "stalled"
+        );
+        // No verdict on the wire (a truth build that predates the field) leaves
+        // the pre-existing mapping exactly as it was.
+        assert_eq!(lower_state_with_verdict("working", None), "working");
+        assert_eq!(
+            lower_state_with_verdict("working", Some("reachable")),
+            "working"
+        );
+    }
+
     // A spawn must NEVER hand bg_create a `None` timeout: the create wait then
     // falls into the unbounded `rx.recv()` arm and a `claude --bg` that holds
     // its inherited stdout/stderr pipe fds open hangs the dispatcher forever
@@ -3892,7 +3974,12 @@ mod tests {
         timeout: Duration,
         handle: &str,
     ) -> Option<String> {
-        family1_truth_probe_with_command(command, timeout, handle).map(|p| p.state)
+        // Lowered by the verdict, exactly as `family1_truth_state` does. A raw
+        // `.map(|p| p.state)` here would exercise a path production no longer
+        // takes, and every state assertion below would pin the pre-verdict
+        // reading forever.
+        family1_truth_probe_with_command(command, timeout, handle)
+            .map(|p| lower_state_with_verdict(&p.state, p.reachability.as_deref()).to_string())
     }
 
     #[test]
@@ -3918,6 +4005,38 @@ mod tests {
         let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
             .expect("probe answers");
         assert!(stale.observed_model.is_null());
+    }
+
+    /// The whole reachability triple comes off the wire, not just the verdict.
+    ///
+    /// The daemon row re-emits all three, and a parser that lifted only the
+    /// verdict would leave `basis` and `last_activity_age_s` permanently null
+    /// there -- a key that is always null being the same lie as a missing one.
+    /// `last_activity_age_s` crosses as a JSON integer from Python, so the
+    /// float parse has to accept one.
+    #[test]
+    fn family1_truth_probe_carries_the_reachability_triple() {
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args([
+            "-c",
+            "printf '{\"state\":\"working\",\"reachability\":\"unreachable\",\
+             \"basis\":\"pane-gone\",\"last_activity_age_s\":143255}'",
+        ]);
+        let probe = family1_truth_probe_with_command(cmd, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert_eq!(probe.reachability.as_deref(), Some("unreachable"));
+        assert_eq!(probe.basis.as_deref(), Some("pane-gone"));
+        assert_eq!(probe.last_activity_age_s, Some(143255.0));
+
+        // A truth build too old to emit them reads as absent, never as a
+        // fabricated `no-evidence` -- which is a VERDICT, not a missing field.
+        let mut old = std::process::Command::new("sh");
+        old.args(["-c", "printf '{\"state\":\"working\"}'"]);
+        let stale = family1_truth_probe_with_command(old, Duration::from_secs(1), "h1")
+            .expect("probe answers");
+        assert!(stale.reachability.is_none());
+        assert!(stale.basis.is_none());
+        assert!(stale.last_activity_age_s.is_none());
     }
 
     #[test]

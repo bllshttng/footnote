@@ -325,8 +325,17 @@ pub fn deliver_via_control_sock(
     attempts: u32,
     interval_ms: u64,
 ) -> Result<(), &'static str> {
-    // Resolve the recipient on the claude daemon roster. Any miss == not live
-    // reachable.
+    // Resolve the recipient on the claude daemon roster.
+    //
+    // `not-live` is a MISNOMER kept for wire compatibility: what these three
+    // misses actually prove is NOT-INJECTABLE (no roster entry, or no control
+    // socket to write into), which is a different question from whether the
+    // agent is reachable. A busy worker with no reachable control socket is
+    // correctly not-injectable and is NOT dead -- this reason was once read as a
+    // liveness verdict and reported an idle session for a worker whose
+    // transcript was 32 seconds old. For reachability ask
+    // `fno agents truth` / the `reachability` field on `fno agents list`
+    // (`cli/src/fno/agents/reachability.py`), never this string.
     let roster = ClaudeRoster::load_default().map_err(|_| "not-live")?;
     let worker = roster.find(session).ok_or("not-live")?;
     let sock = worker.resolve_control_sock().ok_or("not-live")?;

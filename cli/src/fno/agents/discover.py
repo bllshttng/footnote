@@ -17,6 +17,7 @@ that exits mid-scan) is treated as not-live. Discovery must add only a
 readdir + ~N stat/parse of the strict-pattern live set, never a full scan of
 a 7000+ entry directory.
 """
+
 from __future__ import annotations
 
 import datetime as _dt
@@ -31,6 +32,14 @@ from typing import Callable, Iterable, Iterator, Optional
 
 from fno import paths
 from fno.agents.fs_scan import path_exists_strict, scan_files
+from fno.agents.reachability import (
+    REACHABLE,
+    WIRE_STATUS,
+    Reachability,
+    classify_reachability,
+    pid_falsifier,
+    registry_falsifier,
+)
 from fno.harness_identity import (
     canonical_handle,
     legacy_prefix_handle,
@@ -462,8 +471,7 @@ def _discover_from_opencode_db(
     seen: set[str] = set()
     for sid, directory, _updated in opencode_query(
         db_path,
-        "SELECT id, directory, time_updated FROM session "
-        "ORDER BY time_updated DESC, id DESC",
+        "SELECT id, directory, time_updated FROM session ORDER BY time_updated DESC, id DESC",
     ):
         if not isinstance(sid, str) or not sid or sid in seen or sid in exclude_sids:
             continue
@@ -701,6 +709,12 @@ def _discover_from_registry(
                 "agent": harness,
                 "name": getattr(e, "name", None),
                 "identity_provisional": identity_provisional,
+                # `pid` and `status` are dropped above on purpose, but the row's
+                # EVIDENCE must not be dropped with them: a worker the registry
+                # already condemned (dead pid, exited pane, recorded exit) would
+                # otherwise arrive in the discovered lane with nothing to falsify
+                # on and read reachable off a still-warm transcript.
+                "registry_falsifier": registry_falsifier(e),
             }
         )
     return rows
@@ -719,6 +733,11 @@ class DiscoveredSession:
     status: Optional[str]  # registry status: idle/busy/waiting
     agent: str = "claude"
     truth_state: str = "unknown"
+    #: Age of the transcript evidence behind ``truth_state``. Kept rather than
+    #: discarded because the verdict is not usable without it: `unknown` at 30s
+    #: and `unknown` at 30h are different situations, and this lane renders into
+    #: the same payload as the registry lane, which carries the age.
+    last_activity_age_s: Optional[int] = None
     transcript_path: Optional[str] = None
     name: Optional[str] = None  # registered spawn name (address axis, distinct from handle/alias)
     # True only when a legacy Claude row lacks a full harness session id and its
@@ -726,13 +745,73 @@ class DiscoveredSession:
     # participates in short-address ambiguity, but can never claim full-id
     # precedence over another candidate.
     identity_provisional: bool = False
+    #: The falsifier the SOURCE registry row carried, when this session was
+    #: projected from one. ``_discover_from_registry`` cannot forward the row's
+    #: pid or stored status (it projects `pid=0` / `status=None` by design), so
+    #: without this a worker the registry had already condemned arrives here
+    #: with nothing to falsify on and reads reachable off a warm transcript.
+    #:
+    #: Derived ONCE by ``registry_falsifier`` at projection time, which already
+    #: knows about panes, exit tombstones and pids; carried rather than
+    #: re-derived so this lane never grows a second copy of those rules.
+    registry_falsifier: Optional[str] = None
+
+    def _reachability(self) -> Reachability:
+        """This session's verdict from the one shared derivation.
+
+        Both the rendered row and every caller that ASKS whether this session
+        is usable resolve through here, so the projection and the decision
+        cannot answer differently about the same session. `or None` because
+        pid 0 is this projection's "not recorded" placeholder, and absence of a
+        pid is absence of evidence, never a death sentence.
+        """
+        return classify_reachability(
+            truth_state=self.truth_state,
+            age_s=self.last_activity_age_s,
+            # Either source may condemn; neither may raise. A registry-projected
+            # row has no usable pid of its own, and a scanned row has no registry
+            # entry, so in practice at most one of these is ever present.
+            falsifier=pid_falsifier(self.pid or None) or self.registry_falsifier,
+        )
 
     @property
     def is_alive(self) -> bool:
+        """Transcript activity only -- an ADDRESSING filter, not a verdict.
+
+        Deliberately NOT the shared verdict, and the distinction is the same one
+        the spawn gate turns on. This property backs
+        ``resolve_or_suggest(require_alive=True)``, which answers "WHICH session
+        does this handle name": a recorded pid can go stale while its session is
+        still resumable, so falsifying here would make that handle resolve to
+        nothing at all. "No such agent" is strictly worse than resolving and
+        then reporting the recipient unreachable, and an unaddressable row
+        cannot even be resumed by hand.
+
+        Ask :attr:`is_reachable` for the reachability question. Anything that
+        decides whether a recipient can be REACHED must use that one.
+        """
         return self.truth_state in {"working", "watching", "your-move"}
+
+    @property
+    def is_reachable(self) -> bool:
+        """The shared verdict, falsifiers included: can this session be reached?
+
+        Split from :attr:`is_alive` because collapsing them breaks one of the
+        two callers whichever way you collapse it. Mail read `is_alive` to set
+        `recipient_live`, so a provably dead session was classed live and its
+        durable fallback went to `live-drain` instead of `wake-daemon`, which
+        strands the message on a worker that is gone.
+        """
+        return self._reachability().verdict == REACHABLE
 
     def to_row(self) -> dict:
         """Canonical dict shape for the JSON/table renderers."""
+        # Routed through the one derivation rather than mapped here, because
+        # this lane and the registry lane render into the SAME payload: with a
+        # private mapping, one silent session read `orphaned` here while an
+        # equivalent registry row read `unknown`, which is the incongruence the
+        # shared derivation exists to end.
+        reach = self._reachability()
         return {
             "handle": self.handle,
             "short_id": self.short_id,
@@ -740,13 +819,15 @@ class DiscoveredSession:
             "pid": self.pid,
             "cwd": self.cwd,
             "project": self.project,
-            "status": (
-                "live"
-                if self.is_alive
-                else "orphaned"
-                if self.truth_state in {"done", "stalled"}
-                else "unknown"
-            ),
+            "status": WIRE_STATUS[reach.verdict],
+            # The evidence, not just the word derived from it. Reducing the
+            # verdict to a bare `status` here left this lane unable to say
+            # whether a `live` came from a transcript reading or an `orphaned`
+            # from a fired falsifier -- on the one list surface whose rows are
+            # ALL derived, and which the Rust path re-serves verbatim.
+            "reachability": reach.verdict,
+            "basis": reach.basis,
+            "last_activity_age_s": reach.age_s,
             "agent": self.agent,
         }
 
@@ -774,8 +855,7 @@ def _exact_address_matches(
     full = [
         session
         for session in rows
-        if not session.identity_provisional
-        and session_handle_tier(token, session.session_id) == 0
+        if not session.identity_provisional and session_handle_tier(token, session.session_id) == 0
     ]
     candidates = full or [
         session
@@ -1095,9 +1175,7 @@ def discover_subagents(
     """
     root = projects_dir or default_projects_dir()
     live_threshold = (
-        live_within_seconds
-        if live_within_seconds is not None
-        else _subagent_live_seconds()
+        live_within_seconds if live_within_seconds is not None else _subagent_live_seconds()
     )
     reference = now if now is not None else time.time()
     scan_cutoff = reference - (scan_window_seconds or _SUBAGENT_SCAN_WINDOW_S)
@@ -1264,9 +1342,7 @@ def _load_name_map(path: Path) -> dict:
     return data if isinstance(data, dict) else {}
 
 
-def _resolve_aliases(
-    live: list[dict], name_map_path: Path
-) -> dict[str, str]:
+def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
     """Assign + persist a stable, unique alias per live session_id.
 
     Holds an exclusive flock around load -> retire-dead -> assign -> write so
@@ -1459,9 +1535,7 @@ def resolve_or_suggest(
                 project=None,
                 status=row["status"],
                 agent=row["agent"],
-                transcript_path=(
-                    transcript_path if transcript_path is not None else None
-                ),
+                transcript_path=(transcript_path if transcript_path is not None else None),
                 name=row.get("name"),
                 identity_provisional=bool(row.get("identity_provisional")),
             ), []
@@ -1648,9 +1722,7 @@ def _decode_project_dir(name: str) -> Optional[str]:
     return None
 
 
-def _alias_to_session_ids(
-    token: str, name_map_path: Optional[Path]
-) -> tuple[list[str], bool]:
+def _alias_to_session_ids(token: str, name_map_path: Optional[Path]) -> tuple[list[str], bool]:
     """Session ids whose persisted friendly alias equals ``token``.
 
     A user who addressed ``<project>-<short8>`` while a session was live should
@@ -1680,11 +1752,7 @@ def _alias_to_session_ids(
         return [], False
     if not isinstance(stored, dict):
         return [], False
-    return [
-        sid
-        for sid, alias in stored.items()
-        if isinstance(sid, str) and alias == token
-    ], True
+    return [sid for sid, alias in stored.items() if isinstance(sid, str) and alias == token], True
 
 
 def _reachable_from_transcripts(token: str, projects_dir: Path) -> tuple[_Hits, bool]:
@@ -1747,9 +1815,7 @@ def _token_matches(token: str, session_id: str) -> bool:
     return session_handle_tier(token, session_id) is not None
 
 
-def _reachable_from_registry(
-    token: str, registry_path: Optional[Path]
-) -> tuple[_Hits, bool]:
+def _reachable_from_registry(token: str, registry_path: Optional[Path]) -> tuple[_Hits, bool]:
     """Registry rows including dead-pid and exited ones.
 
     An exited row is exactly the case the live lane drops and this lane keeps:
@@ -1789,12 +1855,14 @@ def _reachable_from_registry(
         if _token_matches(token, sid) and key not in seen:
             seen.add(key)
             cwd = getattr(e, "cwd", None)
-            hits.append((
-                sid,
-                harness,
-                cwd if isinstance(cwd, str) and cwd else None,
-                True,
-            ))
+            hits.append(
+                (
+                    sid,
+                    harness,
+                    cwd if isinstance(cwd, str) and cwd else None,
+                    True,
+                )
+            )
     return hits, True
 
 
@@ -1898,19 +1966,19 @@ def _reachable_from_graph(token: str) -> tuple[_Hits, bool]:
                 malformed = True
                 continue
             raw_harness = entry.get("harness")
-            harness = (
-                raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
-            )
+            harness = raw_harness if isinstance(raw_harness, str) and raw_harness else "claude"
             key = (harness, session_identity_key(sid))
             if _token_matches(token, sid) and key not in seen:
                 seen.add(key)
                 cwd = node.get("cwd")
-                hits.append((
-                    sid,
-                    harness,
-                    cwd if isinstance(cwd, str) and cwd else None,
-                    True,
-                ))
+                hits.append(
+                    (
+                        sid,
+                        harness,
+                        cwd if isinstance(cwd, str) and cwd else None,
+                        True,
+                    )
+                )
     return hits, not malformed
 
 
@@ -1923,10 +1991,7 @@ def _reachable_from_harness_stores(token: str) -> tuple[_Hits, bool]:
         hits = complete_store_hits(token)
     except AgentResolutionError:
         return [], False
-    return [
-        (hit.session_id, hit.harness, hit.cwd or None, True)
-        for hit in hits
-    ], True
+    return [(hit.session_id, hit.harness, hit.cwd or None, True) for hit in hits], True
 
 
 def resolve_reachable(
@@ -2180,9 +2245,7 @@ def discover_live_sessions(
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
-    for r in _discover_from_registry(
-        registry_path, exclude_session_ids=excluded_session_ids
-    ):
+    for r in _discover_from_registry(registry_path, exclude_session_ids=excluded_session_ids):
         if r["short_id"] in exclude:
             continue
         candidates.append(r)
@@ -2196,9 +2259,7 @@ def discover_live_sessions(
     # metadata on the primary candidate.
     by_sid: dict[tuple[str, str], dict] = {}
     for r in candidates:
-        existing = by_sid.setdefault(
-            (r["agent"], session_identity_key(r["session_id"])), r
-        )
+        existing = by_sid.setdefault((r["agent"], session_identity_key(r["session_id"])), r)
         if existing is not r:
             if not existing.get("cwd") and r.get("cwd"):
                 existing["cwd"] = r["cwd"]
@@ -2228,6 +2289,7 @@ def discover_live_sessions(
             transcript_path=r.get("transcript_path"),
             name=r.get("name"),
             identity_provisional=bool(r.get("identity_provisional")),
+            registry_falsifier=r.get("registry_falsifier"),
         )
         for r in live
     ]
@@ -2245,8 +2307,12 @@ def discover_live_sessions(
                 codex_sessions_dir=codex_sessions_dir,
                 opencode_storage_dir=opencode_storage_dir,
             )
+
     for session in sessions:
-        session.truth_state = str(truth_fn(session).get("state") or "unknown")
+        truth = truth_fn(session)
+        session.truth_state = str(truth.get("state") or "unknown")
+        age = truth.get("last_activity_age_s")
+        session.last_activity_age_s = int(age) if isinstance(age, (int, float)) else None
     # Stable render order: by handle.
     sessions.sort(key=lambda s: s.handle)
     return sessions

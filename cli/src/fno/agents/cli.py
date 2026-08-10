@@ -2635,6 +2635,76 @@ def cmd_top(
     print(render_top(as_json=as_json, include_subagents=show_subagents))
 
 
+def _registry_falsifier(handle: str) -> str | None:
+    """The falsifier for ``handle``, read off its registry row. Never raises.
+
+    A handle with no registry row (a discovered-but-unadopted session) carries
+    no falsifier, which is absence of evidence and NOT a death sentence.
+
+    Matched on name, session id, AND short id, because callers key on different
+    ones: a human types the name, while the Rust list path passes
+    ``harness_session_id`` (``registry_truth_handle`` in daemon.rs). A
+    name-only lookup silently returns "no falsifier" for every row on that path,
+    which reads exactly like a healthy process and is how a guard ends up
+    decorative on one of two reachable paths.
+    """
+    from fno.agents.reachability import registry_falsifier
+
+    if not handle:
+        return None
+    try:
+        from fno.agents.registry import load_registry
+
+        row = next(
+            (
+                r
+                for r in load_registry()
+                if handle in {r.name, r.harness_session_id, r.short_id}
+            ),
+            None,
+        )
+    except Exception:  # noqa: BLE001 -- an unreadable registry falsifies nothing
+        return None
+    if row is None:
+        return None
+    return registry_falsifier(row)
+
+
+def _truth_payload(result: dict, *, falsifier: str | None = None) -> dict:
+    """The ``truth --json`` wire shape.
+
+    This is the Python/Rust boundary: ``family1_truth_probe`` in
+    ``crates/fno-agents/src/claude_ask.rs`` reads this, and ``resume`` decides
+    "is live - attaching" from it. The reachability verdict has to be ON this
+    wire or Rust keeps re-deriving liveness from the raw transcript ``state``
+    and never sees the falsifier -- the same trap, one language over.
+
+    ``state`` stays exactly as it was. Existing Rust consumers parse it, and
+    overloading a field they already match on would be a silent contract break.
+    """
+    from fno.agents.reachability import classify_reachability
+
+    reach = classify_reachability(
+        truth_state=result.get("state"),
+        age_s=result.get("last_activity_age_s"),
+        falsifier=falsifier,
+    )
+    payload = {
+        k: result.get(k)
+        for k in (
+            "handle",
+            "state",
+            "reason",
+            "last_activity_age_s",
+            "session_id",
+            "observed_model",
+        )
+    }
+    payload["reachability"] = reach.verdict
+    payload["basis"] = reach.basis
+    return payload
+
+
 @agents_app.command("truth", hidden=True)
 def cmd_truth(
     handle: str = typer.Argument(
@@ -2664,21 +2734,12 @@ def cmd_truth(
     from fno.agents.session_truth import render_truth, resolve_session_truth
 
     result = resolve_session_truth(handle)
+    falsifier = _registry_falsifier(handle)
     if json_out:
-        payload = {
-            k: result.get(k)
-            for k in (
-                "handle",
-                "state",
-                "reason",
-                "last_activity_age_s",
-                "session_id",
-                "observed_model",
-            )
-        }
-        sys.stdout.write(_json.dumps(payload) + "\n")
+        sys.stdout.write(_json.dumps(_truth_payload(result, falsifier=falsifier)) + "\n")
     else:
-        sys.stdout.write(render_truth(result) + "\n")
+        payload = _truth_payload(result, falsifier=falsifier)
+        sys.stdout.write(f"{render_truth(result)} [{payload['reachability']}: {payload['basis']}]\n")
     sys.stdout.flush()
     # Both are unresolvable-handle exits (13, the lifecycle not-found code); the
     # reason distinguishes the routine miss from a crashing resolver, which

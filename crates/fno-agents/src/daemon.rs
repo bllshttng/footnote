@@ -2828,8 +2828,27 @@ fn reap_zombies() {
     }
 }
 
-fn rendered_status_from_truth(truth: Option<&str>) -> &'static str {
-    match truth {
+/// Map a truth probe onto the wire value `list` renders.
+///
+/// Prefers the shared reachability verdict, which is derived once (Python-side,
+/// `fno/agents/reachability.py`) with the falsifiers applied. The `state` arm
+/// below is a COMPATIBILITY FALLBACK for a `fno` too old to emit the verdict,
+/// not a second opinion: it maps transcript activity alone, so a session whose
+/// process died forty minutes ago still reads `working` there and renders live.
+///
+/// Note the fallback and the verdict disagree deliberately on quiet rows. The
+/// fallback calls a silent row `orphaned`; the verdict calls it `unknown`,
+/// because silence is absence of evidence and this registry lists REACHABLE
+/// agents rather than live processes -- a row is never condemned for being
+/// quiet, only for an affirmative falsification.
+fn rendered_status_from_truth(probe: Option<&crate::claude_ask::TruthProbe>) -> &'static str {
+    match probe.and_then(|p| p.reachability.as_deref()) {
+        Some("reachable") => return "live",
+        Some("unreachable") => return "orphaned",
+        Some("unknown") => return "unknown",
+        _ => {}
+    }
+    match probe.map(|p| p.state.as_str()) {
         Some("working" | "watching" | "your-move") => "live",
         Some("done" | "stalled") => "orphaned",
         _ => "unknown",
@@ -2937,8 +2956,19 @@ where
         .map(|e| {
             let truth_handle = registry_truth_handle(e);
             let truth = truth_fn(&truth_handle);
-            let rendered_status =
-                rendered_status_from_truth(truth.as_ref().map(|t| t.state.as_str()));
+            let rendered_status = rendered_status_from_truth(truth.as_ref());
+            // The whole reachability triple, not just the verdict that
+            // `rendered_status` above was picked from. That rendered word says
+            // WHAT the row is; the triple says which question was answered and
+            // off what evidence, and only the triple separates a positive
+            // transcript reading from a fired falsifier. Null on a `fno` too old
+            // to emit them: a stale probe that did not answer must read as
+            // absent, never as no-evidence.
+            let evidence = (
+                json!(truth.as_ref().and_then(|t| t.reachability.as_deref())),
+                json!(truth.as_ref().and_then(|t| t.basis.as_deref())),
+                json!(truth.as_ref().and_then(|t| t.last_activity_age_s)),
+            );
             // A probe that did not answer is the same situation Python's
             // resolver reports as `no-transcript` (its dominant cause here is
             // the routine exit-13 miss), so both emitters say the same thing
@@ -2947,12 +2977,12 @@ where
                 .map(|t| t.observed_model)
                 .filter(|v| !v.is_null())
                 .unwrap_or_else(|| json!({"kind": "no-transcript"}));
-            (e, rendered_status, observed_model)
+            (e, rendered_status, observed_model, evidence)
         })
         .collect();
     let entries: Vec<Value> = classified
         .into_iter()
-        .filter(|(_e, rendered_status, _observed)| {
+        .filter(|(_e, rendered_status, _observed, _evidence)| {
             if let Some(ref st) = filter_status {
                 if rendered_status != &st.as_str() {
                     return false;
@@ -2960,7 +2990,8 @@ where
             }
             true
         })
-        .map(|(e, rendered_status, observed_model)| {
+        .map(|(e, rendered_status, observed_model, evidence)| {
+            let (reachability, basis, last_activity_age_s) = evidence;
             // Return the full row shape matching Python's serialize_entry. The
             // key set is pinned by schemas/agents-list-row.json, asserted here
             // and by the Python test; edit that file before adding a key.
@@ -3039,6 +3070,15 @@ where
                 "created_at": e.created_at,
                 "last_message_at": e.last_message_at,
                 "status": rendered_status,
+                // The reachability triple, from the same probe the rendered
+                // word above came from. `fno agents list` is where `peek` and
+                // the census helpers below send a reader for this evidence, and
+                // the default `list` is THIS projection whenever an installed
+                // binary is present -- so emitting it Python-side only left the
+                // documented field missing on the path readers actually take.
+                "reachability": reachability,
+                "basis": basis,
+                "last_activity_age_s": last_activity_age_s,
                 "live_status": null,
                 // The model this worker is ACTUALLY answering as, from the same
                 // family-1 probe that produced `status` above -- so the daemon
@@ -3107,6 +3147,18 @@ where
 /// The shape is the contract Wave 7's `status-v1.json` schema + CI parity check
 /// codify; keep additions backward-compatible. `daemon.state` is always
 /// `serving` here because a served RPC implies the daemon got past recovery.
+///
+/// `agents.by_status` is a histogram of the STORED lifecycle enum -- what was
+/// last WRITTEN to each registry row -- and NOT a reachability census. It will
+/// not match `fno agents list`, and that is correct rather than a bug: they
+/// answer different questions. Because the daemon reconciles once at startup,
+/// these values can be stale for its entire uptime, so an `exited` here means
+/// "we recorded exited at some point", not "unreachable now". For reachability,
+/// read `fno agents list` (its `reachability` + `basis` fields), which derives
+/// from `cli/src/fno/agents/reachability.py`.
+///
+/// Deliberately NOT renamed to say so: the field name is pinned by the schema
+/// and its CI parity check, and a breaking rename would buy wording alone.
 async fn handle_status(ctx: &Ctx, req: &Request) -> Response {
     // load_registry does blocking flock I/O; offload it from the async worker
     // thread (Gemini review). The drive-table read below stays async.
@@ -6589,11 +6641,57 @@ mod tests {
     /// A stub family-1 probe answer for the tests that only pin the state.
     /// `observed_model` null here stands for "this probe did not answer it",
     /// which the row renders as `no-transcript` rather than inventing a model.
+    ///
+    /// `reachability: None` deliberately exercises the COMPATIBILITY FALLBACK in
+    /// `rendered_status_from_truth` (a `fno` too old to emit the verdict), which
+    /// is what keeps these pre-existing state-mapping assertions meaningful.
+    /// `probe_reachable` below covers the current wire.
     fn probe(state: &str) -> Option<crate::claude_ask::TruthProbe> {
         Some(crate::claude_ask::TruthProbe {
             state: state.into(),
+            reachability: None,
+            basis: None,
+            last_activity_age_s: None,
             observed_model: Value::Null,
         })
+    }
+
+    /// A probe carrying the shared verdict, as a current `fno` emits it.
+    fn probe_with_verdict(
+        state: &str,
+        reachability: &str,
+    ) -> Option<crate::claude_ask::TruthProbe> {
+        Some(crate::claude_ask::TruthProbe {
+            state: state.into(),
+            reachability: Some(reachability.into()),
+            basis: Some("transcript".into()),
+            last_activity_age_s: Some(12.0),
+            observed_model: Value::Null,
+        })
+    }
+
+    /// The verdict OUTRANKS the transcript state, which is the whole point of
+    /// putting it on the wire: a session whose process died forty minutes ago
+    /// still reads `working` from its transcript, and mapping that state is how
+    /// `list` reported a dead worker live. Same input state, opposite render.
+    #[test]
+    fn the_reachability_verdict_outranks_the_transcript_state() {
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("working", "unreachable").as_ref()),
+            "orphaned",
+            "a falsified row must not render live merely because its transcript is recent"
+        );
+        // And silence is not death: the verdict says unknown where the legacy
+        // state mapping said orphaned.
+        assert_eq!(
+            rendered_status_from_truth(probe_with_verdict("stalled", "unknown").as_ref()),
+            "unknown"
+        );
+        assert_eq!(
+            rendered_status_from_truth(probe("stalled").as_ref()),
+            "orphaned",
+            "the fallback keeps its old meaning for a fno too old to send a verdict"
+        );
     }
 
     fn test_ctx(home: AgentsHome, worker_bin: PathBuf) -> Ctx {
@@ -6808,6 +6906,46 @@ done
         std::fs::remove_dir_all(home.root()).ok();
     }
 
+    /// The reachability EVIDENCE reaches the row, not just the verdict the
+    /// rendered word was picked from.
+    ///
+    /// `fno agents list` auto-routes here whenever an installed binary is
+    /// present, so this is the projection nearly every reader gets -- and both
+    /// `peek` and the census comment in this file send a reader to `fno agents
+    /// list` for exactly these fields. Emitting them Python-side only left the
+    /// documented evidence missing from the default path: the guard-on-one-of-N
+    /// shape, in the fix for a guard-on-one-of-N bug.
+    ///
+    /// The key-set contract above cannot catch this on its own, because a
+    /// hardcoded null satisfies it.
+    #[test]
+    fn list_row_carries_the_reachability_evidence() {
+        let home = short_home("listevidence");
+        seed_stream_row(&home, "worker-evidence", "abc12345");
+        let ctx = test_ctx(home.clone(), PathBuf::from("fno-agents-worker"));
+        let req = Request::new(1, "agent.list", json!({}));
+
+        let response = handle_list_with_truth(&ctx, &req, |_handle| {
+            probe_with_verdict("working", "reachable")
+        });
+        let row = &response.result().unwrap()["agents"][0];
+
+        assert_eq!(row["reachability"], "reachable");
+        assert_eq!(row["basis"], "transcript");
+        assert_eq!(row["last_activity_age_s"], 12.0);
+
+        // A probe that did not answer leaves all three null. That is NOT the
+        // same as `no-evidence`, which is a verdict this emitter must never
+        // invent on the probe's behalf.
+        let response = handle_list_with_truth(&ctx, &req, |_handle| None);
+        let row = &response.result().unwrap()["agents"][0];
+        assert!(row["reachability"].is_null());
+        assert!(row["basis"].is_null());
+        assert!(row["last_activity_age_s"].is_null());
+
+        std::fs::remove_dir_all(home.root()).ok();
+    }
+
     /// The row reports the model the worker is ACTUALLY answering as, taken
     /// from the same family-1 probe that produced `status`.
     ///
@@ -6827,6 +6965,9 @@ done
         let response = handle_list_with_truth(&ctx, &req, |_handle| {
             Some(crate::claude_ask::TruthProbe {
                 state: "working".into(),
+                reachability: Some("reachable".into()),
+                basis: Some("transcript".into()),
+                last_activity_age_s: Some(3.5),
                 observed_model: json!({
                     "kind": "observed", "model": "glm-5.2", "samples": 300
                 }),

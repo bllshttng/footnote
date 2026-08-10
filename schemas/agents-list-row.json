@@ -10,6 +10,9 @@
     "created_at",
     "last_message_at",
     "status",
+    "reachability",
+    "basis",
+    "last_activity_age_s",
     "live_status",
     "observed_model",
     "log_path",
@@ -23,6 +26,7 @@
     "provider": "REMOVED. It was a legacy alias of `harness` and carried the HARNESS value, so a worker routed to another vendor still listed `provider: claude` - read as proof the route had silently fallen back to Anthropic, and it nearly got three healthy workers killed. A key whose name says vendor and whose value is a harness is worse than no key. Read `harness` for the CLI, `observed_model` for the vendor the worker is actually answering as. Do not re-add it to one serializer: present-or-absent depending on which reader answered is worse still."
   },
   "derived": {
+    "reachability": "The one derivation with a declared basis (cli/src/fno/agents/reachability.py). `reachability` is the verdict (reachable | unreachable | unknown), `basis` is the evidence it was reached from (transcript | process-gone | pane-gone | silent | no-evidence), and `last_activity_age_s` is how old that evidence is. The three travel together on purpose: a bare verdict cannot separate a positive transcript reading from a fired falsifier, and `unknown` at 30s means something different from `unknown` at 30h. `status` keeps the older wire vocabulary its consumers already parse, and says WHAT the row is; the triple says which question was answered. Both serializers read it from the same `fno agents truth --json` probe - the Rust one from the probe it already ran for `status` - so they cannot disagree about the same row. All three are null when the probe did not answer, which is not the same as `no-evidence`: that is a verdict, this is an absent reading.",
     "observed_model": "What the worker is ACTUALLY answering as, read from its own transcript by fno.agents.session_truth.observed_model - never from anything the spawn recorded, which reports the INTENDED model in exactly the case an operator suspects a silent fallback. A discriminated object: {kind: observed, model, samples} | {kind: no-transcript} | {kind: not-file-backed} | {kind: no-model-yet} | {kind: unreadable, reason}. The five never collapse into one unknown: no-model-yet is a worker that came up and never processed a turn, not-file-backed is a harness that keeps no per-session file at all, and neither is the same thing as a worker whose transcript has not appeared yet. Both serializers derive it from the same Python resolver (the Rust daemon shells out to `fno agents truth --json`, one probe per row, the one it already ran for `status`), so the two cannot report different models for the same worker."
   },
   "rust_only": {
@@ -30,7 +34,7 @@
     "keys": ["pid", "last_reconciled_at", "project_root"]
   },
   "python_only": {
-    "$comment": "Keys the Python serializer emits on top of `required`. Empty today.",
+    "$comment": "Keys the Python serializer emits on top of `required`. Empty: the reachability triple was briefly listed here, which was the wrong call and is worth recording. `fno agents list` auto-routes to the Rust projection whenever an installed binary is present, so a triple emitted Python-side only was missing from the path nearly every reader takes - while peek and the daemon's own census comment both send readers to `fno agents list` to find it. Both serializers now emit it from the same `fno agents truth --json` probe.",
     "keys": []
   }
 }
