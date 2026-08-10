@@ -56,16 +56,18 @@ CORPUS_DIRS = [
 ]
 CORPUS_FILES = ["AGENTS.md", "README.md"]
 
-# Path-anchored prunes (never bare globs). Applied to directory names during the
-# walk, at any depth. NOTE: "target" is NOT here - it is handled by the
+# Skip dirs reachable from the corpus that hold no contributor-readable text:
+# bytecode caches and venvs. Root-level state dirs (.claude, .fno, internal, ...)
+# are intentionally NOT here: the walk descends only the named corpus subdirs
+# (skills/, docs/, ...), never the repo root, so those dirs are unreachable, and
+# a literal ".claude" here would trip scripts/ci/check-placement-rule.sh (it
+# guards .claude path construction). "target" is handled separately by the
 # `under_skills` conditional in iter_corpus, so skills/target/ (a real skill
 # bundle) is walked while crates/target/ (Rust build output) is skipped. Putting
 # "target" in this set would unconditionally remove it and silently swallow
 # skills/target/, the exact rg-glob pitfall this tool exists to avoid.
 SKIP_DIRS = {
-    ".git", "node_modules", "internal", "graphify-out", "__pycache__",
-    ".claude", ".fno", "archive", ".codex", ".agents", ".gemini",
-    ".worktrees", "venv", ".venv",
+    "node_modules", "__pycache__", "venv", ".venv",
 }
 
 # A verb-path token: lowercase letters, digits, hyphens, and (for fan-out) pipes.
