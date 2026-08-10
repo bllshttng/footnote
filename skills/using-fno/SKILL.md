@@ -31,6 +31,7 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 |-------------|--------------|
 | `fno event emit\|audit` | events.jsonl writes + audit. |
 | `fno backlog ...` | graph.json mutations: intake, update, done, defer, supersede, find, get. |
+| `fno pr status <n>` | Merge-readiness verdict. `statusCheckRollup` shows SUPERSEDED runs; `gh pr checks` ignores reviews. Reports `ready` + `optional_reviews_unresolved`. |
 | `fno pr merge\|verify\|rebase` | PR ops with canonical guards. |
 | `fno plan stamp\|graduate` | Plan frontmatter stamping at ship time. |
 | `fno executor resolve` / `fno phase kill-check` | Executor chain / kill criteria. |
@@ -42,13 +43,11 @@ Atomic, lock-protected, schema-validated. Use for exact state transitions, not o
 | `fno agents spawn\|ask\|peek\|attach\|resume\|wait` | Cross-CLI agent lifecycle; per-harness support in `docs/harness-command-matrix.md`. |
 | `fno carveout add` | Capture left-out work for retro-triage at merge. |
 
-**Replying to a2a mail (the one rule).** A message arrives as `<fno_mail from="H" ...>`. Reply with `fno mail send H "..."` - pass back the exact `from` handle, nothing else. Never inspect `harness`/`model` to pick a transport. Replying is optional for FYIs.
+**Replying to a2a mail (the one rule).** Answer any `<fno_mail ... id="X">` with `fno mail reply --to X "..."`: it threads the reply and resolves the sender itself, whether the message arrived live or was drained, so never re-type a handle or inspect `harness`/`model`. Optional for FYIs.
 
-**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` is not and may never drain - no receipt is no coordination. Before re-sending queued mail, `peek` (a busy recipient may still receive it); `resume`/`attach` if needed.
+**Read send evidence literally.** `delivered (hosted)` is confirmed; `queued (durable)` may never drain - no receipt is no coordination. Before re-sending, `peek` (a busy recipient may still get it), then `resume`/`attach`.
 
-**Correlated reply when draining your inbox.** `fno mail unread` / `drain-self` list messages with `id:`; answer one with `fno mail reply --to <id> "..."`.
-
-**Sending with a reply address.** Name-lane `send <name>` self-stamps your handle. `--to-project` stamps the project (add `--from-self` if you will hold for the answer). The `mail:` line of `fno whoami` is the only valid `--from-name`.
+**Sending with a reply address.** `send <name>` self-stamps your handle; `--to-project` stamps the project (add `--from-self` if you will hold for the answer). Only `fno whoami`'s `mail:` line is a valid `--from-name`.
 
 **Observing = `fno agents peek <handle>`** (`--lines`, `--follow`): tails a transcript peer or a pane worker via its mux ref. Distinct from `fno agents logs <name>` (registry-scoped).
 
@@ -59,7 +58,7 @@ Spawn for citizens, harness subagent for limbs - the limb for one-shot work you 
 Neither is always correct; a limb is observable only (`fno agents top --subagents`), not addressable.
 Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 
-**Mail is user-shaped.** `fno mail send` injects as user-shaped text in the recipient pane, so it is the fallback when a worker's Skill-tool self-invocation is refused: the king's `fno mail send <worker> --raw '/<verb>'` fires it at the worker's prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A mail probe can only test the user-triggered path, never autonomous action.
+**Mail is user-shaped.** `fno mail send` injects as user-shaped text, so it is the fallback when a worker's Skill-tool self-invocation is refused: `fno mail send <worker> --raw '/<verb>'` fires it at the prompt line (a wrapped reply does not). No live king -> advisory self-review (`docs/architecture/review-lanes.md`). A probe over mail tests only the user-triggered path, never autonomous action.
 
 **Fold in small fixes; capture the rest.** A small pre-existing bug found mid-task gets fixed in the current PR as its own atomic commit (optionally file a born-done record: `fno backlog idea` + `update --pr-number`). Not-small, or decided-but-deferred: `fno carveout add --kind deferred|oos-bug [--need "..."] "<what + why>"` - advisory, harvested into backlog nodes at merge. Applies in every pipeline.
 
@@ -82,6 +81,7 @@ Detail: [docs/architecture/coordination.md](docs/architecture/coordination.md).
 | "What state am I in after compaction?" | `fno whoami` then `fno status` |
 | "Open a PR" | `/fno:pr create` |
 | "Wait for external review" | `/fno:pr check` |
+| "Is this PR ready to merge?" | `fno pr status <n>` |
 | "Merge an approved PR" | `fno pr merge` |
 | "Rebase before merge" | `fno pr rebase --base=origin/main` |
 
