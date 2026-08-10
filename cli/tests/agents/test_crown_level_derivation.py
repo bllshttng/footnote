@@ -49,7 +49,7 @@ def territory(tmp_path, monkeypatch):
     cfg = tmp_path / "config.toml"
     cfg.write_text(
         '[work.workspaces.ws1]\n'
-        'projects = [{ name = "alpha" }, { name = "beta" }]\n',
+        'projects = [{ name = "alpha", short_name = "a" }, { name = "beta" }]\n',
         encoding="utf-8",
     )
     monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
@@ -125,6 +125,40 @@ def test_a_mixed_scope_is_refused_rather_than_coerced(territory, scopes) -> None
 
 
 # --- containment is now real, not an honor system ----------------------------
+
+
+# --- an alias is the same territory, not a second one ------------------------
+#
+# `resolve_project_name` accepts a project's `short_name`, so one project can be
+# spelled two ways. The stored scope must be the CANONICAL name, or the
+# equality-based one-live-crown guard sees two territories where there is one.
+
+
+def test_an_alias_stores_as_the_canonical_project(territory) -> None:
+    from fno.agents.crown import resolve_crown
+
+    assert resolve_crown(["a"]) == resolve_crown(["alpha"]) == (1, "alpha")
+
+
+def test_one_project_named_twice_is_not_a_portfolio(territory) -> None:
+    """`-k alpha -k a` is one project spelled two ways. Deduping the raw strings
+    would count two members and mint portfolio authority over a single project."""
+    from fno.agents.crown import resolve_crown
+
+    assert resolve_crown(["alpha", "a"]) == (1, "alpha")
+
+
+def test_a_real_portfolio_still_derives_level_0_through_aliases(territory) -> None:
+    from fno.agents.crown import resolve_crown
+
+    assert resolve_crown(["a", "beta"]) == (0, "alpha,beta")
+
+
+def test_containment_normalizes_aliases_on_both_sides(territory) -> None:
+    from fno.agents.crown import scope_contains
+
+    assert scope_contains("alpha,beta", "a") is True
+    assert scope_contains("a,beta", "alpha") is True
 
 
 def test_containment_is_checkable_across_the_ladder(territory) -> None:

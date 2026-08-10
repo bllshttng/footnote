@@ -53,7 +53,11 @@ from fno.agents.registry import (
     load_registry,
     update_registry,
 )
-from fno.agents.crown import crown_validation_error
+from fno.agents.crown import (
+    calling_agent_row,
+    crown_validation_error,
+    grant_error,
+)
 
 #: Bound on the `pane run` / `pane ls` subprocesses. `pane run` includes a
 #: possible server self-spawn + squad git resolve (~2s worst case), so this is
@@ -1285,6 +1289,12 @@ def dispatch_spawn_pane(
     crown_problem = crown_validation_error(crown_level, crown_scope)
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
+    if crown_level is not None:
+        # Same authorization rule as the bg seam: a grant must be a strict subset
+        # of what the grantor holds. Both paths check, because either is a door.
+        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        if grant_problem is not None:
+            raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
 
     # Launch-time headroom picking (x-7d45). `pane` is the DEFAULT substrate and
     # `cmd_spawn` routes it straight here, never through `dispatch_spawn` - so a

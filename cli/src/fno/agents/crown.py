@@ -46,6 +46,27 @@ class CrownScopeError(ValueError):
     """A scope that names no territory this ladder recognizes."""
 
 
+def calling_agent_row():
+    """The calling session's registry row, or None for an attended human.
+
+    A hand-started agent carries no ``FNO_AGENT_SELF``, so env alone cannot tell
+    it from a human at a keyboard; the registry can, because a joined agent has a
+    row keyed by its harness session id. Resolved the same way ``fno whoami``
+    does, so "who am I" has one answer.
+    """
+    from fno.agents.registry import load_registry
+    from fno.agents.whoami import _find_by_session
+    from fno.harness_identity import resolve_harness_identity
+
+    ident = resolve_harness_identity()
+    if not ident.session_id or not ident.harness:
+        return None
+    try:
+        return _find_by_session(load_registry(), ident.session_id, ident.harness)
+    except Exception:
+        return None
+
+
 def canonical_scope(scopes: list[str]) -> str:
     """The stored form: one name, or sorted unique members joined.
 
@@ -80,58 +101,85 @@ def _graph_entry(node_id: str) -> Optional[dict]:
     )
 
 
-def _is_project(name: str) -> bool:
-    """Does ``name`` resolve to a configured project? Projects are declared in
-    config (``work.workspaces.<ws>.projects[].name``) and need no backlog node -
-    which is why the top two rungs cannot be derived from the graph alone."""
+def _canonical_project(name: str) -> Optional[str]:
+    """``name`` resolved to its CANONICAL project name, or None if it is not a
+    project. Projects are declared in config
+    (``work.workspaces.<ws>.projects[].name``) and need no backlog node - which is
+    why the top two rungs cannot be derived from the graph alone.
+
+    Returning the canonical name rather than a bool is load-bearing: the resolver
+    accepts a project's ``short_name`` alias too, so a caller can spell one
+    territory two ways. Storing the raw spelling would let `alpha` and its alias
+    `a` sit as two live crowns over one project (the guard compares scopes by
+    equality), and naming both at once would read as a two-project portfolio
+    instead of one project named twice.
+    """
     try:
         from fno.projects.resolve import resolve_project_name
 
-        resolve_project_name(name)
-        return True
+        return resolve_project_name(name)
     except Exception:
-        return False
+        return None
 
 
-def derive_crown_level(scopes: list[str]) -> int:
-    """The rung ``scopes`` implies. Raises :class:`CrownScopeError` when they
-    name no territory - the refusal that keeps implementers uncrowned.
+def resolve_crown(scopes: list[str]) -> "tuple[int, str]":
+    """``scopes`` -> the (rung, stored scope) they imply, both derived together.
 
-    Mixed scopes are refused rather than coerced: a portfolio is projects, so
-    naming a project and an epic together is a mistake about what is being ruled,
-    not a level-0 crown over both.
+    ONE call rather than a derive-then-encode pair, because the two answers must
+    agree and a caller holding them separately can mismatch them: the rung is
+    counted over CANONICAL project names, so a scope encoded from the raw
+    spelling would be a different territory than the one that was counted.
+
+    Raises :class:`CrownScopeError` when the scopes name no territory - the
+    refusal that keeps implementers uncrowned. Mixed scopes are refused rather
+    than coerced: a portfolio is projects, so naming a project and an epic
+    together is a mistake about what is being ruled, not a level-0 crown over
+    both.
     """
     members = split_scope(canonical_scope(scopes))
     if not members:
         raise CrownScopeError("a crown needs a scope: name an epic or a project")
 
+    # Resolve aliases FIRST, then dedupe: `-k alpha -k a` is one project spelled
+    # twice, not a two-project portfolio.
+    resolved = [(m, _canonical_project(m)) for m in members]
+    projects = [canon for _, canon in resolved if canon]
+
     if len(members) > 1:
-        unknown = [m for m in members if not _is_project(m)]
+        unknown = [raw for raw, canon in resolved if not canon]
         if unknown:
             raise CrownScopeError(
                 f"a multi-scope crown rules PROJECTS, but {', '.join(unknown)} "
                 f"{'is not a configured project' if len(unknown) == 1 else 'are not configured projects'}. "
                 "Name projects from your config, or pass a single epic instead."
             )
-        return 0
+        scope = canonical_scope(projects)
+        # One project named twice collapses to one project, not a portfolio.
+        return (0 if len(split_scope(scope)) > 1 else 1), scope
 
-    name = members[0]
-    if _is_project(name):
-        return 1
+    raw = members[0]
+    if projects:
+        return 1, projects[0]
 
-    entry = _graph_entry(name)
+    entry = _graph_entry(raw)
     if entry is None:
         raise CrownScopeError(
-            f"{name!r} is neither a configured project nor a backlog node; "
+            f"{raw!r} is neither a configured project nor a backlog node; "
             "nothing to reign over (check for a typo)"
         )
     if entry.get("type") != "epic":
         raise CrownScopeError(
-            f"{name!r} is a {entry.get('type') or 'node'}, not an epic. "
+            f"{raw!r} is a {entry.get('type') or 'node'}, not an epic. "
             "Implementers get no crowns - a single node is work, not a territory. "
             "Crown the epic above it, or its project."
         )
-    return 2
+    return 2, raw
+
+
+def derive_crown_level(scopes: list[str]) -> int:
+    """The rung alone. Thin wrapper over :func:`resolve_crown` for callers that
+    only need the altitude."""
+    return resolve_crown(scopes)[0]
 
 
 def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
@@ -143,21 +191,80 @@ def scope_contains(outer: Optional[str], inner: Optional[str]) -> bool:
     project is in a portfolio by name, and an epic carries the project it belongs
     to, so a grantor can no longer hand down authority it does not hold.
     """
-    outer_members = set(split_scope(outer))
-    inner_members = split_scope(inner)
+    def _canon(members: list[str]) -> set[str]:
+        # Alias-normalize both sides, or a portfolio stored as `alpha` fails to
+        # contain a project the caller spelled `a`.
+        return {(_canonical_project(m) or m) for m in members}
+
+    outer_members = _canon(split_scope(outer))
+    inner_members = _canon(split_scope(inner))
     if not outer_members or not inner_members:
         return False
-    if set(inner_members) == outer_members:
+    if inner_members == outer_members:
         return False  # a peer crown, not a subordinate one
 
     if len(inner_members) > 1:
-        return set(inner_members) < outer_members
+        return inner_members < outer_members
 
-    name = inner_members[0]
+    name = next(iter(inner_members))
     if name in outer_members:
         return True
     entry = _graph_entry(name)
     return bool(entry and entry.get("project") in outer_members)
+
+
+def grant_error(requested_scope: str, caller_row) -> Optional[str]:
+    """Why this caller may not bestow a crown over ``requested_scope``, or None.
+
+    The rule the docs have always stated and nothing was enforcing after the
+    promotion verb was deleted: you cannot hand down authority you do not hold.
+    ``scope_contains`` existed but had no caller, so any spawned worker could
+    mint portfolio-level authority for its child.
+
+    Two grantor classes, matching what the verb used to accept:
+
+    - **an attended human** (``caller_row`` is None - a shell with no agent
+      identity in its environment) may grant any scope; there is nobody above a
+      human to check against.
+    - **an agent** must hold a live crown that STRICTLY contains the request.
+      Uncrowned means it holds nothing to hand down, and an equal scope would be
+      a peer crown rather than a subordinate one - already refused by the
+      one-live-crown rule, and refused here with a message that explains it.
+    """
+    if caller_row is None:
+        return None
+    holder = getattr(caller_row, "crown_scope", None)
+    if not holder:
+        return (
+            "a crown is handed DOWN, and this session holds none: an uncrowned "
+            "agent cannot bestow one. Ask a king whose scope contains "
+            f"{requested_scope!r}, or spawn from an attended shell."
+        )
+    # SUCCESSION, not a grant. Handing your own scope to an heir is the one case
+    # where an equal scope is legal, because the caller does not keep it: the
+    # one-live-crown guard vacates the caller in the same write that stamps the
+    # heir. Checking strict containment alone would refuse exactly the abdication
+    # this design requires - a king cannot hand off after exiting.
+    if _same_territory(holder, requested_scope):
+        return None
+    if not scope_contains(holder, requested_scope):
+        return (
+            f"this session's crown over {holder!r} neither contains nor equals "
+            f"{requested_scope!r}, so it cannot bestow it. A grant must be a "
+            "strict subset of what the grantor holds; an equal scope is allowed "
+            "only as succession, which hands YOUR scope to an heir."
+        )
+    return None
+
+
+def _same_territory(a: Optional[str], b: Optional[str]) -> bool:
+    """Do two stored scopes name the same territory, aliases normalized?"""
+
+    def _canon(scope: Optional[str]) -> set:
+        return {(_canonical_project(m) or m) for m in split_scope(scope)}
+
+    left, right = _canon(a), _canon(b)
+    return bool(left) and left == right
 
 
 def crown_validation_error(level: Any, scope: Any) -> Optional[str]:

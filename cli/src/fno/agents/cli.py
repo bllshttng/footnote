@@ -966,14 +966,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        from fno.agents.crown import CrownScopeError, canonical_scope, derive_crown_level
+        from fno.agents.crown import CrownScopeError, resolve_crown
 
         try:
-            crown_level = derive_crown_level(list(crown))
+            crown_level, crown_scope = resolve_crown(list(crown))
         except CrownScopeError as exc:
             print(f"--crown: {exc}", file=sys.stderr)
             raise typer.Exit(code=2) from exc
-        crown_scope = canonical_scope(list(crown))
 
     # --account names a claude account PROFILE (config_dir/settings/plugins); a
     # vendor route (-P/--route/--role) names endpoint+auth+model. They are
