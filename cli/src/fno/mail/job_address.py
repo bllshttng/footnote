@@ -61,47 +61,37 @@ def is_job_token(token: str) -> bool:
 
 
 def _session_from_holder(holder: Optional[str]) -> Optional[str]:
-    """Strip the ``target-session:`` prefix to recover the holder's session id.
+    """Re-exported from :mod:`fno.agents.truth_status` (the single source).
 
-    Mirrors ``fno.agents.truth_status._session_from_holder`` (the one consumer of
-    this join today). A claim holder is ``target-session:<session-id>``; for
-    claude that id is exactly what mail-inject targets. Codex claims can be owned
-    by the durable thread id, so a codex holder is a known approximation until the
-    manifest join refines it -- and the dominant, testable case is claude.
+    A claim holder is ``target-session:<session-id>``; for claude that id is
+    exactly what mail-inject targets. Codex claims can be owned by the durable
+    thread id, so a codex holder is a known approximation until the manifest join
+    refines it -- and the dominant, testable case is claude.
     """
-    if holder and holder.startswith("target-session:"):
-        sid = holder[len("target-session:"):]
-        return sid or None
-    return None
+    from fno.agents.truth_status import _session_from_holder as _impl
+
+    return _impl(holder)
 
 
-def _node_id_for_pr(pr_number: int) -> Optional[str]:
-    """Find the backlog node id whose PR is ``pr_number``.
+def _node_ids_for_pr(pr_number: int) -> list[str]:
+    """Every backlog node id carrying PR ``pr_number`` (primary OR additional).
 
-    Prefers a node with a live/suspect claim (the active worker for that PR);
-    falls back to the first node carrying the PR so a caller can report "no live
-    holder" rather than "no such PR". The graph is the cross-project backlog, so
-    a bare number can match more than one repo -- the active-claim preference is
-    the tiebreak (only one session holds a node at a time).
+    PR numbers are per-repo, so the cross-project graph can carry the same number
+    under more than one node: the caller refuses on ambiguity rather than
+    silently routing ``pr:<n>`` to the wrong project's holder. Reuses
+    ``_node_carries_pr`` so the primary + ``additional_prs`` contract stays the
+    graph module's, not a restatement here.
     """
-    from fno.graph.store import read_graph
+    from fno.graph.store import _node_carries_pr, read_graph
 
-    fallback: Optional[str] = None
+    out: list[str] = []
     for node in read_graph():
         if not isinstance(node, dict):
             continue
-        if node.get("pr_number") != pr_number:
-            continue
         nid = node.get("id")
-        if not isinstance(nid, str):
-            continue
-        if fallback is None:
-            fallback = nid
-        # An active claim wins outright.
-        res = _resolve_node(nid)
-        if res.has_holder:
-            return nid
-    return fallback
+        if isinstance(nid, str) and _node_carries_pr(node, pr_number):
+            out.append(nid)
+    return out
 
 
 def _resolve_node(node_id: str) -> JobHolder:
@@ -136,7 +126,11 @@ def resolve_job_address(token: str) -> Optional[JobHolder]:
         return _resolve_node(node_id)
     if token.startswith("pr:"):
         raw = token[len("pr:"):].strip()
-        if not raw or not raw.isdigit():
+        # isdecimal, not isdigit: the latter is True for unicode digits
+        # (superscripts, subscripts) that int() rejects, which would crash the
+        # path instead of refusing cleanly. A try/except catches anything isdecimal
+        # misses too.
+        if not raw or not raw.isdecimal():
             return JobHolder(
                 node_id="",
                 address=token,
@@ -145,8 +139,19 @@ def resolve_job_address(token: str) -> Optional[JobHolder]:
                 harness=None,
                 note=f"pr address must be pr:<number> (got {token!r})",
             )
-        nid = _node_id_for_pr(int(raw))
-        if nid is None:
+        try:
+            pr_num = int(raw)
+        except ValueError:
+            return JobHolder(
+                node_id="",
+                address=token,
+                state="free",
+                session_id=None,
+                harness=None,
+                note=f"pr address must be pr:<number> (got {token!r})",
+            )
+        candidates = _node_ids_for_pr(pr_num)
+        if not candidates:
             return JobHolder(
                 node_id="",
                 address=token,
@@ -155,7 +160,22 @@ def resolve_job_address(token: str) -> Optional[JobHolder]:
                 harness=None,
                 note=f"no backlog node carries PR {raw}",
             )
-        res = _resolve_node(nid)
+        if len(candidates) > 1:
+            # PR numbers are per-repo; >1 node carrying the same number means the
+            # bare pr:<n> is ambiguous across projects. Refuse rather than silently
+            # route to one -- the sender disambiguates with node:<id>.
+            return JobHolder(
+                node_id="",
+                address=token,
+                state="free",
+                session_id=None,
+                harness=None,
+                note=(
+                    f"PR {raw} is ambiguous across nodes {', '.join(candidates)}; "
+                    f"use node:<id> to pick one"
+                ),
+            )
+        res = _resolve_node(candidates[0])
         return JobHolder(
             node_id=res.node_id,
             address=res.address,

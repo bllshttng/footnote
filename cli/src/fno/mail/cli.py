@@ -547,9 +547,11 @@ def cmd_reply(
     """Reply to a message, routed by the answered message's lane.
 
     The id is resolved against the durable bus FIRST. A directed message (to_kind
-    is name or session) goes back to its original sender without you re-typing
-    the handle, correlated via in_reply_to. Any other target falls through to the
-    thread-store reply.
+    is name, session, or node) goes back to its original sender without you
+    re-typing the handle, correlated via in_reply_to. A ``node``-addressed job
+    message is answered at its sender too (the job address is the routing key on
+    the way IN; the reply goes back to who sent it). Any other target falls
+    through to the thread-store reply.
 
     If the id is not on the bus, this session's own TRANSCRIPT is searched next.
     That path is the common one, not a fallback for odd cases: a live-confirmed
@@ -569,14 +571,14 @@ def cmd_reply(
     _enforce_body_cap(body_text)
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
-    # and answer name/session mail back to its original sender. Anything else
+    # and answer name/session/node mail back to its original sender. Anything else
     # falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
     from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
-    if orig is not None and orig.to_kind in {"name", "session"}:
+    if orig is not None and orig.to_kind in {"name", "session", "node"}:
         # A stored sender predating the address flip carries the retired
         # `<harness>-<short8>` form. That is a fact about an old RECORD, not a
         # mistake by whoever is replying, and the address it would carry today is
@@ -1508,12 +1510,7 @@ def _job_lane_send(
     from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
     from fno.agents.self_stamp import resolve_self_model, stamp_from
     from fno.dispatch_flags import infer_invoking_harness
-    from fno.inbox.store import (
-        DurableOwner,
-        _append_to_bus,
-        generate_msg_id,
-        ttl_at_for,
-    )
+    from fno.inbox.store import DurableOwner, generate_msg_id, write_new_thread
     from fno.mail.envelope import harness_for_provider, wrap_fno_mail
     from fno.mail.job_address import resolve_job_address
 
@@ -1568,28 +1565,24 @@ def _job_lane_send(
         print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
         return
 
-    # Live miss: durable floor addressed to the JOB. A successor (or this holder's
-    # next drain) surfaces it via scan_unread(node:<id>). Owner is wake-daemon:
-    # the holder exists but the inject missed, so the message waits for a drain
+    # Live miss: durable floor addressed to the JOB, written through the SAME
+    # write_new_thread the name lane uses (node:<id> is a first-class recipient
+    # now that inbox_dir_for admits ':'). A successor (or this holder's next
+    # drain) surfaces it via scan_unread(node:<id>). Owner is wake-daemon: the
+    # holder exists but the inject missed, so the message waits for a drain
     # (resumable), not a turn boundary -- live-drain's 1h "drains next turn"
     # assumption does not hold for a job address whose only drain is SessionStart.
-    from datetime import datetime, timezone
-
-    ts = datetime.now(tz=timezone.utc)
     owner = DurableOwner.WAKE_DAEMON
     try:
-        _append_to_bus(
-            msg_id=msg_id,
-            thread_id=msg_id,
-            sender=stamp_from(from_name),
+        th = write_new_thread(
             recipient=recipient,
+            sender=stamp_from(from_name),
             kind="send",
             body=wrapped,
-            timestamp=ts,
+            msg_id=msg_id,
             provider_to=provider,
             to_kind="node",
             owner=owner.value,
-            ttl_at=ttl_at_for(owner, ts),
         )
     except (OSError, ValueError, RuntimeError) as exc:
         print(
@@ -1601,7 +1594,7 @@ def _job_lane_send(
     # recovery: the message waits for the holder's next drain, not a reply window.
     print(f"mail: {recipient} live-inject missed; durable until a holder drains",
           file=sys.stderr)
-    print(f"{msg_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
+    print(f"{th.thread_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
 
 
 # Send-time human escalation for a question, per (sender, recipient). A burst
@@ -2582,39 +2575,33 @@ def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
 
     The job address outlives any session, so a successor re-claiming the node
     drains mail here that the prior holder never read (x-8f8c part 2). The node
-    comes from this session's own manifest (``target_claim_key``), then the LIVE
-    claim is checked so a stale manifest -- the claim already moved to a
-    successor -- never drains another holder's mail.
+    comes from this session's own manifest (``target_claim_key``); the holder
+    check reuses ``resolve_truth_status`` -- the same node->holder-session join
+    ``fno agents list`` runs -- so this session drains only when IT is the live
+    holder. A successor sees a different holder -> ``session_id`` None -> no
+    drain, which is the security gate (a stale manifest must not drain another
+    holder's mail).
 
     Returns ``(job_address, envelopes)``; ``(None, [])`` when this session holds
     no live node claim. Never raises: an unreadable manifest or claim degrades to
     no job mail, so the drain still surfaces handle mail.
     """
+    from fno.agents.truth_status import resolve_truth_status
     from fno.bus.cursor import scan_unread
-    from fno.claims.core import claim_status
-    from fno.claims.io import claims_root_for
+    from fno.mail.job_address import HOLDER_STATES
 
-    fm = _manifest_fields(
-        "target_claim_key", "session_id", "target_claim_holder"
-    )
-    key = fm.get("target_claim_key")
+    key = _manifest_fields("target_claim_key").get("target_claim_key")
     if not key or not key.startswith("node:"):
         return None, []
-    # Only this session's own manifest: a shared cwd (canonical with linked .fno)
-    # must not let one session drain another's job mail.
-    if fm.get("session_id") and fm.get("session_id") != ident.session_id:
+    res = resolve_truth_status(
+        key[len("node:"):], manifest_cwd=str(Path.cwd())
+    )
+    if res.get("claim_state") not in HOLDER_STATES:
         return None, []
-    root = claims_root_for(key)
-    status = claim_status(key, root=root)
-    if status.get("state") not in ("live", "suspect"):
-        return None, []
-    holder = status.get("holder")
-    mine = f"target-session:{ident.session_id}" if ident.session_id else None
-    recorded = fm.get("target_claim_holder")
-    # claude: holder == target-session:<my session id>. codex: the claim may be
-    # owned by the durable thread id rather than the session id, so also accept
-    # the manifest's recorded holder when the live claim still carries it.
-    if holder != mine and holder != recorded:
+    # resolve_truth_status returns the holder's session id only when the live
+    # claim holder still matches this manifest's recorded holder; equalling
+    # ident.session_id means THIS session is that holder.
+    if not ident.session_id or res.get("session_id") != ident.session_id:
         return None, []
     return key, scan_unread(key)
 

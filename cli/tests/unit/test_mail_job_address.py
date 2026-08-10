@@ -242,6 +242,106 @@ def test_pr_with_no_node_refuses(runner, isolated, monkeypatch):
     assert _bus_to("node:") == []
 
 
+def test_pr_refuses_when_ambiguous_across_nodes(runner, isolated, monkeypatch):
+    # Two nodes carry PR 5050 (per-repo numbers collide on the global graph).
+    # pr:<n> must refuse rather than silently route to one of them.
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph",
+        lambda *a, **k: [
+            {"id": "x-a", "pr_number": 5050, "status": "ready"},
+            {"id": "x-b", "pr_number": 5050, "status": "ready"},
+        ],
+    )
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    res = runner.invoke(
+        app, ["mail", "send", "pr:5050", "hi", "--from-name", "king"]
+    )
+    assert res.exit_code == 16, res.output
+    out = (res.stdout + (res.stderr or "")).lower()
+    assert "ambiguous" in out
+    assert _bus_to("node:") == []
+
+
+def test_pr_resolves_via_additional_prs(runner, isolated, monkeypatch):
+    # A PR carried only as a secondary entry (additional_prs) still resolves.
+    monkeypatch.setattr(
+        "fno.graph.store.read_graph",
+        lambda *a, **k: [
+            {
+                "id": "x-multi",
+                "pr_number": 100,
+                "additional_prs": [{"number": 101, "url": "u"}],
+                "status": "ready",
+            }
+        ],
+    )
+    _acquire_node("x-multi", "88888888-8888-8888-8888-888888888888")
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    monkeypatch.setattr(
+        "fno.agents.dispatch._mail_inject_claude", lambda sid, wrapped: True
+    )
+    res = runner.invoke(
+        app, ["mail", "send", "pr:101", "secondary pr", "--from-name", "king"]
+    )
+    assert res.exit_code == 0, res.output
+    assert "node:x-multi" in res.stdout
+
+
+def test_pr_unicode_digit_refuses_cleanly(runner, isolated, monkeypatch):
+    # A unicode digit that isdigit() accepts but int() rejects must refuse, not
+    # crash with a traceback.
+    monkeypatch.setenv("CLAUDE_PROJECTS_DIR", str(isolated / "projects"))
+    res = runner.invoke(
+        app, ["mail", "send", "pr:²", "hi", "--from-name", "king"]
+    )
+    assert res.exit_code == 16, res.output
+    assert "Traceback" not in res.output
+
+
+# ---------------------------------------------------------------------------
+# Reply: a node-addressed message is answered at its sender
+# ---------------------------------------------------------------------------
+
+
+def test_reply_to_node_message_routes_to_sender(runner, isolated, monkeypatch):
+    # Seed a durable-floored job message (to_kind=node) from a known sender.
+    from fno.bus.log import append as bus_append
+    from fno.bus.log import Envelope
+    from datetime import datetime, timezone
+
+    sender_handle = "5555abcd"
+    bus_append(
+        Envelope(
+            id="msg-node-1",
+            thread="msg-node-1",
+            from_=sender_handle,
+            to="node:reply-abcd",
+            kind="send",
+            body="job note",
+            ts=datetime.now(tz=timezone.utc).isoformat(),
+            to_kind="node",
+        )
+    )
+    _acquire_node("reply-abcd", "99999999-9999-9999-9999-999999999999")
+
+    captured: list[str] = []
+
+    def _capture(body, *, from_project, target, to_msg, require_resolution=False):
+        captured.append(target)
+        print(f"replied to {target}")
+        return None
+
+    monkeypatch.setattr("fno.mail.cli._reply_to_name_handle", _capture)
+    res = runner.invoke(
+        app,
+        ["mail", "reply", "--to", "msg-node-1", "--body", "got it"],
+    )
+    assert res.exit_code == 0, res.output
+    # Routed back to the original sender, not the job address.
+    assert captured == [sender_handle]
+
+
+
 # ---------------------------------------------------------------------------
 # Drain: a holding session surfaces job mail; a non-holder does not
 # ---------------------------------------------------------------------------

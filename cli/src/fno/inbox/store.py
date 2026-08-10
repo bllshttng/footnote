@@ -218,15 +218,16 @@ def _inbox_root() -> Optional[Path]:
     return None
 
 
-_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_PROJECT_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 
 
 def inbox_dir_for(project: str) -> Path:
     """Return the ``inbox/`` directory for a recipient project.
 
     Validates ``project`` strictly: it must match
-    ``^[A-Za-z0-9][A-Za-z0-9._-]*$`` and contain no ``..`` segments. This
-    closes a path-traversal hole where a maliciously crafted recipient
+    ``^[A-Za-z0-9][A-Za-z0-9._:-]*$`` (``:`` admitted so a job address like
+    ``node:<id>`` is a first-class recipient) and contain no ``..`` segments.
+    This closes a path-traversal hole where a maliciously crafted recipient
     name (``..`` / ``../etc``) would let writes escape the inbox tree.
 
     Path resolution order:
