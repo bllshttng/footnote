@@ -453,6 +453,7 @@ def resolve_promise_evidence(
     query: Optional[Callable[..., PrMergeState]] = None,
     probe_runner: Optional[Callable[[str, Optional[str]], tuple[bool, str]]] = None,
     extra_refs: Optional[list[tuple[int, Optional[str]]]] = None,
+    carveout_reader: Optional[Callable[[Optional[str]], "list[dict]"]] = None,
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
@@ -462,9 +463,23 @@ def resolve_promise_evidence(
     case (one .md == one PR == one node) uses waves as internal structure and
     would false-positive identically to a half-ship, parking every such node on
     autonomous /target. Coverage grows as /blueprint stamps ``expected_url_count``
-    going forward, so nothing retroactively parks. Two conditions, first refusal
-    wins; both read the plan at ``node["plan_path"]``:
+    going forward, so nothing retroactively parks.
 
+    Three conditions, first refusal wins. D reads the carve-out ledger and is
+    independent of the plan; B and C read the plan at ``node["plan_path"]``:
+
+      D. Unharvested deferred carve-outs. The project ledger
+         (``.fno/carveouts.jsonl``) still carries a ``deferred`` carve-out -
+         declared scope that did not ship. It must become a node (the retro
+         harvest files and consumes it) or be force-overridden. ``oos-bug`` and
+         ``backfill`` carve-outs do NOT block (genuine discovery, filed by the
+         later harvest); both land in the same ledger and look identical, which
+         is why a deferred item can merge away unnoticed (cv-99ebc0f3 on
+         x-44cb). Checked first and independent of the plan so a close is held
+         even when the plan is absent or unreadable. Project-wide over the
+         canonical ledger: a carve-out carries only a session id (no node id),
+         and that session is often a spawned worker of a different harness than
+         the node's own, so per-node attribution is unsound.
       B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
          delegated to ``fno-agents probe-run`` (the same runner the loop uses for
          ``done_probes``); a declared gate that cannot be evaluated fails closed.
@@ -478,6 +493,17 @@ def resolve_promise_evidence(
     frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
     names the unreadable path so the gap is visible, not silent.
     """
+    # Condition D (checked first; independent of the plan): an unharvested
+    # `deferred` carve-out is declared scope that did not ship, and it blocks
+    # the close until it becomes a node (harvest) or is force-overridden. See
+    # the docstring for why this is project-wide and why oos-bug/backfill pass.
+    deferred = (carveout_reader or _unharvested_deferred_carveouts)(cwd)
+    if deferred:
+        return PromiseVerdict(
+            outcome="promise_unmet",
+            reason=_promise_refusal_d(node.get("id", "(unknown)"), deferred),
+        )
+
     plan_path = node.get("plan_path")
     if not isinstance(plan_path, str) or not plan_path:
         return PromiseVerdict(outcome="ok")
@@ -645,6 +671,78 @@ def _promise_refusal_c(node_id: str, plan_display: str, expected: int, merged: i
         f"    ship the rest, then close; or\n"
         f"    file the remainder (`fno backlog idea`) and close with\n"
         f"      --force --reason \"remaining ships filed as <id>\""
+    )
+
+
+def _unharvested_deferred_carveouts(cwd: Optional[str]) -> list[dict]:
+    """Unharvested ``deferred`` carve-outs on the node's project ledger.
+
+    ``deferred`` blocks a close (declared scope did not ship); ``oos-bug`` and
+    ``backfill`` do not (genuine discovery, filed by the later harvest). Both
+    land in the same ``.fno/carveouts.jsonl``, which is why a deferred item can
+    merge away unnoticed (cv-99ebc0f3 on x-44cb). The ledger is resolved from
+    the NODE's project (``cwd``), not the ambient command repo: a cross-project
+    close names a foreign node from this session, and reading the ambient
+    ledger would both miss the foreign carve-out and let an unrelated local one
+    block it. Falls back to the ambient canonical ledger when ``cwd`` is absent
+    or unresolvable (the same-project close, the common case). Fails open on an
+    unreadable ledger: a corrupt ledger must not wedge a close, and the retro
+    harvest is the durable resolution path either way.
+    """
+    root = _carveout_ledger_root(cwd)
+    try:
+        from fno.carveout.core import read_carveouts
+
+        return read_carveouts(root, kind="deferred")
+    except Exception:
+        return []
+
+
+def _carveout_ledger_root(cwd: Optional[str]) -> Path:
+    """The canonical root whose ``.fno/carveouts.jsonl`` owns the node's work.
+
+    Resolved from ``cwd`` (the node's checkout) via ``git worktree list`` so a
+    cross-project close reads the right project's ledger; falls back to the
+    ambient canonical root, then to ``cwd``/cwd. Never raises.
+    """
+    if cwd:
+        try:
+            from fno.paths import resolve_canonical_worktree
+
+            wt = resolve_canonical_worktree(Path(cwd))
+            if wt is not None:
+                return wt
+        except Exception:
+            pass
+    try:
+        from fno.carveout.core import resolve_carveout_root
+
+        return resolve_carveout_root()
+    except Exception:
+        return Path(cwd) if cwd else Path.cwd()
+
+
+def _promise_refusal_d(node_id: str, deferred: list[dict]) -> str:
+    # Name each unharvested deferred carve-out by id + need (or description) so
+    # the operator sees exactly what declared scope did not ship. Cap the list
+    # so a flooded ledger stays readable.
+    cap = 5
+    rows = []
+    for rec in deferred[:cap]:
+        label = rec.get("need") or str(rec.get("description", ""))[:80]
+        rows.append(f"    {rec.get('id', '?')}: {label}")
+    more = (
+        f"\n    ...and {len(deferred) - cap} more" if len(deferred) > cap else ""
+    )
+    return (
+        f"Refused: {node_id} would close with {len(deferred)} unharvested "
+        f"deferred carve-out(s).\n"
+        f"  A `deferred` carve-out is declared scope that did not ship.\n"
+        f"  carve-outs:\n" + "\n".join(rows) + f"{more}\n\n"
+        f"  Two legal exits:\n"
+        f"    harvest them into nodes (`fno backlog groom` files and consumes\n"
+        f"      each), then close; or\n"
+        f"    close with --force --reason \"deferred carve-out <id> filed as <node>\""
     )
 
 

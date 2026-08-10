@@ -41,6 +41,16 @@ if [[ -f "$RESULT" ]] && command -v jq >/dev/null 2>&1; then
     # cosmetic line must never be able to kill the trigger below it.
     cu=$(jq -r '.sync_catchup // empty | select(.outcome | test("failed|unknown|error|marked|skipped")) | "\(.outcome)\(if .detail != "" then " (" + .detail + ")" else "" end)"' "$RESULT" 2>/dev/null || true)
     [[ -n "$cu" ]] && echo "reconcile: canonical-sync catch-up ${cu}. The canonical checkout may be behind; run \`fno doctor\` for the outcome-keyed report."
+    # Promise-gate held-open nodes (condition D, plus #794's probes/ship-count):
+    # a node the sweep refused to close lands in .promise_unmet. Surfacing only
+    # .closed left these held open with no named cause - the silent-gate shape
+    # this repo fixes at the source, so the bucket is surfaced here too, before
+    # the consume-after-show move hides the result.
+    unmet_n=$(jq '.promise_unmet | length' "$RESULT" 2>/dev/null || echo 0)
+    if [[ "$unmet_n" =~ ^[0-9]+$ ]] && (( unmet_n > 0 )); then
+        nodes=$(jq -r '.promise_unmet[].node_id' "$RESULT" 2>/dev/null | paste -sd, - 2>/dev/null)
+        echo "reconcile: last sweep held ${unmet_n} node(s) open on the promise gate (${nodes}). Run \`fno backlog reconcile\` for the per-node cause (unharvested carve-out / failed close_probe / short ship count); resolve, or close with --force --reason."
+    fi
     mv -f "$RESULT" "$RESULT.shown" 2>/dev/null || true
 fi
 

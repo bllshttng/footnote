@@ -173,6 +173,81 @@ def test_condition_b_failing_probe_refuses(tmp_path: Path):
     assert "exited 1" in (v.reason or "")
 
 
+# ---------------------------------------------------------------------------
+# condition D - unharvested deferred carve-outs
+# ---------------------------------------------------------------------------
+# The carveout_reader seam returns the post-filter DEFERRED list (the real
+# reader delegates the deferred-vs-oos-bug/backfill split to read_carveouts,
+# which the carveout-core tests cover). An empty list therefore also stands in
+# for "ledger has only oos-bug/backfill" - those are filtered out before the
+# gate, which is the load-bearing kind split.
+
+
+def _cv(cv_id: str, need: str = "a deferred thing") -> dict:
+    return {"id": cv_id, "kind": "deferred", "need": need, "description": need}
+
+
+def test_condition_d_deferred_carveout_refuses(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=1)
+    v = resolve_promise_evidence(
+        {"id": "x-d", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [_cv("cv-99ebc0f3", "item 43 index move")],
+    )
+    assert v.outcome == "promise_unmet"
+    assert v.exit_code == 6
+    # The carve-out is named, the scope rationale is stated, and both legal
+    # exits (harvest / --force --reason) appear.
+    assert "1 unharvested deferred carve-out" in (v.reason or "")
+    assert "cv-99ebc0f3" in (v.reason or "")
+    assert "item 43 index move" in (v.reason or "")
+    assert "--force --reason" in (v.reason or "")
+    assert "harvest" in (v.reason or "")
+
+
+def test_condition_d_empty_ledger_passes(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=1)
+    v = resolve_promise_evidence(
+        {"id": "x-d", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [],
+    )
+    assert v.outcome == "ok"
+
+
+def test_condition_d_fires_on_a_multi_wave_plan(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    # Condition D is independent of the plan: a multi-wave plan that declared no
+    # assertion closes cleanly on its own (wave-inference was rejected), but a
+    # deferred carve-out still holds it. D fires and names the carve-out, never
+    # a wave count.
+    plan = _write_plan(tmp_path / "p.md", waves=2)
+    v = resolve_promise_evidence(
+        {"id": "x-d", "plan_path": str(plan)},
+        carveout_reader=lambda cwd: [_cv("cv-deadbeef")],
+    )
+    assert v.outcome == "promise_unmet"
+    assert "deferred carve-out" in (v.reason or "")
+    assert "promised 2 waves" not in (v.reason or "")
+
+
+def test_carveout_ledger_root_resolves_from_the_nodes_project(tmp_path):
+    """The ledger root is the canonical of the repo at ``cwd``, not the ambient
+    command repo, so a cross-project close reads the foreign project's ledger
+    rather than the session's (codex P1: the resolver must follow the node)."""
+    import subprocess
+    from fno.graph._reconcile import _carveout_ledger_root
+
+    repo = tmp_path / "foreign"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=str(repo), check=True)
+    root = _carveout_ledger_root(str(repo))
+    assert Path(root).resolve() == repo.resolve()
+
+
 def test_condition_b_fail_closed_when_binary_absent(tmp_path: Path, monkeypatch):
     from fno.graph._reconcile import resolve_promise_evidence
     import fno.rust_binary as rb
@@ -388,6 +463,77 @@ def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch
     assert _node(routed, "ab-d1").get("completed_at") is not None
     assert _node(routed, "ab-d2").get("completed_at") is not None
     assert _node(routed, "ab-d3").get("completed_at") is not None
+
+
+# ---------------------------------------------------------------------------
+# condition D through the verbs (carve-out ledger) + --force bypass
+# ---------------------------------------------------------------------------
+
+
+def test_condition_D_refuses_on_all_three_verbs(routed, tmp_path, monkeypatch):
+    """A deferred carve-out holds the node open on every close path - the
+    one-of-N decorative-guard shape this feature exists to end (a gate on a
+    single verb would let a second path close around it)."""
+    import fno.graph._reconcile as rec
+
+    plan = _write_plan(tmp_path / "one-wave.md", waves=1)
+    _seed(routed, [
+        _base_node("ab-dc1", str(plan)),
+        _base_node("ab-dc2", str(plan)),
+        _base_node("ab-dc3", str(plan)),
+    ])
+    monkeypatch.setattr(
+        rec,
+        "_unharvested_deferred_carveouts",
+        lambda cwd: [{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43"}],
+    )
+    _merged(monkeypatch)
+    from fno.cli import app
+
+    assert CliRunner().invoke(app, ["backlog", "done", "ab-dc1"]).exit_code == 6
+    assert _node(routed, "ab-dc1").get("completed_at") is None
+
+    assert CliRunner().invoke(app, ["done", "ab-dc2", "--pr", "42"]).exit_code == 6
+    assert _node(routed, "ab-dc2").get("completed_at") is None
+
+    def _scan(entries, node_id=None):
+        return [rec.MergeDriftRecord(
+            node_id="ab-dc3", plan_path=str(plan), pr_number=42,
+            pr_url="https://github.com/o/r/pull/42", pr_state="MERGED",
+            merged_at="2026-08-09T00:00:00Z",
+        )]
+
+    monkeypatch.setattr(rec, "scan_merge_drift", _scan)
+    from fno.graph.cli import cli
+
+    payload = json.loads(CliRunner().invoke(cli, ["reconcile", "--json"]).output)
+    assert any(p["node_id"] == "ab-dc3" for p in payload["promise_unmet"])
+    assert all(c.get("node_id") != "ab-dc3" for c in payload["closed"])
+    assert _node(routed, "ab-dc3").get("completed_at") is None
+
+
+def test_condition_D_force_bypass_closes(routed, tmp_path, monkeypatch):
+    """--force --reason records the carve-out as accepted and closes; the
+    promise gate never runs on the force path, so a deliberate deferred-scope
+    close is a journal line, not a hard wedge."""
+    import fno.graph._reconcile as rec
+
+    plan = _write_plan(tmp_path / "one-wave.md", waves=1)
+    _seed(routed, [_base_node("ab-dc4", str(plan))])
+    monkeypatch.setattr(
+        rec,
+        "_unharvested_deferred_carveouts",
+        lambda cwd: [{"id": "cv-99ebc0f3", "kind": "deferred", "need": "item 43"}],
+    )
+    _merged(monkeypatch, target="graph")
+    from fno.cli import app
+
+    r = CliRunner().invoke(
+        app,
+        ["backlog", "done", "ab-dc4", "--force", "--reason", "cv-99ebc0f3 filed as x-rest"],
+    )
+    assert r.exit_code == 0, r.output
+    assert _node(routed, "ab-dc4").get("completed_at") is not None
 
 
 # ---------------------------------------------------------------------------

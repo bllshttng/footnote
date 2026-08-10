@@ -2566,8 +2566,15 @@ fn ac2_err_unaddressed_p1_blocks_with_path_line() {
         d.message
     );
     assert!(
-        d.message.contains("wontfix:") && d.message.contains("reply in-thread"),
+        d.message.contains("wontfix:") && d.message.contains("Reply in-thread"),
         "message must name the remedy; got: {}",
+        d.message
+    );
+    // A no-reply finding is the top-level-comment blind spot this message
+    // exists for: it names the missing mechanism, not just the remedy.
+    assert!(
+        d.message.contains("no in-thread reply"),
+        "no-reply message must name the missing mechanism; got: {}",
         d.message
     );
     assert!(

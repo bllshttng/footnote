@@ -3381,6 +3381,12 @@ struct Finding {
     created_at: String,
     /// Parsed severity label (P1 / critical / high).
     severity: &'static str,
+    /// Whether this finding's thread had ANY non-bot reply. False is the
+    /// silent-failure shape (PR #447, #787): the finding was answered with a
+    /// top-level PR comment, which this gate cannot read, so it reads as
+    /// unaddressed with no named cause. Carried per-finding so the block
+    /// reason can name the count and the missing in_reply_to mechanism.
+    had_reply: bool,
 }
 
 /// Parse a blocking severity from the bot's own badge markup. The exact
@@ -3525,6 +3531,7 @@ fn compute_unaddressed_findings(
                                 .unwrap_or(0),
                             created_at: created_at.to_string(),
                             severity,
+                            had_reply: false,
                         });
                     }
                 }
@@ -3534,17 +3541,24 @@ fn compute_unaddressed_findings(
 
     let unaddressed: Vec<Finding> = candidates
         .into_iter()
-        .filter(|f| {
+        .filter_map(|mut f| {
             let non_bot_replies = replies.get(&f.id);
             let has_reply = non_bot_replies.map(|r| !r.is_empty()).unwrap_or(false);
+            // Record whether this finding's thread had any non-bot reply so
+            // the block reason can name the top-level-comment blind spot.
+            f.had_reply = has_reply;
             if !has_reply {
-                return true; // no ack -> unaddressed
+                return Some(f); // no ack -> unaddressed
             }
             let commit_after = commit_dates.iter().any(|d| ts_after(d, &f.created_at));
             let wontfix = non_bot_replies
                 .map(|rs| rs.iter().any(|b| b.to_lowercase().contains(WONTFIX_MARKER)))
                 .unwrap_or(false);
-            !(commit_after || wontfix)
+            if !(commit_after || wontfix) {
+                Some(f)
+            } else {
+                None
+            }
         })
         .collect();
 
@@ -6400,6 +6414,38 @@ fn build_block_reason(pr: &PrInfo, local_head: &str, open_findings_empty: bool) 
             let reply_to = profile_by_author(&f.author)
                 .map(|p| format!(" addressed to {}", p.reply_handle))
                 .unwrap_or_default();
+            // The silent failure (PR #447, #787): a finding answered with a
+            // top-level PR comment reads as unaddressed because this gate only
+            // walks in_reply_to_id chains on /pulls/N/comments. The worker
+            // sees green CI, its own fix commits, and a loop that will not
+            // terminate, with nothing connecting the two. When any unaddressed
+            // finding has no reply at all, lead with the mechanism and the
+            // exact command - "reply in-thread" alone was misread twice as
+            // "I did reply" by workers who had posted top-level comments.
+            let no_reply = pr
+                .unaddressed_findings
+                .iter()
+                .filter(|fnd| !fnd.had_reply)
+                .count();
+            if no_reply > 0 {
+                return format!(
+                    "PR #{}: {} blocking finding(s) unaddressed, {} with no in-thread reply. \
+                     A top-level PR comment is NOT detected - this gate reads in_reply_to_id chains \
+                     on /pulls/{}/comments only. Reply in-thread: gh api repos/$OWNER/$REPO/pulls/{}/comments \
+                     -F in_reply_to=<id> -f body='Fixed in <sha>: ...' (or wontfix: <reason>). \
+                     First: {} {} at {}:{}{}",
+                    pr.number,
+                    pr.unaddressed_findings.len(),
+                    no_reply,
+                    pr.number,
+                    pr.number,
+                    f.author,
+                    f.severity,
+                    f.path,
+                    f.line,
+                    more
+                );
+            }
             return format!(
                 "PR #{}: {} {} at {}:{} unaddressed (reply in-thread{} or wontfix:){}",
                 pr.number, f.author, f.severity, f.path, f.line, reply_to, more
@@ -7573,6 +7619,7 @@ mod tests {
             line: 12,
             created_at: "2026-08-06T00:00:00Z".to_string(),
             severity: "P1",
+            had_reply: true,
         }];
         assert!(!awaiting_review_only(&with_finding), "unaddressed P1");
 
@@ -7789,6 +7836,7 @@ mod tests {
                 line: 10,
                 created_at: "2026-07-06T01:00:00Z".into(),
                 severity: "P1",
+                had_reply: true,
             }],
             ..watch_pr()
         };
@@ -8251,6 +8299,7 @@ mod tests {
                         line: 1,
                         created_at: "2026-07-27T00:00:00Z".into(),
                         severity: "P1",
+                        had_reply: true,
                     }],
                     ..reviewers_gate_pr()
                 },
@@ -8290,6 +8339,7 @@ mod tests {
                 line: 7,
                 created_at: "2026-07-27T00:00:00Z".into(),
                 severity: "P1",
+                had_reply: true,
             }],
             ..reviewers_gate_pr()
         };
@@ -8302,6 +8352,32 @@ mod tests {
             ..pr
         };
         assert!(build_block_reason(&after, "abc", true).contains("reviewers gate unmet"));
+    }
+
+    #[test]
+    fn unaddressed_finding_with_no_reply_names_the_top_level_blind_spot() {
+        // A finding answered with a top-level PR comment reads as unaddressed
+        // because the gate walks in_reply_to_id chains only. The block reason
+        // must name the mechanism and the exact gh command, not the ambiguous
+        // "reply in-thread" a worker who posted a top-level comment reads as
+        // "I did reply" (PR #447, #787 both stalled green PRs this way).
+        let pr = PrInfo {
+            unaddressed_findings: vec![Finding {
+                id: 1,
+                author: "codex".into(),
+                path: "a.rs".into(),
+                line: 7,
+                created_at: "2026-07-27T00:00:00Z".into(),
+                severity: "P1",
+                had_reply: false,
+            }],
+            ..reviewers_gate_pr()
+        };
+        let reason = build_block_reason(&pr, "abc", true);
+        assert!(reason.contains("no in-thread reply"), "got: {reason}");
+        assert!(reason.contains("in_reply_to_id"), "got: {reason}");
+        assert!(reason.contains("top-level PR comment"), "got: {reason}");
+        assert!(reason.contains("in_reply_to=<id>"), "got: {reason}");
     }
 
     #[test]
@@ -8425,6 +8501,7 @@ mod tests {
                 line: 1,
                 created_at: "none".into(),
                 severity: "P1",
+                had_reply: true,
             }],
             ..watch_pr()
         };

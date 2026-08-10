@@ -352,6 +352,11 @@ timestamp OR the reply body carries `wontfix:`). A consolidated top-level
 comment is invisible to that detection - PR #447 was addressed with zero
 in-thread replies and could not have reached DonePRGreen under the gate.
 Without this step, an otherwise-green PR stalls until backstop/budget.
+The loop-check receipt now names this at the gate: when a blocking finding
+has no in-thread reply it prints `N with no in-thread reply` plus the
+`gh api ... -F in_reply_to=<id>` command, so a stalled session sees the
+cause in the block reason without opening this skill (the runtime line is
+the load-bearing fix; this prose is the background).
 
 For EVERY blocking finding (`![P1 Badge]` from codex, `![critical]`/`![high]`
 from gemini), post a reply **in that finding's thread** after pushing the fix:

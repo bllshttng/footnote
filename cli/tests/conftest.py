@@ -77,6 +77,22 @@ def _neutral_host_harness(monkeypatch):
     )
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_promise_carveout_gate(monkeypatch):
+    """Default condition D of the promise gate to an empty carve-out ledger.
+
+    ``resolve_promise_evidence`` (consulted by every close verb) reads
+    ``.fno/carveouts.jsonl`` off the canonical repo root; in the test process
+    that resolves to the real checkout, so it would read the real ledger and
+    refuse every close. Default the reader to empty so unrelated close tests
+    stay hermetic; tests that exercise condition D override it (``carveout_reader``
+    on the unit gate, or re-patch this attribute for the close verbs).
+    """
+    import fno.graph._reconcile as rec
+
+    monkeypatch.setattr(rec, "_unharvested_deferred_carveouts", lambda cwd: [])
+
+
 # ---------------------------------------------------------------------------
 # Hermetic state isolation (ab-2f78b48e)
 # ---------------------------------------------------------------------------
