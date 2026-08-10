@@ -411,6 +411,131 @@ def test_acquire_then_release_closes_do_window(tmp_path, monkeypatch):
     assert do[0]["started_at"] <= do[0]["ended_at"]
 
 
+def _do_graph(tmp_path, monkeypatch, node_id, session_marker):
+    """A one-node graph wired as fno.paths.graph_json, with a clean claude
+    ambient identity. Returns the graph path."""
+    import fno.paths
+
+    home = tmp_path / "home"
+    (home / ".fno").mkdir(parents=True)
+    monkeypatch.delenv("FNO_CLAIMS_ROOT", raising=False)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", session_marker)
+    for m in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "GEMINI_SESSION_ID",
+              "OPENCODE_SESSION_ID", "CLAUDE_SESSION_ID"):
+        monkeypatch.delenv(m, raising=False)
+    g = tmp_path / "graph.json"
+    g.write_text('{"entries": [{"id": "%s", "title": "t", '
+                 '"domain": "code", "project": "p"}]}\n' % node_id)
+    monkeypatch.setattr(fno.paths, "graph_json", lambda: g)
+    return g
+
+
+def _do_rows(graph_path):
+    return [
+        x for x in json.loads(graph_path.read_text())["entries"][0].get("sessions", [])
+        if x.get("phase") == "do"
+    ]
+
+
+def test_release_rollback_do_removes_the_open_acquire_row(tmp_path, monkeypatch):
+    """A worker whose POST-acquire validation refuses it did no work, so the row
+    its acquire opened must not survive the refusal - otherwise the node reads as
+    permanently in progress for a phase that never ran. This is the init
+    acquire-then-check-contained rollback path."""
+    g = _do_graph(tmp_path, monkeypatch, "ab-rollback", "sess-rb-1")
+
+    acq = runner.invoke(
+        cli, ["acquire", "node:ab-rollback", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    assert acq.exit_code == 0, acq.output
+    assert len(_do_rows(g)) == 1  # the row the refusal must undo
+
+    rel = runner.invoke(
+        cli, ["release", "node:ab-rollback", "--holder", "target-session:s", "--rollback-do"]
+    )
+    assert rel.exit_code == 0, rel.output
+    assert _do_rows(g) == []
+
+
+def test_rollback_do_never_removes_a_closed_row(tmp_path, monkeypatch):
+    """A row carrying ended_at recorded a finished window. A later acquire +
+    rollback (the same session refused on a second run) must leave it intact -
+    the rollback undoes an open row, never real provenance."""
+    g = _do_graph(tmp_path, monkeypatch, "ab-rbclosed", "sess-rb-2")
+
+    runner.invoke(
+        cli, ["acquire", "node:ab-rbclosed", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    closed = runner.invoke(
+        cli, ["release", "node:ab-rbclosed", "--holder", "target-session:s", "--stamp-do"]
+    )
+    assert closed.exit_code == 0, closed.output
+    assert _do_rows(g)[0]["ended_at"]
+
+    runner.invoke(
+        cli, ["acquire", "node:ab-rbclosed", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    rel = runner.invoke(
+        cli, ["release", "node:ab-rbclosed", "--holder", "target-session:s", "--rollback-do"]
+    )
+    assert rel.exit_code == 0, rel.output
+    rows = _do_rows(g)
+    assert len(rows) == 1
+    assert rows[0]["ended_at"]  # untouched
+
+
+def test_rollback_do_spares_an_earlier_open_row_from_the_same_session(
+    tmp_path, monkeypatch
+):
+    """The dangerous case: a session did real work, was killed with its row still
+    open, then re-acquired and was refused. An idempotent re-acquire refreshes
+    the claim's acquired_at while the row keeps the FIRST started_at (append
+    never overwrites), so the rollback's started_at no longer matches and the
+    earlier window survives its successor's refusal."""
+    import yaml
+
+    from fno.claims.io import claim_path
+
+    g = _do_graph(tmp_path, monkeypatch, "ab-rbearly", "sess-rb-3")
+    home = tmp_path / "home"
+
+    runner.invoke(
+        cli, ["acquire", "node:ab-rbearly", "--holder", "target-session:s", "--ttl", "1h"]
+    )
+    first_started = _do_rows(g)[0]["started_at"]
+
+    # Stand in for the re-acquire's refreshed acquired_at without a wall-clock
+    # sleep: the row's started_at is second-granular, so a same-second re-acquire
+    # would not exercise the divergence this test is about.
+    cp = claim_path("node:ab-rbearly", root=home)
+    raw = yaml.safe_load(cp.read_text())
+    raw["acquired_at"] = raw["acquired_at"] + 60_000
+    cp.write_text(yaml.safe_dump(raw, sort_keys=False))
+
+    rel = runner.invoke(
+        cli, ["release", "node:ab-rbearly", "--holder", "target-session:s", "--rollback-do"]
+    )
+    assert rel.exit_code == 0, rel.output
+    rows = _do_rows(g)
+    assert len(rows) == 1
+    assert rows[0]["started_at"] == first_started
+    assert "no open do row to roll back" in rel.output
+
+
+def test_stamp_do_and_rollback_do_are_mutually_exclusive(tmp_path, monkeypatch):
+    """One records a finished window, the other removes a row for work that never
+    ran. Passing both is a caller bug, refused before the claim is touched."""
+    _do_graph(tmp_path, monkeypatch, "ab-rbboth", "sess-rb-4")
+
+    r = runner.invoke(
+        cli, ["release", "node:ab-rbboth", "--holder", "target-session:s",
+              "--stamp-do", "--rollback-do"]
+    )
+    assert r.exit_code == 2, r.output
+    assert "mutually exclusive" in r.output
+
+
 def test_release_without_stamp_do_writes_no_provenance(tmp_path, monkeypatch):
     """A bare release (the handoff path) records nothing - the do window would
     mis-attribute the predecessor under the successor's identity."""

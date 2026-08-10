@@ -1203,8 +1203,25 @@ PYEOF
           # Report what actually happened. Swallowing the release rc while the
           # message said "claim released" would strand a live claim for its full
           # TTL on a node nobody is building AND tell the operator the opposite.
+          #
+          # --rollback-do, not --stamp-do: the acquire above opened this
+          # worker's `do` row, but the acquire was only a serialization step and
+          # the re-check has now refused it. It does no work, so there is no
+          # window to record and the open row would leave the node reading as
+          # permanently in progress.
           FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
-            --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
+            --holder "$_CLAIM_HOLDER" --rollback-do >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
+          if [[ "$_REL_RC" -ne 0 ]]; then
+            # A stale fno predating --rollback-do REJECTS the flag (exit 2), and
+            # an unretried failure strands a live claim for its full TTL on a
+            # node nobody is building - worse than a stale row. Freeing the
+            # claim outranks rolling it back: retry bare, and say so.
+            FNO_CLAIMS_ROOT="$HOME" fno claim release "$_CLAIM_KEY" \
+              --holder "$_CLAIM_HOLDER" >/dev/null 2>&1 && _REL_RC=0 || _REL_RC=$?
+            if [[ "$_REL_RC" -eq 0 ]]; then
+              echo "[init-target-state] note: \`fno claim release --rollback-do\` was rejected; the claim was freed but its open do row on $_NODE_ID stays, so the node reads as in progress. If this persists, run \`fno doctor --fix\` - a stale fno predates the flag." >&2
+            fi
+          fi
           if [[ "$_REL_RC" -eq 0 ]]; then
             _REL_NOTE="claim released"
           else

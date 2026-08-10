@@ -96,6 +96,13 @@ if [[ "\$1" == "claim" && "\$2" == "release" ]]; then
   # that some release happened - a release naming the wrong holder is a no-op
   # that would otherwise read as success.
   echo "\$*" >> "${_dir}/release-calls.log"
+  # A deployed fno predating --rollback-do REJECTS the flag. Freeing the claim
+  # outranks rolling its do row back, so the caller must retry bare rather than
+  # let a stale binary strand the claim for its full TTL.
+  if [[ -f "${_dir}/reject-rollback-do" && "\$*" == *--rollback-do* ]]; then
+    echo "Error: No such option: --rollback-do" >&2
+    exit 2
+  fi
   exit ${_rel_rc}
 fi
 if [[ "\$1" == "claim" && "\$2" == "acquire" ]]; then
@@ -184,6 +191,37 @@ pass "post-claim: the manifest was removed"
 grep -q "claim released" "$TMP_POST/err.log" \
   || fail "post-claim: the refusal did not report the release"
 pass "post-claim: the message reports the release"
+
+# The acquire opened this worker's `do` row before the re-check refused it. The
+# worker did no work, so the row must come back out or the node reads as
+# permanently in progress. The flag is the only thing that removes it, and it
+# lives on THIS release call - asserting the row-removal logic in Python proves
+# the verb works, not that init asks for it.
+grep -q -- "--rollback-do" "$TMP_POST/release-calls.log" \
+  || fail "post-claim: release did not pass --rollback-do - the open do row survives a refusal that earned no work (got: $(cat "$TMP_POST/release-calls.log"))"
+grep -q -- "--stamp-do" "$TMP_POST/release-calls.log" \
+  && fail "post-claim: release passed --stamp-do - a refused worker has no do window to record"
+pass "post-claim: the release rolls back the do row it opened"
+
+# ── Stale fno rejects --rollback-do: free the claim anyway, and say so ──
+# The flag ships after the release site that passes it, so a deployed binary can
+# reject it. An unretried failure here strands a live claim for its full TTL on a
+# node nobody is building - strictly worse than a stale row.
+log "post-claim/stale-fno: --rollback-do rejected => claim still freed, degrade named"
+make_repo TMP_STALEFLAG 0 9
+_ALL_TMPS+=("$TMP_STALEFLAG")
+: > "$TMP_STALEFLAG/reject-rollback-do"
+
+run_init "$TMP_STALEFLAG"
+_RC=$?
+[[ "$_RC" -eq 2 ]] || fail "post-claim/stale-fno: expected exit 2, got $_RC"
+grep -q "claim released" "$TMP_STALEFLAG/err.log" \
+  || fail "post-claim/stale-fno: the claim was NOT freed after the flag was rejected - it strands for its full TTL (err: $(cat "$TMP_STALEFLAG/err.log"))"
+pass "post-claim/stale-fno: the bare retry freed the claim"
+
+grep -q "rollback-do\` was rejected" "$TMP_STALEFLAG/err.log" \
+  || fail "post-claim/stale-fno: degraded silently - the operator is not told the do row stayed open (err: $(cat "$TMP_STALEFLAG/err.log"))"
+pass "post-claim/stale-fno: the degrade is named, not hidden"
 
 # ── POST-claim with a FAILING release: say so, never claim success ──
 log "post-claim: release fails => the message says so"

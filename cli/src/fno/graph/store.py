@@ -904,6 +904,47 @@ def append_progress_note(
 _SESSION_STR_MAX = 200
 
 
+def _utc_session_stamp(label: str, value: str) -> str:
+    """Normalize a session-row timestamp to the canonical ``...Z`` form.
+
+    The timestamp contract is ISO-8601 *UTC*. ``fromisoformat`` alone would
+    accept a date-only value, a naive datetime, or a non-UTC offset -- all of
+    which break append-order comparison and a future evidence-based backfill. So
+    require a tz-aware instant whose offset is exactly UTC. Shared by the append
+    and rollback primitives so a rollback's ``started_at`` compares equal to the
+    value the append wrote rather than missing on a formatting difference.
+    """
+    try:
+        parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(
+            f"{label} must be an ISO-8601 timestamp, got {value!r}"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
+        raise ValueError(
+            f"{label} must be a UTC timestamp (offset +00:00 / Z), got {value!r}"
+        )
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tuple[str, str]":
+    """Validate a session row's identity triple, returning the stripped pair."""
+    from fno.graph.types import SESSION_PHASES
+
+    if phase not in SESSION_PHASES:
+        raise ValueError(
+            f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}"
+        )
+    harness = (harness or "").strip()
+    session_id = (session_id or "").strip()
+    for label, value in (("harness", harness), ("session_id", session_id)):
+        if not value:
+            raise ValueError(f"{label} must be a non-empty string")
+        if len(value) > _SESSION_STR_MAX:
+            raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
+    return harness, session_id
+
+
 def append_session_record(
     path: Path,
     node_id: str,
@@ -925,7 +966,9 @@ def append_session_record(
     may FILL a timestamp the first omitted (``started_at`` / ``ended_at``), so a
     row opened at claim acquire (started_at, no end) closes at release (ended_at
     filled) without losing either value. A value already set is never
-    overwritten, and no row is ever removed.
+    overwritten, and this function never removes a row - the single compensating
+    write is :func:`remove_open_session_record`, whose preconditions are narrow
+    enough that only a row this function opened moments ago can match.
 
     ``started_at`` / ``ended_at`` are optional and bound the phase window. Both
     are omitted unless the writer has an honest value: ``ended_at`` is the phase
@@ -944,46 +987,17 @@ def append_session_record(
     ``found=False`` when the node is absent (no mutation).
     """
     from fno.graph._intake import _find_node  # function-local: avoid import cycle
-    from fno.graph.types import SESSION_PHASES
 
-    if phase not in SESSION_PHASES:
-        raise ValueError(
-            f"invalid phase {phase!r}; expected one of {sorted(SESSION_PHASES)}"
-        )
-    harness = (harness or "").strip()
-    session_id = (session_id or "").strip()
-    for label, value in (("harness", harness), ("session_id", session_id)):
-        if not value:
-            raise ValueError(f"{label} must be a non-empty string")
-        if len(value) > _SESSION_STR_MAX:
-            raise ValueError(f"{label} exceeds {_SESSION_STR_MAX} chars")
-
-    # The timestamp contract is ISO-8601 *UTC*. fromisoformat alone would accept a
-    # date-only value, a naive datetime, or a non-UTC offset -- all of which break
-    # append-order comparison and a future evidence-based backfill. So require a
-    # tz-aware instant whose offset is exactly UTC, then normalize to the
-    # canonical `...Z` form the default path emits.
-    def _utc(label: str, value: str) -> str:
-        try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
-        except ValueError as exc:
-            raise ValueError(
-                f"{label} must be an ISO-8601 timestamp, got {value!r}"
-            ) from exc
-        if parsed.tzinfo is None or parsed.utcoffset() != timedelta(0):
-            raise ValueError(
-                f"{label} must be a UTC timestamp (offset +00:00 / Z), got {value!r}"
-            )
-        return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    harness, session_id = _validate_session_identity(phase, harness, session_id)
 
     # ended_at is the phase END; omitted when the writer has no honest end to
     # record (a row opened mid-session has a start and no end). Defaulting to the
     # stamp-fire time would name that instant as the phase end - the receipt-can-
     # lie failure under an honest name - so it is absent, not faked.
     if ended_at is not None:
-        ended_at = _utc("ended_at", ended_at)
+        ended_at = _utc_session_stamp("ended_at", ended_at)
     if started_at is not None:
-        started_at = _utc("started_at", started_at)
+        started_at = _utc_session_stamp("started_at", started_at)
 
     result = {"found": False, "added": False}
 
@@ -1022,6 +1036,73 @@ def append_session_record(
 
     locked_mutate_graph(path, mutator)
     return result["found"], result["added"]
+
+
+def remove_open_session_record(
+    path: Path,
+    node_id: str,
+    *,
+    phase: str,
+    harness: str,
+    session_id: str,
+    started_at: str,
+) -> "tuple[bool, bool]":
+    """Remove the still-OPEN lifecycle row an acquire opened, returning
+    ``(found, removed)`` - the one compensating write against the otherwise
+    append-only ``sessions`` list.
+
+    A claim acquired purely as a serialization point is not evidence of work: if
+    the post-acquire re-check refuses the worker, the row it opened claims a
+    phase that never ran and the node reads as permanently in progress. So the
+    refusal path rolls its own row back.
+
+    Four preconditions must ALL hold before a row is dropped, which is what keeps
+    this from eating real provenance:
+
+    * the ``(phase, harness, session_id)`` key matches,
+    * the row carries no ``ended_at`` -- a closed row recorded a finished window
+      and is never touched,
+    * its ``started_at`` is present and equals ``started_at`` exactly.
+
+    That last clause is the one that matters. The dangerous case is a session
+    that already did real work on this node under the same identity, was killed,
+    and then re-acquired and got refused: an idempotent re-acquire refreshes the
+    claim's ``acquired_at`` while the row keeps the FIRST observation's
+    ``started_at`` (``append_session_record`` never overwrites), so the two
+    disagree and the earlier real row survives its successor's rollback.
+
+    ``found=False`` when the node is absent (no mutation). Raises ``ValueError``
+    under the same identity/timestamp contract as ``append_session_record``.
+    """
+    from fno.graph._intake import _find_node  # function-local: avoid import cycle
+
+    harness, session_id = _validate_session_identity(phase, harness, session_id)
+    started_at = _utc_session_stamp("started_at", started_at)
+
+    result = {"found": False, "removed": False}
+
+    def mutator(entries: list[dict]) -> list[dict]:
+        node = _find_node(entries, node_id)
+        if node is None:
+            return entries
+        result["found"] = True
+        rows = node.get("sessions") or []
+        keep = [
+            r for r in rows
+            if not (
+                (r.get("phase"), r.get("harness"), r.get("session_id"))
+                == (phase, harness, session_id)
+                and "ended_at" not in r
+                and r.get("started_at") == started_at
+            )
+        ]
+        if len(keep) != len(rows):
+            node["sessions"] = keep
+            result["removed"] = True
+        return entries
+
+    locked_mutate_graph(path, mutator)
+    return result["found"], result["removed"]
 
 
 def _node_carries_pr(node: dict, pr_number: int) -> bool:

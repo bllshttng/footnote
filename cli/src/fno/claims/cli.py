@@ -1,4 +1,4 @@
-"""fno claim - Typer surface for the six work-claim verbs.
+"""fno claim - Typer surface for the work-claim verbs.
 
 Exit codes:
     0  success
@@ -9,6 +9,42 @@ Exit codes:
 
 The structured output uses --json on each verb. Without --json, output is a
 human-friendly summary on stdout; errors always go to stderr.
+
+do provenance: why the claim verbs write it
+-------------------------------------------
+A node's `do` lifecycle row used to be written only at a clean terminal
+(release --stamp-do, the finalize backstop, /do Step 1.5). A session killed
+mid-phase reaches none of those, so the whole row was lost - including a
+started_at that sat in its claim file the entire time. A node finished to an
+open, green, attested PR read `sessions=[blueprint only]`, and a groom pass
+would have redone it.
+
+The claim is the one thing every worker touches at the start of work and again
+at its end, so the row is bound to the claim's own lifecycle:
+
+  acquire  -> OPEN the row (started_at = claim.acquired_at, no ended_at)
+  release  -> CLOSE it (--stamp-do fills ended_at on the same row)
+
+`append_session_record` completes a duplicate row by filling a timestamp the
+first write omitted and never overwrites one, so open-then-close collapses to a
+single row and a retried stamp is a no-op.
+
+Three constraints shape the rest:
+
+* Both reachable acquire paths must stamp. The CLI `acquire` verb (init's cold
+  start) and target-start's in-process `_reacquire_node_claim` takeover are
+  separate code paths; a stamp on one is decorative, since a session killed on
+  the other still loses its row.
+* The identity is the OWNED one, never the ambient env. `_owned_do_identity`
+  reads the harness the claim was pinned to (init passes the proven --harness)
+  and the session encoded in the holder, because ambient marker precedence would
+  launder an inherited foreign marker into the row. Acquire and release share it
+  so they always address the same row.
+* Acquiring is not doing. A caller that takes the claim as a serialization step
+  and only then validates can be refused after the row is open; it releases with
+  --rollback-do, which removes an open row whose started_at matches this claim.
+  A closed row, or one opened by an earlier real window under the same identity,
+  is never touched.
 """
 from __future__ import annotations
 
@@ -162,11 +198,11 @@ def acquire(
     # mid-phase still reaches (release/finalize fire only on a clean terminal).
     # started_at from this claim's own acquire time; ended_at stays open for the
     # release path to fill. Best-effort and node-keyed, mirroring the release
-    # stamp's contract. Known edge: init acquires as a serialization step
-    # BEFORE its post-claim check-contained, so a worker refused on that
-    # re-check keeps an open do-row it earned no work for (a rare adoption
-    # race); the complete fix defers this stamp to init-success, a larger
-    # change to the init script.
+    # stamp's contract. A caller that acquires as a serialization step before
+    # its own validation (init's post-claim check-contained) can still be
+    # refused after this row is open, so it rolls the row back on that path via
+    # `release --rollback-do` - the stamp stays here, at the one choke point
+    # every acquire path reaches, rather than being deferred per caller.
     if key.startswith("node:"):
         _stamp_do_on_acquire(key, claim, holder)
 
@@ -188,9 +224,26 @@ def release(
              "finished terminal - never a handoff, which runs under a successor's "
              "identity and would mis-attribute the predecessor's window.",
     ),
+    rollback_do: bool = typer.Option(
+        False, "--rollback-do",
+        help="Remove the open do provenance row this claim's acquire opened. Set "
+             "by a releaser whose POST-ACQUIRE validation refused it: it took the "
+             "claim only to serialize, did no work, and must not leave the node "
+             "reading as in progress. Only an open row (no ended_at) whose "
+             "started_at matches this claim is removed. Mutually exclusive with "
+             "--stamp-do.",
+    ),
     json_output: bool = typer.Option(False, "--json", "-J"),
 ) -> None:
     """Release a claim we own. Silent success if already released."""
+    if stamp_do and rollback_do:
+        typer.echo(
+            "validation error: --stamp-do and --rollback-do are mutually "
+            "exclusive (one records a finished do window, the other removes a "
+            "row for work that never ran)",
+            err=True,
+        )
+        raise typer.Exit(code=2)
     try:
         released = release_claim(
             key=key, holder=holder, strict=strict, root=_node_aware_root(key)
@@ -210,8 +263,11 @@ def release(
     # at the release instant - a true per-session hold window, not the
     # stamp-fire time. The --stamp-do gate means only a session releasing its
     # own claim (the finished-terminal path) records it.
-    if stamp_do and released is not None and key.startswith("node:"):
-        _stamp_do_on_release(key, released, holder)
+    if released is not None and key.startswith("node:"):
+        if stamp_do:
+            _stamp_do_on_release(key, released, holder)
+        elif rollback_do:
+            _rollback_do_on_release(key, released, holder)
 
     if json_output:
         typer.echo(json.dumps({"key": key, "released": True}))
@@ -242,6 +298,34 @@ def _owned_do_identity(claim, holder: str) -> "tuple[str, str]":
     return harness, session_id
 
 
+def _do_row_coordinates(key: str, claim, holder: str, action: str):
+    """The ``(node_id, harness, session_id, started_at)`` naming the do row for
+    this claim, or ``None`` after printing the named skip.
+
+    All three do-row writers (open at acquire, close at release, roll back at a
+    refused acquire) must address the SAME row, so they derive its coordinates
+    here rather than each re-deriving them. ``started_at`` is the claim's own
+    acquire time - the honest phase start, which sat in the claim file all along.
+    ``action`` names the caller in the skip line."""
+    node_id = key.split(":", 1)[1] if ":" in key else ""
+    if not node_id:
+        return None
+    harness, session_id = _owned_do_identity(claim, holder)
+    if not harness or not session_id:
+        typer.echo(
+            f"claim {action}: no owned identity for the do provenance row of "
+            f"{node_id}; the row is skipped. Skipped.",
+            err=True,
+        )
+        return None
+    from datetime import datetime, timezone
+
+    started = datetime.fromtimestamp(
+        claim.acquired_at / 1000, tz=timezone.utc
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return node_id, harness, session_id, started
+
+
 def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     """Open the do lifecycle row at claim acquire, recording started_at from the
     claim's own acquire time and leaving ended_at open for the release path to
@@ -265,26 +349,18 @@ def _stamp_do_on_acquire(key: str, claim, holder: str) -> None:
     (the init-script cold start) and ``_reacquire_node_claim`` (a target-start
     takeover that calls ``acquire_claim`` in-process and bypasses this Typer
     command). Both must stamp, or a killed session on either path loses its row.
-    """
-    from datetime import datetime, timezone
 
+    A caller that acquires the claim as a serialization step and may still be
+    refused by a post-acquire re-check owns the rollback: see ``release
+    --rollback-do``.
+    """
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
-    node_id = key.split(":", 1)[1] if ":" in key else ""
-    if not node_id:
+    coords = _do_row_coordinates(key, claim, holder, "acquire")
+    if coords is None:
         return
-    harness, session_id = _owned_do_identity(claim, holder)
-    if not harness or not session_id:
-        typer.echo(
-            f"claim acquire: no owned identity to open do provenance for "
-            f"{node_id}; the row is skipped. Skipped.",
-            err=True,
-        )
-        return
-    started = datetime.fromtimestamp(
-        claim.acquired_at / 1000, tz=timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    node_id, harness, session_id, started = coords
     try:
         found, _added = append_session_record(
             graph_json(), node_id, phase="do",
@@ -321,20 +397,10 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
     from fno.graph.store import append_session_record
     from fno.paths import graph_json
 
-    node_id = key.split(":", 1)[1] if ":" in key else ""
-    if not node_id:
+    coords = _do_row_coordinates(key, claim, holder, "release")
+    if coords is None:
         return
-    harness, session_id = _owned_do_identity(claim, holder)
-    if not harness or not session_id:
-        typer.echo(
-            f"claim release: no owned identity to stamp do provenance for "
-            f"{node_id}; the row is skipped. Skipped.",
-            err=True,
-        )
-        return
-    started = datetime.fromtimestamp(
-        claim.acquired_at / 1000, tz=timezone.utc
-    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+    node_id, harness, session_id, started = coords
     ended = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     try:
         found, _added = append_session_record(
@@ -356,6 +422,58 @@ def _stamp_do_on_release(key: str, claim, holder: str) -> None:
         typer.echo(
             f"claim release: do provenance stamp skipped for {node_id} "
             f"(node not in graph); the row was not written. Skipped.",
+            err=True,
+        )
+
+
+def _rollback_do_on_release(key: str, claim, holder: str) -> None:
+    """Drop the open do row this claim's acquire opened, for a worker whose
+    post-acquire validation refused it.
+
+    Acquiring is not doing. ``fno target init`` takes the claim purely as a
+    serialization point and only then re-runs its containment gate; a worker
+    refused there releases without ``--stamp-do`` because it must not proceed -
+    but the acquire stamp had already opened its row, leaving the node reading
+    as permanently in progress for work nobody performed.
+
+    The removal is guarded in the graph primitive, not here: only an OPEN row
+    (no ended_at) whose started_at equals this claim's acquire time is dropped,
+    so a real earlier window under the same identity survives. Best-effort and
+    named on skip, matching the two stamps - a rollback failure must not turn a
+    refusal into a crash."""
+    from fno.graph.store import remove_open_session_record
+    from fno.paths import graph_json
+
+    coords = _do_row_coordinates(key, claim, holder, "release --rollback-do")
+    if coords is None:
+        return
+    node_id, harness, session_id, started = coords
+    try:
+        found, removed = remove_open_session_record(
+            graph_json(), node_id, phase="do",
+            harness=harness, session_id=session_id,
+            started_at=started,
+        )
+    except (Exception, SystemExit) as exc:
+        typer.echo(
+            f"claim release: do provenance rollback skipped for {node_id}: {exc}",
+            err=True,
+        )
+        return
+    if not found:
+        typer.echo(
+            f"claim release: do provenance rollback skipped for {node_id} "
+            f"(node not in graph); nothing was removed. Skipped.",
+            err=True,
+        )
+    elif not removed:
+        # Not an error: the acquire stamp itself may have been skipped (no owned
+        # identity, node absent at the time), or the row is a closed window this
+        # rollback must not touch. Say which outcome happened rather than let
+        # silence read as "the open row was removed".
+        typer.echo(
+            f"claim release: no open do row to roll back for {node_id} "
+            f"(none was opened, or the row is already closed).",
             err=True,
         )
 
