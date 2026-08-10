@@ -1106,7 +1106,12 @@ struct PrInfo {
 /// check-reviewer-descriptor-parity.sh.
 const REVIEWER_INVOCATIONS: &[(&str, &str, bool, &str)] = &[
     ("sigma", "/fno:review sigma", false, ""),
-    ("code-review", "/code-review", false, "claude=/code-review;codex=/review"),
+    (
+        "code-review",
+        "/code-review",
+        false,
+        "claude=/code-review;codex=/review",
+    ),
     ("declare", "/fno:review declare", true, ""),
 ];
 
@@ -4383,11 +4388,15 @@ pub fn decide(args: &[String]) -> (i32, String) {
     // already-configured lane (reviewers, bots, peers) keeps meaning exactly
     // what it meant today, and a lane that already names code-review is a no-op.
     let payload = classify_payload(&parsed.git_bin, &cwd);
-    let lane_configured = !required_bots.is_empty()
-        || !optional_bots.is_empty()
-        || !required_reviewers.is_empty();
+    let lane_configured =
+        !required_bots.is_empty() || !optional_bots.is_empty() || !required_reviewers.is_empty();
     let self_review_required = settings.self_review_required.unwrap_or(true);
-    let self_review_floor = floor_self_review(&required_reviewers, lane_configured, payload.0, self_review_required);
+    let self_review_floor = floor_self_review(
+        &required_reviewers,
+        lane_configured,
+        payload.0,
+        self_review_required,
+    );
     if let Some(floored) = self_review_floor.clone() {
         required_reviewers.push(floored);
     }
@@ -8312,12 +8321,21 @@ mod tests {
         // keeps the Rust half self-consistent at unit-test speed.
         for (name, inv, self_cert, _per) in REVIEWER_INVOCATIONS {
             assert!(!inv.is_empty(), "{name} has no invocation");
-            assert_eq!(reviewer_invocation_for(name, None), Some((*inv, *self_cert)));
+            assert_eq!(
+                reviewer_invocation_for(name, None),
+                Some((*inv, *self_cert))
+            );
         }
         assert_eq!(reviewer_invocation_for("teleport", None), None);
         // AC5: the ONE self-cert must stay visibly marked on this surface too.
-        assert_eq!(reviewer_invocation_for("declare", None).map(|(_, sc)| sc), Some(true));
-        assert_eq!(reviewer_invocation_for("sigma", None).map(|(_, sc)| sc), Some(false));
+        assert_eq!(
+            reviewer_invocation_for("declare", None).map(|(_, sc)| sc),
+            Some(true)
+        );
+        assert_eq!(
+            reviewer_invocation_for("sigma", None).map(|(_, sc)| sc),
+            Some(false)
+        );
     }
 
     #[test]
@@ -8359,7 +8377,9 @@ mod tests {
         assert!(payload_is_code(&["Cargo.lock".into()]));
         assert!(payload_is_code(&["scripts/ci/gate.sh".into()]));
         assert!(!payload_is_code(&["README.md".into()]));
-        assert!(!payload_is_code(&["docs/architecture/review-lanes.md".into()]));
+        assert!(!payload_is_code(&[
+            "docs/architecture/review-lanes.md".into()
+        ]));
         assert!(!payload_is_code(&["docs/preflight.txt".into()]));
     }
 
@@ -8367,7 +8387,10 @@ mod tests {
     fn code_payload_empty_or_docs_only_diff_is_not_code() {
         // No diff -> no ship -> no gate. Docs-only -> unchanged behavior.
         assert!(!payload_is_code(&[]));
-        assert!(!payload_is_code(&["docs/a.md".into(), "CHANGELOG.md".into()]));
+        assert!(!payload_is_code(&[
+            "docs/a.md".into(),
+            "CHANGELOG.md".into()
+        ]));
     }
 
     #[test]
@@ -8380,7 +8403,8 @@ mod tests {
     fn self_review_gate_classifies_unreadable_diff_as_code() {
         // AC4-ERR: a git that cannot produce a diff fails CLOSED - code with
         // assumed=true - so a degraded probe cannot wave the obligation away.
-        let (is_code, assumed) = classify_payload("definitely-not-a-real-git-binary", Path::new("."));
+        let (is_code, assumed) =
+            classify_payload("definitely-not-a-real-git-binary", Path::new("."));
         assert!(is_code);
         assert!(assumed);
     }
@@ -8440,7 +8464,10 @@ mod tests {
         )
         .unwrap();
         let out = unattested_reviewers(&p, &["code-review".to_string()], "h");
-        assert!(out.is_empty(), "code-review should clear on a pass: {out:?}");
+        assert!(
+            out.is_empty(),
+            "code-review should clear on a pass: {out:?}"
+        );
     }
 
     #[test]
