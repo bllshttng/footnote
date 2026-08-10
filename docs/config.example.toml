@@ -347,11 +347,11 @@ max_age_days = 14
 model = "claude-haiku-4-5"
 
 [recovery]
-# Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick).
+# Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick).
 enabled = true
-# How stale a bg session must be before a resume nudge fires (seconds).
+# How stale a bg session must be (seconds) before recovery acts on it.
 idle_threshold_seconds = 900
-# Per-session cap on resume nudges before the watchdog gives up.
+# Per-session cap on recovery actions (close-surface notifications) before it stops acting on this session.
 max_nudges = 3
 
 [health_monitor]

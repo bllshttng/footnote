@@ -2684,7 +2684,7 @@ event_types:
           description: "How many nudges this session has now received (1-based; capped by config.recovery.max_nudges)."
 
   - name: recovery_skipped
-    description: "Session auto-recovery looked at an idle-stale bg session and deliberately did NOT nudge it (waiting on a human, unreachable socket, or a failed send)."
+    description: "Session auto-recovery looked at an idle-stale bg session and deliberately did NOT act on it: waiting on a human, an unreachable socket, or a node-bound stuck worker surfaced once as held-by-design (the socket nudge cannot reach a bypassPermissions recipient, x-d93d)."
     sources: [daemon]
     data:
       required: [short_id, reason]
@@ -2694,13 +2694,13 @@ event_types:
           description: "The 8-hex jobId of the bg session that was spared."
         reason:
           type: string
-          description: "Why the nudge was skipped: needs-input | socket-unreachable | send-failed."
+          description: "Why it was skipped: needs-input | socket-unreachable | send-failed | held-by-design."
         error:
           type: string
           description: "The send failure detail; present only when reason=send-failed."
 
   - name: recovery_capped
-    description: "Session auto-recovery reached the per-session nudge cap (config.recovery.max_nudges); no further nudges fire for this session. Emitted once on the transition, not every tick."
+    description: "Session auto-recovery reached the per-session cap (config.recovery.max_nudges); no further actions fire for this session. Emitted once on the transition, not every tick."
     sources: [daemon]
     data:
       required: [short_id, nudges]
@@ -2710,7 +2710,17 @@ event_types:
           description: "The 8-hex jobId of the bg session that hit the cap."
         nudges:
           type: integer
-          description: "The nudge count at which the cap was reached (== config.recovery.max_nudges)."
+          description: "The action count at which the cap was reached (== config.recovery.max_nudges)."
+
+  - name: recovery_close_notify
+    description: "Session auto-recovery surfaced a finished-but-lingering node-bound /target worker once for the operator to close (run retro, then /stop). x-a76d: the operator wants finished sessions off the view, not resumed over the held socket. Emitted once per session."
+    sources: [daemon]
+    data:
+      required: [short_id]
+      properties:
+        short_id:
+          type: string
+          description: "The 8-hex jobId of the finished-but-open bg session surfaced to close."
 
   - name: human_touch
     description: "A human steered an agent-managed node (W4 touch telemetry). Emitted at exactly three choke points: mux keystroke injection into an agent pane (source=inject, coalesced per pane), answer-queue submission (source=answer), and a manual merge (source=merge: tty `fno pr merge` or reconcile closing an out-of-band merge). Observing never counts; steering always counts. Emit is fire-and-forget non-fatal: a failed emit must never touch the steering path."

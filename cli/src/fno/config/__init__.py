@@ -2008,30 +2008,32 @@ class PrWatchBlock(BaseModel):
 
 
 class RecoveryBlock(BaseModel):
-    """Session auto-recovery watchdog settings (nested under 'config.recovery').
+    """Bg-session recovery sweep settings (nested under 'config.recovery').
 
-    Controls the Layer-2 watchdog (x-f47c) that rides the ``pr_watch`` launchd
-    tick: it finds footnote-launched bg sessions which went idle-but-incomplete
-    after an abnormal turn termination and re-injects a resume nudge. It only
-    runs when ``pr_watch`` is installed (it shares that cadence) AND ``enabled``
-    here is true; even then it is a no-op unless an idle-stale footnote bg
-    session exists.
+    Controls the Layer-2 sweep (x-f47c) that rides the ``pr_watch`` launchd
+    tick over footnote-launched bg sessions. Two actions survive the x-d93d
+    removal of the held socket nudge: provider failover on a swap-class death
+    (rate-limit / quota / auth / 5xx; respawns a fresh ``claude --bg``), and
+    close-surfacing for a session whose mission finished but whose process
+    still lingers. It only runs when ``pr_watch`` is installed (it shares that
+    cadence) AND ``enabled`` here is true; even then it is a no-op unless an
+    idle-stale footnote bg session exists.
 
     Fields
     ------
     enabled:
         True to run the recovery sweep each pr_watch tick (default True; the
         target audience for pr_watch is exactly bg-session operators). Set
-        false to keep pr_watch's PR polling without the resume nudges.
+        false to keep pr_watch's PR polling without the recovery sweep.
     idle_threshold_seconds:
-        How old family-1 transcript activity may be before recovery nudges an
-        incomplete session (default 900 = 15 min). Keep it above the longest
-        expected single-tool runtime because a long build can legitimately
-        produce no transcript turn while it runs.
+        How old family-1 transcript activity may be before recovery acts on a
+        session (default 900 = 15 min). Keep it above the longest expected
+        single-tool runtime because a long build can legitimately produce no
+        transcript turn while it runs.
     max_nudges:
-        Per-session cap on resume nudges before the watchdog gives up and emits
-        ``recovery_capped`` (default 3) so a genuinely wedged session surfaces
-        instead of looping forever.
+        Per-session cap on recovery actions (close-surface notifications)
+        before the sweep gives up and emits ``recovery_capped`` (default 3) so
+        a genuinely wedged session surfaces instead of looping forever.
     """
 
     model_config = ConfigDict(extra="ignore")

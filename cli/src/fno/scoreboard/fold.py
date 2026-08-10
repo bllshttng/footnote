@@ -1198,6 +1198,7 @@ CONTEXT_TRACE_EVENT_KINDS = {
     "handoff_probe_unreadable",
     "loop_check",
     "recovery_capped",
+    "recovery_close_notify",
     "recovery_nudge",
     "recovery_skipped",
     "review_attestation",
