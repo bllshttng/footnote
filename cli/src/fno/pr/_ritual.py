@@ -531,7 +531,11 @@ class Ritual:
         deferred = self._deferral_nodes()
         files, lines = self._diff_stat()
         pl_set = bool(self.ctx.parking_lot)
-        above_bar = pl_set and files >= 1 and lines >= 10
+        # The bar gates on diff size alone, not parking-lot availability: a
+        # maintainer-only item has a default home (.fno/tasks/user.md) even
+        # without a shared lot, so the dedicated destination must stay reachable
+        # on the normal no-deferrals path rather than dead unless a lot is set.
+        above_bar = files >= 1 and lines >= 10
         inputs = (f"deferred={deferred} files={files} lines={lines} "
                   f"parking_lot={'set' if pl_set else 'unset'} bar="
                   f"{'above' if above_bar else 'below'}")
@@ -587,18 +591,34 @@ class Ritual:
 
     def _judgment_prompt(self, deferred: int, files: int, lines: int) -> str:
         pr = self.ctx.pr
-        pl = self.ctx.parking_lot or "<unset>"
+        marker = getattr(self.ctx.pm, "maintainer_marker", None) or ""
+        if self.ctx.parking_lot is not None:
+            # Shared/vault destination: narrative AND maintainer-only items both
+            # live in the parking-lot section, the latter tagged only when a
+            # marker is configured (the discriminator is earned by a shared lot).
+            dest = str(self.ctx.parking_lot)
+            tag = f" tagged `{marker}`" if marker else ""
+            content = (f"narrative plus maintainer-only items (a "
+                       f"decision/sign-off/manual setup){tag}")
+        else:
+            # Default: no shared lot, so ONLY maintainer-only items get a home
+            # (a dedicated repo-local file). Narrative has no shared-lot home, so
+            # it must NOT go in this file - file real follow-up work as a backlog
+            # node instead. A dedicated file needs no discriminator tag.
+            dest = ".fno/tasks/user.md (under the canonical repo root)"
+            content = ("maintainer-only items only (a decision/sign-off/manual "
+                       "setup), no tag - do NOT write narrative here")
         return (
             f"Post-merge judgment for PR #{pr} (autonomous; do not prompt). "
             f"(a) Triage {deferred} deferral-born node(s) filed from this PR: "
             f"run `fno backlog find 'deferred from PR #{pr}'` and for each open "
             f"node decide promote/keep/defer/supersede via the matching "
             f"`fno backlog` verb, logging undecided ones. "
-            f"(b) Parking-lot prose: read `gh pr diff {pr}`, and if the diff "
+            f"(b) Follow-up capture: read `gh pr diff {pr}`, and if the diff "
             f"(files={files}, lines={lines}) carries genuine follow-up context, "
             f"append ONE dated section keyed `<!-- post-merge:pr-{pr} -->` to "
-            f"{pl} (append-only, never overwrite), keeping narrative + #jc "
-            f"items only the maintainer can do. Skip prose if below the bar. "
+            f"{dest} via an append-only redirect (never overwrite): {content}. "
+            f"Skip if below the bar. "
             f"Self-end when done; never spawn further work."
         )
 

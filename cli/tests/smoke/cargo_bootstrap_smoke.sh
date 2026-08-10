@@ -21,7 +21,7 @@
 # Usage: cargo_bootstrap_smoke.sh <path-to-binary-complete-wheel>
 #
 # Note: the by-name `cargo install fno` + `uv tool install fno` variant can only
-# go green AFTER the PyPI + crates.io publishes (foundation launch #jc); that is
+# go green AFTER the PyPI + crates.io publishes (foundation launch); that is
 # the launch-gated required check. This smoke proves the mechanism now.
 set -uo pipefail
 

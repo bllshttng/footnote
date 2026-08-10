@@ -26,6 +26,12 @@ anywhere in the verb.
   merge with `fno config doctor --post-merge`; scaffold it with
   `fno setup post-merge`. Without it the verb's judgment leg reports
   `parking_lot=unset` and prose is skipped (never guessed).
+- `config.post_merge.maintainer_marker` (optional, default empty) is the
+  discriminator tag for maintainer-only items (decisions, sign-offs, manual
+  setups). Leave it empty unless the parking-lot destination is a SHARED vault
+  where maintainer items would otherwise drown in unrelated checkboxes; an empty
+  default ships no one's initials. The capture parser honors the same key, so
+  `fno backlog capture list --by-type` and `tidy` recognize the tag too.
 - `gh` is authenticated for reading the merged diff.
 
 ## Autonomous mode (no operator present)
@@ -118,14 +124,30 @@ gh pr diff "<n>"
 gh pr view "<n>" --json title,body,mergedAt
 ```
 
-The judgment line's `bar=above|below` (files/lines vs the parking-lot bar) tells
-you whether prose is warranted; read the diff regardless and decide with judgment.
+The judgment line's `bar=above|below` (diff size: files/lines) tells you whether
+follow-up capture is warranted; read the diff regardless and decide with judgment.
 
-**(a) Parking-lot prose -> `$PARKING_LOT_PATH`.** `parking_lot=set` means the
-verb resolved the canonical parking-lot file (resolve it yourself the same way if
-needed: repo-relative path under the canonical root, never the worktree). Append
-a dated section keyed by the PR number - the `<!-- post-merge:pr-<N> -->` marker
-on the first line is the idempotency guard (a re-run is a full no-op):
+**(a) Follow-up capture.** Two item classes, each with its own home:
+
+- **Narrative** ("a thing to keep an eye on") goes to `$PARKING_LOT_PATH` when
+  `parking_lot=set` (the verb resolved the canonical parking-lot file; resolve
+  it yourself the same way if needed: repo-relative path under the canonical
+  root, never the worktree). When `parking_lot=unset` there is no shared lot, so
+  narrative has no home here - file it as a backlog node (path (b)) instead.
+- **Maintainer-only items** (a decision, a sign-off, a manual setup) are
+  distinct from narrative. Their destination depends on whether the lot is
+  shared:
+  - `parking_lot=set` -> append them INTO the same dated parking-lot section as
+    the narrative, tagged with `config.post_merge.maintainer_marker` ONLY when
+    that key is set. The marker is a discriminator against unrelated checkboxes
+    in a shared vault, so it is earned by a shared destination; with no marker
+    configured, append them untagged.
+  - `parking_lot=unset` -> append them to a dedicated repo-local
+    `.fno/tasks/user.md` (under the canonical root), with NO marker. A dedicated
+    file is already 100% maintainer items, so it needs no discriminator.
+
+Append a dated section keyed by the PR number - the `<!-- post-merge:pr-<N> -->`
+marker on the first line is the idempotency guard (a re-run is a full no-op):
 
 ```markdown
 
@@ -135,17 +157,21 @@ on the first line is the idempotency guard (a re-run is a full no-op):
 _<pr title>, merged 2026-07-23. Written by /fno:pr merged._
 
 - A thing to keep an eye on now that this shipped.
-- [ ] a decision/sign-off only the maintainer can make #jc
+- [ ] a decision/sign-off only the maintainer can make
 ```
 
-Write the section with an **append-only redirect** (`printf '%s' "$section" >> "$PARKING_LOT_PATH"`),
-never an Edit-tool read-modify-write. O_APPEND is what makes the shared file
-safe without a lock: same-PR concurrency is already excluded by the verb's mutex
-claim, and two rituals for different PRs each do one atomic append.
+(The maintainer line above is untagged. Append the configured marker - e.g.
+`<marker>` - to it only in the `parking_lot=set` + `maintainer_marker` set case.)
 
-Keep the narrative to genuine context: a thing to watch, plus `#jc` items only
-the maintainer can do (a decision, a sign-off, a manual setup). Implementation
-work does NOT get `#jc`.
+Write the section with an **append-only redirect**
+(`printf '%s' "$section" >> "$PARKING_LOT_PATH"`, or
+`>> "$CANONICAL_ROOT/.fno/tasks/user.md"` in the dedicated-file case), never an
+Edit-tool read-modify-write. O_APPEND is what makes the file safe without a
+lock: same-PR concurrency is already excluded by the verb's mutex claim, and two
+rituals for different PRs each do one atomic append.
+
+Implementation work does NOT get the marker, and does NOT go in the maintainer
+file. Maintainer-only means a human decision the diff alone cannot settle.
 
 For each small follow-on below a full node, emit a TYPED `fu-*` line instead of a
 freeform bullet so it is deduped and visible to `fno backlog capture list`:
@@ -227,7 +253,7 @@ rule), never as `backlog idea` nodes.
   the `<!-- post-merge:pr-<N> -->` marker guards the judgment prose/triage. Do
   not re-run 3b if the marker already exists.
 - **Empty diff (merge commit with no file changes)** - the verb reports
-  `bar=below`; treat as below the parking-lot bar, never an error.
+  `bar=below`; treat as below the bar (no capture work), never an error.
 - **Run from inside the merged PR's own worktree** - the archive leg defers to
   `fno worktree cleanup --merged --apply` (run from canonical); it never
   self-removes.

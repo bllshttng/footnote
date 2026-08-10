@@ -358,6 +358,16 @@ class PostMergeBlock(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     parking_lot_path: Optional[str] = None
+    # Maintainer-only action marker (e.g. "#maintainer"): a discriminator appended to
+    # decision / sign-off / manual-setup items so they stand out in a SHARED
+    # vault parking lot that already carries thousands of unrelated checkboxes.
+    # Default empty: a dedicated maintainer file (or an unconfigured shared one)
+    # needs no discriminator, so a fresh install tags nobody's todos with someone
+    # else's initials. Opt in by setting the marker; it is honored by both the
+    # post-merge ritual (skills/pr/references/merged.md) and the capture parser
+    # (cli/src/fno/backlog/capture.py) - the producer and consumer of
+    # maintainer-only items share one key, mirroring parking_lot_path above.
+    maintainer_marker: Optional[str] = None
     enabled: bool = True
     self_reap: bool = False
     # Canonical-sync (x-47be): all three default to the feature-off state so a
@@ -405,6 +415,29 @@ class PostMergeBlock(BaseModel):
                     f"path segment (no repo escape); got: {v!r}"
                 )
         return v
+
+    @field_validator("maintainer_marker", mode="before")
+    @classmethod
+    def validate_maintainer_marker(cls, v: object) -> object:
+        """Coerce to a single whitespace-free token (a markdown tag), else None.
+
+        A marker is one token like ``#maintainer`` that is appended to a checkbox line,
+        so internal whitespace would corrupt the line's semantics. Empty or
+        whitespace-only coerces to None (the OSS-safe "omit the tag" default);
+        a token with an internal space is a real config error and raises,
+        mirroring parking_lot_path's fail-loud-on-bad-input stance.
+        """
+        if not isinstance(v, str):
+            return None
+        cleaned = v.strip()
+        if not cleaned:
+            return None
+        if any(ch.isspace() for ch in cleaned):
+            raise ValueError(
+                "config.post_merge.maintainer_marker must be a single "
+                f"whitespace-free token (e.g. '#maintainer'); got: {v!r}"
+            )
+        return cleaned
 
     @field_validator("self_reap", mode="before")
     @classmethod

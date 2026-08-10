@@ -117,6 +117,8 @@ max_nodes = 3
 [post_merge]
 # Per-repo vault parking-lot path for the post-merge ritual (repo-relative).
 # parking_lot_path = <unset>   # optional; no default
+# Discriminator tag for maintainer-only post-merge items (e.g. '#maintainer'). Default empty: omit the tag entirely so a fresh install ships no one's initials. Honored by both the post-merge ritual and the capture parser; set per-repo only when the destination is a shared vault.
+# maintainer_marker = <unset>   # optional; no default
 # Whether the post-merge ritual runs.
 enabled = true
 # Whether a post-merge watcher self-reaps.

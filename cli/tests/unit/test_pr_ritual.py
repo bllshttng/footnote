@@ -337,6 +337,55 @@ def test_judgment_attended_defers_to_skill(tmp_path, capsys):
     assert not any(len(c) > 1 and c[1] == "agents" and "spawn" in c for c in runner.calls)
 
 
+def test_judgment_prompt_default_ships_no_personal_marker(tmp_path):
+    # OSS hygiene: the autonomous prompt must never carry an operator's initials.
+    # Default (no parking lot, no marker) routes maintainer items to the
+    # dedicated repo-local file, untagged, and keeps narrative OUT of it
+    # (x-codex-review P2: the dedicated file is maintainer-only).
+    r = _bare(tmp_path, FakeRunner(), autonomous=True, pr=7)
+    prompt = r._judgment_prompt(deferred=0, files=14, lines=320)
+    assert "#jc" not in prompt
+    assert ".fno/tasks/user.md" in prompt
+    assert "no tag" in prompt
+    assert "do NOT write narrative here" in prompt
+
+
+def test_judgment_prompt_tags_only_when_marker_configured_on_shared_lot(tmp_path):
+    # The marker is a discriminator earned by a SHARED destination: applied only
+    # when both a parking lot and a marker are configured, else never mentioned.
+    r = _bare(tmp_path, FakeRunner(), autonomous=True, pr=7,
+              parking_lot="internal/x/parking-lot.md")
+    # No marker on the (shared) lot -> untagged, and still no operator initials.
+    # A shared lot DOES take narrative alongside maintainer items.
+    prompt = r._judgment_prompt(deferred=0, files=14, lines=320)
+    assert "#jc" not in prompt
+    assert "tagged" not in prompt
+    assert "narrative" in prompt
+    # Opt in via the configured marker -> it appears, but only the configured one.
+    r.ctx.pm.maintainer_marker = "#maintainer"
+    prompt = r._judgment_prompt(deferred=0, files=14, lines=320)
+    assert "#maintainer" in prompt
+    assert "#jc" not in prompt
+
+
+def test_judgment_autonomous_spawns_without_parking_lot_above_bar(
+    tmp_path, capsys, monkeypatch
+):
+    # The dedicated maintainer destination (.fno/tasks/user.md) must be reachable
+    # on the normal no-parking-lot path: an above-bar diff spawns the headless
+    # worker even with no parking lot, so maintainer items are captured rather
+    # than dropped (x-codex-review P2: the bar is decoupled from parking-lot
+    # availability).
+    monkeypatch.setattr(_ritual, "fno_py_cmd", lambda: ["fno-py"])
+    runner = FakeRunner(diff_files=14, additions=300, deletions=20)
+    r = _bare(tmp_path, runner, autonomous=True, pr=7)  # NO parking_lot
+    r.leg_judgment()
+    out = capsys.readouterr().out
+    assert "step=judgment status=ok" in out
+    assert "spawned headless" in out
+    assert "parking_lot=unset" in out and "bar=above" in out
+
+
 # --- codex review fixes: enabled gate + node recovery --------------------
 
 def test_run_skips_when_post_merge_disabled(tmp_path, capsys, monkeypatch):

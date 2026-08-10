@@ -560,10 +560,10 @@ def test_cli_empty_pass_succeeds_when_event_lands(tmp_path: Path) -> None:
 # Phase 1 (US1): generalized typed-item lens.
 #
 # parse_managed_items + `list --by-type` recognize four token types
-# (fu/cv/ab/#jc), grouped into four labeled buckets with priority + source
+# (fu/cv/ab/#maintainer), grouped into four labeled buckets with priority + source
 # section. AC1 (identify all four) and AC2 (a token in narrative prose is never
 # a managed item). Inbox lines use the em-dash separator (matching the existing
-# fixtures above and the real file format); the calendar emoji on the #jc line
+# fixtures above and the real file format); the calendar emoji on the #maintainer line
 # is written as a \U escape so the source file stays ASCII-only there.
 # --------------------------------------------------------------------------
 
@@ -590,15 +590,15 @@ _BY_TYPE_FIXTURE = (
     "- [ ] cv-deadbeef — out-of-scope bug in foo (p2)\n"
     "- [ ] ab-12345678 — **wire the thing** (p2). shipped via PR#100 "
     "source: PR#100 filed: ab-12345678\n"
-    "- [ ] follow up with the design team #jc \U0001F4C5 2026-06-09\n"
+    "- [ ] follow up with the design team #maintainer \U0001F4C5 2026-06-09\n"
 )
 
 
 def test_parse_managed_items_groups_four_types() -> None:
-    """AC1: fu/cv/ab/#jc are each classified with id, priority, status, section."""
+    """AC1: fu/cv/ab/#maintainer are each classified with id, priority, status, section."""
     from fno.backlog.capture import parse_managed_items
 
-    items = parse_managed_items(_BY_TYPE_FIXTURE)
+    items = parse_managed_items(_BY_TYPE_FIXTURE, marker="#maintainer")
     by_type = {i["type"]: i for i in items}
     assert set(by_type) == {"followup", "carveout", "node", "human"}
 
@@ -628,7 +628,7 @@ def test_parse_managed_items_ignores_prose_tokens() -> None:
     never reported as managed items."""
     from fno.backlog.capture import parse_managed_items
 
-    items = parse_managed_items(_BY_TYPE_FIXTURE)
+    items = parse_managed_items(_BY_TYPE_FIXTURE, marker="#maintainer")
     ids = {i["id"] for i in items}
     assert "fu-bad999" not in ids
     assert "ab-feedface" not in ids
@@ -674,9 +674,15 @@ def test_parse_managed_items_accepts_both_separators() -> None:
     assert got == {"fu-abc123": "p1", "cv-deadbeef": "p2"}
 
 
-def test_cli_list_by_type_json_four_buckets(tmp_path: Path) -> None:
+def test_cli_list_by_type_json_four_buckets(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """AC1 (CLI): list --by-type --json emits four labeled buckets, each item
     carrying its priority + source section, and no prose token leaks in."""
+    from fno.backlog import capture as inbox_mod
+    # The CLI resolves the marker from config; the OSS default is empty (human
+    # arm inactive), so opt this test into a marker to exercise the fourth bucket.
+    monkeypatch.setattr(inbox_mod, "_maintainer_marker", lambda: "#maintainer")
     from fno.backlog.capture import cli, _inbox_path
 
     inbox = _inbox_path()
@@ -787,23 +793,36 @@ def test_parse_recognizes_hand_authored_slug_fu_ids() -> None:
     assert re.fullmatch(r"fu-[0-9a-f]{6}", mint_fu_id(set()))
 
 
-def test_parse_managed_items_jc_priority_and_no_truncation() -> None:
-    """A trailing (pN) on a #jc line IS its priority; a (pN) embedded in the
+def test_parse_managed_items_marker_priority_and_no_truncation() -> None:
+    """A trailing (pN) on a #maintainer line IS its priority; a (pN) embedded in the
     human-readable text is NOT (it must not truncate the title)."""
     from fno.backlog.capture import parse_managed_items
 
     text = (
         "## h\n"
-        "- [ ] ship the thing #jc (p1)\n"
-        "- [ ] talk to (p2) team about budget #jc 2026-06-09\n"
+        "- [ ] ship the thing #maintainer (p1)\n"
+        "- [ ] talk to (p2) team about budget #maintainer 2026-06-09\n"
     )
-    items = parse_managed_items(text)
+    items = parse_managed_items(text, marker="#maintainer")
     assert [i["type"] for i in items] == ["human", "human"]
     assert items[0]["priority"] == "p1"
-    assert items[0]["title"] == "ship the thing #jc"
+    assert items[0]["title"] == "ship the thing #maintainer"
     # The mid-line (p2) is prose, not a priority: title stays intact.
     assert items[1]["priority"] is None
     assert "talk to (p2) team about budget" in items[1]["title"]
+
+
+def test_parse_managed_items_default_marker_is_inactive() -> None:
+    """OSS hygiene: a tagged checkbox line is recognized ONLY when its marker is
+    explicitly configured. The default (no marker) leaves the human arm inactive
+    so no operator's initials ship as built-in behavior."""
+    from fno.backlog.capture import parse_managed_items
+
+    text = "## h\n- [ ] a decision only the maintainer can make #xyz\n"
+    assert parse_managed_items(text) == []                    # no marker -> inactive
+    assert parse_managed_items(text, marker="#nope") == []    # a different marker -> inactive
+    got = parse_managed_items(text, marker="#xyz")            # the configured marker -> recognized
+    assert len(got) == 1 and got[0]["type"] == "human"
 
 
 def test_parse_managed_items_section_falls_back_to_heading() -> None:

@@ -172,7 +172,8 @@ def find_unparseable_fu_lines(text: str) -> list[tuple[int, str]]:
 #                           ab-932f5a92; only 6-hex is MINTED, see mint_fu_id)
 #   carveout  cv-XXXXXXXX  (8 hex; lifecycle owned by carveouts.jsonl + retro)
 #   node      ab-XXXXXXXX  (8 hex; transient - Phase 2 `tidy` ejects filed nodes)
-#   human     a #jc tag    (no shortcode; the tag itself IS the type token)
+#   human     a maintainer-marker tag (config-driven via post_merge.maintainer_marker;
+#                           inactive by default - no tag ships out of the box)
 #
 # The discriminator is the "- [<mark>]" checkbox-line structure, never the bare
 # token: a fu-/ab- mentioned inside a narrative paragraph is not a checkbox line
@@ -197,7 +198,20 @@ _MANAGED_SHORTCODE_RE = re.compile(
     r"\s+(?:—|-)\s+(.*?)\s*$"
 )
 _CHECKBOX_LINE_RE = re.compile(r"^- \[([ x\-])\]\s+(.*?)\s*$")
-_JC_TAG_RE = re.compile(r"(?:^|\s)#jc(?:\s|$)")
+
+
+def _marker_tag_re(marker: Optional[str]) -> Optional["re.Pattern[str]"]:
+    """Compile the maintainer-marker tag regex for ``marker``, or ``None``.
+
+    ``marker`` is the configured ``post_merge.maintainer_marker`` (e.g. "#maintainer").
+    ``None``/empty means the human arm is inactive, so no checkbox line is ever
+    classified by its tag - the OSS default ships no one's initials. The tag is
+    escaped and anchored as a whitespace/bos-bounded token so a configured
+    marker never substring-matches unrelated text.
+    """
+    if not marker:
+        return None
+    return re.compile(rf"(?:^|\s){re.escape(marker)}(?:\s|$)")
 # Priority anywhere in the line, not only trailing: real ab-* lines carry the
 # (pN) mid-line followed by prose (see _split_priority_lenient).
 _ANY_PRIORITY_RE = re.compile(r"\((p[0-3])\)")
@@ -213,7 +227,7 @@ _BUCKET_BY_TYPE = {
     "node": "filed_nodes",
 }
 _BUCKET_ORDER = ("your_actions", "followups", "carveouts", "filed_nodes")
-# These two tables are the load-bearing coupling: every type a shortcode/#jc
+# These two tables are the load-bearing coupling: every type a shortcode/marker
 # line can yield must have a bucket, or bucket_managed_items would KeyError at
 # runtime on a live inbox. Pin the invariant at import time so a future type
 # added to one table but not the other fails loudly here, not in production.
@@ -254,26 +268,38 @@ def _split_priority_lenient(rest: str) -> tuple[str, Optional[str]]:
     return rest[: m.start()].strip(), m.group(1)
 
 
-def parse_managed_items(text: str, *, include_struck: bool = False) -> list[dict]:
+def parse_managed_items(
+    text: str,
+    *,
+    include_struck: bool = False,
+    marker: Optional[str] = None,
+) -> list[dict]:
     """Parse every *managed* checkbox line into a typed item dict (read-only).
 
     Returns ``[{"type", "id", "title", "priority", "status", "section",
     "line"}]`` where ``type`` is ``followup``/``carveout``/``node``/``human``
-    and ``id`` is ``None`` for ``human`` (#jc) lines. Mutates nothing and never
-    parses timeline prose: only a ``- [<mark>]`` checkbox line carrying a
-    shortcode token or a ``#jc`` tag is an item (AC2). Both the legacy em-dash
-    and the target hyphen separators are accepted. By default only ``open``
-    (``[ ]``) items are returned; pass ``include_struck=True`` for all marks.
+    and ``id`` is ``None`` for ``human`` (maintainer-marker) lines. Mutates
+    nothing and never parses timeline prose: only a ``- [<mark>]`` checkbox
+    line carrying a shortcode token, or a configured maintainer-marker tag, is
+    an item (AC2). Both the legacy em-dash and the target hyphen separators are
+    accepted. By default only ``open`` (``[ ]``) items are returned; pass
+    ``include_struck=True`` for all marks.
+
+    ``marker`` is the configured ``post_merge.maintainer_marker``; ``None`` /
+    empty leaves the human arm inactive (no line classified by tag), so the OSS
+    default ships no one's initials. Pass it explicitly to keep the parser pure
+    and testable rather than reading config internally.
 
     ``section`` is the nearest preceding ``##`` heading or
     ``<!-- post-merge:pr-N -->`` marker so each item is traceable to its block.
     """
     items: list[dict] = []
     section: Optional[str] = None
+    marker_re = _marker_tag_re(marker)
     for lineno, line in enumerate(text.splitlines(), start=1):
-        marker = _POST_MERGE_MARKER_RE.match(line)
-        if marker:
-            section = marker.group(1)
+        pm_match = _POST_MERGE_MARKER_RE.match(line)
+        if pm_match:
+            section = pm_match.group(1)
             continue
         heading = _SECTION_HEADING_RE.match(line)
         if heading:
@@ -308,17 +334,17 @@ def parse_managed_items(text: str, *, include_struck: bool = False) -> list[dict
             continue
 
         cb = _CHECKBOX_LINE_RE.match(line)
-        if cb and _JC_TAG_RE.search(cb.group(2)):
+        if marker_re and cb and marker_re.search(cb.group(2)):
             mark, body = cb.group(1), cb.group(2)
             status = _STATUS_BY_MARK.get(mark, "open")
             if status != "open" and not include_struck:
                 continue
-            # #jc lines carry no minted shortcode and their priority is the
+            # Marker lines carry no minted shortcode and their priority is the
             # Obsidian-Tasks emoji vocabulary (⏫/🔼/🔽/📅), not a (pN) token, so
             # use the STRICT trailing split here: the lenient mid-line split
             # would mis-read a parenthetical inside the human-readable text
-            # (e.g. "talk to (p2) team #jc") as the priority and truncate the
-            # title. Only a genuinely trailing (pN) is taken.
+            # (e.g. "talk to (p2) team <marker>") as the priority and truncate
+            # the title. Only a genuinely trailing (pN) is taken.
             title, priority = _split_priority(body)
             items.append(
                 {
@@ -808,8 +834,8 @@ def archive_struck(path: Path, archive_path: Optional[Path] = None) -> dict:
 #   3. NORMALIZE the item separator em-dash -> hyphen on every managed line it
 #      keeps (only the token separator; em-dashes inside prose survive).
 #   4. DIGEST: rebuild a pinned block between regenerable markers listing open
-#      `#jc` actions (deduped; dated ascending then undated in source order) and
-#      open followups grouped by priority.
+#      maintainer-marker actions (deduped; dated ascending then undated in
+#      source order) and open followups grouped by priority.
 #
 # Idempotent: the digest block is stripped before parsing (so it never feeds
 # back into itself), the timeline's blank edges are trimmed every run, and the
@@ -1001,32 +1027,42 @@ def _cluster_dedup(items: list[tuple[str, str, Optional[str]]]) -> list[list[str
     return [groups[key] for key in order if len(groups[key]) >= 2]
 
 
-def _build_digest(open_items: list[dict]) -> list[str]:
+def _build_digest(
+    open_items: list[dict], marker: Optional[str] = None
+) -> list[str]:
     """Build the pinned digest block (markers inclusive) from open items.
 
-    `#jc` actions: deduped by normalized text, dated ascending by 📅 then
-    undated in stable source order. Followups: count + ids per priority tier.
+    Maintainer-marker actions: present ONLY when a ``marker`` is configured.
+    Deduped by normalized text, dated ascending by 📅 then undated in stable
+    source order. Followups: count + ids per priority tier. With no marker the
+    actions section is omitted entirely (a fresh install emits no one's tag).
     """
-    jc = [it for it in open_items if it["type"] == "human"]
     fus = [it for it in open_items if it["type"] == "followup"]
 
-    annotated = [
-        (_JC_DATE_RE.search(it["title"]), idx, it["title"])
-        for idx, it in enumerate(jc)
-    ]
-    dated = sorted(
-        (a for a in annotated if a[0] is not None),
-        key=lambda a: (a[0].group(1) if a[0] is not None else "", a[1]),
-    )
-    undated = [a for a in annotated if a[0] is None]  # stable source order
-    jc_lines: list[str] = []
-    seen: set[str] = set()
-    for _date, _idx, title in [*dated, *undated]:
-        key = _norm(title)
-        if key in seen:
-            continue
-        seen.add(key)
-        jc_lines.append(f"- {title}")
+    block: list[str] = [DIGEST_START]
+    if marker:
+        human = [it for it in open_items if it["type"] == "human"]
+        annotated = [
+            (_JC_DATE_RE.search(it["title"]), idx, it["title"])
+            for idx, it in enumerate(human)
+        ]
+        dated = sorted(
+            (a for a in annotated if a[0] is not None),
+            key=lambda a: (a[0].group(1) if a[0] is not None else "", a[1]),
+        )
+        undated = [a for a in annotated if a[0] is None]  # stable source order
+        action_lines: list[str] = []
+        seen: set[str] = set()
+        for _date, _idx, title in [*dated, *undated]:
+            key = _norm(title)
+            if key in seen:
+                continue
+            seen.add(key)
+            action_lines.append(f"- {title}")
+
+        block.append(f"## Open {marker} actions")
+        block += action_lines or ["_(none)_"]
+        block += ""
 
     fu_lines: list[str] = []
     for tier in ("p0", "p1", "p2", "p3"):
@@ -1039,11 +1075,9 @@ def _build_digest(open_items: list[dict]) -> list[str]:
             f"- (unprioritized): {len(unprioritized)} ({', '.join(unprioritized)})"
         )
 
-    block = [DIGEST_START, "## Open #jc actions"]
-    block += jc_lines or ["_(none)_"]
-    block += ["", "## Open followups by priority"]
+    block.append("## Open followups by priority")
     block += fu_lines
-    block += [DIGEST_END]
+    block.append(DIGEST_END)
     return block
 
 
@@ -1066,6 +1100,7 @@ def tidy(
     graph_path: Optional[Path] = None,
     include_deferred: bool = False,
     lock_retries: int = 50,
+    marker: Optional[str] = None,
 ) -> dict:
     """Run one idempotent tidy pass over the inbox. Returns a summary dict.
 
@@ -1095,8 +1130,10 @@ def tidy(
 
         kept, moved, ejected, dedup_clusters = _process_body(body, complete_ids)
 
-        open_items = parse_managed_items("\n".join(kept), include_struck=False)
-        digest = _build_digest(open_items)
+        open_items = parse_managed_items(
+            "\n".join(kept), include_struck=False, marker=marker
+        )
+        digest = _build_digest(open_items, marker=marker)
 
         # Durability ordering: append the ejected blocks to the archive BEFORE
         # truncating the inbox. A crash (or a failing archive write) between the
@@ -1114,7 +1151,7 @@ def tidy(
         "ejected": ejected,
         "archive_path": str(archive_path),
         "dedup_clusters": dedup_clusters,
-        "jc_actions": sum(1 for it in open_items if it["type"] == "human"),
+        "human_actions": sum(1 for it in open_items if it["type"] == "human"),
         "followups_open": sum(1 for it in open_items if it["type"] == "followup"),
         "graph_warning": graph_warning,
     }
@@ -1299,6 +1336,17 @@ def _inbox_path() -> Path:
     return inbox_path()
 
 
+def _maintainer_marker() -> Optional[str]:
+    """The configured ``post_merge.maintainer_marker``, or ``None``.
+
+    ``None`` (the default) leaves the capture human/maintainer arm inactive so a
+    fresh install recognizes nobody's initials. Lazy import keeps the same
+    module-load shape as ``_inbox_path`` (paths reads the same config block).
+    """
+    from fno.paths import maintainer_marker
+    return maintainer_marker()
+
+
 def _graph_path_for_tidy() -> Path:
     """Resolve the canonical graph.json for tidy's completion lookup.
 
@@ -1360,14 +1408,16 @@ def cmd_add(
 
 
 _BUCKET_LABELS = {
-    "your_actions": "Your actions (#jc)",
+    "your_actions": "Your actions",
     "followups": "Followups (fu-*)",
     "carveouts": "Carveouts (cv-*)",
     "filed_nodes": "Filed nodes (ab-*)",
 }
 
 
-def _render_by_type(text: str, *, as_json: bool, include_struck: bool) -> None:
+def _render_by_type(
+    text: str, *, as_json: bool, include_struck: bool, marker: Optional[str] = None
+) -> None:
     """Render the four-bucket typed lens (the body of ``list --by-type``).
 
     Read-only: groups every managed line into Your-actions / Followups /
@@ -1378,7 +1428,7 @@ def _render_by_type(text: str, *, as_json: bool, include_struck: bool) -> None:
     token quoted in timeline prose, which is exactly what this lens avoids.
     """
     buckets = bucket_managed_items(
-        parse_managed_items(text, include_struck=include_struck)
+        parse_managed_items(text, include_struck=include_struck, marker=marker)
     )
     if as_json:
         typer.echo(json.dumps(buckets))
@@ -1389,7 +1439,10 @@ def _render_by_type(text: str, *, as_json: bool, include_struck: bool) -> None:
         return
     for key in _BUCKET_ORDER:
         bucket = buckets[key]
-        typer.echo(f"{_BUCKET_LABELS[key]}: {len(bucket)}")
+        label = _BUCKET_LABELS[key]
+        if key == "your_actions" and marker:
+            label = f"{label} ({marker})"
+        typer.echo(f"{label}: {len(bucket)}")
         for it in bucket:
             id_part = f"{it['id']}  " if it["id"] else ""
             prio = f" ({it['priority']})" if it["priority"] else ""
@@ -1405,7 +1458,7 @@ def cmd_list(
     by_type: bool = typer.Option(
         False,
         "--by-type",
-        help="Group ALL managed types (followups/carveouts/filed-nodes/#jc) "
+        help="Group ALL managed types (followups/carveouts/filed-nodes/marker) "
         "into four labeled buckets. Read-only identify lens.",
     ),
 ) -> None:
@@ -1419,7 +1472,9 @@ def cmd_list(
         typer.echo(f"error: cannot read inbox {path}: {exc}", err=True)
         raise typer.Exit(code=1)
     if by_type:
-        _render_by_type(text, as_json=as_json, include_struck=include_struck)
+        _render_by_type(
+            text, as_json=as_json, include_struck=include_struck, marker=_maintainer_marker()
+        )
         return
     items = parse_items(text, include_struck=include_struck)
 
@@ -1587,12 +1642,14 @@ def cmd_tidy(
     ),
 ) -> None:
     """One idempotent pass: eject completed filed nodes, dedup (report-only),
-    normalize separators, rebuild the pinned #jc + followups digest."""
+    normalize separators, rebuild the pinned maintainer + followups digest."""
+    marker = _maintainer_marker()
     try:
         result = tidy(
             _inbox_path(),
             graph_path=_graph_path_for_tidy(),
             include_deferred=include_deferred,
+            marker=marker,
         )
     except InboxValidationError as exc:
         typer.echo(f"error: {exc}", err=True)
@@ -1611,10 +1668,15 @@ def cmd_tidy(
     if as_json:
         typer.echo(json.dumps(result))
         return
+    actions_phrase = (
+        f"{result['human_actions']} {marker} action(s)"
+        if marker
+        else f"{result['human_actions']} maintainer action(s)"
+    )
     typer.echo(
         f"tidy: ejected {result['ejected']} filed node(s), "
         f"{result['followups_open']} open followup(s), "
-        f"{result['jc_actions']} #jc action(s), "
+        f"{actions_phrase}, "
         f"{len(result['dedup_clusters'])} dedup cluster(s)."
     )
     for cluster in result["dedup_clusters"]:
