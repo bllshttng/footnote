@@ -256,7 +256,7 @@ def test_warm_delivery_skips_cold_and_marks(tmp_path, monkeypatch):
         emit_receipt_fn=rcpt,
     )
     assert res.outcome == "routed-warm"
-    assert res.short_id == "s-live-1"
+    assert res.short_id == "sess-liv"
     assert warm.calls == [("sess-live-1", 7, None)]
     assert verb.calls == []
     assert (tmp_path / ".fno" / "post-merge-dispatched" / "shaW1").exists()

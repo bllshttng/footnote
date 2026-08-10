@@ -43,7 +43,6 @@ from fno.agents.reachability import (
 )
 from fno.harness_identity import (
     canonical_handle,
-    legacy_prefix_handle,
     session_handle_tier,
     session_identity_key,
 )
@@ -1722,7 +1721,7 @@ def resolve_or_suggest(
     # copied out of an old transcript) is still building addresses the retired
     # way. Lead the suggestions with the bare form it should have used.
     if retired:
-        bare = legacy_prefix_handle(handle.split("-", 1)[1])
+        bare = canonical_handle(handle.split("-", 1)[1])
         return None, [bare] + [c for c in candidates if c != bare][: max(limit - 1, 0)]
     return None, difflib.get_close_matches(handle or "", candidates, n=limit, cutoff=0.3)
 
@@ -2230,9 +2229,12 @@ def discover_live_sessions(
                 pid = int(f.stem)
             except ValueError:
                 continue
-        # jobId/name are explicit Claude transport keys; only the absent-key
-        # fallback mints a generated mailbox address.
-        short_id = data.get("jobId") or data.get("name") or canonical_handle(session_id)
+        # short_id is a hex mailbox handle, never a friendly name: a --name
+        # like "blueprint-x-ce6e-glm" is not a session id, and admitting it as
+        # a handle strands mail on the bus (the drain is handle-keyed, so a
+        # name never matches a session's handle). jobId is Claude's own
+        # transport key; otherwise derive the canonical address.
+        short_id = data.get("jobId") or canonical_handle(session_id)
         short_id = str(short_id)
         if short_id in exclude:
             continue

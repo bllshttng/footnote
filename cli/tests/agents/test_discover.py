@@ -369,7 +369,7 @@ def test_alias_write_failure_exposes_only_canonical_handle(tmp_path, monkeypatch
         classify_truth=False,
     )
 
-    assert [session.handle for session in sessions] == ["cafefeed"]
+    assert [session.handle for session in sessions] == ["aaaaaaaa"]
     assert not name_map.exists()
 
 
@@ -407,7 +407,7 @@ def test_alias_lock_contention_is_bounded_to_canonical_handle(tmp_path, monkeypa
         )
 
     assert time.monotonic() - started < 0.5
-    assert [session.handle for session in sessions] == ["cafefeed"]
+    assert [session.handle for session in sessions] == ["aaaaaaaa"]
     assert not name_map.exists()
 
 
@@ -599,7 +599,7 @@ def test_x_a1d5_fallback_surfaces_live_session(tmp_path, monkeypatch):
     assert len(sessions) == 1
     s = sessions[0]
     assert s.session_id == sid
-    assert s.short_id == "5d0f3671"  # canonical random tail
+    assert s.short_id == "02a5c8bc"  # canonical first-eight
     assert s.cwd == "/Users/x/code/proj"  # from the live process
     assert s.pid == 4242  # real pid from the running claude
     assert s.agent == "claude"
@@ -640,7 +640,7 @@ def test_x_a1d5_sidecar_and_projects_candidates_are_unioned(tmp_path, monkeypatc
         ),
         project_resolver=lambda c: None,
     )
-    assert {s.short_id for s in sessions} == {"side0001", "host-sid"}
+    assert {s.short_id for s in sessions} == {"side0001", "ghost-si"}
 
 
 def test_x_a1d5_stale_transcript_not_surfaced(tmp_path, monkeypatch):
@@ -796,7 +796,7 @@ def test_us2_codex_rollout_surfaces_live_session(tmp_path):
     s = sessions[0]
     assert s.agent == "codex"
     assert s.session_id == "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
-    assert s.short_id == "4bcf4ae4"
+    assert s.short_id == "019f48e1"
     assert s.cwd == "/Users/x/proj"
 
 
@@ -1424,7 +1424,7 @@ def test_daemon_probe_shapes_valid_rows_and_skips_bad_entries(monkeypatch):
 
     assert [(r["session_id"], r["short_id"], r["cwd"]) for r in rows] == [
         ("short", "short", ""),
-        ("019f4d0c-full", "d0c-full", "/repo"),
+        ("019f4d0c-full", "019f4d0c", "/repo"),
     ]
 
 
@@ -1438,7 +1438,7 @@ def test_us2_codex_malformed_meta_skipped_not_fatal(tmp_path):
         mtime_age=3.0,
     )
     sessions = _run_codex(tmp_path, codex)
-    assert [s.short_id for s in sessions] == ["cde-good"]
+    assert [s.short_id for s in sessions] == ["019abcde"]
 
 
 def test_us3_resolve_bare_short_id_across_harnesses(tmp_path):
@@ -1490,7 +1490,7 @@ def test_retired_shape_refused_even_when_stored_as_friendly_alias(tmp_path):
 
     assert resolved is None
     assert suggestions[0] == "019f48e1"
-    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-4bcf4ae4"
+    assert json.loads(name_map.read_text(encoding="utf-8"))[sid] == "session-019f48e1"
 
 
 @pytest.mark.parametrize("project", ["claude", "codex", "gemini", "agy", "opencode"])
@@ -1760,7 +1760,7 @@ def test_repaired_codex_identity_resolves_by_name_short_and_full_id(tmp_path, mo
         resolved.append(match)
 
     assert {peer.session_id for peer in resolved} == {session_id}
-    assert {peer.short_id for peer in resolved} == {session_id[-8:]}
+    assert {peer.short_id for peer in resolved} == {session_id[:8]}
     assert {peer.name for peer in resolved} == {requested_name}
 
 
@@ -2065,18 +2065,18 @@ def test_us2_registry_short_id_is_jobid_not_uuid_prefix(tmp_path, monkeypatch):
     assert by_canon is not None
 
 
-def test_ac2_fr_codex_and_opencode_discovery_rows_use_canonical_tail(tmp_path):
+def test_ac2_fr_codex_and_opencode_discovery_rows_use_canonical_first_eight(tmp_path):
     codex = tmp_path / "codex"
     codex_sid = "019fb417-1111-2222-3333-444455556666"
     _write_codex_rollout(codex, session_id=codex_sid, cwd="/codex")
     codex_rows = discover._discover_from_codex(codex, recency_seconds=60, now=time.time())
-    assert codex_rows[0]["short_id"] == "55556666"
+    assert codex_rows[0]["short_id"] == "019fb417"
 
     storage = tmp_path / "opencode"
     opencode_sid = "ses_7f3a9b2cAbCd1234"
     _write_opencode_session(storage, session_id=opencode_sid, cwd="/opencode", mtime_age=1)
     opencode_rows = discover._discover_from_opencode(storage, recency_seconds=60, now=time.time())
-    assert opencode_rows[0]["short_id"] == "AbCd1234"
+    assert opencode_rows[0]["short_id"] == "ses_7f3a"
 
 
 # --------------------------------------------------------------------------
@@ -2148,7 +2148,7 @@ def test_us6_opencode_session_surfaces_live(tmp_path):
     s = sessions[0]
     assert s.agent == "opencode"
     assert s.session_id == sid
-    assert s.short_id == sid[-8:]
+    assert s.short_id == sid[:8]
     assert s.cwd == "/Users/x/proj"  # from `directory`, not `cwd`
     assert s.pid == 0  # no OS handle, mirroring the codex lane
 
@@ -2287,8 +2287,8 @@ def test_opencode_db_surfaces_live_session(tmp_path):
     )
     sessions = _run_opencode(tmp_path, storage)
     assert [(s.session_id, s.cwd, s.agent) for s in sessions] == [
-        ("ses_stale", "/Users/x/old", "opencode"),
         ("ses_live", "/Users/x/proj", "opencode"),
+        ("ses_stale", "/Users/x/old", "opencode"),
     ]
     assert [s.truth_state for s in sessions] == ["unknown", "unknown"]
 

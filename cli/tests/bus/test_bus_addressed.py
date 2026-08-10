@@ -114,7 +114,7 @@ def _register(name, project_cwd, *, status="live"):
             name=name, harness="claude", cwd=str(project_cwd),
             log_path=f"/tmp/{name}.log", short_id=f"id-{name}",
             harness_session_id=(
-                f"aaaaaaaa-1111-7222-8333-{name[-4:]:0>4}0001"
+                f"{name:0>8}-1111-7222-8333-444455556666"
             ),
             status=status,
         )
@@ -135,13 +135,13 @@ def test_dispatch_send_writes_addressed_session_envelope(env, tmp_path):
         cwd=cwd, from_name="alice",
     )
 
-    addressed = [m for m in iter_messages() if m.to == "0bob0001"]
+    addressed = [m for m in iter_messages() if m.to == "00000bob"]
     assert len(addressed) == 1
     env_ = addressed[0]
     assert env_.to_kind == "session"
     assert env_.from_ == "alice"
     # sender session recorded (best-effort) so a project-broadcast read can exclude it
-    assert env_.from_session == "aaaaaaaa-1111-7222-8333-lice0001"
+    assert env_.from_session == "000alice-1111-7222-8333-444455556666"
     # The durable bus body is <fno_mail>-wrapped now (node x-1f23): the same
     # envelope the live path injects, so grep <fno_mail> finds durable mail too.
     assert env_.body.startswith("<fno_mail "), env_.body[:40]

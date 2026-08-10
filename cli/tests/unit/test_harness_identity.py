@@ -14,6 +14,7 @@ from fno.harness_identity import (
     claude_transport_short_id,
     current_session_id,
     current_session_ids,
+    legacy_suffix_handle,
     present_harness_markers,
     resolve_harness_identity,
     resolve_owned_identity,
@@ -434,11 +435,25 @@ def test_current_session_helpers_share_precedence_and_legacy_fallback():
     assert current_session_ids({}) == set()
 
 
-def test_ac1_hp_canonical_handle_is_random_tail():
-    """The generated mailbox id carries no harness prefix (AC1-HP)."""
-    assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
-    assert canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"
-    assert canonical_handle("ses_7f3a9b2cAbCd1234") == "AbCd1234"
+def test_ac1_hp_canonical_handle_is_first_eight():
+    """The generated mailbox id is the harness's own short-id (first eight),
+    carrying no harness prefix (AC1-HP)."""
+    assert canonical_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "019f48e1"
+    assert canonical_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "019f48e1"
+    # ses_ prefix is preserved (case-sensitive); the address includes it, so
+    # prefer the full id for ses_ short addressing.
+    assert canonical_handle("ses_7f3a9b2cAbCd1234") == "ses_7f3a"
+
+
+def test_legacy_suffix_handle_is_last_eight_read_only_lookup():
+    """The retired last-eight address survives only as a read-only lookup so
+    pre-flip handles (e.g. a king addressed 08e8c104) still drain. It is never
+    generated for new mail and is NOT the canonical address."""
+    assert legacy_suffix_handle("019f48e1-5b09-72a0-9bc8-6b364bcf4ae4") == "4bcf4ae4"
+    assert legacy_suffix_handle("019F48E1-5B09-72A0-9BC8-6B364BCF4AE4") == "4bcf4ae4"
+    assert legacy_suffix_handle("ses_7f3a9b2cAbCd1234") == "AbCd1234"
+    sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
+    assert legacy_suffix_handle(sid) != canonical_handle(sid)
 
 
 def test_session_identity_key_normalizes_uuid_case_but_preserves_opencode():
@@ -490,7 +505,7 @@ def test_ac1_fr_registry_name_equals_canonical_handle(tmp_path):
         cwd="/tmp",
         registry_path=tmp_path / "agents.json",
     )
-    assert entry.name == canonical_handle(sid) == "4bcf4ae4"
+    assert entry.name == canonical_handle(sid) == "019f48e1"
 
 
 def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch):
@@ -526,22 +541,27 @@ def test_no_generating_surface_produces_a_retired_address(tmp_path, monkeypatch)
     # The wire envelope's from/to too - the bus columns drifted from this once.
     body = wrap_fno_mail("hi", from_=stamp_from(None), harness="claude-code",
                          model="m", to=canonical_handle(sid))
-    assert 'from="4bcf4ae4"' in body and 'to="4bcf4ae4"' in body
+    assert 'from="019f48e1"' in body and 'to="019f48e1"' in body
 
 
-def test_ac4_err_legacy_prefix_has_one_named_compatibility_owner():
-    """Legacy first-eight lookup is explicit compatibility, never generation."""
+def test_ac4_err_legacy_suffix_is_read_only_compatibility_lookup():
+    """Legacy last-eight lookup is explicit read-only compatibility for in-flight
+    pre-flip handles, never generation."""
     from fno import harness_identity
 
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
-    assert harness_identity.legacy_prefix_handle(sid) == "019f48e1"
-    assert harness_identity.legacy_prefix_handle(sid) != canonical_handle(sid)
+    assert harness_identity.legacy_suffix_handle(sid) == "4bcf4ae4"
+    assert harness_identity.legacy_suffix_handle(sid) != canonical_handle(sid)
 
 
-def test_claude_transport_key_is_named_separately_from_mailbox_address():
+def test_claude_transport_key_equals_canonical_address_since_flip():
+    """claude_transport_short_id is claude's own first-eight job key. Since the
+    2026-08-10 flip made the harness's own short-id the mailbox address, it is
+    equal in value to canonical_handle; kept as the named seam for claude's
+    native job key at claude-specific call sites."""
     sid = "019f48e1-5b09-72a0-9bc8-6b364bcf4ae4"
     assert claude_transport_short_id(sid) == "019f48e1"
-    assert claude_transport_short_id(sid) != canonical_handle(sid)
+    assert claude_transport_short_id(sid) == canonical_handle(sid)
 
 
 def test_rust_marker_mirror_matches_the_python_tuple():
@@ -581,3 +601,42 @@ def test_rust_marker_mirror_matches_the_python_tuple():
         "claims.rs HARNESS_SESSION_MARKERS drifted from harness_identity.py; "
         f"rust={mirrored} python={list(HARNESS_SESSION_MARKERS)}"
     )
+
+
+def test_rust_identity_mirror_matches_python_addressing_rule():
+    """identity.rs mirrors the Python addressing rule because the Rust lifecycle
+    client cannot import Python, and a divergence strands mail silently: a
+    durable send addresses one handle while its recipient drains another.
+
+    Pins the two load-bearing facts in the Rust source: canonical_handle takes
+    the FIRST eight chars and the tier order is [full, canonical(first-8),
+    legacy_suffix(last-8)]. A Python-only or Rust-only change to the addressing
+    rule fails here rather than shipping a silent parity break.
+    """
+    import re
+    from pathlib import Path
+
+    identity_rs = (
+        Path(__file__).resolve().parents[3] / "crates" / "fno-agents" / "src" / "identity.rs"
+    )
+    source = identity_rs.read_text()
+
+    # Each function body runs to its column-0 close brace; inner braces are
+    # indented, so the first "\n}" bounds the function.
+    canonical_body = re.search(r"fn canonical_handle.*?\n\}", source, re.S)
+    assert canonical_body, "no canonical_handle fn in identity.rs"
+    assert ".chars().take(8)" in canonical_body.group(0), (
+        "Rust canonical_handle must take the FIRST eight chars to match Python"
+    )
+
+    suffix_body = re.search(r"fn legacy_suffix_handle.*?\n\}", source, re.S)
+    assert suffix_body, "no legacy_suffix_handle fn in identity.rs"
+    assert ".rev().take(8)" in suffix_body.group(0), (
+        "Rust legacy_suffix_handle must take the LAST eight chars to match Python"
+    )
+
+    assert re.search(
+        r"session_id\.to_string\(\),\s*canonical_handle\(session_id\),\s*"
+        r"legacy_suffix_handle\(session_id\)",
+        source,
+    ), "Rust tier order must be [full, canonical(first-8), legacy_suffix(last-8)]"

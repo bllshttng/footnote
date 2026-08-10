@@ -253,7 +253,7 @@ def test_deliver_live_codex_daemon_delivered_false(
     assert result.delivery == "durable"
     assert result.msg_id.startswith("msg-")
 
-    threads = read_all_threads("00000001")
+    threads = read_all_threads("deadbeef")
     assert len(threads) == 1
 
 
@@ -294,7 +294,7 @@ def test_deliver_live_codex_daemon_unreachable(
     assert result.delivery == "durable"
     assert result.msg_id.startswith("msg-")
 
-    threads = read_all_threads("00000001")
+    threads = read_all_threads("deadbeef")
     assert len(threads) == 1
 
     captured = capsys.readouterr()
@@ -368,7 +368,7 @@ def test_deliver_live_codex_daemon_rpc_error_still_durable(
     )
 
     assert result.delivery == "durable"
-    threads = read_all_threads("00000001")
+    threads = read_all_threads("deadbeef")
     assert len(threads) == 1, "envelope must survive RPC error"
 
 
@@ -1803,4 +1803,4 @@ def test_mail_context_uses_canonical_sender_handle(monkeypatch) -> None:
         "019fb417-1111-7222-8333-444455556666",
         "codex",
     )
-    assert context.from_ == "55556666"
+    assert context.from_ == "019fb417"

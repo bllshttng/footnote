@@ -117,8 +117,8 @@ def test_ac1hp_ac2hp_name_lane_reply_reaches_sender_and_is_queryable(
 
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "0164189c"  # sender resolved to its canonical handle
-    assert replies[0].from_ == "66667777"  # my canonical handle, not a project
+    assert replies[0].to == "9a063cd3"  # sender resolved to its canonical handle
+    assert replies[0].from_ == "11111111"  # my canonical handle, not a project
     assert f'reply_to="{msg}"' in replies[0].body  # wire attr rides in the body
 
 
@@ -381,7 +381,7 @@ def test_reply_to_retired_sender_migrates_the_address_and_delivers(
     assert r.exit_code == 0, r.output
     replies = [m for m in _bus_msgs() if m.in_reply_to == msg]
     assert len(replies) == 1
-    assert replies[0].to == "0164189c"  # migrated to the live session's canonical handle
+    assert replies[0].to == "9a063cd3"  # migrated to the live session's canonical handle
 
 
 def test_reply_to_retired_sender_offline_fails_without_queuing_an_unsafe_prefix(
@@ -468,7 +468,8 @@ def test_deferred_warning_on_inject_miss(runner, mailbox, monkeypatch, tmp_path)
     )
     r = runner.invoke(app, ["mail", "reply", "--to", msg, "--body", "ack"])
     assert r.exit_code == 0, r.output
-    assert "has no live pane" in (r.stderr or "")
+    assert "is not live" in (r.stderr or "")
+    assert "may never" in (r.stderr or "")
     assert "queued (durable)" in r.stdout
 
 

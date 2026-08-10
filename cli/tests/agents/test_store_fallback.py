@@ -570,7 +570,7 @@ def test_registration_identity_collision_is_never_degraded_to_a_synthesized_row(
     from fno.agents.registry import AgentEntry, write_registry
 
     existing_id = "aaaaaaaa-1111-2222-3333-444455556666"
-    store_only_id = "019fb417-1111-7222-8333-4444deadbeef"
+    store_only_id = "deadbeef-1111-7222-8333-444400000000"
     write_registry([
         AgentEntry(
             name="deadbeef",

@@ -5068,14 +5068,14 @@ mod tests {
             dead.status = AgentStatus::Exited;
             dead.cwd = dead_repo.to_string_lossy().into_owned();
             dead.exited_at = Some("2020-01-01T00:00:00Z".into());
-            dead.harness_session_id = Some("harness-dead-uuid".into());
+            dead.harness_session_id = Some("dead-harness-uuid".into());
             r.entries.push(dead);
 
             let mut done = bg_claude_row("target-x-b44e-finished", "done0002");
             done.status = AgentStatus::Exited;
             done.cwd = done_repo.to_string_lossy().into_owned();
             done.exited_at = Some("2020-01-01T00:00:00Z".into());
-            done.harness_session_id = Some("harness-done-uuid".into());
+            done.harness_session_id = Some("done-harness-uuid".into());
             r.entries.push(done);
         })
         .unwrap();

@@ -219,7 +219,7 @@ class TestWhoami:
         `stamp_from(None)` self-stamps on a name-lane send."""
         from fno.agents.self_stamp import stamp_from
 
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")
         assert result.exit_code == 0, result.stdout + result.stderr
@@ -233,7 +233,7 @@ class TestWhoami:
             _invoke(runner, project, monkeypatch, "whoami", "--json").stdout
         )
         assert payload["mail_handle"] == "879d8d26" == stamp_from(None)
-        assert payload["harness_session_id"] == "00000000-2505-4977-9b87-0000879d8d26"
+        assert payload["harness_session_id"] == "879d8d26-2505-4977-9b87-000000000000"
 
     def test_ac4_fr_degrades_without_identity(self, tmp_path, runner, monkeypatch):
         """No ambient harness identity: no `mail:` line, JSON `mail_handle` null,
@@ -253,7 +253,7 @@ class TestWhoami:
     def test_ac5_edge_mesh_worker_shows_both_identities(self, tmp_path, runner, monkeypatch):
         """A mesh worker with ambient identity surfaces both `agent:` (mesh name)
         and `mail:` (canonical reply handle); they may differ, both reachable."""
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "prefix-879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-prefix")
         monkeypatch.setenv("FNO_AGENT_SELF", "myworker")
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")
@@ -274,7 +274,7 @@ class TestWhoami:
         `mail: N unread` line and a `mail_unread` JSON key."""
         from fno.inbox.store import write_new_thread
 
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         self._isolate_bus(tmp_path, monkeypatch)
         for _ in range(3):
             write_new_thread(
@@ -298,7 +298,7 @@ class TestWhoami:
         the canonical handle - that dead-letter lane is counted too."""
         from fno.inbox.store import write_new_thread
 
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         monkeypatch.setenv("FNO_AGENT_SELF", "billing-worker")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(  # to the canonical handle
@@ -322,7 +322,7 @@ class TestWhoami:
         mail it can never ack."""
         from fno.inbox.store import write_new_thread
 
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         monkeypatch.setenv("FNO_AGENT_SELF", "webworker")
         self._isolate_bus(tmp_path, monkeypatch)
         project = _make_workspace(tmp_path, target=True)
@@ -348,7 +348,7 @@ class TestWhoami:
         from fno.bus.cursor import cursor_path
         from fno.inbox.store import write_new_thread
 
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         self._isolate_bus(tmp_path, monkeypatch)
         write_new_thread(
             recipient="879d8d26", sender="etl", kind="send",
@@ -365,7 +365,7 @@ class TestWhoami:
 
     def test_mail_unread_zero_silent(self, tmp_path, runner, monkeypatch):
         """No unread mail: no unread line, no JSON key, exit 0 as today."""
-        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+        _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
         self._isolate_bus(tmp_path, monkeypatch)
         project = _make_workspace(tmp_path, target=True)
         result = _invoke(runner, project, monkeypatch, "whoami")

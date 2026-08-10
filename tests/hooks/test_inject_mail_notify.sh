@@ -190,8 +190,8 @@ REAL_FNO
       || fail "journey $label: mail repeated after acknowledgement: turn=$second start=$session_start"
   }
 
-  run_journey claude CLAUDE_CODE_SESSION_ID ffffabcd1234 abcd1234
-  run_journey codex CODEX_THREAD_ID 0000cdef5678 cdef5678
+  run_journey claude CLAUDE_CODE_SESSION_ID ffffabcd1234 ffffabcd
+  run_journey codex CODEX_THREAD_ID 0000cdef5678 0000cdef
 fi
 
 echo ""

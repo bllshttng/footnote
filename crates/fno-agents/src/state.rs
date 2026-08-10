@@ -1022,7 +1022,7 @@ fn validate_changed_identities(
     before: &BTreeMap<String, IdentitySignature>,
     entries: &[RegistryEntry],
 ) -> Result<(), String> {
-    use crate::identity::{canonical_handle, legacy_prefix_handle, session_handle_tier};
+    use crate::identity::{canonical_handle, legacy_suffix_handle, session_handle_tier};
 
     let matches = |token: &str, other: &RegistryEntry, include_legacy: bool| {
         if token == other.name || (!other.short_id.is_empty() && token == other.short_id) {
@@ -1051,7 +1051,7 @@ fn validate_changed_identities(
             strong.insert(session_id.to_string());
             strong.insert(canonical_handle(session_id));
         }
-        let legacy = (!session_id.is_empty()).then(|| legacy_prefix_handle(session_id));
+        let legacy = (!session_id.is_empty()).then(|| legacy_suffix_handle(session_id));
         for (other_index, other) in entries.iter().enumerate() {
             if index == other_index {
                 continue;
@@ -1551,7 +1551,7 @@ mod tests {
             let mut first = sample_entry("first");
             first.short_id = "transport1".into();
             first.harness = Some("codex".into());
-            first.harness_session_id = Some("aaaaaaaa-0000-0000-0000-1111deadbeef".into());
+            first.harness_session_id = Some("aaaaaaaa-0000-0000-0000-111111111111".into());
             registry.entries.push(first);
         })
         .unwrap();
@@ -1560,7 +1560,9 @@ mod tests {
             let mut second = sample_entry("second");
             second.short_id = "transport2".into();
             second.harness = Some("codex".into());
-            second.harness_session_id = Some("bbbbbbbb-0000-0000-0000-2222deadbeef".into());
+            // Same first-eight (canonical address) as `first` -> refused. Their
+            // last-eight differs, so this is a canonical-only collision.
+            second.harness_session_id = Some("aaaaaaaa-0000-0000-0000-222222222222".into());
             registry.entries.push(second);
         });
 
@@ -1570,8 +1572,8 @@ mod tests {
     }
 
     #[test]
-    fn state_update_registry_allows_retired_prefix_collision() {
-        let dir = tmpdir("legacy-prefix-compatible");
+    fn state_update_registry_allows_retired_suffix_collision() {
+        let dir = tmpdir("legacy-suffix-compatible");
         let path = dir.join("registry.json");
         update_registry(&path, |registry| {
             let mut first = sample_entry("first");
@@ -1585,7 +1587,9 @@ mod tests {
             let mut second = sample_entry("second");
             second.short_id = "transport2".into();
             second.harness = Some("codex".into());
-            second.harness_session_id = Some("019fb417-0000-0000-0000-444455556666".into());
+            // Different first-eight (canonical) but same last-eight (retired
+            // read-only tier) -> allowed: a retired-tier collision never refuses.
+            second.harness_session_id = Some("019fb418-0000-0000-0000-000012223333".into());
             registry.entries.push(second);
         })
         .unwrap();

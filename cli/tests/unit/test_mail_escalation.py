@@ -253,7 +253,7 @@ def test_attended_live_miss_escalates(mailbox, monkeypatch, emitted_events):
 
     assert len(emitted_events) == 1, "operator live-miss escalates once"
     assert emitted_events[0]["data"]["reason"] == "attended-miss"
-    assert emitted_events[0]["data"]["recipient"] == "0164189c"
+    assert emitted_events[0]["data"]["recipient"] == "9a063cd3"
 
 
 def test_worker_recipient_live_miss_does_not_escalate(mailbox, monkeypatch, emitted_events):

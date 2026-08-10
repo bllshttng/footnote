@@ -38,13 +38,16 @@ import pytest
 from typer.testing import CliRunner
 
 from fno.cli import app
+from fno.harness_identity import canonical_handle, legacy_suffix_handle
 from fno.paths_testing import use_tmpdir
 
 LIVE_SID = "9a063cd3-69d4-415a-ada5-649b0164189c"
 ASLEEP_SID = "5b17e2f0-1c44-4d9a-8e3b-2f6a7c081d55"
-LIVE_HANDLE = LIVE_SID[-8:]
-LIVE_LEGACY_PREFIX = LIVE_SID[:8]
-ASLEEP_HANDLE = ASLEEP_SID[-8:]
+LIVE_HANDLE = canonical_handle(LIVE_SID)
+# The retired short form read off a pre-flip record is the last-eight
+# (legacy_suffix); migration resolves it to the canonical first-eight.
+LIVE_LEGACY_PREFIX = legacy_suffix_handle(LIVE_SID)
+ASLEEP_HANDLE = canonical_handle(ASLEEP_SID)
 
 
 @pytest.fixture
@@ -702,12 +705,13 @@ def test_unreadable_store_still_allows_an_exact_full_session_id(
         ),
     ],
 )
-def test_unreadable_store_full_id_live_miss_queues_to_drainable_canonical_handle(
+def test_unreadable_store_full_id_live_miss_queues_to_drainable_full_id(
     runner, mailbox, monkeypatch, tmp_path, send_id, drain_id
 ):
-    """A full-id live miss persists under the same address drain-self reads."""
+    """A full-id live miss persists under the full id (the collision escape),
+    which drain-self reads via its full-id address form."""
     from fno.agents import discover
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import session_identity_key
 
     monkeypatch.setattr(
         discover,
@@ -733,7 +737,7 @@ def test_unreadable_store_full_id_live_miss_queues_to_drainable_canonical_handle
 
     assert res.exit_code == 0, res.output
     assert attempted == [("claude", send_id), ("codex", send_id)]
-    expected_handle = canonical_handle(drain_id)
+    expected_handle = session_identity_key(drain_id)
     assert f"queued (durable) for {expected_handle}" in res.output
     drained = _drain_as(runner, monkeypatch, drain_id)
     assert len(drained) == 1

@@ -300,7 +300,7 @@ def test_cmd_send_from_self_stamps_canonical_handle(isolated, runner, monkeypatc
     a --to-project note lands in the sender's session lane, not the project inbox."""
     from fno.inbox.store import read_unread_threads
 
-    _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "00000000-2505-4977-9b87-0000879d8d26")
+    _only_marker(monkeypatch, "CLAUDE_CODE_SESSION_ID", "879d8d26-2505-4977-9b87-000000000000")
     result = _invoke(
         runner,
         "--to-project", "acme-docs",

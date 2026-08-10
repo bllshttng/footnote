@@ -112,19 +112,30 @@ def ambient_identity_env_unset_args() -> list[str]:
     return flags
 
 
-# The mailbox handle is the random tail of the session id. The signature takes
-# no harness ON PURPOSE: harness is an envelope attribute, never part of an
-# address, and no code path may recover it from a handle string. A
-# harness-prefixed address (`claude-<short8>`) is a
-# retired form that is NOT accepted anywhere - a caller still producing one is a
-# bug to fix at the source, so resolution refuses it by name rather than quietly
-# translating it.
+# A mail address is EITHER the harness's own short-id (the first eight of the
+# session id) OR the full session id. Nothing else. If a short-id is discovered
+# to have duplicates, resolution fails closed and asks for the full id rather
+# than guessing. Codex session ids are time-prefixed, so their first-8 collides
+# across sessions started in the same window; codex addressing is therefore
+# often the full id in practice, and the send path says so on ambiguity.
 #
-# This function is the Python source of the generated string: discovery,
+# Harness is an envelope attribute, never part of an address: no code path may
+# recover it from a handle string, and a harness-prefixed address
+# (`claude-<short8>`) is a retired form that is NOT accepted anywhere. A caller
+# still producing one is a bug to fix at the source, so resolution refuses it by
+# name rather than quietly translating it.
+#
+# canonical_handle is the Python source of the generated address: discovery,
 # registration, receipts, send, and drain all call it. The Rust lifecycle client
-# carries a parity-tested mirror because it cannot import Python. If those two
-# rules differ, a durable send can address one handle while its recipient drains
-# another and silently strand on the bus.
+# (crates/fno-agents/src/identity.rs) carries a parity-tested mirror because it
+# cannot import Python. If those two rules differ, a durable send can address
+# one handle while its recipient drains another and silently strand on the bus.
+#
+# legacy_suffix_handle (the last-8) is NOT an address. It survives only as a
+# read-only lookup so mail addressed before the 2026-08-10 flip back to first-8
+# (when last-8 was the address) still drains while the bus turns over. It plays
+# the same read-only-compatibility role first-8 played across the earlier
+# (2026-07-30) cutover, and is removed once no in-flight handle is a last-8.
 def session_identity_key(session_id: str) -> str:
     """Normalize one session id for identity comparison across stores.
 
@@ -134,27 +145,45 @@ def session_identity_key(session_id: str) -> str:
 
 
 def canonical_handle(session_id: str) -> str:
-    """The mailbox address: the final eight characters of the session id."""
+    """The mailbox address: the first eight characters of the session id.
+
+    This is the harness's own short-id. A mail address is this short-id OR the
+    full session id; on a short-id collision, resolution fails closed and asks
+    for the full id. (Codex ids are time-prefixed, so their first-8 collides
+    across same-window sessions; codex addressing is often the full id.)
+    """
+    return session_identity_key(session_id)[:8]
+
+
+def legacy_suffix_handle(session_id: str) -> str:
+    """The retired last-eight address, read-only lookup compatibility only.
+
+    Pre-2026-08-10 handles were addressed by the last eight (e.g. ``08e8c104``);
+    this lets those in-flight messages drain while the bus turns over. Never
+    generated, never an accepted address for new mail.
+    """
     return session_identity_key(session_id)[-8:]
 
 
-def legacy_prefix_handle(session_id: str) -> str:
-    """The retired first-eight address, for fail-closed lookup compatibility only."""
-    return session_id[:8]
-
-
 def claude_transport_short_id(session_id: str) -> str:
-    """Claude's first-eight attach/job key, which is not a mailbox address."""
-    return legacy_prefix_handle(session_id)
+    """Claude's first-eight attach/job key.
+
+    Equal in value to :func:`canonical_handle` since the 2026-08-10 flip made
+    the harness's own short-id the mailbox address; kept as the named seam for
+    call sites that conceptually want claude's native job key, not the address.
+    """
+    return canonical_handle(session_id)
 
 
 def session_handle_tier(token: str, session_id: str) -> Optional[int]:
     """Return full/canonical/legacy match tier (0/1/2), or ``None``.
 
-    OpenCode identifiers are case-sensitive; UUID-family identifiers retain the
-    historical case-insensitive paste behavior. Callers may prefer the explicit
-    full-id tier, but must union canonical and legacy matches with every other
-    short address category before deciding uniqueness.
+    Tier 1 is the canonical first-eight address; tier 2 is the retired
+    last-eight (read-only transition lookup). OpenCode identifiers are
+    case-sensitive; UUID-family identifiers retain the historical
+    case-insensitive paste behavior. Callers may prefer the explicit full-id
+    tier, but must union canonical and legacy matches with every other short
+    address category before deciding uniqueness.
     """
     token = (token or "").strip()
     if not token or not session_id:
@@ -164,7 +193,7 @@ def session_handle_tier(token: str, session_id: str) -> Optional[int]:
     def equal(value: str) -> bool:
         return token == value if exact_case else token.lower() == value.lower()
     for tier, value in enumerate(
-        (session_id, canonical_handle(session_id), legacy_prefix_handle(session_id))
+        (session_id, canonical_handle(session_id), legacy_suffix_handle(session_id))
     ):
         if equal(value):
             return tier

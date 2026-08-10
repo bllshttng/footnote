@@ -2,7 +2,7 @@
 
 The verb surfaces paths.handoffs_dir() so a session or hook resolves the canon
 handoff doc through one door instead of composing a path. Filename key is the
-session's canonical handle (last-8) unless --slug overrides.
+session's canonical handle (first-8) unless --slug overrides.
 """
 from __future__ import annotations
 
@@ -21,9 +21,9 @@ from fno.paths import handoffs_dir
 runner = CliRunner()
 _ENV = {"COLUMNS": "240", "NO_COLOR": "1", "TERM": "dumb"}
 
-# A uuid whose last-8 handle is unambiguous and not equal to its first-8.
+# A uuid whose first-8 handle is unambiguous and not equal to its last-8.
 SID = "c35abbca-bd2d-4407-8365-cf468baa7eea"
-HANDLE = canonical_handle(SID)  # 8baa7eea (tail), not c35abbca (head)
+HANDLE = canonical_handle(SID)  # c35abbca (first-8), not 8baa7eea (last-8)
 
 
 @pytest.fixture(autouse=True)
@@ -51,12 +51,12 @@ def _isolate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Generator[None,
                 pass
 
 
-def test_name_only_uses_canonical_handle_tail() -> None:
+def test_name_only_uses_canonical_handle_first_eight() -> None:
     result = runner.invoke(app, ["paths", "handoff", "--session-id", SID, "--name-only"], env=_ENV)
     assert result.exit_code == 0, result.output
     name = result.output.strip()
-    # Date prefix + tail-8 handle. Guards the both-ends truncation hazard: the key must be the
-    # tail (8baa7eea), never the head (c35abbca).
+    # Date prefix + first-8 handle. Guards the both-ends truncation hazard: the key must be the
+    # head (c35abbca), never the tail (8baa7eea).
     assert re.fullmatch(r"\d{8}-[0-9a-f]{8}\.md", name), name
     assert name.endswith(f"-{HANDLE}.md"), name
 

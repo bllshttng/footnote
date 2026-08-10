@@ -59,7 +59,7 @@ def test_ac1_hp_full_uuid_is_case_insensitive(tmp_path: Path) -> None:
 
 def test_ac2_hp_daemon_short_and_canonical_handle_both_resolve(tmp_path: Path) -> None:
     """AC2-HP: a codex row resolves by its daemon short_id (name-derived,
-    non-hex) AND by the canonical tail of its thread id."""
+    non-hex) AND by the canonical first-eight of its thread id."""
     codex_uuid = "a1b2c3d4-1111-2222-3333-444455556666"
     codex = AgentEntry(
         name="reviewer",
@@ -71,30 +71,30 @@ def test_ac2_hp_daemon_short_and_canonical_handle_both_resolve(tmp_path: Path) -
     )
     reg = _write(tmp_path, codex)
     assert resolve_agent("billingf", path=reg).matched_by == "short_id"
-    assert resolve_agent("55556666", path=reg).matched_by == "canonical_handle"
+    assert resolve_agent("a1b2c3d4", path=reg).matched_by == "canonical_handle"
 
 
 def test_ac2_hp_opencode_canonical_handle_preserves_case() -> None:
-    ses = "ses_7f3a9b2cAbCd1234"
+    ses = "ses_7F3a9b2cAbCd1234"
     row = AgentEntry(
         name="oc", harness="opencode", harness_session_id=ses, cwd="/w", log_path="/l"
     )
-    assert resolve_agent_in([row], "AbCd1234").matched_by == "canonical_handle"
+    assert resolve_agent_in([row], "ses_7F3a").matched_by == "canonical_handle"
     with pytest.raises(AgentResolutionError):
-        resolve_agent_in([row], "abcd1234")
+        resolve_agent_in([row], "ses_7f3a")
 
 
 def test_update_registry_refuses_new_canonical_handle_collision(tmp_path: Path) -> None:
     """Normal producers cannot mint two rows sharing one durable mailbox."""
     reg = _write(
         tmp_path,
-        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-1111deadbeef"),
+        _claude("first", "transport1", "aaaaaaaa-0000-0000-0000-111111111111"),
     )
     second = _claude(
-        "second", "transport2", "bbbbbbbb-0000-0000-0000-2222deadbeef"
+        "second", "transport2", "aaaaaaaa-0000-0000-0000-222222222222"
     )
 
-    with pytest.raises(AgentResolutionError, match="identity 'deadbeef'"):
+    with pytest.raises(AgentResolutionError, match="identity 'aaaaaaaa'"):
         update_registry(lambda rows: [*rows, second], path=reg)
 
 
@@ -111,14 +111,14 @@ def test_update_registry_refuses_name_shadowing_existing_handle(tmp_path: Path) 
         update_registry(lambda rows: [*rows, shadow], path=reg)
 
 
-def test_update_registry_allows_legacy_prefix_collision(tmp_path: Path) -> None:
-    """Retired UUIDv7 time prefixes remain ambiguity-compatible, not a spawn wall."""
+def test_update_registry_allows_legacy_suffix_collision(tmp_path: Path) -> None:
+    """Retired last-eight handles remain ambiguity-compatible, not a spawn wall."""
     reg = _write(
         tmp_path,
         _claude("first", "transport1", "019fb417-0000-0000-0000-111122223333"),
     )
     second = _claude(
-        "second", "transport2", "019fb417-0000-0000-0000-444455556666"
+        "second", "transport2", "019fb418-0000-0000-0000-000012223333"
     )
 
     persisted = update_registry(lambda rows: [*rows, second], path=reg)
@@ -258,7 +258,7 @@ def test_opencode_style_row_resolves_by_name_full_id_and_canonical_handle(tmp_pa
     reg = _write(tmp_path, row)
     assert resolve_agent("oc-worker", path=reg).matched_by == "name"
     assert resolve_agent(ses, path=reg).matched_by == "full_session_id"
-    assert resolve_agent("AbCd1234", path=reg).matched_by == "canonical_handle"
+    assert resolve_agent("ses_7f3a", path=reg).matched_by == "canonical_handle"
 
 
 def test_registry_name_and_persisted_alias_share_one_namespace(

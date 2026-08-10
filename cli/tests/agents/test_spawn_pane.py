@@ -635,7 +635,7 @@ def test_codex_spawn_with_capture_returns_bound_identity(
     assert row.status == "live"
     assert result.status == "live"
     assert result.session_uuid == session_id
-    assert result.short_id == session_id[-8:]
+    assert result.short_id == session_id[:8]
 
 
 def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
@@ -683,7 +683,7 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert row.short_id == ""
     # The pane receipt carries the generated mailbox handle, not a provider
     # transport job id, so the caller can mail the pane from the receipt.
-    assert result.short_id == result.session_uuid[-8:]
+    assert result.short_id == result.session_uuid[:8]
     # That canonical handle resolves back to this exact row.
     from fno.agents.registry import resolve_agent_in
 

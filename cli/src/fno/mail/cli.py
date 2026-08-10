@@ -523,7 +523,7 @@ def cmd_reply(
     # falls through to the thread-store reply below.
     from fno.bus.log import iter_messages
 
-    from fno.harness_identity import LEGACY_HANDLE_RE, legacy_prefix_handle
+    from fno.harness_identity import LEGACY_HANDLE_RE, canonical_handle
 
     orig = next((m for m in iter_messages() if m.id == to_msg), None)
     if orig is not None and orig.to_kind in {"name", "session"}:
@@ -549,7 +549,7 @@ def cmd_reply(
                 # token uniquely. Never demote an unverified mutable alias.
                 require_resolution = True
         elif LEGACY_HANDLE_RE.match(target):
-            migrated = legacy_prefix_handle(target.split("-", 1)[1])
+            migrated = canonical_handle(target.split("-", 1)[1])
             print(
                 f"note: stored sender {target!r} is a retired address form "
                 f"(pre-flip record); resolving legacy token {migrated!r}.",
@@ -965,15 +965,16 @@ def _warn_deferred(target: str, *, project: bool = False) -> None:
     Warning only - the durable enqueue succeeded, so exit stays 0."""
     if project:
         msg = (
-            f"mail: project inbox {target} has no live drain; queued durably - "
-            "delivery waits for a drain\n"
+            f"mail: project inbox {target} has no live drain; queued durably as "
+            "recovery only - a session must drain the project inbox to read this, "
+            "and may never do so\n"
             "  this is NOT delivery. Address a live session instead: "
             "`fno agents top` to find one, then `fno mail send <short-id>`"
         )
     else:
         msg = (
-            f"mail: {target} has no live pane; queued durably - "
-            "delivery waits for its next SessionStart drain\n"
+            f"mail: {target} is not live; queued durably as recovery only - the "
+            "recipient must drain its inbox to read this, and may never do so\n"
             "  live delivery NOT confirmed - do not wait for a reply, recover:\n"
             f"    fno agents peek {target}     # did it land? a busy peer may have queued it\n"
             f"    fno agents resume {target}   # idle session -> live, then re-send\n"
@@ -1165,9 +1166,9 @@ def _name_lane_send(
     from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex, _mux_pane_send
     from fno.agents.registry import AgentResolutionError, resolve_agent
     from fno.agents.self_stamp import resolve_self_model, stamp_from
-    from fno.agents.store_fallback import is_full_session_id
+    from fno.agents.store_fallback import is_full_session_id, is_session_shaped
     from fno.dispatch_flags import infer_invoking_harness
-    from fno.harness_identity import canonical_handle
+    from fno.harness_identity import canonical_handle, session_identity_key
     from fno.inbox.store import (
         classify_durable_owner,
         generate_msg_id,
@@ -1205,11 +1206,23 @@ def _name_lane_send(
         self_send = token_lane == "self-send"
         if self_recipient is not None:
             recipient = self_recipient
+        elif is_full_session_id(token):
+            # The full id is the collision escape hatch: address the durable copy
+            # by the full id (distinct), not canonical_handle. Two same-window
+            # codex sessions share first-8, so canonicalizing a full id would
+            # collapse both onto one durable key. drain-self reads the full id.
+            recipient = session_identity_key(token)
         elif token_reachable is not None:
             recipient = canonical_handle(token_reachable.session_id)
-        elif is_full_session_id(token):
-            recipient = canonical_handle(token)
         else:
+            # A non-id token (a --name like blueprint-x-ce6e-glm) is not a mail
+            # address, and writing it as a durable recipient strands the message:
+            # the drain is handle-keyed, so a name never matches a session's
+            # handle. Refuse rather than queue a message nobody can drain. A
+            # bare hex short-handle of a session no store currently knows still
+            # earns a durable write (it may yet drain if that session revives).
+            if not is_session_shaped(token):
+                raise UnreachableTokenError(token)
             recipient = token
         provider = (
             token_reachable.agent if token_reachable is not None else provider
@@ -1660,7 +1673,13 @@ def _raw_send(name, payload, *, self_ok: bool) -> None:
 @mail_app.command("send")
 def cmd_send(
     name: str | None = typer.Argument(
-        None, help="Agent name. Omit when using --to-project."
+        None,
+        help=(
+            "Agent name, short-id (first 8 of the session id), or full session "
+            "id. An ambiguous short-id fails and asks for the full id; codex "
+            "session ids are time-prefixed so their first-8 collides across "
+            "same-window sessions, so codex is often addressed by full id."
+        ),
     ),
     message: str | None = typer.Argument(
         None, help="Message to send (async, fire-and-forget)."
@@ -2351,7 +2370,12 @@ def cmd_drain_self(
     hook is safe on any surface.
     """
     from fno.bus.cursor import advance_cursor, scan_unread
-    from fno.harness_identity import canonical_handle, resolve_harness_identity
+    from fno.harness_identity import (
+        canonical_handle,
+        legacy_suffix_handle,
+        resolve_harness_identity,
+        session_identity_key,
+    )
 
     ident = resolve_harness_identity()
     if not ident.harness or not ident.session_id:
@@ -2359,8 +2383,25 @@ def cmd_drain_self(
             print(json.dumps([]))
         return
 
-    handle = canonical_handle(ident.session_id)
-    msgs = scan_unread(handle)
+    sid = ident.session_id
+    handle = canonical_handle(sid)  # primary address, used in the render label
+    # Drain every address form this session owns: the canonical first-eight (new
+    # mail), the full id (the collision-escape send path), and the legacy
+    # last-eight (pre-flip mail still on the bus). Each address has its own
+    # cursor; a message has one `to`, so it matches exactly one form.
+    last_by_form: dict[str, str] = {}
+    all_msgs: list = []
+    for _form in (handle, session_identity_key(sid), legacy_suffix_handle(sid)):
+        _got = scan_unread(_form)
+        if _got:
+            last_by_form[_form] = _got[-1].id
+            all_msgs.extend(_got)
+    _seen: set[str] = set()
+    msgs = []
+    for _m in all_msgs:
+        if _m.id not in _seen:
+            _seen.add(_m.id)
+            msgs.append(_m)
 
     if json_out:
         print(
@@ -2398,7 +2439,8 @@ def cmd_drain_self(
     # is the opposite of what the paragraph above promises.
     if msgs:
         sys.stdout.flush()
-        advance_cursor(handle, msgs[-1].id)
+        for _form, _last_id in last_by_form.items():
+            advance_cursor(_form, _last_id)
 
 
 # ---------------------------------------------------------------------------
