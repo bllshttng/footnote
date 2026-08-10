@@ -1473,6 +1473,133 @@ def _name_lane_send(
             print(f"escalated to human ({recipient}) [attended-miss]", file=sys.stderr)
 
 
+def _job_lane_send(
+    message: str,
+    token: str,
+    *,
+    from_name: Optional[str],
+) -> None:
+    """Deliver to a JOB address (``node:<id>`` / ``pr:<n>``), resolved to whoever
+    holds the claim RIGHT NOW (x-8f8c part 2).
+
+    A job address names the work, not the process: it survives the holder's death
+    because the durable copy is addressed to ``node:<id>`` and a successor drains
+    it at SessionStart. This is the structural fix for the dead-handle strand --
+    a session handle expired faster than the message, so mail to it accumulated on
+    a queue the dead session never drained.
+
+    Two outcomes, matching the name-lane one-line stdout contract (no separate
+    delivery-verification receipt -- the existing receipt is the send-time inject
+    confirmation, and a second receipt claiming delivery happened is the shape
+    that has lied four times):
+
+    - holder exists (claim live/suspect): live-inject to the holder's session. On
+      a confirmed inject, that IS delivery (no durable copy, same as a name-lane
+      hosted send). On a live miss, durable-floor to ``node:<id>`` so a successor
+      drains it.
+    - no holder (free/stale/corrupted/no-node): REFUSE, exit 16, queue nothing.
+      Queueing would strand the message at the job address -- the defect again,
+      one address over.
+
+    ``pr:<n>`` is normalized to ``node:<id>`` by the resolver (graph lookup), so
+    the durable envelope always carries the canonical node address and the drain
+    consumes one address space.
+    """
+    from fno.agents.dispatch import _mail_inject_claude, _mail_inject_codex
+    from fno.agents.self_stamp import resolve_self_model, stamp_from
+    from fno.dispatch_flags import infer_invoking_harness
+    from fno.inbox.store import (
+        DurableOwner,
+        _append_to_bus,
+        generate_msg_id,
+        ttl_at_for,
+    )
+    from fno.mail.envelope import harness_for_provider, wrap_fno_mail
+    from fno.mail.job_address import resolve_job_address
+
+    job = resolve_job_address(token)
+    if job is None:
+        # Not a job address -- should not reach here (cmd_send gates on the
+        # prefix), but fail closed rather than misaddress.
+        print(f"error: not a job address: {token!r}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    if not job.has_holder:
+        note = f" ({job.note})" if job.note else ""
+        print(
+            f"mail: {token}{note} has no live holder "
+            f"(claim state: {job.state}); not queued.\n"
+            f"  a job address with no holder would strand. "
+            f"Retry when a /target session holds {job.address}.",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=16)
+
+    msg_id = generate_msg_id()
+    # The durable recipient is the JOB (node:<id>), not the holder's session
+    # handle: this is what makes the address outlive the session. pr:<n> was
+    # already normalized to node:<id> by the resolver.
+    recipient = job.address
+    wrapped = wrap_fno_mail(
+        message,
+        from_=stamp_from(from_name),
+        harness=harness_for_provider(h) if (h := infer_invoking_harness()) else "cli",
+        model=resolve_self_model(),
+        to=recipient,
+        node=job.node_id,
+        id=msg_id,
+    )
+
+    # Live-inject to the current holder's session. Inject targets the session id
+    # (control.sock / codex daemon are keyed by it, cwd-independent), so a holder
+    # in another worktree is reachable from this sender's cwd.
+    provider = job.harness or "claude"
+    if provider == "codex":
+        injected = _mail_inject_codex(job.session_id, wrapped)
+    else:
+        injected = _mail_inject_claude(job.session_id, wrapped)
+
+    holder_tag = f" [holder {provider} {(job.session_id or '')[:8]}]"
+    if injected:
+        print(f"delivered (hosted) to {recipient}{holder_tag} id:{msg_id}")
+        return
+
+    # Live miss: durable floor addressed to the JOB. A successor (or this holder's
+    # next drain) surfaces it via scan_unread(node:<id>). Owner is wake-daemon:
+    # the holder exists but the inject missed, so the message waits for a drain
+    # (resumable), not a turn boundary -- live-drain's 1h "drains next turn"
+    # assumption does not hold for a job address whose only drain is SessionStart.
+    from datetime import datetime, timezone
+
+    ts = datetime.now(tz=timezone.utc)
+    owner = DurableOwner.WAKE_DAEMON
+    try:
+        _append_to_bus(
+            msg_id=msg_id,
+            thread_id=msg_id,
+            sender=stamp_from(from_name),
+            recipient=recipient,
+            kind="send",
+            body=wrapped,
+            timestamp=ts,
+            provider_to=provider,
+            to_kind="node",
+            owner=owner.value,
+            ttl_at=ttl_at_for(owner, ts),
+        )
+    except (OSError, ValueError, RuntimeError) as exc:
+        print(
+            f"durable envelope write failed for {recipient!r}: {exc}",
+            file=sys.stderr,
+        )
+        raise typer.Exit(code=12) from exc
+    # One stdout line (the receipt contract) + an advisory on stderr naming the
+    # recovery: the message waits for the holder's next drain, not a reply window.
+    print(f"mail: {recipient} live-inject missed; durable until a holder drains",
+          file=sys.stderr)
+    print(f"{msg_id} queued (durable) for {recipient} [job-live-miss]{holder_tag}")
+
+
 # Send-time human escalation for a question, per (sender, recipient). A burst
 # re-nudges every window rather than once forever (marker refreshed only on an
 # actual escalation, so the window runs from the last nudge, not the first send).
@@ -2202,6 +2329,22 @@ def cmd_send(
             )
         return
 
+    # Job-address mode (x-8f8c part 2): node:<id> / pr:<n> names the work, not a
+    # process. It resolves to the current claim holder and outlives any session, so
+    # mail survives the holder's death. Intercept before name-mode resolution: a
+    # job token is neither a registered agent nor a session handle, so the normal
+    # dispatch_send -> handle path would only refuse it.
+    if name:
+        from fno.mail.job_address import is_job_token
+
+        if is_job_token(name):
+            if message is None:
+                print(f"usage: fno mail send {name} <message>", file=sys.stderr)
+                raise typer.Exit(code=2)
+            _enforce_body_cap(message)
+            _job_lane_send(message, name, from_name=stamp_from(from_name))
+            return
+
     # Name mode.
     if not name or message is None:
         print(
@@ -2407,6 +2550,71 @@ def cmd_bus_ack(
         print(f"cursor for {name!r} already at or past {msg_id}; unchanged")
 
 
+def _manifest_fields(*names: str) -> dict[str, Optional[str]]:
+    """Read named fields from this session's ``.fno/target-state.md`` (cwd-relative).
+
+    The manifest is per-worktree (each target session owns one), so reading it
+    from cwd is reading THIS session's own claim binding. Returns ``{}`` when no
+    manifest is present (a non-target session has no job to drain)."""
+    try:
+        raw = (Path.cwd() / ".fno" / "target-state.md").read_text(
+            encoding="utf-8", errors="replace"
+        )
+    except OSError:
+        return {}
+    out: dict[str, Optional[str]] = {}
+    for name in names:
+        m = re.search(rf"^{re.escape(name)}\s*:\s*(.*)$", raw, re.MULTILINE)
+        if m is None:
+            out[name] = None
+            continue
+        val = m.group(1).strip().strip("\"'")
+        out[name] = val if val and val != "null" else None
+    return out
+
+
+def _scan_held_job_mail(ident) -> "tuple[Optional[str], list]":
+    """Scan job-addressed mail for the node THIS session holds, verified live.
+
+    The job address outlives any session, so a successor re-claiming the node
+    drains mail here that the prior holder never read (x-8f8c part 2). The node
+    comes from this session's own manifest (``target_claim_key``), then the LIVE
+    claim is checked so a stale manifest -- the claim already moved to a
+    successor -- never drains another holder's mail.
+
+    Returns ``(job_address, envelopes)``; ``(None, [])`` when this session holds
+    no live node claim. Never raises: an unreadable manifest or claim degrades to
+    no job mail, so the drain still surfaces handle mail.
+    """
+    from fno.bus.cursor import scan_unread
+    from fno.claims.core import claim_status
+    from fno.claims.io import claims_root_for
+
+    fm = _manifest_fields(
+        "target_claim_key", "session_id", "target_claim_holder"
+    )
+    key = fm.get("target_claim_key")
+    if not key or not key.startswith("node:"):
+        return None, []
+    # Only this session's own manifest: a shared cwd (canonical with linked .fno)
+    # must not let one session drain another's job mail.
+    if fm.get("session_id") and fm.get("session_id") != ident.session_id:
+        return None, []
+    root = claims_root_for(key)
+    status = claim_status(key, root=root)
+    if status.get("state") not in ("live", "suspect"):
+        return None, []
+    holder = status.get("holder")
+    mine = f"target-session:{ident.session_id}" if ident.session_id else None
+    recorded = fm.get("target_claim_holder")
+    # claude: holder == target-session:<my session id>. codex: the claim may be
+    # owned by the durable thread id rather than the session id, so also accept
+    # the manifest's recorded holder when the live claim still carries it.
+    if holder != mine and holder != recorded:
+        return None, []
+    return key, scan_unread(key)
+
+
 @mail_app.command("drain-self", hidden=True)
 def cmd_drain_self(
     json_out: bool = typer.Option(
@@ -2465,31 +2673,47 @@ def cmd_drain_self(
     # log-order, so without this a legacy (pre-flip) message would render after a
     # newer canonical one. Cursor advance below is per-form and unaffected.
     msgs.sort(key=lambda _m: _m.ts)
+    # Job mail: also drain mail addressed to the node THIS session holds. The
+    # address outlives any session, so this is where a successor picks up mail
+    # the prior holder never read (x-8f8c part 2). Per-address cursor, so this is
+    # independent of the handle/form cursors -- no double-delivery across them.
+    job_addr, job_msgs = _scan_held_job_mail(ident)
 
     if json_out:
-        print(
-            json.dumps(
-                [
-                    {
-                        "id": m.id, "from": m.from_, "to": m.to,
-                        "kind": m.kind, "ts": m.ts, "body": m.body,
-                    }
-                    for m in msgs
-                ],
-                ensure_ascii=False,
+        out = [
+            {
+                "id": m.id, "from": m.from_, "to": m.to,
+                "kind": m.kind, "ts": m.ts, "body": m.body,
+            }
+            for m in msgs
+        ]
+        for m in job_msgs:
+            out.append(
+                {
+                    "id": m.id, "from": m.from_, "to": m.to,
+                    "kind": m.kind, "ts": m.ts, "body": m.body,
+                    "job": job_addr,
+                }
             )
-        )
-    elif msgs:
-        print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
-        for m in msgs:
-            print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
-            print(m.body.rstrip("\n"))
+        print(json.dumps(out, ensure_ascii=False))
+    else:
+        if msgs:
+            print(f"[fno mail] {len(msgs)} message(s) for {handle}:")
+            for m in msgs:
+                print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
+                print(m.body.rstrip("\n"))
+        if job_msgs:
+            print(f"\n[fno mail] {len(job_msgs)} job message(s) for {job_addr}:")
+            for m in job_msgs:
+                print(f"\n--- from {m.from_} ({m.ts})  id:{m.id} ---")
+                print(m.body.rstrip("\n"))
         # This render is what a session sees on receive, so surface the id (which
         # `reply --to` correlates against) and the how-to. Replying is optional --
         # an FYI/broadcast needs none.
-        print(
-            '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
-        )
+        if msgs or job_msgs:
+            print(
+                '\n[fno mail] to answer one: fno mail reply --to <id> --body "..."'
+            )
 
     # Inject-before-ack: advance the cursor to the last drained id only after
     # the bodies are out, so a crash re-surfaces rather than drops.
@@ -2500,10 +2724,12 @@ def cmd_drain_self(
     # is already advanced, and a SIGTERM from the hook's wall-clock bound
     # discards them with the mail marked consumed. Losing it permanently, which
     # is the opposite of what the paragraph above promises.
-    if msgs:
+    if msgs or job_msgs:
         sys.stdout.flush()
         for _form, _last_id in last_by_form.items():
             advance_cursor(_form, _last_id)
+    if job_addr and job_msgs:
+        advance_cursor(job_addr, job_msgs[-1].id)
 
 
 # ---------------------------------------------------------------------------
