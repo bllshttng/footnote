@@ -1,40 +1,59 @@
-"""fno.recovery — Layer-2 session auto-recovery watchdog (x-f47c).
+"""fno.recovery — Layer-2 provider-failover and close-surfacing for bg sessions.
 
-A background ``/target`` session whose turn ends on an *abnormal* termination
-(``API Error: Connection closed mid-response``, a dropped stream, an empty
-response) is not resumed by anything today: the stream closed cleanly, so
-Claude Code's stuck-stream watchdog treats it as not-stuck, and the footnote
-stop hook / ``loop-check`` only ever fire on a clean Stop event. The work just
-stops until the ~1h reaper kills the process, leaving the backlog node stuck
-``claimed``. A human has to notice and type "keep going".
+ORIGIN (x-f47c): a background ``/target`` session whose turn ended on an
+*abnormal* termination (``API Error: Connection closed mid-response``, a dropped
+stream, an empty response) was resumed by nothing. The stream closed cleanly, so
+Claude Code's stuck-stream watchdog treated it as not-stuck, and the footnote
+stop hook / ``loop-check`` only fire on a clean Stop event. The work just
+stopped until the ~1h reaper killed the process, leaving the backlog node stuck
+``claimed``. This module was the programmatic "keep going": a periodic sweep
+(hosted on the ``pr_watch`` launchd tick, independent of any session) that
+re-injected a resume nudge over Claude Code's messaging socket.
 
-This module is the programmatic version of that "keep going": a periodic sweep
-(hosted on the ``pr_watch`` launchd tick so it runs INDEPENDENTLY of any
-session) that finds footnote-launched bg sessions which are idle-but-incomplete
-and re-injects a resume nudge over Claude Code's messaging socket.
+THE SOCKET NUDGE NO LONGER DELIVERS (x-d93d, observed live 2026-08-09). Current
+Claude Code (verified on 2.1.226) holds every cross-session message sent to a
+``bypassPermissions`` session for manual review (the ``crossSessionInbound``
+guard). footnote's bg ``/target`` sessions ARE bypassPermissions (unattended
+means bypass), so the nudge was held in exactly the sessions it was built for.
+The listener's ``fromMode`` attestation field would lift the hold, but reading
+it is gated behind an internal, default-off GrowthBook flag footnote cannot
+enable, so attestation is not a supported contract; and the only documented
+escape (``crossSessionInbound: "accept"``) accepts every un-attested peer, which
+is not footnote's setting to make. See ``providers.claude._build_envelope``.
 
-Design notes (the load-bearing parts):
+So this module is NOT an auto-resume watchdog anymore: it cannot inject a resume
+into a stuck bypass session, and pretending otherwise would ship a daemon that
+silently no-ops while every held nudge raised an operator dialog. What survives:
 
-- **Scope = registry ∩ live bg sessions.** Provenance comes from footnote's own
-  agents registry (``provider == "claude"`` rows carry the jobId in ``short_id``);
-  liveness + the messaging socket come from ``locate_session`` reading
-  ``~/.claude/sessions``. The join is exactly "footnote-launched AND reachable",
-  which satisfies the invariant *only ever touch sessions footnote launched*.
-  Under-coverage (a footnote bg session missing from the registry) is the SAFE
-  failure: we never nudge an arbitrary CC session, we just might miss one.
+- **Provider failover (x-7abe).** A swap-class death (rate-limit / quota / auth
+  / 5xx) rotates the active provider and respawns a fresh ``claude --bg``
+  worker (``--resume`` or ``/target``) on the new account. A fresh process's
+  seed is a CLI arg, NOT a socket inject, so it is not held. This is the one
+  live autonomous recovery path.
 
-- **Transcript truth owns liveness.** ``session_truth`` supplies the content-aware
-  activity state and age; frozen ``state.json`` remains phase metadata only.
+- **Close-surfacing (x-a76d).** A session whose MISSION finished (node ``done``
+  or PR shipped) but whose process still lingers is surfaced ONCE for the
+  operator to close (retro, then /stop), not told to "keep going" over a held
+  socket. The operator wants finished sessions off the view, not re-opened.
 
-- **Reuse over re-implement.** The socket write is the shipped
-  ``providers.claude.send_to_session`` (the same BG8 inject used by ``fno
-  mail`` / dispatch); the state read is ``_claude_session_registry`` — this
-  module is the predicate + the cadence wiring, nothing more.
+Scope = footnote-launched bg sessions ONLY. Provenance comes from footnote's
+agents registry; liveness + socket come from ``locate_session`` reading
+``~/.claude/sessions``. The join is "footnote-launched AND bg AND reachable",
+which satisfies the invariant *only ever touch footnote bg sessions*. An
+INTERACTIVE session waiting on its human looks idle to a transcript-age probe,
+so "has-been-quiet" is NOT the discriminator: bg-ness is. Under-coverage (a
+footnote bg session missing from the registry) stays the safe failure.
 
-ponytail: V1 handles the live-socket case (the observed repro — an idle-but-alive
-session, socket still up). A suspended session (null socket) is skipped, not
-respawned; the daemon-backend respawn-and-deliver path is the upgrade if
-suspended-session recovery is ever observed in the wild.
+Transcript truth owns liveness (``session_truth``; frozen ``state.json`` is
+phase metadata only). The socket write is the shipped
+``providers.claude.send_to_session`` (same transport as ``fno mail`` /
+dispatch); the state read is ``_claude_session_registry``.
+
+The held-socket resume is intentionally NOT replaced here by a speculative
+respawn-for-every-stuck-session. ``_redispatch`` / ``_respawn_bg_resume``
+already recover swap-class and node-less deaths via a fresh process; routing
+the plain connection-drop case through them is a separate design call (noted
+in the PR body), not a silent default.
 """
 from __future__ import annotations
 
@@ -53,14 +72,23 @@ _SendError = ProviderSocketError
 
 # Decision constants returned by :func:`classify`.
 NUDGE = "nudge"
+NUDGE_CLOSE = "nudge-close"
 SKIP_NEEDS_INPUT = "skip-needs-input"
 SKIP_TERMINAL = "skip-terminal"
 NOT_STALE = "not-stale"
 
-# The resume nudge. "keep going" is the exact text that resumed the motivating
-# repro (b78039cc, a human typed it); the agent re-enters its turn loop on any
-# user message, so the proven text is the lazy-correct choice.
+# The fresh-process resume seed. "keep going" is the exact text that resumed the
+# motivating repro (b78039cc, a human typed it); the agent re-enters its turn
+# loop on any user message. This is now ONLY the CLI-arg seed passed to a fresh
+# ``claude --bg --resume <uuid>`` (the failover/revive path); it is NOT a socket
+# inject. The held socket nudge was removed in x-d93d: a bypassPermissions
+# recipient (which every autonomous /target worker is, via the
+# ``spawn_permission_mode`` default) holds every cross-session message by design.
 CONTINUE_MESSAGE = "keep going"
+# A finished-but-lingering session is surfaced to the operator to CLOSE (run its
+# retro, then /stop), not to resume. Routed over an OS notification, not the
+# held socket (x-a76d): the operator wants these off the view, not re-opened.
+CLOSE_MESSAGE = "mission complete but still open - run retro then /stop to close"
 FROM_NAME = "fno-recovery"
 
 
@@ -84,16 +112,28 @@ def classify(
     terminal ``<promise>`` done, so on its own it lets a worker that promised
     and then died abnormally suppress recovery AND failover forever. Only an
     explicit ``False`` - positive evidence of an unfinished mission - relaxes
-    that; True and None (unverifiable) keep the terminal skip.
+    that to the staleness gate (resume). An explicit ``True`` (the mission
+    actually shipped, but the process still lingers) flips to :data:`NUDGE_CLOSE`
+    once idle (x-a76d): the operator wants finished sessions off the view, not
+    re-opened. ``None`` (unverifiable) keeps the terminal skip (fail closed).
     """
     del updated_at, now
     if state == "needs-input" or truth_state == "your-move":
         return SKIP_NEEDS_INPUT
     if truth_state == "done":
-        if mission_complete is not False:
+        if mission_complete is False:
+            # Hollow promise: fall through to the staleness gate below, so a
+            # fresh promise mid-finalize is left alone and only an idle one is
+            # flagged for resume.
+            pass
+        elif mission_complete is True:
+            # Finished for real but the process still lingers. Surface it to
+            # CLOSE once idle; a fresh finish is left alone.
+            if truth_age_s is None or truth_age_s < idle_threshold_s:
+                return NOT_STALE
+            return NUDGE_CLOSE
+        else:  # None: unverifiable mission -> fail closed.
             return SKIP_TERMINAL
-        # Hollow promise: fall through to the staleness gate below, so a fresh
-        # promise mid-finalize is left alone and only an idle one is nudged.
     if truth_state in {"unknown", "watching"}:
         return NOT_STALE
     if truth_state == "stalled":
@@ -190,6 +230,11 @@ def _capped_key(short_id: str) -> str:
     return f"capped:{short_id}"
 
 
+def _close_key(short_id: str) -> str:
+    """Sentinel: a close-surface has fired once for this id (x-a76d)."""
+    return f"close:{short_id}"
+
+
 def recovery_sweep(
     now: datetime,
     cfg,
@@ -200,36 +245,36 @@ def recovery_sweep(
     read_state_fn: Callable,
     truth_fn: Callable[[Candidate], dict],
     liveness_fn: Callable[[str], bool],
-    send_fn: Callable[[str, str, str], None],
     failover_fn: Optional[Callable[["Candidate", object], str]] = None,
     mission_complete_fn: Optional[Callable[["Candidate"], Optional[bool]]] = None,
+    notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> None:
-    """Classify each candidate and act: failover, nudge (capped), skip, or stay silent.
+    """Classify each candidate and act: failover, close-surface, held-surface, or stay silent.
 
-    Every decision that *matters* emits exactly one event:
+    Every decision that *matters* emits at most one event:
       - ``failover_swapped`` when an out-of-usage session rotates providers,
       - ``failover_blocked{reason}`` when a swap is wanted but storm-capped
         (thrash). A queue-exhausted result (no alternate) is NOT blocked - it
-        falls through to the bounded nudge below,
-      - ``recovery_nudge`` when a resume is injected,
-      - ``recovery_skipped{reason}`` when an idle-stale session is deliberately
-        spared (``needs-input``), unreachable, or the send failed,
-      - ``recovery_capped`` once when a session hits the per-session nudge cap.
-    A done / not-yet-stale session is silent (no event) so healthy ticks do not
-    spam the log. All I/O is injected so this is unit-testable offline.
+        falls through to the held-by-design surface below,
+      - ``recovery_close_notify`` once when a finished-but-lingering /target
+        worker is surfaced to the operator to close (x-a76d),
+      - ``recovery_skipped{reason}`` when a session is deliberately spared
+        (``needs-input``) or, for a node-bound stuck worker, surfaced once as
+        ``held-by-design`` (x-d93d: the socket nudge cannot reach a bypass
+        recipient, so the worker is stuck-but-not-auto-resumable).
+    A not-yet-stale / done-and-not-lingering session is silent so healthy ticks
+    do not spam the log. All I/O is injected so this is unit-testable offline.
 
-    ``failover_fn`` (x-7abe) is the only way the failover branch activates: when
-    None (every nudge-path caller / test), the sweep behaves exactly as the
-    x-f47c watchdog. When supplied, a stale session whose last error is a
-    *swap-class* one (rate-limit / quota / auth / 5xx) routes to provider
-    failover INSTEAD of a nudge - nudging "keep going" at a rate-limited provider
-    just re-hits the limit. A connection-drop (non-swap class) still nudges.
+    ``failover_fn`` (x-7abe) is the only way the failover branch activates: a
+    stale session whose last error is a *swap-class* one (rate-limit / quota /
+    auth / 5xx) routes to provider failover INSTEAD of surfacing - the failover
+    respawns a fresh ``claude --bg`` (a CLI-arg seed, not a socket inject), so it
+    is not held. A connection-drop (non-swap class) is not failover-eligible.
 
     At most ONE provider rotation fires per sweep tick (``rotated`` guard): a
     swap mutates the *global* active provider, so a second candidate evaluated
     after it would have its error mis-attributed to the already-swapped-to
-    provider (codex P2). The remaining stale sessions nudge this tick and are
-    reconsidered next tick against the settled provider.
+    provider (codex P2).
     """
     rotated = False  # one provider rotation per tick (P2: global active mutation)
     for c in candidates:
@@ -250,6 +295,30 @@ def recovery_sweep(
 
         if decision == SKIP_NEEDS_INPUT:
             emit("recovery_skipped", {"short_id": c.short_id, "reason": "needs-input"})
+            continue
+        if decision == NUDGE_CLOSE:
+            # Finished for real but the process still lingers. Surface it ONCE
+            # to close over an OS notification (not the held socket: the
+            # recipient is bypass). mission_complete==True means a resolvable
+            # finished mission (a /target worker, or a think birth pass whose
+            # node is done), so the node-less / human-driven exclusion that
+            # gates the resume path does not apply here.
+            ck = _close_key(c.short_id)
+            if not counts.get(ck):
+                delivered = True
+                if notify_close_fn is not None:
+                    try:
+                        delivered = bool(notify_close_fn(c))
+                    except Exception:  # noqa: BLE001 - a notify miss must never crash the sweep
+                        delivered = False
+                # Record once-only regardless, so a channel-less host does not
+                # retry every tick; but do NOT claim a surface that never reached
+                # the operator (a non-zero channel return is "not delivered").
+                counts[ck] = True
+                if delivered:
+                    emit("recovery_close_notify", {"short_id": c.short_id})
+                else:
+                    emit("recovery_skipped", {"short_id": c.short_id, "reason": "no-notify-channel"})
             continue
         if decision != NUDGE:
             # SKIP_TERMINAL / NOT_STALE: nothing to say.
@@ -284,19 +353,29 @@ def recovery_sweep(
                         continue
                     # "rotated-no-worker": the swap landed on a provider we
                     # cannot bg-redispatch a /target onto (non-claude) or the
-                    # spawn failed; fall through to the bounded nudge so the
-                    # session is not left dead-and-unnudged (codex P1).
+                    # spawn failed; fall through to the held-by-design surface so
+                    # the stuck session is not left silent (codex P1).
                 elif outcome == "blocked-thrash":
                     # Storm-cap reached: genuine churn, deliberate bounded stop.
                     emit("failover_blocked", {"short_id": c.short_id, "reason": outcome})
                     continue
                 # "queue-exhausted" (no alternate provider exists — the common
                 # single-provider case) and "no-swap" (controller declined): fall
-                # through to the x-f47c nudge. With nothing to swap to, the
-                # bounded nudge is the right fallback — the rate-limit window may
-                # clear and the per-session cap stops it spinning, so this is
-                # strictly no worse than the pre-failover watchdog.
+                # through to the held-by-design surface. Nothing can be swapped
+                # to and the socket nudge cannot reach a bypass recipient, so the
+                # honest action is to surface the stuck session once for the
+                # operator.
 
+        # x-d93d: the recipient is a bypass bg /target worker
+        # (``spawn_permission_mode`` default), so a socket nudge is held by
+        # Claude Code's ``crossSessionInbound`` guard and would stack an operator
+        # dialog without recovering anything. Do NOT send. A node-bound worker
+        # that is genuinely stuck is surfaced (bounded by ``max_nudges``, then
+        # ``recovery_capped``); a node-less bg thread (an ask/relay worker, or a
+        # ``--bg`` session a human has attached to and drives interactively) is
+        # none of recovery's mission and stays silent (x-a76d scope fix).
+        if not c.cwd or _worktree_is_node_less(c.cwd):
+            continue
         n = counts.get(c.short_id, 0)
         if n >= cfg.max_nudges:
             ck = _capped_key(c.short_id)
@@ -304,19 +383,13 @@ def recovery_sweep(
                 counts[ck] = True
                 emit("recovery_capped", {"short_id": c.short_id, "nudges": n})
             continue
-
         if not liveness_fn(c.sock_path):
+            # Socket gone: the session is not "held", it is unreachable/dead.
+            # Surface that distinctly (the reaper owns actual cleanup).
             emit("recovery_skipped", {"short_id": c.short_id, "reason": "socket-unreachable"})
             continue
-
-        try:
-            send_fn(c.sock_path, CONTINUE_MESSAGE, FROM_NAME)
-        except (ProviderSocketError, OSError) as exc:
-            emit("recovery_skipped", {"short_id": c.short_id, "reason": "send-failed", "error": str(exc)})
-            continue
-
         counts[c.short_id] = n + 1
-        emit("recovery_nudge", {"short_id": c.short_id, "nudge_count": n + 1})
+        emit("recovery_skipped", {"short_id": c.short_id, "reason": "held-by-design"})
 
 
 # ---------------------------------------------------------------------------
@@ -969,9 +1042,33 @@ def _default_failover(candidate: "Candidate", error) -> str:
 
 def _prune_keep(key: str, live: set) -> bool:
     """Keep a counts entry only while its session is still a live candidate."""
-    if key.startswith("capped:"):
-        return key[len("capped:"):] in live
+    for prefix in ("capped:", "close:"):
+        if key.startswith(prefix):
+            return key[len(prefix):] in live
     return key in live
+
+
+def _notify_close(candidate: "Candidate") -> bool:
+    """OS-notify the operator that a finished /target worker is still open, so
+    they run its retro and ``/stop`` it. Returns True iff a notification was
+    actually delivered.
+
+    Uses the working notification channel, not the held socket. A host with no
+    notification channel (no ``osascript`` / ``notify-send``) makes
+    ``send_notification`` return a non-zero exit code rather than raise, so the
+    caller must treat a False return as "not delivered" and not claim a surface
+    that never reached the operator.
+    """
+    try:
+        from fno.notify._impl import send_notification
+
+        code, _msg = send_notification(
+            f"footnote: {candidate.short_id} finished but still open",
+            CLOSE_MESSAGE,
+        )
+        return code == 0
+    except Exception:  # noqa: BLE001 - a notify miss must never crash the sweep
+        return False
 
 
 def run_recovery_sweep(
@@ -984,11 +1081,11 @@ def run_recovery_sweep(
     read_state_fn: Optional[Callable] = None,
     truth_fn: Optional[Callable[[Candidate], dict]] = None,
     liveness_fn: Optional[Callable] = None,
-    send_fn: Optional[Callable] = None,
     load_counts_fn: Optional[Callable] = None,
     save_counts_fn: Optional[Callable] = None,
     failover_fn: Optional[Callable] = None,
     mission_complete_fn: Optional[Callable] = None,
+    notify_close_fn: Optional[Callable[["Candidate"], bool]] = None,
 ) -> int:
     """Build the real seams, run one sweep, persist counts. Returns candidate count.
 
@@ -1011,10 +1108,6 @@ def run_recovery_sweep(
         from fno.agents.providers.claude import liveness_probe
 
         liveness_fn = liveness_probe
-    if send_fn is None:
-        from fno.agents.providers.claude import send_to_session
-
-        send_fn = send_to_session
     read_state_fn = read_state_fn or _safe_read_state
     if truth_fn is None:
         from fno.agents.session_truth import resolve_session_truth
@@ -1032,6 +1125,7 @@ def run_recovery_sweep(
     # default is safe (x-7abe).
     failover_fn = failover_fn or _default_failover
     mission_complete_fn = mission_complete_fn or mission_complete
+    notify_close_fn = notify_close_fn or _notify_close
 
     candidates = iter_candidates(registry_load(), locate_fn)
     counts = load_counts_fn()
@@ -1043,9 +1137,10 @@ def run_recovery_sweep(
         candidates=candidates, counts=counts, emit=emit,
         read_state_fn=read_state_fn,
         truth_fn=truth_fn,
-        liveness_fn=liveness_fn, send_fn=send_fn,
+        liveness_fn=liveness_fn,
         failover_fn=failover_fn,
         mission_complete_fn=mission_complete_fn,
+        notify_close_fn=notify_close_fn,
     )
 
     save_counts_fn(counts)

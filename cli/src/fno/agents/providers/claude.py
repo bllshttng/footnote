@@ -771,12 +771,30 @@ def build_cross_session_container(message: str, from_name: str) -> str:
 
 
 def _build_envelope(message: str, from_name: str) -> bytes:
-    """Render the BG8 envelope as UTF-8 bytes including the trailing newline.
+    """Render the BG8 cross-session envelope as UTF-8 bytes + trailing newline.
 
-    Tag/attribute structure is fixed by claude 2.1.143's CE7 listener.
-    XML-attribute escape is mandatory; the dispatch layer rejects
-    XML-unsafe input before we get here, but a defensive escape keeps
-    the envelope shape safe in every code path.
+    Shape ``{"type":"user","message":{"role":"user","content":<wrapped>},
+    "priority":"next"}`` (a synthetic USER turn) is fixed by Claude Code's CE7
+    socket listener and has been stable across versions. What changed is what
+    the receiver DOES with it: current Claude Code (verified on 2.1.226) holds
+    this envelope for manual review whenever the recipient runs
+    ``bypassPermissions`` (the ``crossSessionInbound`` guard, shipped as a
+    security feature: a synthetic user turn is indistinguishable from operator
+    typing, and in a bypass session it would drive tools with no approval).
+
+    The listener does carry a ``fromMode`` attestation field (a peer origin
+    whose mode matches the recipient's class is auto-delivered), but reading it
+    is gated behind the internal GrowthBook flag ``tengu_harbor_kite_mode_emit``
+    (default off), so it is not a contract a sender can rely on or enable. The
+    only documented escape is the receiver setting ``crossSessionInbound:
+    "accept"``, which accepts every un-attested peer. Net: a socket inject
+    cannot be delivered into a bypass session. ``recovery.py`` documents the
+    consequence for the watchdog; a fresh ``claude --bg --resume`` (whose seed
+    is a CLI arg, not a socket inject) is the deliverable channel.
+
+    XML-attribute escape is mandatory; the dispatch layer rejects XML-unsafe
+    input before we get here, but a defensive escape keeps the envelope safe in
+    every code path.
     """
     wrapped = build_cross_session_container(message, from_name)
     envelope = {
@@ -787,19 +805,31 @@ def _build_envelope(message: str, from_name: str) -> bytes:
     return (json.dumps(envelope, separators=(",", ":")) + "\n").encode("utf-8")
 
 
-def send_to_session(sock_path: str, content: str, from_name: str) -> None:
+# Transport-level send outcome. The only success state of a single-shot AF_UNIX
+# write is "the bytes were written to the local socket end"; it does NOT mean the
+# recipient accepted the message. A ``bypassPermissions`` recipient holds
+# cross-session messages by design (Claude Code >=2.1.226 ``crossSessionInbound``
+# guard), and that hold is asynchronous and undetectable from the sender. Callers
+# that need a delivery guarantee must use a channel with an ack (or a fresh
+# process whose seed is a CLI arg, not a socket inject). See ``_build_envelope``.
+SEND_WRITTEN = "written"
+
+
+def send_to_session(sock_path: str, content: str, from_name: str) -> str:
     """Single-shot send of the BG8 envelope over the messaging socket.
 
     Opens an AF_UNIX SOCK_STREAM, writes the rendered envelope plus a
     newline, closes. Raises :class:`ProviderSocketError` on any
     connect/write/close failure, with the underlying ``OSError`` chained
-    as ``__cause__``.
+    as ``__cause__``. On success returns :data:`SEND_WRITTEN`.
 
-    On AF_UNIX SOCK_STREAM, post-``sendall`` close-time errors (EIO,
-    ECONNRESET) are the only reliable "your bytes never made it across"
-    signal — ``sendall`` only guarantees the bytes hit the kernel
-    buffer, not that the peer accepted them. So a close OSError is
-    propagated as a send failure rather than swallowed.
+    "Written" is a TRANSPORT outcome, not a delivery outcome: it means the bytes
+    hit the kernel buffer, not that the peer accepted them. A
+    ``bypassPermissions`` recipient holds the message by design and the sender
+    cannot tell. On AF_UNIX SOCK_STREAM, post-``sendall`` close-time errors
+    (EIO, ECONNRESET) are the only reliable "your bytes never made it across"
+    signal, so a close OSError is propagated as a send failure rather than
+    swallowed; a clean close still only proves the write, not the delivery.
     """
     payload = _build_envelope(content, from_name)
     sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -822,6 +852,7 @@ def send_to_session(sock_path: str, content: str, from_name: str) -> None:
                 raise ProviderSocketError(f"close after send failed: {close_exc}") from close_exc
     if primary_exc is not None:
         raise ProviderSocketError(str(primary_exc)) from primary_exc
+    return SEND_WRITTEN
 
 
 def liveness_probe(sock_path: str) -> bool:

@@ -231,10 +231,13 @@ def tick() -> None:
             f"pr-watch tick: open_prs={result.open_prs} acted={result.acted} skipped={result.skipped}"
         )
 
-    # Session auto-recovery (x-f47c) rides this same launchd cadence: a sweep
-    # that resumes footnote-launched bg sessions which went idle-but-incomplete
-    # after an abnormal turn termination. Gated by config.recovery.enabled and
-    # wrapped non-fatally so a recovery failure never breaks the PR-watch tick.
+    # Session recovery rides this same launchd cadence: a sweep over
+    # footnote-launched bg /target sessions that rotates providers on swap-class
+    # deaths and surfaces finished-but-lingering sessions to close. The held
+    # socket nudge was removed (a bypass recipient holds it by design), so the
+    # sweep no longer resumes idle-but-incomplete sessions. Gated by
+    # config.recovery.enabled and wrapped non-fatally so a recovery failure
+    # never breaks the PR-watch tick.
     if settings.recovery.enabled:
         try:
             from fno.recovery import run_recovery_sweep

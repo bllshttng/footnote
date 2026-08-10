@@ -351,11 +351,11 @@ max_age_days = 14
 model = "claude-haiku-4-5"
 
 [recovery]
-# Enable the session auto-recovery watchdog (resumes idle-but-incomplete bg sessions; rides the pr_watch tick).
+# Enable the bg-session recovery sweep: provider failover on swap-class deaths plus close-surfacing for finished-but-lingering sessions (rides the pr_watch tick). Assumes bypass workers (the config.agents.spawn_permission_mode default); a non-bypass worker cannot run autonomously and is not resumed.
 enabled = true
-# How stale a bg session must be before a resume nudge fires (seconds).
+# How stale a bg session must be (seconds) before recovery acts on it.
 idle_threshold_seconds = 900
-# Per-session cap on resume nudges before the watchdog gives up.
+# Per-session cap on held-by-design surfaces before recovery stops surfacing a stuck session (close notifications are once-only, tracked separately).
 max_nudges = 3
 
 [health_monitor]

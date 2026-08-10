@@ -127,9 +127,10 @@ class TestClassify:
 # ---------------------------------------------------------------------------
 
 class _Entry:
-    def __init__(self, harness, short_id):
+    def __init__(self, harness, short_id, cwd=None):
         self.harness = harness
         self.short_id = short_id
+        self.cwd = cwd
 
 
 class _Locator:
@@ -170,11 +171,23 @@ class _Cfg:
     max_nudges = 3
 
 
-def _stale_candidate(tmp_path, short_id="aaaa1111", sock="/tmp/a.sock"):
+def _node_bound_cwd(tmp_path):
+    """A worktree-like cwd with a ``.fno/target-state.md`` so the candidate reads
+    as a node-bound /target worker (not node-less)."""
+    cwd = tmp_path / "wt"
+    (cwd / ".fno").mkdir(parents=True, exist_ok=True)
+    (cwd / ".fno" / "target-state.md").write_text(
+        "graph_node_id: x-test\n", encoding="utf-8"
+    )
+    return str(cwd)
+
+
+def _stale_candidate(tmp_path, short_id="aaaa1111", sock="/tmp/a.sock", *, node_less=False):
     return recovery.Candidate(
         short_id=short_id,
         sock_path=sock,
         jobs_dir=tmp_path,
+        cwd=None if node_less else _node_bound_cwd(tmp_path),
     )
 
 
@@ -213,7 +226,11 @@ class _Harness:
 
 
 class TestSweep:
-    def test_stale_session_gets_one_nudge_and_one_event(self, tmp_path):
+    def test_stale_node_bound_worker_surfaced_as_held_no_send(self, tmp_path):
+        # x-d93d: a stuck node-bound /target worker is bypass, so the socket
+        # nudge is held by Claude Code's crossSessionInbound guard. recovery does
+        # NOT send (that would stack an operator dialog); it surfaces the stuck
+        # worker once as held-by-design.
         h = _Harness()
         counts: dict = {}
         recovery.recovery_sweep(
@@ -221,12 +238,28 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
-        assert len(h.sends) == 1
-        assert h.sends[0][1] == recovery.CONTINUE_MESSAGE
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.sends == []
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
         assert counts["aaaa1111"] == 1
+
+    def test_node_less_bg_thread_is_silent_not_surfaced(self, tmp_path):
+        # x-a76d scope fix: a node-less bg thread (an ask/relay worker, or a
+        # ``--bg`` session a human attached to and drives) is none of recovery's
+        # mission. A stuck one stays silent, never a candidate for held-by-design
+        # surfacing or a close nudge.
+        h = _Harness()
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path, node_less=True)],
+            counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+        )
+        assert h.sends == []
+        assert h.events == []
 
     def test_needs_input_emits_skipped_no_send(self, tmp_path):
         h = _Harness(state="needs-input")
@@ -235,7 +268,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
@@ -250,7 +283,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.events == []
@@ -264,7 +297,7 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_capped"]
@@ -281,7 +314,7 @@ class TestSweep:
                 candidates=[_stale_candidate(tmp_path)],
                 counts=counts,
                 emit=h.emit, read_state_fn=h.read_state,
-                truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+                truth_fn=h.truth, liveness_fn=h.liveness,
             )
         assert h.event_types().count("recovery_capped") == 1
 
@@ -294,28 +327,27 @@ class TestSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
         assert h.sends == []
         assert h.event_types() == ["recovery_skipped"]
         assert h.events[0][1]["reason"] == "socket-unreachable"
 
-    def test_send_failure_is_non_fatal(self, tmp_path):
-        # AC: a re-nudge whose socket write fails must not crash the sweep.
+    def test_held_path_does_not_invoke_send_fn(self, tmp_path):
+        # x-d93d: the socket nudge was removed; a stuck node-bound worker is
+        # surfaced held-by-design and no socket send is attempted (the bypass
+        # recipient would hold it). The seam carries no send_fn anymore.
         h = _Harness()
-
-        def boom(sock, content, from_name):
-            raise recovery._SendError("socket gone")
-
-        # Should not raise.
         recovery.recovery_sweep(
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=boom,
+            truth_fn=h.truth, liveness_fn=h.liveness,
         )
-        assert "recovery_skipped" in h.event_types()
+        assert h.sends == []
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
 
 # ---------------------------------------------------------------------------
@@ -363,9 +395,9 @@ class TestSafeReadState:
 
 
 class TestRunRecoverySweep:
-    def test_end_to_end_nudge_and_counts_persisted(self, tmp_path):
+    def test_end_to_end_held_surface_and_counts_persisted(self, tmp_path):
         h = _Harness()  # stale running session, live socket, no promise
-        entries = [_Entry("claude", "aaaa1111"), _Entry("codex", "z")]
+        entries = [_Entry("claude", "aaaa1111", cwd=_node_bound_cwd(tmp_path)), _Entry("codex", "z")]
         live = {"aaaa1111": _Locator("aaaa1111", "/tmp/a.sock", tmp_path)}
         saved: dict = {}
 
@@ -377,18 +409,18 @@ class TestRunRecoverySweep:
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
             truth_fn=h.truth, liveness_fn=h.liveness,
-            send_fn=h.send,
             load_counts_fn=lambda: {},
             save_counts_fn=lambda c: saved.update(c),
         )
 
         assert n == 1
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
         assert saved["aaaa1111"] == 1
 
     def test_prunes_counts_for_vanished_sessions(self, tmp_path):
         h = _Harness()
-        entries = [_Entry("claude", "aaaa1111")]
+        entries = [_Entry("claude", "aaaa1111", cwd=_node_bound_cwd(tmp_path))]
         live = {"aaaa1111": _Locator("aaaa1111", "/tmp/a.sock", tmp_path)}
         saved: dict = {}
         # "gone9999" is a leftover count for a session no longer live.
@@ -402,7 +434,6 @@ class TestRunRecoverySweep:
             locate_fn=lambda sid: live.get(sid),
             read_state_fn=h.read_state,
             truth_fn=h.truth, liveness_fn=h.liveness,
-            send_fn=h.send,
             load_counts_fn=lambda: dict(prior),
             save_counts_fn=lambda c: saved.update(c),
         )
@@ -431,7 +462,7 @@ class TestClassifySessionError:
 
     def test_connection_drop_is_not_swap_class(self):
         # AC2-FR: a clean connection-drop carries no quota/5xx marker, so it is
-        # not a swap trigger — the watchdog nudges it exactly as x-f47c does.
+        # not a swap trigger — it surfaces held-by-design, not failover.
         err = recovery.classify_session_error("API Error: Connection closed mid-response")
         assert err is None or err.triggers_swap is False
 
@@ -465,7 +496,7 @@ class TestFailoverSweep:
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=h.failover,
         )
 
@@ -478,21 +509,23 @@ class TestFailoverSweep:
         assert h.event_types() == ["failover_swapped"]
         assert h.events[0][1]["redispatched"] is True   # honest: worker started
 
-    def test_rotated_no_worker_emits_swapped_then_nudges(self, tmp_path):
+    def test_rotated_no_worker_emits_swapped_then_held(self, tmp_path):
         # codex P1: the swap rotated the provider but no replacement worker
         # started (non-claude target / spawn failed). The event must report
-        # redispatched=False (no phantom redispatch) AND the session still gets
-        # the bounded nudge rather than being left dead-and-unnudged.
+        # redispatched=False (no phantom redispatch); the stuck session then
+        # falls through to the held-by-design surface (not a socket nudge).
         h = _FailoverHarness(output_result="rate limit", outcome="rotated-no-worker")
         self._run(h, tmp_path)
-        assert h.event_types() == ["failover_swapped", "recovery_nudge"]
+        assert h.event_types() == ["failover_swapped", "recovery_skipped"]
         assert h.events[0][1]["redispatched"] is False
-        assert len(h.sends) == 1
+        assert h.events[1][1]["reason"] == "held-by-design"
+        assert h.sends == []
 
     def test_one_swap_per_tick(self, tmp_path):
         # codex P2: a swap mutates the GLOBAL active provider, so only one
-        # rotation may fire per tick; the second stale session nudges this tick
-        # (reconsidered next tick against the settled provider).
+        # rotation may fire per tick; the second stale session surfaces
+        # held-by-design this tick (reconsidered next tick against the settled
+        # provider).
         h = _FailoverHarness(output_result="rate limit", outcome="swapped")
         recovery.recovery_sweep(
             _now(), _Cfg(),
@@ -502,28 +535,32 @@ class TestFailoverSweep:
             ],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=h.failover,
         )
         assert len(h.failover_calls) == 1            # only the first swaps
         assert h.failover_calls[0][0] == "aaaa1111"
-        assert h.event_types() == ["failover_swapped", "recovery_nudge"]
-        assert h.sends[0][0] == "/tmp/b.sock"        # the second nudged
+        assert h.event_types() == ["failover_swapped", "recovery_skipped"]
+        assert h.events[1][1]["short_id"] == "bbbb2222"   # the second surfaced
 
-    def test_connection_drop_still_nudges(self, tmp_path):
-        # AC2-FR: a clean connection-drop is unchanged — failover never called.
+    def test_connection_drop_surfaces_held(self, tmp_path):
+        # AC2-FR: a clean connection-drop never triggers failover; the stuck
+        # worker is surfaced held-by-design (the socket nudge is held by the
+        # bypass recipient, x-d93d).
         h = _FailoverHarness(output_result="API Error: Connection closed mid-response")
         self._run(h, tmp_path)
         assert h.failover_calls == []
-        assert h.sends and h.sends[0][1] == recovery.CONTINUE_MESSAGE
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.sends == []
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
-    def test_no_output_result_nudges(self, tmp_path):
-        # No last-error text (the common idle case): unchanged nudge.
+    def test_no_output_result_surfaces_held(self, tmp_path):
+        # No last-error text (the common idle case): held-by-design surface.
         h = _FailoverHarness(output_result=None)
         self._run(h, tmp_path)
         assert h.failover_calls == []
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
     def test_blocked_thrash_emits_blocked_no_nudge(self, tmp_path):
         # AC2-EDGE: storm-cap reached -> bounded stop, no nudge churn.
@@ -544,36 +581,38 @@ class TestFailoverSweep:
         assert h.event_types() == ["failover_swapped"]
         assert h.events[0][1]["redispatched"] is False
 
-    def test_queue_exhausted_falls_through_to_nudge(self, tmp_path):
+    def test_queue_exhausted_falls_through_to_held(self, tmp_path):
         # AC1-EDGE (watchdog reading): no eligible alternate -> nothing to swap
-        # to, so fall back to the bounded x-f47c nudge (the rate-limit window may
-        # clear). Strictly no worse than the pre-failover watchdog for the common
-        # single-provider case; the per-session cap stops it spinning.
+        # to, so fall through to the held-by-design surface. Nothing can be
+        # swapped to and the socket nudge cannot reach a bypass recipient, so the
+        # honest action is to surface the stuck session once for the operator.
         h = _FailoverHarness(output_result="quota exceeded", outcome="queue-exhausted")
         self._run(h, tmp_path)
-        assert len(h.sends) == 1
-        assert h.sends[0][1] == recovery.CONTINUE_MESSAGE
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.sends == []
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
-    def test_no_swap_outcome_falls_through_to_nudge(self, tmp_path):
-        # Controller declined (NO_SWAP_NEEDED): defensive fall-through to nudge.
+    def test_no_swap_outcome_falls_through_to_held(self, tmp_path):
+        # Controller declined (NO_SWAP_NEEDED): defensive fall-through to held.
         h = _FailoverHarness(output_result="rate limit", outcome="no-swap")
         self._run(h, tmp_path)
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
     def test_failover_disabled_when_fn_absent(self, tmp_path):
-        # Backward compat: no failover_fn -> swap-class error still nudges (today).
+        # Backward compat: no failover_fn -> swap-class error surfaces held-by-design.
         h = _FailoverHarness(output_result="rate limit exceeded")
         recovery.recovery_sweep(
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)],
             counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             # failover_fn omitted
         )
         assert h.failover_calls == []
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
 
 class TestDefaultFailover:
@@ -927,11 +966,20 @@ class TestMissionAwareTerminalGate:
         # AC1: positive evidence of an unfinished mission relaxes the skip.
         assert self._classify(False) == recovery.NUDGE
 
-    @pytest.mark.parametrize("mc", [True, None])
-    def test_complete_or_unverifiable_stays_terminal(self, mc):
-        # AC3/AC7: only False relaxes; None (probe failed, node-less thread)
-        # keeps today's behavior.
+    @pytest.mark.parametrize("mc", [None])
+    def test_unverifiable_stays_terminal(self, mc):
+        # AC7: None (probe failed, node-less thread) keeps the terminal skip
+        # (fail closed).
         assert self._classify(mc) == recovery.SKIP_TERMINAL
+
+    def test_complete_and_stale_nudges_close(self):
+        # x-a76d: a session whose mission actually shipped but still lingers is
+        # surfaced to CLOSE once idle, not left silent or resumed.
+        assert self._classify(True) == recovery.NUDGE_CLOSE
+
+    def test_complete_and_fresh_is_left_alone(self):
+        # A fresh finish is not yet lingering; leave it alone.
+        assert self._classify(True, age_s=120) == recovery.NOT_STALE
 
     def test_default_keyword_preserves_legacy_behavior(self):
         assert recovery.classify(
@@ -963,21 +1011,63 @@ class TestMissionAwareTerminalGate:
             candidates=[_stale_candidate(tmp_path)],
             counts=counts,
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             failover_fn=failover_fn,
             mission_complete_fn=mission_complete_fn,
         )
         return h, counts
 
-    def test_sweep_nudges_hollow_promise(self, tmp_path):
+    def test_sweep_hollow_promise_surfaces_held(self, tmp_path):
+        # A hollow promise (mission_complete=False) is unfinished; once idle it
+        # falls to the held-by-design surface (the resume nudge is held by the
+        # bypass recipient, x-d93d).
         h, counts = self._sweep(tmp_path, mission_complete_fn=lambda c: False)
-        assert h.event_types() == ["recovery_nudge"]
-        assert h.events[0][1]["nudge_count"] == 1
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
         assert counts["aaaa1111"] == 1
 
-    def test_sweep_stays_silent_for_complete_mission(self, tmp_path):
+    def test_sweep_complete_mission_surfaces_close(self, tmp_path):
+        # x-a76d: a finished-but-lingering session is surfaced to CLOSE over a
+        # working channel, not resumed over the held socket and not left silent.
         h, _ = self._sweep(tmp_path, mission_complete_fn=lambda c: True)
-        assert (h.sends, h.events) == ([], [])
+        assert h.sends == []
+        assert h.event_types() == ["recovery_close_notify"]
+
+    def test_close_notify_calls_seam_once_across_ticks(self, tmp_path):
+        # The close surface fires ONCE per session (a finished session the
+        # operator has not gotten to must not ping every tick).
+        notified: list = []
+        counts: dict = {}
+        for _ in range(3):
+            h = _Harness(state="done")
+            recovery.recovery_sweep(
+                _now(), _Cfg(),
+                candidates=[_stale_candidate(tmp_path)], counts=counts,
+                emit=h.emit, read_state_fn=h.read_state,
+                truth_fn=h.truth, liveness_fn=h.liveness,
+                mission_complete_fn=lambda c: True,
+                notify_close_fn=lambda c: notified.append(c) or True,
+            )
+        assert len(notified) == 1
+        assert counts[recovery._close_key("aaaa1111")] is True
+
+    def test_close_notify_undelivered_does_not_claim_surface(self, tmp_path):
+        # A channel that reports not-delivered (no osascript/notify-send, or a
+        # raising seam) must not record a recovery_close_notify it never sent.
+        def boom(_c):
+            raise RuntimeError("notify down")
+
+        h = _Harness(state="done")
+        recovery.recovery_sweep(
+            _now(), _Cfg(),
+            candidates=[_stale_candidate(tmp_path)], counts={},
+            emit=h.emit, read_state_fn=h.read_state,
+            truth_fn=h.truth, liveness_fn=h.liveness,
+            mission_complete_fn=lambda c: True,
+            notify_close_fn=boom,
+        )
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "no-notify-channel"
 
     def test_sweep_without_seam_is_unchanged(self, tmp_path):
         h, _ = self._sweep(tmp_path, mission_complete_fn=None)
@@ -990,11 +1080,12 @@ class TestMissionAwareTerminalGate:
             _now(), _Cfg(),
             candidates=[_stale_candidate(tmp_path)], counts={},
             emit=h.emit, read_state_fn=h.read_state,
-            truth_fn=h.truth, liveness_fn=h.liveness, send_fn=h.send,
+            truth_fn=h.truth, liveness_fn=h.liveness,
             mission_complete_fn=lambda c: calls.append(c) or False,
         )
         assert calls == []
-        assert h.event_types() == ["recovery_nudge"]
+        assert h.event_types() == ["recovery_skipped"]
+        assert h.events[0][1]["reason"] == "held-by-design"
 
     def test_hollow_promise_reaches_failover(self, tmp_path):
         # AC1/US4: a swap-class death behind a hollow promise rotates providers
