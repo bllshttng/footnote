@@ -202,7 +202,7 @@ TRANSCRIPT_PATH=$(printf '%s' "$HOOK_INPUT" | jq -r '.transcriptPath // empty' 2
 # newest-first, so losing an early bad line is harmless).
 #
 # ponytail: agy's exact transcript.jsonl line schema is unconfirmed at build time
-# (deferred capture, plan #jc 2026-07-11) -- this filter handles the documented-
+# (deferred capture, dated 2026-07-11) -- this filter handles the documented-
 # likely shapes (Gemini model/parts, claude message.content, flat role/content).
 # A line matching none is dropped, which is SAFE: no promise detected -> the
 # adapter keeps the session working (loop-check's world-gate + NoProgress backstop

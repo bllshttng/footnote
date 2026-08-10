@@ -49,7 +49,7 @@ The verifier chooses severity; the wrapper validates the value. Use this matrix:
 | Destructive command | S0 | rm-rf-detector, shell-eval-warner |
 | Style / formatting / convention | S1 | emdash-grep, trailing-whitespace, missing-newline-at-eof |
 | Lint / type / build break | S1 | shellcheck, mypy, eslint |
-| Documentation / drift | S2 | skill-bundle-fresh, todo-without-jc-marker |
+| Documentation / drift | S2 | skill-bundle-fresh, todo-without-marker |
 
 S0 verifiers should be additionally wired to fire an immediate review (see Phase 02 Task 2.4 for the inline S0 trigger). Most verifiers stay at S1 or S2.
 

@@ -31,7 +31,7 @@
 # Usage: brew_formula_smoke.sh <path-to-binary-complete-wheel>
 #   The wheel is required for the INSTALL tier; the STRUCTURAL tier ignores it.
 #   The by-name `brew install <owner>/fno/fno` + the full `--new` audit go green
-#   only AFTER the PyPI publish + tap creation (foundation launch #jc); this
+#   only AFTER the PyPI publish + tap creation (foundation launch); this
 #   smoke proves the formula + the symlink mechanism now.
 set -uo pipefail
 
