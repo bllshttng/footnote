@@ -128,6 +128,7 @@ cli/tests/agents/test_crown_bg_substrate.py:263: provider="claude" (provider-nam
 cli/tests/agents/test_crown_bg_substrate.py:306: provider="claude" (provider-named binding holds a harness literal)
 cli/tests/agents/test_crown_bg_substrate.py:331: provider="claude" (provider-named binding holds a harness literal)
 cli/tests/agents/test_crown_succession.py:77: provider="claude" (provider-named binding holds a harness literal)
+cli/tests/agents/test_crown_succession.py:158: provider="claude" (provider-named binding holds a harness literal)
 cli/tests/agents/test_dispatch.py:111: requested_provider="claude" (provider-named binding holds a harness literal)
 cli/tests/agents/test_dispatch.py:140: requested_provider="codex" (provider-named binding holds a harness literal)
 cli/tests/agents/test_dispatch_ask.py:1013: provider="claude" (provider-named binding holds a harness literal)

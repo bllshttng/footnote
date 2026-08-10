@@ -54,7 +54,7 @@ from fno.agents.registry import (
     resolve_registered_agent_across_sources,
     update_registry,
 )
-from fno.agents.crown import crown_validation_error
+from fno.agents.crown import calling_agent_row, crown_validation_error, grant_error
 from fno.harness_identity import (
     canonical_handle,
     resolve_harness_identity,
@@ -2245,6 +2245,13 @@ def dispatch_spawn(
     if crown_problem is not None:
         raise DispatchAskError(crown_problem, exit_code=2)
     if crown_level is not None:
+        # Authorization, at the seam every caller reaches: you cannot hand down
+        # authority you do not hold. Refuses BEFORE the launch rather than
+        # declining after, because an unauthorized grant is an authority error,
+        # not a race - nothing should exist as a result of it.
+        grant_problem = grant_error(crown_scope or "", calling_agent_row())
+        if grant_problem is not None:
+            raise DispatchAskError(f"--crown: {grant_problem}", exit_code=2)
         if once or headless:
             raise DispatchAskError(
                 "--crown needs a session that outlives the grant; a one-shot "

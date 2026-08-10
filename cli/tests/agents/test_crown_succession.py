@@ -137,3 +137,63 @@ def test_an_uncrowned_caller_grants_normally(court) -> None:
 
     assert _row("heir").crown_scope == SCOPE
     assert _row("heir").crown_grantor == CALLER_SESSION
+
+
+# --- you cannot hand down authority you do not hold --------------------------
+#
+# The strict-subset rule was documented from the start and enforced by the
+# deleted promotion verb. Its replacement (`scope_contains`) shipped with no
+# caller at all, so for one commit any spawned worker could mint portfolio
+# authority for its child. These exercise the seam, not the helper: a test that
+# called `scope_contains` directly passed the whole time the rule was unenforced.
+
+
+def _spawn_over(scope: str, name: str = "heir"):
+    from fno.agents.dispatch import dispatch_spawn
+
+    level = 0 if "," in scope else 1
+    return dispatch_spawn(
+        name=name,
+        message="reign",
+        provider="claude",
+        cwd=Path("/tmp"),
+        crown_level=level,
+        crown_scope=scope,
+    )
+
+
+def test_an_uncrowned_agent_cannot_bestow_a_crown(court) -> None:
+    """The caller is a registered agent (a row keyed by its session) holding no
+    crown. It has nothing to hand down, so the grant is refused before launch."""
+    from fno.agents.dispatch import DispatchAskError
+
+    _seat("caller", CALLER_SESSION, scope=None, status="busy")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn_over("alpha")
+    assert exc.value.exit_code == 2
+    assert "holds none" in str(exc.value)
+    assert _row("heir") is None, "an unauthorized grant must launch nothing"
+
+
+def test_a_king_cannot_grant_outside_its_own_scope(court) -> None:
+    """A king over one epic cannot mint a portfolio crown - that is authority it
+    does not hold, and the escalation the subset rule exists to stop."""
+    from fno.agents.dispatch import DispatchAskError
+
+    _seat("caller", CALLER_SESSION, scope="epic-x", status="busy")
+
+    with pytest.raises(DispatchAskError) as exc:
+        _spawn_over("alpha,beta")
+    assert exc.value.exit_code == 2
+    assert "neither contains nor equals" in str(exc.value)
+
+
+def test_an_attended_human_may_grant_anything(court, monkeypatch) -> None:
+    """No agent identity in the environment means a human at a keyboard, and
+    there is nobody above a human to check the grant against."""
+    monkeypatch.delenv("CLAUDE_CODE_SESSION_ID", raising=False)
+
+    _spawn_over("alpha")
+
+    assert _row("heir").crown_scope == "alpha"
