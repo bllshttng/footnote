@@ -7742,13 +7742,16 @@ def cmd_reconcile(
     if closeable:
         gated: list = []
         for record in closeable:
-            node_obj = _find_node(entries, record.node_id) or {
+            # Distinct name from the rollup loop's `node_obj`: that loop assigns
+            # `_find_node(...)` (dict | None), so reusing the name here would pin
+            # it to `dict` via the `or {...}` and trip mypy at the later assign.
+            gate_node = _find_node(entries, record.node_id) or {
                 "id": record.node_id,
                 "plan_path": record.plan_path,
                 "pr_number": record.pr_number,
                 "pr_url": record.pr_url,
             }
-            verdict = resolve_promise_evidence(node_obj)
+            verdict = resolve_promise_evidence(gate_node)
             if verdict.outcome == "promise_unmet":
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.
