@@ -3163,3 +3163,162 @@ def test_subagent_unreadable_root_emits_one_warning(tmp_path, monkeypatch):
     assert rows == []
     assert len(warnings) == 1
     assert "unreadable" in warnings[0]
+
+
+def test_disambiguate_does_not_compound_a_non_unique_short_id():
+    """A repeated ``short_id`` must not grow the alias on every render.
+
+    ``_disambiguate`` used to append ``short_id`` unconditionally, trusting it
+    to be unique. When it was not, every colliding session got the SAME suffix,
+    the name still collided, and the next render appended another copy -
+    observed in the wild at 13 repetitions inside a 224-char alias. The suffix
+    has to be checked before it is accepted.
+    """
+    from fno.agents.discover import _disambiguate
+
+    live = [
+        {"session_id": "aaaaaaaa-1111-2222-3333-444444444444", "short_id": "dup"},
+        {"session_id": "bbbbbbbb-1111-2222-3333-555555555555", "short_id": "dup"},
+        {"session_id": "cccccccc-1111-2222-3333-666666666666", "short_id": "dup"},
+    ]
+    # Base carries no "dup" of its own, so counting the suffix measures the
+    # escalation rather than the name it was appended to.
+    aliases = {r["session_id"]: "etl-worker" for r in live}
+
+    out = _disambiguate(aliases, live)
+
+    assert len(set(out.values())) == 3, f"aliases must be unique, got {out}"
+    # The defect was unbounded GROWTH, not merely a duplicate: the shared
+    # short_id may be appended at most once, and the third session must escalate
+    # past it to something actually unique.
+    for name in out.values():
+        assert name.count("-dup") <= 1, f"suffix compounded: {name}"
+
+    # Idempotent: feeding the result back in must not grow anything. This is the
+    # property that actually failed in production, where the map is re-rendered
+    # from its own stored output on every pass.
+    again = _disambiguate(out, live)
+    assert again == out, f"second render changed the map: {out} -> {again}"
+
+
+def test_disambiguate_never_emits_a_duplicate_even_when_every_suffix_is_taken():
+    """The uniqueness guarantee has to hold on the exhausted path too.
+
+    Reachable only from a hand-edited map that aliases one session to exactly
+    the `<name>-<sid>` another session would escalate to. Falling through would
+    emit a duplicate, and a duplicate alias resolves to two holders on the send
+    path - the precise failure the guarantee exists to prevent.
+    """
+    from fno.agents.discover import _disambiguate, canonical_handle
+
+    # The victim must sort LAST, so every rung of its ladder is already in
+    # `seen` by the time it is processed. Sorting it first would mean no
+    # collision at all and the exhausted path would never run.
+    victim = "zzzzzzzz-1111-2222-3333-999999999999"
+    holders = [
+        "aaaaaaaa-1111-2222-3333-444444444444",
+        "bbbbbbbb-1111-2222-3333-555555555555",
+        "cccccccc-1111-2222-3333-666666666666",
+        "dddddddd-1111-2222-3333-777777777777",
+    ]
+    live = [{"session_id": s, "short_id": "dup"} for s in [*holders, victim]]
+    aliases = {
+        holders[0]: "etl-worker",
+        holders[1]: "etl-worker-dup",
+        holders[2]: f"etl-worker-{canonical_handle(victim)}",
+        holders[3]: f"etl-worker-{victim}",
+        victim: "etl-worker",
+    }
+
+    out = _disambiguate(aliases, live)
+
+    assert len(set(out.values())) == len(out), f"duplicate emitted: {out}"
+    assert out[victim] not in [out[s] for s in holders]
+
+
+def test_accretion_detector_catches_short_damage_and_spares_real_names():
+    """The heal must not key on length alone.
+
+    Accretion added one token-group per render, so a session that rendered two
+    or three times before the fix is stored as `etl-dup-dup` - well under any
+    length cap, never growing again, and never healed either. That is the same
+    "preserved, not healed" failure the length guard was added to prevent, just
+    below the cutoff.
+    """
+    from fno.agents.discover import _is_accreted
+
+    for damaged in (
+        "etl-dup-dup",
+        "etl-dup-dup-dup",
+        "etl-handoff-siera-lm-handoff-siera-lm",
+        "etl-" + "handoff-siera-lm-" * 13 + "x",  # the observed 224-char case
+    ):
+        assert _is_accreted(damaged), f"missed accretion: {damaged[:60]}"
+
+    for healthy in (
+        "etl-worker-a1b2c3d4",
+        "session-9f3a2b1c",
+        "my-long-descriptive-name",
+        "etl-a1b2c3d4",
+    ):
+        assert not _is_accreted(healthy), f"false positive on: {healthy}"
+
+
+def test_disambiguate_leaves_already_unique_aliases_untouched():
+    """The common case stays byte-identical - no suffix on a unique name."""
+    from fno.agents.discover import _disambiguate
+
+    live = [
+        {"session_id": "aaaaaaaa-1111-2222-3333-444444444444", "short_id": "a1b2c3d4"},
+        {"session_id": "bbbbbbbb-1111-2222-3333-555555555555", "short_id": "e5f6a7b8"},
+    ]
+    aliases = {
+        "aaaaaaaa-1111-2222-3333-444444444444": "etl-a1b2c3d4",
+        "bbbbbbbb-1111-2222-3333-555555555555": "etl-e5f6a7b8",
+    }
+    assert _disambiguate(aliases, live) == aliases
+
+
+def test_already_accreted_alias_is_healed_not_preserved(tmp_path, monkeypatch):
+    """Stopping the growth is not enough: a name already grown must shrink.
+
+    An accreted alias no longer collides with anything, so the stored map hands
+    it back verbatim on every later render and the 224-char name the operator
+    reported would live forever. An over-long stored alias is therefore dropped
+    and regenerated from the default.
+    """
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    ct = _write_session(sdir, 931, session_id="uuid-grown", job_id="grown001",
+                        cwd="/Users/x/code/proj")
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    accreted = "proj-grown001" + "-grown001" * 13
+    name_map.write_text(json.dumps({"uuid-grown": accreted}), encoding="utf-8")
+
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir, name_map_path=name_map,
+        psutil_mod=_FakePsutil({931: ct}), project_resolver=lambda c: "proj",
+    )
+
+    assert [s.handle for s in sessions] == ["proj-grown001"]
+    assert json.loads(name_map.read_text(encoding="utf-8")) == {
+        "uuid-grown": "proj-grown001"
+    }
+
+
+def test_hand_edited_short_alias_survives_the_heal(tmp_path, monkeypatch):
+    """The heal is keyed on accretion-scale length, so a real alias is kept."""
+    use_tmpdir(monkeypatch, tmp_path)
+    sdir = tmp_path / "sessions"
+    name_map = tmp_path / ".fno" / "session-names.json"
+    ct = _write_session(sdir, 932, session_id="uuid-named", job_id="named001",
+                        cwd="/Users/x/code/proj")
+    name_map.parent.mkdir(parents=True, exist_ok=True)
+    name_map.write_text(json.dumps({"uuid-named": "billing-worker"}), encoding="utf-8")
+
+    sessions = discover.discover_live_sessions(
+        sessions_dir=sdir, name_map_path=name_map,
+        psutil_mod=_FakePsutil({932: ct}), project_resolver=lambda c: "proj",
+    )
+    assert [s.handle for s in sessions] == ["billing-worker"]

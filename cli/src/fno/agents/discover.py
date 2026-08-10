@@ -25,6 +25,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,6 +64,36 @@ _CLAUDE_UUID_RE = re.compile(
 NAME_MAP_FILENAME = "session-names.json"
 _ALIAS_LOCK_TIMEOUT_SECONDS = 1.0
 _ALIAS_LOCK_POLL_SECONDS = 0.02
+# A stored alias longer than this is not a hand edit, it is accretion damage:
+# the pre-fix `_disambiguate` appended the same non-unique suffix on every
+# render (observed at 224 chars, 13 repetitions of one token). Stopping the
+# growth does not shorten a name already grown, because the long name no longer
+# collides and is reused verbatim from the stored map forever. So an over-long
+# stored alias is discarded and regenerated from the default; nobody types an
+# 80-character mailbox address by hand.
+_MAX_STORED_ALIAS_LEN = 80
+
+
+def _is_accreted(alias: str) -> bool:
+    """Whether ``alias`` carries the pre-fix disambiguator's damage signature.
+
+    The old ``_disambiguate`` appended the SAME suffix once per render, so the
+    damage is a trailing token-group repeated back to back: ``etl-dup-dup``,
+    ``etl-handoff-siera-lm-handoff-siera-lm``. Detecting that shape rather than
+    only a length lets the heal reach a name that stopped growing after two or
+    three renders, which a length cap alone leaves stored - and therefore
+    handed back verbatim - forever.
+
+    Length stays a second, independent trigger: an alias long enough to be a
+    mailbox nuisance is discarded whatever produced it.
+    """
+    if len(alias) > _MAX_STORED_ALIAS_LEN:
+        return True
+    parts = alias.split("-")
+    # Two identical adjacent k-token blocks at the tail is the accretion shape.
+    return any(
+        parts[-2 * k : -k] == parts[-k:] for k in range(1, len(parts) // 2 + 1)
+    )
 
 
 # Test/operator seam: point discovery at a different registry dir. The agents
@@ -1324,8 +1355,12 @@ def resolve_project_for_cwd(cwd: str) -> Optional[str]:
 def _default_alias(project: Optional[str], short_id: str) -> str:
     """Default legible alias: ``<project-basename>-<short-id>``.
 
-    ``short_id`` is the unique hex handle, so the default alias is unique by
-    construction; the disambiguation pass only fires on hand-edited collisions.
+    ``short_id`` is USUALLY the unique hex handle, and then the default alias is
+    unique too - but it can also be a registry-supplied jobId/name, which is only
+    as unique as its writer made it. Two sessions carrying the same one produce
+    the same default alias here, so the disambiguation pass is not reserved for
+    hand-edited collisions; see :func:`_disambiguate`, whose old form trusted the
+    claim in this docstring and grew aliases without bound because of it.
     """
     base = os.path.basename(project) if project else "session"
     alias = f"{base}-{short_id}"
@@ -1402,10 +1437,21 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
                         sid in pruned
                         and isinstance(pruned[sid], str)
                         and pruned[sid]
+                        and not _is_accreted(pruned[sid])
                         and not LEGACY_HANDLE_RE.fullmatch(pruned[sid])
                     ):
                         aliases[sid] = pruned[sid]
                     else:
+                        # Discarding a stored alias is destructive - anything
+                        # addressed to it stops resolving - so say so rather
+                        # than doing it silently. Only the heal path can
+                        # surprise a user; a first-fill has nothing to lose.
+                        if sid in pruned and isinstance(pruned[sid], str) and pruned[sid]:
+                            print(
+                                f"fno: discarding damaged session alias "
+                                f"{pruned[sid]!r}; regenerating from the default",
+                                file=sys.stderr,
+                            )
                         aliases[sid] = _default_alias(r.get("project"), r["short_id"])
                 aliases = _disambiguate(aliases, live)
                 if aliases != stored:
@@ -1422,19 +1468,49 @@ def _resolve_aliases(live: list[dict], name_map_path: Path) -> dict[str, str]:
 def _disambiguate(aliases: dict[str, str], live: list[dict]) -> dict[str, str]:
     """Guarantee aliases are unique within a render (Invariant).
 
-    Default aliases embed the unique hex, so this only fires when a hand-edited
-    map maps two sessions to the same name; the loser gets its short-id
-    appended deterministically (sorted by session_id, never silently dropped).
+    The loser of a collision gets a suffix appended deterministically (sorted by
+    session_id, never silently dropped).
+
+    The suffix is TRIED, not trusted. This used to append ``short_id``
+    unconditionally on the reasoning that default aliases embed a unique hex -
+    but ``short_id`` is only unique when whatever wrote it honored that, and
+    when it did not, the appended token was the SAME string for every colliding
+    session. The name then still collided, gained another copy on the next
+    render, and grew without bound: observed at 13 repetitions of one 16-char
+    token in a 224-char alias, on 20 of 194 entries. The guard meant to catch a
+    non-unique short_id was the thing amplifying it.
+
+    So each candidate is checked before it is accepted, ending at the full
+    session id, which is the map's own key and therefore unique by
+    construction. A non-unique ``short_id`` upstream is still a bug; this only
+    stops it from compounding here.
     """
-    seen: dict[str, str] = {}
+    seen: set[str] = set()
     short_by_sid = {r["session_id"]: r["short_id"] for r in live}
     out: dict[str, str] = {}
     for sid in sorted(aliases):
         name = aliases[sid]
-        if name in seen.values():
-            name = f"{name}-{short_by_sid.get(sid, canonical_handle(sid))}"
+        if name in seen:
+            for suffix in (short_by_sid.get(sid), canonical_handle(sid), sid):
+                if not suffix:
+                    continue
+                candidate = f"{name}-{suffix}"
+                if candidate not in seen:
+                    name = candidate
+                    break
+            else:
+                # Every candidate taken. Only a hand-edited map aliasing another
+                # session to exactly `<name>-<sid>` gets here, but falling
+                # through would emit a DUPLICATE - the one thing this function
+                # promises not to do, and a duplicate alias resolves to two
+                # holders on the send path. Counting terminates because `seen`
+                # is finite.
+                n = 2
+                while f"{name}-{sid}-{n}" in seen:
+                    n += 1
+                name = f"{name}-{sid}-{n}"
         out[sid] = name
-        seen[sid] = name
+        seen.add(name)
     return out
 
 

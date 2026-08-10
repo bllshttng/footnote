@@ -655,11 +655,15 @@ def test_ac1_hp_spawn_pane_runs_mux_and_writes_mux_ref_row(
     assert "FNO_AGENT_SELF=peer" in tail
     assert "FNO_AGENT_HARNESS=claude" in tail
     assert "CLAUDE_CODE_FORCE_SESSION_PERSISTENCE=1" in tail
-    # The provider argv is interactive claude with the pinned session id.
+    # The provider argv is interactive claude with the pinned session id and the
+    # worker's own display name (x-c028: without `--name` claude inherits one
+    # from the launching session's lineage and every pane worker looks alike).
     claude_at = tail.index("claude")
     assert tail[claude_at + 1] == "--session-id"
     assert tail[claude_at + 2] == result.session_uuid
-    assert tail[claude_at + 3] == "hello"
+    assert tail[claude_at + 3] == "--name"
+    assert tail[claude_at + 4] == "peer"
+    assert tail[claude_at + 5] == "hello"
 
     assert result.pane_id == 7
     assert result.session == "main"
@@ -2881,3 +2885,43 @@ def test_happy_pane_success_returns_live_receipt(
     result, _ = _spawn(monkeypatch, tmp_path, route_env=dict(_ROUTE))
     assert result.status == "live"
     assert result.short_id, "a live receipt must carry a non-empty short_id"
+
+
+def test_claude_pane_argv_carries_the_worker_name(tmp_path: Path) -> None:
+    """The pane lane forwards `--name`, like the bg lane always has.
+
+    Without it claude names the session from the launching session's lineage,
+    so every pane worker on one box shows the SAME display name and a session
+    list cannot tell N workers apart. Asserting the flag is PRESENT is not
+    enough: it has to carry THIS worker's name, since a lineage-inherited
+    string is also a non-empty name and would pass a presence check.
+    """
+    from fno.agents.mux_spawn import build_pane_argv
+
+    argv = build_pane_argv(
+        "claude", "task", tmp_path, False, "uuid-1", name="target-x-e4bf-ca-enf"
+    )
+    assert argv == [
+        "claude",
+        "--session-id",
+        "uuid-1",
+        "--name",
+        "target-x-e4bf-ca-enf",
+        "task",
+    ]
+
+    # No name resolved -> today's argv, byte for byte. An empty `--name` would
+    # be worse than none: claude would take the empty string as the display name.
+    assert build_pane_argv("claude", "task", tmp_path, False, "uuid-1", name="") == [
+        "claude",
+        "--session-id",
+        "uuid-1",
+        "task",
+    ]
+
+    # Only claude is wired. The other arms have no verified equivalent flag, so
+    # a name must not leak into their argv as a stray token.
+    for provider in ("codex", "gemini", "agy", "opencode"):
+        assert "--name" not in build_pane_argv(
+            provider, "task", tmp_path, False, None, name="target-x-e4bf-ca-enf"
+        ), f"{provider} pane argv must not grow an unverified --name"

@@ -734,6 +734,7 @@ def build_pane_argv(
     agent: Optional[str] = None,
     tools: Optional[str] = None,
     deny_tools: Optional[str] = None,
+    name: Optional[str] = None,
 ) -> list[str]:
     """The interactive PANE argv for ``provider`` - the bare-TUI form a mux
     pane hosts. This is DISTINCT from each provider's Rust ``create_argv``
@@ -747,7 +748,16 @@ def build_pane_argv(
     TUI flag (claude/codex/gemini/agy ``--model <m>``; opencode
     ``--model <provider/model>``). Exact passthrough, no fuzzy resolution;
     empty/None = provider default. A CLI ``--model`` arg beats any role-routing
-    model set via env (``resolve_route``), so explicit intent wins."""
+    model set via env (``resolve_route``), so explicit intent wins.
+
+    ``name`` is the worker's registry name, forwarded to claude's ``--name``
+    (its session DISPLAY name). Parity with the bg lane, which has always
+    hardcoded it (``claude_ask.rs`` ``build_argv``). Without it claude falls
+    back to a name inherited from the launching session's lineage, so every
+    pane worker on one box shows the SAME string in any session list that reads
+    it - N distinct workers collapse onto one row and the list cannot route.
+    Only claude is wired: the other pane arms have no verified equivalent flag,
+    and guessing one fails the spawn rather than degrading."""
     if message.strip().startswith(("/", "$fno:")):
         message = normalize_command(message, provider)
 
@@ -764,6 +774,8 @@ def build_pane_argv(
         argv = ["claude"]
         if session_uuid:
             argv += ["--session-id", session_uuid]
+        if name:
+            argv += ["--name", name]
         if model:
             argv += ["--model", model]
         if permission_mode:
@@ -1389,6 +1401,7 @@ def dispatch_spawn_pane(
         agent=agent,
         tools=tools,
         deny_tools=deny_tools,
+        name=name,
     )
     if codex_route is not None:
         argv = [argv[0], *codex_route.config_args, *argv[1:]]
