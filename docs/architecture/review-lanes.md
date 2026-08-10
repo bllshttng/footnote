@@ -191,22 +191,32 @@ coverage regardless of its origin, `self_attested` included.
 **A green PR whose only attestation is `self_attested` is covered. Merge it.**
 `self_attested` is not a hold condition and has never been one.
 
-No lane today can produce a non-self attestation: `emit-attestation.sh` runs in
-whichever session invokes the review verb, and the king-mediated lane (Lane 3)
-fires the verb at the worker's prompt line, so the author always emits and
-nothing spawns a separate reviewing session.
-Holding a green PR until someone else attests therefore waits on something no
-dispatched lane emits today.
-Two workers did exactly that on 2026-08-07, on separate PRs, and escalated to
-the operator to merge on their behalf; neither was blocked.
+**The spawned-reviewer lane.** A non-self attestation is producible today: the author spawns its own reviewer citizen, a different session by construction, so its attestation renders `attestation_origin = other_session`.
 
-"Keep the reviewer off the authoring worker" is the standing aspiration, and it
-is not a merge precondition.
-It becomes one when a lane exists that can satisfy it, and that decision is
-tracked on its own.
-"Land this, measure, then gate" would measure zero percent independent forever,
-so the gate waits on a lane that can produce one, not on elapsed measurement
-time.
+```bash
+fno agents spawn --name <name>-review "/code-review <size> for PR <n> against main" \
+  --harness claude --substrate bg --model opus \
+  --permission-mode bypassPermissions --cwd <the author's worktree>
+```
+
+Two rules ride with the lane, each derived from a code fact.
+`--cwd` MUST be the author's worktree: `fno event emit` writes cwd-relative through `append_event`, and `local_head_pinned_passes` reads only the project log, so a reviewer anywhere else emits an attestation its own loop-check never sees.
+NO `--fix`: the reviewer shares the worktree, so a fixing reviewer moves HEAD and silently invalidates the author's own head-pinned attestation, and re-opens the tree-corruption specimens.
+One writer per worktree while a review is in flight; the author applies findings and re-attests, and the reviewer's attestation is then stale by design, which is the head-pinning rule working, not a bug.
+
+The lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author spawns a claude reviewer (or vice versa), so "different session" can mean "different model".
+The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the lane's headline value, `other_session`, is silently unreachable.
+
+The king-mediated lane (Lane 3) still cannot produce independence by construction: it fires the review verb at the worker's own prompt line, so the author runs and emits it.
+That lane produces compliance, not independence; the spawned-reviewer lane is what produces the latter.
+
+Two workers held green PRs on 2026-08-07 waiting for a second attestation that no dispatched lane emitted then, and escalated to the operator to merge on their behalf; neither was blocked.
+The spawned-reviewer lane is the path that did not exist for them.
+
+No gate lands with the lane.
+Producing a countable non-author attestation and gating on it are separate decisions; `self_attested` stays a recorded origin, never a hold condition.
+"Land, measure, then decide" no longer measures zero percent independent forever, because the lane above is what emits the `other_session` value the sequence was waiting on.
+Whether to hold a green PR on a self-attested-only attestation remains its own decision, tracked on its own.
 
 This records WHOSE process rendered a verdict; the role-routing note in
 [role-based-model-routing.md](role-based-model-routing.md) records WHICH model,

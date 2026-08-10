@@ -113,7 +113,7 @@ The event is pinned to the current HEAD; if a new commit lands afterward, the de
 
 - **sigma** emits `sigma` when the panel returns with no unaddressed blocking finding (see [sigma.md](references/sigma.md)).
 - **peer** emits `peer` only after `consume-peer-verdict.sh` validates an explicit clean cross-model verdict with zero blocking findings.
-- **code-review** emits `code-review` when a `/code-review` pass completes on the current HEAD (the operator runs the helper after the pass).
+- **code-review** emits `code-review` when a `/code-review` pass completes on the current HEAD (the operator runs the helper after the pass). The same label can be emitted by a spawned reviewer citizen, a separate session the author launches to run `/code-review` in its own worktree, which is the one path that yields an `other_session` origin rather than `self_attested`; see the spawned-reviewer lane in [review-lanes.md](../../docs/architecture/review-lanes.md).
 - **declare** emits `declare` via Step 5 above.
 
 Head-pinning is mandatory: the helper stamps `git rev-parse HEAD`, and loop-check only counts an attestation whose `head_sha` equals the current HEAD (a pass on a superseded commit is discarded). Absence holds the gate (fail closed).
