@@ -5558,6 +5558,129 @@ fn coverage_origin_author_unknown_is_unknown_fail_open() {
     assert_eq!(rep.coverage_count(), Some(1));
 }
 
+// ── pair-key: (reviewer, attester_session_id) (x-f50f task 1.1) ──────────────
+
+/// AC1-HP: two passes at the same head under the same reviewer label but from
+/// DIFFERENT attester sessions join instead of replacing. Before the pair key
+/// the second `insert` overwrote the first and a peer-reviewed PR read
+/// `1 reviewed` while deleting its own control. Now it reads two verdicts - one
+/// `SelfAttested` (the author) and one `OtherSession` (the spawned peer) - and
+/// coverage_count is 2. This is the load-bearing test for the spawned-reviewer
+/// lane: it is what proves a non-author attestation is both producible AND
+/// countable, not silently collapsed.
+#[test]
+fn coverage_two_sessions_same_reviewer_join_not_replace() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
+        attestation_line_attested("code-review", COV_HEAD, "pass", OTHER),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(
+        locals.len(),
+        2,
+        "two sessions must produce two verdicts, not one"
+    );
+    assert_eq!(
+        locals
+            .iter()
+            .filter(|v| v.attestation_origin == AttestationOrigin::SelfAttested)
+            .count(),
+        1
+    );
+    assert_eq!(
+        locals
+            .iter()
+            .filter(|v| v.attestation_origin == AttestationOrigin::OtherSession)
+            .count(),
+        1
+    );
+    assert_eq!(rep.coverage, Coverage::Covered(2));
+    assert_eq!(rep.coverage_count(), Some(2));
+}
+
+/// AC2: two passes at the same head, same reviewer, SAME attester session
+/// collapse to one entry - the dedup the name key was originally built for (a
+/// same-session re-run must not double-count). Last-writer-wins within the pair,
+/// so the later verdict is the survivor.
+#[test]
+fn coverage_same_session_same_reviewer_dedups_to_one() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line_attested("code-review", COV_HEAD, "fail", AUTHOR),
+        attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(locals.len(), 1);
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
+/// AC3: a legacy corpus with no `attester_session_id` (the whole pre-landed
+/// backlog) keys as `(name, None)` and is byte-identical to the old name-keyed
+/// output. A same-name re-run collapses (latest verdict wins), distinct names
+/// stay distinct, and every origin is Unknown. The pair key must not change the
+/// shape of a corpus that predates the field.
+#[test]
+fn coverage_legacy_no_attester_byte_identical_to_name_key() {
+    let events = format!(
+        "{}\n{}\n{}\n",
+        // same reviewer, no attester: re-run collapses, latest (pass) wins
+        attestation_line("code-review", COV_HEAD, "fail"),
+        attestation_line("code-review", COV_HEAD, "pass"),
+        // a distinct reviewer with no attester: its own entry
+        attestation_line("codex", COV_HEAD, "pass"),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(locals.len(), 2);
+    assert!(locals
+        .iter()
+        .all(|v| v.attestation_origin == AttestationOrigin::Unknown));
+    assert_eq!(rep.coverage_count(), Some(2));
+}
+
+/// AC4-ERR: an author pass at head plus a later peer FAIL at the same head from
+/// a different attester does NOT revoke the author's pass. Under the pair key
+/// the peer's fail touches only the peer's own `(name, peer)` slot, which never
+/// held a pass; the author's `(name, author)` pass still counts. Coverage counts
+/// reviews performed, not approvals granted - the hold on a bad peer review
+/// lives on `open_review_findings` and on `unattested_reviewers_scan`'s name key
+/// (unchanged), which is the deliberate divergence this design calls for.
+#[test]
+fn coverage_peer_fail_does_not_revoke_author_pass() {
+    let events = format!(
+        "{}\n{}\n",
+        attestation_line_attested("code-review", COV_HEAD, "pass", AUTHOR),
+        attestation_line_attested("code-review", COV_HEAD, "fail", OTHER),
+    );
+    let rep = classify_coverage(&[], &[], &events, COV_HEAD, &[], true, Some(AUTHOR));
+    let locals: Vec<_> = rep
+        .verdicts
+        .iter()
+        .filter(|v| v.producer == CoverageProducer::LocalAttestation)
+        .collect();
+    assert_eq!(locals.len(), 1, "only the author's pass survives");
+    assert_eq!(
+        locals[0].attestation_origin,
+        AttestationOrigin::SelfAttested
+    );
+    assert_eq!(rep.coverage_count(), Some(1));
+}
+
 /// The receipt names all three buckets so a reader learns the vocabulary even
 /// when two are zero.
 #[test]

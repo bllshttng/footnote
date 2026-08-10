@@ -2990,16 +2990,22 @@ fn classify_attestation_origin(attester: Option<&str>, author: Option<&str>) -> 
     }
 }
 
-/// Distinct local reviewers whose LATEST head-pinned attestation is `pass`,
-/// each paired with that pass's `attester_session_id` (the harness session that
-/// emitted it, or None when the event predates the field). events.jsonl is
-/// append-ordered; a later `fail` revokes, a later `pass` restores - mirrors
+/// Distinct `(reviewer, attester_session_id)` pairs whose LATEST head-pinned
+/// attestation is `pass`. Keying on the pair - not the reviewer name alone -
+/// keeps a same-session re-run collapsed (one key, last-writer-wins, retraction
+/// intact) while letting two sessions attesting under the same reviewer label
+/// coexist: before this, a spawned peer emitting `code-review` replaced the
+/// author's pass and a peer-reviewed PR read `1 reviewed` while deleting its
+/// own control. `attester_session_id` is the harness session that emitted, or
+/// None when the event predates the field. events.jsonl is append-ordered; a
+/// later `fail` revokes, a later `pass` restores - mirrors
 /// `unattested_reviewers_scan`'s retraction handling. Pure: scans text, no IO.
 /// Presence-based: counts any reviewer regardless of the configured `reviewers`
 /// list, so a worker-run `/code-review` counts even when `reviewers: []`.
 fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, Option<String>)> {
-    // reviewer -> (is_pass, attester_session_id of the latest-at-head event).
-    let mut latest_at_head: std::collections::HashMap<String, (bool, Option<String>)> =
+    // (reviewer, attester_session_id) -> latest-at-head pass? The attester lives
+    // in the key so cross-session attestations join instead of replace.
+    let mut latest_at_head: std::collections::HashMap<(String, Option<String>), bool> =
         std::collections::HashMap::new();
     for line in events_text.lines() {
         let Ok(val) = serde_json::from_str::<Value>(line) else {
@@ -3031,14 +3037,19 @@ fn local_head_pinned_passes(events_text: &str, head_sha: &str) -> Vec<(String, O
             .and_then(|v| v.as_str())
             .map(|s| s.to_string())
             .filter(|s| !s.is_empty());
-        latest_at_head.insert(r.trim_start_matches('/').to_string(), (is_pass, attester));
+        // Under the pair key a peer's `fail` revokes only the peer's own pass;
+        // the author's `pass` still counts toward coverage. Coverage counts
+        // reviews performed, not approvals granted - the hold on a bad review
+        // lives on `open_review_findings` and on `unattested_reviewers_scan`,
+        // which keeps its name key (the config.review.reviewers gate).
+        latest_at_head.insert((r.trim_start_matches('/').to_string(), attester), is_pass);
     }
     let mut out: Vec<(String, Option<String>)> = latest_at_head
         .into_iter()
-        .filter(|(_, (pass, _))| *pass)
-        .map(|(r, (_, attester))| (r, attester))
+        .filter(|(_, pass)| *pass)
+        .map(|((r, attester), _)| (r, attester))
         .collect();
-    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out.sort();
     out
 }
 
