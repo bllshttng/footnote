@@ -13,12 +13,9 @@ wrote the diff" is too strong.
 Self-invocation has worked for several workers, so it is the first lane
 to try - but it has also been refused, so it is not a guarantee.
 
-The obligation to use one of these lanes on a code payload is enforced at
-the stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno pr merge`,
-not only in this prose: a code PR that reaches the gate with no head-pinned
-`review_attestation` is held, and the held reason names this harness's verb.
-This doc is the lane menu; the gate is the authority. Opt out with
-`config.review.self_review_required = false`.
+The obligation to use one of these lanes on a code payload is enforced at the stop gate (`crates/fno-agents/src/loopcheck.rs`) and `fno pr merge`, not only in this prose: a code PR that reaches the gate with no head-pinned `review_attestation` is held, and the held reason names this harness's verb.
+This doc is the lane menu; the gate is the authority.
+Opt out with `config.review.self_review_required = false`.
 
 ## Lane 1: self-invoke via the Skill tool (primary)
 
