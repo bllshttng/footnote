@@ -1138,6 +1138,53 @@ fn reviewer_invocation_for(name: &str, harness: Option<&str>) -> Option<(&'stati
     Some((inv, sc))
 }
 
+/// Documentation is `*.md` anywhere and anything under `docs/`. Plan files are
+/// markdown, so the `.md` rule covers them; the `internal/` vault is gitignored
+/// and never appears in a diff. A config file, a lockfile, and a shell script
+/// all count as code.
+fn is_documentation_path(path: &str) -> bool {
+    let p = path.trim().trim_start_matches("./");
+    if p.is_empty() {
+        return false;
+    }
+    p.ends_with(".md") || p.starts_with("docs/")
+}
+
+/// Pure payload classifier: CODE iff any changed path is not documentation.
+/// An empty diff is NOT a code payload (no ship, so no gate). Pure over a path
+/// slice so unit tests need no git; the git-caller wrapper is `classify_payload`.
+fn payload_is_code(paths: &[String]) -> bool {
+    paths.iter().any(|p| !is_documentation_path(p))
+}
+
+/// `(is_code, assumed)`: classifies the branch's payload, failing CLOSED. An
+/// unreadable diff (no `origin/main`, git missing, any non-zero exit) classifies
+/// as code with `assumed=true`, so a degraded probe can never silently disable
+/// the obligation the way failing open would. `origin/main...HEAD` is the
+/// three-dot diff, so it names the branch's own changes (the PR diff), not
+/// changes that landed on main since the branch point.
+fn classify_payload(git_bin: &str, cwd: &Path) -> (bool, bool) {
+    let out = Command::new(git_bin)
+        .args(["diff", "--name-only", "origin/main...HEAD"])
+        .current_dir(cwd)
+        .output();
+    let (paths, readable) = match out {
+        Ok(o) if o.status.success() => {
+            let paths = String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect::<Vec<_>>();
+            (paths, true)
+        }
+        _ => (Vec::new(), false),
+    };
+    if !readable {
+        return (true, true);
+    }
+    (payload_is_code(&paths), false)
+}
+
 fn git_head_sha(git_bin: &str, cwd: &Path) -> String {
     let out = Command::new(git_bin)
         .args(["rev-parse", "HEAD"])
@@ -8252,6 +8299,41 @@ mod tests {
             !codex_verb.chars().any(|c| c.is_whitespace()),
             "codex self-review verb must be bare, got {codex_verb:?}"
         );
+    }
+
+    #[test]
+    fn code_payload_classifies_code_and_docs() {
+        // Code: source, config, lockfile, script. Docs: markdown, docs/.
+        assert!(payload_is_code(&["cli/src/fno/x.py".into()]));
+        assert!(payload_is_code(&["crates/fno-agents/src/lib.rs".into()]));
+        assert!(payload_is_code(&[".fno/config.toml".into()]));
+        assert!(payload_is_code(&["Cargo.lock".into()]));
+        assert!(payload_is_code(&["scripts/ci/gate.sh".into()]));
+        assert!(!payload_is_code(&["README.md".into()]));
+        assert!(!payload_is_code(&["docs/architecture/review-lanes.md".into()]));
+        assert!(!payload_is_code(&["docs/preflight.txt".into()]));
+    }
+
+    #[test]
+    fn code_payload_empty_or_docs_only_diff_is_not_code() {
+        // No diff -> no ship -> no gate. Docs-only -> unchanged behavior.
+        assert!(!payload_is_code(&[]));
+        assert!(!payload_is_code(&["docs/a.md".into(), "CHANGELOG.md".into()]));
+    }
+
+    #[test]
+    fn code_payload_mixed_diff_is_code() {
+        // One code file among docs is enough to carry a code payload.
+        assert!(payload_is_code(&["docs/a.md".into(), "src/lib.rs".into()]));
+    }
+
+    #[test]
+    fn self_review_gate_classifies_unreadable_diff_as_code() {
+        // AC4-ERR: a git that cannot produce a diff fails CLOSED - code with
+        // assumed=true - so a degraded probe cannot wave the obligation away.
+        let (is_code, assumed) = classify_payload("definitely-not-a-real-git-binary", Path::new("."));
+        assert!(is_code);
+        assert!(assumed);
     }
 
     #[test]
