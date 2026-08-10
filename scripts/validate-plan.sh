@@ -735,34 +735,6 @@ validate_wave_section_headers() {
     header_dupes=$(printf '%s\n' "$header_waves_raw" \
         | awk 'NF{printf "%d\n", $0+0}' | sort -n | uniq -d || true)
 
-    # close_probes advisory (x-5d34): a multi-wave plan that asserts no outcome
-    # refuses to close at the close gate (exit 6) until each wave's result is
-    # asserted or the remainder is filed. Count both `## Wave N:` (canonical)
-    # and `## Wave N -` (hand-written) so the advisory fires on exactly what the
-    # gate refuses. Advisory, not an error: kill_criteria is optional too, and
-    # the close gate is the hard enforcement.
-    local advisory_waves n_advisory=0
-    # Mirror the gate's own regex (`^##\s+Wave\s+(\d+)\b`): a narrower one here
-    # stays quiet on headings the gate still refuses (`##  Wave 1`, a bare
-    # `## Wave 2` with no title after the digit).
-    advisory_waves=$( { grep -E '^##[[:space:]]+Wave[[:space:]]+[0-9]+([^0-9]|$)' "$index_file" 2>/dev/null \
-        | sed -E 's/^##[[:space:]]+Wave[[:space:]]+([0-9]+).*/\1/' | grep -E '^[0-9]+$' \
-        | sort -un; } || true )
-    if [[ -n "$advisory_waves" ]]; then
-        n_advisory=$(printf '%s\n' "$advisory_waves" | grep -c . || true)
-    fi
-    if (( n_advisory >= 2 )); then
-        local fm_block
-        fm_block=$(awk 'NR==1&&/^---/{f=1;next} f&&/^---/{exit} f' "$index_file" 2>/dev/null || true)
-        # expected_url_count >= 2 is the OTHER assertion the gate accepts, so a
-        # plan carrying it must not be warned about a gate it already satisfies.
-        local fm_expected
-        fm_expected=$(printf '%s\n' "$fm_block" | sed -nE 's/^expected_url_count:[[:space:]]*([0-9]+).*/\1/p' | head -1)
-        if ! printf '%s\n' "$fm_block" | grep -qE '^close_probes:' \
-            && (( ${fm_expected:-0} < 2 )); then
-            warn "multi-wave plan ($n_advisory waves) declares no close_probes; it will refuse to close (exit 6) until each wave's outcome is asserted or the remainder is filed (fno backlog idea)"
-        fi
-    fi
 
     # Duplicate detection runs BEFORE the `-z "$yaml_waves"` early
     # return: a plan with two `## Wave 1:` headers but no Execution

@@ -73,28 +73,32 @@ the plan's declared work all ship". One verdict function,
 (`fno backlog done`, `fno backlog reconcile`, `fno done`) so a node can never
 close through a second, ungated path.
 
-Three conditions, first refusal wins:
+The gate fires ONLY on an explicit declaration. A plan that declares **neither
+`close_probes` nor `expected_url_count` closes exactly as it does today** -
+`## Wave N` headings are internal structure, not a promise (one .md == one PR ==
+one node is the house rule), so a multi-wave single-PR plan closes clean.
+Inferring "multi-wave" from headings was rejected because it false-positives on
+exactly that common case, parking every such node on autonomous `/target`. A
+gate that only fires on an explicit promise cannot false-positive. Two
+conditions, first refusal wins:
 
-- **Unasserted multi-wave promise.** The plan declares >= 2 `## Wave N`
-  headings and carries neither `close_probes` nor `expected_url_count >= 2`.
-  This is the condition that catches a plan that promised two waves and shipped
-  one.
-- **Outcome probes.** Any `close_probes` entry exits non-zero. Probes run via
-  `fno-agents probe-run` (the same runner `loop-check` uses for `done_probes`).
-- **Ship count.** `expected_url_count: N` (N >= 2) and fewer than N of the
-  node's PR refs are MERGED.
+- **Outcome probes.** Any declared `close_probes` entry exits non-zero. Probes
+  run via `fno-agents probe-run` (the same runner `loop-check` uses for
+  `done_probes`).
+- **Ship count.** A declared `expected_url_count: N` (N >= 2) and fewer than N
+  of the node's PR refs are MERGED.
 
-A refusal exits **6** from `backlog done` / `done`. `reconcile` (an unattended
-sweep) holds the node open in a `promise_unmet` bucket and names it in the
-summary rather than exiting. `--force --reason` bypasses the gate on
-`backlog done` so a deliberate half-ship is a recorded line, not silence. The
-Rust loop closer needs no change: its catch-all maps any non-zero, non-5 exit
-to `Parked` with the refusal text intact.
+Coverage grows as `/blueprint` stamps `expected_url_count` going forward;
+nothing retroactively parks. A refusal exits **6** from `backlog done` / `done`.
+`reconcile` (an unattended sweep) holds the node open in a `promise_unmet`
+bucket and names it in the summary rather than exiting. `--force --reason`
+bypasses the gate on `backlog done` so a deliberate half-ship is a recorded
+line, not silence. The Rust loop closer needs no change: its catch-all maps any
+non-zero, non-5 exit to `Parked` with the refusal text intact.
 
 The gate fails open on an absent/unreadable/unparseable plan (a stale
-`plan_path` never wedges a close) and it cannot see work a plan never declared,
-so a plan that under-declared still closes clean. Those limits are stated in
-the refusal text itself.
+`plan_path` never wedges a close) or a gh outage while counting ships (retryable,
+matching the merge gate). Those limits are stated in the refusal/warning text.
 
 ## Invocation Points
 

@@ -487,13 +487,23 @@ them twice.
 There is no env override: a probe that cannot pass in this environment is
 resolved by editing the plan, which is visible in git.
 
-## close_probes: per-wave outcome assertion (MANDATORY for multi-wave plans)
+## close_probes: node-closure outcome assertion (optional declaration)
 
-A plan with **two or more `## Wave N` headings** MUST declare one
-`close_probes` entry per wave in its frontmatter.
-A single-wave or flat plan omits the field entirely.
+The node-closure gate fires ONLY on an explicit declaration. A plan that
+declares **neither `close_probes` nor `expected_url_count` closes exactly as it
+does today** - `## Wave N` headings are internal structure, not a promise, so a
+multi-wave single-PR plan (the common `one .md == one PR == one node` case)
+closes clean. The gate does not infer; a promise must be written down.
 
-`close_probes` is the node-closure gate; it is distinct from `done_probes`:
+Two declarations are honored, either or both:
+
+- `expected_url_count: N` - the plan promises N ships; the gate counts merged
+  refs and refuses (exit 6) while fewer than N are merged. This is the natural
+  multi-repo / split-delivery count, and `/blueprint` stamps it going forward so
+  coverage grows as new plans land and nothing retroactively parks.
+- `close_probes` - one or more commands that must exit 0 for the node to close.
+
+`close_probes` is distinct from `done_probes`:
 
 | Key | Read by | Question |
 |-----|---------|----------|
@@ -509,13 +519,9 @@ stays open until the promise lands.
 
 The close verbs shell out to `fno-agents probe-run --key close_probes`, the
 same runner `loop-check` uses for `done_probes` - one runner, two gates.
-A multi-wave plan that asserts nothing (no `close_probes`, no
-`expected_url_count >= 2`) refuses to close at all (exit 6), naming the
-shortfall and the two legal exits: ship the rest, or file it.
 
 ```yaml
 close_probes:
-  - "rg -c '## Wave 2' path/to/plan.md"   # wave 2 landed
   - "test $(wc -l < scripts/ci/verb-baseline.txt) -lt 364"   # the cull ran
 ```
 
@@ -523,8 +529,7 @@ close_probes:
 A probe asserts something a reader can check in the world: a count dropped, a
 file gained a section, a leaf verb disappeared.
 Checkboxes are ticked by the party that wants to close, the weakest evidence
-class, and a plan that asserts nothing via `close_probes` is exactly the case
-that fails the specimen (two waves, one shipped, the rest lost silently).
+class.
 
 The same shape and fail-closed rules as `done_probes`: block form or
 single-line inline list, at most 3, a 60s native timeout, 127/non-zero/timeout

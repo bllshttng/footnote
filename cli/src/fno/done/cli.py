@@ -532,6 +532,14 @@ def done_command(
     # reads them - keying on the argument alone would reopen the original
     # bypass whenever gh auto-detect fails, and let --note close an open PR.
     # A node with no ref anywhere has nothing to gate (--link/--note).
+    #
+    # ASYMMETRY with the promise gate below (~:586), intentional - do not align:
+    # this gate REPLACES the refs with [(pr, node.pr_url)] and asks "is THIS pr
+    # merged" (one ship, scoped to the node's repo). The promise gate UNIONS the
+    # explicit --pr onto the stored refs and uses the pr's OWN url, because it
+    # asks "how many ships landed" and a multi-repo split may put the new PR in
+    # a different repo than the node's prior ship. Replace-vs-union and
+    # node-url-vs-pr-url differ because the two questions differ.
     gate_refs = [(pr, node.get("pr_url"))] if pr is not None else node_pr_refs(node)
 
     # An already-done node is a metadata update, not a close. The close was
@@ -579,6 +587,13 @@ def done_command(
         # An explicit --pr is a ship the merge gate just confirmed but the node
         # has not stored yet; condition C must count it, else a final multi-PR
         # close reports its own new PR as missing (P2).
+        #
+        # ASYMMETRY with the merge gate above (~:535), intentional: that gate
+        # REPLACES the refs with the explicit pr scoped to node.pr_url (one ship,
+        # node-scoped); this gate UNIONS the explicit pr onto the stored refs
+        # (all ships) and uses the pr's OWN url, since a multi-repo split may put
+        # the new PR in a different repo than the node's prior ship. The two
+        # resolve the ref url differently because they ask different questions.
         # The url that belongs to THIS pr number, when the operator named one:
         # the ref's url is only a repo hint, and the node's stored pr_url points
         # at the PREVIOUS ship, which in the multi-repo split that

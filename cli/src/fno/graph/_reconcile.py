@@ -382,25 +382,6 @@ class PromiseVerdict:
         return PROMISE_REFUSAL_EXIT_CODE if self.outcome == "promise_unmet" else 0
 
 
-# The human promise, not the machine schedule. Matches the canonical
-# `## Wave N: name` (skills/blueprint/references/section-headers.md) and the
-# `## Wave N - name` the specimen wrote. The digit is required so
-# `## Wave rationale` is not a wave; dedupe by number so a repeated header
-# counts once. The YAML `Execution Strategy` wave list is deliberately NOT
-# read: two counters that can disagree is worse than one that undercounts.
-_WAVE_HEADING_RE = re.compile(r"(?m)^##\s+Wave\s+(\d+)\b")
-
-
-def plan_wave_numbers(body: str) -> list[int]:
-    """The distinct ``## Wave N`` heading numbers in a plan body, ascending."""
-    return sorted({int(n) for n in _WAVE_HEADING_RE.findall(body)})
-
-
-def count_plan_waves(body: str) -> int:
-    """Distinct ``## Wave N`` heading numbers in a plan body."""
-    return len(plan_wave_numbers(body))
-
-
 def _close_probe_runner_shellout(
     plan_path: str, cwd: Optional[str]
 ) -> tuple[bool, str]:
@@ -475,25 +456,27 @@ def resolve_promise_evidence(
 ) -> PromiseVerdict:
     """Decide whether a node's plan promised work that has not all shipped.
 
-    Three conditions, first refusal wins; all read the plan at
-    ``node["plan_path"]``:
+    Fires ONLY on an explicit declaration - a plan that declares neither
+    ``close_probes`` nor ``expected_url_count`` closes exactly as it does today.
+    Inferring "multi-wave" from ``## Wave N`` headings was rejected: the common
+    case (one .md == one PR == one node) uses waves as internal structure and
+    would false-positive identically to a half-ship, parking every such node on
+    autonomous /target. Coverage grows as /blueprint stamps ``expected_url_count``
+    going forward, so nothing retroactively parks. Two conditions, first refusal
+    wins; both read the plan at ``node["plan_path"]``:
 
-      A. Unasserted multi-wave promise. The plan declares >= 2 ``## Wave N``
-         headings and carries neither ``close_probes`` nor
-         ``expected_url_count >= 2``. This is the condition that catches a plan
-         that promised two waves and shipped one: it refuses with no cooperation
-         from the plan's author.
       B. Outcome probes. Any ``close_probes`` entry exits non-zero. Probes are
          delegated to ``fno-agents probe-run`` (the same runner the loop uses for
          ``done_probes``); a declared gate that cannot be evaluated fails closed.
       C. Ship count. ``expected_url_count: N`` (N >= 2) and fewer than N of the
          node's PR refs are MERGED. The right check for multi-repo / split
-         deliveries; it does NOT catch the specimen (which promised one PR), so
-         it is the droppable one if the surface ever shrinks.
+         deliveries.
 
-    Fails open on an absent/unreadable plan or unparseable frontmatter: a stale
-    ``plan_path`` must not wedge a close, but the warning names the unreadable
-    path so the gap is visible, not silent.
+    A gate that only fires on an explicit promise cannot false-positive, which
+    is the reason the count is written at blueprint time rather than inferred
+    afterward. Fails open on an absent/unreadable plan or unparseable
+    frontmatter: a stale ``plan_path`` must not wedge a close, but the warning
+    names the unreadable path so the gap is visible, not silent.
     """
     plan_path = node.get("plan_path")
     if not isinstance(plan_path, str) or not plan_path:
@@ -524,7 +507,9 @@ def resolve_promise_evidence(
 
     from fno.plan._doc import FrontmatterError, _parse_frontmatter, _split_frontmatter
 
-    yaml_text, body = _split_frontmatter(text)
+    # Only the frontmatter is read here (close_probes, expected_url_count); the
+    # body is the probe-runner's to parse via fno-agents probe-run.
+    yaml_text, _body = _split_frontmatter(text)
     try:
         frontmatter = _parse_frontmatter(yaml_text) if yaml_text.strip() else {}
     except FrontmatterError as exc:
@@ -539,26 +524,20 @@ def resolve_promise_evidence(
     close_probes = frontmatter.get("close_probes")
     expected_raw = frontmatter.get("expected_url_count")
     expected = expected_raw if isinstance(expected_raw, int) else None
-    wave_numbers = plan_wave_numbers(body)
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
-    # Condition A: a multi-wave promise that asserts nothing. close_probes OR a
-    # multi-ship count both count as "the plan asserted an outcome", so neither
-    # alone trips A; together their absence on a >= 2-wave plan is the refusal.
-    if (
-        len(wave_numbers) >= 2
-        and not close_probes
-        and not (isinstance(expected, int) and expected >= 2)
-    ):
-        return PromiseVerdict(
-            outcome="promise_unmet",
-            reason=_promise_refusal_a(node_id, plan_display, wave_numbers),
-        )
-
+    # The gate fires ONLY on an explicit declaration. A plan that declares
+    # neither close_probes nor expected_url_count closes exactly as it does
+    # today - inferring "multi-wave" from `## Wave N` headings was rejected
+    # because the common case (one .md == one PR == one node) uses waves as
+    # internal structure and would false-positive identically to a half-ship,
+    # parking every such node on autonomous /target. Coverage grows as
+    # /blueprint stamps expected_url_count going forward; nothing retroactively
+    # parks. A gate that only fires on an explicit promise cannot false-positive.
+    #
     # Condition B: run the declared outcome probes. Opt-in by construction (only
-    # fires when the plan declared the field), so it never adds subprocess work
-    # to a plan that asserted nothing - A already refused those.
+    # fires when the plan declared the field).
     if close_probes:
         runner = probe_runner or _close_probe_runner_shellout
         passed, detail = runner(plan_path_clean, cwd)
@@ -642,27 +621,6 @@ def _count_merged_refs(
             if merged >= ceiling:
                 return merged, None
     return merged, outage
-
-
-def _promise_refusal_a(node_id: str, plan_display: str, numbers: list[int]) -> str:
-    # The numbers the plan actually wrote, not 1..N: a plan whose headings are
-    # `## Wave 2` / `## Wave 3` must not be told it declared a `## Wave 1`.
-    waves = len(numbers)
-    headings = ", ".join(f"## Wave {n}" for n in numbers)
-    return (
-        f"Refused: {node_id} promised {waves} waves and asserts none of them.\n"
-        f"  plan: {plan_display}\n"
-        f"  waves declared: {waves} ({headings})\n"
-        f"  close_probes: none    expected_url_count: unset\n"
-        f"\n"
-        f"  Two legal exits:\n"
-        f"    ship the rest, then close; or\n"
-        f"    file the remainder (`fno backlog idea`) and close with\n"
-        f"      --force --reason \"wave N filed as <id>\"\n"
-        f"\n"
-        f"  This checks what the plan wrote down. It cannot see work the plan\n"
-        f"  never declared, and a plan that under-declared still closes clean."
-    )
 
 
 def _promise_refusal_b(node_id: str, plan_display: str, detail: str) -> str:

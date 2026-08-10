@@ -1,15 +1,22 @@
 """The plan-closure promise gate (x-5d34).
 
-A merged PR is closing evidence for an ARTIFACT, not for a PLAN. A plan that
-promised two waves and shipped one used to close clean on wave 1's merge, the
-remainder vanishing silently. ``resolve_promise_evidence`` adds one condition to
-the existing close gate: "did the plan's declared work all ship". One verdict,
-three callers (``cmd_done``, ``cmd_reconcile``, ``fno done``) - never a second
-closer.
+A merged PR is closing evidence for an ARTIFACT, not for a PLAN. ``resolve_promise_evidence``
+adds one condition to the existing close gate - "did the plan's declared work
+all ship" - consulted by all three close verbs (``cmd_done``,
+``cmd_reconcile``, ``fno done``) so a node can never close through a second,
+ungated path.
+
+The gate fires ONLY on an explicit declaration (``close_probes`` or
+``expected_url_count``). A plan that declares neither closes exactly as it does
+today: inferring "multi-wave" from ``## Wave N`` headings was rejected because
+the common case (one .md == one PR == one node) uses waves as internal
+structure and would false-positive identically to a half-ship, parking every
+such node on autonomous /target. A gate that only fires on an explicit promise
+cannot false-positive.
 
 The load-bearing test is the three-verb assertion: a guard landed on only one
 of the three close paths is the exact decorative-guard defect this feature
-exists to end, so every condition is exercised against each verb independently.
+exists to end, so the refusal is exercised against each verb independently.
 """
 
 from __future__ import annotations
@@ -32,9 +39,9 @@ def _write_plan(
     waves: int = 0,
     close_probes: list[str] | None = None,
     expected_url_count: int | None = None,
-    body_extra: str = "",
 ) -> Path:
-    """Write a minimal plan doc with frontmatter and the requested wave headings."""
+    """Write a minimal plan doc. `waves` only adds body headings (flavor); the
+    gate no longer reads them, so a multi-wave plan declaring nothing closes."""
     lines = ["---", "node: x-prom", "status: ready", "created: 2026-08-09T00:00:00+00:00"]
     if close_probes is not None:
         lines.append("close_probes:")
@@ -46,16 +53,9 @@ def _write_plan(
     lines.append("")
     lines.append("# Plan")
     lines.append("")
-    # The specimen wrote `## Wave 1 - name`; the canonical is `## Wave 1: name`.
-    # Alternate the separator so both forms are covered across the suite.
     for n in range(1, waves + 1):
-        sep = ":" if n % 2 else " -"
-        lines.append(f"## Wave {n}{sep} wave {n} title")
+        lines.append(f"## Wave {n}{' -' if n % 2 == 0 else ':'} wave {n} title")
         lines.append("")
-        lines.append(f"Body of wave {n}.")
-        lines.append("")
-    if body_extra:
-        lines.append(body_extra)
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
     return path
 
@@ -116,42 +116,19 @@ def _base_node(node_id: str, plan_path: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# wave counter
+# resolve_promise_evidence, direct (no-declaration + conditions B / C + fail-open)
 # ---------------------------------------------------------------------------
 
 
-def test_count_plan_waves_matches_both_separators_and_dedupes():
-    from fno.graph._reconcile import count_plan_waves
-
-    assert count_plan_waves("## Wave 1: Foundation\n## Wave 2: Build\n") == 2
-    assert count_plan_waves("## Wave 1 - widen\n## Wave 2 - cull\n") == 2
-    # A repeated header counts once; `## Wave rationale` is not a wave.
-    assert count_plan_waves("## Wave 1: a\n## Wave 1: b\n## Wave rationale\n") == 1
-    assert count_plan_waves("no waves here") == 0
-
-
-# ---------------------------------------------------------------------------
-# resolve_promise_evidence, direct (conditions A / B / C + fail-open)
-# ---------------------------------------------------------------------------
-
-
-def test_condition_a_two_waves_no_assertion_refuses(tmp_path: Path):
+def test_no_declaration_closes_clean_even_multi_wave(tmp_path: Path):
+    """THE design property: a plan declaring neither close_probes nor
+    expected_url_count closes exactly as it does today - even with many wave
+    headings, since waves are internal structure, not a promise (one .md == one
+    PR == one node is the house rule). Inferring from headings would park every
+    such node on autonomous /target."""
     from fno.graph._reconcile import resolve_promise_evidence
 
     plan = _write_plan(tmp_path / "p.md", waves=2)
-    v = resolve_promise_evidence({"id": "x-a", "plan_path": str(plan)})
-    assert v.outcome == "promise_unmet"
-    assert v.exit_code == 6
-    assert "promised 2 waves" in (v.reason or "")
-    # The limits land in the refusal, not only the docs.
-    assert "under-declared" in (v.reason or "")
-    assert "--force --reason" in (v.reason or "")
-
-
-def test_condition_a_one_wave_passes(tmp_path: Path):
-    from fno.graph._reconcile import resolve_promise_evidence
-
-    plan = _write_plan(tmp_path / "p.md", waves=1)
     assert resolve_promise_evidence({"id": "x-a", "plan_path": str(plan)}).outcome == "ok"
 
 
@@ -175,7 +152,7 @@ def test_unreadable_plan_fails_open_with_named_warning(tmp_path: Path):
 def test_condition_b_passing_probes_pass(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence
 
-    plan = _write_plan(tmp_path / "p.md", waves=2, close_probes=["true"])
+    plan = _write_plan(tmp_path / "p.md", close_probes=["true"])
     v = resolve_promise_evidence(
         {"id": "x-b", "plan_path": str(plan)},
         probe_runner=lambda p, c: (True, ""),
@@ -186,7 +163,7 @@ def test_condition_b_passing_probes_pass(tmp_path: Path):
 def test_condition_b_failing_probe_refuses(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence
 
-    plan = _write_plan(tmp_path / "p.md", waves=2, close_probes=["exit 1"])
+    plan = _write_plan(tmp_path / "p.md", close_probes=["exit 1"])
     v = resolve_promise_evidence(
         {"id": "x-b", "plan_path": str(plan)},
         probe_runner=lambda p, c: (False, "probe `exit 1` exited 1"),
@@ -200,9 +177,7 @@ def test_condition_b_fail_closed_when_binary_absent(tmp_path: Path, monkeypatch)
     from fno.graph._reconcile import resolve_promise_evidence
     import fno.rust_binary as rb
 
-    plan = _write_plan(tmp_path / "p.md", waves=2, close_probes=["true"])
-    # The gate resolves the binary the way every other caller does (env override
-    # -> wheel-bundled -> sibling -> PATH), so absence means resolve_binary None.
+    plan = _write_plan(tmp_path / "p.md", close_probes=["true"])
     monkeypatch.setattr(rb, "resolve_binary", lambda: None)
     v = resolve_promise_evidence({"id": "x-b", "plan_path": str(plan)})
     assert v.outcome == "promise_unmet"
@@ -212,7 +187,7 @@ def test_condition_b_fail_closed_when_binary_absent(tmp_path: Path, monkeypatch)
 def test_condition_c_shortfall_refuses(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence, PrMergeState
 
-    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=3)
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=3)
     node = {
         "id": "x-c",
         "plan_path": str(plan),
@@ -229,7 +204,7 @@ def test_condition_c_shortfall_refuses(tmp_path: Path):
 def test_condition_c_satisfied_passes(tmp_path: Path):
     from fno.graph._reconcile import resolve_promise_evidence, PrMergeState
 
-    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=3)
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=3)
     node = {
         "id": "x-c",
         "plan_path": str(plan),
@@ -250,7 +225,7 @@ def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
     the merge gate treats the same outage as retryable, not a policy refusal."""
     from fno.graph._reconcile import ReconcileError, resolve_promise_evidence
 
-    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=2)
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
     node = {
         "id": "x-c",
         "plan_path": str(plan),
@@ -267,17 +242,6 @@ def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
     assert "could not confirm 2 ships" in (v.warning or "")
 
 
-def test_refusal_a_names_the_headings_the_plan_actually_wrote(tmp_path: Path):
-    from fno.graph._reconcile import resolve_promise_evidence
-
-    plan = tmp_path / "p.md"
-    plan.write_text("# Plan\n\n## Wave 2: a\n\n## Wave 3: b\n", encoding="utf-8")
-    v = resolve_promise_evidence({"id": "x-a", "plan_path": str(plan)})
-    assert v.outcome == "promise_unmet"
-    assert "## Wave 2, ## Wave 3" in (v.reason or "")
-    assert "## Wave 1" not in (v.reason or "")
-
-
 def test_promise_verdict_exit_code_table():
     from fno.graph._reconcile import PromiseVerdict
 
@@ -288,15 +252,19 @@ def test_promise_verdict_exit_code_table():
 def test_relative_plan_resolved_against_owning_cwd(tmp_path: Path):
     """A repo-relative plan_path is read from the node's cwd, not the process
     CWD - the global reconcile runs from canonical while a node's plan lives in
-    its owning checkout. Without resolution the read fails and the gate fails
-    open silently (P1)."""
-    from fno.graph._reconcile import resolve_promise_evidence
+    its owning checkout. Uses a DECLARATION so a fail-open (plan not found)
+    would read as ok, not promise_unmet: condition C firing proves the plan was
+    read from cwd (P1)."""
+    from fno.graph._reconcile import resolve_promise_evidence, PrMergeState
 
     repo = tmp_path / "repo"
     repo.mkdir()
-    _write_plan(repo / "rel.md", waves=2)  # written under the owning checkout
-    v = resolve_promise_evidence({"id": "x-rel", "plan_path": "rel.md"}, cwd=str(repo))
-    assert v.outcome == "promise_unmet"  # found the 2 waves, did not fail open
+    _write_plan(repo / "rel.md", expected_url_count=2)
+    node = {"id": "x-rel", "plan_path": "rel.md", "pr_number": 7,
+            "pr_url": "https://github.com/o/r/pull/7"}
+    merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
+    v = resolve_promise_evidence(node, cwd=str(repo), query=merged)
+    assert v.outcome == "promise_unmet"  # found the declaration via cwd, did not fail open
 
 
 def test_condition_c_counts_extra_refs(tmp_path: Path):
@@ -305,7 +273,7 @@ def test_condition_c_counts_extra_refs(tmp_path: Path):
     close is not deadlocked by its own new PR (P2)."""
     from fno.graph._reconcile import resolve_promise_evidence, PrMergeState
 
-    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=2)
+    plan = _write_plan(tmp_path / "p.md", expected_url_count=2)
     node = {
         "id": "x-c",
         "plan_path": str(plan),
@@ -323,18 +291,20 @@ def test_condition_c_counts_extra_refs(tmp_path: Path):
 
 
 # ---------------------------------------------------------------------------
-# THE THREE-VERB ASSERTION: condition A refuses on each close path independently
+# THE THREE-VERB ASSERTION: a declared shortfall refuses on each close path
 # ---------------------------------------------------------------------------
 
 
-def _two_wave_world(g: Path, tmp_path: Path, node_id: str = "ab-prom01") -> str:
-    plan = _write_plan(tmp_path / "two-wave.md", waves=2)
+def _shortfall_world(g: Path, tmp_path: Path, node_id: str = "ab-prom01") -> str:
+    """A node whose plan DECLARES expected_url_count=2 but has one PR ref.
+    The merge gate passes (the one PR is merged); the promise gate refuses."""
+    plan = _write_plan(tmp_path / "shortfall.md", expected_url_count=2)
     _seed(g, [_base_node(node_id, str(plan))])
     return str(plan)
 
 
-def test_condition_A_refuses_on_cmd_done(routed, tmp_path, monkeypatch):
-    _two_wave_world(routed, tmp_path)
+def test_condition_C_refuses_on_cmd_done(routed, tmp_path, monkeypatch):
+    _shortfall_world(routed, tmp_path)
     _merged(monkeypatch, target="graph")
     from fno.cli import app
 
@@ -343,8 +313,8 @@ def test_condition_A_refuses_on_cmd_done(routed, tmp_path, monkeypatch):
     assert _node(routed, "ab-prom01").get("completed_at") is None
 
 
-def test_condition_A_refuses_on_fno_done(routed, tmp_path, monkeypatch):
-    _two_wave_world(routed, tmp_path)
+def test_condition_C_refuses_on_fno_done(routed, tmp_path, monkeypatch):
+    _shortfall_world(routed, tmp_path)
     _merged(monkeypatch, target="done")
     from fno.cli import app
 
@@ -353,9 +323,17 @@ def test_condition_A_refuses_on_fno_done(routed, tmp_path, monkeypatch):
     assert _node(routed, "ab-prom01").get("completed_at") is None
 
 
-def test_condition_A_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
-    plan = _two_wave_world(routed, tmp_path)
+def test_condition_C_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
+    plan = _shortfall_world(routed, tmp_path)
     import fno.graph._reconcile as rec
+    from fno.graph._reconcile import PrMergeState
+
+    # Reconcile's resolve_promise_evidence uses the default query_pr_merge_state
+    # (not the verb shims), so stub it here too - condition C re-counts merges.
+    monkeypatch.setattr(
+        rec, "query_pr_merge_state",
+        lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None),
+    )
 
     def _scan(entries, node_id=None):
         return [rec.MergeDriftRecord(
@@ -378,25 +356,18 @@ def test_condition_A_holds_open_on_reconcile(routed, tmp_path, monkeypatch):
     assert _node(routed, "ab-prom01").get("completed_at") is None
 
 
-def test_one_wave_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):
-    """The inverse of the refusal: a plan that promised one wave closes clean.
-
-    One fixture, three verbs - a regression on any single close path that
-    re-introduces an ungated writer is caught because the other two still close.
-    """
-    plan = _write_plan(tmp_path / "one-wave.md", waves=1)
-    _seed(routed, [_base_node("ab-wave1", str(plan))])
-    _merged(monkeypatch)
-    from fno.cli import app
-
-    # cmd_done needs its own node (the verbs mutate the shared graph); re-seed
-    # per verb by clearing completed_at is unnecessary because each closes a
-    # distinct node. Use three nodes so each verb sees an open one.
+def test_undeclared_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):
+    """The inverse of the refusal: a plan declaring nothing closes clean on
+    every close path - a regression on any single path that re-introduces an
+    ungated writer is caught because the other two still close."""
+    plan = _write_plan(tmp_path / "plain.md")  # no declaration
     _seed(routed, [
         _base_node("ab-d1", str(plan)),
         _base_node("ab-d2", str(plan)),
         _base_node("ab-d3", str(plan)),
     ])
+    _merged(monkeypatch)
+    from fno.cli import app
 
     assert CliRunner().invoke(app, ["backlog", "done", "ab-d1"]).exit_code == 0
     assert CliRunner().invoke(app, ["done", "ab-d2", "--pr", "42"]).exit_code == 0
@@ -424,25 +395,22 @@ def test_one_wave_plan_closes_on_all_three_verbs(routed, tmp_path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_force_bypass_closes_two_wave_plan(routed, tmp_path, monkeypatch):
-    """A deliberate half-ship is a recorded line, not silence.
-
-    `--force --reason` journals (best-effort) and closes; the promise gate never
-    runs on the force path.
-    """
-    _two_wave_world(routed, tmp_path)
+def test_force_bypass_closes_a_ship_shortfall(routed, tmp_path, monkeypatch):
+    """A deliberate half-ship is a recorded line, not silence. `--force --reason`
+    journals and closes; the promise gate never runs on the force path."""
+    _shortfall_world(routed, tmp_path)
     _merged(monkeypatch, target="graph")
     from fno.cli import app
 
     r = CliRunner().invoke(
-        app, ["backlog", "done", "ab-prom01", "--force", "--reason", "wave 2 filed as x-rest"]
+        app, ["backlog", "done", "ab-prom01", "--force", "--reason", "second ship filed as ab-rest"]
     )
     assert r.exit_code == 0, r.output
     assert _node(routed, "ab-prom01").get("completed_at") is not None
 
 
 def test_condition_c_through_cmd_done_refuses_then_closes(routed, tmp_path, monkeypatch):
-    plan = _write_plan(tmp_path / "c.md", waves=0, expected_url_count=3)
+    plan = _write_plan(tmp_path / "c.md", expected_url_count=3)
     _seed(routed, [_base_node("ab-ship1", str(plan))])
     _merged(monkeypatch, target="graph")
     from fno.cli import app
