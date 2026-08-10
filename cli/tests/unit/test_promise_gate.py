@@ -198,10 +198,12 @@ def test_condition_b_failing_probe_refuses(tmp_path: Path):
 
 def test_condition_b_fail_closed_when_binary_absent(tmp_path: Path, monkeypatch):
     from fno.graph._reconcile import resolve_promise_evidence
-    import fno.graph._reconcile as rec
+    import fno.rust_binary as rb
 
     plan = _write_plan(tmp_path / "p.md", waves=2, close_probes=["true"])
-    monkeypatch.setattr(rec.shutil, "which", lambda _: None)
+    # The gate resolves the binary the way every other caller does (env override
+    # -> wheel-bundled -> sibling -> PATH), so absence means resolve_binary None.
+    monkeypatch.setattr(rb, "resolve_binary", lambda: None)
     v = resolve_promise_evidence({"id": "x-b", "plan_path": str(plan)})
     assert v.outcome == "promise_unmet"
     assert "fno-agents binary was not found" in (v.reason or "")
@@ -240,6 +242,40 @@ def test_condition_c_satisfied_passes(tmp_path: Path):
     }
     merged = lambda n, **kw: PrMergeState(number=n, state="MERGED", url=None, merged_at=None)
     assert resolve_promise_evidence(node, query=merged).outcome == "ok"
+
+
+def test_condition_c_gh_outage_fails_open_not_refuses(tmp_path: Path):
+    """An unreachable ref is not a missing ship. Counting a gh outage as
+    unmerged told the operator the plan under-shipped when gh was simply down;
+    the merge gate treats the same outage as retryable, not a policy refusal."""
+    from fno.graph._reconcile import ReconcileError, resolve_promise_evidence
+
+    plan = _write_plan(tmp_path / "p.md", waves=0, expected_url_count=2)
+    node = {
+        "id": "x-c",
+        "plan_path": str(plan),
+        "pr_number": 1,
+        "pr_url": "https://github.com/o/r/pull/1",
+        "additional_prs": [{"number": 2, "url": "https://github.com/o/r/pull/2"}],
+    }
+
+    def _down(n, **kw):
+        raise ReconcileError("gh pr view timed out")
+
+    v = resolve_promise_evidence(node, query=_down)
+    assert v.outcome == "ok"
+    assert "could not confirm 2 ships" in (v.warning or "")
+
+
+def test_refusal_a_names_the_headings_the_plan_actually_wrote(tmp_path: Path):
+    from fno.graph._reconcile import resolve_promise_evidence
+
+    plan = tmp_path / "p.md"
+    plan.write_text("# Plan\n\n## Wave 2: a\n\n## Wave 3: b\n", encoding="utf-8")
+    v = resolve_promise_evidence({"id": "x-a", "plan_path": str(plan)})
+    assert v.outcome == "promise_unmet"
+    assert "## Wave 2, ## Wave 3" in (v.reason or "")
+    assert "## Wave 1" not in (v.reason or "")
 
 
 def test_promise_verdict_exit_code_table():

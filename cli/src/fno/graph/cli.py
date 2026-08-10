@@ -7751,7 +7751,20 @@ def cmd_reconcile(
                 "pr_number": record.pr_number,
                 "pr_url": record.pr_url,
             }
-            verdict = resolve_promise_evidence(gate_node, cwd=gate_node.get("cwd"))
+            # _effective_reconcile_cwd, not the raw node cwd: an archived
+            # worktree is a dead dir, and handing it to subprocess(cwd=) makes
+            # the probe runner fail to launch - a fail-CLOSED refusal that would
+            # hold the node open on every sweep forever.
+            gate_cwd = _effective_reconcile_cwd(
+                gate_node.get("cwd") or "", gate_node.get("project")
+            )
+            verdict = resolve_promise_evidence(
+                gate_node, cwd=gate_cwd if os.path.isdir(gate_cwd) else None
+            )
+            if verdict.warning and not json_out:
+                # Named, not silent: reconcile is the unattended close path, so a
+                # gate that skipped itself must still leave a trace.
+                typer.echo(f"warning: {verdict.warning}", err=True)
             if verdict.outcome == "promise_unmet":
                 # First refusal line only: the full reason belongs to the verb
                 # the operator runs to resolve it, not this one-line sweep roll.

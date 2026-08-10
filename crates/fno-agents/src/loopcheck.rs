@@ -5937,6 +5937,22 @@ fn parse_probes_for(content: &str, key: &str) -> ProbeDecl {
                     ProbeDecl::Probes(items)
                 };
             }
+            // A plain scalar (`close_probes: cmd`) is ONE probe. The plan
+            // schema advertises `str | list`, so refusing the scalar here made
+            // a documented-legal declaration an unevaluable gate (a hard
+            // refusal at the close verbs). A YAML block scalar (`|` / `>`) puts
+            // the value on the following lines and is still unreadable here.
+            if !rest.is_empty() {
+                if rest.starts_with('|') || rest.starts_with('>') {
+                    return ProbeDecl::Unparseable;
+                }
+                let item = unquote_scalar(rest);
+                return if item.is_empty() {
+                    ProbeDecl::Unparseable
+                } else {
+                    ProbeDecl::Probes(vec![item])
+                };
+            }
             in_block = true;
             continue;
         }
@@ -10761,6 +10777,23 @@ mod done_probe_tests {
         assert_eq!(parse_done_probes(&fm("done_probes: []")), ProbeDecl::None);
         assert_eq!(parse_done_probes(&fm("status: ready")), ProbeDecl::None);
         assert_eq!(parse_done_probes("no frontmatter here"), ProbeDecl::None);
+    }
+
+    #[test]
+    fn a_plain_scalar_is_one_probe_but_a_block_scalar_refuses() {
+        // The plan schema advertises `str | list` for close_probes/done_probes,
+        // so a scalar must EVALUATE, not refuse - refusing turned a legal
+        // declaration into an unevaluable gate at the close verbs.
+        assert_eq!(
+            parse_done_probes(&fm("done_probes: \"echo ok\"")),
+            ProbeDecl::Probes(vec!["echo ok".to_string()])
+        );
+        // A YAML block scalar's value lives on the following lines; this parser
+        // cannot read it, so it stays fail-closed.
+        assert_eq!(
+            parse_done_probes(&fm("done_probes: |\n  echo ok")),
+            ProbeDecl::Unparseable
+        );
     }
 
     #[test]

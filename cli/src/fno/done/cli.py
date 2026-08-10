@@ -579,7 +579,12 @@ def done_command(
         # An explicit --pr is a ship the merge gate just confirmed but the node
         # has not stored yet; condition C must count it, else a final multi-PR
         # close reports its own new PR as missing (P2).
-        _extra_refs = [(pr, node.get("pr_url"))] if pr is not None else None
+        # The url that belongs to THIS pr number, when the operator named one:
+        # the ref's url is only a repo hint, and the node's stored pr_url points
+        # at the PREVIOUS ship, which in the multi-repo split that
+        # expected_url_count exists for is a different repo entirely.
+        _extra_url = pr_url or auto_url or node.get("pr_url")
+        _extra_refs = [(pr, _extra_url)] if pr is not None else None
         promise = resolve_promise_evidence(
             node, cwd=node.get("cwd"), query=_gh_query, extra_refs=_extra_refs
         )

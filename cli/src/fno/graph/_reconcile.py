@@ -391,9 +391,14 @@ class PromiseVerdict:
 _WAVE_HEADING_RE = re.compile(r"(?m)^##\s+Wave\s+(\d+)\b")
 
 
+def plan_wave_numbers(body: str) -> list[int]:
+    """The distinct ``## Wave N`` heading numbers in a plan body, ascending."""
+    return sorted({int(n) for n in _WAVE_HEADING_RE.findall(body)})
+
+
 def count_plan_waves(body: str) -> int:
     """Distinct ``## Wave N`` heading numbers in a plan body."""
-    return len({int(n) for n in _WAVE_HEADING_RE.findall(body)})
+    return len(plan_wave_numbers(body))
 
 
 def _close_probe_runner_shellout(
@@ -405,14 +410,29 @@ def _close_probe_runner_shellout(
     reason on fail. Fail-closed: a binary absent or a verb too old to know
     ``probe-run`` refuses rather than reading a declared gate as no gate.
     """
-    exe = shutil.which("fno-agents")
+    # resolve_binary, not shutil.which: the wheel ships fno-agents inside the
+    # package (`<pkg>/_bin/`) and `$FNO_AGENTS_BIN` overrides it, neither of
+    # which is on PATH. A bare which() plus this function's fail-closed contract
+    # would refuse EVERY close_probes close on a plain `pip install fno`.
+    from fno.rust_binary import resolve_binary
+
+    exe = resolve_binary()
     if not exe:
         return (
             False,
-            "close_probes declared but the fno-agents binary was not found; "
+            "close_probes declared but the fno-agents binary was not found "
+            "(set FNO_AGENTS_BIN or run `fno update --rust`); "
             "the gate cannot be evaluated",
         )
-    cmd = [exe, "probe-run", "--plan", plan_path, "--key", "close_probes", "--json"]
+    cmd = [
+        str(exe),
+        "probe-run",
+        "--plan",
+        plan_path,
+        "--key",
+        "close_probes",
+        "--json",
+    ]
     if cwd:
         cmd += ["--cwd", cwd]
     try:
@@ -519,17 +539,21 @@ def resolve_promise_evidence(
     close_probes = frontmatter.get("close_probes")
     expected_raw = frontmatter.get("expected_url_count")
     expected = expected_raw if isinstance(expected_raw, int) else None
-    waves = count_plan_waves(body)
+    wave_numbers = plan_wave_numbers(body)
     node_id = node.get("id", "(unknown)")
     plan_display = node.get("plan_path", plan_path_clean)
 
     # Condition A: a multi-wave promise that asserts nothing. close_probes OR a
     # multi-ship count both count as "the plan asserted an outcome", so neither
     # alone trips A; together their absence on a >= 2-wave plan is the refusal.
-    if waves >= 2 and not close_probes and not (isinstance(expected, int) and expected >= 2):
+    if (
+        len(wave_numbers) >= 2
+        and not close_probes
+        and not (isinstance(expected, int) and expected >= 2)
+    ):
         return PromiseVerdict(
             outcome="promise_unmet",
-            reason=_promise_refusal_a(node_id, plan_display, waves),
+            reason=_promise_refusal_a(node_id, plan_display, wave_numbers),
         )
 
     # Condition B: run the declared outcome probes. Opt-in by construction (only
@@ -558,8 +582,22 @@ def resolve_promise_evidence(
                 if isinstance(num, int) and num not in seen:
                     refs.append((num, url))
                     seen.add(num)
-        merged = _count_merged_refs(refs, ceiling=expected, cwd=cwd, query=query)
+        merged, outage = _count_merged_refs(
+            refs, ceiling=expected, cwd=cwd, query=query
+        )
         if merged < expected:
+            # An unreachable ref is not a missing ship. Refusing on a gh outage
+            # would tell the operator the plan under-shipped when gh was simply
+            # down, and the merge gate already treats an outage as retryable
+            # (exit 4) rather than a policy refusal.
+            if outage:
+                return PromiseVerdict(
+                    outcome="ok",
+                    warning=(
+                        f"promise gate could not confirm {expected} ships for "
+                        f"{node_id}: {outage}; ship-count check skipped"
+                    ),
+                )
             return PromiseVerdict(
                 outcome="promise_unmet",
                 reason=_promise_refusal_c(node_id, plan_display, expected, merged),
@@ -574,16 +612,19 @@ def _count_merged_refs(
     ceiling: int,
     cwd: Optional[str] = None,
     query: Optional[Callable[..., PrMergeState]] = None,
-) -> int:
-    """Count MERGED refs, stopping once ``ceiling`` merges are found.
+) -> tuple[int, Optional[str]]:
+    """Count MERGED refs; return ``(merged, first_outage)``.
 
     Mirrors :func:`resolve_merge_evidence`'s per-ref resolution so the two agree
     on what counts as merged. Stops early at ``ceiling``: once enough ships are
     confirmed to satisfy the promise, the remaining refs cannot change the
-    verdict and are not queried.
+    verdict and are not queried. An unreachable ref is reported separately from
+    a genuinely unmerged one: the caller must not read a gh outage as a short
+    ship count.
     """
     query = query or query_pr_merge_state
     merged = 0
+    outage: Optional[str] = None
     repo: Optional[str] = None
     for pr_number, pr_url in refs:
         pr_repo = repo_slug_from_url(pr_url) or repo
@@ -592,17 +633,22 @@ def _count_merged_refs(
         pr_cwd = cwd if pr_repo is None else None
         try:
             state = query(pr_number, repo=pr_repo, cwd=pr_cwd)
-        except ReconcileError:
+        except ReconcileError as exc:
+            if outage is None:
+                outage = f"PR #{pr_number}: {exc}"
             continue
         if state.state == "MERGED":
             merged += 1
             if merged >= ceiling:
-                break
-    return merged
+                return merged, None
+    return merged, outage
 
 
-def _promise_refusal_a(node_id: str, plan_display: str, waves: int) -> str:
-    headings = ", ".join(f"## Wave {n}" for n in range(1, waves + 1))
+def _promise_refusal_a(node_id: str, plan_display: str, numbers: list[int]) -> str:
+    # The numbers the plan actually wrote, not 1..N: a plan whose headings are
+    # `## Wave 2` / `## Wave 3` must not be told it declared a `## Wave 1`.
+    waves = len(numbers)
+    headings = ", ".join(f"## Wave {n}" for n in numbers)
     return (
         f"Refused: {node_id} promised {waves} waves and asserts none of them.\n"
         f"  plan: {plan_display}\n"
