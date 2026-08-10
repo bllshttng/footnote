@@ -2131,9 +2131,12 @@ def _claude_env_pairs(argv: list[str]) -> dict:
 def _env1_assignments(wrapped: list[str]) -> dict:
     """The ``NAME=VALUE`` run of an ``env(1)`` wrapper, as the child receives it.
 
-    Mirrors the mux server's ``env_assignments_start`` scan (server.rs): skip the
-    leading ``env``, step over each ``-u NAME`` pair, collect assignments, and
-    stop at the first token that is the command rather than an assignment.
+    Handles the exact shape ``_mesh_env_wrapper`` emits: a leading ``env``, a run
+    of ``-u NAME`` pairs, then assignments, then the command. Deliberately NOT a
+    full mirror of the mux server's ``env_assignments_start`` (server.rs), which
+    also steps over ``--unset NAME``, other flags, and a ``--`` terminator. If
+    the wrapper ever grows one of those, this stops at it and the union
+    assertions fail loudly rather than silently skipping a key.
     """
     assert wrapped[0] == "env", wrapped[:3]
     pairs: dict[str, str] = {}

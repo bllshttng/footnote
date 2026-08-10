@@ -271,6 +271,22 @@ def happy_pane_argv(
     not a tradeoff, and the credential is not "lost" but carried by the wrapper
     that was always carrying it.
 
+    What this buys is precisely "no LONG-LIVED argv token", NOT "no argv token".
+    Be exact here, because the next reader will treat this as the security
+    contract: the wrapper is handed to ``mux pane run`` as ``-- env
+    ANTHROPIC_AUTH_TOKEN=... happy ...``, so the credential is still on that
+    client process's command line for the ``pane run`` RPC alone, and on the
+    pane's own ``env`` command line until it execs. The readiness gate is NOT
+    part of that window: ``_run_mux`` has returned (and the credential-bearing
+    process exited) before :func:`_await_interactive_readiness` runs, and that
+    gate probes through separate ``pane wait`` / ``pane read`` subprocesses
+    carrying no route at all -- a non-exact spawn does not run it. Both windows
+    are bounded by one subprocess each, against a whole worker session before
+    this change; neither duration is independently measured, so do not restate
+    them as a number. Closing the client-side window needs the assignments to
+    travel over the mux IPC instead of the command line, which is a Rust
+    protocol change and is tracked separately.
+
     These refusals are on the ONLY reachable happy path, so the usual "a guard
     on one of N paths is decorative" audit does not apply here and does not need
     re-running: this function has exactly one production caller (the
@@ -1658,8 +1674,9 @@ def dispatch_spawn_pane(
         # re-apply it or refuse. A happy pane carries its route as env(1) plus
         # --claude-env rather than --settings, so nothing has materialized the
         # file yet; materializing here is what makes the route recoverable at
-        # all -- including the credential, which by design rides neither the
-        # pane's --claude-env nor any other argv token. The
+        # all -- including the credential, which by design rides no LONG-LIVED
+        # argv token (it is still on the short-lived `mux pane run` client and
+        # pre-exec `env` command lines; see happy_pane_argv). The
         # writer is content-addressed, so this costs one 0600 file per distinct
         # route, not one per spawn.
         #
