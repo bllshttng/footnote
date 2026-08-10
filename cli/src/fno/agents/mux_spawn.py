@@ -1787,14 +1787,12 @@ def dispatch_spawn_pane(
             _declined_scope = crown_scope if crown_level is not None else None
             update_registry(_append, path=registry_path)
             if crown_declined and _declined_scope:
-                import sys
                 print(
                     f"spawn: crown declined (scope {_declined_scope!r} already held "
                     "by a live row); spawned uncrowned. The worker launched without a crown.",
                     file=sys.stderr,
                 )
             elif crown_succeeded and _declined_scope:
-                import sys
                 print(
                     f"spawn: crown over {_declined_scope!r} transferred from this "
                     f"session to {name} (succession). You no longer hold it.",
