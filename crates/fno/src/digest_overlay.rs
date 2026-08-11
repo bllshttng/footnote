@@ -108,7 +108,13 @@ pub fn backlog_section_enabled(cwd: &Path) -> bool {
 /// [`crate::keys::resolve_keymap`], which is pure.
 pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarning>) {
     let prefix = mux_str(cwd, "prefix");
-    let (map, mut warnings) = crate::keys::resolve_keymap(prefix.as_deref(), &mux_keys_table(cwd));
+    let (entries, read_warnings) = mux_keys_table(cwd);
+    let (map, mut warnings) = crate::keys::resolve_keymap(prefix.as_deref(), &entries);
+    // Read-time problems first: a file that would not parse explains every
+    // rebind that is missing, so it outranks any one refused entry.
+    for w in read_warnings.into_iter().rev() {
+        warnings.insert(0, w);
+    }
     if let Some(w) = unreadable_explicit_config() {
         warnings.insert(0, w);
     }
@@ -141,10 +147,13 @@ fn unreadable_explicit_config() -> Option<crate::keys::KeymapWarning> {
 /// this whole notice depends on.
 fn warn_if_not_toml(path: &Path) -> Option<crate::keys::KeymapWarning> {
     let ext = path.extension().and_then(|e| e.to_str())?;
+    // Meaning first, path last, and the meaning fits 38 columns exactly. The
+    // notice strip clips from the right on a 40-column terminal, which is the
+    // supported minimum, so a path-first message rendered there as a truncated
+    // path and nothing else: technically a warning, practically silence.
     (!ext.eq_ignore_ascii_case("toml")).then(|| {
         crate::keys::KeymapWarning(format!(
-            "$FNO_CONFIG points at {}, which the mux reads as TOML; \
-             its keys are using built-in defaults",
+            "keys on defaults: $FNO_CONFIG not TOML ({})",
             path.display()
         ))
     })
@@ -157,16 +166,20 @@ fn warn_if_not_toml(path: &Path) -> Option<crate::keys::KeymapWarning> {
 /// (`config_io::_deep_merge`) and `mux_str` above falls through per scalar key,
 /// so a project table naming one action used to reset every global rebind.
 /// Sorted so a warning list is stable rather than following TOML map order.
-fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
-    let read = |path: &Path| -> Option<Vec<(String, String)>> {
-        let content = std::fs::read_to_string(path).ok()?;
-        let t = content.parse::<toml::Table>().ok()?;
-        let keys = t.get("mux")?.as_table()?.get("keys")?.as_table()?;
-        Some(
-            keys.iter()
-                .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-                .collect(),
-        )
+/// Nothing here drops an entry quietly. A value the reader cannot use and a file
+/// it cannot parse both leave with a warning, because "your key did nothing and
+/// nothing said why" is the failure the whole notice channel exists to end - the
+/// same one a refused rebind, a YAML pin and a clipped notice each produced.
+fn mux_keys_table(cwd: &Path) -> (Vec<(String, String)>, Vec<crate::keys::KeymapWarning>) {
+    let mut warnings: Vec<crate::keys::KeymapWarning> = Vec::new();
+    let mut read = |path: &Path| -> Vec<(String, String)> {
+        // An absent file is the normal case, not a problem worth a notice.
+        let Ok(content) = std::fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        let (entries, mut found) = keys_from_toml(path, &content);
+        warnings.append(&mut found);
+        entries
     };
     // `$FNO_CONFIG` is the SOLE candidate when set, mirroring the Python loader.
     let layers: Vec<PathBuf> = match non_empty_env("FNO_CONFIG") {
@@ -190,7 +203,53 @@ fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
                 .collect()
         }
     };
-    merge_key_layers(layers.iter().map(|p| read(p).unwrap_or_default()))
+    let merged = merge_key_layers(layers.iter().map(|p| read(p)));
+    (merged, warnings)
+}
+
+/// One config file's `[mux.keys]`, plus everything it could not use.
+///
+/// Split from the file read so both refusals are testable without a scratch
+/// directory or a process-wide variable.
+fn keys_from_toml(
+    path: &Path,
+    content: &str,
+) -> (Vec<(String, String)>, Vec<crate::keys::KeymapWarning>) {
+    let mut warnings = Vec::new();
+    let Ok(table) = content.parse::<toml::Table>() else {
+        // Python logs on a parse failure for exactly this reason. The mux says
+        // it on screen instead, because a malformed file defaults EVERY key and
+        // an operator staring at a dead keyboard has nowhere else to look.
+        warnings.push(crate::keys::KeymapWarning(format!(
+            "keys on defaults: bad TOML in {}",
+            path.display()
+        )));
+        return (Vec::new(), warnings);
+    };
+    let Some(keys) = table
+        .get("mux")
+        .and_then(|m| m.as_table())
+        .and_then(|m| m.get("keys"))
+        .and_then(|k| k.as_table())
+    else {
+        return (Vec::new(), warnings);
+    };
+    let entries = keys
+        .iter()
+        .filter_map(|(k, v)| match v.as_str() {
+            Some(s) => Some((k.clone(), s.to_string())),
+            None => {
+                // `detach = 3` parses as valid TOML and is not a key. Dropping
+                // it at this boundary robbed the resolver of the chance to
+                // refuse it, so the entry vanished with nothing said.
+                warnings.push(crate::keys::KeymapWarning(format!(
+                    "config.mux.keys.{k}: needs a quoted key, not {v}"
+                )));
+                None
+            }
+        })
+        .collect();
+    (entries, warnings)
 }
 
 /// Collapse `[mux.keys]` layers, lowest precedence first, one action at a time.
@@ -592,6 +651,41 @@ mod tests {
     }
 
     #[test]
+    fn nothing_the_key_reader_cannot_use_disappears_quietly() {
+        let p = Path::new("/tmp/config.toml");
+
+        // A value that is not a string parses as valid TOML and is not a key.
+        // Filtering it out here left the resolver nothing to refuse, so the
+        // entry vanished and the keyboard silently kept its default.
+        let (entries, warnings) =
+            keys_from_toml(p, "[mux.keys]\ndetach = 3\nzoom = false\nfind = \"F\"\n");
+        assert_eq!(entries, vec![("find".to_string(), "F".to_string())]);
+        assert_eq!(warnings.len(), 2, "both bad values reported: {warnings:?}");
+        for want in ["detach", "zoom"] {
+            assert!(
+                warnings.iter().any(|w| w.0.contains(want)),
+                "{want} must be named: {warnings:?}"
+            );
+        }
+
+        // A file that will not parse defaults EVERY key, so it says so once
+        // rather than once per missing binding.
+        let (entries, warnings) = keys_from_toml(p, "[mux.keys\ndetach = \"Q\"\n");
+        assert!(entries.is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(
+            warnings[0].0.contains("bad TOML") && warnings[0].0.contains("defaults"),
+            "and says what the operator is getting: {:?}",
+            warnings[0].0
+        );
+
+        // The ordinary cases stay quiet: a good file, and one with no [mux.keys]
+        // at all, which is what almost every config looks like.
+        assert_eq!(keys_from_toml(p, "[mux.keys]\ndetach = \"Q\"\n").1.len(), 0);
+        assert_eq!(keys_from_toml(p, "[mux]\nhover_focus = false\n").1.len(), 0);
+    }
+
+    #[test]
     fn a_yaml_fno_config_says_so_instead_of_reading_as_empty() {
         // Python reads an explicitly pinned file as-is and parses YAML by
         // suffix, while every Rust reader here is TOML-only. That combination
@@ -602,10 +696,13 @@ mod tests {
             let w = warn_if_not_toml(Path::new(yaml))
                 .unwrap_or_else(|| panic!("{yaml} must warn, not read as empty"));
             assert!(w.0.contains(yaml), "the warning names the file: {}", w.0);
+            // Meaning BEFORE the path: the notice strip clips from the right, so
+            // a path-first message is a truncated path and nothing else on a
+            // 40-column terminal.
+            let head: String = w.0.chars().take(38).collect();
             assert!(
-                w.0.contains("built-in defaults"),
-                "and says what the operator is actually getting: {}",
-                w.0
+                head.contains("defaults") && head.contains("not TOML"),
+                "the first 38 columns must carry the meaning, got {head:?}"
             );
         }
         assert!(warn_if_not_toml(Path::new("/tmp/config.toml")).is_none());
