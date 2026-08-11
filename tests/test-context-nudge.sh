@@ -15,6 +15,15 @@
 #        session_context_nudge; below the general trigger does not
 #   AC18 latch holds across CWD: the per-session latch lives in the global state
 #        dir, so a cwd move between fires does not re-nudge within a band
+#   compact gate: the compact advice matches a MEASURED injection path, all THREE
+#        answers (injectable / not-injectable / could-not-measure), plus source
+#        sweeps for the dead crown verb and the raw transport name, each with a
+#        positive control so a passing absent-assertion proves the file was read
+#
+# No python that can import fno.cli is a HARD FAIL here, not a skip. This file is
+# the only thing pinning the hook's behaviour, so an exit-0 skip makes every claim
+# resting on it decorative; a fresh worktree with no cli/.venv once "passed" this
+# suite having run none of it.
 set -uo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -45,7 +54,14 @@ do
   fi
 done
 if [ -z "$FNO_PYTHON" ]; then
-  echo "SKIP: no python can import fno.cli from $FNO_SRC (need cli/.venv)"; exit 0
+  # NOT a skip, and deliberately not exit 0. This file is the only thing that pins
+  # the hook's behaviour, so an exit-0 skip makes every claim resting on it
+  # decorative: a fresh worktree with no cli/.venv "passed" this suite while
+  # running none of it. Fail loudly and name the fix.
+  echo "FAIL: no python can import fno.cli from $FNO_SRC" >&2
+  echo "      This suite cannot verify the hook without it, and a silent pass here" >&2
+  echo "      is worth less than a red run. Fix: (cd cli && uv sync)" >&2
+  exit 1
 fi
 BINDIR="$(mktemp -d)"
 printf '#!/usr/bin/env bash\nexec "%s" -m fno.cli "$@"\n' "$FNO_PYTHON" > "$BINDIR/fno"
@@ -64,6 +80,14 @@ printf '[target.handoff]\nking_used_pct_trigger = 40\nused_pct_trigger = 50\n' >
 export FNO_CONFIG="$SBX/.fno/settings.yaml"
 export HOME="$SBX"
 export FNO_REPO_ROOT="$SBX"
+# Ambient harness identity is a FIXTURE, not something inherited. The hook asks
+# `fno mail send --to-self`, which derives its recipient from these markers, so a
+# developer machine leaked the REAL session id in and CI (which has none) took a
+# different branch than the local run: the local pass was environment-dependent.
+# Pin it to the fixture session and scrub every other family, since --to-self
+# refuses when two harness families are present.
+export CLAUDE_CODE_SESSION_ID="$KING_SID"
+unset CODEX_THREAD_ID CODEX_SESSION_ID GEMINI_SESSION_ID OPENCODE_SESSION_ID CLAUDE_SESSION_ID
 cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events all land under $SBX
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
@@ -93,6 +117,17 @@ write_registry() {
       crown_level:$cl, crown_scope:$cs, crown_grantor:$cg
     }] + $children + $peers )
   }' > "$SBX/.fno/agents/registry.json"
+}
+
+# A registry with no row for THIS session: the hand-started REPL shape. The
+# context check does not consult the registry, so the nudge still fires; `--check`
+# answers not-injectable at resolve_agent.
+write_registry_without_self() {
+  jq -n '{schema_version: 13, agents: [{
+    name:"someone-else", harness:"claude", cwd:"/tmp", log_path:"/tmp/x",
+    status:"live", short_id:"other", harness_session_id:"other-sid",
+    crown_level:null, crown_scope:null, crown_grantor:null
+  }]}' > "$SBX/.fno/agents/registry.json"
 }
 
 # A transcript with one assistant usage line: input_tokens sets the pct against
@@ -133,8 +168,21 @@ run_hook "$(payload "$SBX/t.jsonl")"
 assert_eq     "AC5: exits 0 (block decision in JSON, not exit 2)" "$RC" "0"
 assert_contains "AC5: decision block" "$OUT" '"decision":"block"'
 assert_contains "AC5: reason carries measured 50%" "$OUT" '50% used'
-assert_contains "AC5: reason names the king trigger" "$OUT" 'king handoff trigger (40%)'
+assert_contains "AC5: reason names the crowned scope" "$OUT" "$SCOPE"
 events_has king_context_nudge && ok "AC5: king_context_nudge event emitted" || bad "AC5: no king_context_nudge event"
+
+# A crown survives a compact, so this percentage asks a king to COMPACT and keep
+# ruling. It is not a handoff threshold, and the branch must not read as one: the
+# old wording pointed a king at the more expensive move on a number that measures
+# nothing about ruling quality.
+assert_contains "crown: compact is the default, not handoff" "$OUT" 'COMPACT AND KEEP RULING'
+assert_contains "crown: crown survives a compact" "$OUT" 'maintained across a compact'
+assert_absent   "crown: no handoff threshold claim" "$OUT" 'handoff trigger'
+assert_contains "crown: handoff is a quality judgement" "$OUT" 'ORCHESTRATION is visibly degrading'
+assert_contains "crown: names the successor-handle cost" "$OUT" 'NEW mail handle'
+# The stored rung is stale for any king crowned before succession moved into
+# spawn, and those rows were never migrated, so the nudge must not print one.
+assert_absent   "crown: does not print a stale rung" "$OUT" 'level 1'
 
 # === AC7: negative controls ===================================================
 # same band fires once -> second fire is latched, no block
@@ -164,7 +212,7 @@ run_hook "$(payload "$SBX/t.jsonl")"
 assert_eq     "AC17: uncrowned past trigger exits 0" "$RC" "0"
 assert_contains "AC17: uncrowned decision block" "$OUT" '"decision":"block"'
 assert_contains "AC17: reason carries measured 50%" "$OUT" '50% used'
-assert_contains "AC17: reason names the general trigger" "$OUT" 'session handoff trigger (50%)'
+assert_contains "AC17: reason names the general trigger" "$OUT" 'session compact trigger (50%)'
 events_has session_context_nudge && ok "AC17: session_context_nudge event emitted" || bad "AC17: no session_context_nudge event"
 
 # uncrowned BELOW the general trigger -> exit 0, no block
@@ -183,7 +231,11 @@ assert_contains "AC14: orphan decision block" "$OUT" '"decision":"block"'
 assert_contains "AC14: names worker kfad-a" "$OUT" 'kfad-a'
 assert_contains "AC14: names worker kfad-b" "$OUT" 'kfad-b'
 assert_contains "AC14: names resolution 1 (court)" "$OUT" 'stay as court'
-assert_contains "AC14: names resolution 2 (--succeed)" "$OUT" '--succeed'
+# Succession moved into spawn: a sitting king spawning its heir over its own scope
+# transfers the crown in the write that vacates its own. The verb this line used to
+# name, and the flag it used to pass, were both deleted; an assertion pinning them
+# passed while documenting a command that no longer exists.
+assert_contains "AC14: names resolution 2 (spawn the heir)" "$OUT" 'fno agents spawn -k'
 assert_contains "AC14: names resolution 3 (carveout)" "$OUT" 'carveout add'
 events_has king_orphan_block && ok "AC14: king_orphan_block event emitted" || bad "AC14: no king_orphan_block event"
 
@@ -208,7 +260,7 @@ fno carveout list --json >/dev/null 2>&1   # (carveouts persist; clear by trunca
 printf '' > "$SBX/.fno/carveouts.jsonl" 2>/dev/null || true
 write_transcript "$SBX/t.jsonl" 500000     # past trigger AND has orphans
 run_hook "$(payload "$SBX/t.jsonl")"
-assert_contains "AC16: ctx reason present" "$OUT" 'king handoff trigger'
+assert_contains "AC16: ctx reason present" "$OUT" 'COMPACT AND KEEP RULING'
 assert_contains "AC16: orphan reason present" "$OUT" 'cannot be a pure pass'
 
 # === AC18: latch holds across CWD (global state dir, not CWD-relative) ========
@@ -323,6 +375,87 @@ write_registry yes no yes                              # crowned king + 1 peer k
 write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "AC25: king roll-up names the peer king" "$OUT" 'peer king'
+
+# === compact gate: the advice matches a MEASURED injection path ================
+# The hook used to prescribe a self-inject to every session unconditionally. A
+# session with no injection path ran it, got a resolution miss, misread the miss as
+# "busy with my turn", and stopped trying to compact. So the sentence is chosen by
+# asking the one resolver, and BOTH answers are pinned here: a gate tested on one
+# side only is the shape that shipped the bug.
+#
+# not-injectable: a session with NO registry row of its own, which is the
+# hand-started REPL that hit this bug. `--check` refuses at resolve_agent, before
+# any transport, so this case is decided in Python and does not depend on whether
+# the DEPLOYED fno-agents binary carries --probe. Keying it on the roster instead
+# would make the assertion flip the moment the binary is updated.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+write_registry_without_self
+write_transcript "$SBX/t.jsonl" 500000
+run_hook "$(payload "$SBX/t.jsonl")"
+assert_contains "gate: no path -> says so"            "$OUT" 'has NO injection path'
+assert_contains "gate: no path -> names the operator" "$OUT" 'ask your operator to type /compact'
+# The needle is the PRESCRIPTION, not the substring: this branch legitimately
+# quotes the `--to-self --raw --check` command it ran, so a bare '--to-self --raw'
+# needle fails on the diagnostic rather than on advice to self-inject.
+assert_absent   "gate: no path -> prescribes no self-inject" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
+# The reason a session must not read as a liveness verdict, stated where it is read.
+assert_contains "gate: miss is not a death claim" "$OUT" 'NOT a claim that you are dead'
+
+# injectable: driven by a shim, because no fixture can honestly produce this answer
+# for a SELF address in a sandbox. The mux lane is guarded and refuses a mid-turn
+# recipient, and a session asking about itself is always mid-turn, so only the
+# control.sock lane can answer yes to self - and that needs a real daemon roster
+# this sandbox has no business faking. What is under test here is the hook's
+# BRANCHING on the verdict; which verdict each lane deserves is pinned in
+# cli/tests/test_mail_send_check.py, next to the code that decides it.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+check_shim() {  # check_shim <line-to-print> <exit-code>
+  SHIMDIR="$(mktemp -d)"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'if [ "$1" = "mail" ] && [ "$2" = "send" ]; then\n'
+    printf '  for a in "$@"; do [ "$a" = "--check" ] && { printf "%%s\\n" %q; exit %s; }; done\n' "$1" "$2"
+    printf 'fi\n'
+    printf 'exec %q "$@"\n' "$BINDIR/fno"
+  } > "$SHIMDIR/fno"
+  chmod +x "$SHIMDIR/fno"
+  OLD_PATH="$PATH"; PATH="$SHIMDIR:$PATH"
+}
+unshim() { PATH="$OLD_PATH"; rm -rf "$SHIMDIR"; }
+
+check_shim 'injectable: control.sock (a paste can still refuse a busy prompt)' 0
+run_hook "$(payload "$SBX/t.jsonl")"
+unshim
+assert_contains "gate: path -> prescribes the front door" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
+assert_absent   "gate: path -> no operator fallback"      "$OUT" 'ask your operator to type'
+# A path is not a landing, and the text must not promise one.
+assert_contains "gate: path is not a landing" "$OUT" 'A path is not a landing'
+
+# unmeasurable: the check could not resolve at all, so the hook must claim NEITHER
+# verdict. This is the live case until the next `fno update`: the probe shells the
+# DEPLOYED fno-agents binary, and one too old to carry --probe answers
+# 'unmeasurable: probe-unavailable'.
+#
+# Shimmed rather than PATH-emptied. Emptying PATH takes jq with it, and the hook
+# needs jq for its own registry read and its output, so that variant tested a
+# broken hook rather than an unmeasurable check. The shim intercepts only
+# `mail send ... --check` and delegates everything else to the real fno, so the
+# rest of the nudge (plan_path, handoff path, carveouts) behaves normally.
+rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
+check_shim 'unmeasurable: probe-unavailable (the fno-agents binary is absent, too old to carry --probe, or did not answer)' 3
+run_hook "$(payload "$SBX/t.jsonl")"
+unshim
+assert_contains "gate: unmeasured -> says it did not measure" "$OUT" 'could not be measured here'
+assert_absent   "gate: unmeasured -> claims no path"          "$OUT" 'has NO injection path'
+assert_absent   "gate: unmeasured -> claims a path"           "$OUT" 'HAS an injection path'
+
+# Neither branch may name the plumbing under the front door, nor a deleted verb.
+HOOK_SRC="$(cat "$HOOK")"
+assert_absent "hook: no raw mail-inject prescription" "$HOOK_SRC" 'mail-inject'
+assert_absent "hook: no deleted crown verb"           "$HOOK_SRC" 'agents crown'
+assert_absent "hook: no deleted succession flag"      "$HOOK_SRC" '--succeed'
+# Positive control for the three sweeps above: a needle that IS present, so a
+# passing absent-assertion proves the haystack was read rather than empty.
+assert_contains "hook: sweep positive control" "$HOOK_SRC" 'fno agents spawn -k'
 
 echo ""
 echo "================================"

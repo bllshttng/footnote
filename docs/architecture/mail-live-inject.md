@@ -50,7 +50,37 @@ Provider-agnostic fallback: footnote tees each spawned agent's I/O to a per-agen
 
 ## The `mail-inject` verb
 
-`fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, `op:'reply'`-injects the text verbatim, and confirms delivery by transcript GROWTH. It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-live`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
+`fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, bracketed-pastes the text verbatim as raw keystrokes plus a wire-level CR, and confirms delivery by CONTENT (the injected turn's marker appearing in the recipient transcript after the inject, not mere transcript growth, because the growth proxy false-confirmed on a busy recipient whose transcript was already moving). It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-injectable`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
+
+### `not-injectable` is not a liveness verdict
+
+`not-injectable` means one thing: no roster entry for the session, or a roster entry with no control socket to write into.
+It says nothing about whether the recipient is alive, and a busy worker mid-turn is often both alive and not-injectable.
+
+That reason spent a long time spelled `not-live`, and the name did real damage twice.
+Once it was reported as an idle session for a worker whose transcript was 32 seconds old.
+Once a session read it as "the session is busy with my turn, so mail-inject cannot queue a prompt", concluded it could not compact, and wrote that conclusion into its handoff for the next session to inherit.
+A source comment warning about the misnomer was already in place for the second one, which is why the name changed instead of the comment growing.
+The binary now also prints a one-line explanation on stderr whenever it returns this reason, so a human reading the terminal gets the sentence and not just the token.
+
+For reachability ask `fno agents truth` or the `reachability` field on `fno agents list` (`cli/src/fno/agents/reachability.py`), never this string.
+
+### `--probe`: does a path exist, without injecting
+
+`fno-agents mail-inject --probe --session <uuid|short>` runs resolution ONLY and prints `{"injectable": bool, "reason": str}`, exit 0 when injectable.
+No stdin read, no attach, no keystroke, no audit record.
+Both it and the real send resolve through one `resolve_target`, so the probe cannot say yes where the send would say no.
+It is claude-only: the codex lane submits a turn with no prompt line, so a slash payload never fires there and there is no keystroke path to probe.
+
+The front door is `fno mail send '<payload>' --to-self --raw --check`, which additionally checks the preconditions Python owns (a registry row, a keystroke lane) and picks the right lane before probing.
+It answers on three exits, not two: 0 `injectable: <lane>`, 1 `not-injectable: <reason>`, 3 `unmeasurable: <reason>` when the evidence could not be read (an unreadable registry, or a `fno-agents` binary absent or too old to carry `--probe`).
+`unmeasurable` is deliberately not folded into `not-injectable`: "I resolved and found no path" and "I could not resolve" are different claims, and a caller gating advice has to tell them apart.
+Gate on it before you TELL a session to self-inject anything.
+Advice naming a mechanism that cannot fire is worse than no advice: the Stop hook in `hooks/context-nudge.sh` prescribed an unconditional self-inject, and a session with no path burned its remaining context on two failed attempts and then stopped trying to compact at all.
+
+What a yes does NOT promise: that the turn lands.
+No probe can see whether the recipient's prompt line is idle, so a paste can still refuse a mid-turn pane or a busy socket.
+A path existing is the whole claim.
 
 It is binary-direct (a Python subprocess), NOT a routable `fno agents` verb: it is dispatched via `matches!` in `bin/client.rs` like `version`/`--emit-schema`, so it stays out of the verb-parity lists (`RUST_CLIENT_VERBS` / `CLIENT_VERB_USAGE`).
 

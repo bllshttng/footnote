@@ -58,6 +58,26 @@ fno mail send <peer> '/code-review medium --fix' --raw
 fno mail send '/code-review medium --fix' --to-self --raw
 ```
 
+## A reply does not resolve a thread
+
+`fno pr status` reports `optional_reviews_unresolved`, and `ready` is `green && unresolved == 0`.
+Answering a finding in-thread does not decrement that counter: a GitHub review thread stays unresolved until it is resolved EXPLICITLY.
+So a PR whose every finding has been fixed and answered can sit at `ready: false` indefinitely while reading, to a human and to the loop, as fully handled.
+
+Resolve each thread with the "Resolve conversation" button, or:
+
+```bash
+gh api graphql -f query='mutation($t: ID!){resolveReviewThread(input:{threadId: $t}){thread{isResolved}}}' -F t=<threadId>
+```
+
+Thread ids come from `reviewThreads` on the `pullRequest`.
+`fno pr status` prints this instruction on stderr whenever the counter is non-zero, so the fix travels with the number rather than living only here.
+
+Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) injects nothing and reports one of THREE answers, never two: `injectable: <lane>` (exit 0), `not-injectable: <reason>` (exit 1), or `unmeasurable: <reason>` (exit 3) when the evidence needed to decide could not be read at all.
+Branch on all three. Collapsing `unmeasurable` into `not-injectable` states a verdict about a session the run never measured, and a deployed `fno-agents` too old to carry `--probe` answers `unmeasurable: probe-unavailable`.
+It answers whether a PATH exists, never whether the turn lands, since no probe can see whether the prompt line is idle.
+See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Stop hook gates its compact advice on it.
+
 `fno mail send --raw` routes to the right transport per recipient, and that transport is not always the same binary.
 A claude daemon session injects via the `fno-agents mail-inject` Rust binary (`cli/src/fno/agents/dispatch.py`).
 A mux-hosted session injects via `fno mux pane send`, a separate path that never reaches the mail-inject binary.

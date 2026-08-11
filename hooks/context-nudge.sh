@@ -5,10 +5,19 @@
 # every session and was discarded at the old crown gate.
 #
 # EVERY session gets the CONTEXT check (a): past the context trigger, block once
-# per 10% band. The trigger is crown-shaped: a crowned king hands off EARLIER
+# per 10% band. The trigger is crown-shaped: a crowned king is nudged EARLIER
 # (king_used_pct_trigger, default 40) than any other session (used_pct_trigger,
-# default 50), because a king's degradation propagates into every ruling it
-# issues and every worker it routes, and the handoff itself costs context.
+# default 50), because a king's degradation propagates into every ruling it issues
+# and every worker it routes.
+#
+# What the trigger asks for is a COMPACT, for a king as much as anyone. A crown is
+# maintained across a compact, so a king at high context compacts and keeps
+# ruling; the branch used to read this percentage as a handoff trigger and pointed
+# kings at the more expensive move. Handoff is a judgement about ruling QUALITY -
+# worse calls, lost threads, repetition - and no percentage measures that, so the
+# crowned branch asks the king to assess its own rulings and attaches no number to
+# the answer. The concrete cost that makes compact the default: a successor gets a
+# NEW mail handle, orphaning every worker still holding the old one.
 #
 # A CROWNED king additionally gets the ORPHAN check (b): did it spawn workers
 # that are still live with no resolution recorded? A reign that spawns workers
@@ -40,9 +49,12 @@
 # (a pid can only prove life, never death, and the init wrapper pid died ~1s
 # after init), no read of the target manifest (a king pass has none, so keying
 # on one would deliver this to zero kings), no reconstructed session identity.
-# Every signal here is either handed to the hook in its payload (transcript_path,
-# session_id) or read from live external state (the registry, the carveout
-# ledger, config) at fire time.
+# Every GATING signal here is either handed to the hook in its payload
+# (transcript_path, session_id) or read from live external state (the registry,
+# the carveout ledger, config) at fire time. The one place that does touch ambient
+# identity is the compact-path check in 5b, which asks `--to-self` because the
+# verdict differs by recipient; it only WORDS an already-fired nudge, gates
+# nothing, and a contaminated or absent identity lands on the unmeasurable branch.
 set -uo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -225,6 +237,59 @@ FLUSH_STATE="${LATCH_DIR}/.context-nudge-flush-${TBASE}"
 
 REASON=""
 
+# ── 5b. The compact instruction, gated on a MEASURED injection path. ──────────
+# `/compact` is a REPL built-in the Skill tool cannot call, so a session that
+# needs one either fires it at its own prompt line or asks its operator to type
+# it. WHICH of those is possible is not derivable from the session's shape: the
+# front door needs a registry row, a keystroke lane, and on the daemon lane a
+# roster entry with a resolvable control socket. This hook used to prescribe the
+# inject unconditionally; a session with no path ran it twice, got a resolution
+# miss twice, read that miss as "the session is busy with my turn", and gave up on
+# compacting for the rest of its run. Advice naming a mechanism that cannot fire
+# is worse than no advice, so ASK rather than guess.
+#
+# `--check` is the one resolver answering about itself: it injects nothing and
+# resolves through the same path the real send would, so it cannot say yes where
+# the send says no. It is asked with `--to-self` (see the note on the function),
+# which resolves the caller from its ambient harness markers rather than from the
+# payload's SESSION_ID, because the verdict differs by recipient and the prescribed
+# command is a self-address too. A contaminated or absent ambient identity makes
+# --to-self error, which prints no verdict and lands on the unmeasurable branch.
+#
+# What it can and cannot promise: a PATH exists. No probe can see whether the
+# prompt line is idle, so a send can still come back unconfirmed even on a yes.
+#
+# Fail direction, matching the rest of this hook: anything unmeasurable (no `fno`,
+# an unbuilt binary, a timeout) takes the operator sentence. Telling a session to
+# ask its operator when it could have self-injected costs one message; the reverse
+# cost a session.
+# THREE answers, not two. "I measured no path" and "I could not measure" are
+# different claims, and collapsing them would make this hook do the thing it
+# exists to stop: state a verdict it did not establish.
+compact_instruction() {
+    # Branch on the VERDICT the check printed, not on an exit code: a wrapper, a
+    # pipeline, or a swallowed status can flip a code, and reading one has already
+    # produced false greens elsewhere in this repo today. The word is the signal.
+    # Asks with --to-self, the same address the prescribed command uses, because
+    # the answer DIFFERS by recipient: the mux pane lane is guarded and refuses a
+    # mid-turn recipient, and a session injecting into itself is mid-turn by
+    # construction, so a peer-shaped question would answer "path" where the self
+    # answer is "none". Absent ambient identity --to-self errors, which prints
+    # neither verdict and lands on the unmeasurable branch.
+    local out=""
+    if command -v fno >/dev/null 2>&1; then
+        out=$(with_timeout 5 fno mail send '/compact' --to-self --raw --check 2>/dev/null || true)
+    fi
+    local _ask="ask your operator to type /compact <brief-path> at your prompt, and say in one line what to preserve"
+    if [[ "$out" == injectable:* ]]; then
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session HAS an injection path (measured just now: ${out}), so fire it at your own prompt line: fno mail send '/compact <brief-path>' --to-self --raw   (the leading slash is load-bearing, and the brief path matters: a bare /compact at exhausted context has no headroom left to summarize). A path is not a landing - if the receipt comes back unconfirmed, read your own prompt before assuming either way, and never re-send."
+    elif [[ "$out" == not-injectable:* ]]; then
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session has NO injection path: 'fno mail send /compact --to-self --raw --check' answered ${out}. That means no registry row, a non-keystroke lane, a guarded mux pane (which refuses a mid-turn recipient, and you are mid-turn), or no control socket to write into. It is NOT a claim that you are dead. You cannot fire the verb yourself, so ${_ask}. On whether /fno-me would help: it adds the registry row this check needs FIRST, and nothing else - it creates no daemon roster entry and no control socket - so it flips this answer only for a session that already had those and merely lacked a row. Read the reason above rather than guessing which case you are."
+    else
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and whether you can inject it at your own prompt line could not be measured here (no fno on PATH, or the check timed out), so this nudge will not claim you have a path. Either ${_ask}, or check for yourself with 'fno mail send /compact --to-self --raw --check' and fire it if that says injectable."
+    fi
+}
+
 # ── 6. Check (a): context pressure (EVERY session). Two branches: ─────────────
 #   quality  - large window (>= MIN_WINDOW) past the trigger (returns diminish)
 #   capacity - any window about to hit the absolute RESERVE floor (preamble-heavy
@@ -242,6 +307,10 @@ if [[ -n "$USED_PCT" && -n "$WINDOW_TOKENS" ]]; then
 fi
 if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
     touch "$CTX_LATCH" 2>/dev/null || true
+    # Measured ONCE per fire, inside the latch, and shared by both branches: both
+    # ask for a compact and the answer does not depend on the crown. Outside the
+    # latch this would probe on every Stop.
+    _compact_ask="$(compact_instruction)"
     if [[ "$IS_KING" -eq 1 ]]; then
         emit_event "king_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${KING_TRIGGER},\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"session_id\":\"${SESSION_ID}\"}"
@@ -257,7 +326,19 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         _rollup=""
         [[ "$PEER_KINGS" =~ ^[0-9]+$ && "$PEER_KINGS" -gt 0 ]] && _rollup=" ${PEER_KINGS} peer king(s) also in flight."
         [[ "$KING_ABOVE" =~ ^[0-9]+$ && "$KING_ABOVE" -gt 0 ]] && _rollup="${_rollup} A king above holds your scope."
-        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and are past the king handoff trigger (${KING_TRIGGER}%). Hand off before you abdicate: a crowned session that abdicates at kickoff orphans every worker it spawned. While you still hold live workers a COMPACT beats a handoff, because it keeps your crown, session id, and mail handle, so every worker holding your handle can still reach you, whereas a successor gets a NEW handle and orphans them; /compact is a REPL built-in your Skill tool cannot call, so inject it on your own prompt line: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}. If you do hand off instead: bash skills/target/scripts/handoff.sh, or spawn your successor and run 'fno agents crown <successor> --scope ${CROWN_SCOPE} --succeed', closing this pane only after the successor's session header prints.${_rollup}"
+        # A crown SURVIVES a compact, so this percentage is not a handoff trigger
+        # for a king; it is a compact trigger. The nudge says that plainly rather
+        # than pointing a king at the more expensive of the two moves. Handoff is a
+        # judgement about ruling quality, so it is written as a self-assessment and
+        # deliberately carries no number.
+        #
+        # The rung is NOT printed. Rung semantics changed when succession moved
+        # into spawn and pre-existing rows were never migrated, so a stored level
+        # is stale for any king stamped before that. The scope is unambiguous and
+        # says everything the king needs. The event above still records the stored
+        # level: that is a snapshot for whoever migrates the rows, and no session
+        # acts on it.
+        REASON="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You hold the crown over ${CROWN_SCOPE}. A crown is maintained across a compact - your crown, session id, mail handle, and claims all come out the other side - so the move here is to COMPACT AND KEEP RULING. ${_compact_ask} Handing off is a different decision and this percentage is not its trigger: hand off when your ORCHESTRATION is visibly degrading (you are making worse calls, losing threads, repeating yourself) and a fresh session would rule ${CROWN_SCOPE} better. Ask yourself that about your last few rulings, not about this number. The cost is concrete either way: a successor gets a NEW mail handle, so every worker still holding yours is orphaned at review. If you judge a handoff is right anyway: bash skills/target/scripts/handoff.sh, or spawn your heir over your own scope, which transfers the crown in the same atomic write that vacates yours - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"' - and close this pane only after the successor's session header prints.${_rollup}"
     else
         emit_event "session_context_nudge" \
             "{\"used_pct\":${USED_PCT},\"trigger\":${GENERAL_TRIGGER},\"session_id\":\"${SESSION_ID}\"}"
@@ -270,7 +351,7 @@ if [[ "$FIRE_CTX" -eq 1 && ! -f "$CTX_LATCH" ]]; then
         if command -v fno >/dev/null 2>&1; then
             PLAN_PATH=$(with_timeout 3 fno state show --type target --field plan_path 2>/dev/null | head -1 || true)
         fi
-        _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session handoff trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now - but /compact is a REPL built-in and your Skill tool CANNOT call it, so inject it on your own prompt line instead: printf '/compact <brief-path>' | fno-agents mail-inject --harness claude --session ${SESSION_ID}   (the leading slash is load-bearing, and passing a brief path matters: a bare /compact at exhausted context has no headroom left to summarize). Your session id, mail handle, and claims all survive a compact."
+        _compact_core="context: ${USED_PCT}% used (${USED_TOKENS:-?} of ${WINDOW_TOKENS:-?} tokens). You are past the session compact trigger (${GENERAL_TRIGGER}%). Returns diminish well before this window fills, so a long run degrades from here. Compact now: your session id, mail handle, and claims all survive it. ${_compact_ask}"
         if [[ -n "$PLAN_PATH" ]]; then
             REASON="${_compact_core} You have a plan bound, so the plan, STATE.md and SUMMARY.md survive the compact - but your in-flight judgment does not. Before you compact, flush what is only in volatile state: commit small fixes in this PR as their own atomic commit, 'fno carveout add -k deferred \"...\"' for separable work, 'fno backlog idea' for new findings, and note any plan drift in SUMMARY.md."
         else
@@ -315,7 +396,7 @@ if [[ "$IS_KING" -eq 1 && "$ORPHAN_COUNT" -gt 0 && ! -f "$ORPHAN_LATCH" ]]; then
         touch "$ORPHAN_LATCH" 2>/dev/null || true
         emit_event "king_orphan_block" \
             "{\"crown_level\":${CROWN_LEVEL},\"crown_scope\":\"${CROWN_SCOPE}\",\"workers\":\"${ORPHANS}\",\"count\":${ORPHAN_COUNT},\"session_id\":\"${SESSION_ID}\"}"
-        ORPHAN_REASON="You hold a crown (level ${CROWN_LEVEL}, scope ${CROWN_SCOPE}) and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown over with 'fno agents crown <handle> --scope ${CROWN_SCOPE} --succeed'; (3) record that these workers are review-orphaned with 'fno carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
+        ORPHAN_REASON="You hold the crown over ${CROWN_SCOPE} and ${ORPHAN_COUNT} worker(s) you spawned are still live (${ORPHANS}). A reign that spawns workers cannot be a pure pass: abdicating now leaves them with nobody to mail when they reach review. Pick one and act, then this stops: (1) stay as court through the wave; (2) hand the crown to an heir by spawning it over your own scope, which vacates yours in the same atomic write - 'fno agents spawn -k \"${CROWN_SCOPE}\" \"<seed prompt>\"'; (3) record that these workers are review-orphaned with 'fno carveout add -k deferred --scope ${CROWN_SCOPE} \"...\"' and they fall back to advisory self-review."
         if [[ -n "$REASON" ]]; then
             REASON="${REASON}  ||  ${ORPHAN_REASON}"
         else

@@ -31,7 +31,7 @@
 //! envelope (follow-up); the bounded duplicate is the accepted live-first tradeoff.
 
 use std::io::{self, BufRead, Read, Seek};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::claude_attach::{perform_attach, AttachRequest, UnixControlTransport};
@@ -87,7 +87,35 @@ pub struct MailInjectArgs {
     pub interval_ms: u64,
     /// Sender mail handle for the audit event; absent on a direct binary call.
     pub sender: Option<String>,
+    /// `--probe`: run resolution ONLY and report whether an injection path
+    /// exists, injecting nothing and reading no stdin. Answers the question a
+    /// caller has to ask BEFORE it prescribes an inject to someone.
+    pub probe: bool,
 }
+
+/// Resolution miss: no roster entry for the session, or a roster entry with no
+/// control socket to write into. It says NOT-INJECTABLE and nothing else. It is
+/// NOT a liveness verdict: a busy worker with an unreachable control socket is
+/// correctly not-injectable and is not dead. This string was called `not-live`
+/// for as long as it kept misleading its readers, twice on record: once reported
+/// as an idle session whose transcript was 32 seconds old, and once read as "the
+/// session is busy with my turn", which cost a whole session's compact. The
+/// comment warning about the misnomer did not prevent the second misreading, so
+/// the name changed instead. For reachability ask `fno agents truth` or the
+/// `reachability` field on `fno agents list`
+/// (`cli/src/fno/agents/reachability.py`), never this string.
+pub const NOT_INJECTABLE: &str = "not-injectable";
+
+/// The one-line human explanation printed alongside [`NOT_INJECTABLE`], so the
+/// failure is self-explaining at the point of use instead of only in a source
+/// comment a reader of the terminal never sees.
+pub const NOT_INJECTABLE_HELP: &str = concat!(
+    "mail-inject: not-injectable means no roster entry, or no control socket to ",
+    "write into. It is NOT a liveness verdict: the session may be alive and ",
+    "mid-turn. Ask `fno agents truth <handle>` for reachability. A session with ",
+    "no injection path can still act: its operator can type the command at its ",
+    "prompt.",
+);
 
 /// Parse `mail-inject` argv (everything after the verb). Pure + total so the flag
 /// grammar is unit-tested without a daemon.
@@ -97,6 +125,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
     let mut attempts = DEFAULT_ATTEMPTS;
     let mut interval_ms = DEFAULT_INTERVAL_MS;
     let mut sender: Option<String> = None;
+    let mut probe = false;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match a.as_str() {
@@ -120,6 +149,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
                 };
             }
             "--provider" => return Err((2, PROVIDER_AXIS_TOMBSTONE.to_string())),
+            "--probe" => probe = true,
             "--sender" => {
                 sender = Some(
                     it.next()
@@ -151,6 +181,7 @@ pub fn parse_args(rest: &[String]) -> Result<MailInjectArgs, (i32, String)> {
         attempts,
         interval_ms,
         sender,
+        probe,
     })
 }
 
@@ -204,6 +235,13 @@ pub fn emit_raw_inject_audit(
     }
     let _ = crate::events::EventEmitter::new(events_path, "daemon")
         .emit_fields("agent_raw_inject", fields);
+}
+
+/// The `--probe` outcome line: `{"injectable": bool, "reason": str}`. A DIFFERENT
+/// key from [`outcome_json`]'s `delivered` on purpose -- a probe that printed
+/// `delivered` would be one careless read away from being logged as a delivery.
+pub fn probe_json(injectable: bool, reason: &str) -> String {
+    serde_json::json!({ "injectable": injectable, "reason": reason }).to_string()
 }
 
 /// Print the outcome JSON to stdout and return its exit code.
@@ -306,6 +344,24 @@ fn confirm_content_after(path: &Path, marker: &str, since_byte: u64) -> io::Resu
     Ok(false)
 }
 
+/// Resolve everything an inject needs before it can write a byte: the recipient's
+/// roster entry, its `control.sock`, and its transcript (the confirm target).
+/// Returns `(control_sock, short_id, transcript)`.
+///
+/// The SINGLE resolution path. Both [`deliver_via_control_sock`] and `--probe`
+/// call it, so a probe cannot disagree with the send it predicts -- a second
+/// implementation of these four steps would drift the moment resolution changes,
+/// and a probe that says yes where the send says no is worse than no probe.
+fn resolve_target(session: &str) -> Result<(PathBuf, String, PathBuf), &'static str> {
+    let roster = ClaudeRoster::load_default().map_err(|_| NOT_INJECTABLE)?;
+    let worker = roster.find(session).ok_or(NOT_INJECTABLE)?;
+    let sock = worker.resolve_control_sock().ok_or(NOT_INJECTABLE)?;
+    // No transcript yet == we cannot confirm landing, so there is no usable path
+    // even though the socket resolved.
+    let transcript = find_transcript(&worker.session_id).ok_or("no-transcript")?;
+    Ok((sock, worker.short_id().to_string(), transcript))
+}
+
 /// Deliver `text` to `session` over the daemon `control.sock`: resolve the
 /// recipient on the roster, attach, paste the envelope + wire-level CR submit, and
 /// confirm by CONTENT that the injected turn landed in the recipient transcript.
@@ -325,26 +381,8 @@ pub fn deliver_via_control_sock(
     attempts: u32,
     interval_ms: u64,
 ) -> Result<(), &'static str> {
-    // Resolve the recipient on the claude daemon roster.
-    //
-    // `not-live` is a MISNOMER kept for wire compatibility: what these three
-    // misses actually prove is NOT-INJECTABLE (no roster entry, or no control
-    // socket to write into), which is a different question from whether the
-    // agent is reachable. A busy worker with no reachable control socket is
-    // correctly not-injectable and is NOT dead -- this reason was once read as a
-    // liveness verdict and reported an idle session for a worker whose
-    // transcript was 32 seconds old. For reachability ask
-    // `fno agents truth` / the `reachability` field on `fno agents list`
-    // (`cli/src/fno/agents/reachability.py`), never this string.
-    let roster = ClaudeRoster::load_default().map_err(|_| "not-live")?;
-    let worker = roster.find(session).ok_or("not-live")?;
-    let sock = worker.resolve_control_sock().ok_or("not-live")?;
-    let short = worker.short_id().to_string();
+    let (sock, short, transcript) = resolve_target(session)?;
     let auth = read_control_key();
-
-    // Locate the recipient transcript. No transcript yet == we cannot confirm
-    // landing.
-    let transcript = find_transcript(&worker.session_id).ok_or("no-transcript")?;
 
     let mut transport = UnixControlTransport::connect(&sock).map_err(|_| "io-error")?;
     if perform_attach(
@@ -459,6 +497,35 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
         }
     };
 
+    // `--probe` answers "does an injection path exist" and stops there: no stdin
+    // read (a caller probing has no payload yet), no attach, no keystroke, no
+    // audit record. Claude only, because the codex lane submits a turn with no
+    // prompt line, so a slash payload never fires there and `--raw` already
+    // refuses it upstream; a probe that answered for codex would be answering a
+    // question nobody can act on.
+    if args.probe {
+        if args.provider == MailInjectProvider::Codex {
+            eprintln!(
+                "mail-inject: --probe is claude-only (the codex lane submits a turn \
+                 with no prompt line, so there is no keystroke path to probe)"
+            );
+            return 2;
+        }
+        return match resolve_target(&args.session) {
+            Ok(_) => {
+                println!("{}", probe_json(true, "resolved"));
+                0
+            }
+            Err(reason) => {
+                if reason == NOT_INJECTABLE {
+                    eprintln!("{NOT_INJECTABLE_HELP}");
+                }
+                println!("{}", probe_json(false, reason));
+                1
+            }
+        };
+    }
+
     let mut text = String::new();
     if let Err(e) = std::io::stdin().read_to_string(&mut text) {
         eprintln!("mail-inject: reading stdin: {e}");
@@ -506,7 +573,15 @@ pub async fn run_mail_inject(rest: &[String]) -> i32 {
 
     match result {
         Ok(()) => emit(true, "delivered"),
-        Err(reason) => emit(false, reason),
+        Err(reason) => {
+            // Self-explaining at the point of use. The JSON reason is a token for
+            // a parser; a human reading the terminal gets the sentence, so the
+            // misreading that cost a session cannot recur from this door.
+            if reason == NOT_INJECTABLE {
+                eprintln!("{NOT_INJECTABLE_HELP}");
+            }
+            emit(false, reason)
+        }
     }
 }
 
@@ -869,9 +944,42 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(&outcome_json(true, "delivered")).unwrap();
         assert_eq!(v["delivered"], true);
         assert_eq!(v["reason"], "delivered");
-        let w: serde_json::Value = serde_json::from_str(&outcome_json(false, "not-live")).unwrap();
+        let w: serde_json::Value =
+            serde_json::from_str(&outcome_json(false, NOT_INJECTABLE)).unwrap();
         assert_eq!(w["delivered"], false);
-        assert_eq!(w["reason"], "not-live");
+        assert_eq!(w["reason"], "not-injectable");
+    }
+
+    /// The reason token must not go back to saying anything about liveness. Two
+    /// recorded misdiagnoses came from a reader taking it as one, and a comment
+    /// warning about that did not stop the second, so the name is pinned here.
+    #[test]
+    fn resolution_miss_reason_never_claims_liveness() {
+        assert_eq!(NOT_INJECTABLE, "not-injectable");
+        assert!(!NOT_INJECTABLE.contains("live"));
+        assert!(
+            NOT_INJECTABLE_HELP.contains("NOT a liveness verdict"),
+            "the help line is the self-explaining half: it must say what the token is not"
+        );
+    }
+
+    /// A probe reports on a different key than a delivery, so a probe line read by
+    /// the wrong parser cannot be mistaken for a landed inject.
+    #[test]
+    fn probe_json_never_reports_delivered() {
+        let v: serde_json::Value = serde_json::from_str(&probe_json(true, "resolved")).unwrap();
+        assert_eq!(v["injectable"], true);
+        assert!(v.get("delivered").is_none());
+    }
+
+    #[test]
+    fn parse_args_probe_defaults_off_and_opts_in() {
+        assert!(!parse_args(&argv(&["--session", "s1"])).unwrap().probe);
+        assert!(
+            parse_args(&argv(&["--session", "s1", "--probe"]))
+                .unwrap()
+                .probe
+        );
     }
 
     #[test]

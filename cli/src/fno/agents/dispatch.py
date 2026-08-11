@@ -5433,6 +5433,42 @@ def _mux_followup_path(
     return DispatchAskResult(kind="followup", short_id=ref, reply="")
 
 
+def mail_inject_probe(recipient: str) -> tuple[bool, str]:
+    """Ask the ``fno-agents mail-inject --probe`` verb whether an injection path to
+    ``recipient`` EXISTS, without injecting anything.
+
+    Returns ``(injectable, reason)``. The probe resolves through the same
+    ``resolve_target`` the real send uses, so it cannot say yes where the send
+    would say no. It answers whether a PATH exists, never whether a turn will
+    land: the recipient's prompt line may still refuse a mid-turn paste.
+
+    Degrades to ``(False, "probe-unavailable")`` when the binary is missing or the
+    call fails, so a caller gating advice on this never claims a path it could not
+    measure.
+    """
+    import json
+
+    from fno import rust_binary
+
+    binary = rust_binary.resolve_installed_binary()
+    if binary is None:
+        return False, "probe-unavailable"
+    try:
+        proc = subprocess.run(
+            [str(binary), "mail-inject", "--probe", "--session", recipient],
+            capture_output=True,
+            text=True,
+            timeout=_MAIL_INJECT_TIMEOUT_S,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False, "probe-unavailable"
+    try:
+        out = json.loads(proc.stdout.strip())
+        return bool(out.get("injectable")), str(out.get("reason") or "unknown")
+    except (ValueError, AttributeError):
+        return False, "probe-unavailable"
+
+
 def _mail_inject_claude(recipient: str, text: str, *, sender: Optional[str] = None) -> bool:
     """Inject ``text`` into a live claude session over the daemon ``control.sock``
     via the ``fno-agents mail-inject`` verb (G1 substrate, node x-1f23).

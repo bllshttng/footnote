@@ -730,7 +730,7 @@ _MAIL_INJECT_TIMEOUT_S = 20.0
 INJECT_CONFIRMED = "confirmed"      # mail-inject saw transcript growth: the turn landed.
 INJECT_UNCONFIRMED = "unconfirmed"  # op:'reply' sent, growth not confirmed in budget (or the
                                     # subprocess timed out mid-confirm): the turn may still land.
-INJECT_NOT_SENT = "not_sent"        # the inject never reached the session (not-live, verb
+INJECT_NOT_SENT = "not_sent"        # the inject never reached the session (not-injectable, verb
                                     # absent, attach/write failed): nothing was delivered.
 
 
@@ -743,7 +743,7 @@ def submit_via_control_reply(session_id: str, framed: str) -> str:
     :data:`INJECT_NOT_SENT`. mail-inject emits ``{"delivered": bool, "reason": str}``:
     ``delivered`` -> CONFIRMED; ``reason == "not-confirmed"`` -> UNCONFIRMED (the
     op:'reply' WAS written but growth wasn't seen in budget -- a busy recipient still
-    lands it); every other not-delivered reason (``not-live`` / ``no-transcript`` /
+    lands it); every other not-delivered reason (``not-injectable`` / ``no-transcript`` /
     ``attach-failed`` / ``io-error`` / ``unsafe-text``) means the turn never reached
     the session -> NOT_SENT. A subprocess timeout is UNCONFIRMED: the verb may have
     written the op:'reply' before its growth-confirm poll was cut off.
