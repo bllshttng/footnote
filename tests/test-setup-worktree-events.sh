@@ -62,6 +62,21 @@ else
   echo "PASS: looping events symlink fails closed"
 fi
 
+old_canonical="$TMP/old-canonical"
+retargeted="$TMP/retargeted"
+mkdir -p "$old_canonical/.fno" "$retargeted/.fno"
+printf '%s\n' '{"type":"old_canonical_only"}' > "$old_canonical/.fno/events.jsonl"
+ln -s "$old_canonical/.fno/events.jsonl" "$retargeted/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$retargeted" bash "$SETUP" >/dev/null 2>&1
+retargeted_rc=$?
+assert "noncanonical journal symlink makes setup fail" test "$retargeted_rc" -ne 0
+assert "failed retarget preserves the existing journal link" \
+  test "$old_canonical/.fno/events.jsonl" -ef "$retargeted/.fno/events.jsonl"
+assert "failed retarget preserves old-only rows" \
+  grep -q 'old_canonical_only' "$old_canonical/.fno/events.jsonl"
+assert "failed retarget does not strand rows behind a successful switch" \
+  bash -c '! grep -q old_canonical_only "$1"' _ "$canonical/.fno/events.jsonl"
+
 missing_cursor_canonical="$TMP/missing-cursor-canonical"
 missing_cursor_worktree="$TMP/missing-cursor-worktree"
 mkdir -p "$missing_cursor_canonical/.fno" "$missing_cursor_worktree/.fno"

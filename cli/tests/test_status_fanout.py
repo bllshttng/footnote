@@ -426,6 +426,34 @@ def test_tick_renews_its_lock_during_a_long_dispatch(tmp_path, monkeypatch):
     assert renewed.is_set()
 
 
+def test_tick_does_not_publish_cursor_after_lease_loss(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir.mkdir(parents=True)
+    original_cursor = {"ts": "2026-08-11T08:00:00Z", "n": 0}
+    _seed_cursor(state_dir, "s", original_cursor["ts"])
+    _write_events(tmp_path, [_ev("2026-08-11T09:00:00Z", "blocked")])
+    renewal_failed = threading.Event()
+
+    def lose_lease(path, token):
+        renewal_failed.set()
+        return False
+
+    def slow_dispatch(sink, event):
+        assert renewal_failed.wait(1)
+        return sf.DELIVERED, ""
+
+    monkeypatch.setattr(sf, "_TICK_LEASE_RENEW_EVERY_S", 0.01)
+    monkeypatch.setattr(sf, "renew_dir_mutex", lose_lease)
+
+    result = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=slow_dispatch)
+
+    assert result.lease_lost is True
+    assert result.sinks[0].dispatched == 1
+    assert _cursor(state_dir, "s") == original_cursor
+
+
 def test_tick_orders_migrated_older_rows_before_the_canonical_tail(tmp_path):
     from fno import status_fanout as sf
 

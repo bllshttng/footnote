@@ -68,6 +68,7 @@ class TickResult:
     sinks: list[SinkResult] = field(default_factory=list)
     skipped_lines: int = 0
     locked_out: bool = False  # another tick held the per-project lock; skipped
+    lease_lost: bool = False  # lock was stolen; cursor persistence was aborted
 
 
 # ── event stream (rotation-aware, skip-and-count) ───────────────────────────
@@ -286,7 +287,7 @@ def run_tick(
     if not lock.acquire():
         return TickResult(locked_out=True)
     try:
-        return _run_locked(project_root, enabled, dry_run, dispatch)
+        return _run_locked(project_root, enabled, dry_run, dispatch, lock.verify)
     finally:
         lock.release()
 
@@ -296,6 +297,7 @@ def _run_locked(
     sinks: list[StatusSinkConfig],
     dry_run: bool,
     dispatch: Dispatcher,
+    verify_lease: Callable[[], bool],
 ) -> TickResult:
     active = paths.project_log("events.jsonl", project_root=project_root)
     eof = _eof_cursor(active)  # (ts, count_at_ts) - the fresh-sink floor
@@ -375,6 +377,12 @@ def _run_locked(
         for s in sinks:
             st = state[s.name]
             if st.dispatched or st.dropped or fresh[s.name]:
+                if not verify_lease():
+                    return TickResult(
+                        sinks=[state[item.name] for item in sinks],
+                        skipped_lines=skipped,
+                        lease_lost=True,
+                    )
                 try:
                     _write_cursor(s.name, st.new_cursor, project_root)  # type: ignore[arg-type]
                 except OSError as exc:
@@ -399,6 +407,7 @@ class _TickLock:
         self._path = _state_dir(project_root) / ".tick.lock.d"
         self._token: Optional[str] = None
         self._stop = threading.Event()
+        self._lost = threading.Event()
         self._renewer: Optional[threading.Thread] = None
 
     def acquire(self) -> bool:
@@ -418,7 +427,16 @@ class _TickLock:
         while not self._stop.wait(_TICK_LEASE_RENEW_EVERY_S):
             token = self._token
             if token is None or not renew_dir_mutex(self._path, token):
+                self._lost.set()
                 return
+
+    def verify(self) -> bool:
+        """Confirm ownership at a cursor-publication boundary."""
+        token = self._token
+        if token is None or self._lost.is_set() or not renew_dir_mutex(self._path, token):
+            self._lost.set()
+            return False
+        return True
 
     def release(self) -> None:
         if self._token is not None:

@@ -805,6 +805,7 @@ link_events_journal() {
   local pending_candidate
   local recover_pending=0
   local fresh_target=0
+  local source_resolved target_resolved
   EVENTS_MIGRATION_TOKEN="$token"
   EVENTS_MIGRATION_DIRS=()
   EVENTS_MIGRATION_PUBLISHED=0
@@ -820,8 +821,15 @@ link_events_journal() {
     [[ "$pending_candidate" == *.landed ]] || pending_backups+=("$pending_candidate")
   done
   shopt -u nullglob
+  source_resolved=$(_resolve_event_symlink "$source") || return 1
+  if [[ -L "$target" ]]; then
+    target_resolved=$(_resolve_event_symlink "$target") || return 1
+    if [[ "$target_resolved" != "$source_resolved" ]]; then
+      echo "setup-worktree: refusing to retarget noncanonical events symlink: $target -> $target_resolved" >&2
+      return 1
+    fi
+  fi
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
-    ln -sfn "$source" "$target"
     reconcile_shared_events_fanout "$source" "$target" "$token"
     return $?
   fi
@@ -948,6 +956,21 @@ link_events_journal() {
     [[ "$pending_candidate" == *.landed ]] || pending_backups+=("$pending_candidate")
   done
   shopt -u nullglob
+  source_resolved=$(_resolve_event_symlink "$source") || {
+    cleanup_events_migration
+    return 1
+  }
+  if [[ -L "$target" ]]; then
+    target_resolved=$(_resolve_event_symlink "$target") || {
+      cleanup_events_migration
+      return 1
+    }
+    if [[ "$target_resolved" != "$source_resolved" ]]; then
+      cleanup_events_migration
+      echo "setup-worktree: refusing to retarget noncanonical events symlink: $target -> $target_resolved" >&2
+      return 1
+    fi
+  fi
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     local reconcile_rc=0
     if verify_events_migration_leases; then

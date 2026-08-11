@@ -28,7 +28,7 @@ _resolve_event_symlink() {
 
 _steal_stale_event_dir() {
     local lock_dir="${1:?event lock directory required}"
-    local modified now age owner_before owner_check owner_after reap
+    local modified modified_after now age owner_before owner_check owner_after reap
     owner_before=$(cat "$lock_dir/owner" 2>/dev/null || true)
     modified=$(stat -c %Y "$lock_dir" 2>/dev/null || stat -f %m "$lock_dir" 2>/dev/null) || return 1
     now=$(date +%s)
@@ -40,7 +40,8 @@ _steal_stale_event_dir() {
     reap="${lock_dir}.reap.${BASHPID:-$$}.${RANDOM}"
     mv "$lock_dir" "$reap" 2>/dev/null || return 1
     owner_after=$(cat "$reap/owner" 2>/dev/null || true)
-    if [[ "$owner_after" != "$owner_before" ]]; then
+    modified_after=$(stat -c %Y "$reap" 2>/dev/null || stat -f %m "$reap" 2>/dev/null) || modified_after=""
+    if [[ "$owner_after" != "$owner_before" || "$modified_after" != "$modified" ]]; then
         # Reserve the canonical name before restoring the owner file. A direct
         # `mv "$reap" "$lock_dir"` nests the reaped directory when another
         # holder acquired lock_dir after our rename, leaving its lock non-empty.
