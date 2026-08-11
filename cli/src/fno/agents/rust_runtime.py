@@ -395,9 +395,7 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a == "--role" or a.startswith("--role=") for a in _args_before_argv(args)
-    )
+    return _has_flag(args, longs=("--role",))
 
 
 def _has_flag(
@@ -410,8 +408,7 @@ def _has_flag(
     ``--substrate bg`` spawn spelled that way routed to the Rust binary and
     exited ``unknown flag``); a long flag as ``--foo`` and ``--foo=V``. One
     matcher for every routing detector so the attached-short blind spot cannot
-    recur one flag at a time - the crown fix closed it for ``-k`` only; this
-    closes the sibling ``-r`` and ``-P`` detectors in the same file too.
+    recur one flag at a time.
     """
     for a in _args_before_argv(args):
         if short and a.startswith(short):
@@ -452,10 +449,7 @@ def _is_monitor_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """Keep ``--monitor`` on the Python path that owns its pane-only guards."""
     if verb != "spawn":
         return False
-    return any(
-        a == "--monitor" or a.startswith("--monitor=")
-        for a in _args_before_argv(args)
-    )
+    return _has_flag(args, longs=("--monitor",))
 
 
 def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
@@ -470,10 +464,7 @@ def _is_dispatch_account_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """
     if verb != "spawn":
         return False
-    return any(
-        a == "--dispatch-account" or a.startswith("--dispatch-account=")
-        for a in args
-    )
+    return _has_flag(args, longs=("--dispatch-account",))
 
 
 def _is_resume_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
