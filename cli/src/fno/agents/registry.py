@@ -643,7 +643,8 @@ def _ensure_unique_across_stores(
 
 
 def resolve_from_harness_store(
-    token: str, *, registry_path: Optional[Path] = None
+    token: str, *, registry_path: Optional[Path] = None,
+    scope_cwd: Optional[str] = None, cross_project: bool = False,
 ) -> Optional[AgentEntry]:
     """The registry-miss healer (x-9cc5), isolated so every resolution surface
     reaches it identically -- including ``resume``, which loads its own entries
@@ -651,10 +652,18 @@ def resolve_from_harness_store(
 
     Returns ``None`` when no store knows the token, so the caller raises its own
     unchanged error. Propagates :class:`AgentResolutionError` on an ambiguous
-    token: refusing to guess is the designed outcome, not a miss."""
+    token: refusing to guess is the designed outcome, not a miss.
+
+    ``scope_cwd``/``cross_project`` carry the project-confinement contract
+    through to :func:`heal_from_harness_store`; the default (process cwd, no
+    override) confines adoption to the caller's project. ``resume`` bypasses this
+    healer entirely, so it is uncovered by design."""
     from fno.agents.store_fallback import heal_from_harness_store
 
-    return heal_from_harness_store(token, registry_path=registry_path)
+    return heal_from_harness_store(
+        token, registry_path=registry_path,
+        scope_cwd=scope_cwd, cross_project=cross_project,
+    )
 
 
 def _registry_path(path: Optional[Path]) -> Path:

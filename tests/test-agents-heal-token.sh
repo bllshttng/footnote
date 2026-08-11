@@ -23,6 +23,11 @@ fi
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
 mkdir -p "$tmp/bin" "$tmp/projects/-repo-one" "$tmp/codex/2026/07/20" "$tmp/home"
+# Run from a cwd that is NOT a known project: project confinement (defect 1) is
+# N/A outside a project, so this seam-plumbing test exercises adoption through
+# the Rust->Python shellout as before. The confined path (same-project adopt,
+# foreign refuse) is covered by cli/tests/agents/test_store_fallback_confinement.py.
+cd "$tmp" || { echo "FAIL: could not enter tmp"; exit 1; }
 
 # Shim `fno` to this worktree's source, so the shellout exercises the code under
 # test rather than whatever version happens to be installed.

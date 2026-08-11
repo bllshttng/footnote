@@ -18,11 +18,25 @@ Three rules keep it from guessing:
 - **Never live** -- a store row proves the session EXISTS, never that it is
   running, so the adopted row is ``orphaned``. Store membership must not
   resurrect a dead session into lane caps or live anycast (the x-830c lesson).
+- **Project confinement** -- a store hit is adopted only into the CALLER's
+  project. The probes scan machine-wide (a transcript store is global), and
+  before this rule a bare handle from a foreign repo healed into scope and got
+  woken as a side effect (defect 1: a regready session revived from footnote).
+  Membership is settings ``project`` first, then the shared ``git-common-dir``
+  (NOT toplevel -- footnote is worktree-first, so toplevel differs per worktree
+  and would refuse canonical->worktree traffic), then refuse. An out-of-project
+  hit is refused with the candidate named, copying the ambiguity posture; an
+  explicit ``cross_project`` flag is the only override (a spawn into a foreign
+  repo). The confinement lives here because every store-adoption path routes
+  through :func:`heal_from_harness_store`; ``resume`` does not (it matches loaded
+  registry entries via ``resolve_agent_in``), so it is uncovered by design.
 """
 from __future__ import annotations
 
 import json
+import os
 import re
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -260,8 +274,160 @@ def complete_store_hits(token: str) -> list[StoreHit]:
     return probe_stores(token, require_complete=True)
 
 
+def _git_common_dir(cwd: Path) -> Optional[str]:
+    """The shared git common-dir for ``cwd``, absolute and worktree-stable.
+
+    ``git rev-parse --git-common-dir`` is ``<canonical>/.git`` from the canonical
+    checkout AND from every one of its worktrees (including ones outside the
+    checkout, like ``~/.fno/worktrees/...``), so it identifies a project across
+    its whole worktree family. ``--show-toplevel`` does NOT -- it differs per
+    worktree, so it would refuse canonical->worktree traffic. Returns None for a
+    non-repo or any git failure (the caller then refuses to adopt).
+    """
+    try:
+        out = subprocess.run(
+            ["git", "-C", str(cwd), "rev-parse",
+             "--path-format=absolute", "--git-common-dir"],
+            capture_output=True, text=True, check=False, timeout=2,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    common = (getattr(out, "stdout", "") or "").strip()
+    if getattr(out, "returncode", 1) == 0 and common:
+        try:
+            return str(Path(common).resolve())
+        except OSError:
+            return None
+    return None
+
+
+def _project_identity(cwd: Optional[str]) -> "tuple[Optional[str], Optional[str]]":
+    """A comparable project identity for ``cwd``: ``(settings_project_id, git_common_dir)``.
+
+    Either field may be None. Settings project id wins when both cwds answer it
+    (the canonical fno notion of project); the git common-dir is the
+    worktree-stable fallback for a cwd whose project config did not link.
+    """
+    pid: Optional[str] = None
+    if cwd:
+        try:
+            from fno.inbox.store import ProjectIdentificationError, resolve_project
+
+            pid = resolve_project(cwd=Path(cwd))
+        except ProjectIdentificationError:
+            pid = None
+        except Exception:  # noqa: BLE001 - membership must degrade, never crash the verb
+            pid = None
+    gdir = _git_common_dir(Path(cwd)) if cwd else None
+    return (pid, gdir)
+
+
+def _membership(
+    s_ident: "tuple[Optional[str], Optional[str]]",
+    h_ident: "tuple[Optional[str], Optional[str]]",
+) -> Optional[bool]:
+    """True if two project identities match; False if a different project; None
+    if membership is unresolvable (cannot be proven either way).
+
+    Settings project id compared first; when one or both lack it, the git
+    common-dir decides. Two foreign repos differ; a canonical checkout and its
+    worktree match (same common-dir). Unresolvable on both axes -> None.
+    """
+    s_pid, s_gdir = s_ident
+    h_pid, h_gdir = h_ident
+    if s_pid is not None and h_pid is not None:
+        return s_pid == h_pid
+    if s_gdir is not None and h_gdir is not None:
+        return s_gdir == h_gdir
+    # One resolved by settings, the other only by git (or not at all). A settings
+    # project id cannot be cross-compared to a git dir, so we cannot prove a match.
+    return None
+
+
+def _same_project(scope_cwd: Optional[str], hit_cwd: Optional[str]) -> Optional[bool]:
+    """True if ``hit_cwd`` is in ``scope_cwd``'s project; False if a different one;
+    None if membership is unresolvable (the caller refuses).
+
+    Thin two-cwd wrapper over :func:`_membership`; callers that resolve one side
+    once across many hits ( confinement ) should call ``_membership`` directly
+    with the precomputed scope identity rather than re-spawning git per hit.
+    """
+    if not scope_cwd or not hit_cwd:
+        return None
+    return _membership(_project_identity(scope_cwd), _project_identity(hit_cwd))
+
+
+def _confine_to_project(
+    token: str,
+    hits: list[StoreHit],
+    *,
+    scope_cwd: Optional[str],
+    cross_project: bool,
+) -> list[StoreHit]:
+    """Filter ``hits`` to the caller's project; refuse when none is in-project.
+
+    The refused posture copies ambiguity: an out-of-project candidate is named,
+    never silently adopted and woken. Returns ``hits`` unchanged when confinement
+    does not apply -- ``cross_project`` set, or the scope is itself not a known
+    project (no settings project and not a git repo), in which case there is no
+    "across" to protect and the historical behavior stands. Raises
+    :class:`AgentResolutionError` (``ambiguous=True``) on the refuse.
+    """
+    if cross_project:
+        return hits
+    scope = scope_cwd or os.getcwd()
+    # ponytail: compute the scope identity ONCE here, not per hit. The scope is
+    # invariant across the loop, and _project_identity spawns a git subprocess;
+    # re-resolving it per hit (via _same_project) was N redundant fork+exec calls.
+    s_ident = _project_identity(scope)
+    if s_ident == (None, None):
+        return hits
+    in_project: list[StoreHit] = []
+    cross: list[StoreHit] = []
+    unknown: list[StoreHit] = []
+    for h in hits:
+        verdict = _membership(s_ident, _project_identity(h.cwd))
+        if verdict is True:
+            in_project.append(h)
+        elif verdict is False:
+            cross.append(h)
+        else:
+            unknown.append(h)
+    if in_project:
+        return in_project
+    from fno.agents.registry import AgentResolutionError
+
+    refused = sorted(cross + unknown, key=lambda h: (h.harness, h.session_id))
+    cands = ", ".join(
+        f"{h.session_id} ({h.harness}, cwd={h.cwd or '?'})"
+        for h in refused
+    )
+    # Name the real reason: confirmed foreign, unresolvable (e.g. a transcript
+    # that never recorded a cwd, or a since-deleted worktree), or both. Calling
+    # an unresolvable hit "cross-project" sends the operator looking in the wrong
+    # place.
+    if cross and unknown:
+        reason = (
+            "cross-project and project-unresolvable candidate(s) refused"
+        )
+    elif cross:
+        reason = "cross-project candidate(s) refused"
+    else:
+        reason = (
+            "candidate(s) whose project membership could not be determined "
+            "(cwd unset or no longer resolvable)"
+        )
+    raise AgentResolutionError(
+        f"token {token!r} matches no session in this project; "
+        f"{reason}: {cands}. "
+        f"Disambiguate with the full session id in scope, or pass cross-project.",
+        ambiguous=True,
+    )
+
+
 def heal_from_harness_store(
-    token: str, *, registry_path: Optional[Path] = None
+    token: str, *, registry_path: Optional[Path] = None,
+    scope_cwd: Optional[str] = None, cross_project: bool = False,
 ) -> Optional["AgentEntry"]:
     """Adopt the session ``token`` names into the registry and return its row.
 
@@ -270,6 +436,12 @@ def heal_from_harness_store(
     :class:`~fno.agents.registry.AgentResolutionError` naming the candidates when
     more than one session matches: an ambiguous token is refused, never guessed.
 
+    Adoption is CONFINED to the caller's project unless ``cross_project`` is set
+    (defect 1: a bare handle from a foreign repo healed into scope and got woken).
+    ``scope_cwd`` defaults to the process cwd; an out-of-project hit is refused
+    with the candidate named, copying the ambiguity posture. See the module
+    docstring's project-confinement rule.
+
     Registration is best-effort. If the registry write fails, the synthesized row
     is still returned so the verb reaches the session anyway -- reaching it wins,
     and the row appears on the next resolution.
@@ -277,6 +449,13 @@ def heal_from_harness_store(
     from fno.agents.registry import AgentEntry, AgentResolutionError, register_existing_session
 
     hits = complete_store_hits(token)
+    if not hits:
+        return None
+    # Project confinement: adopt only a session in the caller's project, else
+    # refuse (an out-of-project hit named, not silently healed and woken).
+    hits = _confine_to_project(
+        token, hits, scope_cwd=scope_cwd, cross_project=cross_project
+    )
     if not hits:
         return None
     if len(hits) > 1:

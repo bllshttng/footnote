@@ -35,6 +35,11 @@ def _scratch_stores(tmp_path, monkeypatch):
                       ("codex", discover.CODEX_SESSIONS_DIR_ENV)):
         (tmp_path / name).mkdir()
         monkeypatch.setenv(env, str(tmp_path / name))
+    # Run from a cwd that is NOT a known project: project confinement (defect 1)
+    # is N/A outside a project, so these adoption-mechanic tests proceed as
+    # before. The confined path (same-project adopt, foreign refuse) is covered
+    # by test_store_fallback_confinement.py.
+    monkeypatch.chdir(tmp_path)
     return tmp_path
 
 
