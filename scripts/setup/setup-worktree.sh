@@ -525,7 +525,11 @@ PY
       publish_events_migration_receipt "$staged" "$receipt" "$migration_id" || rc=$?
     fi
     if (( rc == 0 )); then
-      mv "$staged" "$source" || rc=$?
+      if mv "$staged" "$source"; then
+        EVENTS_MIGRATION_PUBLISHED=1
+      else
+        rc=$?
+      fi
     fi
     if (( rc == 0 )); then
       recover_event_cursor_pending "$source" "$cursor" || rc=$?
@@ -592,9 +596,11 @@ link_events_journal() {
   local target_cursor="$WORKTREE/.fno/.think-offer-cursor"
   local token="$(hostname):$$:$(date -u +%s):$RANDOM"
   local pending_backups=()
+  local pending_candidate
   local recover_pending=0
   EVENTS_MIGRATION_TOKEN="$token"
   EVENTS_MIGRATION_DIRS=()
+  EVENTS_MIGRATION_PUBLISHED=0
 
   mkdir -p "$(dirname "$source")" "$(dirname "$target")"
   : >> "$source" || {
@@ -603,7 +609,9 @@ link_events_journal() {
   }
 
   shopt -s nullglob
-  pending_backups=("${target}.pre-share.pending."*)
+  for pending_candidate in "${target}.pre-share.pending."*; do
+    [[ "$pending_candidate" == *.landed ]] || pending_backups+=("$pending_candidate")
+  done
   shopt -u nullglob
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     ln -sfn "$source" "$target"
@@ -707,7 +715,10 @@ link_events_journal() {
   # Another setup may have completed while this process waited for the locks.
   # Re-read both the link and recovery receipts before choosing a mutation path.
   shopt -s nullglob
-  pending_backups=("${target}.pre-share.pending."*)
+  pending_backups=()
+  for pending_candidate in "${target}.pre-share.pending."*; do
+    [[ "$pending_candidate" == *.landed ]] || pending_backups+=("$pending_candidate")
+  done
   shopt -u nullglob
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     cleanup_events_migration
@@ -797,7 +808,7 @@ link_events_journal() {
   fi
 
   if (( rc != 0 )); then
-    if (( recover_pending == 0 )); then
+    if (( recover_pending == 0 && EVENTS_MIGRATION_PUBLISHED == 0 )); then
       if [[ -L "$target" ]]; then
         rm -f "$target" 2>/dev/null || true
       fi

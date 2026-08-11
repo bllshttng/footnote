@@ -361,7 +361,32 @@ PY
 printf '%s\n' '{"type":"intervening_after_landed_segment"}' >> "$canonical/.fno/events.jsonl"
 printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
 CANONICAL="$canonical" WORKTREE="$receipt_recovery" bash "$SETUP" >/dev/null 2>&1
+receipt_retry_rc=$?
 assert "landed receipt survives GC and an intervening append without replay" test "$(grep -c 'receipt_recovery_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "landed receipt recovery completes successfully" test "$receipt_retry_rc" -eq 0
+assert "receipt sidecar is never appended as a journal row" bash -c '! grep -q '"'"'^{"device":.*"inode":'"'"' "$1"' _ "$canonical/.fno/events.jsonl"
+
+post_publish_failure="$TMP/post-publish-failure"
+mkdir -p "$post_publish_failure/.fno"
+printf '%s\n' '{"type":"post_publish_once"}' > "$post_publish_failure/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+cat > "$TMP/fail-cursor-recovery-env" <<'STUB'
+python3() {
+  if [[ "${4:-}" == *.gc-pending && "${2:-}" == */events.jsonl ]]; then
+    return 1
+  fi
+  command python3 "$@"
+}
+export -f python3
+STUB
+CANONICAL="$canonical" WORKTREE="$post_publish_failure" BASH_ENV="$TMP/fail-cursor-recovery-env" bash "$SETUP" >/dev/null 2>&1
+post_publish_failure_rc=$?
+assert "post-publish cursor recovery failure is reported" test "$post_publish_failure_rc" -ne 0
+assert "post-publish failure keeps the shared journal link" test -L "$post_publish_failure/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$post_publish_failure" bash "$SETUP" >/dev/null 2>&1
+post_publish_retry_rc=$?
+assert "post-publish recovery retry succeeds" test "$post_publish_retry_rc" -eq 0
+assert "post-publish recovery does not replay local rows" test "$(grep -c 'post_publish_once' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
 failed_recovery="$TMP/failed-recovery"
 mkdir -p "$failed_recovery/.fno"
