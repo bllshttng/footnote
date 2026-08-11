@@ -7613,6 +7613,25 @@ def _archived_entry(node_id: str) -> Optional[dict]:
         return None
 
 
+def _evidence_pr_number(evidence, refs: list) -> Optional[int]:
+    """The PR number that produced ``evidence``'s outcome, not merely the first ref.
+
+    ``resolve_merge_evidence`` reports an outcome derived from ANY ref, so the
+    receipt has to name the ref that actually carries it: the merged PR's number
+    on a merge, the open one on awaiting_merge. Falling back to ``refs[0]``
+    everywhere let a node whose primary #41 was closed and whose additional #42
+    merged emit ``pr_number: 41, pr_state: MERGED`` - a receipt pointing an
+    auditor at the wrong PR.
+    """
+    if evidence.outcome == "merged" and evidence.pr_url:
+        for number, url in refs:
+            if url == evidence.pr_url:
+                return number
+    if evidence.outcome == "awaiting_merge" and evidence.open_pr_number is not None:
+        return evidence.open_pr_number
+    return refs[0][0] if refs else None
+
+
 def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str], list[str]]:
     """Reopen ancestor epics the cascade auto-closed. Returns (reopened, warned).
 
@@ -7766,11 +7785,22 @@ def cmd_reopen(
     refs = node_pr_refs(node)
     pr_number: Optional[int] = None
     pr_state: Optional[str] = None
+    # True only when --force actually bypassed the merged-PR refusal. The event
+    # schema defines `forced` as "the work is in main and was reopened anyway",
+    # so deriving it from the flag's presence would stamp that claim on an
+    # ordinary --force reopen of a node with no PR, an open PR, or an
+    # unreachable gh - a false audit receipt on the one field an auditor reads
+    # to find the risky reopens.
+    bypassed_merged = False
     if refs:
-        pr_number = refs[0][0]
         evidence = resolve_merge_evidence(
             refs, cwd=node.get("cwd"), query=_done_gh_query
         )
+        # Pair the number with the state it describes. The aggregate outcome can
+        # come from any ref, so recording refs[0] beside a MERGED read from
+        # additional_prs[0] would name PR #41 as the merge evidence when #42 is
+        # what merged - the receipt pointing at the wrong PR.
+        pr_number = _evidence_pr_number(evidence, refs)
         if evidence.outcome == "outage" and not force:
             typer.echo(
                 f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
@@ -7794,6 +7824,7 @@ def cmd_reopen(
                     err=True,
                 )
                 raise typer.Exit(code=3)
+            bypassed_merged = True
             typer.echo(
                 f"Warning: force-reopening {task_id} (reason: {cleaned_reason}). "
                 f"A referenced PR is MERGED"
@@ -7863,7 +7894,7 @@ def cmd_reopen(
             _evts.backlog_reopened(
                 node_id=canonical_id_box[0],
                 reason=cleaned_reason,
-                forced=bool(force),
+                forced=bypassed_merged,
                 pr_number=pr_number,
                 pr_state=pr_state,
                 cascade_reopened=cascade_out,
@@ -9980,18 +10011,26 @@ def cmd_unarchive(
         )
         raise typer.Exit(code=1)
 
-    # Everything below runs INSIDE the graph lock, including the archive read and
-    # write. cmd_archive already does its archive I/O inside the mutator, which
-    # makes the graph flock the de-facto archive mutex; reading here and writing
-    # after the lock released would let a concurrent `archive --apply` (the
-    # SessionStart reconcile runs one) interleave: unarchive reads [A,B,X], the
-    # sweep writes [A,B,X,C] while removing C from the working graph, unarchive
-    # then writes [A,B] and C exists in neither file. That is the one outcome
-    # neither verb may produce.
+    # TWO locked passes, and the split is the whole safety argument.
+    #
+    # `archive` writes the archive inside its mutator because archive-FIRST is
+    # safe for it: a crash leaves a duplicate. Inverting the verb inverts the
+    # safe order, and the mutator cannot express it - `locked_mutate_graph`
+    # persists the returned entries only AFTER the mutator returns, so an
+    # archive shrink written inside the mutator lands BEFORE the working graph
+    # and a crash between them loses the node from both files. That is the one
+    # outcome neither verb may produce, and doing it there quietly guaranteed
+    # the ordering the comment claimed to prevent.
+    #
+    # So: pass 1 adds the row to the working graph and persists it. Pass 2 takes
+    # the lock again, re-reads the archive fresh (never a list read before the
+    # first write, which a concurrent `archive --apply` could have grown), and
+    # drops the row only after confirming the node is really live. A crash
+    # between the passes leaves a duplicate, which read-through resolves working
+    # -first and the next sweep dedupes.
     row_box: list[Optional[dict]] = [None]
-    archive_write_error: list[str] = []
 
-    def mutator(entries):
+    def add_to_working(entries):
         try:
             archived = _apply_graph_defaults(_read_json(archive_path))
         except GraphCorruptError:
@@ -10010,34 +10049,47 @@ def cmd_unarchive(
             raise typer.Exit(code=1)
         row_box[0] = row
         rid = row.get("id")
-
         # Idempotent under a race: another unarchive may have landed it already.
         if any(isinstance(e, dict) and e.get("id") == rid for e in entries):
             return entries
-
-        # Graph-first: the working graph is written when this mutator returns,
-        # so shrinking the archive here (before that return) is the ONE ordering
-        # that can only ever leave a duplicate, which the next sweep dedupes and
-        # read-through already tolerates.
-        try:
-            _write_json(
-                [e for e in archived if not (isinstance(e, dict) and e.get("id") == rid)],
-                archive_path,
-            )
-        except OSError as exc:
-            archive_write_error.append(str(exc))
         return [*entries, row]
 
-    locked_mutate_graph(_graph_path(), mutator)
+    locked_mutate_graph(_graph_path(), add_to_working)
+
+    resolved = (row_box[0] or {}).get("id") or task_id
+    archive_write_error: list[str] = []
+
+    def drop_from_archive(entries):
+        # Confirm against the just-persisted working graph, not against the
+        # mutator's own return value: if the node is somehow not live, shrinking
+        # the archive would delete the only copy.
+        if not any(isinstance(e, dict) and e.get("id") == resolved for e in entries):
+            archive_write_error.append("node not present in the working graph after the write")
+            return entries
+        try:
+            archived_now = _apply_graph_defaults(_read_json(archive_path))
+        except GraphCorruptError:
+            archive_write_error.append(f"{archive_path} unreadable")
+            return entries
+        remaining = [
+            e for e in archived_now if not (isinstance(e, dict) and e.get("id") == resolved)
+        ]
+        if len(remaining) != len(archived_now):
+            try:
+                _write_json(remaining, archive_path)
+            except OSError as exc:
+                archive_write_error.append(str(exc))
+        return entries
+
+    locked_mutate_graph(_graph_path(), drop_from_archive)
 
     for exc in archive_write_error:
         typer.echo(
-            f"warning: {task_id} is back in the working graph, but the archive copy "
+            f"warning: {resolved} is back in the working graph, but the archive copy "
             f"could not be removed ({exc}); the next `archive` sweep dedupes it",
             err=True,
         )
 
-    resolved = (row_box[0] or {}).get("id") or task_id
     typer.echo(f"Unarchived {resolved}")
 
 

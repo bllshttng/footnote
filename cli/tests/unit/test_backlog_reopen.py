@@ -36,8 +36,17 @@ def tmp_graph(tmp_path, monkeypatch) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def no_plan_projection(monkeypatch):
-    """Plan projection writes real files; the graph is what these tests assert."""
+def no_plan_projection(monkeypatch, request):
+    """Plan projection writes real files; the graph is what most of these assert.
+
+    Opt out with @pytest.mark.real_plan_projection. That escape exists because
+    this fixture HID a P1: reopen cleared completed_at while the plan doc stayed
+    stamped `done`, so dispatch kept refusing the node and the correction did
+    nothing usable. Stubbing the projector is the "guard on one of N paths"
+    trap wearing a test's clothes, so the path now has its own live test.
+    """
+    if "real_plan_projection" in request.keywords:
+        return
     import fno.graph.cli as gcli
 
     monkeypatch.setattr(gcli, "_project_plans_from_graph", lambda *a, **k: None)
@@ -239,6 +248,74 @@ def test_a_merged_additional_pr_refuses_even_when_the_primary_is_not(tmp_graph, 
     res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
     assert res.exit_code == 3, res.output
     assert _read(tmp_graph)["ab-11111111"]["completed_at"] is not None
+
+
+def test_the_receipt_names_the_pr_that_produced_the_state(tmp_graph, monkeypatch):
+    """pr_number and pr_state have to describe the same PR.
+
+    The aggregate outcome can come from any ref, so recording refs[0] beside a
+    MERGED read off additional_prs points an auditor at the wrong PR.
+    """
+    import fno.graph.cli as gcli
+    from fno.graph._reconcile import PrMergeState
+
+    states = {41: "CLOSED", 42: "MERGED"}
+    monkeypatch.setattr(
+        gcli,
+        "_done_gh_query",
+        lambda n, **kw: PrMergeState(
+            number=n,
+            state=states[n],
+            url=f"https://github.com/o/r/pull/{n}",
+            merged_at="2026-08-01T00:00:00Z" if states[n] == "MERGED" else None,
+        ),
+    )
+    captured: dict = {}
+    monkeypatch.setattr(
+        "fno.events.append_event", lambda ev, **kw: captured.update(ev["data"])
+    )
+    _write(
+        tmp_graph,
+        _node(
+            "ab-11111111",
+            pr_number=41,
+            pr_url="https://github.com/o/r/pull/41",
+            additional_prs=[{"number": 42, "url": "https://github.com/o/r/pull/42"}],
+        ),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x", "-F"])
+    assert res.exit_code == 0, res.output
+    assert captured["pr_state"] == "MERGED"
+    assert captured["pr_number"] == 42
+
+
+def test_forced_is_false_when_no_refusal_was_bypassed(tmp_graph, monkeypatch):
+    """`forced` claims the work is in main and was reopened anyway.
+
+    Deriving it from the flag stamps that claim on an ordinary --force reopen of
+    a node with an open PR, which is a false receipt on the field an auditor
+    reads to find the risky reopens.
+    """
+    _stub_pr(monkeypatch, "OPEN")
+    captured: dict = {}
+    monkeypatch.setattr(
+        "fno.events.append_event", lambda ev, **kw: captured.update(ev["data"])
+    )
+    _write(tmp_graph, _node("ab-11111111", pr_number=7))
+    runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x", "--force"])
+    assert captured["forced"] is False
+
+
+def test_forced_is_true_when_a_merged_refusal_was_bypassed(tmp_graph, monkeypatch):
+    """Positive control for the test above."""
+    _stub_pr(monkeypatch, "MERGED")
+    captured: dict = {}
+    monkeypatch.setattr(
+        "fno.events.append_event", lambda ev, **kw: captured.update(ev["data"])
+    )
+    _write(tmp_graph, _node("ab-11111111", pr_number=7))
+    runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x", "--force"])
+    assert captured["forced"] is True
 
 
 def test_the_gate_carries_the_nodes_cwd(tmp_graph, monkeypatch):
@@ -443,6 +520,41 @@ def test_a_close_reopen_close_cycle_re_annotates_the_epic(tmp_graph):
     epic = next(e for e in live if e["id"] == "ab-e0000000")
     assert epic["completed_at"] is not None
     assert str(epic["completion_note"]).startswith("auto-closed:")
+
+
+# -- the plan doc, projected for real --
+
+
+@pytest.mark.real_plan_projection
+def test_the_plan_doc_comes_off_terminal_done(tmp_graph, tmp_path):
+    """The P1 the stubbed fixture hid.
+
+    Clearing completed_at in the graph while the plan stays stamped `done`
+    leaves dispatch refusing the node: the verb reports success and nothing the
+    operator can use has changed. The projector is forward-only, so reopen has
+    to force the plan off terminal the way unsupersede does.
+    """
+    plan = tmp_path / "plan.md"
+    plan.write_text(
+        "---\nstatus: done\ndone_at: 2026-08-01T00:00:00Z\n---\n\n# a plan\n"
+    )
+    _write(tmp_graph, _node("ab-11111111", plan_path=str(plan)))
+
+    res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "wrong"])
+    assert res.exit_code == 0, res.output
+    assert "status: done" not in plan.read_text()
+
+
+@pytest.mark.real_plan_projection
+def test_an_untouched_plan_stays_put_when_the_node_was_not_done(tmp_graph, tmp_path):
+    """Positive control: the forced write happens on the reopen, not on every call."""
+    plan = tmp_path / "plan.md"
+    original = "---\nstatus: done\ndone_at: 2026-08-01T00:00:00Z\n---\n\n# a plan\n"
+    plan.write_text(original)
+    _write(tmp_graph, _node("ab-11111111", completed_at=None, plan_path=str(plan)))
+
+    runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
+    assert plan.read_text() == original
 
 
 # -- the event --

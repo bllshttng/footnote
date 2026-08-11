@@ -68,10 +68,19 @@ def project_node_to_plan(
     every other path leaves the doc's own ``type`` alone, because the graph's
     value there is a mint-time default nobody chose.
 
-    ``force_status_off_terminal`` is the one legitimate backward move: an
-    ``unsupersede`` reviving a node whose plan the supersede stamped terminal
-    ``superseded``. The projector is forward-only by design, so without this the
-    revived node's graph is active while its plan doc stays terminal.
+    ``force_status_off_terminal`` names the legitimate backward moves, of which
+    there are two: ``unsupersede`` reviving a node whose plan the supersede
+    stamped ``superseded``, and ``reopen`` clearing a completion whose plan the
+    close stamped ``done``. The projector is forward-only by design, so without
+    this the corrected node's graph is active while its plan doc stays terminal
+    and dispatch keeps refusing it - the correction verb appears to work and
+    changes nothing anyone can use.
+
+    ``done`` was added on the second one: `reopen` shipped calling this with a
+    ``superseded``-only condition, so it cleared ``completed_at`` and left the
+    plan terminal. The unit tests missed it because their fixture replaced the
+    projector with a no-op, which is the "guard on one of N paths" trap wearing
+    a test's clothes.
     """
     try:
         target, fields, rest = read_plan_file(plan_path)
@@ -160,11 +169,11 @@ def project_node_to_plan(
         current_status = fields.get("status")
         if (
             force_status_off_terminal
-            and canonical_status(current_status) == "superseded"
-            and graph_status != "superseded"
+            and canonical_status(current_status) in ("superseded", "done")
+            and graph_status != canonical_status(current_status)
         ):
-            # Reversal (unsupersede): the forward-only projector refuses to
-            # leave terminal `superseded`, so force the plan off it or the doc
+            # Reversal (unsupersede, reopen): the forward-only projector refuses
+            # to leave a terminal status, so force the plan off it or the doc
             # stays terminal while the graph is active. Only the field-derived
             # statuses are safe to trust: done (completed_at), in_review
             # (pr_number), in_progress (lock) come from graph FIELDS, not the
@@ -175,7 +184,7 @@ def project_node_to_plan(
             # non-dispatchable `design` rather than stamp `ready`, which would
             # let unfinished planning work auto-dispatch.
             forced = graph_status if graph_status in ("done", "in_review", "in_progress") else "design"
-            if forced != "superseded" and current_status != forced:
+            if forced not in ("superseded", "done") and current_status != forced:
                 fields["status"] = forced
                 changed = True
                 if forced == "done" and not fields.get("done_at"):
