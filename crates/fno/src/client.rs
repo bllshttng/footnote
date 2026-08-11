@@ -7747,10 +7747,6 @@ async fn attach_and_run(
     if !stashed_modesync.is_empty() {
         raw_out(&stashed_modesync).map_err(|e| format!("mode sync: {e}"))?;
     }
-    // The terminal is ours, so the keymap warning's clock can start.
-    if let Some(text) = key_notice {
-        view.set_notice(text);
-    }
     let mut compositor = Compositor::new();
     let mut scanner = Scanner::default();
     // When the pending prefix chord started, for the which-key hint timer
@@ -7811,6 +7807,14 @@ async fn attach_and_run(
         .unwrap_or_default();
     view.digest = crate::digest_overlay::on_attach(&view.session, &focused_cwd).await;
 
+    // LAST thing before the first paint, deliberately. The deadline is an
+    // absolute instant, so every await it is stamped ahead of is lifetime the
+    // operator never gets: the handshake, the catch-up fold, and this digest
+    // shell-out, which alone is budgeted 800ms of a 3s notice. Anything added
+    // between here and the draw below belongs above this line, not under it.
+    if let Some(text) = key_notice {
+        view.set_notice(text);
+    }
     compositor
         .draw(&view.compose())
         .map_err(|e| format!("draw: {e}"))?;
