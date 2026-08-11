@@ -1011,7 +1011,20 @@ def _emit_human(
     out = (lambda m: typer.echo(m, err=True)) if err else typer.echo
     status = result["status"]
     if status == "fresh":
-        out("fno doctor: installed fno is up to date with source.")
+        # Naming WHICH source is load-bearing. The comparison is against
+        # `git rev-parse HEAD` of the RESOLVED source checkout, which is the
+        # canonical clone sitting on the default branch. Unmerged work in a
+        # feature worktree is invisible to it, so this verdict answers "am I
+        # behind the default branch" and never "does this binary carry the
+        # change I just wrote". Anyone editing fno itself reads the first as the
+        # second and then verifies their branch against a binary without it.
+        out(
+            "fno doctor: installed fno is up to date with source at "
+            f"{src or 'the resolved source checkout'} "
+            f"(rev {result.get('source_rev') or 'unknown'}). "
+            "Unmerged work in another branch or worktree is not included; "
+            "run fno from that checkout to exercise it."
+        )
     elif status == "stale":
         # A missing-verb verdict can be stale with no resolved source (src is
         # None), so fall back to a readable label rather than printing "behind None".
