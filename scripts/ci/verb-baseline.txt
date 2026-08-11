@@ -3,8 +3,13 @@
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.
 #
-# To regenerate after an intentional change: `fno lint verb-ratchet --update`,
-# then commit this file in that PR. A deliberate addition carries a PR-body line:
+# To regenerate after an intentional change:
+#   uv run --project cli fno-py lint verb-ratchet --update
+# then commit this file in that PR. Run it that way, not as a bare `fno`: a bare
+# `fno` enumerates the INSTALLED package while writing this checkout's file, and
+# a verb that exists only in source is missed. The lint refuses that combination
+# rather than emitting a byte-identical file plus a success line.
+# A deliberate addition carries a PR-body line:
 #   verb-exception: <rationale>
 # (mirrors `loc-exception:` so contributors learn one idiom, not two).
 # Two PRs that each add a verb both edit this file; the merge conflict is the

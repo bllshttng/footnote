@@ -194,7 +194,20 @@ def load_enrichment(root: Path) -> dict[str, tuple[str, str]]:
     try:
         import inspect
 
-        from fno.lint_verb_ratchet import iter_python_leaves
+        from fno.lint_verb_ratchet import VerbRatchetError, iter_python_leaves
+    except Exception:
+        return {}
+    # A refusal is NOT the same as "no fno environment". The enumerator refuses
+    # when the imported package is not this checkout's source, and swallowing
+    # that into an empty table would report an unenriched sweep as if the
+    # registry simply had nothing to add - an absence reading as an answer. Let
+    # the sweep continue (enrichment is best-effort) but say why, with the
+    # named, actionable message rather than a bare traceback out of a diagnostic.
+    try:
+        next(iter(iter_python_leaves()))
+    except VerbRatchetError as exc:
+        print(f"verb enrichment SKIPPED: {exc}", file=sys.stderr)
+        return {}
     except Exception:
         return {}
     table: dict[str, tuple[str, str]] = {}

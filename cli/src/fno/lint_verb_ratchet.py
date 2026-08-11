@@ -171,6 +171,47 @@ def _group_leaves(group, ctx, prefix: str, depth: int = 0) -> list[str]:
     return [_format_leaf(path, cmd) for path, cmd in _iter_group_leaves(group, ctx, prefix, depth)]
 
 
+def _assert_python_source_matches_repo() -> None:
+    """Refuse when the imported ``fno`` package is not the repo's own source.
+
+    The Python half enumerates by IMPORTING ``fno.cli`` in this interpreter,
+    while the baseline is written to ``resolve_repo_root()``. Invoked as a bare
+    ``fno``, those are two different trees: the surface comes from the INSTALLED
+    package and the file comes from the checkout. ``--update`` then reports
+    "regenerated ... (N leaves)" over a byte-identical file - a success line for
+    work it did not do - and ``check()`` compares one tree's surface against
+    another tree's baseline.
+
+    This is the Python-side twin of the reachability check
+    :func:`enumerate_rust_leaves` already performs. That half refuses to emit a
+    half-true baseline when it cannot reach the Rust front; this half had no
+    equivalent, so a stale deployed ``fno`` produced a confident wrong answer.
+
+    Guarding the ENUMERATOR rather than ``--update`` is deliberate: ``check()``
+    reaches the same code, so a guard on the writer alone would be a guard on
+    one of two paths - the exact shape this module's docstring says it exists to
+    avoid.
+
+    An editable install resolves into the checkout and passes. CI runs via
+    ``uv run --project cli fno-py``, so it passes too.
+    """
+    import fno
+
+    pkg_dir = Path(fno.__file__).resolve().parent
+    expected = (_repo_root() / "cli" / "src" / "fno").resolve()
+    if pkg_dir != expected:
+        raise VerbRatchetError(
+            "verb-ratchet: the imported fno package is not this checkout's source, "
+            "so the surface enumerated here does not describe the baseline being "
+            f"read or written.\n  imported: {pkg_dir}\n  expected: {expected}\n"
+            "  A bare `fno` runs the INSTALLED package; the baseline belongs to the "
+            "checkout. Re-run as:  uv run --project cli fno-py lint verb-ratchet "
+            "[--update]\n  (Refusing rather than guessing: this silently emitted a "
+            "byte-identical baseline plus a success line, which is how a new verb "
+            "reached CI unbaselined.)"
+        )
+
+
 def iter_python_leaves():
     """Yield ``(path, cmd)`` for every fno-py leaf verb, visible and hidden.
 
@@ -188,6 +229,8 @@ def iter_python_leaves():
     import click
     import typer
     import typer.main
+
+    _assert_python_source_matches_repo()
 
     from fno.cli import LAZY_SUBCOMMANDS, _EAGER_COMMAND_HELP, app as _root_app
 
@@ -421,8 +464,13 @@ _HEADER = """\
 # AND hidden, recursed to leaves) plus the Rust front's mux + version surface.
 # Remove or add a line only in the same PR that removes or adds the verb.
 #
-# To regenerate after an intentional change: `fno lint verb-ratchet --update`,
-# then commit this file in that PR. A deliberate addition carries a PR-body line:
+# To regenerate after an intentional change:
+#   uv run --project cli fno-py lint verb-ratchet --update
+# then commit this file in that PR. Run it that way, not as a bare `fno`: a bare
+# `fno` enumerates the INSTALLED package while writing this checkout's file, and
+# a verb that exists only in source is missed. The lint refuses that combination
+# rather than emitting a byte-identical file plus a success line.
+# A deliberate addition carries a PR-body line:
 #   verb-exception: <rationale>
 # (mirrors `loc-exception:` so contributors learn one idiom, not two).
 # Two PRs that each add a verb both edit this file; the merge conflict is the
@@ -526,22 +574,26 @@ def check() -> CheckReport:
     if added_verbs:
         parts.append("  Added (in the code, not the baseline): " + ", ".join(added_verbs))
         parts.append("    A verb cannot be added silently. Regenerate with")
-        parts.append("    `fno lint verb-ratchet --update`, commit this file in the PR,")
+        parts.append("    `uv run --project cli fno-py lint verb-ratchet --update`,")
+        parts.append("    commit this file in the PR,")
         parts.append("    and add a PR-body line:  verb-exception: <rationale>")
     if added_flags:
         parts.append("  Added hidden options (in the code, not the baseline): " + ", ".join(added_flags))
         parts.append("    A hidden option cannot be added silently. Regenerate with")
-        parts.append("    `fno lint verb-ratchet --update`, commit this file in the PR,")
+        parts.append("    `uv run --project cli fno-py lint verb-ratchet --update`,")
+        parts.append("    commit this file in the PR,")
         parts.append("    and add a PR-body line:  flag-exception: <rationale>")
     if removed_verbs:
         parts.append("  Removed (in the baseline, not the code): " + ", ".join(removed_verbs))
         parts.append(
-            "    Regenerate with `fno lint verb-ratchet --update` and commit the baseline."
+            "    Regenerate with `uv run --project cli fno-py lint verb-ratchet "
+            "--update` and commit the baseline."
         )
     if removed_flags:
         parts.append("  Removed hidden options (in the baseline, not the code): " + ", ".join(removed_flags))
         parts.append(
-            "    Regenerate with `fno lint verb-ratchet --update` and commit the baseline."
+            "    Regenerate with `uv run --project cli fno-py lint verb-ratchet "
+            "--update` and commit the baseline."
         )
     parts.append("  If two PRs each add a verb or hidden option, both edit this file; the")
     parts.append("  merge conflict is the intended review moment, not tooling noise.")
