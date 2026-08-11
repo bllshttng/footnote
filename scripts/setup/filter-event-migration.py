@@ -21,10 +21,7 @@ def _gate_key(row: object) -> tuple[object, ...] | None:
         head_sha = data.get("head_sha")
         if not isinstance(reviewer, str) or not isinstance(head_sha, str):
             return None
-        attester = data.get("attester_session_id")
-        if not isinstance(attester, str) or not attester:
-            attester = None
-        return ("review_attestation", reviewer.lstrip("/"), head_sha, attester)
+        return ("review_attestation", reviewer.lstrip("/"), head_sha)
     if row.get("type") == "review_coverage":
         pr = data.get("pr")
         head_sha = data.get("head_sha")
@@ -36,6 +33,17 @@ def _gate_key(row: object) -> tuple[object, ...] | None:
             return None
         return ("review_coverage", pr, head_sha)
     return None
+
+
+def _attester_key(row: object) -> tuple[object, ...] | None:
+    key = _gate_key(row)
+    if key is None or key[0] != "review_attestation" or not isinstance(row, dict):
+        return None
+    data = row["data"]
+    attester = data.get("attester_session_id")
+    if not isinstance(attester, str) or not attester:
+        attester = None
+    return (*key, attester)
 
 
 def _favorable(row: dict[str, object]) -> bool:
@@ -76,22 +84,65 @@ def _rows(path: Path) -> Iterator[tuple[bytes, object | None]]:
                 yield raw, None
 
 
+def _record_latest(
+    records: dict[tuple[object, ...], tuple[datetime | None, bool]],
+    key: tuple[object, ...] | None,
+    row: object,
+) -> None:
+    if key is None or not isinstance(row, dict):
+        return
+    candidate = (_timestamp(row), _favorable(row))
+    previous = records.get(key)
+    if previous is None:
+        records[key] = candidate
+        return
+    timestamp, favorable = candidate
+    previous_timestamp, _ = previous
+    if timestamp is not None and (
+        previous_timestamp is None
+        or timestamp > previous_timestamp
+        or (timestamp == previous_timestamp and not favorable)
+    ):
+        records[key] = candidate
+
+
+def _gate_row_is_stale(
+    row: dict[str, object],
+    timestamp: datetime | None,
+    previous: tuple[datetime | None, bool],
+) -> bool:
+    previous_timestamp, _ = previous
+    if timestamp is not None and previous_timestamp is not None:
+        return timestamp < previous_timestamp or (
+            timestamp == previous_timestamp and _favorable(row)
+        )
+    return _favorable(row)
+
+
+def _preserves_distinct_attester_coverage(
+    row: dict[str, object],
+    timestamp: datetime | None,
+    gate_previous: tuple[datetime | None, bool],
+    attester_previous: tuple[datetime | None, bool] | None,
+) -> bool:
+    if not _favorable(row) or not gate_previous[1] or timestamp is None:
+        return False
+    if attester_previous is None:
+        return True
+    previous_timestamp, _ = attester_previous
+    return previous_timestamp is None or timestamp > previous_timestamp
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         print("usage: filter-event-migration.py CANONICAL LOCAL", file=sys.stderr)
         return 2
     canonical, local = map(Path, sys.argv[1:])
-    existing: dict[tuple[object, ...], datetime | None] = {}
+    existing: dict[tuple[object, ...], tuple[datetime | None, bool]] = {}
+    attesters: dict[tuple[object, ...], tuple[datetime | None, bool]] = {}
     for _, row in _rows(canonical):
-        key = _gate_key(row)
-        if key is None:
-            continue
-        timestamp = _timestamp(row)
-        previous = existing.get(key)
-        if key not in existing or (
-            timestamp is not None and (previous is None or timestamp > previous)
-        ):
-            existing[key] = timestamp
+        _record_latest(existing, _gate_key(row), row)
+        _record_latest(attesters, _attester_key(row), row)
     local_size = local.stat().st_size
     try:
         local_cursor = int(
@@ -108,24 +159,22 @@ def main() -> int:
     for raw, row in _rows(local):
         line_end = local_offset + len(raw)
         key = _gate_key(row)
+        attester_key = _attester_key(row)
         timestamp = _timestamp(row)
-        if (
+        stale = (
             key is not None
             and isinstance(row, dict)
             and key in existing
-            and (
-                (
-                    timestamp is not None
-                    and existing[key] is not None
-                    and (
-                        timestamp < existing[key]
-                        or (timestamp == existing[key] and _favorable(row))
-                    )
-                )
-                or (
-                    _favorable(row)
-                    and (timestamp is None or existing[key] is None)
-                )
+            and _gate_row_is_stale(row, timestamp, existing[key])
+        )
+        if stale and not (
+            isinstance(row, dict)
+            and attester_key is not None
+            and _preserves_distinct_attester_coverage(
+                row,
+                timestamp,
+                existing[key],
+                attesters.get(attester_key),
             )
         ):
             local_offset = line_end
@@ -133,12 +182,8 @@ def main() -> int:
         sys.stdout.buffer.write(raw)
         if line_end <= local_cursor:
             mapped_cursor += len(raw)
-        if key is not None:
-            previous = existing.get(key)
-            if key not in existing or (
-                timestamp is not None and (previous is None or timestamp > previous)
-            ):
-                existing[key] = timestamp
+        _record_latest(existing, key, row)
+        _record_latest(attesters, attester_key, row)
         local_offset = line_end
     mapping_path = os.environ.get("EVENTS_MIGRATION_CURSOR_MAP")
     if mapping_path:

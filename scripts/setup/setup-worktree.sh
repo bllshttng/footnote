@@ -1078,6 +1078,7 @@ link_events_journal() {
   local rc=0
   local leases_owned=1
   local -a migrated_segments=()
+  local -a completed_segments=()
   local stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
   local backup="${target}.pre-share.pending.${stamp}"
   local completed_backup="${target}.pre-share.${stamp}"
@@ -1121,11 +1122,8 @@ link_events_journal() {
       fi
       completed="${pending/.pre-share.pending./.pre-share.}"
       if (( rc == 0 )) && verify_events_migration_leases; then
-        mv "$pending" "$completed" || rc=$?
-        if (( rc == 0 )); then
-          migrated_segments+=("$completed")
-          command -p rm -f "${pending}.landed"
-        fi
+        migrated_segments+=("$pending")
+        completed_segments+=("$completed")
       elif (( rc == 0 )); then
         rc=1
         leases_owned=0
@@ -1155,14 +1153,9 @@ link_events_journal() {
       rc=1
       leases_owned=0
     fi
-    if (( rc == 0 )) && ! mv "$backup" "$completed_backup"; then
-      echo "setup-worktree: events rows landed; pending backup retained for recovery: $backup" >&2
-      cleanup_events_migration
-      return 1
-    fi
     if (( rc == 0 )); then
-      migrated_segments+=("$completed_backup")
-      command -p rm -f "${backup}.landed"
+      migrated_segments+=("$backup")
+      completed_segments+=("$completed_backup")
     fi
   fi
 
@@ -1175,6 +1168,23 @@ link_events_journal() {
   elif (( rc == 0 )); then
     rc=1
     leases_owned=0
+  fi
+
+  if (( rc == 0 && ${#migrated_segments[@]} > 0 )); then
+    local segment_index
+    for (( segment_index=0; segment_index<${#migrated_segments[@]}; segment_index++ )); do
+      if ! verify_events_migration_leases; then
+        rc=1
+        leases_owned=0
+        break
+      fi
+      if ! mv "${migrated_segments[$segment_index]}" "${completed_segments[$segment_index]}"; then
+        echo "setup-worktree: events rows landed; pending backup retained for recovery: ${migrated_segments[$segment_index]}" >&2
+        rc=1
+        break
+      fi
+      command -p rm -f "${migrated_segments[$segment_index]}.landed"
+    done
   fi
 
   verify_events_migration_leases || { rc=1; leases_owned=0; }

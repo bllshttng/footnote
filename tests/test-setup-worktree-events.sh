@@ -216,6 +216,14 @@ CANONICAL="$canonical" WORKTREE="$distinct_attester" bash "$SETUP" >/dev/null 2>
 attester_count=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "multi-attester-head") | .data.attester_session_id' "$canonical/.fno/events.jsonl" | sort -u | wc -l | tr -d ' ')
 assert "migration preserves independent attester identities" test "$attester_count" -eq 2
 
+conflicting_attester="$TMP/conflicting-attester"
+mkdir -p "$conflicting_attester/.fno"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"conflicting-attester-head","verdict":"fail","attester_session_id":"author"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"conflicting-attester-head","verdict":"pass","attester_session_id":"peer"}}' > "$conflicting_attester/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$conflicting_attester" bash "$SETUP" >/dev/null 2>&1
+conflicting_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "conflicting-attester-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration cannot restore an older pass from another attester" test "$conflicting_verdict" = fail
+
 untimed_gate="$TMP/untimed-gate"
 mkdir -p "$untimed_gate/.fno"
 printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"untimed-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
@@ -251,6 +259,34 @@ CANONICAL="$canonical" WORKTREE="$cursorless_fanout_worktree" bash "$SETUP" >/de
 assert "migration lowers canonical sinks for pending rows without a local cursor" \
   bash -c 'jq -e '\''.ts == "2026-08-11T07:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
   _ "$canonical/.fno/status-sinks/cursorless.cursor"
+
+fanout_recovery_worktree="$TMP/fanout-recovery-worktree"
+mkdir -p "$fanout_recovery_worktree/.fno"
+printf '%s\n' '{"ts":"2026-08-11T06:00:00Z","v":1,"type":"blocked","source":"target","run":"fanout-recovery-run","data":{"reason":"pending-after-reconcile-failure"}}' > "$fanout_recovery_worktree/.fno/events.jsonl"
+printf '%s' '{"ts":"2026-08-11T11:00:00Z","n":1}' > "$canonical/.fno/status-sinks/recovery.cursor"
+cat > "$TMP/fail-fanout-reconcile-env" <<'STUB'
+python3() {
+  if [[ "${2:-}" == */status-sinks ]]; then
+    return 1
+  fi
+  command python3 "$@"
+}
+export -f python3
+STUB
+CANONICAL="$canonical" WORKTREE="$fanout_recovery_worktree" BASH_ENV="$TMP/fail-fanout-reconcile-env" bash "$SETUP" >/dev/null 2>&1
+fanout_recovery_first_rc=$?
+shopt -s nullglob
+fanout_recovery_pending=()
+for fanout_recovery_candidate in "$fanout_recovery_worktree/.fno/events.jsonl.pre-share.pending."*; do
+  [[ "$fanout_recovery_candidate" == *.landed ]] || fanout_recovery_pending+=("$fanout_recovery_candidate")
+done
+shopt -u nullglob
+assert "failed fanout reconciliation is reported" test "$fanout_recovery_first_rc" -ne 0
+assert "failed fanout reconciliation retains pending segment metadata" test "${#fanout_recovery_pending[@]}" -eq 1
+CANONICAL="$canonical" WORKTREE="$fanout_recovery_worktree" bash "$SETUP" >/dev/null 2>&1
+assert "fanout reconciliation retry lowers the canonical cursor" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T06:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/recovery.cursor"
 
 fractional_cursor_worktree="$TMP/fractional-cursor-worktree"
 mkdir -p "$fractional_cursor_worktree/.fno/status-sinks"
