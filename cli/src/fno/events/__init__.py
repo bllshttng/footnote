@@ -1292,6 +1292,10 @@ def append_event(
         from fno.paths import resolve_repo_root
 
         events_path = resolve_repo_root() / ".fno" / "events.jsonl"
+    # Worktree setup symlinks this leaf to the canonical repo journal.
+    # Resolve it before deriving the sibling mutex so every worktree locks the
+    # same directory while appending the shared file.
+    events_path = events_path.resolve()
     events_path.parent.mkdir(parents=True, exist_ok=True)
 
     lock_dir = events_path.parent / (events_path.name + ".lock.d")

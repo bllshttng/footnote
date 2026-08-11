@@ -107,7 +107,9 @@ pub struct ProjectJournalPath(pub PathBuf);  // writes are FATAL
 pub struct GlobalJournalPath(pub PathBuf);   // writes are best-effort
 ```
 
-**Project journal (`<cwd>/.fno/events.jsonl`) is authoritative.** A write failure there stops dispatch loudly (`LoopError::Journal`). An unobservable walk that continues spending compute is worse than stopping.
+**Project journal (`<repo-root>/.fno/events.jsonl`) is authoritative.**
+Worktrees symlink that path to the canonical checkout's journal, and a write failure there stops dispatch loudly (`LoopError::Journal`).
+An unobservable walk that continues spending compute is worse than stopping.
 
 **Global mirror (`~/.fno/events.jsonl`) is best-effort.** A write failure is logged to stderr and never propagated. The project journal is the record; the global mirror is convenience for cross-project tooling.
 
@@ -245,10 +247,10 @@ The reachable merge paths it governs:
 | `gh pr merge` (raw GitHub) | not footnote-gated; the human is the authority on a non-auto-merge repo |
 
 One source also has to mean one *location*.
-The stop hook writes the events file of whatever directory the session ran in, so an attestation made inside a worktree landed in that worktree's `.fno/events.jsonl` while a merge or reconcile run from canonical read canonical's.
-They agreed only when the merge happened to run where the review had; every other invocation read a file the writer never touched, and the refusal named a count rather than a location, so it read as "nobody reviewed this" instead of "I looked in the wrong place".
-`review_coverage` therefore goes to **both** logs like every other loop-check event, carrying a `repo` key so the cross-project `~/.fno/events.jsonl` stays scoped - the FULL `host/owner/repo` identity, not the last path segment, because `org-a/widget` and `org-b/widget` would otherwise share a key and one repo's coverage could clear the other's merge guard - and every reader that can run somewhere other than the writer - `fno pr merge`, `fno backlog reconcile`, `fno pr status` - consults the global log alongside its project one.
-`~/.fno` is the one file canonical and all its worktrees stand in, which makes writer and reader agree by construction rather than by the caller remembering where to stand.
+Every worktree resolves its local journal from the worktree root, and setup symlinks that file to the canonical checkout's journal so an isolated reviewer, author, merge, and reconcile all observe the same repository evidence.
+`review_coverage` still goes to **both** the project and global logs, carrying the full `host/owner/repo` identity so cross-project readers cannot confuse repositories with the same final path segment.
+The project symlink removes the former cross-worktree visibility dependency, while `~/.fno/events.jsonl` remains the cross-project mirror rather than the mechanism that makes sibling worktrees agree.
+Two sibling worktrees on the same exact HEAD share attestations by design, and session identity records whether the coverage came from the author or another reviewer.
 `finalize.rs` reads the project log alone (`coverage_satisfied_in_latest_event`, `covered_head_from_event`) because finalize is invoked by the loop-check that just wrote the event, in that same directory; if finalize ever gains a caller that can stand elsewhere, those two become the same bug.
 
 There is no environment override.
@@ -402,7 +404,9 @@ The walker pre-generates a `session_key` in `gen_session_key()` (shape: `{utc}-m
 
 Three consequences flow from this:
 
-1. The `termination` event emitted by the worker's stop hook carries `session_id = session_key`, which `Journal::find_termination` matches against `unit.session_key`. Cross-cwd delivery works because workers run `/target` in their own conductor worktrees; their termination events land in the worktree's `events.jsonl` AND the global `~/.fno/events.jsonl` mirror (via `loop-check`'s `emit_to_both`). `find_termination` scans the project journal first, then falls back to the global mirror.
+1. The `termination` event emitted by the worker's stop hook carries `session_id = session_key`, which `Journal::find_termination` matches against `unit.session_key`.
+Cross-worktree delivery works because each worktree journal symlinks to the canonical repository journal, while the global `~/.fno/events.jsonl` mirror remains a fallback for cross-project observation.
+`find_termination` scans the project journal first, then falls back to the global mirror.
 
 2. The worker's `init-target-state.sh` calls `fno claim acquire node:<id> --holder target-session:<session_key>` with the same holder string the walker used. `core.py:acquire_claim` line 209 treats a same-holder re-acquire as idempotent - it refreshes `pid/host/acquired_at` without blocking, emitting `claim_idempotent_reacquired`.
 

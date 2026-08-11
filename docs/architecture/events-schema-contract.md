@@ -66,6 +66,7 @@ phase boundaries (no gate flip happened).
 The 64KB cap on `data` payload is enforced by both validators.
 
 Branch-A Python, Rust claims, and loop-journal writers serialize on the same mkdir mutex at `<events-file>.lock.d`.
+When `events.jsonl` is a worktree symlink, every writer resolves the leaf before deriving that mutex so sibling worktrees lock the canonical target rather than separate worktree paths.
 The project journal treats a lock timeout as fatal, while its global observability mirror remains best-effort so daemon progress does not depend on that mirror.
 The three fixed-shape shell helpers remain unlocked and reject serialized rows above 4000 bytes before appending.
 They also wait while `<events-file>.gc.d` exists so retention compaction cannot replace the journal during their append.

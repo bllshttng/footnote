@@ -541,6 +541,34 @@ fn journal_waits_for_shared_dir_mutex() {
 }
 
 #[test]
+fn symlinked_journal_waits_for_target_mutex() {
+    let dir = TempDir::new().unwrap();
+    let canonical_events = dir.path().join("canonical-events.jsonl");
+    fs::write(&canonical_events, b"").unwrap();
+    let worktree_events = dir.path().join("worktree-events.jsonl");
+    std::os::unix::fs::symlink(&canonical_events, &worktree_events).unwrap();
+    let global_events = dir.path().join("global-events.jsonl");
+    let lock_dir = dir.path().join("canonical-events.jsonl.lock.d");
+    fs::create_dir(&lock_dir).unwrap();
+
+    let barrier = Arc::new(Barrier::new(2));
+    let thread_barrier = Arc::clone(&barrier);
+    let handle = std::thread::spawn(move || {
+        let journal = Journal::new_raw(worktree_events, global_events);
+        thread_barrier.wait();
+        journal.append("symlink_mutex_probe", serde_json::json!({}))
+    });
+
+    barrier.wait();
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(fs::metadata(&canonical_events).unwrap().len(), 0);
+
+    fs::remove_dir_all(lock_dir).unwrap();
+    handle.join().unwrap().unwrap();
+    assert_eq!(count_events(&canonical_events, "symlink_mutex_probe"), 1);
+}
+
+#[test]
 fn journal_project_lock_timeout_is_fatal() {
     let dir = TempDir::new().unwrap();
     let project_events = dir.path().join("events.jsonl");

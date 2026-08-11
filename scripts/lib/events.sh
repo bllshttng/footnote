@@ -8,6 +8,29 @@ if [[ -z "${EVENTS_FILE:-}" ]]; then
     EVENTS_FILE="$_events_repo_root/.fno/events.jsonl"
     unset _events_repo_root
 fi
+
+_resolve_event_symlink() {
+    local path="${1:?events path required}"
+    local link_target
+    while [[ -L "$path" ]]; do
+        link_target=$(readlink "$path") || return 1
+        if [[ "$link_target" == /* ]]; then
+            path="$link_target"
+        else
+            path="$(dirname "$path")/$link_target"
+        fi
+    done
+    local physical_dir
+    physical_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd -P) || return 1
+    printf '%s/%s' "$physical_dir" "$(basename "$path")"
+}
+
+# Resolve only an existing symlink leaf. Already-running shells retain the old
+# path until their next setup migration, while newly sourced writers share the
+# canonical GC marker and mutex neighbourhood immediately.
+if [[ -L "$EVENTS_FILE" ]]; then
+    EVENTS_FILE=$(_resolve_event_symlink "$EVENTS_FILE") || return 1 2>/dev/null || exit 1
+fi
 EVENTS_ATOMIC_LINE_MAX_BYTES=4000
 
 _wait_for_event_gc() {

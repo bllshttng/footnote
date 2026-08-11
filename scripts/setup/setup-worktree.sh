@@ -13,7 +13,7 @@
 # Safety contract (load-bearing):
 #   - Uses `ln -sf` to create or refresh symlinks; never `rm -rf` a target
 #   - If a target already exists as a real (non-symlink) file or directory,
-#     SKIP it with a stderr warning - we never overwrite real local state
+#     SKIP it with a stderr warning, except events.jsonl's lock-protected migration
 #   - Never deletes an existing symlink either; ln -sf replaces atomically
 #   - Each link is independent so a failure on one does not block the rest
 
@@ -148,11 +148,172 @@ link_dir() {
   ln -sfn "$source" "$target"
 }
 
+# Acquire the same owner-token mkdir mutex used by the Python and Rust event
+# writers, without stale-stealing a lock whose holder setup cannot identify.
+acquire_events_dir() {
+  local lock_dir="$1"
+  local token="$2"
+  local attempts=0
+  while ! mkdir "$lock_dir" 2>/dev/null; do
+    if (( attempts >= 300 )); then
+      return 1
+    fi
+    sleep 0.1
+    attempts=$((attempts + 1))
+  done
+  if ! printf '%s' "$token" > "$lock_dir/owner" 2>/dev/null; then
+    rmdir "$lock_dir" 2>/dev/null || true
+    return 1
+  fi
+}
+
+release_events_dir() {
+  local lock_dir="$1"
+  local token="$2"
+  [[ -d "$lock_dir" ]] || return 0
+  [[ -r "$lock_dir/owner" ]] || return 0
+  [[ "$(< "$lock_dir/owner")" == "$token" ]] || return 0
+  rm -f "$lock_dir/owner"
+  rmdir "$lock_dir" 2>/dev/null || true
+}
+
+EVENTS_MIGRATION_TOKEN=""
+EVENTS_MIGRATION_DIRS=()
+
+cleanup_events_migration() {
+  local index
+  for ((index=${#EVENTS_MIGRATION_DIRS[@]} - 1; index >= 0; index--)); do
+    release_events_dir "${EVENTS_MIGRATION_DIRS[index]}" "$EVENTS_MIGRATION_TOKEN"
+  done
+  EVENTS_MIGRATION_DIRS=()
+  EVENTS_MIGRATION_TOKEN=""
+}
+
+trap 'cleanup_events_migration' EXIT
+trap 'cleanup_events_migration; exit 130' INT
+trap 'cleanup_events_migration; exit 143' TERM
+
+ensure_trailing_newline() {
+  local path="$1"
+  [[ -s "$path" ]] || return 0
+  if [[ "$(tail -c 1 "$path" | wc -l | tr -d ' ')" == "0" ]]; then
+    printf '\n' >> "$path"
+  fi
+}
+
+# Migrate a worktree-local journal before linking it to the canonical journal.
+# The GC markers pause the bounded shell appenders, and the ordinary mutexes
+# pause Python, Rust claims, and Journal writers. Locks are acquired in sorted
+# path order so two concurrent setup runs cannot deadlock each other.
+link_events_journal() {
+  local rel=".fno/events.jsonl"
+  local source="$CANONICAL/$rel"
+  local target="$WORKTREE/$rel"
+  local token="$(hostname):$$:$(date -u +%s):$RANDOM"
+  EVENTS_MIGRATION_TOKEN="$token"
+  EVENTS_MIGRATION_DIRS=()
+
+  mkdir -p "$(dirname "$source")" "$(dirname "$target")"
+  : >> "$source" || {
+    echo "setup-worktree: cannot create canonical events journal: $source" >&2
+    return 1
+  }
+
+  if [[ -L "$target" ]]; then
+    ln -sfn "$source" "$target"
+    return 0
+  fi
+  if [[ ! -e "$target" ]]; then
+    ln -s "$source" "$target"
+    return 0
+  fi
+  if [[ ! -f "$target" ]]; then
+    echo "setup-worktree: refusing to replace non-file events journal: $target" >&2
+    return 0
+  fi
+
+  local source_gc="${source}.gc.d"
+  local target_gc="${target}.gc.d"
+  local source_lock="${source}.lock.d"
+  local target_lock="${target}.lock.d"
+  local first_gc="$source_gc" second_gc="$target_gc"
+  local first_lock="$source_lock" second_lock="$target_lock"
+  if [[ "$second_gc" < "$first_gc" ]]; then
+    first_gc="$target_gc"
+    second_gc="$source_gc"
+  fi
+  if [[ "$second_lock" < "$first_lock" ]]; then
+    first_lock="$target_lock"
+    second_lock="$source_lock"
+  fi
+
+  if ! acquire_events_dir "$first_gc" "$token"; then
+    echo "setup-worktree: events migration timed out on $first_gc" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$first_gc")
+  if ! acquire_events_dir "$second_gc" "$token"; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration timed out on $second_gc" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$second_gc")
+  sleep 0.1
+  if ! acquire_events_dir "$first_lock" "$token"; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration timed out on $first_lock" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$first_lock")
+  if ! acquire_events_dir "$second_lock" "$token"; then
+    cleanup_events_migration
+    echo "setup-worktree: events migration timed out on $second_lock" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$second_lock")
+
+  local rc=0
+  if [[ ! "$source" -ef "$target" && -s "$target" ]]; then
+    ensure_trailing_newline "$source" || rc=$?
+    if (( rc == 0 )); then
+      cat "$target" >> "$source" || rc=$?
+    fi
+    if (( rc == 0 )); then
+      ensure_trailing_newline "$source" || rc=$?
+    fi
+  fi
+
+  local backup="${target}.pre-share.$(date -u +%Y%m%dT%H%M%SZ).$$"
+  if (( rc == 0 )); then
+    mv "$target" "$backup" || rc=$?
+  fi
+  if (( rc == 0 )); then
+    ln -s "$source" "$target" || rc=$?
+  fi
+  if (( rc != 0 )); then
+    if [[ ! -e "$target" && -e "$backup" ]]; then
+      mv "$backup" "$target" 2>/dev/null || true
+    fi
+    echo "setup-worktree: events migration failed; local journal retained: $target" >&2
+  else
+    echo "setup-worktree: migrated events journal; backup retained at $backup" >&2
+  fi
+
+  cleanup_events_migration
+  return "$rc"
+}
+
 # Shared content (Obsidian vault link)
 link_dir "internal"
 
 # Shared fno state (project-level, propagates across worktrees)
 link_file ".fno/config.toml"
+# One journal per repository makes exact-HEAD gate evidence visible across
+# isolated reviewer worktrees. Real worktree journals take the migration path
+# above instead of link_file's ordinary skip-if-real-file behavior.
+if ! link_events_journal; then
+  echo "setup-worktree: events journal left worktree-local after migration failure" >&2
+fi
 # config.local.toml is deliberately NOT linked: it is the one config file kept
 # per-worktree, layering the collision-prone keys (post_merge.parking_lot_path,
 # project.id) on top of the shared config.toml (x-cbce). Do not add a

@@ -358,19 +358,14 @@ That is a merge-authority decision, tracked separately.
 ```bash
 fno agents spawn --name <name>-review "/code-review <size> for PR <n> against main" \
   --harness claude --substrate bg --model opus \
-  --permission-mode bypassPermissions --cwd <the author's worktree>
+  --permission-mode bypassPermissions --cwd <an isolated reviewer worktree>
 ```
 
-Two rules ride with the lane, each derived from a code fact.
-`--cwd` MUST be the author's worktree.
-`fno event emit` writes cwd-relative through `append_event`, and `local_latest_passes` reads only the project log.
-A reviewer anywhere else emits an attestation its own loop-check never sees.
-NO `--fix`: the reviewer shares the worktree, so a fixing reviewer moves HEAD and can silently invalidate the author's own attestation.
-Keep one writer per worktree while a review is in flight.
-The author applies findings and re-attests, and the reviewer's attestation is then stale by design.
-That is the freshness rule working, not a bug.
-A `--fix` that touches only documentation now carries rather than invalidates.
-That is exactly why the freshness rule is not the reason for this constraint. The tree-corruption specimens are.
+The reviewer worktree must run `scripts/setup/setup-worktree.sh`, which symlinks its `.fno/events.jsonl` to the repository's canonical journal.
+That shared journal lets the reviewer remain isolated from the author's files while its exact-HEAD attestation is visible to the author's loop-check.
+A `--fix` that touches only documentation now carries rather than invalidates, so the freshness rule is not the reason this constraint stands; the tree-corruption specimens are.
+NO `--fix` remains the review contract: the author applies findings and re-attests, and the reviewer's prior attestation is then stale by design.
+Two worktrees at the same exact HEAD can see each other's attestations, so session identity remains part of the coverage origin and HEAD movement invalidates the shared evidence.
 
 The lane also buys cross-model review, which the king-mediated lane cannot: a GLM or codex author spawns a claude reviewer (or vice versa), so "different session" can mean "different model".
 The identity scrub on every spawn substrate is what makes a cross-harness reviewer stamp its own session rather than the author's; without it the lane's headline value, `other_session`, is silently unreachable.

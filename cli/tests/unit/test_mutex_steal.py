@@ -354,6 +354,18 @@ class TestEventsMutex:
         with pytest.raises(TimeoutError, match="events.jsonl lock timeout"):
             append_event(_event(), events_path=events, lock_timeout_seconds=1)
 
+    def test_symlinked_journal_uses_target_mutex(self, tmp_path):
+        canonical = tmp_path / "canonical-events.jsonl"
+        canonical.touch()
+        linked = tmp_path / "worktree-events.jsonl"
+        linked.symlink_to(canonical)
+        (tmp_path / "canonical-events.jsonl.lock.d").mkdir()
+
+        with pytest.raises(TimeoutError, match="canonical-events.jsonl.lock.d"):
+            append_event(_event(), events_path=linked, lock_timeout_seconds=0.1)
+
+        assert canonical.read_text() == ""
+
     def test_AC3_FR_concurrent_stealers_both_land(self, tmp_path):
         """Exactly one rename wins; both events land as whole lines.
 

@@ -366,7 +366,7 @@ fi
 
 # ---- Salvage local-only .fno state before removal (data-loss guard) ------
 # A worktree's .fno mixes symlinks (canonical state) with REAL local-only
-# files (artifacts/, scratchpad/, events.jsonl, target-state.md, *.log) that
+# files (artifacts/, scratchpad/, target-state.md, *.log) that
 # `git worktree remove` would delete silently. Copy every real (non-symlink)
 # entry into the canonical .fno keyed by date+node BEFORE removal: directories
 # to <canon>/.fno/<name>/<date>-<node>/ so tools find salvaged runs in place,

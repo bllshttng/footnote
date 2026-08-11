@@ -941,6 +941,12 @@ pub(crate) fn append_event_line(
     event: &Value,
     lock_timeout: Duration,
 ) -> Result<(), String> {
+    // Worktree setup symlinks events.jsonl to the canonical repo journal.
+    // Resolve that leaf before deriving the sibling mutex path, or every
+    // worktree would lock a different directory while appending one file.
+    let resolved_path =
+        std::fs::canonicalize(events_path).unwrap_or_else(|_| events_path.to_path_buf());
+    let events_path = resolved_path.as_path();
     if let Some(parent) = events_path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     }
