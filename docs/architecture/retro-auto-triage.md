@@ -75,13 +75,16 @@ It is a DRY RUN by default; `--apply` is the only path that writes.
 Bare `fno retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
 
 **The harvest is manual by design, and that is the trade, not an oversight.**
-There is no `fno backlog delete`, so every filed node is permanent.
-An irreversible operation must not run unattended, and `fno retro run` fires from a background SessionStart hook.
-The measured consequence of that rule: condition D keeps refusing closes until a human runs the verb.
-A gate that clears itself unattended by minting permanent state is not a gate, and a harvest that files a duplicate has no undo.
-One project reached 23 surplus nodes that cannot be removed by taking the other side of this trade.
+This paragraph used to rest on "there is no `fno backlog delete`, so every filed node is permanent".
+That was false, and it is the third place the same false belief turned up: the verb is `fno backlog remove`, it has always existed, and the 23 surplus nodes another project believed un-file-able were removable the whole time.
+The name is why nobody found it, which is what [the lifecycle-pairs gate](../../cli/tests/unit/test_lifecycle_pairs.py) now exists to prevent.
 
-Dedup is the feature, not polish. Filing one node per carve-out is worse than not harvesting, because a re-filed item becomes a duplicate and there is no `fno backlog delete`.
+The trade survives the correction, on narrower grounds.
+A background SessionStart hook that mints backlog nodes unattended is still the wrong shape, because cleaning up after it is manual work an operator never asked for, and a duplicate that nobody notices is worse than one that never lands.
+The measured consequence of the rule stands: condition D keeps refusing closes until a human runs the verb.
+What changed is the escape hatch: a bad harvest is now recoverable with `fno backlog remove`, so the cost of being wrong here is an annoyance rather than permanent graph litter.
+
+Dedup is the feature, not polish. Filing one node per carve-out is worse than not harvesting, because a re-filed item becomes a duplicate that someone has to notice before `fno backlog remove` can clean it up.
 Each row is matched against every node in the graph, done nodes included, by three matchers with two outcomes:
 
 | Match | Outcome |

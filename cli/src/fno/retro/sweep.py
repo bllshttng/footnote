@@ -38,11 +38,18 @@ Nothing is consumed without a node id attached to it. Clearing the ledger to
 turn a gate green, with the work tracked nowhere, is the failure the close gate
 exists to prevent.
 
-Applying is MANUAL on purpose. There is no ``fno backlog delete``, so every
-node filed here is permanent, and an irreversible operation must not run
-unattended - which rules out the background SessionStart hook that fires
-``fno retro run``. The cost is real and is not softened anywhere: the close
-gate keeps refusing until a human runs ``--apply``.
+Applying is MANUAL on purpose, though not for the reason this docstring used to
+give. It said there is no ``fno backlog delete`` so every node filed here is
+permanent. That was false: the verb is ``fno backlog remove`` and it has always
+existed. The claim appeared in three places and was repeated to an operator as
+fact, which is why the lifecycle-pairs gate now requires a correction verb to
+name itself where a caller reads.
+
+The manual default survives on narrower grounds: a background SessionStart hook
+minting backlog nodes unattended leaves cleanup work nobody asked for, and a
+duplicate nobody notices is worse than one that never lands. The cost is real
+and is not softened anywhere: the close gate keeps refusing until a human runs
+``--apply``. What changed is that being wrong here is now recoverable.
 
 ``deferred`` and ``oos-bug`` are both swept, and the sweep does NOT flatten
 them: ``deferred`` is declared scope that did not ship (it blocks a close via
