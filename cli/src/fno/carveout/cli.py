@@ -236,6 +236,7 @@ def resolve_carveouts(
     reason: str = typer.Option(
         None,
         "--reason",
+        "-R",
         help="Why these rows are being retired without a node. Recorded as a "
         "`carveout_resolved` event - the only trace a row leaves when it is "
         "removed without becoming tracked work.",
