@@ -180,11 +180,11 @@ crates/fno/build.rs:2
 crates/fno/src/agents_view.rs:56
 crates/fno/src/backlog_view.rs:79
 crates/fno/src/bootstrap.rs:11
-crates/fno/src/client.rs:57
+crates/fno/src/client.rs:56
 crates/fno/src/clipboard.rs:2
 crates/fno/src/connections_view.rs:3
 crates/fno/src/digest_overlay.rs:1
-crates/fno/src/keys.rs:6
+crates/fno/src/keys.rs:9
 crates/fno/src/link.rs:9
 crates/fno/src/needs_overlay.rs:1
 crates/fno/src/proto.rs:3
