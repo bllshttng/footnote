@@ -145,9 +145,25 @@ fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
                 .collect()
         }
     };
+    merge_key_layers(layers.iter().map(|p| read(p).unwrap_or_default()))
+}
+
+/// Collapse `[mux.keys]` layers, lowest precedence first, one action at a time.
+///
+/// Action ids are folded HERE rather than left to the resolver, even though
+/// [`crate::keys::resolve_keymap`] folds them too. Deduplicating on the raw id
+/// while the resolver dedupes on the folded one lets `Detach` and `detach` both
+/// survive the merge; sorting then hands the resolver the LOWER layer last, and
+/// its own last-wins rule silently reverses precedence. Two dedupe keys for one
+/// identity is the whole bug, so there is one key and it lives here.
+///
+/// Split out from its file reads because the precedence rule is worth a test
+/// that does not mutate `$HOME` out from under every other thread.
+fn merge_key_layers(layers: impl Iterator<Item = Vec<(String, String)>>) -> Vec<(String, String)> {
     let mut merged: Vec<(String, String)> = Vec::new();
-    for path in layers {
-        for (action, spec) in read(&path).unwrap_or_default() {
+    for layer in layers {
+        for (action, spec) in layer {
+            let action = action.trim().to_ascii_lowercase();
             merged.retain(|(a, _)| *a != action);
             merged.push((action, spec));
         }
@@ -370,6 +386,38 @@ mod tests {
         assert_eq!(lines_from_json(r#"{"lines":[]}"#), None);
         assert_eq!(lines_from_json("not json"), None);
         assert_eq!(lines_from_json(r#"{"no_lines":1}"#), None);
+    }
+
+    #[test]
+    fn a_project_rebind_outranks_a_global_one_whatever_its_case() {
+        let layer = |a: &str, k: &str| vec![(a.to_string(), k.to_string())];
+        let merged = |a: Vec<(String, String)>, b: Vec<(String, String)>| {
+            merge_key_layers(vec![a, b].into_iter())
+        };
+        // Global first, project on top. The resolver folds case, so these two
+        // ids are ONE action and the higher layer has to win outright.
+        assert_eq!(
+            merged(layer("detach", "Q"), layer("Detach", "D")),
+            layer("detach", "D")
+        );
+        // And the other way round, or the test would only prove that `D` sorts
+        // before `Q`.
+        assert_eq!(
+            merged(layer("Detach", "D"), layer("detach", "Q")),
+            layer("detach", "Q")
+        );
+        // Untouched actions from the lower layer still survive the merge.
+        let global = vec![
+            ("detach".to_string(), "Q".to_string()),
+            ("zoom".to_string(), "z".to_string()),
+        ];
+        assert_eq!(
+            merge_key_layers(vec![global, layer("DETACH", "D")].into_iter()),
+            vec![
+                ("detach".to_string(), "D".to_string()),
+                ("zoom".to_string(), "z".to_string()),
+            ]
+        );
     }
 
     #[test]
