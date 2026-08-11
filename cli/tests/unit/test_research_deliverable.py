@@ -228,3 +228,16 @@ def test_emit_done_advisory_remains_nonfatal_on_schema_failure(
     deli.emit_done_advisory(events, slug="topic-slug")
 
     assert events.read_text(encoding="utf-8") == ""
+
+
+def test_emit_done_advisory_remains_nonfatal_on_symlink_resolution_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    monkeypatch.setattr(
+        deli,
+        "append_event",
+        lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("symlink loop")),
+    )
+
+    deli.emit_done_advisory(events, slug="topic-slug")

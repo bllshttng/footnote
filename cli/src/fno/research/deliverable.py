@@ -185,7 +185,7 @@ def emit_done_advisory(events_path: Path, *, slug: str) -> None:
             },
         )
         append_event(event, events_path)
-    except (OSError, SchemaUnavailableError, TimeoutError, ValidationError):
+    except (OSError, RuntimeError, SchemaUnavailableError, TimeoutError, ValidationError):
         pass
 
 

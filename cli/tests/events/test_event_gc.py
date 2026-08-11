@@ -428,6 +428,14 @@ def test_gc_keeps_live_writer_when_identity_probe_is_unavailable(
     assert token.exists()
 
 
+def test_gc_ignores_non_object_fanout_cursor(tmp_path: Path) -> None:
+    status_dir = tmp_path / "status-sinks"
+    status_dir.mkdir()
+    (status_dir / "malformed.cursor").write_text("[]", encoding="utf-8")
+
+    assert event_gc._fanout_cursor_timestamps(status_dir) == set()
+
+
 def test_gc_reaps_dead_writer_when_identity_probe_is_empty(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

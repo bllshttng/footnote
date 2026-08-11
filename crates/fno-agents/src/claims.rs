@@ -956,6 +956,8 @@ pub(crate) fn append_event_line(
     event: &Value,
     lock_timeout: Duration,
 ) -> Result<(), String> {
+    let mut line = serde_json::to_vec(event).map_err(|e| e.to_string())?;
+    line.push(b'\n');
     loop {
         // Setup can replace a local journal with a canonical-journal symlink
         // while this writer waits on the old mutex. Re-resolve after acquiring
@@ -984,7 +986,7 @@ pub(crate) fn append_event_line(
             .append(true)
             .create(true)
             .open(&resolved_path)
-            .and_then(|mut f| writeln!(f, "{event}"))
+            .and_then(|mut f| f.write_all(&line))
             .map_err(|e| e.to_string());
         release_dir_mutex(&lock_dir, &token);
         return res;

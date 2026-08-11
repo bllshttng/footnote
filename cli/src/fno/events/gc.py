@@ -115,7 +115,7 @@ def _fanout_cursor_timestamps(status_dir: Path) -> set[str]:
             payload = json.loads(cursor_path.read_text(encoding="utf-8"))
             timestamp = payload["ts"]
             count = payload["n"]
-        except (KeyError, OSError, UnicodeError, ValueError):
+        except (KeyError, OSError, TypeError, UnicodeError, ValueError):
             continue
         if (
             isinstance(timestamp, str)
