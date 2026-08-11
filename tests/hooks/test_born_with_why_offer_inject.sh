@@ -48,6 +48,25 @@ except Exception:
 WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 git -C "$WORK" init -q || fail "git init failed"
+
+# A brand-new checkout has no .fno directory. The missing-journal fast path must
+# return before cursor-lock retries turn every prompt into a one-second stall.
+FRESH="$WORK/fresh"
+mkdir -p "$FRESH"
+git -C "$FRESH" init -q || fail "fresh git init failed"
+python3 - "$HOOK" "$FRESH" <<'PY' || fail "missing journal did not return promptly"
+import subprocess
+import sys
+
+hook, cwd = sys.argv[1:]
+result = subprocess.run(
+    ["bash", hook], cwd=cwd, stdin=subprocess.DEVNULL, capture_output=True, timeout=0.5
+)
+assert result.returncode == 0, result.stderr.decode(errors="replace")
+assert result.stdout == b"", result.stdout
+PY
+pass "missing journal returns before cursor-lock retries"
+
 mkdir -p "$WORK/.fno"
 EVENTS="$WORK/.fno/events.jsonl"
 CURSOR="$WORK/.fno/.think-offer-cursor"

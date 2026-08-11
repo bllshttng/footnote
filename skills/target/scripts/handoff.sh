@@ -494,11 +494,11 @@ else
 fi
 rm -f "$_TMP_RECEIPT_ERR" 2>/dev/null || true
 
-# Builder crumb trail (x-4852): the worktree-local events.jsonl is single-node,
-# so no node filter is needed. Summarize the tail for the delegation receipt and
-# append the last crumbs to the successor's brief so it picks up from the trail
-# instead of re-deriving. Best-effort: a missing/rotated/malformed log degrades
-# to "crumbs: none", never fatal.
+# Builder crumb trail (x-4852): the shared journal carries multiple nodes, so
+# select only crumbs correlated to this handoff's node. Summarize that tail for
+# the delegation receipt and append the last crumbs to the successor's brief so
+# it picks up from the trail instead of re-deriving. Best-effort: a missing,
+# rotated, malformed, or legacy uncorrelated row is ignored, never fatal.
 _CRUMB_SUMMARY="crumbs: none"
 if [ -f "$EVENTS_FILE" ] || [ -f "$EVENTS_FILE.1" ]; then
   set +o pipefail
@@ -506,7 +506,9 @@ if [ -f "$EVENTS_FILE" ] || [ -f "$EVENTS_FILE.1" ]; then
   # skipped, not fatal - `jq -c 'select(...)'` aborts at the first bad line and
   # drops every crumb after it (the exact malformed-log case this must tolerate).
   _CRUMBS="$( { [ -f "$EVENTS_FILE.1" ] && cat "$EVENTS_FILE.1"; [ -f "$EVENTS_FILE" ] && cat "$EVENTS_FILE"; } 2>/dev/null \
-    | jq -Rc 'fromjson? | select(.type? == "builder_step")' 2>/dev/null || true)"
+    | jq -Rc --arg node "$NODE_ID" \
+      'fromjson? | select(.type? == "builder_step" and .data.node_id? == $node)' \
+      2>/dev/null || true)"
   _CRUMB_N="$(printf '%s' "$_CRUMBS" | grep -c . || true)"
   if [ "${_CRUMB_N:-0}" -gt 0 ]; then
     _CRUMB_LAST="$(printf '%s\n' "$_CRUMBS" | tail -1 | jq -r '.data.outcome // "?"' 2>/dev/null || echo "?")"

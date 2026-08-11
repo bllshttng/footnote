@@ -32,6 +32,10 @@ source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 EVENTS="$REPO_ROOT/.fno/events.jsonl"
+# No journal means there is no cursor state to serialize. Keep this ahead of
+# lock acquisition because a fresh checkout does not have a .fno parent yet.
+[[ -f "$EVENTS" ]] || exit 0
+
 CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
 if [[ -L "$CURSOR" ]]; then
     CURSOR=$(_resolve_event_symlink "$CURSOR") || exit 0
@@ -59,9 +63,6 @@ cleanup_cursor_lock() {
     rmdir "$CURSOR_LOCK" 2>/dev/null || true
 }
 trap cleanup_cursor_lock EXIT
-
-# No events file yet -> nothing to surface.
-[[ -f "$EVENTS" ]] || exit 0
 
 # Both tools are required before the cursor can move. A GC rewrite publishes a
 # recoverable inode-pinned cursor mapping before replacing the journal; finish
