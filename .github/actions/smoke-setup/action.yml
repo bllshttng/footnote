@@ -1,0 +1,84 @@
+name: smoke-setup
+description: >
+  Provision a runner for `fno test smoke`. Shared by the clean and dirty
+  ambient lanes so the two cannot drift on what a smoke run is given.
+
+# Why a composite action rather than two copies of these steps: the dirty lane
+# started life as a hand-copied subset of the clean job, and the copy was
+# missing the Rust front build. The lane then went red for a setup reason
+# rather than a real leak, which is the failure this whole change exists to
+# prevent - a job that is red for the wrong reason gets ignored exactly as fast
+# as one that is always green. One definition, two callers, no drift.
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: "3.12"
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v3
+      with:
+        version: "latest"
+
+    - name: Install PyYAML for bundler + marketplace lint
+      # The skill-bundler parser opts into PyYAML when the manifest declares
+      # references: or agents: blocks (nested shapes the stdlib fallback
+      # parser can't handle). The marketplace-readiness lint similarly
+      # imports yaml for frontmatter validation. Install at system level so
+      # the freshness check + lint scripts (run outside the cli venv) can
+      # import yaml from the same python3 that setup-python installed. This
+      # stays in the yml (not the smoke runner): the runner only ASSERTS
+      # python3-yaml and names it if missing, the CI/local install divergence
+      # is deliberate (locally you install pyyaml once, by hand).
+      shell: bash
+      run: python3 -m pip install --upgrade pyyaml
+
+    - name: Assert yq (dotted-key config reads)
+      # scripts/lib/config.sh reads dotted keys (auto_merge.*) through yq and
+      # has NO fallback: without it every nested lookup returns the default
+      # and any harness asserting configured behavior fails for an unrelated
+      # reason. ubuntu-latest happens to ship yq, so this dependency was
+      # satisfied incidentally and declared nowhere; assert it so a runner
+      # image change fails with one clear line instead of a cascade.
+      shell: bash
+      run: |
+        command -v yq >/dev/null 2>&1 || {
+          echo "yq missing: scripts/lib/config.sh cannot read dotted config keys" >&2
+          exit 1
+        }
+        yq --version
+
+    - name: Install stable Rust toolchain (for journey tests)
+      # Journey tests (e2e, emission-schema, backstop-subprocess) and the
+      # claims compat matrix invoke the REAL fno-agents binary, which the
+      # smoke runner builds mid-run. Provision the toolchain + cargo cache
+      # here (CI-runner concern); the debug build itself lives in the runner
+      # so local runs build it too.
+      uses: dtolnay/rust-toolchain@stable
+
+    - name: Cache Cargo registry + build artifacts (journey tests)
+      uses: actions/cache@v4
+      with:
+        path: |
+          ~/.cargo/registry
+          ~/.cargo/git
+          crates/fno-agents/target
+          crates/fno/target
+        key: ${{ runner.os }}-cargo-journey-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
+        restore-keys: |
+          ${{ runner.os }}-cargo-journey-
+
+    - name: Build the Rust front (verb-surface ratchet)
+      # `fno lint verb-ratchet` covers BOTH binaries and fails closed when the
+      # front is unreachable, so the smoke job has to supply it: the toolchain
+      # above is provisioned for fno-agents, which is a separate crate with its
+      # own target dir. Handed over by explicit path rather than added to PATH,
+      # because a bare `fno` here would shadow the Python entry point that every
+      # other smoke step resolves.
+      shell: bash
+      run: |
+        cargo build --manifest-path crates/fno/Cargo.toml
+        echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"

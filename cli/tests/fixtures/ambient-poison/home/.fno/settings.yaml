@@ -1,0 +1,8 @@
+# Synthetic. The Path.home()/.fno/settings.yaml global candidate, reached
+# through HOME rather than through FNO_GLOBAL_SETTINGS_PATH.
+active_combo: fno-poison-home-combo
+combos:
+  fno-poison-home-combo:
+    harness: codex
+    provider: fno-poison-home-provider
+    model: fno-poison-home-model

@@ -1,0 +1,1 @@
+fno-poison plugin root; resolve_plugin_script must never resolve here in a test

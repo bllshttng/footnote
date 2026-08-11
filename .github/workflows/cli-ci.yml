@@ -155,72 +155,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v3
-        with:
-          version: "latest"
-
-      - name: Install PyYAML for bundler + marketplace lint
-        # The skill-bundler parser opts into PyYAML when the manifest declares
-        # references: or agents: blocks (nested shapes the stdlib fallback
-        # parser can't handle). The marketplace-readiness lint similarly
-        # imports yaml for frontmatter validation. Install at system level so
-        # the freshness check + lint scripts (run outside the cli venv) can
-        # import yaml from the same python3 that setup-python installed. This
-        # stays in the yml (not the smoke runner): the runner only ASSERTS
-        # python3-yaml and names it if missing, the CI/local install divergence
-        # is deliberate (locally you install pyyaml once, by hand).
-        run: python3 -m pip install --upgrade pyyaml
-
-      - name: Assert yq (dotted-key config reads)
-        # scripts/lib/config.sh reads dotted keys (auto_merge.*) through yq and
-        # has NO fallback: without it every nested lookup returns the default
-        # and any harness asserting configured behavior fails for an unrelated
-        # reason. ubuntu-latest happens to ship yq, so this dependency was
-        # satisfied incidentally and declared nowhere; assert it so a runner
-        # image change fails with one clear line instead of a cascade.
-        run: |
-          command -v yq >/dev/null 2>&1 || {
-            echo "yq missing: scripts/lib/config.sh cannot read dotted config keys" >&2
-            exit 1
-          }
-          yq --version
-
-      - name: Install stable Rust toolchain (for journey tests)
-        # Journey tests (e2e, emission-schema, backstop-subprocess) and the
-        # claims compat matrix invoke the REAL fno-agents binary, which the
-        # smoke runner builds mid-run. Provision the toolchain + cargo cache
-        # here (CI-runner concern); the debug build itself lives in the runner
-        # so local runs build it too.
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Cargo registry + build artifacts (journey tests)
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            crates/fno-agents/target
-            crates/fno/target
-          key: ${{ runner.os }}-cargo-journey-${{ hashFiles('crates/fno-agents/Cargo.lock', 'crates/fno/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-cargo-journey-
-
-      - name: Build the Rust front (verb-surface ratchet)
-        # `fno lint verb-ratchet` covers BOTH binaries and fails closed when the
-        # front is unreachable, so the smoke job has to supply it: the toolchain
-        # above is provisioned for fno-agents, which is a separate crate with its
-        # own target dir. Handed over by explicit path rather than added to PATH,
-        # because a bare `fno` here would shadow the Python entry point that every
-        # other smoke step resolves.
-        run: |
-          cargo build --manifest-path crates/fno/Cargo.toml
-          echo "FNO_RUST_FRONT=$PWD/crates/fno/target/debug/fno" >> "$GITHUB_ENV"
+      # Shared with smoke-dirty so the two ambient lanes cannot drift on what a
+      # smoke run is provisioned with. See .github/actions/smoke-setup.
+      - name: Provision the smoke runner
+        uses: ./.github/actions/smoke-setup
 
       - name: Smoke (test + lint registry)
         # The test/lint steps live in the code-owned `fno test smoke` runner
@@ -239,6 +177,38 @@ jobs:
       # independent of test selection (and faster than full collection).
       - name: Dead import paths (module-move guard)
         run: bash scripts/ci/check-import-paths.sh
+
+  # The lane that lets CI see what only a dirty machine sees.
+  #
+  # A clean runner cannot fail on a test that READS the developer's ambient
+  # state, because the value it reads is always absent here. This job poisons
+  # the runner's environment with synthetic developer state and lets the
+  # hermeticity fixture scrub it: a channel the fixture covers produces a child
+  # identical to the `smoke` job's, and a channel it MISSED survives into the
+  # child and reddens the test that reads it.
+  #
+  # Green `smoke` beside red `smoke-dirty` on one commit IS an ambient leak, and
+  # the failing test names itself. `smoke` stays the merge gate, so a leak reads
+  # as "ambient leak" rather than as "the suite is broken".
+  #
+  # TODO: graduate to blocking once this has run advisory for a release - remove
+  # continue-on-error then.
+  smoke-dirty:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    continue-on-error: true
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # The SAME provisioning the clean lane gets. This job started as a
+      # hand-copied subset of it, the copy was missing the Rust front build,
+      # and the lane went red for a setup reason rather than a real leak.
+      - name: Provision the smoke runner
+        uses: ./.github/actions/smoke-setup
+
+      - name: Smoke under synthetic ambient state
+        run: uv run --project cli fno-py test smoke --ambient dirty
 
   # TODO: graduate to blocking in the next release - remove continue-on-error
   prompt-drift:
