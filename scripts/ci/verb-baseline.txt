@@ -221,6 +221,7 @@ lint provider-stderr-merge
 lint shellout-drift
 lint spawn-paths
 lint stale-skill-refs
+lint style
 lint verb-ratchet
 log activity
 log milestone

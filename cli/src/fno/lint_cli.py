@@ -373,6 +373,146 @@ def verb_ratchet(
     raise typer.Exit(0 if report.ok else 1)
 
 
+_STYLE_SURFACES = ("mail", "pr-body", "markdown")
+
+
+@app.command("style", hidden=True)
+def style(
+    surface: str = typer.Option(
+        "mail",
+        "--surface",
+        help="Where the text is read: mail, pr-body, or markdown. The five rules apply the same everywhere.",
+    ),
+    stdin: bool = typer.Option(
+        False,
+        "--stdin",
+        help="Read the body from standard input.",
+    ),
+    files: Optional[list[Path]] = typer.Option(
+        None,
+        "--files",
+        help="Files to check whole. With --diff-base, scopes the added-lines scan to these paths.",
+    ),
+    diff_base: Optional[str] = typer.Option(
+        None,
+        "--diff-base",
+        help="For --surface markdown: check ADDED lines only since this ref (e.g. origin/main). "
+        "A whole-file gate is unlandable because existing prose already breaks the rules.",
+    ),
+) -> None:
+    """Check text against the five style rules in docs/style-rules.md.
+
+    A list-item sentence is 20 words or fewer, and every other sentence is 25
+    or fewer. No semicolon. No "should", "would", "may", "might", or "could".
+    No contractions. If a sentence carries "if" or "when", that word starts the
+    sentence. Code, paths, flags, and quoted output do not count. Exit 0 clean,
+    1 with violations, 2 on bad usage.
+    """
+    from fno import style as style_mod
+
+    if surface not in _STYLE_SURFACES:
+        typer.echo(f"style: unknown surface {surface!r} (mail, pr-body, markdown)", err=True)
+        raise typer.Exit(2)
+    if diff_base is not None and surface != "markdown":
+        typer.echo("style: --diff-base applies to --surface markdown only.", err=True)
+        raise typer.Exit(2)
+
+    if diff_base is not None:
+        violations, inspected, changed = _style_added_lines(diff_base, files)
+        typer.echo(
+            f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
+        )
+        if changed and inspected == 0:
+            typer.echo(
+                "style: a gated tree changed but no added lines were inspected. "
+                "Add a style-exception marker if the change is deletion-only.",
+                err=True,
+            )
+            raise typer.Exit(1)
+    elif stdin:
+        import sys
+
+        violations = style_mod.check(sys.stdin.read(), surface=surface)
+    elif files:
+        violations = []
+        for path in files:
+            text = path.read_text(encoding="utf-8")
+            violations.extend(style_mod.check(text, surface=surface))
+    else:
+        typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
+        raise typer.Exit(2)
+
+    if not violations:
+        raise typer.Exit(0)
+    typer.echo(style_mod.format_violations(violations), err=True)
+    raise typer.Exit(1)
+
+
+def _style_added_lines(
+    diff_base: str, paths: Optional[list[Path]]
+) -> "tuple[list, int, int]":
+    """Return (violations, added-line count, changed-file count) for markdown.
+
+    Per file: a whole-file style-exception marker exempts it; otherwise only the
+    ADDED lines since diff_base are checked. A bad diff-base fails loud (exit 2),
+    not open: a malformed base that inspects nothing is the absence the pitfalls
+    corpus names, indistinguishable from "no violations found".
+    """
+    from fno import style as style_mod
+
+    repo = _repo_root()
+    scope = [str(p) for p in paths] if paths else ["docs", "skills", "agents"]
+    rev = subprocess.run(
+        ["git", "rev-parse", "--verify", diff_base],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    if rev.returncode != 0:
+        typer.echo(f"style: bad diff-base {diff_base!r}: {rev.stderr.strip()}", err=True)
+        raise typer.Exit(2)
+    diff_files = subprocess.run(
+        ["git", "diff", "--name-only", f"{diff_base}...HEAD", "--", *scope],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    changed = [line for line in diff_files.stdout.splitlines() if line.strip()]
+    violations = []
+    inspected = 0
+    for rel in changed:
+        full = repo / rel
+        if not full.is_file():
+            continue
+        whole = full.read_text(encoding="utf-8")
+        if style_mod.has_exception(whole):
+            continue
+        added = _git_added_lines(rel, diff_base, repo)
+        inspected += len(added)
+        if added:
+            violations.extend(style_mod.check("\n".join(added), surface="markdown"))
+    return violations, inspected, len(changed)
+
+
+def _git_added_lines(rel: str, diff_base: str, repo: Path) -> "list[str]":
+    """Return the added ('+') lines from `git diff -U0 <base>...HEAD -- <rel>`."""
+    proc = subprocess.run(
+        ["git", "diff", "-U0", f"{diff_base}...HEAD", "--", rel],
+        cwd=str(repo),
+        capture_output=True,
+        text=True,
+    )
+    lines: "list[str]" = []
+    for line in proc.stdout.splitlines():
+        if line[:3] in ("+++", "---") or line.startswith("@@"):
+            continue
+        if line.startswith("+"):
+            content = line[1:]
+            if content.strip():
+                lines.append(content)
+    return lines
+
+
 @app.command("stale-skill-refs")
 def stale_skill_refs() -> None:
     """Audit for stale references to cut, demoted, or merged skills.
