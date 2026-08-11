@@ -71,21 +71,43 @@ jobs:
           # expression: interpolating $default into a -q string needs nested
           # quoting, and a branch name with a quote or a shell metacharacter in
           # it would then decide what the sweep looks at.
-          mapfile -t rows < <(
-            gh pr list --state open --limit 200 \
-              --json number,baseRefName,headRefOid \
-              --jq '.[] | [.number, .baseRefName, .headRefOid] | @tsv'
-          )
+          # Captured to a file and status-checked BEFORE mapfile. `mapfile -t
+          # rows < <(gh ...)` takes its exit status from mapfile, and pipefail
+          # does not reach into process substitution - so an auth blip or a 5xx
+          # would leave rows empty and this step would print "0 open PRs" and go
+          # green. This sweep is the only cover for the server-side --auto
+          # window, so "gh failed" reading as "nothing to check" is the one
+          # failure it must never have.
+          if ! gh pr list --state open --limit 200 \
+                --json number,baseRefName,headRefOid \
+                --jq '.[] | [.number, .baseRefName, .headRefOid] | @tsv' > /tmp/open-prs.tsv; then
+            echo "FAIL: could not list open PRs; sweep verified nothing" >&2
+            exit 1
+          fi
+          mapfile -t rows < /tmp/open-prs.tsv
           checked=0
           flipped=0
+          stamped=0
           for row in "${rows[@]}"; do
             IFS=$'\t' read -r pr base sha <<<"$row"
-            # A PR based on the default branch is what this guard protects the
-            # way TO; only a stacked one can have its base die underneath it.
+            # A PR based on the default branch cannot have its base die under
+            # it, but it still gets the context stamped. Once an operator marks
+            # `stacked-base-guard` required, any PR that never received the
+            # context sits permanently pending with nothing able to trigger a
+            # run - so every PR open when this lands would need a fresh push to
+            # become mergeable. One direct status post is cheaper here than
+            # re-running the whole check for each of them.
             # Spelled as an `if` rather than `[ ... ] && continue`: the runner
             # invokes this with `bash -e`, and a trailing `&&` whose left side
             # is false is exactly the shape that reads as safe until it isn't.
             if [ "$base" = "$default" ]; then
+              if gh api --method POST "repos/${GITHUB_REPOSITORY}/statuses/${sha}" \
+                   -f state=success -f context=stacked-base-guard \
+                   -f description="base is the default branch ($default)" >/dev/null; then
+                stamped=$((stamped + 1))
+              else
+                echo "warn: could not stamp PR #$pr ($sha)" >&2
+              fi
               continue
             fi
             checked=$((checked + 1))
@@ -97,4 +119,4 @@ jobs:
           # status it just wrote, and a red main run would only obscure which PR
           # is affected. The 200-PR cap is stated rather than silent, so a
           # truncated sweep cannot read as full coverage.
-          echo "swept ${#rows[@]} open PR(s), checked $checked stacked, $flipped failing (cap: 200)"
+          echo "swept ${#rows[@]} open PR(s): $checked stacked checked, $flipped now failing, $stamped default-based stamped (cap: 200)"

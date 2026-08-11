@@ -3,18 +3,21 @@
 Mocks gh/git at the ``_proc.run`` seam, like ``test_pr_merge.py``, so the two
 probes and their three-way verdict are exercised without a live PR.
 
-The load-bearing cases are the two blindness tests. (i) and (ii) exist to cover
-each other: under ``merge_strategy = "squash"`` a landed base is not an ancestor
-of main, so (ii) sees nothing; a base that landed leaving no merged PR blinds
-(i). A test suite that only ever satisfies both at once would pass with either
-check deleted.
+The load-bearing cases are the blindness pair and the reuse case. (i) and (ii)
+exist to cover each other: under ``merge_strategy = "squash"`` a landed base is
+not an ancestor of main, so (ii) sees nothing; a base that landed leaving no
+merged PR blinds (i). A suite that only ever satisfies both at once would pass
+with either check deleted.
 """
 from __future__ import annotations
 
 import pytest
 
 from fno.pr import _base_lineage
-from fno.pr._proc import Result
+from fno.pr._proc import Result, ToolMissing
+
+LANDED = "85b90e485aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+MOVED = "ca9c86308bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 
 
 class FakeRun:
@@ -26,25 +29,36 @@ class FakeRun:
         default: str = "main",
         base: str = "feature/bg-crown",
         merged_pr: str = "",
+        merged_head: str = LANDED,
+        base_tip: str = LANDED,
         contained: bool = False,
         default_fails: bool = False,
         base_fails: bool = False,
         list_fails: bool = False,
         fetch_fails: bool = False,
+        git_missing: bool = False,
     ) -> None:
         self.default = default
         self.base = base
         self.merged_pr = merged_pr
+        self.merged_head = merged_head
+        self.base_tip = base_tip
         self.contained = contained
         self.default_fails = default_fails
         self.base_fails = base_fails
         self.list_fails = list_fails
         self.fetch_fails = fetch_fails
+        self.git_missing = git_missing
         self.calls: list[list[str]] = []
 
     def __call__(self, cmd, *, cwd=None, env=None, input_text=None, timeout=None):
         cmd = list(cmd)
         self.calls.append(cmd)
+        # Every probe must be bounded: `_merge.py` calls this inside the global
+        # merge lock, so an unbounded git fetch would wedge every other lane.
+        assert timeout, f"probe ran without a timeout: {cmd}"
+        if cmd[0] == "git" and self.git_missing:
+            raise ToolMissing("git")
         if cmd[0] == "gh":
             if cmd[1:3] == ["repo", "view"]:
                 if self.default_fails:
@@ -57,10 +71,14 @@ class FakeRun:
             if cmd[1:3] == ["pr", "list"]:
                 if self.list_fails:
                     return Result(1, "", "gh: api error")
-                return Result(0, (self.merged_pr or "null") + "\n", "")
+                if not self.merged_pr:
+                    return Result(0, "null null\n", "")
+                return Result(0, f"{self.merged_pr} {self.merged_head}\n", "")
         if cmd[0] == "git":
             if cmd[1] == "fetch":
                 return Result(1 if self.fetch_fails else 0, "", "")
+            if cmd[1] == "rev-parse":
+                return Result(0, self.base_tip + "\n", "")
             if cmd[1] == "merge-base":
                 return Result(0 if self.contained else 1, "", "")
         return Result(0, "", "")
@@ -84,14 +102,27 @@ def test_base_is_default_branch_is_ok_without_probing(patch_run):
     assert not any(c[0] == "git" for c in fake.calls)
 
 
-def test_merged_pr_on_base_refuses(patch_run):
-    """The PR #800 shape: base landed via a merged PR, so nothing carries it on."""
-    patch_run(FakeRun(merged_pr="789", contained=True))
+def test_merged_pr_on_unmoved_base_refuses(patch_run):
+    """The specimen: PR #789 merged feature/bg-crown, whose tip had not moved."""
+    patch_run(FakeRun(merged_pr="789", merged_head=LANDED, base_tip=LANDED, contained=True))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"
     assert "#789" in why
     # The refusal has to name the fix, not just the fault.
     assert "gh pr edit 800 --base main" in why
+
+
+def test_recreated_branch_with_same_name_is_not_refused(patch_run):
+    """A merged PR is a fact about a NAME, not about the branch as it stands.
+
+    Delete `feature/x` after merging, recreate it for new work, and the old
+    merged PR answers this query forever. Refusing on that alone would be a
+    permanent false refusal with no remedy but the bypass - the shape that gets
+    a guard switched off.
+    """
+    patch_run(FakeRun(merged_pr="789", merged_head=LANDED, base_tip=MOVED, contained=False))
+    verdict, _ = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "ok"
 
 
 def test_ancestry_alone_refuses_when_no_merged_pr_exists(patch_run):
@@ -100,11 +131,14 @@ def test_ancestry_alone_refuses_when_no_merged_pr_exists(patch_run):
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"
     assert "fully contained" in why
+    # The one known false positive (a base whose own work is not pushed yet) is
+    # named in the refusal, because only the reader can tell the two apart.
+    assert "not pushed yet" in why
 
 
 def test_merged_pr_alone_refuses_when_base_is_not_an_ancestor(patch_run):
     """(i) covers (ii)'s blind spot: under squash a landed base is no ancestor."""
-    patch_run(FakeRun(merged_pr="789", contained=False))
+    patch_run(FakeRun(merged_pr="789", merged_head=LANDED, base_tip=LANDED, contained=False))
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"
     assert "#789" in why
@@ -144,6 +178,19 @@ def test_probe_failures_report_unknown_not_ok(patch_run, kwargs, fragment):
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "unknown"
     assert fragment in why
+
+
+def test_missing_git_degrades_to_unknown_not_a_traceback(patch_run):
+    """`_proc.run` raises ToolMissing when a binary is absent.
+
+    The in-process callers promise that an unevaluated probe degrades to a
+    breadcrumb, so an uncaught raise here would surface as a traceback out of
+    `fno pr verify` instead - the opposite of the stated contract.
+    """
+    patch_run(FakeRun(git_missing=True))
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "unknown"
+    assert "ancestry probe" in why
 
 
 def test_cli_exit_codes(patch_run, monkeypatch):

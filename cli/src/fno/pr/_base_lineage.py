@@ -36,10 +36,19 @@ paths is decorative. The reachable paths in this repo:
   - ``finalize.rs`` the autonomous arm, via ``fno pr base-lineage-check`` -> checked
   - ``.github/workflows/stacked-base-guard.yml``, same verb        -> checked
   - the GitHub web/mobile merge button                             -> NOT reachable
-  - a human's bare ``gh pr merge``                                 -> NOT reachable
+  - a bare ``gh pr merge``                                         -> see below
 
-The last two are covered only once an operator marks the workflow a required
-status check; nothing in this repo can do that from code.
+The web button is reachable from no code here at all. A bare ``gh pr merge`` is
+partly reachable: ``hooks/git-protection.py`` is a ``PreToolUse`` chokepoint
+that already parses the target PR number, so the predicate COULD be wired there
+- but it would bind only that command typed into a Claude Code session, never
+the same command in a plain terminal or under another harness. It is left
+unwired deliberately: a guard that covers one of the ways a human runs a command
+invites the belief that the command is guarded.
+
+Both are covered properly only once an operator marks the workflow's
+``stacked-base-guard`` status context required, which nothing in this repo can
+do from code.
 
 Verdicts are ``ok`` / ``stale`` / ``unknown``. ``unknown`` is a real third
 answer, not a pass: an in-loop CLI caller proceeds with a stderr breadcrumb
@@ -53,7 +62,7 @@ import os
 import sys
 from typing import Optional, Tuple
 
-from fno.pr._proc import run
+from fno.pr._proc import ToolMissing, run
 
 OK = 0
 REFUSED_STALE = 3
@@ -65,74 +74,108 @@ BYPASS_VALUE = "stale-acknowledged"
 #: Probe failed, as distinct from "probe ran and found nothing".
 _PROBE_FAILED = -1
 
+#: Every probe is bounded. `_merge.py` calls this INSIDE the repo-wide merge
+#: lock, so a `git fetch` that hangs on a dead remote or a prompting credential
+#: helper would hold that lock indefinitely and leave every other lane retrying
+#: a `held` forever. A timeout reads as `unknown`, which is already the
+#: proceed-with-a-breadcrumb path.
+_PROBE_TIMEOUT_S = 30
+
+
+def _probe(args: list, cwd: str):
+    """Run a bounded probe; None when it could not run at all.
+
+    ``ToolMissing`` is caught here rather than at each call site: the in-process
+    callers (``_merge.py``, ``_verify.py``) promise that an unevaluated probe
+    degrades to a breadcrumb, and an uncaught ``ToolMissing`` from a box with no
+    ``git`` on PATH would instead surface as a traceback out of ``fno pr
+    verify`` - the opposite of the stated contract.
+    """
+    try:
+        return run(args, cwd=cwd, timeout=_PROBE_TIMEOUT_S)
+    except (ToolMissing, Exception):  # noqa: BLE001 - incl. subprocess.TimeoutExpired
+        return None
+
 
 def _default_branch(cwd: str) -> Optional[str]:
-    res = run(
+    res = _probe(
         ["gh", "repo", "view", "--json", "defaultBranchRef", "-q", ".defaultBranchRef.name"],
-        cwd=cwd,
+        cwd,
     )
-    if not res.ok:
+    if res is None or not res.ok:
         return None
     return res.stdout.strip() or None
 
 
 def _base_ref(pr_number: int, cwd: str) -> Optional[str]:
-    res = run(
+    res = _probe(
         ["gh", "pr", "view", str(pr_number), "--json", "baseRefName", "-q", ".baseRefName"],
-        cwd=cwd,
+        cwd,
     )
-    if not res.ok:
+    if res is None or not res.ok:
         return None
     return res.stdout.strip() or None
 
 
-def _merged_pr_for_head(base: str, cwd: str) -> int:
-    """Number of a MERGED PR whose head is ``base``; 0 none, ``_PROBE_FAILED`` on error.
+def _merged_pr_for_head(base: str, cwd: str) -> tuple:
+    """``(pr_number, head_oid)`` of the newest MERGED PR whose head is ``base``.
 
-    The three-way return keeps a failed probe from reading as a clean bill of
-    health - the whole defect this module guards is a green answer nobody
-    actually computed.
+    ``(0, "")`` when none exists, ``(_PROBE_FAILED, "")`` on a probe error. The
+    three-way return keeps a failed probe from reading as a clean bill of health
+    - the whole defect this module guards is a green answer nobody computed.
+
+    ``head_oid`` rides along because the PR's existence alone is a permanent
+    historical fact, not a statement about the branch as it stands now. See
+    :func:`lineage_verdict` for why the caller compares it to the live tip.
     """
-    res = run(
+    res = _probe(
         [
             "gh", "pr", "list", "--head", base, "--state", "merged",
-            "--limit", "1", "--json", "number", "-q", ".[0].number",
+            "--limit", "1", "--json", "number,headRefOid",
+            "-q", '.[0] | "\\(.number) \\(.headRefOid)"',
         ],
-        cwd=cwd,
+        cwd,
     )
-    if not res.ok:
-        return _PROBE_FAILED
+    if res is None or not res.ok:
+        return (_PROBE_FAILED, "")
     out = res.stdout.strip()
-    if not out or out == "null":
-        return 0
+    if not out or out.startswith("null"):
+        return (0, "")
+    parts = out.split()
     try:
-        return int(out)
-    except ValueError:
-        return _PROBE_FAILED
+        return (int(parts[0]), parts[1] if len(parts) > 1 else "")
+    except (ValueError, IndexError):
+        return (_PROBE_FAILED, "")
 
 
-def _base_contained_in_default(base: str, default: str, cwd: str) -> Optional[bool]:
-    """Whether ``origin/base`` is an ancestor of ``origin/default``; None on probe error.
-
-    Both refs are fetched with explicit refspecs first. Reading a
-    remote-tracking ref without fetching answers from whatever the last fetch
-    left behind, and a stale ref is exactly how a base that has since landed
-    still looks alive.
-    """
-    fetch = run(
+def _fetch_refs(base: str, default: str, cwd: str) -> bool:
+    """Fetch both refs with explicit refspecs. Reading a remote-tracking ref
+    without fetching answers from whatever the last fetch left behind, and a
+    stale ref is exactly how a base that has since landed still looks alive."""
+    fetch = _probe(
         [
             "git", "fetch", "origin",
             f"+refs/heads/{base}:refs/remotes/origin/{base}",
             f"+refs/heads/{default}:refs/remotes/origin/{default}",
         ],
-        cwd=cwd,
+        cwd,
     )
-    if not fetch.ok:
-        return None
-    res = run(
+    return fetch is not None and fetch.ok
+
+
+def _rev(ref: str, cwd: str) -> str:
+    res = _probe(["git", "rev-parse", ref], cwd)
+    return res.stdout.strip() if res is not None and res.ok else ""
+
+
+def _base_contained_in_default(base: str, default: str, cwd: str) -> Optional[bool]:
+    """Whether ``origin/base`` is an ancestor of ``origin/default``; None on error."""
+    res = _probe(
         ["git", "merge-base", "--is-ancestor", f"origin/{base}", f"origin/{default}"],
-        cwd=cwd,
+        cwd,
     )
+    if res is None:
+        return None
     if res.returncode == 0:
         return True
     if res.returncode == 1:
@@ -159,30 +202,54 @@ def lineage_verdict(pr_number: int, cwd: str) -> Tuple[str, str]:
     if base == default:
         return ("ok", f"base is the default branch ({default})")
 
-    merged = _merged_pr_for_head(base, cwd)
-    contained = _base_contained_in_default(base, default, cwd)
+    merged, merged_head = _merged_pr_for_head(base, cwd)
+    fetched = _fetch_refs(base, default, cwd)
+    base_tip = _rev(f"origin/{base}", cwd) if fetched else ""
+    contained = _base_contained_in_default(base, default, cwd) if fetched else None
     retarget = f"retarget it first: gh pr edit {pr_number} --base {default}"
 
-    if merged > 0:
+    # (i) fires only when the branch has not moved since that PR merged it.
+    # A merged PR is a permanent historical fact about a NAME, not a statement
+    # about the branch as it stands now: delete `feature/x` after merging it,
+    # recreate it later for new work, and the old PR still answers this query
+    # forever. Comparing to the live tip keeps the specimen caught (#789 merged
+    # head 85b90e485, which was still feature/bg-crown's tip when #800 merged)
+    # while a recreated or continued branch reads as alive - the false refusal
+    # that would otherwise get this guard switched off.
+    if merged > 0 and merged_head and base_tip and merged_head == base_tip:
         return (
             "stale",
-            f"base branch '{base}' already landed via merged PR #{merged}, so merging "
-            f"PR #{pr_number} into it would report MERGED while the commits never reach "
-            f"'{default}'; {retarget}",
+            f"base branch '{base}' already landed via merged PR #{merged} and has not "
+            f"moved since ({base_tip[:8]}), so merging PR #{pr_number} into it would "
+            f"report MERGED while the commits never reach '{default}'; {retarget}",
         )
     if contained is True:
+        # Known, accepted false positive: a base branch created off the default
+        # branch whose own work is not pushed yet is ALSO fully contained, and
+        # is locally indistinguishable from one that landed by a direct push
+        # (both are just an ancestor of the default branch, and neither leaves a
+        # merged PR for (i) to see). The message names that case rather than
+        # pretending the verdict is certain, because the reader is the only one
+        # who can tell the two apart.
         return (
             "stale",
-            f"base branch '{base}' is already fully contained in '{default}', so merging "
-            f"PR #{pr_number} into it would report MERGED while the commits never reach "
-            f"'{default}'; {retarget}",
+            f"base branch '{base}' is already fully contained in '{default}' (nothing on "
+            f"it that '{default}' lacks), so merging PR #{pr_number} into it would report "
+            f"MERGED while the commits never reach '{default}'; {retarget}. If '{base}' is "
+            f"instead a new branch whose own commits are not pushed yet, push them first, "
+            f"or set {BYPASS_ENV}={BYPASS_VALUE}",
         )
 
-    if merged == _PROBE_FAILED and contained is None:
+    # Only reached when neither check fired. A probe that could not run leaves
+    # its half of the question unanswered, so it is `unknown` rather than a
+    # pass, and the reason names WHICH probe - a caller reading "unknown" alone
+    # cannot tell a broken gh from a broken git.
+    git_blind = not fetched or contained is None or not base_tip
+    if merged == _PROBE_FAILED and git_blind:
         return ("unknown", f"both lineage probes failed for base '{base}' (gh and git)")
     if merged == _PROBE_FAILED:
         return ("unknown", f"merged-PR probe failed for base '{base}' (gh pr list)")
-    if contained is None:
+    if git_blind:
         return ("unknown", f"ancestry probe failed for base '{base}' (git fetch or merge-base)")
 
     return ("ok", f"base '{base}' still leads to '{default}'")

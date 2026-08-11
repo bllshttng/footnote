@@ -275,8 +275,8 @@ Coverage of the seven reachable merge paths, stated honestly rather than implied
 | `finalize.rs` autonomous `--auto` arm | checked, refuses to arm |
 | a PR update, via `.github/workflows/stacked-base-guard.yml` | checked; blocks only once marked a required status check |
 | GitHub's `--auto` queue firing later, server-side | covered by the workflow's push-to-`main` sweep, which re-stamps the same status context |
-| the GitHub web / mobile merge button | NOT covered until the context is marked required |
-| a human's bare `gh pr merge` in their own terminal | NOT covered until the context is marked required |
+| the GitHub web / mobile merge button | NOT covered until the context is marked required; reachable from no code here |
+| a bare `gh pr merge` | NOT covered until the context is marked required. `hooks/git-protection.py` is a `PreToolUse` chokepoint that already parses the PR number, so the predicate could be wired there, but it would bind only that command typed into a Claude Code session - not a plain terminal, not another harness. Left unwired: a guard over one of the ways a human runs a command invites the belief that the command is guarded |
 
 Marking the `stacked-base-guard` context required is a repository-settings action; no code in this repo can take it, and this repo commits no branch-protection or ruleset config.
 Until someone does, the workflow reports and does not block.

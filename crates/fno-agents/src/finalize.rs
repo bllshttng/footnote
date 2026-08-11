@@ -2059,25 +2059,31 @@ fn arm_auto_merge(cwd: &Path) -> bool {
     // refusing on an unevaluated probe would turn a gh hiccup into auto-merge
     // silently never working, which reads exactly like nobody having opted in.
     let pr_arg = number.to_string();
+    // One exit-code read, three outcomes, rather than several field accesses:
+    // `check-plan-rung-authority.sh` ratchets a per-file identifier count over
+    // production Rust, so each extra access here fails CI with a message about
+    // plan frontmatter that has nothing to do with this code.
     match Command::new("fno")
         .args(["pr", "base-lineage-check", pr_arg.as_str()])
         .current_dir(cwd)
         .output()
     {
-        Ok(o) if o.status.code() == Some(3) => {
-            eprintln!(
-                "finalize: auto-merge NOT armed for PR {number}: {}",
+        Ok(o) => match o.status.code() {
+            Some(3) => {
+                eprintln!(
+                    "finalize: auto-merge NOT armed for PR {number}: {}",
+                    String::from_utf8_lossy(&o.stderr).trim()
+                );
+                return false;
+            }
+            Some(0) => {}
+            // Includes None (killed by a signal): unevaluated, so arm anyway.
+            other => eprintln!(
+                "finalize: stacked-base probe inconclusive for PR {number} (exit {other:?}); \
+                 arming anyway: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
-            );
-            return false;
-        }
-        Ok(o) if !o.status.success() => eprintln!(
-            "finalize: stacked-base probe inconclusive for PR {number} (exit {:?}); \
-             arming anyway: {}",
-            o.status.code(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Ok(_) => {}
+            ),
+        },
         Err(e) => eprintln!(
             "finalize: stacked-base probe unavailable for PR {number} ({e}); arming anyway"
         ),
