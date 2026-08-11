@@ -98,12 +98,18 @@ check_session_satisfied() {
     # "no matches" is the common case for fresh sessions. Without the
     # wrapper, the pipeline rc would be 1 on every empty-events
     # iteration, triggering the "possibly corrupt entries" log spuriously.
-    event_json=$( (grep -F '"type":"session_satisfied"' "$events_file" 2>/dev/null || true) \
+    # `tail -1` is applied AFTER the status is read, not inside the pipeline.
+    # With it inline, `jq_rc` was whatever `tail` returned, which is 0 for any
+    # input including jq's failure output, so the variable named jq_rc reported
+    # jq's health only when the caller happened to set `pipefail`. Nothing here
+    # establishes that, so read jq's status directly instead of assuming it.
+    local jq_out
+    jq_out=$( (grep -F '"type":"session_satisfied"' "$events_file" 2>/dev/null || true) \
         | jq -c --arg sid "$sid" --arg hash "$current_hash" \
             'select(.type == "session_satisfied" and .data.session_id == $sid and .data.gate_state_hash == $hash)' \
-            2>/dev/null \
-        | tail -1)
+            2>/dev/null)
     jq_rc=$?
+    event_json=$(printf '%s\n' "$jq_out" | tail -1)
     if [[ $jq_rc -ne 0 ]]; then
         log "check_session_satisfied: jq pipeline rc=$jq_rc on $events_file (possibly corrupt entries); continuing with whatever it returned"
     fi
