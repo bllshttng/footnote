@@ -228,6 +228,14 @@ fn config_roots(cwd: &Path) -> Vec<PathBuf> {
     std::iter::once(root).chain(canonical).collect()
 }
 
+/// Whether `$FNO_NO_CANONICAL_CONFIG` drops the canonical candidate.
+///
+/// Split from the env read so the rule is testable without mutating a variable
+/// the whole process shares.
+fn canonical_suppressed(value: Option<&std::ffi::OsStr>) -> bool {
+    value.is_some_and(|v| v == std::ffi::OsStr::new("1"))
+}
+
 /// The main checkout behind a linked worktree, when the worktree has no config
 /// of its own. `None` from the main checkout itself, or outside a repo.
 ///
@@ -242,9 +250,20 @@ fn config_roots(cwd: &Path) -> Vec<PathBuf> {
 /// worktree's gitdir points at `<canonical>/.git/worktrees/<name>`, so the
 /// canonical root is the part before `/.git/`. Config climbs to canonical;
 /// session state deliberately does not (`fno.paths`).
+///
+/// `fno_agents::paths::canonical_repo_root` answers the same question by
+/// running `git worktree list --porcelain`. This is a second implementation
+/// because crate `fno` does not depend on `fno-agents`, and the two differ in
+/// method, not only in code: this one cannot see a repo whose git dir lives
+/// outside the checkout, and it costs no subprocess on the attach path. Change
+/// one and check the other.
 fn canonical_root(worktree: &Path) -> Option<PathBuf> {
-    // Preflight's hermetic runner drops THIS candidate only, same as Python.
-    if non_empty_env("FNO_NO_CANONICAL_CONFIG").is_some() {
+    // Preflight's hermetic runner drops THIS candidate only. Exactly "1"; any
+    // other value is inert, matching `config/__init__.py` and
+    // `fno_agents::agents_config` verbatim. A third reader with its own idea of
+    // truthiness would resurrect the very split-brain this candidate fixes,
+    // just for operators who set it to "0" or "true".
+    if canonical_suppressed(std::env::var_os("FNO_NO_CANONICAL_CONFIG").as_deref()) {
         return None;
     }
     let gitdir = std::fs::read_to_string(worktree.join(".git")).ok()?;
@@ -563,6 +582,21 @@ mod tests {
         );
         // The main checkout has no checkout behind it.
         assert_eq!(canonical_root(&canonical), None);
+
+        // Only the exact value "1" suppresses the candidate, matching
+        // config/__init__.py ("Exactly \"1\"; any other value inert") and
+        // fno_agents::agents_config. A third reader with its own idea of
+        // truthiness would recreate the split-brain for anyone who set it to
+        // "0" or "true" meaning to turn it OFF.
+        use std::ffi::OsStr;
+        assert!(canonical_suppressed(Some(OsStr::new("1"))));
+        for inert in ["0", "true", "2", "", "yes"] {
+            assert!(
+                !canonical_suppressed(Some(OsStr::new(inert))),
+                "{inert:?} must be inert, not a suppression"
+            );
+        }
+        assert!(!canonical_suppressed(None));
 
         std::fs::remove_dir_all(&base).ok();
     }
