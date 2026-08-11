@@ -184,7 +184,11 @@ def project_node_to_plan(
             # non-dispatchable `design` rather than stamp `ready`, which would
             # let unfinished planning work auto-dispatch.
             forced = graph_status if graph_status in ("done", "in_review", "in_progress") else "design"
-            if forced not in ("superseded", "done") and current_status != forced:
+            # Only `superseded` is suppressed here, never `done`: unsupersede
+            # reviving a node that carries completed_at legitimately promotes
+            # its plan superseded -> done, and suppressing that left the plan
+            # terminal-superseded while the graph read done.
+            if forced != "superseded" and current_status != forced:
                 fields["status"] = forced
                 changed = True
                 if forced == "done" and not fields.get("done_at"):
