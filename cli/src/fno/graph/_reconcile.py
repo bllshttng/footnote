@@ -740,8 +740,8 @@ def _promise_refusal_d(node_id: str, deferred: list[dict]) -> str:
         f"  A `deferred` carve-out is declared scope that did not ship.\n"
         f"  carve-outs:\n" + "\n".join(rows) + f"{more}\n\n"
         f"  Two legal exits:\n"
-        f"    harvest them into nodes (`fno backlog groom` files and consumes\n"
-        f"      each), then close; or\n"
+        f"    harvest them into nodes (`fno retro sweep-carveouts` previews;\n"
+        f"      `--apply` files and consumes each), then close; or\n"
         f"    close with --force --reason \"deferred carve-out <id> filed as <node>\""
     )
 

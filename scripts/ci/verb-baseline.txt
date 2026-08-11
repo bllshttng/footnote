@@ -314,6 +314,7 @@ resume receipt version
 resume receipt write !--session
 retro drain-postmortems
 retro run !--pr !--session
+retro sweep-carveouts
 review !--session !--sigma-current-head !--sigma-head !--sigma-node !--sigma-pr !--sigma-project !--sigma-reviews-root !--sigma-round
 roles context
 roles ls
