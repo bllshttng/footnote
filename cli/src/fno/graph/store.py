@@ -953,7 +953,7 @@ _FULL_SESSION_ID_MIN = 32
 def _observe_model(harness: str, session_id: str) -> dict:
     """What the row's session ACTUALLY answered as, read from its own transcript.
 
-    Delegates to :func:`fno.agents.session_truth.observed_model` - the one truth
+    Delegates to :func:`fno.provenance.observed.observed_model` - the one truth
     source, never a second one - and returns its variant dict UNCHANGED, so the
     row records ``{"kind": "observed", "model": ..., "samples": N}`` and never a
     bare model string. Flattening would erase the difference between "seen on N
@@ -983,7 +983,7 @@ def _observe_model(harness: str, session_id: str) -> dict:
     field's whole job.
     """
     try:
-        from fno.agents.session_truth import observed_model, resolve_transcript_path
+        from fno.provenance.observed import observed_model, resolve_transcript_path
 
         # Ask the reader whether this harness is file-backed at all BEFORE the
         # id-shape guard: opencode ids are 30 chars and gemini keeps no
@@ -1106,7 +1106,7 @@ def append_session_record(
     suspects a silent fallback (an ``ANTHROPIC_MODEL`` surviving without its
     ``ANTHROPIC_BASE_URL`` bills the expensive lane while every receipt says the
     cheap one). This reads the session's own transcript instead. The whole
-    variant dict from :func:`fno.agents.session_truth.observed_model` is stored,
+    variant dict from :func:`fno.provenance.observed.observed_model` is stored,
     never a flattened string; see :func:`_observe_model` for why, and
     :func:`_merge_observed_model` for the one field a re-stamp OVERWRITES and
     for the sixth kind (``observed-multiple``) this writer can produce that the

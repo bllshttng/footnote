@@ -140,6 +140,18 @@ LAYERS = (
             "fno.harness_identity",
             "fno.harness_names",
             "fno.rust_binary",
+            # Where a session's transcript is and what it says about itself.
+            # Asked by the agents runtime (`fno agents truth`) and by the graph
+            # writer that stamps a node's session rows - opposite sides of the
+            # runtime boundary, which is what makes it a platform leaf.
+            # The MODULE, not the fno.provenance package: its siblings
+            # (spawn_think, cli, autobrief) are orchestration that legitimately
+            # reaches up, and declaring the package would map them too. Its one
+            # sibling import, provenance.resolver, stays unmapped and reaches
+            # fno.agents.discover only on the opencode branch, which
+            # resolve_transcript_path cannot reach (it returns None for any
+            # agent outside {claude, codex} before calling the resolver).
+            "fno.provenance.observed",
         ),
     ),
     (

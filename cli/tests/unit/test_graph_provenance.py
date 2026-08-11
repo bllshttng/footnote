@@ -1971,7 +1971,7 @@ def test_observed_model_reader_that_raises_still_writes_the_row(tmp_path, monkey
     """AC (x-01ae): a provenance field must never fail a stamp. A crashed
     resolver is `unreadable` with a reason, NOT a swallowed `no-transcript`:
     a crash and an absent file are different facts."""
-    import fno.agents.session_truth as st
+    import fno.provenance.observed as obs
 
     g = _make_graph(tmp_path, [{"id": "ab-obs00007", "title": "t"}])
     _patch_graph(monkeypatch, g)
@@ -1979,7 +1979,7 @@ def test_observed_model_reader_that_raises_still_writes_the_row(tmp_path, monkey
     def boom(*a, **kw):
         raise OSError("transcript store exploded")
 
-    monkeypatch.setattr(st, "resolve_transcript_path", boom)
+    monkeypatch.setattr(obs, "resolve_transcript_path", boom)
 
     found, added = _add(g, "ab-obs00007", ended_at="2026-08-11T02:00:00Z")
 

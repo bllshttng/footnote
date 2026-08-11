@@ -54,7 +54,7 @@ def serialize_entry(
     omitted the entry.
 
     ``observed_model`` is the five-variant reading from
-    :func:`fno.agents.session_truth.observed_model` -- what the worker is
+    :func:`fno.provenance.observed.observed_model` -- what the worker is
     ACTUALLY answering as, derived from its own transcript rather than from
     anything the spawn recorded. Defaulted rather than required so a caller
     that has no truth reading still produces the full key set; the default is
