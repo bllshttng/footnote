@@ -418,14 +418,17 @@ def style(
         raise typer.Exit(2)
 
     if diff_base is not None:
-        violations, inspected, changed = _style_added_lines(diff_base, files)
+        violations, inspected, changed, unexplained = _style_added_lines(
+            diff_base, files
+        )
         typer.echo(
             f"style: inspected {inspected} added line(s) across {changed} changed file(s)."
         )
-        if changed and inspected == 0:
+        if unexplained:
             typer.echo(
-                "style: a gated tree changed but no added lines were inspected. "
-                "Add a style-exception marker if the change is deletion-only.",
+                f"style: {unexplained} changed file(s) contributed no added lines "
+                "and are not renames, deletions, or exception-marked. Add a "
+                "style-exception marker if the change is deletion-only.",
                 err=True,
             )
             raise typer.Exit(1)
@@ -453,20 +456,51 @@ def style(
     raise typer.Exit(1)
 
 
+def _repo_scope(paths: list[Path], repo: Path) -> "list[str]":
+    """Repo-root-relative POSIX pathspecs for git, from caller-relative paths.
+
+    Callers pass paths relative to THEIR cwd while every git call here runs from
+    the repo root, so the two disagree the moment the caller is not standing at
+    the root. Measured: `--files ../docs` from `cli/` matched nothing and the
+    gate exited 0 over 27 changed files, while the same scope from the root
+    inspected 569 added lines. Absence read as success, one directory off.
+
+    A path outside the repository fails loud rather than silently matching
+    nothing, for the same reason.
+    """
+    root = repo.resolve()
+    out = []
+    for p in paths:
+        try:
+            out.append(Path(p).resolve().relative_to(root).as_posix())
+        except ValueError:
+            typer.echo(
+                f"style: --files path is outside the repository: {p}", err=True
+            )
+            raise typer.Exit(2)
+    return out
+
+
 def _style_added_lines(
     diff_base: str, paths: Optional[list[Path]]
-) -> "tuple[list, int, int]":
-    """Return (violations, added-line count, changed-file count) for markdown.
+) -> "tuple[list, int, int, int]":
+    """Return (violations, added-line count, changed-file count, unexplained).
 
     Per file: a whole-file style-exception marker exempts it; otherwise only the
     ADDED lines since diff_base are checked. A bad diff-base fails loud (exit 2),
     not open: a malformed base that inspects nothing is the absence the pitfalls
     corpus names, indistinguishable from "no violations found".
+
+    ``unexplained`` counts changed files that contributed no added lines and are
+    NOT accounted for by a rename, an exception marker, or a deletion. That is
+    the number the absence guard belongs on. Counting bare zeros instead turned
+    a legitimate outcome into a failure: a PR of pure renames inspects nothing
+    by design, and the rename-resolution fix directly above is what creates it.
     """
     from fno import style as style_mod
 
     repo = _repo_root()
-    scope = [str(p) for p in paths] if paths else ["docs", "skills", "agents"]
+    scope = _repo_scope(paths, repo) if paths else ["docs", "skills", "agents"]
     rev = subprocess.run(
         ["git", "rev-parse", "--verify", diff_base],
         cwd=str(repo),
@@ -480,15 +514,26 @@ def _style_added_lines(
     # caller's config, `diff.renames=false` splits a rename into separate D and
     # A entries, so the deleted old path counts as a changed file and the
     # inspected-file receipt over-counts on that machine and not on this one.
+    # `core.quotePath=false` because git C-quotes any non-ASCII path by default,
+    # so `docs/café.md` comes back as a quoted, backslash-escaped display string.
+    # That path then fails `is_file()` and the file is skipped without a word.
     diff_files = subprocess.run(
         [
             "git", "-c", "diff.renames=true", "-c", "diff.renameLimit=0",
+            "-c", "core.quotePath=false",
             "diff", "--name-only", f"{diff_base}...HEAD", "--", *scope,
         ],
         cwd=str(repo),
         capture_output=True,
         text=True,
     )
+    if diff_files.returncode != 0:
+        typer.echo(
+            f"style: listing changed files failed ({diff_base}...HEAD): "
+            f"{diff_files.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(2)
     # Pre-rename paths, keyed by new path. Resolved from an UNSCOPED name-status
     # pass because rename detection needs both sides visible, which a per-file
     # pathspec denies it.
@@ -502,7 +547,7 @@ def _style_added_lines(
     renames: dict[str, str] = {}
     name_status = subprocess.run(
         [
-            "git", "-c", "diff.renameLimit=0",
+            "git", "-c", "diff.renameLimit=0", "-c", "core.quotePath=false",
             "diff", "--name-status", "--find-renames", f"{diff_base}...HEAD",
         ],
         cwd=str(repo),
@@ -539,6 +584,7 @@ def _style_added_lines(
     ]
     violations = []
     inspected = 0
+    unexplained = 0
     for rel in changed:
         full = repo / rel
         if not full.is_file():
@@ -552,7 +598,9 @@ def _style_added_lines(
             # Mask the WHOLE file and check only the added lines, so an added
             # line inside an existing fenced block is masked as code and skipped.
             violations.extend(style_mod.check_lines(whole, nums))
-    return violations, inspected, len(changed)
+        elif rel not in renames:
+            unexplained += 1
+    return violations, inspected, len(changed), unexplained
 
 
 def _git_added_line_nums(
@@ -571,13 +619,22 @@ def _git_added_line_nums(
     pathspec = [rel] if old_rel is None else [rel, old_rel]
     proc = subprocess.run(
         [
-            "git", "-c", "diff.renameLimit=0",
+            "git", "-c", "diff.renameLimit=0", "-c", "core.quotePath=false",
             "diff", "-U0", "--find-renames", f"{diff_base}...HEAD", "--", *pathspec,
         ],
         cwd=str(repo),
         capture_output=True,
         text=True,
     )
+    # A failed diff produces empty stdout, and empty stdout here means "no added
+    # lines", which is the clean result. Without this the gate reports a file as
+    # unchanged prose on any git error.
+    if proc.returncode != 0:
+        typer.echo(
+            f"style: reading added lines for {rel} failed: {proc.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(2)
     nums: set[int] = set()
     pos = 0
     for line in proc.stdout.splitlines():

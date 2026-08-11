@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from fno import paths
@@ -283,7 +284,7 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     _clear_repo_root_cache()
     os.environ["FNO_REPO_ROOT"] = str(repo)
     try:
-        violations, inspected, changed = _style_added_lines("base", None)
+        violations, inspected, changed, unexplained = _style_added_lines("base", None)
     finally:
         os.environ.pop("FNO_REPO_ROOT", None)
         _clear_repo_root_cache()
@@ -292,6 +293,131 @@ def test_style_gate_reports_no_violations_for_a_pure_rename(tmp_path: Path) -> N
     assert changed == 1, "the renamed doc must still be reported as a changed file"
     assert inspected == 0, "a pure rename authors no lines"
     assert violations == []
+    # The absence guard fires on this number, not on `inspected`. A pure rename
+    # is a legitimate zero, and the rename resolution above is what produces it,
+    # so counting bare zeros made the fix trip the guard it shares a function
+    # with: a rename-only PR inspected nothing and exited 1.
+    assert unexplained == 0, "a pure rename is an explained zero, not a broken scan"
+
+
+def test_style_gate_still_fails_when_a_changed_file_explains_no_zero(
+    tmp_path: Path,
+) -> None:
+    """The absence guard must survive the fix that narrowed it.
+
+    Narrowing a guard is where guards die quietly, so this pins the case it
+    still has to catch: a changed file that is not a rename, not a deletion,
+    and not exception-marked, yet contributes no added lines.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo = tmp_path / "repo"
+    (repo / "docs").mkdir(parents=True)
+    _git(repo, "init", "-q")
+    _git(repo, "config", "user.email", "t@t")
+    _git(repo, "config", "user.name", "t")
+    doc = repo / "docs" / "d.md"
+    doc.write_text("One line.\nTwo line.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "base")
+    _git(repo, "branch", "-f", "base")
+    # Deletion-only edit: the file changed, nothing was authored.
+    doc.write_text("One line.\n", encoding="utf-8")
+    _git(repo, "add", "-A")
+    _git(repo, "commit", "-qm", "delete a line")
+
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    os.environ["FNO_REPO_ROOT"] = str(repo)
+    try:
+        _v, inspected, changed, unexplained = _style_added_lines("base", None)
+    finally:
+        os.environ.pop("FNO_REPO_ROOT", None)
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+
+    assert changed == 1 and inspected == 0
+    assert unexplained == 1, "a deletion-only change is exactly what the guard is for"
+
+
+@pytest.mark.parametrize("marker", ["--name-only", "-U0", "--name-status"])
+def test_a_failing_git_diff_is_not_reported_as_a_clean_tree(
+    tmp_path: Path, monkeypatch, marker: str
+) -> None:
+    """A git failure must exit 2, never look like "nothing changed".
+
+    Every diff call answers with stdout alone, and empty stdout is also the
+    clean result, so an unchecked return code turns any git error into a green
+    gate. Measured before the fix: a malformed pathspec made git exit 128 while
+    the gate exited 0 reporting zero changed files.
+
+    Parameterized per CALL, not per outcome. Failing all three at once passed
+    with two of the three guards deleted, because the surviving guard raised
+    first and the assertion could not tell which one did. One failure injected
+    at a time is what pins each site.
+    """
+    import os
+    import subprocess as sp
+
+    import typer
+
+    from fno.lint_cli import _style_added_lines
+
+    repo, _new, _old = _repo_with_renamed_doc(tmp_path)
+    real_run = sp.run
+
+    def _fail_diffs(argv, *a, **k):
+        if isinstance(argv, list) and marker in argv:
+            return sp.CompletedProcess(argv, 128, "", "fatal: bad revision")
+        return real_run(argv, *a, **k)
+
+    monkeypatch.setattr("fno.lint_cli.subprocess.run", _fail_diffs)
+    cwd = os.getcwd()
+    os.chdir(repo)
+    _clear_repo_root_cache()
+    monkeypatch.setenv("FNO_REPO_ROOT", str(repo))
+    try:
+        with pytest.raises(typer.Exit) as exc:
+            _style_added_lines("base", None)
+    finally:
+        _clear_repo_root_cache()
+        os.chdir(cwd)
+    assert exc.value.exit_code == 2
+
+
+def test_relative_files_paths_resolve_against_the_repo_root(tmp_path: Path) -> None:
+    """A caller-relative --files path must reach the same files from anywhere.
+
+    Every git call here runs from the repo root while the caller's paths are
+    relative to the caller's cwd. Measured before the fix: `--files ../docs`
+    from `cli/` matched nothing and the gate exited 0 over 27 changed files.
+    """
+    import os
+
+    from fno.lint_cli import _style_added_lines
+
+    repo, _new, _old = _repo_with_renamed_doc(tmp_path)
+    (repo / "sub").mkdir()
+
+    def _run(cwd_dir: Path, scope: Path):
+        cwd = os.getcwd()
+        os.chdir(cwd_dir)
+        _clear_repo_root_cache()
+        os.environ["FNO_REPO_ROOT"] = str(repo)
+        try:
+            return _style_added_lines("base", [scope])
+        finally:
+            os.environ.pop("FNO_REPO_ROOT", None)
+            _clear_repo_root_cache()
+            os.chdir(cwd)
+
+    from_root = _run(repo, Path("docs"))
+    from_sub = _run(repo / "sub", Path("../docs"))
+    assert from_root[2] > 0, "positive control: the scope must match files at all"
+    assert from_sub[2] == from_root[2], "the same scope must resolve from any cwd"
 
 
 def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> None:
@@ -333,3 +459,18 @@ def test_every_git_call_pins_the_rename_limit(tmp_path: Path, monkeypatch) -> No
     assert diffs, "positive control: no git diff call was observed at all"
     unpinned = [c for c in diffs if "diff.renameLimit=0" not in c]
     assert not unpinned, f"git diff calls missing the rename-limit pin: {unpinned}"
+    # The limit pin alone is half the configuration, and asserting only it left
+    # the other half deletable. With `diff.renames=false` inherited from the
+    # caller, git splits every rename into a delete plus an add no matter how
+    # high the limit is, so the pin guards a pass that never runs. Each diff must
+    # also turn detection ON, by config or by the equivalent flag.
+    undetected = [
+        c
+        for c in diffs
+        if "diff.renames=true" not in c and "--find-renames" not in c
+    ]
+    assert not undetected, f"git diff calls with rename detection off: {undetected}"
+    # Path quoting off, or git C-quotes any non-ASCII path into a display string
+    # that fails is_file() and the file is skipped without a word.
+    unquoted = [c for c in diffs if "core.quotePath=false" not in c]
+    assert not unquoted, f"git diff calls that leave path quoting on: {unquoted}"
