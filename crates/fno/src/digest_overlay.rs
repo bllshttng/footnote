@@ -108,7 +108,46 @@ pub fn backlog_section_enabled(cwd: &Path) -> bool {
 /// [`crate::keys::resolve_keymap`], which is pure.
 pub fn keymap(cwd: &Path) -> (crate::keys::Keymap, Vec<crate::keys::KeymapWarning>) {
     let prefix = mux_str(cwd, "prefix");
-    crate::keys::resolve_keymap(prefix.as_deref(), &mux_keys_table(cwd))
+    let (map, mut warnings) = crate::keys::resolve_keymap(prefix.as_deref(), &mux_keys_table(cwd));
+    if let Some(w) = unreadable_explicit_config() {
+        warnings.insert(0, w);
+    }
+    (map, warnings)
+}
+
+/// A warning when `$FNO_CONFIG` names a file this reader cannot parse.
+///
+/// The Python loader reads an explicitly pinned file AS-IS and parses YAML by
+/// suffix (`config_io::_load_raw`), while every Rust reader here is TOML-only.
+/// So a `.yaml` pin leaves `fno config` showing values the mux never sees.
+///
+/// TOML-only is the settled convention rather than an oversight
+/// (`fno_agents::agents_config` documents the same choice and warns from
+/// `warn_once_if_yaml`), so this matches it instead of adding a YAML parser and
+/// a third way to read one file. It says so LOUDER than its sibling, though: a
+/// stderr line is invisible under a TUI that is about to take the terminal, and
+/// the mux has a notice surface, so the refusal rides the same channel as a
+/// refused rebind. Silence is the failure being fixed.
+fn unreadable_explicit_config() -> Option<crate::keys::KeymapWarning> {
+    warn_if_not_toml(Path::new(&non_empty_env("FNO_CONFIG")?))
+}
+
+/// The suffix rule, split from the env read so it is testable without mutating
+/// a variable the whole process shares.
+///
+/// A file with NO extension is left alone: Python would parse it as YAML, but a
+/// `.toml`-less pin is more likely a deliberate path than a mistake, and a
+/// warning that cries wolf on every run teaches operators to ignore the channel
+/// this whole notice depends on.
+fn warn_if_not_toml(path: &Path) -> Option<crate::keys::KeymapWarning> {
+    let ext = path.extension().and_then(|e| e.to_str())?;
+    (!ext.eq_ignore_ascii_case("toml")).then(|| {
+        crate::keys::KeymapWarning(format!(
+            "$FNO_CONFIG points at {}, which the mux reads as TOML; \
+             its keys are using built-in defaults",
+            path.display()
+        ))
+    })
 }
 
 /// `[mux.keys]` as raw `(action, spec)` pairs, MERGED action-by-action across
@@ -550,6 +589,29 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&orphan).ok();
+    }
+
+    #[test]
+    fn a_yaml_fno_config_says_so_instead_of_reading_as_empty() {
+        // Python reads an explicitly pinned file as-is and parses YAML by
+        // suffix, while every Rust reader here is TOML-only. That combination
+        // used to mean `fno config` showed values the mux silently never saw.
+        // TOML-only stays (fno_agents::agents_config settled the same way); what
+        // changes is that it says so.
+        for yaml in ["/tmp/settings.yaml", "/tmp/settings.yml", "/tmp/x.YAML"] {
+            let w = warn_if_not_toml(Path::new(yaml))
+                .unwrap_or_else(|| panic!("{yaml} must warn, not read as empty"));
+            assert!(w.0.contains(yaml), "the warning names the file: {}", w.0);
+            assert!(
+                w.0.contains("built-in defaults"),
+                "and says what the operator is actually getting: {}",
+                w.0
+            );
+        }
+        assert!(warn_if_not_toml(Path::new("/tmp/config.toml")).is_none());
+        assert!(warn_if_not_toml(Path::new("/tmp/config.TOML")).is_none());
+        // No extension is left alone rather than warned about on every run.
+        assert!(warn_if_not_toml(Path::new("/tmp/fnoconfig")).is_none());
     }
 
     #[test]
