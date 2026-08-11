@@ -147,7 +147,7 @@ This is useful when running the same repo under Claude Code and openclaw on alte
 
 ## Known limitations (v1)
 
-- Subagent dispatch on openclaw uses subprocess-spawn (`process({action: "log", command: "openclaw -p '...'"})`). Sequential unless the skill orchestrates parallelism via multiple `process` calls. See `docs/providers/provider-adapters.md`.
+- Subagent dispatch on openclaw uses subprocess-spawn (`process({action: "log", command: "openclaw -p '...'"})`). Sequential unless the skill orchestrates parallelism via multiple `process` calls. See `docs/harnesses/harness-adapters.md`.
 - Multi-soul orchestration (one openclaw-as-orchestrator + N openclaw-as-workers with distinct `SOUL.md` personas) is future work. v1 treats openclaw subagents as single-soul subprocess spawns. The `openclaw-persona-forge` skill in ECC generates the SOUL.md files; integration into the target loop is a later spec.
 - Cache-metric features from Claude Code (`token-doctor`) are not available on openclaw. See compatibility in [SKILL-COMPAT-MATRIX.md](./SKILL-COMPAT-MATRIX.md).
 

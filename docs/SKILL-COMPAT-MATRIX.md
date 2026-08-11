@@ -95,7 +95,7 @@ The wrapper script itself lives at `scripts/run-target-loop.sh` and dispatches o
 ## How to add a new driver
 
 1. Implement `scripts/lib/driver-<name>.sh` with the four function contract.
-2. Optionally add a bot-side sentinel plugin that writes `.fno/target-promise.signal` when a `<promise>` tag appears in the assistant response (see `docs/providers/promise-sentinel.md` for the protocol).
+2. Optionally add a bot-side sentinel plugin that writes `.fno/target-promise.signal` when a `<promise>` tag appears in the assistant response (see `docs/harnesses/promise-sentinel.md` for the protocol).
 3. Add a row per skill to this matrix with the new column.
 4. Write `docs/SETUP-<NAME>.md` with the install recipe.
 

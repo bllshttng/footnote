@@ -46,7 +46,7 @@ waves:
 
 ### Task 1.2: Update another provider doc
 **Files:**
-- Modify: `docs/providers/codex.md`
+- Modify: `docs/harnesses/codex.md`
 EOF
 
 python3 - <<'PY' "$TMP_DIR"

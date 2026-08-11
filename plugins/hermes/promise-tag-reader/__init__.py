@@ -5,7 +5,7 @@ docs/SETUP-HERMES.md. The plugin writes .fno/target-promise.signal
 with the inner content of the last <promise>...</promise> tag that
 appears in each assistant response.
 
-See docs/providers/promise-sentinel.md for the protocol.
+See docs/harnesses/promise-sentinel.md for the protocol.
 """
 
 from .reader import on_response
