@@ -641,6 +641,20 @@ def test_bare_explicit_model_wins_over_config_route():
     assert out[out.index("-m") + 1] == "sonnet"
 
 
+def test_bare_explicit_vendor_wins_over_config_route():
+    # A bare -P (no -m) already names the vendor half of a route. cmd_spawn
+    # rejects vendor + --route together ("two spellings of one route") before
+    # its own "add --model" check, so injecting a config route here would turn
+    # a helpful "add --model" error into a confusing route-collision one on an
+    # argv the operator never paired with a route at all.
+    out = _inject(
+        ["spawn", "-P", "zai", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-P") + 1] == "zai"
+
+
 def test_config_account_not_injected_over_explicit_non_claude_harness():
     # Accounts are Claude-only; cmd_spawn rejects --account on any other
     # harness. A configured account must not follow an explicit -H codex (e.g.

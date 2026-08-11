@@ -640,9 +640,16 @@ def inject_spawn_defaults(
     # which carries the same two pieces of information as --route and
     # cmd_spawn rejects two route spellings together.
     explicit_model_present = has_model
+    # A bare explicit -P/--provider (vendor) with no -m already names the vendor
+    # half of a route; cmd_spawn rejects vendor + --route together ("two
+    # spellings of one route") BEFORE it ever reaches the "add --model" check,
+    # so injecting a config route here would turn a helpful "add --model" error
+    # into a confusing route-collision one on an argv the operator never paired
+    # with a route at all.
+    explicit_vendor_present = _flag_present(out[1:], "--provider") or _flag_present(out[1:], "-P")
     explicit_route = _flag_present(out[1:], "--route")
     route_injected = False
-    if cfg_route and not explicit_route and not explicit_model_present:
+    if cfg_route and not explicit_route and not explicit_model_present and not explicit_vendor_present:
         inject += ["--route", cfg_route]
         route_injected = True
         from_config.append(("route", route_rung))  # type: ignore[arg-type]
