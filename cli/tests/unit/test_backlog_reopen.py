@@ -237,7 +237,9 @@ def test_an_archived_node_is_named_as_archived_not_missing(tmp_graph, tmp_path, 
     archive.write_text(json.dumps({"entries": [_node("ab-22222222")]}))
     import fno.graph._constants as gc
 
-    monkeypatch.setattr(gc, "_graph_archive_json", lambda: archive)
+    # The constant, not the helper behind it: see test_backlog_unarchive.py for
+    # why a helper patch survives in isolation and dies in the full suite.
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", archive)
     _write(tmp_graph)
     res = runner.invoke(app, ["backlog", "reopen", "ab-22222222", "--reason", "x"])
     assert res.exit_code == 4

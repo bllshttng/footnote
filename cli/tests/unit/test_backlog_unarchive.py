@@ -34,7 +34,12 @@ def graphs(tmp_path, monkeypatch) -> tuple[Path, Path]:
 
     monkeypatch.setattr(gc, "GRAPH_JSON", working)
     monkeypatch.setattr(gc, "GRAPH_MD", tmp_path / "graph.md")
-    monkeypatch.setattr(gc, "_graph_archive_json", lambda: archive)
+    # Patch the CONSTANT, not the `_graph_archive_json` helper behind it. The
+    # constants module serves these names through __getattr__, and monkeypatch
+    # restores by setattr, so the first sibling test to patch GRAPH_ARCHIVE_JSON
+    # leaves a real module attribute that shadows __getattr__ for the rest of
+    # the session - a helper patch then passes alone and fails in the suite.
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", archive)
     monkeypatch.setattr(gs, "GRAPH_JSON", working)
     monkeypatch.delenv("CLAUDECODE_SESSION_ID", raising=False)
     return working, archive
