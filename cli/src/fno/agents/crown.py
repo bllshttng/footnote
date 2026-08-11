@@ -66,11 +66,23 @@ class CrownScopeError(ValueError):
 #: must refuse rather than assume the most privileged answer.
 REGISTRY_UNREADABLE: Any = object()
 
+#: Sentinel for "the caller carries an agent identity but no registry row matches
+#: it." Distinct from ``None`` (an attended human with no identity at all) and
+#: from :data:`REGISTRY_UNREADABLE` (the registry could not be read): the registry
+#: WAS read, the caller claims to be an agent, but it is not joined - a
+#: just-spawned worker before its row lands, or a session that has not run
+#: ``/fno-me``. Such a caller holds no verified authority, so :func:`grant_error`
+#: refuses with the heal rather than authorize like a human. This is the third
+#: fail-open path: the first review's sentinel covered the registry EXCEPTION, and
+#: ``_find_by_session`` returns ``None`` on a clean miss WITHOUT raising, so the
+#: miss never reached that except branch.
+AGENT_UNREGISTERED: Any = object()
+
 
 def calling_agent_row():
     """The calling session's registry row.
 
-    Three outcomes, and :func:`grant_error` treats each differently:
+    Four outcomes, and :func:`grant_error` treats each differently:
 
     - ``None`` - an attended human: no ``FNO_AGENT_SELF``, so no agent identity
       to check against. A human may grant any scope.
@@ -81,6 +93,13 @@ def calling_agent_row():
       any spawned worker to human authority and mint crowns it has no right to
       bestow - fail-open on the rule "you cannot hand down authority you do not
       hold." Surfaced as a sentinel so the caller refuses instead.
+    - :data:`AGENT_UNREGISTERED` - the caller HAS an agent identity and the
+      registry was read, but no row matches it (a just-spawned worker before its
+      row lands, or a session that has not run ``/fno-me``). ``_find_by_session``
+      returns ``None`` on this clean miss WITHOUT raising, so without this
+      sentinel the miss would flow out as the attended-human ``None`` and
+      authorize any grant - the same fail-open as the exception path, one branch
+      over. Surfaced so :func:`grant_error` refuses with the heal instead.
 
     Resolved the same way ``fno whoami`` does, so "who am I" has one answer.
     """
@@ -92,11 +111,18 @@ def calling_agent_row():
     if not ident.session_id or not ident.harness:
         return None
     try:
-        return _find_by_session(load_registry(), ident.session_id, ident.harness)
+        row = _find_by_session(load_registry(), ident.session_id, ident.harness)
     except Exception:
         # Surface the failure, not flatten it: None means "attended human" and
         # would authorize any grant. The caller refuses on the sentinel instead.
         return REGISTRY_UNREADABLE
+    if row is None:
+        # Identity present, registry read, no match: an agent the registry does
+        # not know yet. _find_by_session returns None on a clean miss WITHOUT
+        # raising, so this never reached the except above - returning None here
+        # would authorize like a human, the same fail-open one branch over.
+        return AGENT_UNREGISTERED
+    return row
 
 
 def canonical_scope(scopes: list[str]) -> str:
@@ -253,8 +279,8 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
     ``scope_contains`` existed but had no caller, so any spawned worker could
     mint portfolio-level authority for its child.
 
-    Two grantor classes, matching what the verb used to accept, plus one
-    failure mode that must fail closed:
+    Two grantor classes, matching what the verb used to accept, plus two
+    failure modes that must fail closed:
 
     - **an attended human** (``caller_row`` is None - a shell with no agent
       identity in its environment) may grant any scope; there is nobody above a
@@ -267,6 +293,11 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
       :data:`REGISTRY_UNREADABLE`) is refused outright. The check cannot verify
       the caller holds anything, so it must not fall back to the most privileged
       answer (human); a registry read failure does not make the caller human.
+    - **an unregistered agent** (``caller_row`` is :data:`AGENT_UNREGISTERED`)
+      has an identity but no registry row. The registry was read and the caller
+      is not in it, so it is an agent holding no verified authority, not a human;
+      refused with the heal (run ``/fno-me`` to join, or wait for the row) rather
+      than authorized.
     """
     if caller_row is None:
         return None
@@ -276,6 +307,14 @@ def grant_error(requested_scope: str, caller_row) -> Optional[str]:
             "be read, so this session is treated as an agent whose authority is "
             "unknown, not as an attended human. A crown may not be bestowed when "
             "the grantor cannot be checked; retry, or spawn from an attended shell."
+        )
+    if caller_row is AGENT_UNREGISTERED:
+        return (
+            "cannot verify the grantor's authority: this session carries an agent "
+            "identity but has no registry row (it spawned before its row landed, "
+            "or has not run /fno-me), so it is an agent with no verified authority, "
+            "not an attended human. Run /fno-me to join or wait for the row, then "
+            "retry; or spawn from an attended shell."
         )
     holder = getattr(caller_row, "crown_scope", None)
     if not holder:

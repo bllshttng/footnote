@@ -93,6 +93,27 @@ def _row(name: str) -> AgentEntry:
 
 def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
     monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
+    # Seat the grantor as a registered king over epic-x; the spawn is then a
+    # succession (it hands its own scope to the heir). An agent identity with no
+    # registry row is now refused at the grantor check, so the agent must be in
+    # the registry - the corrected opposite of the fail-open this test rode.
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="parent",
+                cwd="/tmp",
+                log_path="",
+                harness="claude",
+                harness_session_id="parent-sess-abc",
+                short_id="parent",
+                status="busy",
+                crown_level=2,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
+    )
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",

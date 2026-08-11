@@ -113,19 +113,52 @@ def _spawn_crowned(monkeypatch, tmp_path, *, grantor_env: Optional[str], **crown
 
 
 def test_crown_stamped_grantor_is_the_spawning_session(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.registry import load_registry
+    from fno.agents.registry import AgentEntry, load_registry, update_registry
 
-    _spawn_crowned(
-        monkeypatch, tmp_path,
-        grantor_env="parent-sess-abc",
-        crown_level=1, crown_scope="epic-x",
+    use_tmpdir(monkeypatch, tmp_path)
+    monkeypatch.delenv("FNO_SESSION", raising=False)
+    for var in ("CODEX_SESSION_ID", "GEMINI_SESSION_ID"):
+        monkeypatch.delenv(var, raising=False)
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "parent-sess-abc")
+    # The grantor is a REGISTERED king over epic-x, so the child spawn is a
+    # succession (it hands its own scope to the heir). An agent identity with no
+    # registry row is now refused at the grantor check, so the agent must be
+    # seated - this is the corrected opposite of the fail-open these tests rode.
+    update_registry(
+        lambda rows: rows
+        + [
+            AgentEntry(
+                name="parent",
+                cwd="/w",
+                log_path="",
+                harness="claude",
+                harness_session_id="parent-sess-abc",
+                short_id="parent",
+                status="busy",
+                crown_level=1,
+                crown_scope="epic-x",
+                crown_grantor="human",
+            )
+        ]
     )
-    row = load_registry()[0]
-    assert row.crown_level == 1
-    assert row.crown_scope == "epic-x"
+
+    from fno.agents.mux_spawn import dispatch_spawn_pane
+
+    dispatch_spawn_pane(
+        name="king-epic",
+        message="reign",
+        provider="claude",
+        cwd=tmp_path,
+        runner=_FakeRunner(),
+        crown_level=1,
+        crown_scope="epic-x",
+    )
+    heir = next(e for e in load_registry() if e.name == "king-epic")
+    assert heir.crown_level == 1
+    assert heir.crown_scope == "epic-x"
     # Provenance, not self-declared: the grantor is who actually spawned it.
-    assert row.crown_grantor == "parent-sess-abc"
-    assert row.crown_label == "L1 epic-x"
+    assert heir.crown_grantor == "parent-sess-abc"
+    assert heir.crown_label == "L1 epic-x"
 
 
 def test_crown_grantor_defaults_to_human_for_a_direct_spawn(tmp_path: Path, monkeypatch) -> None:
@@ -274,10 +307,12 @@ def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkey
         short_id="inc", status="live",
         crown_level=1, crown_scope="epic-x", crown_grantor="human",
     )])
-    # Spawn a new worker with --crown level=1,scope=epic-x (same scope)
+    # Spawn a new worker with --crown level=1,scope=epic-x (same scope). The
+    # caller is an attended human (no agent identity), so it is authorized to
+    # attempt the grant; the guard declines it because the incumbent holds it.
     _spawn_crowned(
         monkeypatch, tmp_path,
-        grantor_env="parent-sess-xyz",
+        grantor_env=None,
         crown_level=1, crown_scope="epic-x",
     )
     rows = load_registry()
