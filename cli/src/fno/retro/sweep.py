@@ -312,7 +312,12 @@ def sweep_carveouts(
             to_consume.append(item.carveout_id)
             continue
         # file: mint the node FIRST; the ledger row is consumed only once the
-        # work has somewhere to live.
+        # work has somewhere to live. A file item always carries a candidate
+        # (plan_sweep builds one), but say so rather than consuming a row whose
+        # node could never have been minted.
+        if item.candidate is None:
+            item.error = "no candidate to file"
+            continue
         results = land_candidates(
             [item.candidate],
             mode=mode,

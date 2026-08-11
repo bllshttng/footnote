@@ -106,9 +106,8 @@ def build_body(item: RawItem, *, cap: int = BODY_CAP) -> str:
     marker = f"\n\n[... truncated; full text at {link} ...]"
     # The "Blocked on:" block below is appended AFTER this reservation, so its
     # length has to be reserved here too or a long --need overflows the cap.
-    blocked = ""
-    if item.kind == KIND_CARVEOUT and (item.title_hint or "").strip():
-        blocked = f"Blocked on: {item.title_hint.strip()}"
+    need = (item.title_hint or "").strip()
+    blocked = f"Blocked on: {need}" if item.kind == KIND_CARVEOUT and need else ""
     overhead = (
         len(marker)
         + (len(cite) + 2 if cite else 0)
