@@ -227,6 +227,41 @@ wait "$linked_append_pid"
 line=$(tail -1 "$canonical_events" 2>/dev/null)
 assert_contains "explicit symlink GC barrier append" "$line" '"type":"explicit_symlink_probe"'
 
+# Setup can install the shared-journal symlink while a shell writer waits for
+# maintenance. The writer must discard its local rendezvous token and register
+# against the canonical journal before appending through the new link.
+handoff_local="$WORK/handoff-local/events.jsonl"
+handoff_canonical="$WORK/handoff-canonical/events.jsonl"
+mkdir -p "$(dirname "$handoff_local")" "$(dirname "$handoff_canonical")"
+: > "$handoff_local"
+: > "$handoff_canonical"
+handoff_result=$(
+    (
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        _wait_for_event_gc() {
+            if [[ ! -L "$handoff_local" ]]; then
+                mv "$handoff_local" "${handoff_local}.pending"
+                ln -s "$handoff_canonical" "$handoff_local"
+            fi
+            return 0
+        }
+        _end_shell_event_append() {
+            local token="${1:?writer token required}"
+            printf 'TOKEN=%s\n' "$token"
+            rmdir "$token" 2>/dev/null || true
+            rmdir "$(dirname "$token")" 2>/dev/null || true
+        }
+        _append_bounded_event handoff_probe '{"type":"handoff_probe"}' "$handoff_local"
+    )
+)
+rc=$?
+assert_eq "setup handoff append rc" 0 "$rc"
+handoff_canonical_resolved="$(cd "$(dirname "$handoff_canonical")" && pwd -P)/$(basename "$handoff_canonical")"
+assert_contains "setup handoff canonical token" "$handoff_result" "TOKEN=${handoff_canonical_resolved}.shell-writers.d/"
+line=$(tail -1 "$handoff_canonical" 2>/dev/null)
+assert_contains "setup handoff append" "$line" '"type":"handoff_probe"'
+
 # AC-VALIDATOR: validator accepts canonical envelope (when validator is loadable)
 if declare -F validate_event >/dev/null 2>&1; then
     canonical='{"ts":"2026-05-07T09:30:42Z","type":"polling_external_review","source":"target","data":{"pr_number":204,"reviewer_bot":"gemini-code-assist[bot]","wait_kind":"cron","session_id":"s","next_check_at":"2026-05-08T16:00:00Z"}}'

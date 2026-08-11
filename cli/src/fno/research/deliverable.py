@@ -20,14 +20,15 @@ This is the Python-level deliverable. A standalone `fno research` run is its own
 terminal: it reports `DoneAdvisory` (the non-PR completion state) rather than
 opening a PR.
 """
+
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from fno.events import _build, append_event
 from fno.research.core import Source, read_sources, slugify
 
 # A claim snippet is short enough to scan, long enough to carry meaning.
@@ -147,7 +148,9 @@ def deliver(
     brief_path = out / f"{slug}.md"
     sidecar_path = out / f"{slug}.sources.jsonl"
 
-    brief_path.write_text(build_brief(topic, slug, sources, stopped=stopped, now=now), encoding="utf-8")
+    brief_path.write_text(
+        build_brief(topic, slug, sources, stopped=stopped, now=now), encoding="utf-8"
+    )
     with sidecar_path.open("w", encoding="utf-8") as fh:
         for s in sources:  # full store, not just verified - keeps dead URLs visible
             fh.write(s.to_json_line() + "\n")
@@ -171,15 +174,18 @@ def emit_done_advisory(events_path: Path, *, slug: str) -> None:
     try:
         if not events_path.parent.is_dir():
             return
-        evt = {
-            "ts": datetime.now(timezone.utc).isoformat(),
-            "type": "termination",
-            "source": "research",
-            "data": {"reason": "DoneAdvisory", "slug": slug},
-        }
-        with events_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(evt, ensure_ascii=False) + "\n")
-    except OSError:
+        event = _build(
+            "termination",
+            "hook",
+            {
+                "session_id": "",
+                "reason": "DoneAdvisory",
+                "message": f"research deliverable {slug} shipped",
+                "slug": slug,
+            },
+        )
+        append_event(event, events_path)
+    except (OSError, TimeoutError):
         pass
 
 

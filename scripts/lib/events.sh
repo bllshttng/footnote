@@ -66,10 +66,8 @@ _end_shell_event_append() {
 _append_bounded_event() {
     local label="${1:?label required}"
     local event="${2:?event required}"
-    local events_path="${3:?events path required}"
-    if [[ -L "$events_path" ]]; then
-        events_path=$(_resolve_event_symlink "$events_path") || return 1
-    fi
+    local requested_path="${3:?events path required}"
+    local events_path current_path writer_token
     local event_bytes
     event_bytes=$(printf '%s\n' "$event" | wc -c | tr -d '[:space:]')
     if (( event_bytes > EVENTS_ATOMIC_LINE_MAX_BYTES )); then
@@ -77,9 +75,25 @@ _append_bounded_event() {
             "$label" "$event_bytes" "$EVENTS_ATOMIC_LINE_MAX_BYTES" >&2
         return 1
     fi
-    local writer_token
     local writer_pid="${BASHPID:-$$}"
-    writer_token=$(_begin_shell_event_append "$events_path" "$writer_pid") || return 1
+    while true; do
+        events_path="$requested_path"
+        if [[ -L "$events_path" ]]; then
+            events_path=$(_resolve_event_symlink "$events_path") || return 1
+        fi
+        writer_token=$(_begin_shell_event_append "$events_path" "$writer_pid") || return 1
+        current_path="$requested_path"
+        if [[ -L "$current_path" ]]; then
+            current_path=$(_resolve_event_symlink "$current_path") || {
+                _end_shell_event_append "$writer_token"
+                return 1
+            }
+        fi
+        if [[ "$current_path" == "$events_path" ]]; then
+            break
+        fi
+        _end_shell_event_append "$writer_token"
+    done
     if ! mkdir -p "$(dirname "$events_path")" 2>/dev/null; then
         _end_shell_event_append "$writer_token"
         return 1

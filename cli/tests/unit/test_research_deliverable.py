@@ -4,6 +4,7 @@ Covers AC1 (cited brief + sidecar written, DoneAdvisory), AC3 (no-sources brief
 stamped, not a crash), AC4 (round-cap stop stamped), AC5 (output_dir unset =>
 fail loud, never guess).
 """
+
 from __future__ import annotations
 
 import json
@@ -23,7 +24,9 @@ def _write_sources(path: Path, rows: list[Source]) -> None:
 
 
 def _verified(url: str, extract: str) -> Source:
-    return Source(url=url, fetched_at="2026-06-23T00:00:00+00:00", hash="abc", extract=extract, verified=True)
+    return Source(
+        url=url, fetched_at="2026-06-23T00:00:00+00:00", hash="abc", extract=extract, verified=True
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -57,8 +60,10 @@ def test_resolve_output_dir_expands_and_creates(tmp_path: Path) -> None:
 
 
 def test_build_brief_cites_every_verified_source() -> None:
-    srcs = [_verified("https://a.example/x", "alpha finding text"),
-            _verified("https://b.example/y", "beta finding text")]
+    srcs = [
+        _verified("https://a.example/x", "alpha finding text"),
+        _verified("https://b.example/y", "beta finding text"),
+    ]
     md = deli.build_brief("my research topic", "my-research-topic", srcs, stopped="declared")
     # frontmatter records topic + stop reason + sidecar name
     assert "stopped: declared" in md
@@ -70,8 +75,17 @@ def test_build_brief_cites_every_verified_source() -> None:
 
 
 def test_build_brief_skips_unverified_sources() -> None:
-    srcs = [_verified("https://a.example/x", "alpha"),
-            Source(url="https://dead.example", fetched_at="t", hash="", extract="", verified=False, reason="http 404")]
+    srcs = [
+        _verified("https://a.example/x", "alpha"),
+        Source(
+            url="https://dead.example",
+            fetched_at="t",
+            hash="",
+            extract="",
+            verified=False,
+            reason="http 404",
+        ),
+    ]
     md = deli.build_brief("topic two words", "topic-two-words", srcs, stopped="declared")
     # the dead source is not cited as a claim (only verified rows become claims)
     assert "https://dead.example" not in md
@@ -86,8 +100,12 @@ def test_build_brief_no_sources_stamped() -> None:
 
 def test_build_brief_round_cap_stamped() -> None:
     """AC4: a round-cap stop is recorded in frontmatter (truncation is stated)."""
-    md = deli.build_brief("capped topic words", "capped-topic-words",
-                          [_verified("https://a.example", "x")], stopped="cap 5")
+    md = deli.build_brief(
+        "capped topic words",
+        "capped-topic-words",
+        [_verified("https://a.example", "x")],
+        stopped="cap 5",
+    )
     assert "stopped: cap 5" in md
 
 
@@ -123,10 +141,20 @@ def test_deliver_sidecar_preserves_failed_rows(tmp_path: Path) -> None:
     """The graded sidecar carries the FULL store (incl. verified=false rows) so
     the eval's dead-URL assertion stays meaningful (codex P1 on PR #21)."""
     cache = tmp_path / "cache" / "mixed-topic-words.sources.jsonl"
-    _write_sources(cache, [
-        _verified("https://a.example/p", "finding p"),
-        Source(url="https://dead.example", fetched_at="t", hash="", extract="", verified=False, reason="http 404"),
-    ])
+    _write_sources(
+        cache,
+        [
+            _verified("https://a.example/p", "finding p"),
+            Source(
+                url="https://dead.example",
+                fetched_at="t",
+                hash="",
+                extract="",
+                verified=False,
+                reason="http 404",
+            ),
+        ],
+    )
     out = tmp_path / "out"
     deli.deliver("mixed topic words", sources_path=cache, stopped="declared", output_dir=str(out))
     lines = (out / "mixed-topic-words.sources.jsonl").read_text().splitlines()
@@ -149,7 +177,38 @@ def test_deliver_no_sources_still_ships(tmp_path: Path) -> None:
     cache.parent.mkdir(parents=True)
     cache.touch()
     out = tmp_path / "out"
-    res = deli.deliver("nothing found topic", sources_path=cache, stopped="declared", output_dir=str(out))
+    res = deli.deliver(
+        "nothing found topic", sources_path=cache, stopped="declared", output_dir=str(out)
+    )
     assert res.terminated == "DoneAdvisory"
     assert (out / "nothing-found-topic.md").is_file()
     assert "no sources found" in (out / "nothing-found-topic.md").read_text().lower()
+
+
+def test_emit_done_advisory_uses_coordinated_append(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Research completion must serialize with replacement-based event GC."""
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    appended: list[tuple[dict[str, object], Path]] = []
+
+    monkeypatch.setattr(
+        deli,
+        "append_event",
+        lambda event, events_path: appended.append((event, events_path)),
+    )
+
+    deli.emit_done_advisory(events, slug="topic-slug")
+
+    assert len(appended) == 1
+    event, path = appended[0]
+    assert path == events
+    assert event["type"] == "termination"
+    assert event["source"] == "hook"
+    assert event["data"] == {
+        "session_id": "",
+        "reason": "DoneAdvisory",
+        "message": "research deliverable topic-slug shipped",
+        "slug": "topic-slug",
+    }
