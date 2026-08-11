@@ -221,3 +221,41 @@ def observed_model(agent: str, transcript_path: Optional[Path]) -> dict[str, Any
     if last is None:
         return {"kind": "no-model-yet"}
     return {"kind": "observed", "model": last, "samples": samples}
+
+
+def observed_model_for_session(agent: str, session_id: str, cwd: str) -> dict[str, Any]:
+    """:func:`observed_model` for a session POINTER, keeping a broken resolver
+    distinguishable from an absent transcript.
+
+    :func:`resolve_transcript_path` answers "which file" and collapses every
+    failure to ``None``, which the reader then reports as ``no-transcript``.
+    That is right for a caller who only wants a path, and wrong for a caller
+    recording durable evidence: a resolver that failed on permissions, a
+    schema-drifted store, or an unreadable directory becomes indistinguishable
+    from a session that simply has no transcript yet. An absence has two
+    explanations and a row built on one cannot tell them apart, which is the
+    whole reason the variant vocabulary exists.
+
+    So this resolves with the reason in hand and maps it::
+
+        reason "error" / a raised resolver  -> {"kind": "unreadable", "reason": ...}
+        harness-not-supported               -> {"kind": "not-file-backed"}
+        anything else unresolved            -> {"kind": "no-transcript"}
+
+    Never raises.
+    """
+    if agent not in _MODEL_READERS:
+        return {"kind": "not-file-backed"}
+    try:
+        from fno.provenance.resolver import resolve_transcript
+
+        rt = resolve_transcript(agent, session_id, cwd)
+    except Exception as exc:  # noqa: BLE001 - a broken resolver is a NAMED unknown
+        return {"kind": "unreadable", "reason": f"resolver raised: {exc}"}
+    if not rt.resolved or not rt.transcript_path:
+        if rt.reason == "error":
+            return {"kind": "unreadable", "reason": "transcript resolution failed"}
+        if rt.reason == "harness-not-supported":
+            return {"kind": "not-file-backed"}
+        return {"kind": "no-transcript"}
+    return observed_model(agent, Path(rt.transcript_path))

@@ -983,7 +983,7 @@ def _observe_model(harness: str, session_id: str) -> dict:
     field's whole job.
     """
     try:
-        from fno.provenance.observed import observed_model, resolve_transcript_path
+        from fno.provenance.observed import observed_model, observed_model_for_session
 
         # Ask the reader whether this harness is file-backed at all BEFORE the
         # id-shape guard: opencode ids are 30 chars and gemini keeps no
@@ -1000,9 +1000,12 @@ def _observe_model(harness: str, session_id: str) -> dict:
                 "reason": f"session id {session_id!r} is prefix-shaped; "
                           "a glob match cannot be proven to be this session",
             }
-        return observed_model(
-            harness, resolve_transcript_path(harness, session_id, os.getcwd())
-        )
+        # NOT resolve_transcript_path + observed_model: that pair collapses a
+        # failed resolution to None and reports it as no-transcript, so a
+        # permissions error or a drifted store would be recorded as "this
+        # session has no transcript yet". The _for_session form keeps the
+        # resolver's failure reason and returns unreadable.
+        return observed_model_for_session(harness, session_id, os.getcwd())
     except Exception as exc:  # noqa: BLE001 — a reporting field never breaks a stamp
         return {"kind": "unreadable", "reason": f"{type(exc).__name__}: {exc}"}
 

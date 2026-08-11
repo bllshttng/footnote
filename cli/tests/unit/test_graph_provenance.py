@@ -1967,26 +1967,75 @@ def test_observed_model_same_model_restamp_stays_a_clean_observation(tmp_path, m
         "kind": "observed", "model": "glm-5.2", "samples": 55}
 
 
-def test_observed_model_reader_that_raises_still_writes_the_row(tmp_path, monkeypatch):
-    """AC (x-01ae): a provenance field must never fail a stamp. A crashed
-    resolver is `unreadable` with a reason, NOT a swallowed `no-transcript`:
-    a crash and an absent file are different facts."""
-    import fno.provenance.observed as obs
+def test_observed_model_records_a_failed_resolution_as_unreadable(tmp_path, monkeypatch):
+    """AC (x-01ae): a resolver that FAILS must not be recorded as a session
+    with no transcript.
+
+    Exercised through the production path - the real resolver returning its
+    error verdict - not by monkeypatching the store's own helper to raise. A
+    test that patches a seam the production code cannot reach proves the seam,
+    not the behaviour: `resolve_transcript_path` swallows every failure to
+    None, so the store's outer except can never see one."""
+    import fno.provenance.resolver as resolver
 
     g = _make_graph(tmp_path, [{"id": "ab-obs00007", "title": "t"}])
     _patch_graph(monkeypatch, g)
 
-    def boom(*a, **kw):
-        raise OSError("transcript store exploded")
+    def failed(harness, session_id, cwd, **kw):
+        return resolver.ResolvedTranscript(
+            harness=harness, session_id=session_id, cwd=cwd,
+            resolved=False, reason="error")
 
-    monkeypatch.setattr(obs, "resolve_transcript_path", boom)
+    monkeypatch.setattr(resolver, "resolve_transcript", failed)
 
     found, added = _add(g, "ab-obs00007", ended_at="2026-08-11T02:00:00Z")
 
     assert (found, added) == (True, True), "the row must survive a broken reader"
     got = _node_sessions(g, "ab-obs00007")[0]["observed_model"]
+    assert got["kind"] == "unreadable", "a failed resolution is not an absent transcript"
+    assert "resolution failed" in got["reason"]
+
+
+def test_observed_model_absent_transcript_is_not_called_unreadable(tmp_path, monkeypatch):
+    """AC (x-01ae): the other half of the pair. A session that simply has no
+    transcript yet stays no-transcript, so unreadable keeps meaning something."""
+    import fno.provenance.resolver as resolver
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00010", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    def missing(harness, session_id, cwd, **kw):
+        return resolver.ResolvedTranscript(
+            harness=harness, session_id=session_id, cwd=cwd,
+            resolved=False, reason="not-found")
+
+    monkeypatch.setattr(resolver, "resolve_transcript", missing)
+
+    _add(g, "ab-obs00010", ended_at="2026-08-11T02:00:00Z")
+
+    assert _node_sessions(g, "ab-obs00010")[0]["observed_model"] == {"kind": "no-transcript"}
+
+
+def test_observed_model_never_fails_the_stamp(tmp_path, monkeypatch):
+    """AC (x-01ae): the backstop inside _observe_model. An unexpected raise
+    from the reader becomes a named unknown, and the row is still written -
+    a provenance field must never fail a claim release."""
+    import fno.provenance.observed as obs
+
+    g = _make_graph(tmp_path, [{"id": "ab-obs00011", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+
+    def boom(*a, **kw):
+        raise RuntimeError("reader exploded")
+
+    monkeypatch.setattr(obs, "observed_model", boom)
+
+    found, added = _add(g, "ab-obs00011", ended_at="2026-08-11T02:00:00Z")
+
+    assert (found, added) == (True, True), "the row must survive a broken reader"
+    got = _node_sessions(g, "ab-obs00011")[0]["observed_model"]
     assert got["kind"] == "unreadable"
-    assert "transcript store exploded" in got["reason"]
+    assert "reader exploded" in got["reason"]
 
 
 def test_observed_model_refuses_a_prefix_shaped_session_id(tmp_path, monkeypatch):
