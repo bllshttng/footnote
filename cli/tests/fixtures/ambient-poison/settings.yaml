@@ -1,0 +1,8 @@
+# Synthetic. The global candidate (~/.fno/settings.yaml) that a contributor's
+# own provider config occupies; the cli/src conftest pins it to /dev/null.
+active_combo: fno-poison-combo
+combos:
+  fno-poison-combo:
+    harness: codex
+    provider: fno-poison-provider
+    model: fno-poison-model

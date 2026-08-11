@@ -1,0 +1,9 @@
+# Synthetic. The ~/.fno/config.toml candidate a real developer has, reached
+# through the config chain rather than through FNO_CONFIG. Distinct values from
+# the top-level fixture so a leak names which channel it came through.
+[dispatch]
+substrate = "pane"
+harness = "codex"
+
+[paths]
+worktrees_base = "/fno-poison/home-worktrees"

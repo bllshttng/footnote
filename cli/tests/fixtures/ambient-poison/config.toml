@@ -1,0 +1,11 @@
+# Synthetic. Reproduces the developer config that reddened a dispatch test
+# locally while CI, with no config at all, stayed green.
+[dispatch]
+substrate = "bg"
+harness = "codex"
+
+[review]
+self_review_required = false
+
+[paths]
+worktrees_base = "/fno-poison/worktrees"
