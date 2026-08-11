@@ -24,7 +24,20 @@ import typer
 
 from fno.harness_identity import resolve_harness_identity
 
-cli = typer.Typer(name="graph", help="Feature graph management", no_args_is_help=True)
+cli = typer.Typer(
+    name="graph",
+    help="Feature graph management",
+    no_args_is_help=True,
+    # The curated menu below is nouns; this line is the answer to "can I take
+    # that back". It sits on the group help because that is the surface someone
+    # deciding what is possible actually reads - a correction verb nobody can
+    # find is, for decision-making purposes, a correction that does not exist.
+    epilog=(
+        "Corrections: reopen (undo done) | remove (hard delete) | unarchive | "
+        "undefer | unqueue | unsupersede | unclaim. All hidden; "
+        "`fno help backlog --all` lists every verb."
+    ),
+)
 
 # Nested triage sub-app: `fno backlog triage <verb>`.
 from fno.graph.triage import cli as _triage_cli  # noqa: E402
@@ -7580,11 +7593,13 @@ def _archived_entry(node_id: str) -> Optional[dict]:
     while the node sits readable in the sibling file - an absence with two
     explanations and no way to distinguish them.
     """
-    from fno.graph._constants import _graph_archive_json
     from fno.graph.store import read_graph
 
     try:
-        path = _graph_archive_json()
+        # `_archive_path`, not a second accessor: cmd_archive and cmd_unarchive
+        # already route through it, and a helper that resolves the archive its
+        # own way is a second path that drifts on the first config change.
+        path = _archive_path()
         if not path.exists():
             return None
         for e in read_graph(path):
@@ -9775,7 +9790,12 @@ def cmd_rank(
 
 # -- archive --
 
-@cli.command("archive", hidden=True)
+@cli.command(
+    "archive",
+    hidden=True,
+    epilog="Paired verb: `fno backlog unarchive <id>` moves one node back into "
+    "the working graph. Unlike `remove`, archiving keeps the node readable.",
+)
 def cmd_archive(
     apply: bool = typer.Option(
         False, "--apply", help="Move the entries (default: dry-run, report only)."
@@ -9861,6 +9881,99 @@ def cmd_archive(
         typer.echo(f"Archived {archived_count[0]} terminal node(s) to {_archive_path()}")
     else:
         typer.echo("No terminal nodes eligible to archive.")
+
+
+@cli.command(
+    "unarchive",
+    hidden=True,
+    epilog="Reverses `archive` for one node. Follow it with `fno backlog reopen "
+    "<id> --reason ...` if the node also needs to stop being done.",
+)
+def cmd_unarchive(
+    task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
+) -> None:
+    """Move one node from graph-archive.json back into the working graph.
+
+    ``archive`` is a bulk hygiene sweep with no way back, so a node swept early
+    (or swept correctly and then needed again) could only be recovered by
+    hand-editing, which a PreToolUse hook forbids. It is the fourth instance of
+    the same shape as the missing ``reopen``, and the audit that produced this
+    verb found it in ten minutes.
+
+    Write order mirrors ``archive`` inverted, for its reason: the working graph
+    is written FIRST, so a crash between the two writes leaves a duplicate that
+    the next sweep dedupes rather than a lost node. Read-through
+    (``entries_with_archive``) already tolerates the window.
+
+    Refuses to guess:
+        0  moved, or a warning that the node is already in the working graph
+        1  the id is in neither the working graph nor the archive
+    """
+    from fno.graph._constants import has_node_id_prefix
+    from fno.graph.store import (
+        GraphCorruptError,
+        _apply_graph_defaults,
+        _read_json,
+        _write_json,
+        locked_mutate_graph,
+        read_graph,
+    )
+
+    if not has_node_id_prefix(task_id):
+        typer.echo(
+            f"Error: task_id must be a <prefix>-<4..8 hex> node id, got '{task_id}'",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    if any(
+        isinstance(e, dict) and e.get("id") == task_id
+        for e in read_graph(_graph_path())
+    ):
+        typer.echo(f"warning: {task_id} is already in the working graph", err=True)
+        return
+
+    archive_path = _archive_path()
+    try:
+        archived = _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
+    except GraphCorruptError:
+        typer.echo(f"Error: {archive_path} is corrupt; cannot unarchive", err=True)
+        raise typer.Exit(code=1)
+
+    row = next(
+        (e for e in archived if isinstance(e, dict) and e.get("id") == task_id), None
+    )
+    if row is None:
+        typer.echo(
+            f"Error: {task_id} is in neither the working graph nor {archive_path}",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+
+    def mutator(entries):
+        # Idempotent under a race: another unarchive may have landed it already.
+        if any(isinstance(e, dict) and e.get("id") == task_id for e in entries):
+            return entries
+        return [*entries, row]
+
+    locked_mutate_graph(_graph_path(), mutator)
+
+    # Graph-first, then shrink the archive. The reverse order would risk a crash
+    # that drops the node from both files, which is the one outcome neither
+    # verb may produce.
+    try:
+        _write_json(
+            [e for e in archived if not (isinstance(e, dict) and e.get("id") == task_id)],
+            archive_path,
+        )
+    except OSError as exc:
+        typer.echo(
+            f"warning: {task_id} is back in the working graph, but the archive copy "
+            f"could not be removed ({exc}); the next `archive` sweep dedupes it",
+            err=True,
+        )
+
+    typer.echo(f"Unarchived {task_id}")
 
 
 # -- Internal helpers for intake / update (avoid circular imports) --
