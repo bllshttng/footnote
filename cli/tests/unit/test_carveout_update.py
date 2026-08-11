@@ -153,12 +153,55 @@ def test_an_unwritable_ledger_raises_rather_than_reporting_a_clean_noop(
     """
     cid = _seed(ledger_root)
 
-    def _boom(self, *a, **k):
+    def _boom(*a, **k):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(Path, "write_text", _boom)
+    monkeypatch.setattr("fno.carveout.core._rewrite_jsonl", _boom)
     with pytest.raises(CarveoutError):
         update_carveout(ledger_root, cid, description="new text")
+
+
+def test_a_torn_write_leaves_the_whole_ledger_intact(ledger_root, monkeypatch):
+    """The ledger is replaced atomically, not truncated in place.
+
+    An in-place `write_text` that dies between truncate and flush loses EVERY
+    carve-out, not just the row being edited. The temp-file-plus-replace shape
+    means a failure at the last step leaves the original bytes untouched.
+    """
+    import os
+
+    first = _seed(ledger_root, description="row one")
+    second = _seed(ledger_root, description="row two")
+    path = ledger_root / ".fno" / "carveouts.jsonl"
+    before = path.read_text()
+
+    def _boom(*a, **k):
+        raise OSError("interrupted at the rename")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(CarveoutError):
+        update_carveout(ledger_root, second, description="corrected")
+
+    assert path.read_text() == before
+    assert {r["id"] for r in _rows(ledger_root)} == {first, second}
+
+
+def test_no_temp_files_survive_a_failed_write(ledger_root, monkeypatch):
+    """Positive control on the cleanup path: a litter of .tmp siblings would be
+    read by nothing but would accumulate in every worktree."""
+    import os
+
+    cid = _seed(ledger_root)
+
+    def _boom(*a, **k):
+        raise OSError("interrupted at the rename")
+
+    monkeypatch.setattr(os, "replace", _boom)
+    with pytest.raises(CarveoutError):
+        update_carveout(ledger_root, cid, description="corrected")
+
+    leftovers = list((ledger_root / ".fno").glob("carveouts.jsonl.*.tmp"))
+    assert leftovers == []
 
 
 # -- the CLI surface --

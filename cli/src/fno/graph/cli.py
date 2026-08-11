@@ -7593,6 +7593,7 @@ def _archived_entry(node_id: str) -> Optional[dict]:
     while the node sits readable in the sibling file - an absence with two
     explanations and no way to distinguish them.
     """
+    from fno.graph._intake import _find_node
     from fno.graph.store import read_graph
 
     try:
@@ -7602,12 +7603,14 @@ def _archived_entry(node_id: str) -> Optional[dict]:
         path = _archive_path()
         if not path.exists():
             return None
-        for e in read_graph(path):
-            if isinstance(e, dict) and e.get("id") == node_id:
-                return e
+        # `_find_node`, not an exact compare: it is what resolved the id against
+        # the WORKING graph a line earlier, and a stricter match here recreates
+        # the very ambiguity this helper exists to remove. An exact compare made
+        # `reopen ab-9728` report "not found" for an archived `ab-9728f3c1`,
+        # which is the same message a typo gets.
+        return _find_node(read_graph(path), node_id)
     except Exception:  # noqa: BLE001 - the archive is advisory; a bad read must not mask the real refusal
         return None
-    return None
 
 
 def _cascade_reopen_parents(entries: list[dict], node_id: str) -> tuple[list[str], list[str]]:
@@ -7708,7 +7711,7 @@ def cmd_reopen(
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import locked_mutate_graph, read_graph
     from fno.graph._intake import _find_node
-    from fno.graph._reconcile import node_pr_refs, repo_slug_from_url
+    from fno.graph._reconcile import node_pr_refs, resolve_merge_evidence
 
     if not has_node_id_prefix(task_id):
         typer.echo(
@@ -7751,43 +7754,62 @@ def cmd_reopen(
         return
 
     # -- Step 2: the merged-PR gate (outside the lock, like cmd_done's) --
+    #
+    # Through `resolve_merge_evidence`, the SAME resolver `cmd_done` uses, and
+    # over ALL refs rather than the primary. That is what makes this the same
+    # gate inverted rather than a similar-looking one: a node can close on a
+    # merged `additional_prs` entry while its primary `pr_number` sits closed
+    # and unmerged, and a reopen that only queried the primary would permit
+    # exactly the case the refusal exists to catch. It also carries the node's
+    # `cwd`, which is how a foreign-repo ref reaches the right repository
+    # instead of resolving PR #N in whatever checkout happens to be current.
     refs = node_pr_refs(node)
     pr_number: Optional[int] = None
     pr_state: Optional[str] = None
     if refs:
-        pr_number, pr_url = refs[0]
-        try:
-            pr_state = _done_gh_query(pr_number, repo=repo_slug_from_url(pr_url)).state
-        except Exception as exc:  # noqa: BLE001 - gh outage is retryable, not a verdict
-            if not force:
-                typer.echo(
-                    f"Error: gh cross-check failed for {task_id}: {exc}\n"
-                    f"The check is retryable once gh is available again. Node stays done.",
-                    err=True,
-                )
-                raise typer.Exit(code=4)
-            pr_state = "UNKNOWN"
-        if pr_state == "MERGED" and not force:
+        pr_number = refs[0][0]
+        evidence = resolve_merge_evidence(
+            refs, cwd=node.get("cwd"), query=_done_gh_query
+        )
+        if evidence.outcome == "outage" and not force:
             typer.echo(
-                f"Refused: PR #{pr_number} is MERGED, so {task_id}'s work is in main. "
-                f"Reopening would make the graph assert that shipped work did not ship.\n"
-                f"  If work remains, file it: fno backlog idea \"<what is left>\"\n"
-                f"  If the close itself was wrong: reopen --force --reason \"...\"",
+                f"Error: gh cross-check failed for {task_id}: {evidence.error}\n"
+                f"The check is retryable once gh is available again. Node stays done.",
                 err=True,
             )
-            raise typer.Exit(code=3)
-
-    if force and pr_state == "MERGED":
-        typer.echo(
-            f"Warning: force-reopening {task_id} (reason: {cleaned_reason}). "
-            f"PR #{pr_number} is MERGED.",
-            err=True,
-        )
+            raise typer.Exit(code=4)
+        if evidence.outcome == "merged":
+            pr_state = "MERGED"
+            # The ref that actually evidences the merge, which is not
+            # necessarily the primary - the message has to name the PR the
+            # operator would go look at.
+            merged_url = evidence.pr_url or ""
+            if not force:
+                typer.echo(
+                    f"Refused: a referenced PR is MERGED, so {task_id}'s work is in "
+                    f"main{f' ({merged_url})' if merged_url else ''}. "
+                    f"Reopening would make the graph assert that shipped work did not ship.\n"
+                    f"  If work remains, file it: fno backlog idea \"<what is left>\"\n"
+                    f"  If the close itself was wrong: reopen --force --reason \"...\"",
+                    err=True,
+                )
+                raise typer.Exit(code=3)
+            typer.echo(
+                f"Warning: force-reopening {task_id} (reason: {cleaned_reason}). "
+                f"A referenced PR is MERGED"
+                f"{f' ({merged_url})' if merged_url else ''}.",
+                err=True,
+            )
+        elif evidence.outcome == "awaiting_merge":
+            pr_state = "OPEN"
+        else:
+            pr_state = "UNKNOWN"
 
     # -- Step 3: mutation under the lock --
     cascade_out: list[str] = []
     warned_out: list[str] = []
     canonical_id_box: list[str] = [task_id]
+    raced_box: list[bool] = [False]
 
     def mutator(entries):
         n = _find_node(entries, task_id)
@@ -7795,7 +7817,12 @@ def cmd_reopen(
             typer.echo(f"Error: feature {task_id} not found", err=True)
             raise typer.Exit(code=1)
         if not n.get("completed_at"):
-            return entries  # raced with another reopen; the safe direction wins
+            # Raced with another reopen; the safe direction wins. Flagged rather
+            # than silently returning, because the caller must NOT go on to
+            # print a success line and emit a backlog_reopened event carrying
+            # this reason for a mutation it did not make.
+            raced_box[0] = True
+            return entries
         # The CANONICAL id, not the argument: _find_node resolves a partial id
         # (`ab-9728` for `ab-9728f3c1`), while the cascade walks a parent map
         # keyed on full ids. Passing the argument through would make the cascade
@@ -7810,6 +7837,13 @@ def cmd_reopen(
         return entries
 
     locked_mutate_graph(_graph_path(), mutator)
+
+    if raced_box[0]:
+        typer.echo(
+            f"warning: {task_id} was reopened by another writer; nothing to do",
+            err=True,
+        )
+        return
 
     for pid in warned_out:
         typer.echo(
@@ -9917,6 +9951,7 @@ def cmd_unarchive(
         1  the id is in neither the working graph nor the archive
     """
     from fno.graph._constants import has_node_id_prefix
+    from fno.graph._intake import _find_node
     from fno.graph.store import (
         GraphCorruptError,
         _apply_graph_defaults,
@@ -9933,54 +9968,77 @@ def cmd_unarchive(
         )
         raise typer.Exit(code=1)
 
-    if any(
-        isinstance(e, dict) and e.get("id") == task_id
-        for e in read_graph(_graph_path())
-    ):
+    if _find_node(read_graph(_graph_path()), task_id) is not None:
         typer.echo(f"warning: {task_id} is already in the working graph", err=True)
         return
 
     archive_path = _archive_path()
-    try:
-        archived = _apply_graph_defaults(_read_json(archive_path)) if archive_path.exists() else []
-    except GraphCorruptError:
-        typer.echo(f"Error: {archive_path} is corrupt; cannot unarchive", err=True)
-        raise typer.Exit(code=1)
-
-    row = next(
-        (e for e in archived if isinstance(e, dict) and e.get("id") == task_id), None
-    )
-    if row is None:
+    if not archive_path.exists():
         typer.echo(
             f"Error: {task_id} is in neither the working graph nor {archive_path}",
             err=True,
         )
         raise typer.Exit(code=1)
 
+    # Everything below runs INSIDE the graph lock, including the archive read and
+    # write. cmd_archive already does its archive I/O inside the mutator, which
+    # makes the graph flock the de-facto archive mutex; reading here and writing
+    # after the lock released would let a concurrent `archive --apply` (the
+    # SessionStart reconcile runs one) interleave: unarchive reads [A,B,X], the
+    # sweep writes [A,B,X,C] while removing C from the working graph, unarchive
+    # then writes [A,B] and C exists in neither file. That is the one outcome
+    # neither verb may produce.
+    row_box: list[Optional[dict]] = [None]
+    archive_write_error: list[str] = []
+
     def mutator(entries):
+        try:
+            archived = _apply_graph_defaults(_read_json(archive_path))
+        except GraphCorruptError:
+            typer.echo(f"Error: {archive_path} is corrupt; cannot unarchive", err=True)
+            raise typer.Exit(code=1)
+
+        # Fuzzy-resolve, matching the working-graph lookup above and the archive
+        # probe `reopen` uses: an exact compare made the short id form fail, and
+        # `reopen`'s refusal prints this verb as the remedy.
+        row = _find_node(archived, task_id)
+        if row is None:
+            typer.echo(
+                f"Error: {task_id} is in neither the working graph nor {archive_path}",
+                err=True,
+            )
+            raise typer.Exit(code=1)
+        row_box[0] = row
+        rid = row.get("id")
+
         # Idempotent under a race: another unarchive may have landed it already.
-        if any(isinstance(e, dict) and e.get("id") == task_id for e in entries):
+        if any(isinstance(e, dict) and e.get("id") == rid for e in entries):
             return entries
+
+        # Graph-first: the working graph is written when this mutator returns,
+        # so shrinking the archive here (before that return) is the ONE ordering
+        # that can only ever leave a duplicate, which the next sweep dedupes and
+        # read-through already tolerates.
+        try:
+            _write_json(
+                [e for e in archived if not (isinstance(e, dict) and e.get("id") == rid)],
+                archive_path,
+            )
+        except OSError as exc:
+            archive_write_error.append(str(exc))
         return [*entries, row]
 
     locked_mutate_graph(_graph_path(), mutator)
 
-    # Graph-first, then shrink the archive. The reverse order would risk a crash
-    # that drops the node from both files, which is the one outcome neither
-    # verb may produce.
-    try:
-        _write_json(
-            [e for e in archived if not (isinstance(e, dict) and e.get("id") == task_id)],
-            archive_path,
-        )
-    except OSError as exc:
+    for exc in archive_write_error:
         typer.echo(
             f"warning: {task_id} is back in the working graph, but the archive copy "
             f"could not be removed ({exc}); the next `archive` sweep dedupes it",
             err=True,
         )
 
-    typer.echo(f"Unarchived {task_id}")
+    resolved = (row_box[0] or {}).get("id") or task_id
+    typer.echo(f"Unarchived {resolved}")
 
 
 # -- Internal helpers for intake / update (avoid circular imports) --

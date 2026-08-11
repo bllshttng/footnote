@@ -97,10 +97,35 @@ def test_a_node_closed_in_error_reopens(tmp_graph):
 
 
 def test_the_status_recomputes_off_the_cleared_completion(tmp_graph):
-    """Clearing completed_at IS the status change; nothing sets status directly."""
+    """Clearing completed_at IS the status change; nothing sets status directly.
+
+    Asserts the POSITIVE status rather than `!= "done"`. An absence assertion
+    passes on any of half a dozen states, including ones that would mean the
+    reopen left the node somewhere nobody intended.
+    """
     _write(tmp_graph, _node("ab-11111111"))
     runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "wrong"])
-    assert _read(tmp_graph)["ab-11111111"]["status"] != "done"
+    # `idea`, the underlying state of a plan-less node with no PR - not merely
+    # "something other than done".
+    assert _read(tmp_graph)["ab-11111111"]["status"] == "idea"
+
+
+def test_a_reopened_pr_bearing_node_reads_in_review(tmp_graph, monkeypatch):
+    """Not a dispatchable state, and deliberately so.
+
+    `recompute_statuses` derives `in_review` from a pr_number with no
+    completed_at, which holds the node out of the dispatch pool. That is the
+    honest reading: the node has a PR, and reopening records that its close was
+    wrong, not that a fresh worker should pick it up. `pr_number` survives for
+    the same reason `merge_status` does - it is a fact, not an opinion.
+    """
+    _stub_pr(monkeypatch, "OPEN")
+    _write(tmp_graph, _node("ab-11111111", pr_number=7))
+    runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "early close"])
+    node = _read(tmp_graph)["ab-11111111"]
+    assert node["completed_at"] is None
+    assert node["status"] == "in_review"
+    assert node["pr_number"] == 7
 
 
 # -- what it deliberately does not undo --
@@ -181,6 +206,62 @@ def test_force_overrides_the_merged_refusal(tmp_graph, monkeypatch):
     assert _read(tmp_graph)["ab-11111111"]["completed_at"] is None
 
 
+def test_a_merged_additional_pr_refuses_even_when_the_primary_is_not(tmp_graph, monkeypatch):
+    """The gate has to see every ref, the way done's does.
+
+    A node can close on a merged `additional_prs` entry while its primary
+    pr_number sits closed and unmerged. Querying only the primary would permit
+    exactly the case the refusal exists to catch, and record forced: false.
+    """
+    import fno.graph.cli as gcli
+    from fno.graph._reconcile import PrMergeState
+
+    states = {41: "CLOSED", 42: "MERGED"}
+
+    def _by_number(n, **kw):
+        return PrMergeState(
+            number=n,
+            state=states[n],
+            url=f"https://github.com/o/r/pull/{n}",
+            merged_at="2026-08-01T00:00:00Z" if states[n] == "MERGED" else None,
+        )
+
+    monkeypatch.setattr(gcli, "_done_gh_query", _by_number)
+    _write(
+        tmp_graph,
+        _node(
+            "ab-11111111",
+            pr_number=41,
+            pr_url="https://github.com/o/r/pull/41",
+            additional_prs=[{"number": 42, "url": "https://github.com/o/r/pull/42"}],
+        ),
+    )
+    res = runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
+    assert res.exit_code == 3, res.output
+    assert _read(tmp_graph)["ab-11111111"]["completed_at"] is not None
+
+
+def test_the_gate_carries_the_nodes_cwd(tmp_graph, monkeypatch):
+    """A foreign-repo ref must resolve against its own repository.
+
+    Without the node's cwd, `gh pr view N` runs in whatever checkout is current
+    and answers about an unrelated PR #N.
+    """
+    import fno.graph.cli as gcli
+    from fno.graph._reconcile import PrMergeState
+
+    seen: dict = {}
+
+    def _capture(n, **kw):
+        seen.update(kw)
+        return PrMergeState(number=n, state="OPEN", url=None, merged_at=None)
+
+    monkeypatch.setattr(gcli, "_done_gh_query", _capture)
+    _write(tmp_graph, _node("ab-11111111", pr_number=7, cwd="/repos/other"))
+    runner.invoke(app, ["backlog", "reopen", "ab-11111111", "--reason", "x"])
+    assert seen.get("cwd") == "/repos/other"
+
+
 def test_an_open_pr_does_not_block_a_reopen(tmp_graph, monkeypatch):
     """Only a MERGED PR is evidence the work shipped."""
     _stub_pr(monkeypatch, "OPEN")
@@ -190,11 +271,17 @@ def test_an_open_pr_does_not_block_a_reopen(tmp_graph, monkeypatch):
 
 
 def test_a_gh_outage_leaves_the_node_done(tmp_graph, monkeypatch):
-    """An unreachable gh is a missing answer, not a permitting one."""
+    """An unreachable gh is a missing answer, not a permitting one.
+
+    Raises ReconcileError, which is what `query_pr_merge_state` raises and what
+    the shared resolver catches. A stub raising a bare RuntimeError would test a
+    path production never takes.
+    """
     import fno.graph.cli as gcli
+    from fno.graph._reconcile import ReconcileError
 
     def _boom(n, **kw):
-        raise RuntimeError("gh: network unreachable")
+        raise ReconcileError("gh: network unreachable")
 
     monkeypatch.setattr(gcli, "_done_gh_query", _boom)
     _write(tmp_graph, _node("ab-11111111", pr_number=7))
@@ -245,6 +332,24 @@ def test_an_archived_node_is_named_as_archived_not_missing(tmp_graph, tmp_path, 
     assert res.exit_code == 4
     assert "archived" in res.output
     assert "unarchive" in res.output
+
+
+def test_the_archived_refusal_survives_a_partial_id(tmp_graph, tmp_path, monkeypatch):
+    """An exact compare here recreates the ambiguity the refusal exists to remove.
+
+    `_find_node` resolves a short id against the working graph, so the archive
+    probe has to resolve it the same way or `reopen ab-2222` reports "not found"
+    for a node sitting readable in the archive.
+    """
+    archive = tmp_path / "graph-archive.json"
+    archive.write_text(json.dumps({"entries": [_node("ab-22222222")]}))
+    import fno.graph._constants as gc
+
+    monkeypatch.setattr(gc, "GRAPH_ARCHIVE_JSON", archive)
+    _write(tmp_graph)
+    res = runner.invoke(app, ["backlog", "reopen", "ab-2222", "--reason", "x"])
+    assert res.exit_code == 4, res.output
+    assert "archived" in res.output
 
 
 # -- the cascade --

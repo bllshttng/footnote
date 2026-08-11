@@ -140,6 +140,37 @@ def truncate_description(text: str, cap: int = DESCRIPTION_CAP) -> Tuple[str, bo
     return text[:cap] + marker, True
 
 
+def _rewrite_jsonl(path: Path, lines: "list[str]") -> None:
+    """Replace the ledger's contents atomically. Raises OSError on failure.
+
+    A plain ``write_text`` truncates in place, so a kill or an ENOSPC between
+    truncate and flush leaves the ledger empty or half-written - every carve-out
+    lost, not just the row being changed. Both rewriting callers hold the mkdir
+    mutex, which serializes writers but does nothing about a torn write.
+
+    Same mkstemp + ``os.replace`` shape ``graph.store._write_json`` uses, and
+    the temp file is created in the ledger's own directory so the replace is a
+    same-filesystem rename rather than a copy.
+    """
+    import os
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=path.name + ".", suffix=".tmp")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(("\n".join(lines) + "\n") if lines else "")
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def _append_jsonl(path: Path, line: str, lock_timeout_seconds: int = 30) -> None:
     """Append one line under a mkdir mutex (mirrors events.append_event).
 
@@ -335,7 +366,7 @@ def update_carveout(
             )
 
         try:
-            path.write_text("\n".join(kept) + "\n", encoding="utf-8")
+            _rewrite_jsonl(path, kept)
         except OSError as exc:
             raise CarveoutError(f"cannot write carve-out ledger {path}: {exc}") from exc
         return updated
@@ -443,9 +474,9 @@ def consume_carveouts(repo_root: Path, ids: "set[str] | list[str]") -> int:
                 removed += 1
                 continue
             kept.append(stripped)
-        path.write_text(
-            ("\n".join(kept) + "\n") if kept else "", encoding="utf-8"
-        )
+        # Atomic for the same reason the update path is: an in-place truncate
+        # that dies mid-write loses every carve-out, not just the consumed ones.
+        _rewrite_jsonl(path, kept)
         return removed
     except OSError:
         return 0
