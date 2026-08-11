@@ -77,7 +77,8 @@ assert "migrated symlink targets the canonical journal" test "$canonical/.fno/ev
 assert "stale worktree offer cursor is replaced by the shared cursor" test -L "$existing/.fno/.think-offer-cursor"
 assert "canonical bytes survive migration" grep -q '"type":"canonical_before"' "$canonical/.fno/events.jsonl"
 assert "worktree bytes reach canonical journal" grep -q '"type":"worktree_before"' "$canonical/.fno/events.jsonl"
-assert "unterminated inputs become two complete rows" test "$(wc -l < "$canonical/.fno/events.jsonl" | tr -d ' ')" -eq 2
+assert "unterminated canonical row survives once" test "$(grep -c 'canonical_before' "$canonical/.fno/events.jsonl")" -eq 1
+assert "unterminated worktree row survives once" test "$(grep -c 'worktree_before' "$canonical/.fno/events.jsonl")" -eq 1
 while IFS= read -r row; do
   assert "migrated row remains valid JSON" jq -e . <<< "$row"
 done < "$canonical/.fno/events.jsonl"
@@ -346,10 +347,21 @@ mv() {
 export -f mv
 STUB
 CANONICAL="$canonical" WORKTREE="$receipt_recovery" BASH_ENV="$TMP/fail-completion-env" bash "$SETUP" >/dev/null 2>&1
+printf '%s\n' '{"ts":"2020-01-01T00:00:00Z","type":"claim_acquired","source":"fno-loop","data":{"key":"node:test","holder":"test","pid":1,"host":"test","acquired_at":1}}' >> "$canonical/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+uv run --project "$REPO_ROOT/cli" python - "$canonical/.fno/events.jsonl" <<'PY'
+from datetime import datetime, timezone
+from pathlib import Path
+import sys
+
+from fno.events.gc import gc_events
+
+gc_events(Path(sys.argv[1]), now=datetime(2026, 8, 11, tzinfo=timezone.utc))
+PY
 printf '%s\n' '{"type":"intervening_after_landed_segment"}' >> "$canonical/.fno/events.jsonl"
 printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
 CANONICAL="$canonical" WORKTREE="$receipt_recovery" bash "$SETUP" >/dev/null 2>&1
-assert "landed receipt survives an intervening append without replay" test "$(grep -c 'receipt_recovery_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "landed receipt survives GC and an intervening append without replay" test "$(grep -c 'receipt_recovery_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
 failed_recovery="$TMP/failed-recovery"
 mkdir -p "$failed_recovery/.fno"

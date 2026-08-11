@@ -10,7 +10,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-from fno.events import RETENTION_MINIMUM_TTL_HOURS, _utc_timestamp, retention_for
+from fno.events import (
+    RETENTION_MINIMUM_TTL_HOURS,
+    ValidationError,
+    _utc_timestamp,
+    retention_for,
+    validate,
+)
 from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
 
 _LEASE_RENEW_EVERY_S = 30
@@ -248,6 +254,16 @@ def gc_events(
                 if retention_for(event_type) != "ephemeral" or timestamp is None:
                     if timestamp is None:
                         result["malformed"] += 1
+                    result["kept"] += 1
+                    kept.append(line)
+                    if line_end <= old_cursor:
+                        mapped_cursor += len(line)
+                    source_offset = line_end
+                    continue
+                try:
+                    validate(event)
+                except ValidationError:
+                    result["malformed"] += 1
                     result["kept"] += 1
                     kept.append(line)
                     if line_end <= old_cursor:

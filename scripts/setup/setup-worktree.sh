@@ -341,16 +341,29 @@ PY
 publish_events_migration_receipt() {
   local staged="$1"
   local receipt="$2"
-  python3 - "$staged" "$receipt" <<'PY'
+  local migration_id="$3"
+  python3 - "$staged" "$receipt" "$migration_id" <<'PY'
+import datetime
 import json
 import os
 import sys
 import tempfile
 
-staged, receipt = sys.argv[1:]
+staged, receipt, migration_id = sys.argv[1:]
+marker = {
+    "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+    "type": "event_migration_landed",
+    "source": "migration",
+    "data": {"migration_id": migration_id},
+}
+with open(staged, "ab") as handle:
+    handle.write(json.dumps(marker, separators=(",", ":")).encode("ascii") + b"\n")
+    handle.flush()
+    os.fsync(handle.fileno())
 stat = os.stat(staged)
 payload = json.dumps(
-    {"device": stat.st_dev, "inode": stat.st_ino}, separators=(",", ":")
+    {"device": stat.st_dev, "inode": stat.st_ino, "migration_id": migration_id},
+    separators=(",", ":"),
 ).encode("ascii")
 fd, temp = tempfile.mkstemp(dir=os.path.dirname(receipt), prefix=f".{os.path.basename(receipt)}.")
 try:
@@ -364,6 +377,49 @@ finally:
         os.unlink(temp)
     except FileNotFoundError:
         pass
+PY
+}
+
+event_migration_id() {
+  local local_events="$1"
+  python3 - "$local_events" <<'PY'
+import hashlib
+import os
+import sys
+
+path = os.path.abspath(sys.argv[1])
+digest = hashlib.sha256()
+digest.update(os.fsencode(path))
+digest.update(b"\0")
+with open(path, "rb") as handle:
+    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+        digest.update(chunk)
+print(digest.hexdigest())
+PY
+}
+
+journal_has_event_migration() {
+  local source="$1"
+  local migration_id="$2"
+  python3 - "$source" "$migration_id" <<'PY'
+import json
+import sys
+
+source, migration_id = sys.argv[1:]
+with open(source, "rb") as handle:
+    for raw in handle:
+        try:
+            row = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        if (
+            isinstance(row, dict)
+            and row.get("type") == "event_migration_landed"
+            and isinstance(row.get("data"), dict)
+            and row["data"].get("migration_id") == migration_id
+        ):
+            raise SystemExit(0)
+raise SystemExit(1)
 PY
 }
 
@@ -392,7 +448,12 @@ append_migrated_events() {
   local local_cursor="${4:-}"
   local cursor="$(dirname "$source")/.think-offer-cursor"
   local receipt="${local_events}.landed"
+  local migration_id
+  migration_id=$(event_migration_id "$local_events") || return 1
   recover_event_cursor_pending "$source" "$cursor" || return 1
+  if [[ "$deduplicate_suffix" == "true" ]] && journal_has_event_migration "$source" "$migration_id"; then
+    return 0
+  fi
   if [[ "$deduplicate_suffix" == "true" ]] && migration_receipt_matches "$source" "$receipt"; then
     return 0
   fi
@@ -461,7 +522,7 @@ PY
       publish_event_cursor_pending "$staged" "$cursor" "$((canonical_cursor + consumed_cursor))" || rc=$?
     fi
     if (( rc == 0 )); then
-      publish_events_migration_receipt "$staged" "$receipt" || rc=$?
+      publish_events_migration_receipt "$staged" "$receipt" "$migration_id" || rc=$?
     fi
     if (( rc == 0 )); then
       mv "$staged" "$source" || rc=$?

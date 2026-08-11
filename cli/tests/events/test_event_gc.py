@@ -27,11 +27,35 @@ NOW = datetime(2026, 8, 11, 12, 0, tzinfo=timezone.utc)
 
 
 def _event(event_type: str, ts: str) -> str:
-    return json.dumps({"ts": ts, "type": event_type, "source": "test", "data": {}})
+    source = "test"
+    data: dict[str, object] = {}
+    if event_type == "claim_acquired":
+        source = "fno-loop"
+        data = {
+            "key": "node:test",
+            "holder": "test",
+            "pid": 1,
+            "host": "test",
+            "acquired_at": 1,
+        }
+    elif event_type == "claim_released":
+        source = "fno-loop"
+        data = {
+            "key": "node:test",
+            "holder": "test",
+            "pid": 1,
+            "host": "test",
+            "acquired_at": 1,
+            "duration_held_ms": 1,
+        }
+    elif event_type == "human_touch":
+        data = {"graph_node_id": "test", "source": "answer", "resolution": "ok"}
+    return json.dumps({"ts": ts, "type": event_type, "source": source, "data": data})
 
 
 def test_schema_declares_measured_retention_classes() -> None:
     assert EVENT_TYPES is not None
+    assert EVENT_TYPES["event_migration_landed"]["retention"] == "durable"
     assert retention_for("claim_acquired") == "ephemeral"
     assert retention_for("human_touch") == "ephemeral"
     assert retention_for("review_attestation") == "gate"
@@ -232,6 +256,24 @@ def test_gc_preserves_malformed_utf8_bytes(tmp_path: Path) -> None:
 def test_gc_preserves_ephemeral_row_with_noncanonical_timestamp(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     row = _event("claim_released", "2026-07-01 00:00:00+00:00") + "\n"
+    events.write_text(row, encoding="utf-8")
+
+    result = gc_events(events, now=NOW, ttl_hours=672)
+
+    assert result == {"scanned": 1, "deleted": 0, "kept": 1, "malformed": 1}
+    assert events.read_text(encoding="utf-8") == row
+
+
+def test_gc_preserves_schema_invalid_expired_ephemeral_row(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl"
+    row = json.dumps(
+        {
+            "ts": "2026-07-01T00:00:00Z",
+            "type": "claim_acquired",
+            "source": "fno-loop",
+            "data": {},
+        }
+    ) + "\n"
     events.write_text(row, encoding="utf-8")
 
     result = gc_events(events, now=NOW, ttl_hours=672)

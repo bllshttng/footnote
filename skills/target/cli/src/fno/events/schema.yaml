@@ -62,6 +62,18 @@ gates:
 
 event_types:
 
+  - name: event_migration_landed
+    retention: durable
+    description: "A worktree-local journal segment landed in the canonical journal. Its deterministic migration id survives GC rewrites so crash recovery cannot replay the segment after later appends."
+    sources: [migration]
+    data:
+      required: [migration_id]
+      properties:
+        migration_id:
+          type: string
+          description: "SHA-256 over the pending backup path and bytes, stable for every retry of that migration."
+    consumers: [scripts/setup/setup-worktree.sh]
+
   - name: phase_transition
     description: "A gate flipped to true (gate_bearing=true) OR an audit-only phase boundary crossed (gate_bearing=false)."
     sources: [target, megawalk, fno-loop, hook]
