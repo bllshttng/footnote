@@ -381,6 +381,26 @@ def test_gc_keeps_live_writer_when_identity_probe_is_unavailable(
     assert token.exists()
 
 
+def test_gc_reaps_dead_writer_when_identity_probe_is_empty(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    events = tmp_path / "events.jsonl"
+    events.touch()
+    token = tmp_path / "events.jsonl.shell-writers.d" / "12345.writer"
+    token.mkdir(parents=True)
+    (token / "owner").write_text("dead-process", encoding="utf-8")
+    monkeypatch.setattr(event_gc, "_process_identity", lambda pid: None)
+
+    def dead(pid: int, signal: int) -> None:
+        raise ProcessLookupError
+
+    monkeypatch.setattr(event_gc.os, "kill", dead)
+
+    event_gc._wait_for_shell_writers(events, 0.2)
+
+    assert not token.exists()
+
+
 def test_gc_renews_both_long_held_mutex_leases(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

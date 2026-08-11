@@ -342,14 +342,15 @@ publish_events_migration_receipt() {
   local staged="$1"
   local receipt="$2"
   local migration_id="$3"
-  python3 - "$staged" "$receipt" "$migration_id" <<'PY'
+  local local_events="$4"
+  python3 - "$staged" "$receipt" "$migration_id" "$local_events" <<'PY'
 import datetime
 import json
 import os
 import sys
 import tempfile
 
-staged, receipt, migration_id = sys.argv[1:]
+staged, receipt, migration_id, local_events = sys.argv[1:]
 marker = {
     "ts": datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
     "type": "event_migration_landed",
@@ -367,7 +368,12 @@ with open(staged, "ab+") as handle:
     os.fsync(handle.fileno())
 stat = os.stat(staged)
 payload = json.dumps(
-    {"device": stat.st_dev, "inode": stat.st_ino, "migration_id": migration_id},
+    {
+        "device": stat.st_dev,
+        "inode": stat.st_ino,
+        "migration_id": migration_id,
+        "segment_size": os.path.getsize(local_events),
+    },
     separators=(",", ":"),
 ).encode("ascii")
 fd, temp = tempfile.mkstemp(dir=os.path.dirname(receipt), prefix=f".{os.path.basename(receipt)}.")
@@ -431,18 +437,70 @@ PY
 migration_receipt_matches() {
   local source="$1"
   local receipt="$2"
-  python3 - "$source" "$receipt" <<'PY'
+  local migration_id="$3"
+  python3 - "$source" "$receipt" "$migration_id" <<'PY'
 import json
 import os
 import sys
 
-source, receipt = sys.argv[1:]
+source, receipt, migration_id = sys.argv[1:]
 try:
     payload = json.loads(open(receipt, encoding="ascii").read())
     stat = os.stat(source)
 except (OSError, ValueError):
     raise SystemExit(1)
-raise SystemExit(0 if payload.get("device") == stat.st_dev and payload.get("inode") == stat.st_ino else 1)
+raise SystemExit(
+    0
+    if payload.get("device") == stat.st_dev
+    and payload.get("inode") == stat.st_ino
+    and payload.get("migration_id") == migration_id
+    else 1
+)
+PY
+}
+
+migration_receipt_prefix_size() {
+  local source="$1"
+  local receipt="$2"
+  local local_events="$3"
+  python3 - "$source" "$receipt" "$local_events" <<'PY'
+import hashlib
+import json
+import os
+import sys
+
+source, receipt, local_events = sys.argv[1:]
+try:
+    payload = json.loads(open(receipt, encoding="ascii").read())
+    stat = os.stat(source)
+    size = payload["segment_size"]
+    expected = payload["migration_id"]
+    if (
+        payload.get("device") != stat.st_dev
+        or payload.get("inode") != stat.st_ino
+        or not isinstance(size, int)
+        or isinstance(size, bool)
+        or size < 0
+        or size >= os.path.getsize(local_events)
+        or not isinstance(expected, str)
+    ):
+        raise ValueError
+    digest = hashlib.sha256()
+    digest.update(os.fsencode(os.path.abspath(local_events)))
+    digest.update(b"\0")
+    with open(local_events, "rb") as handle:
+        remaining = size
+        while remaining:
+            chunk = handle.read(min(remaining, 1024 * 1024))
+            if not chunk:
+                raise ValueError
+            digest.update(chunk)
+            remaining -= len(chunk)
+except (KeyError, OSError, ValueError):
+    raise SystemExit(1)
+if digest.hexdigest() != expected:
+    raise SystemExit(1)
+print(size)
 PY
 }
 
@@ -459,26 +517,58 @@ append_migrated_events() {
   if [[ "$deduplicate_suffix" == "true" ]] && journal_has_event_migration "$source" "$migration_id"; then
     return 0
   fi
-  if [[ "$deduplicate_suffix" == "true" ]] && migration_receipt_matches "$source" "$receipt"; then
+  if [[ "$deduplicate_suffix" == "true" ]] && migration_receipt_matches "$source" "$receipt" "$migration_id"; then
     return 0
   fi
-  if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$local_events"; then
+  local migration_input="$local_events"
+  local migration_cursor="$local_cursor"
+  local suffix=""
+  if [[ "$deduplicate_suffix" == "true" ]]; then
+    local landed_size=""
+    landed_size=$(migration_receipt_prefix_size "$source" "$receipt" "$local_events" 2>/dev/null || true)
+    if [[ "$landed_size" =~ ^[0-9]+$ ]]; then
+      suffix=$(mktemp "${source}.migration-tail.XXXXXX") || return 1
+      python3 - "$local_events" "$suffix" "$landed_size" <<'PY' || {
+import sys
+
+source, destination, offset = sys.argv[1:]
+with open(source, "rb") as handle:
+    handle.seek(int(offset))
+    with open(destination, "wb") as output:
+        output.write(handle.read())
+PY
+        rm -f "$suffix"
+        return 1
+      }
+      migration_input="$suffix"
+      if [[ "$local_cursor" =~ ^[0-9]+$ && "$local_cursor" -gt "$landed_size" ]]; then
+        migration_cursor="$((local_cursor - landed_size))"
+      else
+        migration_cursor=0
+      fi
+    fi
+  fi
+  if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$migration_input"; then
+    [[ -z "$suffix" ]] || rm -f "$suffix"
     return 0
   fi
   local filtered mapping
-  filtered=$(mktemp "${source}.migration.XXXXXX") || return 1
-  mapping=$(mktemp "${source}.migration-cursor.XXXXXX") || {
-    rm -f "$filtered"
+  filtered=$(mktemp "${source}.migration.XXXXXX") || {
+    [[ -z "$suffix" ]] || rm -f "$suffix"
     return 1
   }
-  if ! EVENTS_MIGRATION_LOCAL_CURSOR="$local_cursor" EVENTS_MIGRATION_CURSOR_MAP="$mapping" \
-    python3 "$EVENTS_MIGRATION_FILTER" "$source" "$local_events" > "$filtered"; then
-    rm -f "$filtered" "$mapping"
+  mapping=$(mktemp "${source}.migration-cursor.XXXXXX") || {
+    rm -f "$filtered" "$suffix"
+    return 1
+  }
+  if ! EVENTS_MIGRATION_LOCAL_CURSOR="$migration_cursor" EVENTS_MIGRATION_CURSOR_MAP="$mapping" \
+    python3 "$EVENTS_MIGRATION_FILTER" "$source" "$migration_input" > "$filtered"; then
+    rm -f "$filtered" "$mapping" "$suffix"
     return 1
   fi
   local rc=0
   if [[ "$deduplicate_suffix" == "true" ]] && journal_ends_with "$source" "$filtered"; then
-    rm -f "$filtered" "$mapping"
+    rm -f "$filtered" "$mapping" "$suffix"
     return 0
   fi
   local source_size canonical_cursor consumed_cursor
@@ -527,7 +617,7 @@ PY
       publish_event_cursor_pending "$staged" "$cursor" "$((canonical_cursor + consumed_cursor))" || rc=$?
     fi
     if (( rc == 0 )); then
-      publish_events_migration_receipt "$staged" "$receipt" "$migration_id" || rc=$?
+      publish_events_migration_receipt "$staged" "$receipt" "$migration_id" "$local_events" || rc=$?
     fi
     if (( rc == 0 )); then
       if mv "$staged" "$source"; then
@@ -541,7 +631,7 @@ PY
     fi
     [[ -z "${staged:-}" ]] || rm -f "$staged"
   fi
-  rm -f "$filtered" "$mapping"
+  rm -f "$filtered" "$mapping" "$suffix"
   return "$rc"
 }
 

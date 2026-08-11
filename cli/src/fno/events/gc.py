@@ -63,6 +63,13 @@ def _wait_for_shell_writers(path: Path, timeout_seconds: float) -> None:
                 recorded_identity = (entry / "owner").read_text(encoding="utf-8").strip()
                 current_identity = _process_identity(pid)
                 if current_identity is None:
+                    try:
+                        os.kill(pid, 0)
+                    except ProcessLookupError:
+                        (entry / "owner").unlink(missing_ok=True)
+                        entry.rmdir()
+                    except OSError:
+                        pass
                     continue
                 if current_identity == recorded_identity:
                     continue

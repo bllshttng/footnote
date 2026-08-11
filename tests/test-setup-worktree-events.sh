@@ -158,6 +158,14 @@ CANONICAL="$canonical" WORKTREE="$ordered" bash "$SETUP" >/dev/null 2>&1
 last_verdict=$(jq -r 'select(.type == "review_attestation" and .data.reviewer == "code-review" and .data.head_sha == "abc") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
 assert "migration cannot restore older passing gate evidence" test "$last_verdict" = fail
 
+older_failure="$TMP/older-failure"
+mkdir -p "$older_failure/.fno"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"passing-head","verdict":"pass","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"passing-head","verdict":"fail","session_id":"local"}}' > "$older_failure/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$older_failure" bash "$SETUP" >/dev/null 2>&1
+passing_verdict=$(jq -r 'select(.type == "review_attestation" and (.data.reviewer | ltrimstr("/")) == "code-review" and .data.head_sha == "passing-head") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration cannot revoke newer passing gate evidence" test "$passing_verdict" = pass
+
 newer_gate="$TMP/newer-gate"
 mkdir -p "$newer_gate/.fno"
 printf '%s\n' '{"ts":"2026-08-11T08:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"newer-head","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
@@ -359,7 +367,8 @@ mkdir -p "$receipt_recovery/.fno"
 printf '%s\n' '{"type":"receipt_recovery_row"}' > "$receipt_recovery/.fno/events.jsonl"
 cat > "$TMP/fail-completion-env" <<'STUB'
 mv() {
-  if [[ "${1:-}" == *events.jsonl.pre-share.pending.* && "${2:-}" == *events.jsonl.pre-share.* && "${2:-}" != *pending* ]]; then
+  local destination="${2##*/}"
+  if [[ "${1:-}" == *events.jsonl.pre-share.pending.* && "$destination" == events.jsonl.pre-share.* && "$destination" != *pending* ]]; then
     return 1
   fi
   command /bin/mv "$@"
@@ -367,6 +376,13 @@ mv() {
 export -f mv
 STUB
 CANONICAL="$canonical" WORKTREE="$receipt_recovery" BASH_ENV="$TMP/fail-completion-env" bash "$SETUP" >/dev/null 2>&1
+receipt_backups=()
+shopt -s nullglob
+for receipt_candidate in "$receipt_recovery/.fno/events.jsonl.pre-share.pending."*; do
+  [[ "$receipt_candidate" == *.landed ]] || receipt_backups+=("$receipt_candidate")
+done
+shopt -u nullglob
+assert "failed completion retains its pending journal" test "${#receipt_backups[@]}" -eq 1
 printf '%s\n' '{"ts":"2020-01-01T00:00:00Z","type":"claim_acquired","source":"fno-loop","data":{"key":"node:test","holder":"test","pid":1,"host":"test","acquired_at":1}}' >> "$canonical/.fno/events.jsonl"
 printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
 uv run --project "$REPO_ROOT/cli" python - "$canonical/.fno/events.jsonl" <<'PY'
@@ -385,6 +401,26 @@ receipt_retry_rc=$?
 assert "landed receipt survives GC and an intervening append without replay" test "$(grep -c 'receipt_recovery_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 assert "landed receipt recovery completes successfully" test "$receipt_retry_rc" -eq 0
 assert "receipt sidecar is never appended as a journal row" bash -c '! grep -q '"'"'^{"device":.*"inode":'"'"' "$1"' _ "$canonical/.fno/events.jsonl"
+
+grown_pending="$TMP/grown-pending"
+mkdir -p "$grown_pending/.fno"
+printf '%s\n' '{"type":"grown_pending_original"}' > "$grown_pending/.fno/events.jsonl"
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$grown_pending" BASH_ENV="$TMP/fail-completion-env" bash "$SETUP" >/dev/null 2>&1
+grown_backups=()
+shopt -s nullglob
+for grown_candidate in "$grown_pending/.fno/events.jsonl.pre-share.pending."*; do
+  [[ "$grown_candidate" == *.landed ]] || grown_backups+=("$grown_candidate")
+done
+shopt -u nullglob
+assert "failed completion retains exactly one pending journal" test "${#grown_backups[@]}" -eq 1
+if (( ${#grown_backups[@]} == 1 )); then
+  printf '%s\n' '{"type":"late_pending_row"}' >> "${grown_backups[0]}"
+fi
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+CANONICAL="$canonical" WORKTREE="$grown_pending" bash "$SETUP" >/dev/null 2>&1
+assert "stale landed receipt cannot replay its original prefix" test "$(grep -c 'grown_pending_original' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+assert "stale landed receipt cannot discard newly appended pending bytes" test "$(grep -c 'late_pending_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
 post_publish_failure="$TMP/post-publish-failure"
 mkdir -p "$post_publish_failure/.fno"
