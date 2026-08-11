@@ -277,6 +277,16 @@ _STRUCTURAL_STEPS: tuple[tuple[str, str, str], ...] = (
      "bash tests/hooks/test_init_target_session_id.sh\n"
      "bash tests/hooks/test_agy_stop_hook.sh\n"
      "bash tests/hooks/test_check_impl_location.sh"),
+    # The Python hook harnesses run NOWHERE otherwise. Discovery is .sh-only
+    # (shebang-gated), and the pytest step above collects `cli/tests` alone, so
+    # a test_*.py under tests/hooks/ is in neither tree - three files and 116
+    # cases sat unrun, including the ones covering this very gate. Named
+    # explicitly rather than globbed so adding a fourth is a visible edit.
+    ("Python hook harnesses (outside both test trees)", ".",
+     "uv run --project cli python -m pytest -q "
+     "tests/hooks/test_git_protection_push.py "
+     "tests/hooks/test_merge_guard_worktree.py "
+     "tests/hooks/test_merge_guard_stacked_base.py"),
     ("worktree lifecycle: remove-hook contract + cwd-anchored liveness + ttyless archive + job reap",
      ".", "bash tests/hooks/test_worktree_remove_lifecycle.sh"),
     ("in_review dispatch guard", ".", "bash tests/hooks/test_init_in_review_gate.sh"),
