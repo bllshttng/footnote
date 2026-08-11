@@ -19,7 +19,7 @@ The listener's ``fromMode`` attestation field would lift the hold, but reading
 it is gated behind an internal, default-off GrowthBook flag footnote cannot
 enable, so attestation is not a supported contract; and the only documented
 escape (``crossSessionInbound: "accept"``) accepts every un-attested peer, which
-is not footnote's setting to make. See ``providers.claude._build_envelope``.
+is not footnote's setting to make. See ``harnesses.claude._build_envelope``.
 
 So this module is NOT an auto-resume watchdog anymore: it cannot inject a resume
 into a stuck bypass session, and pretending otherwise would ship a daemon that
@@ -46,7 +46,7 @@ footnote bg session missing from the registry) stays the safe failure.
 
 Transcript truth owns liveness (``session_truth``; frozen ``state.json`` is
 phase metadata only). The socket write is the shipped
-``providers.claude.send_to_session`` (same transport as ``fno mail`` /
+``harnesses.claude.send_to_session`` (same transport as ``fno mail`` /
 dispatch); the state read is ``_claude_session_registry``.
 
 The held-socket resume is intentionally NOT replaced here by a speculative

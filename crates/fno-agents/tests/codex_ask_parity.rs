@@ -83,7 +83,7 @@ exit "${FAKE_CODEX_EXIT:-0}"
     fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
 }
 
-/// Drive the Python `providers.codex.create` or `.resume` and return `(exit_code, last_msg)`.
+/// Drive the Python `harnesses.codex.create` or `.resume` and return `(exit_code, last_msg)`.
 ///
 /// MUST hold the module-level `PATH_MUTEX` for the duration of the call.
 /// `cmd.env(...)` adds keys ON TOP of the inherited environment, so if a

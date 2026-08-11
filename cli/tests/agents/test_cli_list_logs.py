@@ -1,7 +1,7 @@
 """CLI-level tests for `fno agents list` and `fno agents logs`.
 
 These tests exercise the Typer entry points, not the underlying
-read.py / providers.claude module. The latter have their own unit tests
+read.py / harnesses.claude module. The latter have their own unit tests
 in test_read.py / test_harnesses_claude_read.py. Here we verify flag
 wiring, exit codes, TTY behavior, and the AC3-ERR allowed-values list.
 """

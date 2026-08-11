@@ -166,7 +166,7 @@ dispatch_ask
   │       ├─ select_provider(name, provider)  (exit 2 on mismatch / unknown)
   │       ├─ is_provider_available(chosen)    (exit 14 if CLI not on PATH)
   │       ├─ emit agent_ask_started
-  │       ├─ providers.claude.bg_create(...) (subprocess + parse short-id)
+  │       ├─ harnesses.claude.bg_create(...) (subprocess + parse short-id)
   │       │     ├─ argv ≤200KB → message via argv
   │       │     └─ argv >200KB → message via subprocess.run(input=msg)
   │       ├─ update_registry(append new AgentEntry)

@@ -28,7 +28,7 @@ The `--yolo` flag is provider-agnostic in spec but a no-op for claude (`claude -
 cli/src/fno/agents/
 ├── cli.py                       ← --yolo flag wiring
 ├── dispatch.py                  ← codex create + resume routes
-└── providers/
+└── harnesses/
     └── codex.py                 ← create() + resume() + argv helpers
 cli/scripts/smoke/
 └── capture-codex-jsonl.sh       ← smoke capture for event-vocabulary pinning

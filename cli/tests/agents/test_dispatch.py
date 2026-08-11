@@ -1,4 +1,4 @@
-"""Tests for fno.agents.dispatch and providers.base — TDD Red phase.
+"""Tests for fno.agents.dispatch and harnesses.base — TDD Red phase.
 
 Acceptance criteria from Task 1.2:
 

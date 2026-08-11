@@ -1,4 +1,4 @@
-"""Unit tests for ``providers.codex.resume`` follow-up invocation.
+"""Unit tests for ``harnesses.codex.resume`` follow-up invocation.
 
 Shares the JSONL replay infrastructure with ``test_harnesses_codex_create``.
 Resume differs from create in three ways:

@@ -103,6 +103,7 @@ fi
 python3 - "$ROOT" "$MODE" "$BASELINE_FILE" <<'PY'
 import os
 import re
+import subprocess
 import sys
 from collections import Counter
 from pathlib import Path
@@ -143,6 +144,13 @@ VENDOR_LITERALS = ("anthropic", "openai", "zai", "deepseek", "google")
 # Inline rather than a file on purpose: three axis-named directories exist in the
 # whole repository, and a separate file would buy a parser, a format validator,
 # and a malformed-entry branch to hold one line.
+# Declare NOT_AN_AXIS when a name merely contains an axis word without being
+# about that axis, such as a `models/` package of Pydantic types. Without it the
+# only green outcomes for such a directory are renaming a correct name or
+# writing a declaration this doc defines as its implemented axis, knowingly
+# false. The sentinel is still a reviewable claim, not a silent skip.
+NOT_AN_AXIS = "not-an-axis"
+
 DECLARED_PATH_AXIS = {
     # Provider records, accounts, rotation, failover, benchmarks.
     "cli/src/fno/adapters/providers": "provider",
@@ -235,10 +243,34 @@ def _stated_axis(name: str):
     return m.group(1).lower() if m else None
 
 
+def _repo_root_for(root: Path) -> Path:
+    """The git root above `root`, else `root` itself.
+
+    DECLARED_PATH_AXIS keys are repo-root-relative, so a directory scanned
+    under a SUBTREE root must still be keyed from the repo root. Keying from
+    the scan root instead made every correct directory read as undeclared:
+    `check-axis-vocabulary.sh --strict cli` reported
+    `src/fno/adapters/providers/` as a violation and advised renaming it.
+    """
+    proc = subprocess.run(
+        ["git", "-C", str(root), "rev-parse", "--show-toplevel"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode == 0 and proc.stdout.strip():
+        # Resolved: git prints the real path, while a caller's root can carry a
+        # symlinked prefix (on macOS /var vs /private/var). Comparing the two
+        # unresolved yields a relpath full of `..` rather than a repo-relative
+        # key, and every declaration misses.
+        return Path(proc.stdout.strip()).resolve()
+    return root.resolve()
+
+
 def scan(root: Path):
     findings = []
     observed_by_ext = {}
     axis_dirs = {}
+    repo_root = _repo_root_for(root)
     for dirpath, dirnames, filenames in os.walk(root):
         dirnames[:] = [d for d in dirnames if d not in EXCLUDE_DIR]
         # Collected in the SAME walk the content scan already performs, so the
@@ -247,7 +279,13 @@ def scan(root: Path):
         if rel_dir != ".":
             stated = _stated_axis(os.path.basename(dirpath))
             if stated:
-                axis_dirs[rel_dir.replace(os.sep, "/")] = stated
+                try:
+                    key = os.path.relpath(os.path.realpath(dirpath), repo_root)
+                except ValueError:
+                    key = rel_dir
+                if key.startswith(".."):
+                    key = rel_dir
+                axis_dirs[key.replace(os.sep, "/")] = stated
         for fn in filenames:
             ext = os.path.splitext(fn)[1]
             if ext not in SCANNABLE_EXT:
@@ -287,6 +325,8 @@ def _name_findings(axis_dirs: dict):
     out = []
     for rel, stated in sorted(axis_dirs.items()):
         declared = DECLARED_PATH_AXIS.get(rel)
+        if declared == NOT_AN_AXIS:
+            continue
         if declared is None:
             out.append(
                 f"{rel}/: undeclared axis-named directory (name states "
@@ -364,6 +404,46 @@ def _self_test():
         failures += 1
     else:
         print("caught planted declared-directory (no name findings) ok")
+
+    # A SUBTREE scan of a real git repo must key declarations from the repo
+    # root. Needs `git init`: without a repo above it, the scan root and the
+    # repo root coincide and the bug cannot reproduce.
+    d = Path(tempfile.mkdtemp(prefix="axis-subtree-"))
+    subprocess.run(["git", "init", "-q", str(d)], capture_output=True)
+    (d / declared_rel).mkdir(parents=True)
+    (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
+    subtree = d / Path(declared_rel).parts[0]
+    _, _, dirs = scan(subtree)
+    if _name_findings(dirs):
+        print(
+            f"FAILED: scanning the subtree {subtree.name}/ flagged a declared "
+            "directory",
+            file=sys.stderr,
+        )
+        failures += 1
+    else:
+        print("caught planted subtree-root scan (no name findings) ok")
+
+    # NOT_AN_AXIS silences a name that merely contains an axis word.
+    d = Path(tempfile.mkdtemp(prefix="axis-notaxis-"))
+    (d / "models").mkdir()
+    (d / "models" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _, _, dirs = scan(d)
+    before = len(_name_findings(dirs))
+    DECLARED_PATH_AXIS["models"] = NOT_AN_AXIS
+    try:
+        after = len(_name_findings(dirs))
+    finally:
+        del DECLARED_PATH_AXIS["models"]
+    if before == 1 and after == 0:
+        print("caught planted not-an-axis declaration ok")
+    else:
+        print(
+            f"FAILED not-an-axis: undeclared={before} (want 1), "
+            f"declared={after} (want 0)",
+            file=sys.stderr,
+        )
+        failures += 1
     return 1 if failures else 0
 
 
@@ -380,7 +460,12 @@ findings, observed, axis_dirs = scan(root_arg)
 # (wrong root, an EXCLUDE_DIR change, a walk that never reached content), not a
 # clean tree. An absence has two explanations and cannot tell them apart, so a
 # zero-collection result exits 2 rather than reporting green.
-if not axis_dirs:
+#
+# Scoped to a whole-repo scan: a SUBTREE root legitimately contains no
+# axis-named directory, and failing there would turn the control into a false
+# red of its own.
+_whole_repo_scan = root_arg.resolve() == _repo_root_for(root_arg).resolve()
+if _whole_repo_scan and not axis_dirs:
     print(
         "check-axis-vocabulary: name scan positive control failed "
         "(no axis-named directories collected anywhere under the root); "

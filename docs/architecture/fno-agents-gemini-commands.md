@@ -29,7 +29,7 @@ cli/src/fno/agents/
 ├── dispatch.py                  # + _gemini_create_path / _gemini_followup_path,
 │                                # + reconcile gemini branch, refactored stop/rm
 │                                # to use with_agent_lock_and_entry
-└── providers/
+└── harnesses/
     ├── base.py                  # + ReachabilityProbeError (lifted)
     ├── claude.py                # ClaudeReachabilityProbeError -> subclass alias
     ├── codex.py                 # SessionIndexReadError -> subclass alias
@@ -58,7 +58,7 @@ cli/tests/agents/
 
 ### 1. `ReachabilityProbeError` lift
 
-Previously, each provider defined its own tri-state probe error class (`ClaudeReachabilityProbeError` in `claude.py`, `SessionIndexReadError` in `codex.py`). Adding gemini meant a third class with the same shape. The lift moves the contract to `harnesses/base.py`:
+Previously, each provider defined its own tri-state probe error class (`ClaudeReachabilityProbeError` in `claude.py`, `SessionIndexReadError` in `codex.py`). On that trajectory, adding gemini meant a third class with the same shape. The lift moves the contract to `harnesses/base.py`:
 
 ```python
 class ReachabilityProbeError(RuntimeError):
@@ -176,7 +176,7 @@ The gemini integration was developed against gemini CLI 0.42.0 and the following
 
 Adding a fourth provider (e.g. `opencode`) requires zero `base.py` edits — the lifted `ReachabilityProbeError`, `with_agent_lock_and_entry`, and batched `reconcile_agents` already absorb a new provider's tri-state probe + lifecycle verbs. The `dispatch.py` routing extends by one elif clause.
 
-The deprecated alias removal is a separate follow-up. New code must `from fno.agents.harnesses.base import ReachabilityProbeError` rather than the legacy class names.
+The deprecated alias removal is a separate follow-up. New code imports `ReachabilityProbeError` from `fno.agents.harnesses.base` rather than using the legacy class names.
 
 ## See also
 

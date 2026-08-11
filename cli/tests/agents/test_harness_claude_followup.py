@@ -1,4 +1,4 @@
-"""Tests for the US2 follow-up surface on providers.claude.
+"""Tests for the US2 follow-up surface on harnesses.claude.
 
 Task 2.3:
 - send_to_session(sock_path, content, from_name) builds and writes the BG8 envelope

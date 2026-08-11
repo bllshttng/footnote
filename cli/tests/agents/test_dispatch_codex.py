@@ -1,6 +1,6 @@
 """Dispatch-layer tests for codex routing (Wave 2.1).
 
-Verifies ``dispatch_ask`` routes to ``providers.codex`` correctly for both
+Verifies ``dispatch_ask`` routes to ``harnesses.codex`` correctly for both
 create and resume paths. Provider invocation is monkeypatched so the
 dispatch logic is exercised in isolation; real subprocess testing lives
 in ``test_codex_integration_smoke.py`` and ``test_codex_signal_handling.py``.

@@ -1,4 +1,4 @@
-"""Unit tests for ``providers.codex.create`` JSONL parser + tee semantics.
+"""Unit tests for ``harnesses.codex.create`` JSONL parser + tee semantics.
 
 Uses the captured fixture from Wave 1.0 as the source-of-truth replay
 stream so the parser is exercised against the real codex 0.130.0

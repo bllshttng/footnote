@@ -64,7 +64,7 @@ footnote/                              # Flat root - plugin.json at .claude-plug
 ├── docs/                               # Documentation
 │   ├── architecture/                   # Architecture decision docs
 │   ├── guides/                         # User-facing guides
-│   └── providers/                      # Provider-specific docs
+│   └── harnesses/                      # Per-harness docs
 │
 ├── providers/                          # Provider abstraction layer
 ├── tests/                              # Test harnesses

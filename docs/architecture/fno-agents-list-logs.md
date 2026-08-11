@@ -15,7 +15,7 @@ cli/src/fno/agents/
 ├── cli.py                  ← Typer wiring; adds the `logs` verb
 ├── format.py               ← pure JSON + table renderers
 ├── read.py                 ← list_agents + read_logs entry points
-└── providers/
+└── harnesses/
     └── claude.py           ← claude_agents_json + logs shellouts
 ```
 
@@ -45,7 +45,7 @@ list_agents(filters, json_out, tty)
    ├─ load_registry()                      ← read-only, no flock
    ├─ apply filters (cwd / provider / status)
    ├─ if any claude entry survives filtering:
-   │    └─ providers.claude.claude_agents_json()
+   │    └─ harnesses.claude.claude_agents_json()
    │         ├─ subprocess.run(timeout=3.0, capture)
    │         ├─ on every failure mode → ({}, [warning])
    │         └─ on success → {short_id: {live_status, ...}}
@@ -73,7 +73,7 @@ read_logs(name, tail, follow, json_out, stdout, stderr)
    ├─ load_registry(); find by name (exit 13 if not found)
    ├─ provider == "claude":
    │    ├─ short_id missing on entry → exit 1 (data drift, not name-miss)
-   │    └─ providers.claude.logs(short_id, tail, follow, stdout, stderr)
+   │    └─ harnesses.claude.logs(short_id, tail, follow, stdout, stderr)
    │         ├─ follow=False → subprocess.run capture, tail slice in-process
    │         └─ follow=True  → subprocess.Popen line-buffered passthrough,
    │                            SIGINT forwarded to child on KeyboardInterrupt

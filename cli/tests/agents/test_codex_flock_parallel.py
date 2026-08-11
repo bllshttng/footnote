@@ -10,7 +10,7 @@ The strategy mirrors the existing claude-path test:
 
 1. Two ``multiprocessing.Process`` workers run ``dispatch_ask`` with the
    same agent name and ``provider="codex"``.
-2. Each worker monkeypatches ``providers.codex.create`` to sleep 0.5s
+2. Each worker monkeypatches ``harnesses.codex.create`` to sleep 0.5s
    inside the flock-bracketed code path so we can observe serialization
    via wall-clock.
 3. Driver asserts both workers reach a readiness gate before either

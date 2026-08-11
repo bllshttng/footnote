@@ -3,7 +3,7 @@
 Covers AC1-HP / AC1-ERR / AC1-UI / AC1-EDGE / AC1-FR from the design
 doc. Provider invocation is monkeypatched via the fake-claude script
 installed in test-isolated bin dirs OR via direct ``_subprocess_run``
-patching on ``providers.claude``.
+patching on ``harnesses.claude``.
 """
 from __future__ import annotations
 

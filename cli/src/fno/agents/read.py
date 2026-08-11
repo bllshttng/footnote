@@ -387,7 +387,7 @@ def read_logs(
 
     if follow:
         # Best-effort 500ms polling loop for codex/gemini. Claude logs
-        # delegate follow to providers.claude.logs which has its own
+        # delegate follow to harnesses.claude.logs which has its own
         # signal-safe implementation. OSError covers the open-time race
         # (log deleted/rotated between the tail read above and the
         # _follow_jsonl open below) — without it the operator sees a

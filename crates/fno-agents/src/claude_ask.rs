@@ -51,7 +51,7 @@ const SEND_SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const RETRY_BACKOFF: Duration = Duration::from_millis(10);
 
 /// Bounded best-effort window for resolving the full session UUID at spawn
-/// (mirrors `providers.claude._SPAWN_UUID_RETRY_*`). The happy path resolves on
+/// (mirrors `harnesses.claude._SPAWN_UUID_RETRY_*`). The happy path resolves on
 /// the first probe (claude writes `~/.claude/sessions/<pid>.json` before
 /// `claude --bg` returns the short-id); the retry only covers the rare write-lag
 /// window. `resolve_session_uuid_at_spawn` short-circuits when the sessions dir

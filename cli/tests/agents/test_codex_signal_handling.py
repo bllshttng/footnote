@@ -1,6 +1,6 @@
 """Real-subprocess AC-FR tests for the codex provider (Wave 2.2).
 
-Spawns providers.codex.create() / resume() against a controlled fake-codex
+Spawns harnesses.codex.create() / resume() against a controlled fake-codex
 shim that hangs forever. Verifies SIGINT and timeout signaling actually
 deliver and clean up — monkeypatched Popen cannot validate signal
 delivery (US3's lesson: mocked tests passed but the real-subprocess
@@ -30,7 +30,7 @@ FIXTURE_PATH = (
 @pytest.fixture
 def fake_codex_on_path(tmp_path, monkeypatch):
     """Install a ``codex`` symlink in tmp_path/bin pointing at the shim,
-    then prepend the dir to PATH so providers.codex picks it up.
+    then prepend the dir to PATH so harnesses.codex picks it up.
 
     Mode is selected via ``FAKE_CODEX_MODE`` env var (default 'create').
     Honored values: 'create', 'resume', 'complete-then-hang'. The
@@ -142,7 +142,7 @@ def test_wait_with_grace_killpg_terminates_subshells_after_turn_completed(
     so subshells get reaped if codex emits turn.completed but never exits.
 
     The shim emits a full happy-path JSONL stream (thread.started,
-    agent_message, turn.completed) then sleeps forever. providers.codex
+    agent_message, turn.completed) then sleeps forever. harnesses.codex
     breaks the read loop on turn.completed and calls _wait_with_grace
     with a default 5s grace. Without process-group cleanup, the shim's
     sleep would orphan and the test would hang. With os.killpg, the
@@ -203,10 +203,10 @@ def test_create_sigint_mid_stream_propagates_and_releases_child(
 ):
     """AC1-FR: SIGINT during create propagates to codex, no zombie left behind.
 
-    Spawns a subprocess that calls providers.codex.create() against the
+    Spawns a subprocess that calls harnesses.codex.create() against the
     hanging shim, then SIGINTs the parent after a short delay. Asserts:
       - the parent exits non-zero (KeyboardInterrupt re-raises out of
-        providers.codex._run_codex)
+        harnesses.codex._run_codex)
       - the codex child process is no longer running
     """
     # Drive the test via a child Python invocation so SIGINT delivery
