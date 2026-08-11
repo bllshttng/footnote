@@ -982,15 +982,24 @@ def _observe_model(harness: str, session_id: str) -> dict:
     and an absent file are different facts and keeping those apart is this
     field's whole job.
     """
-    if len(session_id) < _FULL_SESSION_ID_MIN:
-        return {
-            "kind": "unreadable",
-            "reason": f"session id {session_id!r} is prefix-shaped; "
-                      "a glob match cannot be proven to be this session",
-        }
     try:
         from fno.agents.session_truth import observed_model, resolve_transcript_path
 
+        # Ask the reader whether this harness is file-backed at all BEFORE the
+        # id-shape guard: opencode ids are 30 chars and gemini keeps no
+        # transcript, so a length test applied first would report a full id as
+        # "prefix-shaped" and send an operator hunting for a broken store that
+        # does not exist. Probed rather than hardcoded so the file-backed set
+        # stays owned by the reader.
+        not_backed = observed_model(harness, None)
+        if not_backed.get("kind") == "not-file-backed":
+            return not_backed
+        if len(session_id) < _FULL_SESSION_ID_MIN:
+            return {
+                "kind": "unreadable",
+                "reason": f"session id {session_id!r} is prefix-shaped; "
+                          "a glob match cannot be proven to be this session",
+            }
         return observed_model(
             harness, resolve_transcript_path(harness, session_id, os.getcwd())
         )
@@ -1041,9 +1050,15 @@ def _merge_observed_model(prior: "dict | None", fresh: dict) -> "dict | None":
         return None
     if prior.get("kind") not in {"observed", "observed-multiple"}:
         return fresh
-    if prior.get("model") == fresh.get("model"):
-        return fresh
     seen = list(prior.get("prior_models") or [])
+    if prior.get("model") == fresh.get("model"):
+        # Same model again. A row that has ALREADY recorded a disagreement stays
+        # observed-multiple: three stamps are reachable (acquire, release, plus
+        # a target-start re-acquire or a retried session add), and a third look
+        # landing back on the model of the second must not erase the first. A
+        # recorded failover that reverts to a clean single-model claim is the
+        # partial truth read as total, one more level in.
+        return {**fresh, "kind": prior["kind"], **({"prior_models": seen} if seen else {})}
     if prior.get("model") and prior["model"] not in seen:
         seen.append(prior["model"])
     return {**fresh, "kind": "observed-multiple", "prior_models": seen}
@@ -1122,9 +1137,12 @@ def append_session_record(
         started_at = _utc_session_stamp("started_at", started_at)
 
     # Read the transcript BEFORE the graph lock: the mutator runs under
-    # _acquire_flock and a bounded-but-real file read has no business holding it.
-    # Paid even when the node turns out to be absent, which is one seek on a call
-    # that fires a handful of times per node.
+    # _acquire_flock and this is not a cheap read - claude resolution globs every
+    # dir under the projects root and the model read seeks a 256KB tail, with a
+    # full streaming scan on the rare inconclusive one. It is paid on every call
+    # including the duplicate path and a missing node, which puts it on every
+    # `fno claim acquire` / `release`; that is affordable next to the graph
+    # rewrite those already do, but it does not belong inside the lock.
     observed = _observe_model(harness, session_id)
 
     result = {"found": False, "added": False}

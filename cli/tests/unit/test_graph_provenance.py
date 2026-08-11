@@ -2028,3 +2028,46 @@ def test_observed_model_reads_a_real_transcript_end_to_end(tmp_path, monkeypatch
     assert got["kind"] == "observed", got
     assert got["model"] == "claude-opus-5"
     assert got["samples"] >= 1
+
+
+def test_observed_model_multiple_survives_a_third_same_model_stamp(tmp_path, monkeypatch):
+    """AC (x-01ae): a recorded failover must not revert to a clean single-model
+    claim when a third stamp lands back on the model of the second.
+
+    Three stamps on one row are reachable today: acquire, release, and a
+    target-start re-acquire or a retried `backlog session add`. Collapsing
+    observed-multiple back to observed there is the partial truth read as
+    total, one more level in."""
+    g = _make_graph(tmp_path, [{"id": "ab-obs00009", "title": "t"}])
+    _patch_graph(monkeypatch, g)
+    _patch_observe(monkeypatch,
+                   {"kind": "observed", "model": "glm-5.2", "samples": 2},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 31},
+                   {"kind": "observed", "model": "claude-opus-5", "samples": 77})
+
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z")
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+    _add(g, "ab-obs00009", started_at="2026-08-11T01:00:00Z",
+         ended_at="2026-08-11T02:00:00Z")
+
+    got = _node_sessions(g, "ab-obs00009")[0]["observed_model"]
+    assert got["kind"] == "observed-multiple", "the recorded failover was erased"
+    assert got["prior_models"] == ["glm-5.2"]
+    assert got["samples"] == 77, "the freshest sample count still wins"
+
+
+def test_observed_model_not_file_backed_harness_is_not_called_prefix_shaped(tmp_path):
+    """AC (x-01ae): a harness that keeps no per-session file answers
+    not-file-backed regardless of its id shape.
+
+    A real opencode id is 30 chars - under the full-uuid floor - so an id-shape
+    guard applied first would report a FULL id as prefix-shaped and send an
+    operator hunting for a broken store that does not exist. Permanently
+    unavailable and unprovable are different facts."""
+    from fno.graph.store import _observe_model
+
+    got = _observe_model("opencode", "ses_09679f284ffeJv7NdBAoLQLnLZ")
+
+    assert got == {"kind": "not-file-backed"}
+    assert _observe_model("gemini", "whatever-id")["kind"] == "not-file-backed"
