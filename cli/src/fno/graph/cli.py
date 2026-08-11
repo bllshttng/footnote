@@ -1143,7 +1143,10 @@ def _create_node_impl(
 
 # -- add --
 
-@cli.command("add")
+@cli.command(
+    "add",
+    epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
+)
 def cmd_add(
     title: str = typer.Argument(..., help="Feature title"),
     domain: str = typer.Option("code", help="Domain profile"),
@@ -1220,7 +1223,10 @@ def cmd_add(
 
 # -- idea (sugar verb) --
 
-@cli.command("idea")
+@cli.command(
+    "idea",
+    epilog="Paired verb: `fno backlog remove <id>` deletes it (hidden; run its own --help).",
+)
 def cmd_idea(
     title: str = typer.Argument(..., help="Idea title - what is this?"),
     domain: str = typer.Option("code", help="Domain profile"),
@@ -2626,7 +2632,11 @@ def _intake_impl(
             pass
 
 
-@cli.command("intake", hidden=True)
+@cli.command(
+    "intake",
+    hidden=True,
+    epilog="Paired verb: `fno backlog remove <id>` deletes the node this creates.",
+)
 def cmd_intake(
     plan_paths: Optional[List[str]] = typer.Argument(default=None, help="Plan paths"),
     from_list: Optional[str] = typer.Option(None, "--from", help="Read paths from FILE or '-' for stdin"),
@@ -5686,11 +5696,42 @@ def cmd_cost(
 
 # -- remove --
 
-@cli.command("remove", hidden=True)
+@cli.command(
+    "remove",
+    hidden=True,
+    epilog="Reverses `add` / `idea` / `new` / `intake`. Softer options: `archive` "
+    "(keeps the node readable), `supersede` (records what replaced it), `defer` "
+    "(parks it).",
+)
 def cmd_remove(
     task_id: str = typer.Argument(..., help="Feature ID (ab-XXXXXXXX)"),
     force: bool = typer.Option(False, "--force", "-F", help="Skip cascade warning"),
 ) -> None:
+    """Delete a node from the graph permanently. This verb exists and works.
+
+    It had no docstring until 2026-08-11, which is why `fno help backlog --all`
+    printed its name against an empty description and read as a stub. An agent
+    consequently ruled that no delete verb existed and made that the
+    load-bearing reason for a decision, and another project kept 23 nodes it
+    believed un-file-able. Hence this paragraph: the verb's own help is the one
+    place a caller asking "can this node go away" will actually look.
+
+    A HARD delete, unlike ``archive``, which moves the node to
+    ``graph-archive.json`` and keeps it readable. Prefer ``archive`` for shipped
+    work, ``supersede`` when something replaced it, and ``defer`` when it is
+    merely not now. Reach for ``remove`` on a duplicate, a test artifact, or a
+    node filed by mistake - the cases where the record itself is the noise.
+
+    Repairs every edge that pointed at the node, because nothing else can once
+    the node is gone: drops it from every ``blocked_by``, from the symmetric
+    ``related`` lists, nulls a dependent's ``source_node_id`` rather than
+    leaving a dangling string, and releases contained children (the reconcile
+    heal deliberately skips a MISSING owner, so an orphan there is permanent).
+
+    Refuses when other nodes name it as a blocker, listing them, since removing
+    it silently unblocks work whose real dependency never landed. ``--force``
+    confirms that trade.
+    """
     from fno.graph._constants import has_node_id_prefix
     from fno.graph.store import read_graph, locked_mutate_graph
     from fno.graph._intake import _find_node, _find_dependents
@@ -5876,7 +5917,11 @@ def _expand_id_args(raw_ids: list[str]) -> list[str]:
     return out
 
 
-@cli.command("queue", hidden=True)
+@cli.command(
+    "queue",
+    hidden=True,
+    epilog="Paired verb: `fno backlog unqueue <id>...` reverses this (hidden; run its own --help).",
+)
 def cmd_queue(
     task_ids: List[str] = typer.Argument(
         ...,
@@ -9762,7 +9807,11 @@ def cmd_find(
 # -- new --
 
 
-@cli.command("new", hidden=True)
+@cli.command(
+    "new",
+    hidden=True,
+    epilog="Paired verb: `fno backlog remove <id>` deletes it.",
+)
 def cmd_new(
     title: str = typer.Argument(..., help="Title of the new entry"),
     domain: str = typer.Option("code", "--domain", help="Domain (fuzzy-suggested against history)"),

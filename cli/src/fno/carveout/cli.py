@@ -250,10 +250,20 @@ def resolve_carveouts(
 
     ``--reason`` exists for the row that should be retired WITHOUT filing
     anything: test residue, a duplicate of work already tracked elsewhere, a
-    carve-out overtaken by events. The backlog has no delete verb, so a junk
-    node is permanent while a reasoned resolve is a cheap, recorded correction.
-    Without the reason that same removal is indistinguishable from dropping the
-    work on the floor.
+    carve-out overtaken by events. Without the reason that same removal is
+    indistinguishable from dropping the work on the floor.
+
+    This docstring used to justify that flag by asserting the backlog had no
+    delete verb, so a junk node was permanent. That was FALSE: ``fno backlog
+    remove`` has always existed, and ``fno backlog reopen`` now reverses a
+    close. The claim was read by an agent, which repeated it to an operator as
+    the load-bearing reason for a ruling; another project kept 23 nodes it
+    believed un-file-able. Corrected here rather than deleted, because the
+    failure mode is worth naming: prose in a docstring is consulted as fact.
+
+    To CORRECT a carve-out rather than retire it, use ``fno carveout update``,
+    which preserves the id. Resolving and re-adding changes the id and loses
+    the content if the second step fails.
     """
     from fno.carveout.core import (
         consume_carveouts,
