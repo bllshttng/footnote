@@ -146,9 +146,17 @@ def _merged_pr_for_head(base: str, cwd: str) -> tuple:
         return (0, "")
     parts = out.split()
     try:
-        return (int(parts[0]), parts[1] if len(parts) > 1 else "")
+        number = int(parts[0])
     except (ValueError, IndexError):
         return (_PROBE_FAILED, "")
+    head = parts[1] if len(parts) > 1 else ""
+    if not head or head == "null":
+        # A merged PR with no readable head oid leaves (i) UNEVALUATED, not
+        # clean: without the oid the caller cannot compare it to the live tip,
+        # and returning the number alone would fall through to `ok` - a green
+        # answer nobody computed, the exact defect this module guards.
+        return (_PROBE_FAILED, "")
+    return (number, head)
 
 
 def _fetch_ref(ref: str, cwd: str) -> bool:
@@ -162,8 +170,22 @@ def _fetch_ref(ref: str, cwd: str) -> bool:
     return fetch is not None and fetch.ok
 
 
-def _fetch_refs(base: str, default: str, cwd: str) -> bool:
-    """Refresh both refs. True once the DEFAULT branch is current.
+def _base_ref_gone(base: str, cwd: str) -> bool:
+    """True only when the remote CONFIRMS ``base`` no longer exists.
+
+    Asked only when the base fetch failed, to separate the two reasons it can:
+    the branch was deleted (the state this module exists to catch, where the
+    pinned local ``origin/<base>`` is still the truth) from a transient error
+    (where that same local ref is merely stale). A probe error here answers
+    False, so an unanswerable question keeps the git-side checks blind rather
+    than letting them trust a ref nobody refreshed.
+    """
+    res = _probe(["git", "ls-remote", "--heads", "origin", f"refs/heads/{base}"], cwd)
+    return res is not None and res.ok and not res.stdout.strip()
+
+
+def _fetch_refs(base: str, default: str, cwd: str) -> Tuple[bool, bool]:
+    """Refresh both refs; ``(default_current, base_ref_trustworthy)``.
 
     One fetch carrying both refspecs fails wholesale when either ref is gone,
     and the base ref being gone is not an edge case: `delete_branch_on_merge`
@@ -175,10 +197,18 @@ def _fetch_refs(base: str, default: str, cwd: str) -> bool:
     commit that landed, so (i) matches it against the merged PR's head and (ii)
     still resolves ancestry. A base that never existed locally leaves
     `_rev` empty and the verdict stays `unknown`, as before.
+
+    A FAILED base fetch is not the same as a deleted branch, though, and the
+    fetch alone cannot tell them apart. Trusting the local ref either way cuts
+    both ways: a transient failure on a branch that has since moved on reads as
+    "landed and unmoved" and REFUSES a healthy stacked PR, while a local ref
+    that predates the base's last push reads as moved and lets the real stale
+    base through. So a failed base fetch is trusted only once ``git ls-remote``
+    confirms the branch is actually gone.
     """
     default_ok = _fetch_ref(default, cwd)
-    _fetch_ref(base, cwd)  # best-effort: a deleted base is itself the signal
-    return default_ok
+    base_ok = _fetch_ref(base, cwd) or _base_ref_gone(base, cwd)
+    return default_ok, base_ok
 
 
 def _rev(ref: str, cwd: str) -> str:
@@ -227,9 +257,10 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
         return ("ok", f"base is the default branch ({default})")
 
     merged, merged_head = _merged_pr_for_head(base, cwd)
-    fetched = _fetch_refs(base, default, cwd)
-    base_tip = _rev(f"origin/{base}", cwd) if fetched else ""
-    contained = _base_contained_in_default(base, default, cwd) if fetched else None
+    fetched, base_current = _fetch_refs(base, default, cwd)
+    git_ok = fetched and base_current
+    base_tip = _rev(f"origin/{base}", cwd) if git_ok else ""
+    contained = _base_contained_in_default(base, default, cwd) if git_ok else None
     retarget = f"retarget it first: gh pr edit {pr_number} --base {default}"
 
     # (i) fires only when the branch has not moved since that PR merged it.
@@ -268,7 +299,7 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
     # its half of the question unanswered, so it is `unknown` rather than a
     # pass, and the reason names WHICH probe - a caller reading "unknown" alone
     # cannot tell a broken gh from a broken git.
-    git_blind = not fetched or contained is None or not base_tip
+    git_blind = not git_ok or contained is None or not base_tip
     if merged == _PROBE_FAILED and git_blind:
         return ("unknown", f"both lineage probes failed for base '{base}' (gh and git)")
     if merged == _PROBE_FAILED:

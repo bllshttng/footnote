@@ -37,6 +37,7 @@ class FakeRun:
         list_fails: bool = False,
         fetch_fails: bool = False,
         base_fetch_fails: bool = False,
+        base_still_on_remote: bool = False,
         git_missing: bool = False,
     ) -> None:
         self.default = default
@@ -50,6 +51,7 @@ class FakeRun:
         self.list_fails = list_fails
         self.fetch_fails = fetch_fails
         self.base_fetch_fails = base_fetch_fails
+        self.base_still_on_remote = base_still_on_remote
         self.git_missing = git_missing
         self.calls: list[list[str]] = []
 
@@ -80,6 +82,11 @@ class FakeRun:
             if cmd[1] == "fetch":
                 gone = self.base_fetch_fails and f"refs/heads/{self.base}:" in cmd[-1]
                 return Result(1 if (self.fetch_fails or gone) else 0, "", "")
+            if cmd[1] == "ls-remote":
+                # Empty stdout = the branch is really gone; a line = still there.
+                if self.base_still_on_remote:
+                    return Result(0, f"{MOVED}\trefs/heads/{self.base}\n", "")
+                return Result(0, "", "")
             if cmd[1] == "rev-parse":
                 return Result(0, self.base_tip + "\n", "")
             if cmd[1] == "merge-base":
@@ -174,6 +181,32 @@ def test_deleted_base_branch_still_refuses(patch_run):
     verdict, why = _base_lineage.lineage_verdict(800, "/repo")
     assert verdict == "stale"
     assert "#789" in why
+
+
+def test_transient_base_fetch_failure_does_not_forge_a_refusal(patch_run):
+    """A failed base fetch is not the same as a deleted branch.
+
+    `origin/<base>` is then whatever the last fetch left, so a base that has
+    since moved on still reads as "landed and unmoved" and would REFUSE a
+    healthy stacked PR. `git ls-remote` separates the two; a branch still on
+    the remote leaves the git side blind, which is `unknown`, not `stale`.
+    """
+    patch_run(
+        FakeRun(base_fetch_fails=True, base_still_on_remote=True, merged_pr="789",
+                merged_head=LANDED, base_tip=LANDED, contained=True)
+    )
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "unknown"
+    assert "ancestry probe" in why
+
+
+def test_merged_pr_without_a_head_oid_is_unknown_not_ok(patch_run):
+    """(i) cannot be evaluated without the oid to compare to the live tip, and
+    an unevaluated check must never fall through to a pass."""
+    patch_run(FakeRun(merged_pr="789", merged_head="null", contained=False))
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "unknown"
+    assert "merged-PR probe" in why
 
 
 def test_failed_probe_does_not_mask_a_stale_verdict(patch_run):

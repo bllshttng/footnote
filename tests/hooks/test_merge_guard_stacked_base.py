@@ -103,6 +103,10 @@ def test_other_repo_is_skipped(monkeypatch):
     calls = _patch_run(monkeypatch, _Proc(3))
     assert git_protection._stacked_base_refusal("gh pr merge 42 --repo other/repo") is None
     assert git_protection._stacked_base_refusal("gh pr merge 42 -R other/repo") is None
+    # The attached shorthand gh also accepts. An equality test on the token
+    # missed exactly the form that carries the value.
+    assert git_protection._stacked_base_refusal("gh pr merge 42 -Rother/repo") is None
+    assert git_protection._stacked_base_refusal("gh pr merge 42 --repo=other/repo") is None
     assert "cmd" not in calls
 
 
