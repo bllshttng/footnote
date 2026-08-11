@@ -510,7 +510,10 @@ fn command_only_decision(text: &str) -> Option<i32> {
         );
         return Some(1);
     }
-    if text.contains('\n') || text.contains('\r') {
+    // A trailing terminator (the newline `echo` appends) is harmless: the paste
+    // submits the command, then an empty turn. Refuse only genuine second-line
+    // content, which rides in as a second submitted turn.
+    if trimmed.contains('\n') || trimmed.contains('\r') {
         eprintln!(
             "mail-inject: an unframed payload must be a single line. A second line rides \
              in as trailing content on the submitted turn."
@@ -839,6 +842,9 @@ mod tests {
         // An unwrapped single-line slash command is the documented unframed shape.
         assert_eq!(command_only_decision("/code-review"), None);
         assert_eq!(command_only_decision("  /compact  "), None);
+        // A trailing terminator (the newline `echo` appends) is harmless and passes.
+        assert_eq!(command_only_decision("/code-review\n"), None);
+        assert_eq!(command_only_decision("/compact\r\n"), None);
     }
 
     #[test]
@@ -858,10 +864,11 @@ mod tests {
 
     #[test]
     fn command_only_refuses_multi_line_unwrapped() {
-        // A second line rides in as trailing content on the submitted turn.
+        // A second line of CONTENT rides in as a second submitted turn. A trailing
+        // terminator (covered above) does not, since trim() removes it.
         assert_eq!(command_only_decision("/cmd\nsecond line"), Some(1));
         assert_eq!(command_only_decision("prose one\nprose two"), Some(1));
-        assert_eq!(command_only_decision("/cmd\r\n"), Some(1));
+        assert_eq!(command_only_decision("/cmd\n\nsecond"), Some(1));
     }
 
     #[test]

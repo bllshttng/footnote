@@ -9,10 +9,12 @@ The same rules run on mail, PR bodies, and changed markdown.
 
 1. A list-item sentence is 20 words or fewer.
    Every other sentence is 25 words or fewer.
-2. No semicolon. Write two sentences.
+2. No semicolon.
+   Write two sentences.
 3. No "should", "would", "may", "might", or "could".
    Write "can", "will", or "must".
-4. No contractions. Write "do not", not "don't".
+4. No contractions.
+   Write "do not", not "don't".
 5. If a sentence carries "if" or "when", that word starts the sentence.
 
 ## Rule 1 splits on block type

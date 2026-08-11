@@ -123,7 +123,7 @@ def test_cmd_send_kind_heads_up_writes_durable_thread(isolated, runner) -> None:
         "--to-project", "acme-docs",
         "--kind", "heads-up",
         "--from-name", "acme-web",
-        "locked: schema change; impact: migration",
+        "locked schema change, impact is a migration",
     )
 
     assert result.exit_code == 0, result.output
@@ -220,7 +220,7 @@ def test_cmd_send_body_flag(isolated, runner) -> None:
         "--to-project", "acme-docs",
         "--kind", "heads-up",
         "--from-name", "acme-web",
-        "--body", "spec'd: feature X; touches surface api/",
+        "--body", "feature X touches the surface layer",
     )
     assert result.exit_code == 0, result.output
     threads = read_unread_threads("acme-docs")

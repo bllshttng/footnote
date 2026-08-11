@@ -482,7 +482,13 @@ def _style_added_lines(
         capture_output=True,
         text=True,
     )
-    changed = [line for line in diff_files.stdout.splitlines() if line.strip()]
+    # Markdown only: the gate is "changed markdown", so a PR adding a shell or
+    # Python file under skills/ is not style-checked as prose.
+    changed = [
+        line
+        for line in diff_files.stdout.splitlines()
+        if line.strip() and line.endswith(".md")
+    ]
     violations = []
     inspected = 0
     for rel in changed:

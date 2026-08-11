@@ -158,6 +158,26 @@ def test_frontmatter_removed():
     assert not rule_set(body)
 
 
+def test_frontmatter_does_not_misalign_block_type():
+    # Frontmatter is blanked line-for-line (not stripped), so the raw/masked line
+    # zip stays aligned and a long list item after frontmatter gets the 20-word
+    # list cap, not the 25-word paragraph cap.
+    body = "---\nkey: value\n---\n- " + " ".join("w" for _ in range(22)) + "."
+    assert 1 in rule_set(body)
+
+
+def test_markdown_link_line_is_not_a_log_line():
+    # [See](x.md) is a markdown link, not a log level. It must not be blanked, or
+    # a contraction in the line would slip past rule 4.
+    assert 4 in rule_set("[See](docs/x.md) the docs have don't in them.")
+
+
+def test_same_line_html_comment_keeps_trailing_prose():
+    # A comment that opens and closes on one line strips only the span, so prose
+    # trailing it is still checked.
+    assert 4 in rule_set("<!-- note --> trailing prose has don't in it.")
+
+
 def test_html_comment_removed():
     body = "intro. <!-- don't should; x --> outro."
     assert not rule_set(body)

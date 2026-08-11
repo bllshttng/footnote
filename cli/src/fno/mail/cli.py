@@ -596,6 +596,10 @@ def cmd_reply(
     cascade_of: Optional[str] = typer.Option(None, "--cascade-of", help="Originating msg-id for cascades"),
     from_project: Optional[str] = typer.Option(None, "--from", help="Sender project (overrides settings.yaml)"),
     json_out: bool = typer.Option(False, "--json", "-J", help="Print {msg_id, thread_path} as JSON"),
+    style_exception: str | None = typer.Option(
+        None, "--style-exception",
+        help="Bypass the style check for this body with a stated reason.",
+    ),
 ) -> None:
     """Reply to a message, routed by the answered message's lane.
 
@@ -622,7 +626,7 @@ def cmd_reply(
     kind = _validate_kind(kind)
     body_text = _read_body(body, body_file, body_arg)
     _enforce_body_cap(body_text)
-    _enforce_style(body_text)
+    _enforce_style(body_text, allow_reason=style_exception)
 
     # Directed-lane routing (x-8045): look the --to msg-id up on the durable bus
     # and answer name/session/node mail back to its original sender. Anything else

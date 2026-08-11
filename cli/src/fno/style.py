@@ -75,7 +75,7 @@ _COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
 
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LOG_RE = re.compile(
-    r"^(\[[A-Za-z]+\]|ERROR\b|WARN(?:ING)?\b|INFO\b|DEBUG\b|TRACE\b"
+    r"^(\[[A-Z]{2,}\]|ERROR\b|WARN(?:ING)?\b|INFO\b|DEBUG\b|TRACE\b"
     r"|\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2})"
 )
 _LIST_MARKER_RE = re.compile(r"^\s{0,3}([-*+]|\d+\.)\s+")
@@ -247,14 +247,31 @@ def _mask(text: str) -> str:
     HTML comments, table rows, log lines. Replaced by one placeholder token:
     inline code spans, link targets, double-quoted spans, flags, paths, URLs,
     dotted filenames, and underscore identifiers.
+
+    Every input line maps to one output line (blanked lines become ""), so the
+    caller can zip the raw and masked texts line-for-line to read block type off
+    the raw line. Frontmatter is blanked rather than stripped for the same reason.
     """
-    text = _strip_frontmatter(text)
     out: list[str] = []
     in_fence = False
     fence_char = ""
     in_comment = False
-    for raw_line in text.split("\n"):
+    in_frontmatter = False
+    lines = text.split("\n")
+    for index, raw_line in enumerate(lines):
         lead = raw_line.lstrip()
+
+        # Frontmatter: a leading `--- ... ---` block. Blank it line-for-line so
+        # the masked text keeps the same line count as the raw text.
+        if index == 0 and lead == "---":
+            in_frontmatter = True
+            out.append("")
+            continue
+        if in_frontmatter:
+            if lead == "---":
+                in_frontmatter = False
+            out.append("")
+            continue
 
         if in_comment:
             if "-->" in raw_line:
@@ -280,8 +297,10 @@ def _mask(text: str) -> str:
         if lead.startswith("<!--"):
             if "-->" not in raw_line:
                 in_comment = True
-            out.append("")
-            continue
+                out.append("")
+                continue
+            # A same-line comment falls through: _mask_inline strips just the
+            # span, so prose trailing the comment is still checked.
         if lead.startswith("|"):
             out.append("")
             continue
@@ -304,13 +323,3 @@ def _mask_inline(line: str) -> str:
     line = _FILENAME_RE.sub(_PLACEHOLDER, line)
     line = _IDENT_RE.sub(_PLACEHOLDER, line)
     return line
-
-
-def _strip_frontmatter(text: str) -> str:
-    if not text.startswith("---\n") and not text.startswith("---\r\n"):
-        return text
-    lines = text.split("\n")
-    for index in range(1, len(lines)):
-        if lines[index].strip() == "---":
-            return "\n".join(lines[index + 1:])
-    return text
