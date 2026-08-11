@@ -66,8 +66,12 @@ _PLACEHOLDER = "x"
 # Sentence-split guard: these abbreviations keep their period without splitting.
 _ABBREVIATIONS = ("e.g.", "i.e.", "vs.", "etc.")
 
-# Exception marker scanned in the raw text (line form and HTML-comment form).
-_EXCEPTION_RE = re.compile(r"style-exception:\s*(.+?)\s*$", re.MULTILINE)
+# Exception markers. The line form starts a physical line (mail/PR body); the
+# comment form is the markdown escape. Both require a non-empty reason. A
+# mid-sentence mention of the marker (in prose or a code span) does NOT count,
+# so a doc that describes the escape is not exempted by the description.
+_LINE_EXCEPTION_RE = re.compile(r"^\s*style-exception:\s*(.+?)\s*$", re.MULTILINE)
+_COMMENT_EXCEPTION_RE = re.compile(r"<!--\s*style-exception:\s*(.+?)\s*-->")
 
 _FENCE_OPEN_RE = re.compile(r"^[ \t]*(`{3,}|~{3,})")
 _LOG_RE = re.compile(
@@ -109,12 +113,12 @@ def has_exception(text: str) -> str | None:
     form (``<!-- style-exception: why -->``), since both contain the marker. An
     empty reason does not count. Returns ``None`` when no marker is present.
     """
-    match = _EXCEPTION_RE.search(text)
+    match = _LINE_EXCEPTION_RE.search(text)
+    if match is None:
+        match = _COMMENT_EXCEPTION_RE.search(text)
     if match is None:
         return None
     reason = match.group(1).strip()
-    if reason.endswith("-->"):
-        reason = reason[:-3].strip()
     return reason or None
 
 

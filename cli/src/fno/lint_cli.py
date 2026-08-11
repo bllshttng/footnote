@@ -432,11 +432,16 @@ def style(
     elif stdin:
         import sys
 
-        violations = style_mod.check(sys.stdin.read(), surface=surface)
+        text = sys.stdin.read()
+        if style_mod.has_exception(text):
+            raise typer.Exit(0)
+        violations = style_mod.check(text, surface=surface)
     elif files:
         violations = []
         for path in files:
             text = path.read_text(encoding="utf-8")
+            if style_mod.has_exception(text):
+                continue
             violations.extend(style_mod.check(text, surface=surface))
     else:
         typer.echo("style: pass --stdin, --files, or --diff-base.", err=True)
