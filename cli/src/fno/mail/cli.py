@@ -1836,11 +1836,27 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     # "A path exists" is the whole claim.
     if check:
         if entry.mux:
-            # The pane paste never reaches the roster or a control socket, so the
-            # row recording a pane IS the path. Not verified against the mux server
-            # here: a pane that has since exited still reads injectable, and the
-            # send answers that in ~1s rather than a second subprocess answering it
-            # now.
+            # SELF on the mux lane has no path, and this is not the stale-pane
+            # caveat -- it is structural. `_raw_send` pastes with `guarded=True`,
+            # which rides the server-side turn-taken interlock and refuses
+            # EXIT_TARGET_NOT_IDLE while the recipient is mid-turn. A session
+            # asking about ITSELF is mid-turn by construction: it is running this
+            # command inside its own turn. So a live pane, not merely an exited
+            # one, can never self-inject through this lane, and reporting a path
+            # would be the same false prescription this flag exists to prevent.
+            # The control.sock lane differs for a real reason: it pastes into the
+            # input box and retries the CR, so a mid-turn recipient still lands it.
+            if self_ok or _self_recipient(name, resolved_session_id=session_id):
+                print(
+                    "not-injectable: mux-pane is guarded and refuses a mid-turn "
+                    "recipient, and a session asking about itself is mid-turn by "
+                    "construction; ask your operator to type the verb instead"
+                )
+                raise typer.Exit(code=1)
+            # A PEER on the mux lane can be idle, so the row recording a pane IS
+            # the path. Not verified against the mux server here: a pane that has
+            # since exited still reads injectable, and the send answers that in
+            # about a second rather than a second subprocess answering it now.
             print("injectable: mux-pane (a paste can still refuse a mid-turn pane)")
             raise typer.Exit(code=0)
         injectable, reason = mail_inject_probe(session_id)

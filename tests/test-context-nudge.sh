@@ -84,7 +84,7 @@ cd "$SBX"   # isolate: hook latches (.fno/), git root (carveouts), and events al
 
 # registry.json on disk at state_dir/agents/registry.json: {"schema_version":13,"agents":[...]}.
 write_registry() {
-  local king_crown="$1" has_children="$2" has_peer="${3:-no}" king_mux="${4:-no}"
+  local king_crown="$1" has_children="$2" has_peer="${3:-no}"
   local children='[]' peers='[]'
   if [ "$has_children" = "yes" ]; then
     children='[{"name":"kfad-a","harness":"claude","cwd":"/tmp","log_path":"/tmp/a","status":"live","short_id":"a","spawned_by_session":"'"$KING_SID"'"},
@@ -99,23 +99,13 @@ write_registry() {
   if [ "$king_crown" = "yes" ]; then
     crown_level='1'; crown_scope="\"$SCOPE\""; crown_grantor='"human"'
   fi
-  # A mux-hosted king row is the INJECTABLE shape: the pane-paste lane reaches a
-  # prompt line without a daemon roster or a control socket, so it is the one
-  # positive control for the compact gate that a sandbox can produce. Without it
-  # the row takes the control.sock lane, whose roster this sandboxed HOME has not
-  # got, which is the not-injectable shape.
-  local mux='null'
-  if [ "$king_mux" = "yes" ]; then
-    mux='{"session":"fno","pane_id":"%1"}'
-  fi
-  jq -n --argjson children "$children" --argjson peers "$peers" --argjson mux "$mux" \
+  jq -n --argjson children "$children" --argjson peers "$peers" \
     --argjson cl "$crown_level" --argjson cs "$crown_scope" --argjson cg "$crown_grantor" '{
     schema_version: 13,
     agents: ( [{
       name:"king-test", harness:"claude", cwd:"/tmp", log_path:"/tmp/k",
       status:"live", short_id:"'"$KING_SID"'",
       harness_session_id:"'"$KING_SID"'",
-      mux:$mux,
       crown_level:$cl, crown_scope:$cs, crown_grantor:$cg
     }] + $children + $peers )
   }' > "$SBX/.fno/agents/registry.json"
@@ -396,15 +386,37 @@ write_transcript "$SBX/t.jsonl" 500000
 run_hook "$(payload "$SBX/t.jsonl")"
 assert_contains "gate: no path -> says so"            "$OUT" 'has NO injection path'
 assert_contains "gate: no path -> names the operator" "$OUT" 'ask your operator to type /compact'
-assert_absent   "gate: no path -> prescribes no self-inject" "$OUT" '--to-self --raw'
+# The needle is the PRESCRIPTION, not the substring: this branch legitimately
+# quotes the `--to-self --raw --check` command it ran, so a bare '--to-self --raw'
+# needle fails on the diagnostic rather than on advice to self-inject.
+assert_absent   "gate: no path -> prescribes no self-inject" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
 # The reason a session must not read as a liveness verdict, stated where it is read.
 assert_contains "gate: miss is not a death claim" "$OUT" 'NOT a claim that you are dead'
 
-# injectable: a mux-hosted row reaches a prompt line by pane paste, needing neither
-# roster nor control socket. Positive control for the same gate.
+# injectable: driven by a shim, because no fixture can honestly produce this answer
+# for a SELF address in a sandbox. The mux lane is guarded and refuses a mid-turn
+# recipient, and a session asking about itself is always mid-turn, so only the
+# control.sock lane can answer yes to self - and that needs a real daemon roster
+# this sandbox has no business faking. What is under test here is the hook's
+# BRANCHING on the verdict; which verdict each lane deserves is pinned in
+# cli/tests/test_mail_send_check.py, next to the code that decides it.
 rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
-write_registry no no no yes                   # uncrowned, mux-hosted -> keystroke lane
+check_shim() {  # check_shim <line-to-print> <exit-code>
+  SHIMDIR="$(mktemp -d)"
+  { printf '#!/usr/bin/env bash\n'
+    printf 'if [ "$1" = "mail" ] && [ "$2" = "send" ]; then\n'
+    printf '  for a in "$@"; do [ "$a" = "--check" ] && { printf "%%s\\n" %q; exit %s; }; done\n' "$1" "$2"
+    printf 'fi\n'
+    printf 'exec %q "$@"\n' "$BINDIR/fno"
+  } > "$SHIMDIR/fno"
+  chmod +x "$SHIMDIR/fno"
+  OLD_PATH="$PATH"; PATH="$SHIMDIR:$PATH"
+}
+unshim() { PATH="$OLD_PATH"; rm -rf "$SHIMDIR"; }
+
+check_shim 'injectable: control.sock (a paste can still refuse a busy prompt)' 0
 run_hook "$(payload "$SBX/t.jsonl")"
+unshim
 assert_contains "gate: path -> prescribes the front door" "$OUT" "fno mail send '/compact <brief-path>' --to-self --raw"
 assert_absent   "gate: path -> no operator fallback"      "$OUT" 'ask your operator to type'
 # A path is not a landing, and the text must not promise one.
@@ -421,21 +433,9 @@ assert_contains "gate: path is not a landing" "$OUT" 'A path is not a landing'
 # `mail send ... --check` and delegates everything else to the real fno, so the
 # rest of the nudge (plan_path, handoff path, carveouts) behaves normally.
 rm -f "$SBX/.fno"/.context-nudge-* 2>/dev/null
-SHIMDIR="$(mktemp -d)"
-cat > "$SHIMDIR/fno" <<SHIM
-#!/usr/bin/env bash
-if [ "\$1" = "mail" ] && [ "\$2" = "send" ]; then
-  for a in "\$@"; do [ "\$a" = "--check" ] && {
-    echo "unmeasurable: probe-unavailable (the fno-agents binary is absent, too old to carry --probe, or did not answer; run \\\`fno doctor\\\`)"
-    exit 3
-  }; done
-fi
-exec "$BINDIR/fno" "\$@"
-SHIM
-chmod +x "$SHIMDIR/fno"
-OLD_PATH="$PATH"; PATH="$SHIMDIR:$PATH"
+check_shim 'unmeasurable: probe-unavailable (the fno-agents binary is absent, too old to carry --probe, or did not answer)' 3
 run_hook "$(payload "$SBX/t.jsonl")"
-PATH="$OLD_PATH"; rm -rf "$SHIMDIR"
+unshim
 assert_contains "gate: unmeasured -> says it did not measure" "$OUT" 'could not be measured here'
 assert_absent   "gate: unmeasured -> claims no path"          "$OUT" 'has NO injection path'
 assert_absent   "gate: unmeasured -> claims a path"           "$OUT" 'HAS an injection path'
