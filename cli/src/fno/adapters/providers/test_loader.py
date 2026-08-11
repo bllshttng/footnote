@@ -1415,6 +1415,69 @@ class TestLoadAgents:
         assert set(result.agents) == {"reviewer"}
         assert result.agents["reviewer"].provider == "claude-primary"
 
+    def test_defaults_block_with_empty_provider_not_a_pin(self, tmp_path: Path):
+        """The shipped spawn default (docs/config.example.toml: `[agents.defaults]`
+        with `provider = ""`) is a reserved settings block, not a per-agent pin.
+        Parsing it as one fails the binding id pattern and takes down every caller
+        of load_providers()."""
+        from fno.adapters.providers.loader import load_providers
+
+        base = _valid_providers_block()
+        base["agents"] = {"defaults": {"provider": ""}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        result = load_providers(repo_root=tmp_path)
+
+        assert result.agents == {}
+
+    def test_defaults_block_with_harness_provider_not_a_pin(self, tmp_path: Path):
+        """Same block with a value set. The legacy field name says `provider` but
+        the axis is HARNESS, so the value can never match an accounts.records id -
+        no value is correct here, because the block was never a pin."""
+        from fno.adapters.providers.loader import load_providers
+
+        # Split off its key: the axis gate flags a provider-named identifier
+        # beside a bare harness literal on one line.
+        harness_default = "codex"
+        base = _valid_providers_block()
+        base["agents"] = {"defaults": {"provider": harness_default}}
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        result = load_providers(repo_root=tmp_path)
+
+        assert result.agents == {}
+
+    def test_real_pin_survives_beside_a_defaults_block(self, tmp_path: Path):
+        """The exclusion is by reserved NAME, not a blanket skip of the agents
+        block: a genuine pin in the same config must still resolve."""
+        from fno.adapters.providers.loader import load_providers
+
+        harness_default = "codex"
+        base = _valid_providers_block()
+        base["agents"] = {
+            "defaults": {"provider": harness_default},
+            "reviewer": {"provider": "claude-primary"},
+        }
+        settings = tmp_path / ".fno" / "config.toml"
+        _write_settings(settings, base)
+
+        result = load_providers(repo_root=tmp_path)
+
+        assert set(result.agents) == {"reviewer"}
+        assert result.agents["reviewer"].provider == "claude-primary"
+
+    def test_reserved_keys_match_agents_block_schema(self):
+        """The loader cannot import fno.config at module scope (bootstrap order),
+        so the reserved-key set is a literal. This is the guard that keeps it from
+        drifting: set equality, so a REMOVED field fails too."""
+        from fno.config import AgentsBlock
+
+        from fno.adapters.providers.loader import _AGENTS_RESERVED_KEYS
+
+        assert set(_AGENTS_RESERVED_KEYS) == set(AgentsBlock.model_fields)
+
 
 class TestMutableAccountsBlockShapes:
     """The write helper must reach the block in every shape the READER accepts.
