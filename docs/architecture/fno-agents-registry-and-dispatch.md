@@ -27,7 +27,7 @@ fno agents ping
 | `cli/src/fno/agents/lock.py` | `hold_agent_lock(name, registry_path, timeout, on_wait)` context manager wrapping the per-agent flock |
 | `cli/src/fno/agents/harnesses/claude.py` | `--bg` create + messaging-socket follow-up |
 | `cli/src/fno/agents/harnesses/codex.py` | `exec` create + `exec resume` follow-up |
-| `cli/src/fno/agents/harnesses/gemini.py` | `-p --session-id` create + `-p --resume` follow-up |
+| `gemini.py` (removed; gemini is pane-hosted, with no Python ask adapter) | `-p --session-id` create + `-p --resume` follow-up |
 
 ## Storage shape
 

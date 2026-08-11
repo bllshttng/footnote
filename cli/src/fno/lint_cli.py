@@ -485,6 +485,11 @@ def _style_added_lines(
     # Pre-rename paths, keyed by new path. Resolved from an UNSCOPED name-status
     # pass because rename detection needs both sides visible, which a per-file
     # pathspec denies it.
+    # Failing loud rather than degrading: an empty result here is
+    # indistinguishable from "no renames", and the fallback is the exact bug
+    # this resolution exists to prevent. Every moved doc would silently have
+    # its whole body billed as authored prose while the gate still reported N
+    # files inspected.
     renames: dict[str, str] = {}
     name_status = subprocess.run(
         ["git", "diff", "--name-status", "--find-renames", f"{diff_base}...HEAD"],
@@ -492,6 +497,13 @@ def _style_added_lines(
         capture_output=True,
         text=True,
     )
+    if name_status.returncode != 0:
+        typer.echo(
+            "style: rename detection failed "
+            f"({diff_base}...HEAD): {name_status.stderr.strip()}",
+            err=True,
+        )
+        raise typer.Exit(2)
     for line in name_status.stdout.splitlines():
         parts = line.split("\t")
         if len(parts) == 3 and parts[0].startswith("R"):

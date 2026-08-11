@@ -66,7 +66,6 @@ footnote/                              # Flat root - plugin.json at .claude-plug
 │   ├── guides/                         # User-facing guides
 │   └── harnesses/                      # Per-harness docs
 │
-├── providers/                          # Provider abstraction layer
 ├── tests/                              # Test harnesses
 │
 ├── CLAUDE.md                           # Root project instructions

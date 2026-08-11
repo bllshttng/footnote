@@ -85,7 +85,12 @@ while [[ $# -gt 0 ]]; do
 done
 
 ROOT="${ROOT:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}"
-BASELINE_FILE="${BASELINE_FILE:-$ROOT/scripts/ci/axis-vocabulary-baseline.txt}"
+# Anchored to the git root, never to ROOT. ROOT may be a subtree, and deriving
+# the baseline from it resolved to a path that does not exist: the allowlist
+# silently stopped suppressing and justified ambiguous sites reappeared as
+# violations, while `--baseline <subtree>` exited 2 outright.
+BASELINE_ROOT="$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || echo "$ROOT")"
+BASELINE_FILE="${BASELINE_FILE:-$BASELINE_ROOT/scripts/ci/axis-vocabulary-baseline.txt}"
 
 if [[ "$MODE" == "strict" && $BASELINE_FILE_SEEN -eq 1 ]]; then
   echo "check-axis-vocabulary: --baseline-file is valid only with --baseline" >&2
@@ -393,13 +398,23 @@ def _self_test():
     (d / declared_rel).mkdir(parents=True)
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
     _, _, dirs = scan(d)
-    leftover = [v for v in _name_findings(dirs) if v.startswith(f"{declared_rel}/:")]
-    if leftover:
+    # Asserts the POSITIVE: the expected key was actually computed, then that it
+    # produced no finding. Filtering findings by a `declared_rel` prefix instead
+    # was unfalsifiable - a TMPDIR inside a git repo prefixes every key, no
+    # finding starts with declared_rel, and the test passes while the real
+    # verdict is "undeclared violation".
+    if declared_rel not in dirs:
+        print(
+            f"FAILED: declared '{declared_rel}' was never keyed; got {sorted(dirs)}",
+            file=sys.stderr,
+        )
+        failures += 1
+    elif _name_findings(dirs):
         print(
             f"FAILED: declared '{declared_rel}' ({declared_axis}) still flagged",
             file=sys.stderr,
         )
-        for v in leftover:
+        for v in _name_findings(dirs):
             print(f"  {v}", file=sys.stderr)
         failures += 1
     else:
@@ -414,7 +429,14 @@ def _self_test():
     (d / declared_rel / "x.py").write_text("x = 1\n", encoding="utf-8")
     subtree = d / Path(declared_rel).parts[0]
     _, _, dirs = scan(subtree)
-    if _name_findings(dirs):
+    if declared_rel not in dirs:
+        print(
+            f"FAILED: subtree scan keyed {sorted(dirs)}, not repo-relative "
+            f"'{declared_rel}'",
+            file=sys.stderr,
+        )
+        failures += 1
+    elif _name_findings(dirs):
         print(
             f"FAILED: scanning the subtree {subtree.name}/ flagged a declared "
             "directory",
@@ -464,7 +486,22 @@ findings, observed, axis_dirs = scan(root_arg)
 # Scoped to a whole-repo scan: a SUBTREE root legitimately contains no
 # axis-named directory, and failing there would turn the control into a false
 # red of its own.
+#
+# The bar is the DECLARED set, not merely non-empty. Checking `not axis_dirs`
+# passed on partial traversal loss: excluding `cli` or breaking the walk below
+# it left `docs/harnesses` alone holding the set open while both Python
+# packages went unjudged, and the receipt still printed a confident count. A
+# count nothing asserts is decoration.
 _whole_repo_scan = root_arg.resolve() == _repo_root_for(root_arg).resolve()
+_unreached = sorted(set(DECLARED_PATH_AXIS) - set(axis_dirs)) if _whole_repo_scan else []
+if _unreached:
+    print(
+        "check-axis-vocabulary: name scan positive control failed "
+        f"(declared directories the walk never reached: {', '.join(_unreached)}); "
+        "the traversal did not cover the tree",
+        file=sys.stderr,
+    )
+    sys.exit(2)
 if _whole_repo_scan and not axis_dirs:
     print(
         "check-axis-vocabulary: name scan positive control failed "
