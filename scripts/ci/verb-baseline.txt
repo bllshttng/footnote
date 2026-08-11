@@ -240,10 +240,12 @@ mail notify-self
 mail rebuild-render
 mail reply
 mail send !--provider
+mail sent
 mail status
 mail triage
 mail unread
 mail view
+mail withdraw
 mcp send
 mux attach
 mux block pipe
