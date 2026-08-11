@@ -22,7 +22,7 @@ from fno.paths_testing import use_tmpdir
 
 def test_provider_result_fields() -> None:
     """ProviderResult exposes exit_code, stdout, stderr, duration_ms, session_id_out."""
-    from fno.agents.providers.base import ProviderResult
+    from fno.agents.harnesses.base import ProviderResult
 
     result = ProviderResult(
         exit_code=0,
@@ -40,7 +40,7 @@ def test_provider_result_fields() -> None:
 
 def test_provider_result_session_id_optional() -> None:
     """session_id_out defaults to None for providers that don't return one."""
-    from fno.agents.providers.base import ProviderResult
+    from fno.agents.harnesses.base import ProviderResult
 
     result = ProviderResult(
         exit_code=1,

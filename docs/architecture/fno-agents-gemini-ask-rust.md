@@ -1,6 +1,6 @@
 # Rust client handles gemini `ask` + the unconditional flip
 
-The closing follow-up of the codex auto-routing work ([`fno-agents-ask-auto-route.md`](./fno-agents-ask-auto-route.md)). It ports Python's `cli/src/fno/agents/providers/gemini.py` to a Rust client module and then flips `ask` to auto-route **unconditionally** for every provider, removing the provider-conditional special case.
+The closing follow-up of the codex auto-routing work ([`fno-agents-ask-auto-route.md`](./fno-agents-ask-auto-route.md)). It ports Python's `cli/src/fno/agents/harnesses/gemini.py` to a Rust client module and then flips `ask` to auto-route **unconditionally** for every provider, removing the provider-conditional special case.
 
 ## What this completes
 

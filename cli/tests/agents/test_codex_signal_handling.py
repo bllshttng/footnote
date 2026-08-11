@@ -86,8 +86,8 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
     The watchdog inside providers/codex.py must SIGTERM the child and
     raise CodexTimeoutError, which the dispatcher maps to exit 15.
     """
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexTimeoutError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexTimeoutError
 
     start = time.monotonic()
     with pytest.raises(CodexTimeoutError) as exc_info:
@@ -112,8 +112,8 @@ def test_create_timeout_sigterms_codex_and_raises_timeout_error(
 )
 def test_resume_timeout_sigterms_codex(tmp_path, fake_codex_on_path):
     """AC2-FR end-to-end: resume timeout SIGTERMs codex, raises CodexTimeoutError."""
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexTimeoutError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexTimeoutError
 
     start = time.monotonic()
     with pytest.raises(CodexTimeoutError) as exc_info:
@@ -148,8 +148,8 @@ def test_wait_with_grace_killpg_terminates_subshells_after_turn_completed(
     sleep would orphan and the test would hang. With os.killpg, the
     function escalates SIGTERM->SIGKILL within ~12s.
     """
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.codex import CodexResult, CodexInvocationError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.codex import CodexResult, CodexInvocationError
 
     monkeypatch.setenv("FAKE_CODEX_MODE", "complete-then-hang")
     monkeypatch.setenv("FAKE_HANG_SECS", "60")
@@ -217,7 +217,7 @@ def test_create_sigint_mid_stream_propagates_and_releases_child(
         f"""
 import os, signal, sys
 from pathlib import Path
-from fno.agents.providers import codex as codex_mod
+from fno.agents.harnesses import codex as codex_mod
 
 try:
     codex_mod.create(

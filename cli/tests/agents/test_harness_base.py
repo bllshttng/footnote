@@ -16,7 +16,7 @@ from __future__ import annotations
 import pickle
 import pytest
 
-from fno.agents.providers.base import ReachabilityProbeError
+from fno.agents.harnesses.base import ReachabilityProbeError
 
 
 def test_base_class_has_provider_and_reason_attributes() -> None:
@@ -112,7 +112,7 @@ def test_provider_reachability_probes_raise_shared_base_class(
     raises the shared base class and sets the provider discriminator.
     """
     if provider == "claude":
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         def _raise_os_error(*args, **kwargs):
             raise OSError("simulated probe failure")
@@ -122,7 +122,7 @@ def test_provider_reachability_probes_raise_shared_base_class(
         def probe():
             return claude_mod.claude_logs_reachable("abc12345", timeout=0.01)
     elif provider == "codex":
-        from fno.agents.providers import codex as codex_mod
+        from fno.agents.harnesses import codex as codex_mod
 
         unreadable_index = tmp_path / "session_index.jsonl"
         unreadable_index.mkdir()

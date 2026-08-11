@@ -32,7 +32,7 @@ def test_claude_bg_create_injects_agent_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """claude.bg_create passes env containing FNO_AGENT_SELF/PROVIDER."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: Dict[str, Any] = {}
 
@@ -67,7 +67,7 @@ def test_codex_create_threads_agent_self_to_run_codex(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """codex.create forwards agent_self into _run_codex's spawn env."""
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     captured: Dict[str, Any] = {}
 
@@ -102,7 +102,7 @@ def test_codex_create_without_agent_self_skips_injection(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """When agent_self=None, env=None so the child inherits parent env unchanged."""
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     captured: Dict[str, Any] = {}
 
@@ -143,7 +143,7 @@ def test_env_session_intentionally_absent_on_create(
     (because SESSION is absent). This is the AC3-ERR-adjacent graceful
     degradation path.
     """
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: Dict[str, Any] = {}
 

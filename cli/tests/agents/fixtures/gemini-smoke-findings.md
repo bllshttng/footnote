@@ -192,7 +192,7 @@ fno only uses form 1. Forms 2 + 3 are operator-facing affordances.
 
 ## Pinned constants block
 
-The following will land in `cli/src/fno/agents/providers/gemini.py`
+The following will land in `cli/src/fno/agents/harnesses/gemini.py`
 as `_GEMINI_KEYS`:
 
 ```python

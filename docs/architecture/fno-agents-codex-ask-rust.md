@@ -1,6 +1,6 @@
 # Rust client handles codex `ask` (byte-parity reply extraction)
 
-`ask` was the last `fno agents` verb without a client-side port. As of the auto-routing follow-up to the claude port, the Rust `fno-agents` client handles codex `ask` directly via a one-shot `codex exec --json` subprocess, byte-parity against Python's `cli/src/fno/agents/providers/codex.py`, bypassing the fno daemon entirely.
+`ask` was the last `fno agents` verb without a client-side port. As of the auto-routing follow-up to the claude port, the Rust `fno-agents` client handles codex `ask` directly via a one-shot `codex exec --json` subprocess, byte-parity against Python's `cli/src/fno/agents/harnesses/codex.py`, bypassing the fno daemon entirely.
 
 This document explains the architecture, the provider-conditional routing that drives it, and the deferred follow-ups.
 

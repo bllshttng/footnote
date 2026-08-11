@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from fno.agents.providers import codex as codex_mod
+from fno.agents.harnesses import codex as codex_mod
 
 
 pytestmark = pytest.mark.skipif(

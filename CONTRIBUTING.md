@@ -42,7 +42,7 @@ cargo test --all-targets
 ### Soaking the socket/timing tests under load (on-demand)
 
 The `claude_ask` socket tests (Rust `crates/fno-agents/src/claude_ask.rs` and
-the Python `cli/tests/agents/test_provider_claude_followup.py` twin) are
+the Python `cli/tests/agents/test_harness_claude_followup.py` twin) are
 synchronized by observed readiness signals, not fixed sleeps, so they should
 pass deterministically even under CPU saturation. This is kept as an on-demand
 local check rather than a per-PR CI lane (it would burn the minutes budget).
@@ -54,7 +54,7 @@ for i in $(seq 1 "$(sysctl -n hw.ncpu 2>/dev/null || nproc)"); do yes >/dev/null
 # then loop the clusters from the repo root in another shell (this crate has
 # no top-level Cargo.toml, so the Rust loop pins --manifest-path)
 for i in $(seq 1 50); do cargo test --manifest-path crates/fno-agents/Cargo.toml --lib claude_ask::tests || break; done
-for i in $(seq 1 50); do (cd cli && uv run pytest tests/agents/test_provider_claude_followup.py::test_ask_followup_happy_path -q) || break; done
+for i in $(seq 1 50); do (cd cli && uv run pytest tests/agents/test_harness_claude_followup.py::test_ask_followup_happy_path -q) || break; done
 # stop the load when done: pkill yes
 ```
 

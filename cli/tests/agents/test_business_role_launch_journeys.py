@@ -115,7 +115,7 @@ def _configure_codex(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_real_manifest_reaches_claude_worker_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import claude
+    from fno.agents.harnesses import claude
 
     use_tmpdir(monkeypatch, tmp_path)
     root = tmp_path / "roles"
@@ -142,7 +142,7 @@ def test_real_manifest_reaches_claude_worker_env(
 def test_real_manifest_reaches_codex_worker_argv_and_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import codex
+    from fno.agents.harnesses import codex
 
     use_tmpdir(monkeypatch, tmp_path)
     root = tmp_path / "roles"
@@ -221,7 +221,7 @@ def test_invalid_real_manifest_refuses_before_any_launch(
     from fno.agents.dispatch import DispatchAskError
     from fno.agents.model_routing import RouteCompositionError
     from fno.agents import mux_spawn
-    from fno.agents.providers import claude, codex
+    from fno.agents.harnesses import claude, codex
     from fno.agents.registry import load_registry
 
     use_tmpdir(monkeypatch, tmp_path)

@@ -17,7 +17,7 @@ US1 surface (this module):
   update_registry + events. Returns the parsed short-id on success.
 
 The actual subprocess invocation per provider lives in
-``fno.agents.providers.{claude,codex}``. Gemini is a legacy readable identity,
+``fno.agents.harnesses.{claude,codex}``. Gemini is a legacy readable identity,
 not a maintained Python dispatch provider.
 """
 
@@ -42,8 +42,8 @@ from fno.agents import events
 from fno.agents.context import EventContext, build_context
 from fno.agents.harness_map import DispatchResolveError, normalize_command
 from fno.agents.lock import AgentLockTimeout, hold_agent_lock
-from fno.agents.providers import KNOWN_PROVIDERS
-from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
+from fno.agents.harnesses import KNOWN_PROVIDERS
+from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.agents.registry import (
     AgentEntry,
     AgentResolutionError,
@@ -476,8 +476,8 @@ def _followup_path(
             exit_code=12,
         )
 
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.base import ReachabilityProbeError
 
     _emit_ev(
         "agent_followup_started",
@@ -880,7 +880,7 @@ def _codex_create_path(
     - wall-clock timeout                  -> 15 (CodexTimeoutError)
     - registry write failure post-create  -> 12 (with cleanup hint)
     """
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.model_routing import RouteCompositionError
 
     output_path = _codex_output_path(name)
@@ -1016,7 +1016,7 @@ def _codex_followup_path(
       - codex_session_id is preserved (never re-minted, never overwritten).
       - last_message_at is bumped only on success.
     """
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     session_id = existing.harness_session_id
     if not session_id:
@@ -1218,7 +1218,7 @@ def _claude_create_path(
     # leaves the argv byte-identical to today (matches the Rust bg path).
     effective_mode = permission_mode or ("bypassPermissions" if yolo else None)
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.harness_identity import claude_transport_short_id
 
     # x-9844 Lane 2 / x-7fef: every resume takes the session single-writer claim
@@ -1911,7 +1911,7 @@ def _is_revival(
         return False
     if getattr(existing, "harness_session_id", None) != resume_session_id:
         return False
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     short_id = getattr(existing, "short_id", "") or None
     if short_id:
@@ -2437,7 +2437,7 @@ def dispatch_spawn(
                 # 4b. claude plain spawn.
                 if provider == "claude":
                     if headless:
-                        from fno.agents.providers import claude as claude_mod
+                        from fno.agents.harnesses import claude as claude_mod
 
                         try:
                             result = claude_mod.headless_create(
@@ -3094,7 +3094,7 @@ def stop_agent(
             if not is_provider_available("claude"):
                 raise DispatchAskError("claude CLI not on PATH", exit_code=14)
 
-            from fno.agents.providers import claude as claude_mod
+            from fno.agents.harnesses import claude as claude_mod
 
             try:
                 exit_code, stderr_text = claude_mod.claude_stop(short_id, timeout=shellout_timeout)
@@ -3185,7 +3185,7 @@ def _teardown_harness_session(
     cleaned store must not wedge ``fno agents rm``.
 
     opencode is registry-only because it has no record-only teardown at
-    all; see :mod:`fno.agents.providers.opencode`.
+    all; see :mod:`fno.agents.harnesses.opencode`.
     """
     harness = existing.harness
     sid = existing.harness_session_id
@@ -3212,7 +3212,7 @@ def _teardown_harness_session(
         # No record-only teardown exists for opencode: removing the session
         # would take its child sessions and full message history with it.
         # Registry-only, and say so rather than implying nothing was left.
-        from fno.agents.providers import opencode as opencode_mod
+        from fno.agents.harnesses import opencode as opencode_mod
 
         if sid:
             print(opencode_mod.REGISTRY_ONLY_NOTE.format(sid=sid), flush=True)
@@ -3230,7 +3230,7 @@ def _teardown_harness_session(
         )
 
     if harness == "codex":
-        from fno.agents.providers import codex as codex_mod
+        from fno.agents.harnesses import codex as codex_mod
 
         try:
             removed = codex_mod.remove_session_index_entry(sid)
@@ -3340,7 +3340,7 @@ def rm_agent(
                     if not is_provider_available("claude"):
                         raise DispatchAskError("claude CLI not on PATH", exit_code=14)
 
-                    from fno.agents.providers import claude as claude_mod
+                    from fno.agents.harnesses import claude as claude_mod
 
                     try:
                         claude_exit, stderr_text = claude_mod.claude_rm(
@@ -3583,7 +3583,7 @@ def reconcile_agents(
     # NOT mass-flip every claude row to orphaned (sigma-review C1 finding:
     # the false-orphan storm is the worst kind of silent failure — it
     # rewrites the registry on insufficient evidence).
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     # Tri-state per-codex-side capability: True (readable + present),
     # False (file missing — fresh install), None (file present but
@@ -4016,7 +4016,7 @@ def reconcile_agents(
                 )
                 continue
             else:
-                from fno.agents.providers import claude as claude_mod
+                from fno.agents.harnesses import claude as claude_mod
 
                 # Phase 5: MCP-backed claude agents probe via the sidecar
                 # instead of `claude logs`. Same tri-state contract:
@@ -4403,7 +4403,7 @@ def attach_agent(name: str) -> AttachResult:
     if not is_provider_available("claude"):
         raise DispatchAskError("claude CLI not on PATH", exit_code=14)
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     try:
         exit_code = claude_mod.claude_attach(short_id)
@@ -5369,7 +5369,7 @@ def _mux_followup_path(
     lands as an attributed peer turn rather than bare operator input (the PTY
     delivery contract in docs/architecture/fno-agents-deliver-gate.md).
     """
-    from fno.agents.providers.claude import build_cross_session_container
+    from fno.agents.harnesses.claude import build_cross_session_container
 
     mux = existing.mux or {}
     ref = f"{mux.get('session')}:{mux.get('pane_id')}"
@@ -5584,7 +5584,7 @@ def _acquire_rung2_guard(session_uuid: str, short: str) -> Optional[str]:
     rung, which claims/pins exactly as rung 3 does. Pinned to this pid with a TTL
     so a crash auto-expires instead of stranding. Returns the holder to release,
     or None when another incarnation holds the claim."""
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         SessionWriterClaimError,
         acquire_session_writer_claim,
     )
@@ -5607,7 +5607,7 @@ def _release_rung2_guard(session_uuid: str, holder: Optional[str]) -> None:
     """Release the rung-2 guard claim. Idempotent (silent no-op if not held)."""
     if not holder:
         return
-    from fno.agents.providers.claude import release_session_writer_claim
+    from fno.agents.harnesses.claude import release_session_writer_claim
 
     release_session_writer_claim(session_uuid=session_uuid, holder=holder)
 

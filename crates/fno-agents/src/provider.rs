@@ -23,7 +23,7 @@
 //!   structural cleavage from codex established in US4-gemini).
 //!
 //! Argv shapes mirror the validated US4 Python adapters
-//! (`cli/src/fno/agents/providers/{claude,codex,gemini}.py`) so the Rust
+//! (`cli/src/fno/agents/harnesses/{claude,codex,gemini}.py`) so the Rust
 //! daemon invokes the CLIs identically to the proven implementations.
 
 use std::path::PathBuf;

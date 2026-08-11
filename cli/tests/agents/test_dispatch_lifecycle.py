@@ -8,7 +8,7 @@ Wave-1 coverage (US4-lifecycle):
 - ``attach_agent`` (AC7-*)
 
 Each test monkeypatches the corresponding helper in
-``fno.agents.providers.{claude,codex}`` so we exercise the
+``fno.agents.harnesses.{claude,codex}`` so we exercise the
 dispatch surface in isolation; the provider adapters have their own
 shellout-level tests.
 """
@@ -107,7 +107,7 @@ def test_stop_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     calls: list[tuple[str, float]] = []
 
@@ -148,7 +148,7 @@ def test_stop_claude_nonzero_exit_propagates(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod,
@@ -180,7 +180,7 @@ def test_stop_agent_not_found(tmp_path: Path, monkeypatch) -> None:
     # No registry entry seeded.
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     spawn_called = False
 
@@ -213,7 +213,7 @@ def test_lifecycle_verbs_refuse_unavailable_identity_evidence(
 
     from fno.agents import dispatch
     from fno.agents import registry as registry_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def unavailable(*_args, **_kwargs):
         raise registry_mod.AgentResolutionError(
@@ -262,7 +262,7 @@ def test_destructive_lifecycle_refuses_duplicate_registry_name_after_full_id(
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents import dispatch
     from fno.agents import registry as registry_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     first = registry_mod.AgentEntry(
         name="same",
@@ -314,7 +314,7 @@ def test_destructive_lifecycle_pins_full_id_across_name_lock(
     from contextlib import contextmanager
     from fno.agents import dispatch
     from fno.agents import registry as registry_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     original = registry_mod.AgentEntry(
         name="victim",
@@ -396,7 +396,7 @@ def test_rm_retains_row_restamped_during_shellout(
 
     from fno.agents import dispatch
     from fno.agents import registry as registry_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def restamp_during_rm(*_args, **_kwargs):
         registry_mod.restamp_harness_session_id(
@@ -440,7 +440,7 @@ def test_stop_does_not_stamp_row_restamped_during_shellout(
 
     from fno.agents import dispatch
     from fno.agents import registry as registry_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def restamp_during_stop(*_args, **_kwargs):
         registry_mod.restamp_harness_session_id(
@@ -487,7 +487,7 @@ def test_lifecycle_does_not_mutate_duplicate_name_rows_added_during_shellout(
 
     from dataclasses import replace
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     replacement = replace(
         original,
@@ -527,7 +527,7 @@ def test_stop_codex_is_no_op(tmp_path: Path, monkeypatch, capsys) -> None:
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     spawn_called = False
 
@@ -566,7 +566,7 @@ def test_stop_claude_timeout_maps_to_exit_15(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def fake_stop(short_id, *, timeout=30.0):
         raise subprocess.TimeoutExpired(cmd=["claude", "stop", short_id], timeout=timeout)
@@ -722,7 +722,7 @@ def test_rm_claude_happy_path(tmp_path: Path, monkeypatch, capsys) -> None:
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -758,7 +758,7 @@ def test_rm_claude_refusal_leaves_registry_unchanged(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -803,7 +803,7 @@ def test_rm_force_overrides_claude_refusal(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -848,7 +848,7 @@ def test_rm_codex_is_registry_only(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     spawn_called = False
@@ -910,7 +910,7 @@ def test_reconcile_orphan_detection(tmp_path: Path, monkeypatch) -> None:
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -951,7 +951,7 @@ def test_reconcile_recovery(tmp_path: Path, monkeypatch) -> None:
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -988,7 +988,7 @@ def test_reconcile_backfills_null_harness_session_id(tmp_path: Path, monkeypatch
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     monkeypatch.setattr(
@@ -1031,7 +1031,7 @@ def test_reconcile_backfill_empty_when_id_already_present(tmp_path: Path, monkey
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod, "claude_logs_reachable", lambda short_id, *, timeout=10.0: True
@@ -1095,7 +1095,7 @@ def test_reconcile_codex_index_missing(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.registry import load_registry
 
     # Override the index path to a non-existent file.
@@ -1130,7 +1130,7 @@ def test_reconcile_codex_reachable_flips_to_live(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.registry import load_registry
 
     index = tmp_path / "session_index.jsonl"
@@ -1623,7 +1623,7 @@ def test_reconcile_never_claims_a_refused_claude_backfill(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import AgentEntry, load_registry
 
     monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
@@ -1922,7 +1922,7 @@ def test_attach_claude_inherits_stdio_and_propagates_exit(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     calls: list[str] = []
 
@@ -1952,7 +1952,7 @@ def test_attach_codex_refused_with_exit_13(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     called = False
 
@@ -1993,7 +1993,7 @@ def test_attach_claude_propagates_nonzero_exit(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod, "claude_attach", lambda short_id: 4
@@ -2025,7 +2025,7 @@ def test_rm_claude_timeout_preserves_registry(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def fake_rm(short_id, *, timeout=30.0):
@@ -2068,7 +2068,7 @@ def test_rm_print_lands_after_registry_write(
 
     from fno.agents import dispatch
     from fno.agents import dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(
         claude_mod, "claude_rm",
@@ -2118,7 +2118,7 @@ def test_reconcile_skips_claude_when_cli_missing(
     monkeypatch.setenv("PATH", "/nonexistent")
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     probe_called = False
@@ -2162,7 +2162,7 @@ def test_rm_force_removes_orphan_row_without_short_id(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     spawn_called = False
@@ -2231,7 +2231,7 @@ def test_rm_uses_locked_short_id_after_concurrent_recreate(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import AgentEntry
 
     # Patch _resolve_registry_entry to return a STALE entry on the first
@@ -2299,8 +2299,8 @@ def test_reconcile_preserves_claude_status_on_probe_error(
     _force_claude_on_path(monkeypatch, tmp_path)
 
     from fno.agents import dispatch
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.base import ReachabilityProbeError
     from fno.agents.registry import load_registry
 
     def boom(short_id, *, timeout=10.0):
@@ -2325,8 +2325,8 @@ def test_claude_logs_reachable_raises_on_timeout(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Direct unit-level coverage of the tri-state probe behavior."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.base import ReachabilityProbeError
 
     def slow_run(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd=args[0], timeout=10.0)
@@ -2343,8 +2343,8 @@ def test_claude_logs_reachable_raises_on_oserror(
 ) -> None:
     """OSError (permission, device error) also raises the probe-error,
     not a silent False."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.base import ReachabilityProbeError
 
     def broken_run(*args, **kwargs):
         raise PermissionError("EACCES")
@@ -2380,7 +2380,7 @@ def test_reconcile_codex_index_stat_permission_does_not_abort(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
     from fno.agents.registry import load_registry
 
     def boom(*args, **kwargs):
@@ -2434,8 +2434,8 @@ def test_reconcile_codex_index_unreadable_routes_to_errors(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import codex as codex_mod
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses import codex as codex_mod
+    from fno.agents.harnesses.base import ReachabilityProbeError
     from fno.agents.registry import load_registry
 
     # Create a real file (so session_index_exists returns True) but
@@ -2491,7 +2491,7 @@ def test_reconcile_entries_share_key_schema(
     )
 
     from fno.agents import dispatch
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     # Force the codex index path so the codex branch runs to the
     # missing-session-id check (rather than codex-index-missing).

@@ -38,7 +38,7 @@ cmd_spawn --role  ->  dispatch_spawn  ->  _claude_create_path  ->  bg_create(rol
                                                  dict -> merged into spawn env (secondary)
 ```
 
-`fno.agents.model_routing.resolve_route(role) -> dict | None` is the whole policy. `None` means "use the primary model, change nothing." The only hook point is `bg_create`'s spawn-env builder (`cli/src/fno/agents/providers/claude.py`).
+`fno.agents.model_routing.resolve_route(role) -> dict | None` is the whole policy. `None` means "use the primary model, change nothing." The only hook point is `bg_create`'s spawn-env builder (`cli/src/fno/agents/harnesses/claude.py`).
 
 ## Two non-negotiable invariants
 

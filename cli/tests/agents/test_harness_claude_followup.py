@@ -44,7 +44,7 @@ def _short_sock_path() -> str:
 
 
 def test_followup_module_exports() -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     for sym in (
         "send_to_session",
@@ -173,7 +173,7 @@ class _UnixSocketServer:
 
 def test_send_to_session_writes_documented_envelope() -> None:
     """AF_UNIX write contains the BG8 envelope JSON + trailing newline."""
-    from fno.agents.providers.claude import send_to_session
+    from fno.agents.harnesses.claude import send_to_session
 
     sock_path = _short_sock_path()
     server = _UnixSocketServer(sock_path)
@@ -203,7 +203,7 @@ def test_send_to_session_writes_documented_envelope() -> None:
 
 def test_send_to_session_escapes_xml_unsafe_from_name() -> None:
     """from_name with XML-active chars gets html-escaped before the attribute."""
-    from fno.agents.providers.claude import send_to_session
+    from fno.agents.harnesses.claude import send_to_session
 
     sock_path = _short_sock_path()
     server = _UnixSocketServer(sock_path)
@@ -229,7 +229,7 @@ def test_send_to_session_escapes_xml_unsafe_from_name() -> None:
 
 def test_send_to_session_raises_socket_error_on_connect_refused(tmp_path: Path) -> None:
     """A non-existent socket path -> ProviderSocketError with underlying error preserved."""
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         ProviderSocketError,
         send_to_session,
     )
@@ -241,7 +241,7 @@ def test_send_to_session_raises_socket_error_on_connect_refused(tmp_path: Path) 
 
 def test_send_to_session_passes_500kb_message() -> None:
     """No argv-style limit; 500KB message rides the socket fine."""
-    from fno.agents.providers.claude import send_to_session
+    from fno.agents.harnesses.claude import send_to_session
 
     sock_path = _short_sock_path()
     server = _UnixSocketServer(sock_path)
@@ -267,7 +267,7 @@ def test_send_to_session_passes_500kb_message() -> None:
 
 
 def test_liveness_probe_true_when_socket_accepts() -> None:
-    from fno.agents.providers.claude import liveness_probe
+    from fno.agents.harnesses.claude import liveness_probe
 
     sock_path = _short_sock_path()
     server = _UnixSocketServer(sock_path)
@@ -284,7 +284,7 @@ def test_liveness_probe_true_when_socket_accepts() -> None:
 
 
 def test_liveness_probe_false_when_socket_absent(tmp_path: Path) -> None:
-    from fno.agents.providers.claude import liveness_probe
+    from fno.agents.harnesses.claude import liveness_probe
 
     bogus = str(tmp_path / "missing.sock")
     assert liveness_probe(bogus) is False
@@ -310,7 +310,7 @@ def _write_state(jobs_dir: Path, *, state: str, updated_at: str,
 def test_wait_for_reply_returns_output_result_when_state_transitions(tmp_path: Path,
                                                                       monkeypatch) -> None:
     """state.updated_at > baseline AND state in terminal set -> return result."""
-    from fno.agents.providers.claude import wait_for_reply
+    from fno.agents.harnesses.claude import wait_for_reply
 
     monkeypatch.setenv("HOME", str(tmp_path))
     jobs_dir = tmp_path / "jobs" / "abc"
@@ -326,7 +326,7 @@ def test_wait_for_reply_returns_output_result_when_state_transitions(tmp_path: P
 
 def test_wait_for_reply_excludes_stale_pre_baseline_content(tmp_path: Path) -> None:
     """If updated_at == baseline, the poll must NOT return the stale result."""
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         ProviderTimeoutError,
         wait_for_reply,
     )
@@ -344,7 +344,7 @@ def test_wait_for_reply_excludes_stale_pre_baseline_content(tmp_path: Path) -> N
 
 def test_wait_for_reply_falls_back_to_timeline_when_result_empty(tmp_path: Path) -> None:
     """output.result empty/None -> read_timeline_tail fallback."""
-    from fno.agents.providers.claude import wait_for_reply
+    from fno.agents.harnesses.claude import wait_for_reply
 
     jobs_dir = tmp_path / "jobs" / "fallback"
     jobs_dir.mkdir(parents=True)
@@ -362,7 +362,7 @@ def test_wait_for_reply_falls_back_to_timeline_when_result_empty(tmp_path: Path)
 
 
 def test_wait_for_reply_times_out_when_no_transition(tmp_path: Path) -> None:
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         ProviderTimeoutError,
         wait_for_reply,
     )
@@ -382,7 +382,7 @@ def test_wait_for_reply_times_out_when_no_transition(tmp_path: Path) -> None:
 
 def test_wait_for_reply_waits_for_terminal_state(tmp_path: Path) -> None:
     """Even with updatedAt > baseline, non-terminal state must not exit early."""
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         ProviderTimeoutError,
         wait_for_reply,
     )
@@ -399,7 +399,7 @@ def test_wait_for_reply_waits_for_terminal_state(tmp_path: Path) -> None:
 
 def test_wait_for_reply_handles_state_transition_to_needs_input(tmp_path: Path) -> None:
     """needs-input is in the terminal-exit set."""
-    from fno.agents.providers.claude import wait_for_reply
+    from fno.agents.harnesses.claude import wait_for_reply
 
     jobs_dir = tmp_path / "jobs" / "qa"
     _write_state(jobs_dir, state="needs-input", updated_at="T2",
@@ -441,7 +441,7 @@ def test_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
     fixed `for _ in range(40): time.sleep(0.05)` poll, so it does not depend
     on the recipient being scheduled inside a sleep budget under load.
     """
-    from fno.agents.providers.claude import ask_followup
+    from fno.agents.harnesses.claude import ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
     short_id = "abc12345"
@@ -504,8 +504,8 @@ def test_ask_followup_happy_path(tmp_path: Path, monkeypatch) -> None:
 
 
 def test_ask_followup_missing_session_without_truth_is_inconclusive(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import (
         ProviderOrphanError,
         ask_followup,
     )
@@ -527,8 +527,8 @@ def test_ask_followup_missing_session_without_truth_is_inconclusive(tmp_path: Pa
 
 
 def test_ask_followup_socket_null_without_truth_is_inconclusive(tmp_path: Path, monkeypatch) -> None:
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import (
         ProviderOrphanError,
         ask_followup,
     )
@@ -560,8 +560,8 @@ def test_ask_followup_socket_null_without_truth_is_inconclusive(tmp_path: Path, 
 
 def test_ask_followup_orphan_when_liveness_fails(tmp_path: Path, monkeypatch) -> None:
     """Session entry has socket path that doesn't connect -> orphan with reason=liveness-failed."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import (
         ProviderOrphanError,
         ask_followup,
     )
@@ -588,7 +588,7 @@ def test_ask_followup_socket_miss_is_not_death_when_family1_is_live(
     tmp_path: Path, monkeypatch
 ) -> None:
     """The fast socket probe may reject delivery, never a live transcript."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     locator = SimpleNamespace(
         messaging_socket_path=str(tmp_path / "missing.sock"),
@@ -615,7 +615,7 @@ def test_ask_followup_socket_miss_is_not_death_when_family1_is_live(
 def test_session_truth_state_uses_full_session_uuid(tmp_path: Path, monkeypatch) -> None:
     """The job ID addresses delivery; transcript truth keys on the full UUID."""
     from fno.agents import session_truth
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     full_id = "feedface-1111-2222-3333-444444444444"
     seen = {}
@@ -649,7 +649,7 @@ def test_ask_followup_via_mcp_polls_jobs_dir_without_a_session_file(
     jobs-dir, neither of which needs the socket."""
     import fno.mcp as mcp_pkg
     from fno.mcp import client as mcp_client
-    from fno.agents.providers.claude import ask_followup_via_mcp
+    from fno.agents.harnesses.claude import ask_followup_via_mcp
 
     monkeypatch.setenv("HOME", str(tmp_path))
     short_id = "7c5dcf5d"
@@ -691,8 +691,8 @@ def test_ask_followup_via_mcp_jobs_miss_defers_to_family1(
     tmp_path: Path, monkeypatch
 ) -> None:
     """A missing reply-poll directory is not itself a death verdict."""
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderOrphanError, ask_followup_via_mcp
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import ProviderOrphanError, ask_followup_via_mcp
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
@@ -746,7 +746,7 @@ def test_ask_followup_control_sock_fallback_delivers_and_returns_reply(
     """AC1-HP/AC2-HP: socket-null + roster-live -> control.sock inject, then the
     reply is collected from the bg jobs-dir."""
     import fno.agents.dispatch as dispatch_mod
-    from fno.agents.providers.claude import ask_followup
+    from fno.agents.harnesses.claude import ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
     short_id = "abc12345"
@@ -785,7 +785,7 @@ def test_ask_followup_control_sock_fallback_not_delivered_raises_distinct_reason
     (roster-live-inject-failed), NOT socket-null, so dispatch never orphan-stamps
     a live session."""
     import fno.agents.dispatch as dispatch_mod
-    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+    from fno.agents.harnesses.claude import ProviderOrphanError, ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
     short_id = "abc12345"
@@ -807,8 +807,8 @@ def test_ask_followup_socket_null_without_transcript_is_inconclusive(
 ) -> None:
     """Socket-null is a routing miss when family 1 cannot prove death."""
     import fno.agents.dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import ProviderOrphanError, ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")
@@ -837,8 +837,8 @@ def test_ask_followup_not_found_without_transcript_is_inconclusive(
 ) -> None:
     """A registry miss is not a death verdict when family 1 is inconclusive."""
     import fno.agents.dispatch as dispatch_mod
-    from fno.agents.providers import claude as claude_mod
-    from fno.agents.providers.claude import ProviderOrphanError, ask_followup
+    from fno.agents.harnesses import claude as claude_mod
+    from fno.agents.harnesses.claude import ProviderOrphanError, ask_followup
 
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setattr(claude_mod, "_session_truth_state", lambda *_args: "unknown")

@@ -164,7 +164,7 @@ def test_opencode_variant_cleans_temp_file_when_replace_fails(tmp_path, monkeypa
 
 
 def test_claude_python_build_argv_threads_effort():
-    from fno.agents.providers.claude import _build_argv
+    from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv("w", "hi", False, effort="high") == [
         "claude",
@@ -178,7 +178,7 @@ def test_claude_python_build_argv_threads_effort():
 
 
 def test_codex_python_create_threads_effort(monkeypatch, tmp_path):
-    from fno.agents.providers import codex
+    from fno.agents.harnesses import codex
 
     captured = {}
 
@@ -201,7 +201,7 @@ def test_codex_python_create_threads_effort(monkeypatch, tmp_path):
 
 def test_claude_python_headless_threads_effort(monkeypatch, tmp_path):
     from types import SimpleNamespace
-    from fno.agents.providers import claude
+    from fno.agents.harnesses import claude
 
     captured = {}
 

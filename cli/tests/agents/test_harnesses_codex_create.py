@@ -20,8 +20,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from fno.agents.providers import codex as codex_mod
-from fno.agents.providers.codex import (
+from fno.agents.harnesses import codex as codex_mod
+from fno.agents.harnesses.codex import (
     CodexInvocationError,
     CodexResult,
     NoSessionIdError,
@@ -231,7 +231,7 @@ def test_create_tee_appends_across_invocations(tmp_path, fake_popen):
 def test_create_argv_shape_pin(tmp_path, fake_popen):
     # headless_yolo=False pins the explicit sandboxed argv shape. The autonomous
     # exec lane now DEFAULTS to no-prompt (ab-994222ee); the default-vs-opt-out
-    # behavior is covered in test_providers_codex_argv.py. This test pins the
+    # behavior is covered in test_harnesses_codex_argv.py. This test pins the
     # structural argv (flags + prompt position), so it opts out deterministically.
     codex_mod.create(
         cwd=Path("/tmp/work"),
@@ -664,7 +664,7 @@ def test_create_tee_per_errno_warn_recurs_for_distinct_modes(
 
     broken = _BrokenTee()
     # Patch _open_tee to return our broken tee.
-    import fno.agents.providers.codex as cm
+    import fno.agents.harnesses.codex as cm
 
     original = cm._open_tee
     try:

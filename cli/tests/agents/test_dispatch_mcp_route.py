@@ -71,7 +71,7 @@ def _install_fake_provider_layer(
     ``mcp_send_result`` / ``socket_send_result`` are reply strings or
     callables that raise.
     """
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def fake_probe(channel_id, *, timeout=0.25):
         capture.setdefault("probes", []).append({"channel_id": channel_id, "timeout": timeout})
@@ -178,7 +178,7 @@ def test_ac1_err_mcp_send_failure_demotes_to_socket(tmp_path: Path, monkeypatch)
     use_tmpdir(monkeypatch, tmp_path)
     _seed_mcp_agent()
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def raise_send_failed():
         raise claude_mod.MCPChannelSendError("channel_write_failed")
@@ -228,7 +228,7 @@ def test_mcp_truth_routing_gap_never_stamps_orphaned(tmp_path: Path, monkeypatch
     _seed_mcp_agent()
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry
 
     def raise_routing_gap():
@@ -264,7 +264,7 @@ def test_ac3_hp_probe_raises_demotes_to_socket(tmp_path: Path, monkeypatch) -> N
     use_tmpdir(monkeypatch, tmp_path)
     _seed_mcp_agent()
 
-    from fno.agents.providers.base import ReachabilityProbeError
+    from fno.agents.harnesses.base import ReachabilityProbeError
 
     def raise_probe():
         raise ReachabilityProbeError(

@@ -161,8 +161,8 @@ cli/src/fno/agents/cli.py
 cli/src/fno/agents/discover.py
 cli/src/fno/agents/dispatch.py
 cli/src/fno/agents/format.py
-cli/src/fno/agents/providers/_claude_session_registry.py
-cli/src/fno/agents/providers/claude.py
+cli/src/fno/agents/harnesses/_claude_session_registry.py
+cli/src/fno/agents/harnesses/claude.py
 cli/src/fno/agents/read.py
 cli/src/fno/agents/registry.py
 cli/src/fno/agents/rust_runtime.py

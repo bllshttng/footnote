@@ -464,7 +464,7 @@ def test_attach_refuses_registry_name_that_collides_with_store_session(
     _write_codex_session(_registry_home, store_only_id)
     attached = []
     monkeypatch.setattr(
-        "fno.agents.providers.claude.claude_attach",
+        "fno.agents.harnesses.claude.claude_attach",
         lambda short: attached.append(short) or 0,
     )
 
@@ -653,7 +653,7 @@ def test_attach_heals_an_unregistered_claude_session(_registry_home, monkeypatch
     attached = []
     monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
     monkeypatch.setattr(
-        "fno.agents.providers.claude.claude_attach",
+        "fno.agents.harnesses.claude.claude_attach",
         lambda short: attached.append(short) or 0,
     )
 
@@ -727,7 +727,7 @@ def test_attach_survives_an_unwritable_registry(_registry_home, monkeypatch):
     attached = []
     monkeypatch.setattr(dispatch, "is_provider_available", lambda _p: True)
     monkeypatch.setattr(
-        "fno.agents.providers.claude.claude_attach",
+        "fno.agents.harnesses.claude.claude_attach",
         lambda short: attached.append(short) or 0,
     )
 

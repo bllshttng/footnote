@@ -1,4 +1,4 @@
-"""Tests for fno.agents.providers.claude — TDD Red phase for Task 1.2.
+"""Tests for fno.agents.harnesses.claude — TDD Red phase for Task 1.2.
 
 ACs (US1):
 - AC1-HP: bg_create returns ProviderResult with parsed short_id from stdout
@@ -24,7 +24,7 @@ from tests.agents._fake_claude import configure_fake, install_fake_claude
 
 def test_provider_module_exports() -> None:
     """claude.py exports bg_create + parse_short_id + error types."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     assert hasattr(claude_mod, "bg_create")
     assert hasattr(claude_mod, "parse_short_id")
@@ -39,7 +39,7 @@ def test_provider_module_exports() -> None:
 
 def test_parse_short_id_extracts_8hex() -> None:
     """parse_short_id extracts the 8-hex id from the documented stdout shape."""
-    from fno.agents.providers.claude import parse_short_id
+    from fno.agents.harnesses.claude import parse_short_id
 
     stdout = "backgrounded · 7c5dcf5d · frontend-worker\n"
     assert parse_short_id(stdout) == "7c5dcf5d"
@@ -47,7 +47,7 @@ def test_parse_short_id_extracts_8hex() -> None:
 
 def test_parse_short_id_only_first_line() -> None:
     """parse_short_id only consults stdout's first line (AC contract anchor)."""
-    from fno.agents.providers.claude import parse_short_id
+    from fno.agents.harnesses.claude import parse_short_id
 
     stdout = "backgrounded · abcdef01 · worker\nsome trailing noise\n"
     assert parse_short_id(stdout) == "abcdef01"
@@ -55,7 +55,7 @@ def test_parse_short_id_only_first_line() -> None:
 
 def test_parse_short_id_rejects_uppercase_hex() -> None:
     """Locked Decision 6: short-id regex requires LOWERCASE 8-hex."""
-    from fno.agents.providers.claude import ProviderParseError, parse_short_id
+    from fno.agents.harnesses.claude import ProviderParseError, parse_short_id
 
     stdout = "backgrounded · ABCDEF01 · worker\n"
     with pytest.raises(ProviderParseError):
@@ -63,7 +63,7 @@ def test_parse_short_id_rejects_uppercase_hex() -> None:
 
 
 def test_parse_short_id_rejects_wrong_length() -> None:
-    from fno.agents.providers.claude import ProviderParseError, parse_short_id
+    from fno.agents.harnesses.claude import ProviderParseError, parse_short_id
 
     for bad in (
         "backgrounded · 7c5dcf · worker\n",  # 6 hex
@@ -77,7 +77,7 @@ def test_parse_short_id_rejects_wrong_length() -> None:
 
 def test_provider_parse_error_carries_first_200_chars() -> None:
     """ProviderParseError exposes the raw first 200 chars of stdout."""
-    from fno.agents.providers.claude import ProviderParseError, parse_short_id
+    from fno.agents.harnesses.claude import ProviderParseError, parse_short_id
 
     big = "garbage" * 100  # 700 chars
     try:
@@ -96,8 +96,8 @@ def test_provider_parse_error_carries_first_200_chars() -> None:
 
 def test_bg_create_happy_path(tmp_path: Path, monkeypatch) -> None:
     """bg_create invokes claude --bg, parses short_id, returns ProviderResult."""
-    from fno.agents.providers.base import ProviderResult
-    from fno.agents.providers.claude import bg_create
+    from fno.agents.harnesses.base import ProviderResult
+    from fno.agents.harnesses.claude import bg_create
 
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
@@ -123,7 +123,7 @@ def test_bg_create_happy_path(tmp_path: Path, monkeypatch) -> None:
 
 def test_bg_create_subprocess_non_zero(tmp_path: Path, monkeypatch) -> None:
     """Non-zero subprocess exit raises ProviderSubprocessError with verbatim stderr."""
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         ProviderSubprocessError,
         bg_create,
     )
@@ -150,7 +150,7 @@ def test_bg_create_subprocess_non_zero(tmp_path: Path, monkeypatch) -> None:
 
 def test_bg_create_parse_failure(tmp_path: Path, monkeypatch) -> None:
     """Subprocess succeeds but unparseable stdout raises ProviderParseError."""
-    from fno.agents.providers.claude import ProviderParseError, bg_create
+    from fno.agents.harnesses.claude import ProviderParseError, bg_create
 
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
@@ -175,7 +175,7 @@ def test_bg_create_argv_overflow_routes_via_stdin(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Messages above 200KB are piped via subprocess.run(input=msg)."""
-    from fno.agents.providers.claude import bg_create
+    from fno.agents.harnesses.claude import bg_create
 
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
@@ -208,7 +208,7 @@ def test_bg_create_just_under_threshold_uses_argv(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Messages at or under the 200KB threshold are passed via argv (no stdin)."""
-    from fno.agents.providers.claude import bg_create
+    from fno.agents.harnesses.claude import bg_create
 
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
@@ -242,7 +242,7 @@ def test_bg_create_just_under_threshold_uses_argv(
 
 def test_bg_create_argv_shape_small_message(tmp_path: Path, monkeypatch) -> None:
     """Sub-threshold bg_create invokes ``claude --bg --name <n> <msg>``."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -272,7 +272,7 @@ def test_bg_create_argv_shape_small_message(tmp_path: Path, monkeypatch) -> None
 
 def test_claude_stop_hook_block_cap_default_and_override(monkeypatch) -> None:
     """The cap defaults to 50 and honors an operator-set env value (x-1680)."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.delenv("CLAUDE_CODE_STOP_HOOK_BLOCK_CAP", raising=False)
     assert claude_mod.claude_stop_hook_block_cap() == "50"
@@ -282,7 +282,7 @@ def test_claude_stop_hook_block_cap_default_and_override(monkeypatch) -> None:
 
 def test_bg_create_sets_stop_hook_block_cap(tmp_path: Path, monkeypatch) -> None:
     """bg spawn_env carries the raised Stop-hook block cap, honoring override (x-1680)."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -312,7 +312,7 @@ def test_bg_create_argv_shape_overflow_message(
     tmp_path: Path, monkeypatch
 ) -> None:
     """Over-threshold bg_create omits the message from argv and pipes via stdin."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -347,7 +347,7 @@ def test_build_argv_model_pin_parity() -> None:
     """x-571f: a model pin appends ``--model <m>`` between --name and message;
     empty/None is byte-identical to today. Must match the Rust ``build_argv``
     cases in crates/fno-agents (AC2-FR cross-runtime parity, AC1-EDGE unset)."""
-    from fno.agents.providers.claude import _build_argv
+    from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv("a", "hi", False, "fable") == [
         "claude", "--bg", "--name", "a", "--model", "fable", "hi",
@@ -368,7 +368,7 @@ def test_build_argv_resume_session() -> None:
     new account's env. Unset is byte-identical to today. This flag is spawn-only
     (the Rust ask-hop build_argv never resumes), so cross-runtime parity is scoped
     to the model/permission/effort flags, not this one."""
-    from fno.agents.providers.claude import _build_argv
+    from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv("a", "hi", False, resume_session_id="U-123") == [
         "claude", "--bg", "--name", "a", "--resume", "U-123", "hi",
@@ -395,7 +395,7 @@ def test_build_argv_tier3_parity() -> None:
     fixed order (--add-dir/--agent/--allowedTools/--disallowedTools), riding
     after --effort and before --model. Must byte-match the Rust
     HarnessFlags::push_onto order (AC2-EDGE cross-runtime parity)."""
-    from fno.agents.providers.claude import _build_argv
+    from fno.agents.harnesses.claude import _build_argv
 
     assert _build_argv(
         "a", "hi", False, None, None, None,
@@ -417,7 +417,7 @@ def test_build_argv_tier3_parity() -> None:
 def test_headless_create_applies_account_env(tmp_path: Path, monkeypatch) -> None:
     """x-d012: --account headless must thread CLAUDE_CONFIG_DIR into the -p env
     (a one-shot claude -p inherits the parent env otherwise -> mis-bill)."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -441,7 +441,7 @@ def test_headless_create_applies_account_env(tmp_path: Path, monkeypatch) -> Non
 
 def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) -> None:
     """No --account -> no explicit env (byte-identical to today: inherits parent)."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -462,7 +462,7 @@ def test_headless_create_no_account_inherits_env(tmp_path: Path, monkeypatch) ->
 
 def test_headless_create_forwards_json_output_format(tmp_path: Path, monkeypatch) -> None:
     """Internal canonical callers can preserve Claude's result envelope."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -486,7 +486,7 @@ def test_headless_create_forwards_json_output_format(tmp_path: Path, monkeypatch
 def test_headless_create_scrubs_inherited_auth(tmp_path: Path, monkeypatch) -> None:
     """x-d012: an --account spawn scrubs inherited ANTHROPIC_API_KEY /
     CLAUDE_CODE_OAUTH_TOKEN so an ambient token can't override the account."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-parent")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-parent")
@@ -517,7 +517,7 @@ def test_headless_create_routed_scrubs_ambient_creds(tmp_path: Path, monkeypatch
     ANTHROPIC_API_KEY / CLAUDE_CODE_OAUTH_TOKEN (claude prefers an env credential
     over the --settings file), else it authenticates with the primary account
     instead of the routed provider. Mirrors bg_create's scrub."""
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-parent")
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "oauth-parent")
@@ -561,7 +561,7 @@ def test_headless_receipt_emitted_before_blocking_subprocess(
     watcher (the twin-spawn failure mode this closes)."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.provenance.resolver import _slug
 
     captured: dict[str, object] = {}
@@ -604,7 +604,7 @@ def test_headless_receipt_goes_to_stderr_not_stdout(
     the full headless stdout; a receipt line there would corrupt the envelope."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     envelope = '{"is_error":false,"result":"ok"}'
 
@@ -638,7 +638,7 @@ def test_headless_receipt_resolves_remapped_model(
     spawn serves 'opus' when the routed secondary model actually wins."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     # Clear ambient overrides so the alias-remap path is exercised
     # deterministically (this test process may itself run routed, with
@@ -672,7 +672,7 @@ def test_headless_receipt_reports_routed_model_without_argv_pin(
     model, not null."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -711,7 +711,7 @@ def test_headless_receipt_transcript_dir_follows_account_config_dir(
     false-dead failure this receipt exists to prevent)."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: dict[str, object] = {}
 
@@ -745,7 +745,7 @@ def test_headless_receipt_slug_preserves_underscore(
     points at the real projects dir for an underscore-bearing cwd."""
     import json
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.provenance.resolver import _slug
 
     captured: dict[str, object] = {}

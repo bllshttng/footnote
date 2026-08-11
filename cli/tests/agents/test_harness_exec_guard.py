@@ -11,8 +11,8 @@ from __future__ import annotations
 
 import pytest
 
-from fno.agents.providers import claude as _claude
-from fno.agents.providers import codex as _codex
+from fno.agents.harnesses import claude as _claude
+from fno.agents.harnesses import codex as _codex
 
 
 @pytest.mark.parametrize(

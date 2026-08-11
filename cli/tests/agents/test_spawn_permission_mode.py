@@ -280,7 +280,7 @@ def test_bg_yolo_receipt_names_bypass_via_python(runner, monkeypatch):
 def test_claude_python_build_argv_threads_permission_mode():
     """The Python claude bg argv builder mirrors Rust: --permission-mode rides
     between --name and --model; unset is byte-identical."""
-    from fno.agents.providers.claude import _build_argv
+    from fno.agents.harnesses.claude import _build_argv
 
     argv = _build_argv("w1", "hi", False, None, "acceptEdits")
     assert argv == ["claude", "--bg", "--name", "w1", "--permission-mode",

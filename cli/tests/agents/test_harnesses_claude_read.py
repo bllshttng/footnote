@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from fno.agents.providers import claude as claude_mod
+from fno.agents.harnesses import claude as claude_mod
 
 
 def _fake_completed(stdout: str = "", stderr: str = "", returncode: int = 0):

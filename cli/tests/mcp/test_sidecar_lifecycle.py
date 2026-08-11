@@ -314,7 +314,7 @@ class TestSidecarChannelDelivery:
     The existing suite only covered the miss case
     (``test_send_to_unregistered_channel``). The delivery path has real
     production callers (``agents/dispatch.py``,
-    ``agents/providers/claude.py``) yet no test asserted a payload
+    ``agents/harnesses/claude.py``) yet no test asserted a payload
     actually crosses the socket — the coverage gap that let a
     deliver-nothing regression ship silently.
     """

@@ -85,7 +85,7 @@ def _codex_worker(
     _os.environ["PATH"] = str(bin_dir) + ":" + _os.environ.get("PATH", "")
 
     from fno.agents.dispatch import DispatchAskError, dispatch_ask
-    from fno.agents.providers import codex as codex_mod
+    from fno.agents.harnesses import codex as codex_mod
 
     def fake_create(*, cwd, prompt, from_name, yolo, output_path, timeout, **_kwargs):
         # Sleep simulates the in-flock work; serialization shows up as

@@ -24,8 +24,8 @@ The protocol over the AF_UNIX socket per `BG8`/`CE7`/`Ag5`: SOCK_STREAM, single-
 
 | Module | Role |
 |---|---|
-| `cli/src/fno/agents/providers/_claude_session_registry.py` | `locate_session`, `read_state_json` (retry-on-rename), `read_timeline_tail`, `TERMINAL_STATES`, `SessionLocator`, `StateSnapshot` |
-| `cli/src/fno/agents/providers/claude.py` | `send_to_session`, `liveness_probe`, `wait_for_reply`, `ask_followup`, `ProviderOrphanError`, `ProviderSocketError`, `ProviderTimeoutError`, `OrphanReason` |
+| `cli/src/fno/agents/harnesses/_claude_session_registry.py` | `locate_session`, `read_state_json` (retry-on-rename), `read_timeline_tail`, `TERMINAL_STATES`, `SessionLocator`, `StateSnapshot` |
+| `cli/src/fno/agents/harnesses/claude.py` | `send_to_session`, `liveness_probe`, `wait_for_reply`, `ask_followup`, `ProviderOrphanError`, `ProviderSocketError`, `ProviderTimeoutError`, `OrphanReason` |
 | `cli/src/fno/agents/dispatch.py` | `DispatchAskResult`, `DispatchKind`, `_followup_path`, `_stamp_status`, `_validate_from_name` |
 | `cli/src/fno/agents/cli.py` | `--from-name` option, kind-discriminated stdout |
 | `cli/src/fno/agents/registry.py` | `AgentEntry.status` + `last_message_at`, `AgentStatus` Literal, `KNOWN_STATUSES`, schema-version read-time synthesis |

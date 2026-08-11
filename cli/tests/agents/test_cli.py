@@ -81,7 +81,7 @@ def test_agents_list_shipped_in_us3(tmp_path: Path, monkeypatch, runner: CliRunn
     use_tmpdir(monkeypatch, tmp_path)
     # Silence the live-status shellout so the assertion focuses on the
     # CLI itself, not the provider plumbing.
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     monkeypatch.setattr(
         claude_mod, "claude_agents_json", lambda timeout=3.0: ({}, []),
     )

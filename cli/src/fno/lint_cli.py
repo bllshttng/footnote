@@ -31,8 +31,8 @@ MENU_CAP_SUB_APP = 12
 SPAWN_SHAPE_ALLOWLIST = frozenset(
     {
         "cli/src/fno/agents/dispatch.py",
-        "cli/src/fno/agents/providers/claude.py",
-        "cli/src/fno/agents/providers/codex.py",
+        "cli/src/fno/agents/harnesses/claude.py",
+        "cli/src/fno/agents/harnesses/codex.py",
         # Canonical tool-less one-shot judgment seam; x-81ad consolidated the
         # former inbox/graph/review call-site shapes here.
         "cli/src/fno/llm.py",

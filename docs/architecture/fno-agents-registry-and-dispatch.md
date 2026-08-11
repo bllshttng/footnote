@@ -21,13 +21,13 @@ fno agents ping
 | `cli/src/fno/agents/registry.py` | JSON-backed `AgentEntry` storage with atomic-rename + per-agent flock-path |
 | `cli/src/fno/agents/dispatch.py` | `KNOWN_PROVIDERS`, `is_provider_available`, `select_provider`, `dispatch_ask` orchestrator |
 | `cli/src/fno/agents/events.py` | Best-effort JSONL telemetry to `~/.fno/events.jsonl` |
-| `cli/src/fno/agents/providers/__init__.py` | Single source of truth for `KNOWN_PROVIDERS` |
-| `cli/src/fno/agents/providers/base.py` | `ProviderResult` dataclass |
+| `cli/src/fno/agents/harnesses/__init__.py` | Single source of truth for `KNOWN_PROVIDERS` |
+| `cli/src/fno/agents/harnesses/base.py` | `ProviderResult` dataclass |
 | `cli/src/fno/agents/cli.py` | Typer subapp wiring |
 | `cli/src/fno/agents/lock.py` | `hold_agent_lock(name, registry_path, timeout, on_wait)` context manager wrapping the per-agent flock |
-| `cli/src/fno/agents/providers/claude.py` | `--bg` create + messaging-socket follow-up |
-| `cli/src/fno/agents/providers/codex.py` | `exec` create + `exec resume` follow-up |
-| `cli/src/fno/agents/providers/gemini.py` | `-p --session-id` create + `-p --resume` follow-up |
+| `cli/src/fno/agents/harnesses/claude.py` | `--bg` create + messaging-socket follow-up |
+| `cli/src/fno/agents/harnesses/codex.py` | `exec` create + `exec resume` follow-up |
+| `cli/src/fno/agents/harnesses/gemini.py` | `-p --session-id` create + `-p --resume` follow-up |
 
 ## Storage shape
 
@@ -138,7 +138,7 @@ The `claude` provider's create path is the reference dispatch flow every other p
 | Module | Role |
 |--------|------|
 | `cli/src/fno/agents/lock.py` | `hold_agent_lock` — wraps the per-agent flock with timeout + progress callback + a `detach()` escape hatch for the registry-write-failure path |
-| `cli/src/fno/agents/providers/claude.py` | `bg_create(name, message, cwd, timeout) -> ProviderResult`, `parse_short_id(stdout)`, `ProviderParseError`, `ProviderSubprocessError`, argv-overflow stdin routing |
+| `cli/src/fno/agents/harnesses/claude.py` | `bg_create(name, message, cwd, timeout) -> ProviderResult`, `parse_short_id(stdout)`, `ProviderParseError`, `ProviderSubprocessError`, argv-overflow stdin routing |
 
 `dispatch.py` exposes `dispatch_ask(...)` + `DispatchAskError`; `cli.py` wires `cmd_ask` to call it.
 

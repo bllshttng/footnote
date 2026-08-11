@@ -46,7 +46,7 @@ UUID = "019e7157-4236-7bb1-b274-ebbac6040ace"
 def test_acquire_session_writer_claim_happy_path(tmp_path, monkeypatch):
     """A free session:<uuid> is claimed; the claim file exists."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import acquire_session_writer_claim
+    from fno.agents.harnesses.claude import acquire_session_writer_claim
     from fno.claims import claim_status
     from fno.claims.io import global_claims_root
 
@@ -60,7 +60,7 @@ def test_acquire_skips_liveness_when_no_short_id(tmp_path, monkeypatch):
     """An idle session with no short-id given (never-live) acquires cleanly:
     the liveness guard only fires when a short-id is supplied."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import acquire_session_writer_claim
+    from fno.agents.harnesses.claude import acquire_session_writer_claim
 
     claim = acquire_session_writer_claim(session_uuid=UUID, holder="daemon:1")
     assert claim is not None
@@ -72,8 +72,8 @@ def test_acquire_refuses_when_session_held_live(tmp_path, monkeypatch):
     _use_global_claims_root(monkeypatch, tmp_path)
     _write_session_file(tmp_path, monkeypatch, pid=4242, job_id="7c5dcf5d",
                         socket_path="/tmp/sock.msg")
-    import fno.agents.providers.claude as claude_mod
-    from fno.agents.providers.claude import (
+    import fno.agents.harnesses.claude as claude_mod
+    from fno.agents.harnesses.claude import (
         SessionWriterClaimError,
         acquire_session_writer_claim,
     )
@@ -94,8 +94,8 @@ def test_acquire_allows_when_session_socket_dead(tmp_path, monkeypatch):
     _use_global_claims_root(monkeypatch, tmp_path)
     _write_session_file(tmp_path, monkeypatch, pid=4242, job_id="7c5dcf5d",
                         socket_path="/tmp/sock.msg")
-    import fno.agents.providers.claude as claude_mod
-    from fno.agents.providers.claude import acquire_session_writer_claim
+    import fno.agents.harnesses.claude as claude_mod
+    from fno.agents.harnesses.claude import acquire_session_writer_claim
 
     monkeypatch.setattr(claude_mod, "liveness_probe", lambda sock: False)
 
@@ -109,7 +109,7 @@ def test_concurrent_adopt_only_one_wins(tmp_path, monkeypatch):
     """AC1-EDGE: two adopts of the same session id - the first holds the claim;
     a second holder is refused (atomic single-writer)."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         SessionWriterClaimError,
         acquire_session_writer_claim,
     )
@@ -125,7 +125,7 @@ def test_reacquire_same_holder_is_idempotent(tmp_path, monkeypatch):
     """Re-acquiring with the SAME holder (e.g. a daemon restart reconnecting) is
     idempotent, not a refusal."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import acquire_session_writer_claim
+    from fno.agents.harnesses.claude import acquire_session_writer_claim
 
     acquire_session_writer_claim(session_uuid=UUID, holder="daemon:A")
     again = acquire_session_writer_claim(session_uuid=UUID, holder="daemon:A")
@@ -136,7 +136,7 @@ def test_release_session_writer_claim_frees_it(tmp_path, monkeypatch):
     """Release frees the claim so a later adopt (after the child orphaned) can
     re-take it."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import (
+    from fno.agents.harnesses.claude import (
         acquire_session_writer_claim,
         release_session_writer_claim,
     )
@@ -157,6 +157,6 @@ def test_release_is_silent_when_not_held(tmp_path, monkeypatch):
     """Releasing a claim that was never held is a silent no-op (idempotent
     cleanup on a child that died before the claim was recorded)."""
     _use_global_claims_root(monkeypatch, tmp_path)
-    from fno.agents.providers.claude import release_session_writer_claim
+    from fno.agents.harnesses.claude import release_session_writer_claim
 
     release_session_writer_claim(session_uuid=UUID, holder="daemon:A")  # no raise

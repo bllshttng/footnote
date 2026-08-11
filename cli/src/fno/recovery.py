@@ -65,7 +65,7 @@ from pathlib import Path
 from typing import Callable, Iterable, Optional
 
 from fno import _subprocess_util
-from fno.agents.providers.claude import ProviderSocketError
+from fno.agents.harnesses.claude import ProviderSocketError
 
 # The error the real send seam raises; aliased so callers/tests have one name.
 _SendError = ProviderSocketError
@@ -434,7 +434,7 @@ def save_counts(counts: dict) -> None:
 
 def _safe_read_state(jobs_dir):
     """Read optional phase/error metadata; transcript truth owns liveness."""
-    from fno.agents.providers._claude_session_registry import read_state_json
+    from fno.agents.harnesses._claude_session_registry import read_state_json
 
     try:
         snap = read_state_json(Path(jobs_dir))
@@ -805,7 +805,7 @@ def _resolve_session_uuid(short_id: str) -> Optional[str]:
     Best-effort: a registry-read miss degrades to None so revival falls back to the
     bounded nudge rather than crashing the sweep."""
     try:
-        from fno.agents.providers._claude_session_registry import resolve_session_uuid
+        from fno.agents.harnesses._claude_session_registry import resolve_session_uuid
 
         return resolve_session_uuid(short_id)
     except Exception:  # noqa: BLE001 - a resolve miss must never crash the sweep
@@ -1101,11 +1101,11 @@ def run_recovery_sweep(
 
         registry_load = load_registry
     if locate_fn is None:
-        from fno.agents.providers._claude_session_registry import locate_session
+        from fno.agents.harnesses._claude_session_registry import locate_session
 
         locate_fn = locate_session
     if liveness_fn is None:
-        from fno.agents.providers.claude import liveness_probe
+        from fno.agents.harnesses.claude import liveness_probe
 
         liveness_fn = liveness_probe
     read_state_fn = read_state_fn or _safe_read_state

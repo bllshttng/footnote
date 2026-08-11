@@ -50,7 +50,7 @@ def _fake_run(captured: Dict[str, Any]):
 def test_cheap_role_merges_zai_env(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-secret")
     # A stale Anthropic credential in the parent env must be cleared on a route
@@ -80,7 +80,7 @@ def test_cheap_role_merges_zai_env(
 def test_no_role_leaves_env_unrouted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-secret")
     monkeypatch.delenv("ANTHROPIC_BASE_URL", raising=False)
@@ -101,7 +101,7 @@ def test_no_role_leaves_env_unrouted(
 def test_production_role_leaves_env_unrouted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setenv("ZAI_API_KEY", "zk-secret")
 
@@ -120,7 +120,7 @@ def test_production_role_leaves_env_unrouted(
 def test_cheap_role_without_key_falls_back_unrouted(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.delenv("ZAI_API_KEY", raising=False)
 
@@ -141,7 +141,7 @@ def test_direct_provider_captures_role_resolution_once(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from fno.agents import model_routing
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     captured: Dict[str, Any] = {}
     resolutions: list[str | None] = []

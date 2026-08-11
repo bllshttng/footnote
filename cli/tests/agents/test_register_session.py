@@ -389,7 +389,7 @@ def test_ac7_fr_unreachable_registered_session_orphaned(tmp_path: Path, monkeypa
     use_tmpdir(monkeypatch, tmp_path)
     from fno.agents import dispatch
     from fno.agents.dispatch import reconcile_agents
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
     from fno.agents.registry import load_registry, register_existing_session
 
     register_existing_session(provider="claude", session_id="dead-sess", cwd="/proj")

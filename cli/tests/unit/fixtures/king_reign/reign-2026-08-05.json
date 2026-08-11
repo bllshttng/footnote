@@ -357,7 +357,7 @@
   },
   {
    "tool": "Bash",
-   "target": "ls cli/src/fno/agents/providers/ 2>&1; echo \"=== provider_resolve purpose ===\"; sed -n '1,25p' cli/src/fno/agents/provider_resolve.py 2>&1",
+   "target": "ls cli/src/fno/agents/harnesses/ 2>&1; echo \"=== provider_resolve purpose ===\"; sed -n '1,25p' cli/src/fno/agents/provider_resolve.py 2>&1",
    "index": 61,
    "kind": "tool_use"
   },

@@ -295,7 +295,7 @@ def test_an_explicit_account_composes_with_a_restored_route(
         seen.update(kwargs)
         raise DispatchAskError("stop here", exit_code=99)
 
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     monkeypatch.setattr(claude_mod, "bg_create", _fake_bg_create)
     with pytest.raises(DispatchAskError) as exc:

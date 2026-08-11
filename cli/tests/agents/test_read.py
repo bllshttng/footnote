@@ -4,7 +4,7 @@ Covers AC1-HP (populated table), AC1-EDGE (empty), AC1-UI (--json forces JSON),
 AC3-HP (cross-provider shape), AC3-EDGE (filter intersection).
 
 The claude_agents_json() shellout is mocked via monkeypatch of the
-``fno.agents.providers.claude.claude_agents_json`` function symbol.
+``fno.agents.harnesses.claude.claude_agents_json`` function symbol.
 Live shellout is exercised in providers test + integration smoke.
 """
 from __future__ import annotations
@@ -52,7 +52,7 @@ def _codex(**kw) -> AgentEntry:
 def _patch_claude_agents_json(monkeypatch):
     """Return a function that installs a fake claude_agents_json result."""
     def _install(result, warnings=None):
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         def _fake(timeout=3.0):  # noqa: ARG001
             return result, list(warnings or [])
@@ -299,7 +299,7 @@ def test_list_agents_claude_shellout_only_called_once_per_invocation(
     )
 
     calls = {"count": 0}
-    from fno.agents.providers import claude as claude_mod
+    from fno.agents.harnesses import claude as claude_mod
 
     def _fake(timeout=3.0):  # noqa: ARG001
         calls["count"] += 1

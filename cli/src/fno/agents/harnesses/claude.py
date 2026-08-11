@@ -1,4 +1,4 @@
-"""fno.agents.providers.claude — Claude --bg adapter for US1 dispatch.
+"""fno.agents.harnesses.claude — Claude --bg adapter for US1 dispatch.
 
 Surface:
 
@@ -41,7 +41,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Literal, Mapping, Optional
 
-from fno.agents.providers._claude_session_registry import (
+from fno.agents.harnesses._claude_session_registry import (
     TERMINAL_STATES,
     SessionLocator,
     _jobs_dir_for,
@@ -51,7 +51,7 @@ from fno.agents.providers._claude_session_registry import (
     resolve_session_uuid,
     roster_live,
 )
-from fno.agents.providers.base import ProviderResult, ReachabilityProbeError
+from fno.agents.harnesses.base import ProviderResult, ReachabilityProbeError
 from fno.claims import ClaimHeldByOther, acquire_claim, release_claim
 from fno.claims.io import global_claims_root
 
@@ -1117,7 +1117,7 @@ def _classify_orphan_reason(short_id: str) -> OrphanReason:
     sessions directory to figure out which one applies, so the dispatch
     layer can map to the AC-required stderr reason discriminator.
     """
-    from fno.agents.providers._claude_session_registry import (
+    from fno.agents.harnesses._claude_session_registry import (
         _sessions_dir,
     )
 

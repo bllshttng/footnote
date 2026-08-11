@@ -43,7 +43,7 @@ cli/tests/agents/
 ├── fixtures/gemini-json-sample.json     # committed real-gemini capture
 ├── fixtures/gemini-smoke-findings.md    # runtime-discovery resolution doc
 ├── fixtures/fake-gemini-hang.sh         # signal-handling test shim
-├── test_provider_base.py                # 19 lift + alias tests
+├── test_harness_base.py                # 19 lift + alias tests
 ├── test_with_agent_lock_and_entry.py    # 6 context-manager tests
 ├── test_reconcile_batched.py            # 6 batched-write tests
 ├── test_provider_gemini.py              # 26 provider unit tests
@@ -176,7 +176,7 @@ The gemini integration was developed against gemini CLI 0.42.0 and the following
 
 Adding a fourth provider (e.g. `opencode`) requires zero `base.py` edits — the lifted `ReachabilityProbeError`, `with_agent_lock_and_entry`, and batched `reconcile_agents` already absorb a new provider's tri-state probe + lifecycle verbs. The `dispatch.py` routing extends by one elif clause.
 
-The deprecated alias removal is a separate follow-up. New code should `from fno.agents.providers.base import ReachabilityProbeError` rather than the legacy class names.
+The deprecated alias removal is a separate follow-up. New code should `from fno.agents.harnesses.base import ReachabilityProbeError` rather than the legacy class names.
 
 ## See also
 

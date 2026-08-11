@@ -740,7 +740,7 @@ def cmd_spawn(
         vendor = vendor.strip()
         # The historical confusion, refused by name rather than silently launching
         # the wrong thing: `--provider claude` used to select the CLI binary.
-        from fno.agents.providers import READABLE_PROVIDERS
+        from fno.agents.harnesses import READABLE_PROVIDERS
 
         if vendor in READABLE_PROVIDERS:
             print(
@@ -2149,7 +2149,7 @@ def cmd_whoami(
     live_warnings: list[str] = []
 
     def _live_status_fn(short_id: str) -> str | None:
-        from fno.agents.providers import claude as claude_mod
+        from fno.agents.harnesses import claude as claude_mod
 
         live_map, warns = claude_mod.claude_agents_json()
         live_warnings.extend(warns)
