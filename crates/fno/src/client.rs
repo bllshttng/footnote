@@ -5132,7 +5132,7 @@ impl View {
             flags: cell_flags::BOLD,
             fg: Color::Default,
             hit: None,
-            is_tab_label: false,
+            role: SpanRole::Squad,
         });
         for (i, t) in s.tabs.iter().enumerate() {
             let label = tab_label_text(&t.name, i, t.named);
@@ -5167,7 +5167,7 @@ impl View {
                 flags: base_flags | glyph_flags,
                 fg,
                 hit: Some(TabHit::Tab(t.id)),
-                is_tab_label: true,
+                role: SpanRole::Tab,
             });
         }
         spans.push(TabSpan {
@@ -5175,7 +5175,7 @@ impl View {
             flags: cell_flags::DIM,
             fg: Color::Default,
             hit: Some(TabHit::NewTab),
-            is_tab_label: false,
+            role: SpanRole::NewTab,
         });
         spans
     }
@@ -5264,7 +5264,7 @@ impl View {
                 // Clicking the counter selects the nearest tab it is hiding, so
                 // the strip walks toward the hidden end one click at a time.
                 hit: tabs[start - 1].hit,
-                is_tab_label: false,
+                role: SpanRole::OverflowLeft(start),
             });
         }
         out.extend(tabs[start..end].iter().cloned());
@@ -5274,7 +5274,7 @@ impl View {
                 flags: cell_flags::DIM,
                 fg: Color::Default,
                 hit: tabs[end].hit,
-                is_tab_label: false,
+                role: SpanRole::OverflowRight(tabs.len() - end),
             });
         }
         out.push(plus);
@@ -6433,17 +6433,6 @@ fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
     }
 }
 
-/// One clickable span in the tab bar (label + render flags + what a click does;
-/// `None` = inert, e.g. the squad-name label).
-/// Shrink `spans` until they fit `width`, taking the columns off the tab labels
-/// and never off the pinned chrome.
-///
-/// The widest label yields first, and a tab is dropped only once it cannot show
-/// one character plus its brackets. The counters and the `+` are never touched:
-/// clipping those trades reachability for a character, and a counter shortened
-/// to `‹1 ` reports a wrong count as confidently as a right one. Once no tab
-/// label is left to give, the squad label yields instead - it is the only span
-/// on the strip that nothing navigates by.
 /// Blank whichever half of a double-width pair survives at the edges of the
 /// half-open column range `[start, end)` on `row`.
 ///
@@ -6471,6 +6460,23 @@ fn blank_straddling_pair(cells: &mut [Cell], cols: usize, row: usize, start: usi
     }
 }
 
+/// Shrink `spans` until they fit `width`.
+///
+/// Columns come off in order of what the operator loses by it:
+///
+/// 1. the widest tab label, down to one character plus its brackets;
+/// 2. then the squad label, the only span nothing navigates by;
+/// 3. only then does a tab stop being shown at all.
+///
+/// Having 2 and 3 the wrong way round was not a matter of taste: on a supported
+/// 40-column strip a long enough workspace name dropped the ACTIVE tab while its
+/// own name sat there at full length.
+///
+/// The counters and the `+` are never shortened or shed. A counter squeezed into
+/// `‹1 ` states a wrong count as confidently as a right one, and the `+` is the
+/// only mouse route to a new tab. When step 3 does hide a tab the right-hand
+/// counter takes it on, because a count computed before the hiding is precisely
+/// the confidently-wrong number the rest of this function exists to avoid.
 fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
     let w = |s: &TabSpan| s.text.chars().count();
     let total = |v: &Vec<TabSpan>| v.iter().map(w).sum::<usize>();
@@ -6482,30 +6488,55 @@ fn condense_to_width(spans: &mut Vec<TabSpan>, width: usize) {
         s.text = chars.into_iter().collect();
     };
     while total(spans) > width {
-        let victim = spans
+        let widest_tab = spans
             .iter()
             .enumerate()
-            .filter(|(_, s)| s.is_tab_label && w(s) > 3)
+            .filter(|(_, s)| s.role == SpanRole::Tab && w(s) > 3)
             .max_by_key(|(_, s)| w(s))
             .map(|(i, _)| i);
-        match victim {
-            Some(i) => shrink(&mut spans[i]),
-            // No tab label can give another column: shed the last whole tab, and
-            // when none remain start taking columns off the squad label rather
-            // than letting a counter or the `+` fall off the edge.
-            None => match spans.iter().rposition(|s| s.is_tab_label) {
-                Some(i) => {
-                    spans.remove(i);
-                }
-                None => match spans.first_mut().filter(|s| s.text.chars().count() > 3) {
-                    Some(label) => shrink(label),
-                    None => break,
+        if let Some(i) = widest_tab {
+            shrink(&mut spans[i]);
+            continue;
+        }
+        if let Some(squad) = spans
+            .iter_mut()
+            .find(|s| s.role == SpanRole::Squad && s.text.chars().count() > 3)
+        {
+            shrink(squad);
+            continue;
+        }
+        let Some(i) = spans.iter().rposition(|s| s.role == SpanRole::Tab) else {
+            break;
+        };
+        // The tab did not disappear, it became hidden, so it has to start being
+        // counted. Its hit comes along: it is now the nearest hidden tab, and
+        // the counter is what walks the strip back to it.
+        let dropped = spans.remove(i);
+        match spans.get_mut(i) {
+            Some(counter) if matches!(counter.role, SpanRole::OverflowRight(_)) => {
+                let SpanRole::OverflowRight(n) = counter.role else {
+                    unreachable!()
+                };
+                counter.role = SpanRole::OverflowRight(n + 1);
+                counter.text = format!(" {}\u{203a}", n + 1);
+                counter.hit = dropped.hit;
+            }
+            _ => spans.insert(
+                i,
+                TabSpan {
+                    text: " 1\u{203a}".to_string(),
+                    flags: cell_flags::DIM,
+                    fg: Color::Default,
+                    hit: dropped.hit,
+                    role: SpanRole::OverflowRight(1),
                 },
-            },
+            ),
         }
     }
 }
 
+/// One clickable span in the tab bar: label, render flags, and what a click does
+/// (`None` = inert, e.g. the squad-name label).
 #[derive(Clone)]
 struct TabSpan {
     text: String,
@@ -6514,12 +6545,30 @@ struct TabSpan {
     /// Blocked pane, else `Color::Default`.
     fg: Color,
     hit: Option<TabHit>,
-    /// Whether this span IS a tab's label, as opposed to pinned chrome that
-    /// merely resolves to a tab. An overflow counter also carries a `Tab` hit -
-    /// clicking it walks the strip - so the hit cannot tell the two apart, and
-    /// [`condense_to_width`] must never shorten a counter into `‹1 ` when the
-    /// count is what makes it worth clicking.
-    is_tab_label: bool,
+    role: SpanRole,
+}
+
+/// What a strip span IS, rather than what its click happens to do.
+///
+/// Two review findings in a row came from reading a span's role off `hit` and
+/// its length: an overflow counter carries a `Tab` hit, because clicking it
+/// walks the strip, so by behaviour it is indistinguishable from a short tab
+/// label. It is not, and [`condense_to_width`] treats the two very differently.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum SpanRole {
+    /// The workspace name. Inert, and the only span nothing navigates by, which
+    /// is what makes it the right thing to shorten under pressure.
+    Squad,
+    /// A tab's own label.
+    Tab,
+    /// `‹N `: N tabs hidden to the left of the window.
+    OverflowLeft(usize),
+    /// ` N›`: N tabs hidden to the right. Carries its count so a strip that has
+    /// to hide one more tab can say so, instead of reporting a number that was
+    /// computed before the hiding happened.
+    OverflowRight(usize),
+    /// The `+`: the only mouse route to a new tab.
+    NewTab,
 }
 
 #[derive(Clone, Copy)]
@@ -23418,44 +23467,42 @@ mod tests {
         // becomes `‹1 ` - a wrong count stated as confidently as a right one -
         // and dropped, its click target goes with it.
         let label = TabSpan {
-            text: " a-long-workspace-name ".to_string(),
+            text: " a-very-long-workspace-name ".to_string(),
             flags: cell_flags::BOLD,
             fg: Color::Default,
             hit: None,
-            is_tab_label: false,
+            role: SpanRole::Squad,
         };
-        let counter = |text: &str| TabSpan {
+        let counter = |text: &str, role: SpanRole| TabSpan {
             text: text.to_string(),
             flags: cell_flags::DIM,
             fg: Color::Default,
             hit: Some(TabHit::Tab(7)),
-            is_tab_label: false,
-        };
-        let tab = |text: &str| TabSpan {
-            text: text.to_string(),
-            flags: 0,
-            fg: Color::Default,
-            hit: Some(TabHit::Tab(3)),
-            is_tab_label: true,
+            role,
         };
         let strip = || {
             vec![
                 label.clone(),
-                counter("\u{2039}13 "),
-                tab("[a-tab-label]"),
-                counter(" 4\u{203a}"),
+                counter("\u{2039}13 ", SpanRole::OverflowLeft(13)),
+                TabSpan {
+                    text: "[a-tab-label]".to_string(),
+                    flags: 0,
+                    fg: Color::Default,
+                    hit: Some(TabHit::Tab(3)),
+                    role: SpanRole::Tab,
+                },
+                counter(" 4\u{203a}", SpanRole::OverflowRight(4)),
                 TabSpan {
                     text: " + ".to_string(),
                     flags: cell_flags::DIM,
                     fg: Color::Default,
                     hit: Some(TabHit::NewTab),
-                    is_tab_label: false,
+                    role: SpanRole::NewTab,
                 },
             ]
         };
-        // 40 columns: the tab label alone can pay. 30: it runs out, and the
-        // squad label - the one span nothing navigates by - has to yield rather
-        // than a counter losing its count or the `+` losing its click target.
+        // 40 columns is a supported strip width. 30 forces the squad label to
+        // give. Neither may cost a counter its count or the `+` its click.
         for width in [40usize, 30] {
             let mut spans = strip();
             condense_to_width(&mut spans, width);
@@ -23469,6 +23516,10 @@ mod tests {
                 "at {width}: the `+` is the only mouse route to a new tab: {texts:?}"
             );
             assert!(
+                spans.iter().any(|s| s.role == SpanRole::Tab),
+                "at {width}: the active tab must still be on the strip: {texts:?}"
+            );
+            assert!(
                 spans.iter().map(|s| s.text.chars().count()).sum::<usize>() <= width,
                 "at {width}: still has to fit: {texts:?}"
             );
@@ -23480,6 +23531,78 @@ mod tests {
             "at 30 the squad label is what is left to give: {:?}",
             narrow.iter().map(|s| s.text.as_str()).collect::<Vec<_>>()
         );
+    }
+
+    #[test]
+    fn a_tab_that_stops_being_shown_starts_being_counted() {
+        // Hiding a tab without touching the counter leaves the strip stating a
+        // number that was computed before the hiding: the same
+        // confidently-wrong shape as a counter squeezed down to `‹1 `.
+        let squad = TabSpan {
+            text: " ws ".to_string(),
+            flags: cell_flags::BOLD,
+            fg: Color::Default,
+            hit: None,
+            role: SpanRole::Squad,
+        };
+        let tab = |id: TabId| TabSpan {
+            text: format!("[tab-{id}]"),
+            flags: 0,
+            fg: Color::Default,
+            hit: Some(TabHit::Tab(id)),
+            role: SpanRole::Tab,
+        };
+        let plus = TabSpan {
+            text: " + ".to_string(),
+            flags: cell_flags::DIM,
+            fg: Color::Default,
+            hit: Some(TabHit::NewTab),
+            role: SpanRole::NewTab,
+        };
+
+        // An existing right counter absorbs the newly hidden tab, and points at
+        // it: it is now the nearest one hidden.
+        let mut spans = vec![
+            squad.clone(),
+            tab(1),
+            tab(2),
+            TabSpan {
+                text: " 4\u{203a}".to_string(),
+                flags: cell_flags::DIM,
+                fg: Color::Default,
+                hit: Some(TabHit::Tab(9)),
+                role: SpanRole::OverflowRight(4),
+            },
+            plus.clone(),
+        ];
+        condense_to_width(&mut spans, 14);
+        let counter = spans
+            .iter()
+            .find(|s| matches!(s.role, SpanRole::OverflowRight(_)))
+            .expect("the counter survives");
+        assert_eq!(
+            counter.role,
+            SpanRole::OverflowRight(5),
+            "4 hidden + 1 more"
+        );
+        assert_eq!(counter.text, " 5\u{203a}");
+        assert!(
+            matches!(counter.hit, Some(TabHit::Tab(2))),
+            "clicking it should walk back to the tab just hidden"
+        );
+
+        // And with no counter yet, the hidden tab becomes one rather than
+        // vanishing off the strip unaccounted for. Note that this particular
+        // step buys no columns - a three-column tab becomes a three-column
+        // counter - so it happens for truthfulness, not for width.
+        let mut spans = vec![squad, tab(2), plus];
+        condense_to_width(&mut spans, 8);
+        let counter = spans
+            .iter()
+            .find(|s| matches!(s.role, SpanRole::OverflowRight(_)))
+            .expect("a counter appears for the tab that stopped being shown");
+        assert_eq!(counter.role, SpanRole::OverflowRight(1));
+        assert!(matches!(counter.hit, Some(TabHit::Tab(2))));
     }
 
     #[test]
