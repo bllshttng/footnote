@@ -93,6 +93,9 @@ VERIFY_INTERVAL="${HANDOFF_VERIFY_INTERVAL:-5}"
 # ---------------------------------------------------------------------------
 _SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 _CONFIG_SH="$_SCRIPT_DIR/lib/config.sh"
+_EVENTS_SH="$_SCRIPT_DIR/lib/events.sh"
+# shellcheck source=lib/events.sh
+source "$_EVENTS_SH" 2>/dev/null || true
 if [ -f "$_CONFIG_SH" ]; then
   # Set LOCAL_SETTINGS relative to FNO_DIR so config works in sandbox
   LOCAL_SETTINGS="$FNO_DIR/config.toml"
@@ -116,10 +119,10 @@ case "$USED_PCT_TRIGGER" in ''|*[!0-9]*) USED_PCT_TRIGGER="50" ;; esac
 # Helper: emit an event to events.jsonl
 # Accepts: emit_event <type> <json-data>
 # fno event emit is the PRIMARY writer (validates kind, takes the file lock).
-# The direct printf append is the FALLBACK only when fno exits nonzero
+# The bounded shell append is the FALLBACK only when fno exits nonzero
 # (stale binary, unknown kind, daemon unavailable).
 # The preflight at step 1 guarantees fno can emit `delegated`, so in the
-# normal path fno always succeeds and printf never runs, preventing double-writes
+# normal path fno always succeeds and the fallback never runs, preventing double-writes
 # that would corrupt the generation count and lineage chain.
 # ---------------------------------------------------------------------------
 _emit_event() {
@@ -127,15 +130,18 @@ _emit_event() {
   local edata="$2"
   local ts
   ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || date -u +%Y-%m-%dT%H:%M:%SZ)"
-  # fno is primary; printf is fallback only when fno fails.
+  # fno is primary; the bounded shell helper is fallback only when fno fails.
   # Always pass --source target so the envelope is correct even when
   # target-state.md has already been archived (step 4 happens before step 8).
   if ! fno event emit --type "$etype" --data "$edata" --events "$EVENTS_FILE" \
        --source target >/dev/null 2>&1; then
-    echo "handoff: WARN: fno event emit failed for type '$etype'; using printf fallback" >&2
-    printf '{"ts":"%s","type":"%s","source":"target","data":%s}\n' \
-      "$ts" "$etype" "$edata" >> "$EVENTS_FILE" 2>/dev/null \
-      || echo "handoff: WARN: printf fallback append also failed for type '$etype'" >&2
+    echo "handoff: WARN: fno event emit failed for type '$etype'; using bounded shell fallback" >&2
+    local line
+    line=$(printf '{"ts":"%s","type":"%s","source":"target","data":%s}' "$ts" "$etype" "$edata")
+    if ! declare -F _append_bounded_event >/dev/null 2>&1 \
+       || ! _append_bounded_event target_handoff "$line" "$EVENTS_FILE"; then
+      echo "handoff: WARN: bounded fallback append also failed for type '$etype'" >&2
+    fi
   fi
 }
 

@@ -26,6 +26,7 @@ export PATH="/usr/bin:/bin:/usr/sbin:/sbin:${PATH:-}"
 
 # shellcheck source=../lib/events-lock.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/lib/events-lock.sh"
+EVENTS_MIGRATION_FILTER="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/filter-event-migration.py"
 
 # Resolve canonical project root (where the shared files live). Priority:
 #   1. CANONICAL env var (manual override)
@@ -218,6 +219,24 @@ journal_ends_with() {
   tail -c "$suffix_bytes" "$journal" | cmp -s - "$suffix"
 }
 
+append_migrated_events() {
+  local source="$1"
+  local local_events="$2"
+  local deduplicate_suffix="${3:-false}"
+  local filtered
+  filtered=$(mktemp "${source}.migration.XXXXXX") || return 1
+  if ! python3 "$EVENTS_MIGRATION_FILTER" "$source" "$local_events" > "$filtered"; then
+    rm -f "$filtered"
+    return 1
+  fi
+  local rc=0
+  if [[ "$deduplicate_suffix" != "true" ]] || ! journal_ends_with "$source" "$filtered"; then
+    cat "$filtered" >> "$source" || rc=$?
+  fi
+  rm -f "$filtered"
+  return "$rc"
+}
+
 wait_for_shell_event_writers() {
   local events_path="$1"
   local active_dir="${events_path}.shell-writers.d"
@@ -281,7 +300,7 @@ link_events_journal() {
     recover_pending=1
   fi
   if [[ ! -e "$target" ]]; then
-    ln -s "$source" "$target"
+    ln -s "$source" "$target" 2>/dev/null || [[ -L "$target" ]]
     return 0
   fi
   if [[ ! -f "$target" ]]; then
@@ -340,6 +359,21 @@ link_events_journal() {
   fi
   EVENTS_MIGRATION_DIRS+=("$second_lock")
 
+  # Another setup may have completed while this process waited for the locks.
+  # Re-read both the link and recovery receipts before choosing a mutation path.
+  shopt -s nullglob
+  pending_backups=("${target}.pre-share.pending."*)
+  shopt -u nullglob
+  if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
+    cleanup_events_migration
+    return 0
+  fi
+  if [[ -L "$target" ]]; then
+    recover_pending=1
+  else
+    recover_pending=0
+  fi
+
   local rc=0
   local stamp="$(date -u +%Y%m%dT%H%M%SZ).$$"
   local backup="${target}.pre-share.pending.${stamp}"
@@ -348,8 +382,8 @@ link_events_journal() {
   if (( recover_pending == 1 )); then
     local pending completed
     for pending in "${pending_backups[@]}"; do
-      if (( rc == 0 )) && ! journal_ends_with "$source" "$pending"; then
-        cat "$pending" >> "$source" || rc=$?
+      if (( rc == 0 )); then
+        append_migrated_events "$source" "$pending" true || rc=$?
         if (( rc == 0 )); then
           ensure_trailing_newline "$source" || rc=$?
         fi
@@ -365,7 +399,7 @@ link_events_journal() {
       ln -s "$source" "$target" || rc=$?
     fi
     if (( rc == 0 )) && [[ -s "$backup" ]]; then
-      cat "$backup" >> "$source" || rc=$?
+      append_migrated_events "$source" "$backup" || rc=$?
       if (( rc == 0 )); then
         ensure_trailing_newline "$source" || rc=$?
       fi
@@ -410,6 +444,11 @@ link_file ".fno/config.toml"
 if ! link_events_journal; then
   echo "setup-worktree: events journal left worktree-local after migration failure" >&2
 fi
+if [[ ! -e "$CANONICAL/.fno/.think-offer-cursor" ]]; then
+  canonical_events_size=$(wc -c < "$CANONICAL/.fno/events.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
+  (set -C; printf '%s' "${canonical_events_size:-0}" > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true
+fi
+link_artifact ".fno/.think-offer-cursor"
 # config.local.toml is deliberately NOT linked: it is the one config file kept
 # per-worktree, layering the collision-prone keys (post_merge.parking_lot_path,
 # project.id) on top of the shared config.toml (x-cbce). Do not add a

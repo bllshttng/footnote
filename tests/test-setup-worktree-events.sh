@@ -27,6 +27,8 @@ printf '%s' '{"type":"canonical_before"}' > "$canonical/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$fresh" bash "$SETUP" >/dev/null 2>&1
 assert "fresh worktree gets an events symlink" test -L "$fresh/.fno/events.jsonl"
 assert "fresh symlink targets the canonical journal" test "$canonical/.fno/events.jsonl" -ef "$fresh/.fno/events.jsonl"
+assert "fresh worktree shares the offer cursor" test -L "$fresh/.fno/.think-offer-cursor"
+assert "offer cursor initializes at canonical EOF" test "$(cat "$canonical/.fno/.think-offer-cursor")" -eq "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')"
 resolved_shell_path=$(
   EVENTS_FILE="$fresh/.fno/events.jsonl"
   # shellcheck disable=SC1090
@@ -46,10 +48,12 @@ fi
 existing="$TMP/existing"
 mkdir -p "$existing/.fno"
 printf '%s' '{"type":"worktree_before"}' > "$existing/.fno/events.jsonl"
+printf '%s' '999999' > "$existing/.fno/.think-offer-cursor"
 
 CANONICAL="$canonical" WORKTREE="$existing" bash "$SETUP" >/dev/null 2>&1
 assert "existing real journal is replaced by a symlink" test -L "$existing/.fno/events.jsonl"
 assert "migrated symlink targets the canonical journal" test "$canonical/.fno/events.jsonl" -ef "$existing/.fno/events.jsonl"
+assert "stale worktree offer cursor is replaced by the shared cursor" test -L "$existing/.fno/.think-offer-cursor"
 assert "canonical bytes survive migration" grep -q '"type":"canonical_before"' "$canonical/.fno/events.jsonl"
 assert "worktree bytes reach canonical journal" grep -q '"type":"worktree_before"' "$canonical/.fno/events.jsonl"
 assert "unterminated inputs become two complete rows" test "$(wc -l < "$canonical/.fno/events.jsonl" | tr -d ' ')" -eq 2
@@ -64,6 +68,32 @@ assert "migration retains one pre-share backup" test "${#backups[@]}" -eq 1
 if (( ${#backups[@]} == 1 )); then
   assert "backup retains the worktree bytes" grep -q '"type":"worktree_before"' "${backups[0]}"
 fi
+
+concurrent="$TMP/concurrent"
+mkdir -p "$concurrent/.fno"
+printf '%s\n' '{"type":"concurrent_row"}' > "$concurrent/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$concurrent" bash "$SETUP" >/dev/null 2>&1 &
+setup_one=$!
+CANONICAL="$canonical" WORKTREE="$concurrent" bash "$SETUP" >/dev/null 2>&1 &
+setup_two=$!
+wait "$setup_one"
+wait "$setup_two"
+assert "concurrent setup converges on one shared symlink" test -L "$concurrent/.fno/events.jsonl"
+assert "concurrent setup migrates local rows once" test "$(grep -c 'concurrent_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
+
+ordered="$TMP/ordered"
+mkdir -p "$ordered/.fno"
+printf '%s\n' '{"ts":"2026-08-11T10:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"code-review","head_sha":"abc","verdict":"fail","session_id":"canonical"}}' >> "$canonical/.fno/events.jsonl"
+printf '%s\n' '{"ts":"2026-08-11T09:00:00Z","type":"review_attestation","source":"target","data":{"reviewer":"/code-review","head_sha":"abc","verdict":"pass","session_id":"local"}}' > "$ordered/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$ordered" bash "$SETUP" >/dev/null 2>&1
+last_verdict=$(jq -r 'select(.type == "review_attestation" and .data.reviewer == "code-review" and .data.head_sha == "abc") | .data.verdict' "$canonical/.fno/events.jsonl" | tail -1)
+assert "migration cannot restore older passing gate evidence" test "$last_verdict" = fail
+
+invalid_utf8="$TMP/invalid-utf8"
+mkdir -p "$invalid_utf8/.fno"
+printf '{"type":"note","data":{"text":"caf\xc3"}}\n' > "$invalid_utf8/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$invalid_utf8" bash "$SETUP" >/dev/null 2>&1
+assert "migration preserves malformed UTF-8 rows" python3 -c 'import sys; assert b"caf\xc3" in open(sys.argv[1], "rb").read()' "$canonical/.fno/events.jsonl"
 
 contended="$TMP/contended"
 mkdir -p "$contended/.fno"

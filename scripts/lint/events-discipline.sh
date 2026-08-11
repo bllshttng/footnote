@@ -48,7 +48,7 @@ while IFS= read -r hit; do
     remediation "use scripts/lib/events.sh::emit_event_raw or _append_bounded_event instead"
     violations=$((violations + 1))
 done < <(
-    grep -rEn '^[[:space:]]*[^#].*>>[[:space:]].*[/"]events\.jsonl' \
+    grep -rEn '^[[:space:]]*[^#].*>>[[:space:]].*([/"]events\.jsonl|\$\{?EVENTS(_LOG|_FILE)?\}?)' \
         --include='*.sh' --include='*.bash' \
         cli/ skills/ scripts/ hooks/ 2>/dev/null \
         | grep -v 'scripts/lint/events-discipline.sh' \

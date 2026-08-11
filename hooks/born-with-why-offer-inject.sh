@@ -27,10 +27,35 @@ set -uo pipefail
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/with-timeout.sh
 source "$HOOK_DIR/../scripts/lib/with-timeout.sh" 2>/dev/null || exit 0
+# shellcheck source=../scripts/lib/events-lock.sh
+source "$HOOK_DIR/../scripts/lib/events-lock.sh" 2>/dev/null || exit 0
 
 REPO_ROOT=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 EVENTS="$REPO_ROOT/.fno/events.jsonl"
 CURSOR="$REPO_ROOT/.fno/.think-offer-cursor"
+CURSOR_LOCK="${CURSOR}.lock.d"
+CURSOR_LOCK_TOKEN="$(hostname):$$:$(date -u +%s):$RANDOM"
+
+cursor_lock_attempts=0
+while ! mkdir "$CURSOR_LOCK" 2>/dev/null; do
+    if _steal_stale_event_dir "$CURSOR_LOCK"; then
+        continue
+    fi
+    (( cursor_lock_attempts >= 20 )) && exit 0
+    sleep 0.05
+    cursor_lock_attempts=$((cursor_lock_attempts + 1))
+done
+printf '%s' "$CURSOR_LOCK_TOKEN" > "$CURSOR_LOCK/owner" 2>/dev/null || {
+    rmdir "$CURSOR_LOCK" 2>/dev/null || true
+    exit 0
+}
+cleanup_cursor_lock() {
+    [[ -r "$CURSOR_LOCK/owner" ]] || return
+    [[ "$(< "$CURSOR_LOCK/owner")" == "$CURSOR_LOCK_TOKEN" ]] || return
+    command -p rm -f "$CURSOR_LOCK/owner" 2>/dev/null || true
+    rmdir "$CURSOR_LOCK" 2>/dev/null || true
+}
+trap cleanup_cursor_lock EXIT
 
 # No events file yet -> nothing to surface.
 [[ -f "$EVENTS" ]] || exit 0

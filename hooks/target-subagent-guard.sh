@@ -24,6 +24,17 @@ fi
 # rule (ab-f063 Wave 2) - avoids the nested ~/.fno/.fno accident class.
 REPO_ROOT=$(git rev-parse --show-toplevel 2>/dev/null || echo "$PWD")
 EVENTS_LOG="${REPO_ROOT}/.fno/events.jsonl"
+# shellcheck source=../scripts/lib/events.sh
+source "$PLUGIN_ROOT/scripts/lib/events.sh" 2>/dev/null || true
+
+append_subagent_event() {
+    local line="${1:?event line required}"
+    if ! declare -F _append_bounded_event >/dev/null 2>&1; then
+        echo "target subagent guard: event helper unavailable; skipping event" >&2
+        return
+    fi
+    _append_bounded_event target_subagent_guard "$line" "$EVENTS_LOG" || true
+}
 
 INPUT=$(cat)
 
@@ -63,7 +74,7 @@ except Exception:
             git stash store -m "$STASH_MSG" "$STASH_SHA" 2>/dev/null || true
         fi
 
-        printf '{"ts":"%s","type":"subagent_stash","agent":"%s","stash":"%s"}\n' "$TS" "$AGENT_NAME" "$STASH_MSG" >> "$EVENTS_LOG" 2>/dev/null
+        append_subagent_event "$(printf '{\"ts\":\"%s\",\"type\":\"subagent_stash\",\"agent\":\"%s\",\"stash\":\"%s\"}' "$TS" "$AGENT_NAME" "$STASH_MSG")"
         ;;
 
     SubagentStop)
@@ -77,7 +88,7 @@ except Exception:
     print('unknown')
 " 2>/dev/null || echo "unknown")
 
-        echo "{\"ts\":\"$TS\",\"type\":\"subagent_done\",\"agent\":\"$AGENT_NAME\"}" >> "$EVENTS_LOG" 2>/dev/null
+        append_subagent_event "{\"ts\":\"$TS\",\"type\":\"subagent_done\",\"agent\":\"$AGENT_NAME\"}"
 
         # Pop stash if one was created for this agent
         STASH_MSG="fno-checkpoint-before-${AGENT_NAME// /-}"
@@ -85,7 +96,7 @@ except Exception:
         if [[ -n "$STASH_REF" ]]; then
             # Don't pop - just log that a recovery point exists.
             # Popping could conflict with the agent's changes.
-            echo "{\"ts\":\"$TS\",\"type\":\"subagent_stash_available\",\"agent\":\"$AGENT_NAME\",\"ref\":\"$STASH_REF\"}" >> "$EVENTS_LOG" 2>/dev/null
+            append_subagent_event "{\"ts\":\"$TS\",\"type\":\"subagent_stash_available\",\"agent\":\"$AGENT_NAME\",\"ref\":\"$STASH_REF\"}"
         fi
         ;;
 esac

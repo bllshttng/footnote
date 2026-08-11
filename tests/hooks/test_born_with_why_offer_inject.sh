@@ -152,6 +152,22 @@ out="$(run_hook)" || fail "hook nonzero on second run"
 [[ -z "$out" ]] || fail "AC2-ERR: offer re-surfaced on second turn: $out"
 pass "AC2-ERR: consumed offer does not re-surface"
 
+# A concurrent worktree holding the project cursor makes this invocation yield
+# without consuming the slice; the holder's successor can surface it once.
+offered_line "2026-06-30T04:30:00Z" "x-lock1111" >> "$EVENTS"
+cursor_before=$(cat "$CURSOR")
+mkdir "${CURSOR}.lock.d"
+printf '%s' "test:$$:holder" > "${CURSOR}.lock.d/owner"
+out="$(run_hook)" || fail "cursor lock: hook nonzero while another session held the cursor"
+[[ -z "$out" ]] || fail "cursor lock: contending hook emitted output"
+[[ "$(cat "$CURSOR")" == "$cursor_before" ]] || fail "cursor lock: contending hook consumed the shared slice"
+rm -f "${CURSOR}.lock.d/owner"
+rmdir "${CURSOR}.lock.d"
+out="$(run_hook)" || fail "cursor lock: successor hook nonzero"
+ctx="$(printf '%s' "$out" | extract_ctx)"
+[[ "$ctx" == *"x-lock1111"* ]] || fail "cursor lock: successor did not surface the preserved offer"
+pass "cursor lock serializes once-per-project offer consumption"
+
 # ── AC2-EDGE: malformed line skipped, later valid offer still surfaces ─
 printf '{this is not json\n' >> "$EVENTS"
 offered_line "2026-06-30T05:00:00Z" "x-bbbb2222" >> "$EVENTS"
@@ -485,7 +501,7 @@ pass "resolve-guard: unreadable graph (rc 3) degrades to surfacing, not suppress
 # jq/python3 are used unconditionally after the one-way cursor advance, so a
 # missing one must leave the slice unconsumed rather than silently eat it.
 MINBIN="$WORK/minbin"; mkdir -p "$MINBIN"
-for t in bash dirname git head jq kill python3 sleep tail tr wc; do
+for t in bash cat date dirname git head hostname jq kill mkdir mv python3 rm rmdir sleep stat tail tr wc; do
     p="$(command -v "$t" 2>/dev/null)" && ln -sf "$p" "$MINBIN/$t"
 done
 # POSITIVE CONTROL first. A stripped PATH missing some unrelated tool would make

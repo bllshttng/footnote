@@ -68,10 +68,12 @@ The 64KB cap on `data` payload is enforced by both validators.
 Branch-A Python, Rust claims, loop-journal, loop-check, finalize, and generic-delivery writers serialize on the same mkdir mutex at `<events-file>.lock.d`.
 When `events.jsonl` is a worktree symlink, every writer resolves the leaf before deriving that mutex so sibling worktrees lock the canonical target rather than separate worktree paths.
 The project journal treats a lock timeout as fatal, while its global observability mirror remains best-effort so daemon progress does not depend on that mirror.
-The three general shell helpers and four hook emitters remain unlocked and reject serialized rows above 4000 bytes before appending.
+The three general shell helpers, five hook emitters, and target-handoff fallback remain unlocked and reject serialized rows above 4000 bytes before appending.
 They register unique entries under `<events-file>.shell-writers.d`, recheck `<events-file>.gc.d`, and remove the entry after appending, so they remain unserialized with each other while compaction can prove no append targets the old inode.
 Hook-provided explicit paths resolve a symlink leaf before deriving the marker and rendezvous, keeping their emergency writes in the canonical worktree journal neighbourhood.
 Shell writers and worktree setup age-steal an abandoned owner-token marker after 120 seconds; active GC renews that marker lease during long compactions.
+Worktree setup rechecks the journal after taking both migration locks and filters favorable gate rows that would supersede an existing canonical verdict for the same key.
+The `.think-offer-cursor` is shared beside the journal and uses its own owner-token mutex, preserving once-per-project offer consumption across worktrees.
 
 `schemas/events-v3.json` is the JSON-Schema mirror of this envelope,
 used by the cross-language parity gate; `cli/src/fno/events/schema.yaml`
