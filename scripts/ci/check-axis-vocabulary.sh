@@ -111,6 +111,10 @@ fi
 # constant rather than the class. A helper alone is a snapshot; this is what
 # makes it hold. Legitimate uses carry a `repo-key-exempt:` note naming why.
 SELF_PATH="${BASH_SOURCE[0]}"
+# Exported so --self-test can re-invoke the real entry point end to end. A suite
+# that only calls the helper functions proves the fixtures ran, never that the
+# production path still calls them.
+export AXIS_SELF_PATH="$SELF_PATH"
 _relpath_total=$(grep -c 'os\.path\.relpath(' "$SELF_PATH" || true)
 if [[ "${_relpath_total:-0}" -eq 0 ]]; then
   echo "check-axis-vocabulary: repo-key guard found no os.path.relpath at all;" >&2
@@ -357,10 +361,21 @@ def scan(root: Path):
                 probes_reached.add(probe)
         # Collected in the SAME walk the content scan already performs, so the
         # name check costs no second traversal of the tree.
-        if os.path.relpath(dirpath, root) != ".":  # repo-key-exempt: root test, not a key
-            stated = _stated_axis(os.path.basename(dirpath))
-            if stated:
-                axis_dirs[here] = stated
+        # The scan ROOT is judged like any other directory. Excluding it left the
+        # name gate blind to the one directory a caller names explicitly:
+        # `--strict cli/src/fno/adapters/providers` printed "name scan ok, 0
+        # axis-named directories" about a directory whose name states an axis.
+        # A receipt contradicting the walk it describes is the defect this gate
+        # exists to catch, and the gate was committing it.
+        # Read off the real basename rather than the repo key. When the scan
+        # root IS the repo root the key is ".", which carries no name at all, so
+        # keying the check made the root invisible again in exactly the case a
+        # caller points the gate straight at a directory outside any repo. Not a
+        # repo key and not routed through the helper: this is a NAME.
+        _name = os.path.basename(os.path.abspath(dirpath))
+        stated = _stated_axis(_name)
+        if stated:
+            axis_dirs[here if here != "." else _name] = stated
         for fn in filenames:
             ext = os.path.splitext(fn)[1]
             if ext not in SCANNABLE_EXT:
@@ -513,6 +528,25 @@ def _self_test():
     else:
         print("caught planted subtree-root scan (no name findings) ok")
 
+    # The scan ROOT itself, which the walk used to skip. Pointing the gate at an
+    # axis-named directory is the most direct question a caller can ask it, and
+    # the answer was "0 axis-named directories" every time. Every specimen above
+    # plants its subject BELOW the root, so none of them could see this.
+    d = Path(tempfile.mkdtemp(prefix="axis-asroot-"))
+    (d / "providers").mkdir()
+    (d / "providers" / "x.py").write_text("x = 1\n", encoding="utf-8")
+    _, _, dirs, _ = scan(d / "providers")
+    root_findings = _name_findings(dirs)
+    if len(root_findings) == 1 and "undeclared axis-named" in root_findings[0]:
+        print("caught planted axis-named scan root ok")
+    else:
+        print(
+            f"FAILED to judge the scan root itself (dirs={sorted(dirs)}, "
+            f"findings={root_findings})",
+            file=sys.stderr,
+        )
+        failures += 1
+
     # NOT_AN_AXIS silences a name that merely contains an axis word.
     d = Path(tempfile.mkdtemp(prefix="axis-notaxis-"))
     (d / "models").mkdir()
@@ -555,6 +589,54 @@ def _self_test():
             file=sys.stderr,
         )
         failures += 1
+
+    # Mismatch branch: a directory whose NAME states one axis while the map
+    # DECLARES another. Untested until now, so the whole `declared != stated`
+    # arm could be deleted and this suite stayed green. Reuses the tree above,
+    # whose single axis-named directory is keyed `providers`.
+    DECLARED_PATH_AXIS["providers"] = "model"
+    try:
+        mismatch = _name_findings({"providers": "provider"})
+    finally:
+        del DECLARED_PATH_AXIS["providers"]
+    if len(mismatch) == 1 and "declared axis is 'model'" in mismatch[0]:
+        print("caught planted axis mismatch ok")
+    else:
+        print(f"FAILED mismatch branch: {mismatch}", file=sys.stderr)
+        failures += 1
+
+    # Production wiring, end to end through the real entry point. Every specimen
+    # above calls a helper directly, so deleting the block that CALLS them left
+    # --self-test green while the gate reported nothing. Asserted on a positive
+    # marker naming the planted directory, never on a nonzero exit: a temp root
+    # exits nonzero anyway because the declared map is absent there.
+    script = os.environ.get("AXIS_SELF_PATH")
+    if not script:
+        print("FAILED wiring: AXIS_SELF_PATH unset", file=sys.stderr)
+        failures += 1
+    else:
+        d = Path(tempfile.mkdtemp(prefix="axis-wiring-"))
+        (d / "providers").mkdir()
+        (d / "providers" / "v.py").write_text("x = 1\n", encoding="utf-8")
+        env = dict(os.environ)
+        env.pop("AXIS_SELF_TEST", None)
+        run = subprocess.run(
+            ["bash", script, "--strict", str(d)],
+            capture_output=True,
+            text=True,
+            env=env,
+        )
+        marker = "providers/: undeclared axis-named directory"
+        if marker in run.stdout + run.stderr:
+            print("caught planted directory through the real entry point ok")
+        else:
+            print(
+                "FAILED wiring: the production name verdict never reported the "
+                f"planted directory (exit {run.returncode})",
+                file=sys.stderr,
+            )
+            failures += 1
+
     return 1 if failures else 0
 
 
@@ -729,8 +811,18 @@ findings = [f for f in findings if _finding_key(f) not in allowlisted]
 # observes no provider/harness/model tokens in either has not reached content and
 # must fail rather than report a clean tree. This is the liveness check that makes
 # a zero-finding result trustworthy through a cutover that removes findings.
+#
+# Scoped to a whole-repo scan, for the reason the name control already is: a
+# SUBTREE legitimately contains no Python or Rust at all, so demanding both
+# turned every such scan into a false red. Measured before this change, on
+# origin/main as well: `--baseline docs` and `--baseline crates` each exited 2
+# naming a language the subtree does not contain. A control that fires where it
+# cannot pass is not strictness, it is noise that trains readers to ignore it.
+#
+# The subtree case does not get a weaker control pretending to be the same one.
+# It gets no control and says so, because the honest scope line is the point.
 missing = [lang for lang in (".py", ".rs") if observed.get(lang, 0) == 0]
-if missing:
+if missing and _whole_repo_scan:
     print(
         "check-axis-vocabulary: positive control failed "
         f"(no axis-named bindings observed in {', '.join(missing)}); "
@@ -739,12 +831,17 @@ if missing:
     )
     sys.exit(2)
 
-print(
-    "check-axis-vocabulary: positive control ok "
+_counts = (
     f"(observed axis bindings: py={observed.get('.py', 0)}, "
     f"rs={observed.get('.rs', 0)}, sh={observed.get('.sh', 0) + observed.get('.bash', 0)}, "
     f"md={observed.get('.md', 0)})"
 )
+if _whole_repo_scan:
+    print(f"check-axis-vocabulary: positive control ok {_counts}")
+else:
+    print(
+        f"check-axis-vocabulary: subtree scan, no content positive control {_counts}"
+    )
 
 if mode == "write-baseline":
     header = [
@@ -837,6 +934,15 @@ def _identity(entry: str) -> str:
     """
     return _LINE_IN_ENTRY.sub(r"\1: ", entry, count=1)
 
+
+# A SUBTREE scan produces findings only from that subtree, so diffing it against
+# the whole-repo baseline reports every violation outside the subtree as resolved.
+# Measured: `--baseline cli` exited 1 and blamed unrelated `crates/...` entries.
+# Both sides are narrowed to the subtree so the comparison describes one region.
+if not _whole_repo_scan:
+    _subtree = _repo_key(root_arg, root_arg, _repo_root_for(root_arg)) + "/"
+    baseline = [e for e in baseline if e.startswith(_subtree)]
+    current = [e for e in current if e.startswith(_subtree)]
 
 cur_counts = Counter(_identity(e) for e in current)
 base_counts = Counter(_identity(e) for e in baseline)
