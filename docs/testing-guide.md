@@ -165,6 +165,11 @@ The second waits for a string that only the real outcome produces, so a broken c
 Pin the pattern to the thing being measured, too.
 A monitor armed on `verdict=` fired on `PASS: verdict=canonical-protected` from an unrelated harness while its gate was at step 10 of 124.
 
+A fail-fast gate hides the same way, with no pipe and no pattern involved.
+Once one step is permanently red, every step behind it stops running, and a check that never ran reports exactly what a passing check reports, which is nothing.
+A local gate stopped at step 32 on a known baseline failure and never reached the verb-surface ratchet around step 40, so "the gate did not complain about the ratchet" only meant "the gate never looked at it", and CI caught it instead.
+Once a step is known red, run with `--keep-going` so the steps behind it still report.
+
 ### Validation Scripts
 
 ```bash

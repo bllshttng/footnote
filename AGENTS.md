@@ -26,7 +26,7 @@ Lead responses with the next action, number multi-step work, give concrete time 
 
 Hard-won traps a fresh agent re-hits because they are not yet a lint, guard, or refusal message. Inlined here (not a linked rule file) because AGENTS.md is the one channel proven to reach every harness at session start: codex sees this body but not linked rule bodies, which auto-discover on Claude only.
 
-**Cap: 10 entries (context-cost budget).** Every entry is paid on every session start on every lane; do not raise it, and graduate an over-large one to a lint instead. `scripts/ci/check-pitfalls.sh` fails CI on an 11th entry, a missing field, or an entry older than 60 days.
+**Cap: bytes, not the count.** Every entry is paid on every session start, every lane. `check-pitfalls.sh` fails on an 11th entry, a missing field, or one over 60 days, but the byte budget binds first, near 5: fund a new entry by trading bytes here, never by raising the ceiling.
 
 **Format:** one `###` block each: imperative trap (1-3 sentences), `specimens:` file:line / PR refs, `graduates-to:` the guard that lets it leave, `added:` YYYY-MM-DD. When that guard lands, remove the entry in the same PR.
 
