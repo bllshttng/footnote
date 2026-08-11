@@ -561,7 +561,10 @@ mod tests {
         // exactly that worktree.
         let base = std::env::temp_dir().join(format!("fno-canon-{}", std::process::id()));
         let canonical = base.join("footnote");
-        let wt = canonical.join(".claude/worktrees/feature");
+        // Deliberately not the real harness worktree location: the gitdir parse
+        // is what is under test, and spelling that location out would add the
+        // kind of hardcoded path literal the placement lint exists to prevent.
+        let wt = canonical.join("wt/feature");
         std::fs::create_dir_all(wt.join("crates/fno")).expect("worktree dirs");
         std::fs::create_dir_all(canonical.join(".git/worktrees/feature")).expect("gitdir");
         std::fs::write(
