@@ -104,3 +104,27 @@ def test_unregistered_agent_refuses_grant(monkeypatch):
     assert problem is not None
     # The refusal names the heal, not just "registry".
     assert "/fno-me" in problem or "wait for the row" in problem
+
+
+def test_is_caller_row_is_harness_scoped_and_delegates() -> None:
+    """is_caller_row must not match a row of a DIFFERENT harness via a colliding
+    id (a codex session id equal to a claude holder's cc_session_id), or the
+    spawn would vacate an unrelated holder's crown. Delegating to _find_by_session
+    makes the succession check agree with the auth check for free."""
+    from fno.agents.registry import AgentEntry
+    from fno.agents.whoami import is_caller_row
+
+    holder = AgentEntry(
+        name="k",
+        cwd="/w",
+        log_path="",
+        harness="claude",
+        harness_session_id=None,
+        cc_session_id="collide-x",
+        short_id="k",
+        status="busy",
+    )
+    # A codex caller with the same id must NOT match the claude holder.
+    assert is_caller_row(holder, "collide-x", harness="codex") is False
+    # The claude caller itself matches (via cc_session_id, harness-scoped).
+    assert is_caller_row(holder, "collide-x", harness="claude") is True

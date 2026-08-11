@@ -1745,9 +1745,9 @@ def dispatch_spawn_pane(
                     and r.status not in TERMINAL_STATUSES
                 ]
 
-                if holders and all(is_caller_row(h, spawned_by_session) for h in holders):
+                if holders and all(is_caller_row(h, spawned_by_session, spawned_by_harness) for h in holders):
                     for idx, r in enumerate(rows):
-                        if r.crown_scope == crown_scope and is_caller_row(r, spawned_by_session):
+                        if r.crown_scope == crown_scope and is_caller_row(r, spawned_by_session, spawned_by_harness):
                             rows[idx] = replace(
                                 r,
                                 crown_level=None,

@@ -1478,10 +1478,10 @@ def _claude_create_path(
                 if e.crown_scope == crown_scope and e.status not in TERMINAL_STATUSES
             ]
 
-            if holders and all(is_caller_row(h, spawned_by_session) for h in holders):
+            if holders and all(is_caller_row(h, spawned_by_session, spawned_by_harness) for h in holders):
                 entries = [
                     replace(e, crown_level=None, crown_scope=None, crown_grantor=None)
-                    if e.crown_scope == crown_scope and is_caller_row(e, spawned_by_session)
+                    if e.crown_scope == crown_scope and is_caller_row(e, spawned_by_session, spawned_by_harness)
                     else e
                     for e in entries
                 ]

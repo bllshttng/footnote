@@ -156,27 +156,26 @@ def _find_by_session(
     return None
 
 
-def is_caller_row(row, session_uuid: Optional[str]) -> bool:
+def is_caller_row(
+    row, session_uuid: Optional[str], harness: Optional[str] = None
+) -> bool:
     """Is ``row`` the session that issued the current spawn - the king whose
     crown a succession would transfer?
 
-    Mirrors the exact-match pass of :func:`_find_by_session`: ``harness_session_id``,
-    plus ``cc_session_id`` for claude (the field a partially-backfilled claude row
-    carries before reconcile backfills ``harness_session_id``). Without the
-    ``cc_session_id`` fallback, a claude row born with ``harness_session_id=None``
-    is seen as a stranger and a legitimate abdication is DECLINED instead of
-    transferred - while the authorization check (:func:`calling_agent_row` ->
-    :func:`_find_by_session`) finds the SAME row via this fallback and authorizes
-    it. The two checks must agree, or a king spawns an uncrowned heir.
-
-    ``cc_session_id`` is a claude-only field (``None`` on every other harness), so
-    the fallback is claude-scoped by construction.
+    Delegates to :func:`_find_by_session` so the succession check can NEVER
+    diverge from the authorization check (:func:`calling_agent_row` runs the same
+    ``_find_by_session`` over the full registry). The matching is harness-scoped
+    (a codex session id cannot match a claude row and vacate an unrelated crown),
+    and for claude spans ``harness_session_id``, ``cc_session_id``, and the
+    ``short_id`` prefix - the complete matcher. Re-implementing any of it here is
+    the bug: a partial copy diverged from the auth check and either declined a
+    legitimate abdication (a field missed) or transferred the wrong crown (no
+    harness scoping). One matcher, two callers; if the auth check found the king,
+    this finds the same king.
     """
     if not session_uuid:
         return False
-    if row.harness_session_id == session_uuid:
-        return True
-    return row.cc_session_id == session_uuid
+    return _find_by_session([row], session_uuid, harness) is not None
 
 
 def resolve_self(
