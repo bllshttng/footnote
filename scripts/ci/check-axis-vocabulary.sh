@@ -105,6 +105,26 @@ if [[ $WRITE_BASELINE -eq 1 ]]; then
   MODE="write-baseline"
 fi
 
+# Class guard: every path key routes through _repo_key, and a seventh site that
+# keys directly is how this class returns. Four review passes found one instance
+# of it per pass, in four different constants, because each fix corrected a
+# constant rather than the class. A helper alone is a snapshot; this is what
+# makes it hold. Legitimate uses carry a `repo-key-exempt:` note naming why.
+SELF_PATH="${BASH_SOURCE[0]}"
+_relpath_total=$(grep -c 'os\.path\.relpath(' "$SELF_PATH" || true)
+if [[ "${_relpath_total:-0}" -eq 0 ]]; then
+  echo "check-axis-vocabulary: repo-key guard found no os.path.relpath at all;" >&2
+  echo "  the probe is broken, not the file. Refusing to report it clean." >&2
+  exit 2
+fi
+_relpath_stray=$(grep -n 'os\.path\.relpath(' "$SELF_PATH" | grep -v 'repo-key-exempt' || true)
+if [[ -n "$_relpath_stray" ]]; then
+  echo "check-axis-vocabulary: path key bypasses _repo_key:" >&2
+  echo "$_relpath_stray" | sed 's/^/  /' >&2
+  echo "  Route it through _repo_key, or mark it '# repo-key-exempt: <why>'." >&2
+  exit 2
+fi
+
 python3 - "$ROOT" "$MODE" "$BASELINE_FILE" <<'PY'
 import os
 import re
@@ -308,11 +328,11 @@ def _repo_key(path, root: Path, repo_root: Path) -> str:
     escapes the repo root falls back to scan-relative rather than being trusted.
     """
     try:
-        key = os.path.relpath(os.path.realpath(path), repo_root)
+        key = os.path.relpath(os.path.realpath(path), repo_root)  # repo-key-exempt: this IS the helper
     except ValueError:
-        key = os.path.relpath(path, root)
+        key = os.path.relpath(path, root)  # repo-key-exempt: this IS the helper
     if key.startswith(".."):
-        key = os.path.relpath(path, root)
+        key = os.path.relpath(path, root)  # repo-key-exempt: this IS the helper
     return key.replace(os.sep, "/")
 
 
@@ -337,7 +357,7 @@ def scan(root: Path):
                 probes_reached.add(probe)
         # Collected in the SAME walk the content scan already performs, so the
         # name check costs no second traversal of the tree.
-        if os.path.relpath(dirpath, root) != ".":
+        if os.path.relpath(dirpath, root) != ".":  # repo-key-exempt: root test, not a key
             stated = _stated_axis(os.path.basename(dirpath))
             if stated:
                 axis_dirs[here] = stated
