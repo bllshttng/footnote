@@ -660,6 +660,16 @@ link_events_journal() {
     recover_pending=0
   fi
 
+  if [[ ! -e "$source_cursor" ]]; then
+    (set -C; printf '%s' 0 > "$source_cursor") 2>/dev/null || {
+      if [[ ! -e "$source_cursor" ]]; then
+        cleanup_events_migration
+        echo "setup-worktree: cannot initialize canonical event cursor: $source_cursor" >&2
+        return 1
+      fi
+    }
+  fi
+
   if ! start_events_migration_keepalive; then
     cleanup_events_migration
     echo "setup-worktree: could not start events migration lease renewal" >&2

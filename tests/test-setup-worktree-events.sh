@@ -49,6 +49,17 @@ else
   echo "PASS: looping events symlink fails closed"
 fi
 
+missing_cursor_canonical="$TMP/missing-cursor-canonical"
+missing_cursor_worktree="$TMP/missing-cursor-worktree"
+mkdir -p "$missing_cursor_canonical/.fno" "$missing_cursor_worktree/.fno"
+printf '%s\n' '{"ts":"2026-08-11T00:00:00Z","type":"think_offered","source":"backlog","data":{"node_id":"unread-canonical-offer"}}' > "$missing_cursor_canonical/.fno/events.jsonl"
+printf '%s\n' '{"type":"must_wait_for_missing_cursor_offer"}' > "$missing_cursor_worktree/.fno/events.jsonl"
+CANONICAL="$missing_cursor_canonical" WORKTREE="$missing_cursor_worktree" bash "$SETUP" >/dev/null 2>&1
+missing_cursor_rc=$?
+assert "missing canonical cursor leaves existing offers pending" test "$missing_cursor_rc" -ne 0
+assert "missing canonical cursor initializes at byte zero" test "$(cat "$missing_cursor_canonical/.fno/.think-offer-cursor")" -eq 0
+assert "missing cursor refusal preserves the local journal" test ! -L "$missing_cursor_worktree/.fno/events.jsonl"
+
 unsupported="$TMP/unsupported"
 mkdir -p "$unsupported/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$unsupported" bash "$SETUP" >/dev/null 2>&1

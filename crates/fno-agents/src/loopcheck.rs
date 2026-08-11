@@ -4660,6 +4660,7 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
         eprintln!("loop-check: failed to serialize event {event_type}");
         return;
     };
+    let mut retried_after_timeout = false;
     loop {
         match crate::claims::append_event_line(path, &event, std::time::Duration::from_secs(2)) {
             Ok(()) => return,
@@ -4668,6 +4669,9 @@ fn append_loop_event(path: &Path, event_type: &str, data: serde_json::Value) {
                     && crate::claims::event_maintenance_active(path) =>
             {
                 crate::claims::wait_for_event_maintenance(path);
+            }
+            Err(error) if error.contains("events.jsonl lock timeout") && !retried_after_timeout => {
+                retried_after_timeout = true;
             }
             Err(error) => {
                 eprintln!(
@@ -9077,6 +9081,31 @@ mod tests {
         assert!(std::fs::read_to_string(project)
             .unwrap()
             .contains("review_coverage"));
+    }
+
+    #[test]
+    fn target_stream_emit_retries_when_maintenance_marker_disappears_near_timeout() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("events.jsonl");
+        let lock = dir.path().join("events.jsonl.lock.d");
+        let maintenance = dir.path().join("events.jsonl.gc.d");
+        std::fs::create_dir(&lock).unwrap();
+        std::fs::create_dir(&maintenance).unwrap();
+
+        let handle = std::thread::spawn(move || {
+            append_loop_event(&project, "maintenance_handoff_probe", serde_json::json!({}));
+            project
+        });
+
+        std::thread::sleep(std::time::Duration::from_millis(1_900));
+        std::fs::remove_dir_all(maintenance).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        std::fs::remove_dir_all(lock).unwrap();
+
+        let project = handle.join().unwrap();
+        assert!(std::fs::read_to_string(project)
+            .unwrap()
+            .contains("maintenance_handoff_probe"));
     }
 
     /// The list half of the scan. Production reads the count too, so this
