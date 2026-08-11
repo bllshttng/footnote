@@ -945,6 +945,110 @@ def _validate_session_identity(phase: str, harness: str, session_id: str) -> "tu
     return harness, session_id
 
 
+# A full session id is a uuid (32 hex, 36 with dashes); anything shorter is the
+# 8-hex prefix form the transcript resolver glob-matches. See _observe_model.
+_FULL_SESSION_ID_MIN = 32
+
+
+def _observe_model(harness: str, session_id: str) -> dict:
+    """What the row's session ACTUALLY answered as, read from its own transcript.
+
+    Delegates to :func:`fno.agents.session_truth.observed_model` - the one truth
+    source, never a second one - and returns its variant dict UNCHANGED, so the
+    row records ``{"kind": "observed", "model": ..., "samples": N}`` and never a
+    bare model string. Flattening would erase the difference between "seen on N
+    samples" and "assumed", which is the entire reason the field exists: an
+    unknown that looks like an observation is worse than an absent field,
+    because a reader spends it as evidence.
+
+    Resolution is keyed on ``session_id`` ALONE: claude's resolver requires a
+    non-empty cwd but deliberately does not scope the search by it (x-a472 - a
+    transcript is re-keyed into the worktree's project dir on EnterWorktree and
+    a stub is left behind in the other, so trusting one slug goes blind exactly
+    when a bg worker enters its worktree). ``os.getcwd()`` therefore only has to
+    be non-empty, and a row stamped for a session other than the writing process
+    still resolves to the right transcript rather than to nothing.
+
+    A PREFIX-shaped id is refused before any read. The resolver accepts an 8-hex
+    prefix and glob-matches it; when two sessions in the store share that prefix
+    it takes the first-sorted one and the ambiguity is not visible through this
+    call. A model read off the wrong session is precisely the partial truth read
+    as total that this field exists to prevent, so it is declined by name.
+
+    The import is function-local like ``_find_node`` below: ``fno.graph`` takes
+    no module-level dependency on ``fno.agents``. Never raises - a provenance
+    field must not fail a claim release - and a resolver that blows up is
+    ``unreadable`` rather than a swallowed ``no-transcript``, because a crash
+    and an absent file are different facts and keeping those apart is this
+    field's whole job.
+    """
+    if len(session_id) < _FULL_SESSION_ID_MIN:
+        return {
+            "kind": "unreadable",
+            "reason": f"session id {session_id!r} is prefix-shaped; "
+                      "a glob match cannot be proven to be this session",
+        }
+    try:
+        from fno.agents.session_truth import observed_model, resolve_transcript_path
+
+        return observed_model(
+            harness, resolve_transcript_path(harness, session_id, os.getcwd())
+        )
+    except Exception as exc:  # noqa: BLE001 — a reporting field never breaks a stamp
+        return {"kind": "unreadable", "reason": f"{type(exc).__name__}: {exc}"}
+
+
+def _merge_observed_model(prior: "dict | None", fresh: dict) -> "dict | None":
+    """The value a re-stamp should write to ``observed_model``, or None to keep.
+
+    The timestamps on this row are owned by the FIRST observation; this field is
+    owned by the LATEST one, and the inversion is deliberate. A session can
+    change model mid-run - account failover and provider rotation both do it -
+    so a row that kept the first reading would record the cheap lane for a phase
+    that failed over to the expensive one. That is the error this field exists
+    to catch, one level in: a partial truth read as total.
+
+    So a later observation wins, and when it DISAGREES the row stops claiming to
+    be a single-model phase::
+
+        {"kind": "observed-multiple", "model": <latest>, "samples": N,
+         "prior_models": [<older>, ...]}
+
+    A distinct ``kind`` rather than an extra key on ``observed``: every reader
+    that switches on ``kind == "observed"`` would read a sibling key as a clean
+    single-model observation and the annotation would never fire, which is the
+    same shape as a guard placed on one of several reachable paths. ``model``
+    stays the latest so an uninspecting read still gets the least-wrong single
+    value.
+
+    An unknown NEVER displaces a recording (a transcript reaped between the two
+    stamps must not erase what the first read saw), but a recorded unknown is
+    upgraded by a real observation: the ``do`` row opens at claim acquire, early
+    enough to honestly read ``no-model-yet``, and closes at release when the
+    transcript is thick with evidence. Without the upgrade the most
+    cost-relevant row in the graph would permanently record an unknown.
+
+    KNOWN CEILING: one :func:`observed_model` read returns the LAST model in its
+    tail window, not a set, so a failover inside a single stamp's window is
+    invisible here. ``observed-multiple`` can only ever surface a change that
+    straddles two stamps (acquire, then release). The field answers "what did
+    the last look see, and did it disagree with the one before", which is
+    narrower than "every model that served this phase".
+    """
+    if prior is None:
+        return fresh
+    if fresh.get("kind") != "observed":
+        return None
+    if prior.get("kind") not in {"observed", "observed-multiple"}:
+        return fresh
+    if prior.get("model") == fresh.get("model"):
+        return fresh
+    seen = list(prior.get("prior_models") or [])
+    if prior.get("model") and prior["model"] not in seen:
+        seen.append(prior["model"])
+    return {**fresh, "kind": "observed-multiple", "prior_models": seen}
+
+
 def append_session_record(
     path: Path,
     node_id: str,
@@ -955,9 +1059,9 @@ def append_session_record(
     ended_at: "str | None" = None,
     started_at: "str | None" = None,
 ) -> "tuple[bool, bool]":
-    """Append a ``{phase, harness, session_id, ended_at, started_at}`` lifecycle
-    record to a node's append-only ``sessions`` list, returning ``(found,
-    added)`` (x-b6e4).
+    """Append a ``{phase, harness, session_id, ended_at, started_at,
+    observed_model}`` lifecycle record to a node's append-only ``sessions``
+    list, returning ``(found, added)`` (x-b6e4).
 
     The single graph-owned mutation primitive behind ``fno backlog session add``.
     Idempotent under the graph lock: appends only when ``(phase, harness,
@@ -980,6 +1084,24 @@ def append_session_record(
     new rows always write the canonical names. Neither is part of the
     idempotency key.
 
+    ``observed_model`` answers the question the other four fields cannot: the
+    operator routes phases by model to control cost, and ``harness`` names the
+    binary, not the model it answered as. A route stamped at spawn records
+    INTENT, so it reports the intended model in exactly the case an operator
+    suspects a silent fallback (an ``ANTHROPIC_MODEL`` surviving without its
+    ``ANTHROPIC_BASE_URL`` bills the expensive lane while every receipt says the
+    cheap one). This reads the session's own transcript instead. The whole
+    variant dict from :func:`fno.agents.session_truth.observed_model` is stored,
+    never a flattened string; see :func:`_observe_model` for why, and
+    :func:`_merge_observed_model` for the one field a re-stamp OVERWRITES and
+    for the sixth kind (``observed-multiple``) this writer can produce that the
+    reader never returns. The read is best-effort and cannot fail a stamp.
+
+    Existing rows are NOT backfilled. A reaped transcript cannot be read, and a
+    guessed value is the failure the field exists to prevent - so a row written
+    before this field stays without it, and the absent key is itself the honest
+    signal that nobody looked.
+
     Raises ``ValueError`` on an unknown phase, an empty/over-long harness or
     session id, or an unparseable ``ended_at``/``started_at`` -- validation lives
     here so every caller (CLI, tests, future backfill) is bound by the same
@@ -998,6 +1120,12 @@ def append_session_record(
         ended_at = _utc_session_stamp("ended_at", ended_at)
     if started_at is not None:
         started_at = _utc_session_stamp("started_at", started_at)
+
+    # Read the transcript BEFORE the graph lock: the mutator runs under
+    # _acquire_flock and a bounded-but-real file read has no business holding it.
+    # Paid even when the node turns out to be absent, which is one seek on a call
+    # that fires a handful of times per node.
+    observed = _observe_model(harness, session_id)
 
     result = {"found": False, "added": False}
 
@@ -1024,12 +1152,24 @@ def append_session_record(
                 prior["ended_at"] = ended_at
             if started_at is not None and "started_at" not in prior:
                 prior["started_at"] = started_at
+            # observed_model is the one field the LATEST stamp owns rather than
+            # the first, so a mid-run failover is not recorded as the lane the
+            # phase started on. See _merge_observed_model.
+            merged = _merge_observed_model(prior.get("observed_model"), observed)
+            if merged is not None:
+                prior["observed_model"] = merged
             return entries
         row = {"phase": phase, "harness": harness, "session_id": session_id}
         if ended_at is not None:
             row["ended_at"] = ended_at
         if started_at is not None:
             row["started_at"] = started_at
+        # Written unconditionally, including the unknown kinds: an ABSENT key
+        # means this row predates the field or its writer never looked, while
+        # {"kind": "no-transcript"} means the writer looked and found nothing.
+        # Those are different facts, and so are no-transcript (not yet) and
+        # not-file-backed (never will be, opencode keeps no per-session file).
+        row["observed_model"] = observed
         rows.append(row)
         result["added"] = True
         return entries
