@@ -1434,10 +1434,12 @@ class SpawnDefaultsBlock(BaseModel):
     = unset (the `spawn_permission_mode` convention); an unset field falls
     through to the built-in exactly as today.
 
-    Scope is the operator-initiated spawn surface only. Autonomous dispatch
-    (`/target`, think dispatch, backlog advance) computes its own routing and
-    reaches the seam as explicit flags, so setting `provider` here cannot
-    silently reroute the fleet.
+    These defaults reach every spawn that has not pinned a field, including
+    autonomous dispatch (`/target`, think dispatch, backlog advance); an explicit
+    flag always wins. Autonomous dispatch pins its harness and substrate, so
+    setting `provider` here cannot silently reroute the fleet's binary - but a
+    `model` or `effort` set here DOES reach an autonomous worker that left it
+    unpinned, which is the per-stage coordinate the stage table exists to carry.
 
     No value validation here: config stays a leaf module (x-7fdd, no import
     from agents/providers at load time). Provider is checked against the known
@@ -1454,6 +1456,16 @@ class SpawnDefaultsBlock(BaseModel):
     # seam; an explicit flag stays fail-closed. Empty = unset, as above.
     substrate: str = ""
     permission_mode: str = ""
+    # route/account sit BESIDE the legacy provider field (ruling 4): nothing is
+    # renamed and the legacy field keeps meaning harness. provider could never
+    # carry the full coordinate because it is allowlisted as a harness literal,
+    # so a stage that needed to say zai had no field. route carries vendor/model
+    # as vendor/model (position-carried, forwarded as --route) and so fails
+    # closed on an unknown vendor or a missing key downstream rather than silently
+    # billing the primary; account forwards --account. The names carry no axis
+    # word, so the four-axis guard never reads them as bindings.
+    route: str = ""
+    account: str = ""
 
 
 class DispatchBlock(BaseModel):

@@ -26,7 +26,10 @@ set -euo pipefail
 # `target/` in ~/.ignore), and `-u` governs ignore files, never a `--glob`. The
 # working remedy `RIPGREP_CONFIG_PATH= rg -uu` plus a one-clause why is longer
 # than the inert form it replaces, and the preamble sat at 37999/38000 (1B spare).
-CEILING_BYTES=38100
+# Raised by a further 300 for the stage-table pointer in AGENTS.md, which names
+# config.agents.profiles.<verb> and links the role-based-model-routing doc: the
+# per-stage axis is undiscoverable from the preamble without it (~66 tok/turn).
+CEILING_BYTES=38400
 RATCHET_NUDGE_BYTES=2000
 QUIET=0
 JSON_MODE=0

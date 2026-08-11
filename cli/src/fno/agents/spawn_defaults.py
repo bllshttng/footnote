@@ -14,9 +14,13 @@ written for - the config `provider`, else the builtin default (claude), NOT the
 ambient harness (whose shape the model may not match). A spawn that resolves to a
 DIFFERENT harness (an explicit `-H codex`, OR a codex-ambient session, over a
 claude-shaped `model`) leaves the model to that harness rather than forcing an
-incompatible one. An explicit `-m/--model` always wins. Scope is the operator-
-initiated spawn surface only; autonomous dispatch computes its own routing and
-reaches the seam as explicit flags, never displaced by these.
+incompatible one. An explicit `-m/--model` always wins. The profile layer
+applies to every spawn carrying a slash-verb seed, including autonomous dispatch
+(`/target`, `/blueprint`): a stage that has not pinned a field inherits it from
+`profiles.<verb>` then `agents.defaults`, so a coordinate set in the stage table
+reaches an autonomous worker. An explicit flag always wins, and a `--role` whose
+lane resolves owns the model, so autonomous dispatch is never rerouted on a field
+it pinned (harness, substrate).
 """
 from __future__ import annotations
 
@@ -382,6 +386,32 @@ def _seed_of(toks: Sequence[str]) -> Optional[str]:
     return toks[pos[0]] if pos else None
 
 
+def _role_of(toks: Sequence[str]) -> Optional[str]:
+    """The ``--role`` value if present, else None. Stops at the ``--argv``
+    payload boundary like the other spawn scans."""
+    toks = list(toks)
+    for i, t in _spawn_tokens(toks):
+        if t == "--role":
+            return toks[i + 1] if i + 1 < len(toks) else None
+        if t.startswith("--role="):
+            return t.split("=", 1)[1]
+    return None
+
+
+def _role_resolves(role: str, settings: object, env: Optional[Mapping[str, str]]) -> bool:
+    """Whether ``role`` resolves to a real spawn route (a non-None env overlay).
+
+    resolve_route is fail-SAFE, so this is True only when the role is routed AND
+    its provider is configured with an anthropic endpoint AND a key is present.
+    Any resolution error degrades to False (never bricks the spawn)."""
+    from fno.agents.model_routing import resolve_route
+
+    try:
+        return resolve_route(role, settings=settings, env=env) is not None  # type: ignore[arg-type]
+    except Exception:
+        return False
+
+
 def _profile_key(seed: Optional[str]) -> Optional[str]:
     """Derive the profile key from a seed's first token by a pure string rule:
     must start with ``/`` and contain no further ``/`` (an absolute path never
@@ -415,6 +445,47 @@ def _has_permission_mode(toks: Sequence[str]) -> bool:
         ):
             return True
     return False
+
+
+def _spawn_tokens(toks: Sequence[str]):
+    """Yield ``(index, token)`` from ``toks`` up to the ``--argv`` boundary,
+    skipping any token that is another value-flag's consumed VALUE - so a
+    literal occurrence of one flag can never be misread out of a different
+    flag's value (e.g. ``--session-id --route`` names a session id of
+    ``--route``, not a ``--route`` flag)."""
+    it = enumerate(toks)
+    for i, t in it:
+        if t == "--argv":
+            break
+        yield i, t
+        if t in _SPAWN_VALUE_FLAGS and "=" not in t:
+            next(it, None)
+
+
+def _flag_present(toks: Sequence[str], flag: str) -> bool:
+    """Whether a value ``flag`` appears as ``--flag`` or ``--flag=...`` in toks,
+    up to the ``--argv`` payload boundary."""
+    for _, t in _spawn_tokens(toks):
+        if t == flag or t.startswith(flag + "="):
+            return True
+    return False
+
+
+def _flag_value(toks: Sequence[str], *flags: str) -> Optional[str]:
+    """Value of the first of ``flags`` found as ``--flag value``,
+    ``--flag=value``, or - for a 2-char short flag like ``-P`` - the glued
+    ``-Pvalue`` form typer/click also accepts, else None. Stops at the
+    ``--argv`` payload boundary."""
+    toks = list(toks)
+    for i, t in _spawn_tokens(toks):
+        for f in flags:
+            if t == f:
+                return toks[i + 1] if i + 1 < len(toks) else None
+            if t.startswith(f + "="):
+                return t.split("=", 1)[1]
+            if len(f) == 2 and f[1] != "-" and t != f and t.startswith(f):
+                return t[len(f):]
+    return None
 
 
 def _substrate_compatible(substrate: str, provider: str) -> bool:
@@ -525,8 +596,20 @@ def inject_spawn_defaults(
     cfg_effort, effort_rung = field("effort")
     cfg_substrate, substrate_rung = field("substrate")
     cfg_permission, permission_rung = field("permission_mode")
-    if not (cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission):
+    cfg_route, route_rung = field("route")
+    cfg_account, account_rung = field("account")
+    if not (
+        cfg_provider or cfg_model or cfg_effort or cfg_substrate or cfg_permission
+        or cfg_route or cfg_account
+    ):
         return out
+
+    # A spawn carrying --role whose lane resolves to a real route is billed on
+    # that route: the route owns the model via env (ANTHROPIC_*), so a config
+    # --model sourced here would collide with it. This is the five-opus-workers
+    # defect - a worker believed cheap and billed expensive - so the model
+    # branch below skips injection when resolve_route returns a real route.
+    role = _role_of(out[1:])
 
     err = stderr if stderr is not None else sys.stderr
     has_provider, explicit_provider, has_model, has_effort = _scan(out[1:])
@@ -567,46 +650,143 @@ def inject_spawn_defaults(
         inject += ["--harness", cfg_provider]
         from_config.append(("provider", provider_rung))  # type: ignore[arg-type]
 
-    if cfg_model and not has_model:
-        # A provider-less config model is scoped to the harness it was written
-        # for, but nothing on disk records which harness that was. Scope it to
-        # the HOME provider - the config provider, else the builtin default
-        # (claude, the same fallback resolve_dispatch_provider uses) - NOT the
-        # ambient harness. Inject only when the spawn's resolved TARGET equals
-        # that home: a codex spawn (explicit `-p codex` OR a codex-ambient
-        # session) must not inherit a claude model (it 400s after the round-trip);
-        # an explicit --model stays the supported cross-harness override. This
-        # never maps a model value to a provider (no catalog); it only scopes an
-        # UNqualified default the way the rest of dispatch scopes one.
-        from fno.dispatch_flags import resolve_dispatch_provider
+    # route / account (ruling 4): two new fields beside the legacy provider.
+    # route carries vendor/model as vendor/model and is forwarded as --route, so
+    # it inherits the flag's fail-closed resolution - an unknown vendor or a
+    # missing key refuses the spawn rather than silently billing the primary,
+    # which is the invisible-billing shape this node exists to kill. account
+    # forwards --account. An explicit flag always wins - including a BARE
+    # explicit -m/--model with no -P: it already names the model half of a
+    # route, so injecting a config route on top would carry a DIFFERENT
+    # vendor's model behind the explicit one (cmd_spawn does not reject that
+    # combination the way it rejects -P+-m against --route, so a bare -m
+    # slipped through here and reached the routed vendor's endpoint asking
+    # for a model it likely doesn't have - the exact invisible-billing shape
+    # this field exists to kill). Also covers -P/--provider + -m/--model,
+    # which carries the same two pieces of information as --route and
+    # cmd_spawn rejects two route spellings together.
+    explicit_model_present = has_model
+    # A bare explicit -P/--provider (vendor) with no -m already names the vendor
+    # half of a route; cmd_spawn rejects vendor + --route together ("two
+    # spellings of one route") BEFORE it ever reaches the "add --model" check,
+    # so injecting a config route here would turn a helpful "add --model" error
+    # into a confusing route-collision one on an argv the operator never paired
+    # with a route at all.
+    explicit_vendor = _flag_value(out[1:], "--provider", "-P")
+    explicit_vendor_present = explicit_vendor is not None
+    explicit_route = _flag_present(out[1:], "--route")
+    route_injected = False
+    if cfg_route and not explicit_route and not explicit_model_present and not explicit_vendor_present:
+        inject += ["--route", cfg_route]
+        route_injected = True
+        from_config.append(("route", route_rung))  # type: ignore[arg-type]
+    # route_present covers BOTH ways --route ends up in the final argv: injected
+    # from config just above, or already explicit on the caller's argv. Gating
+    # the model-suppression below on route_injected alone missed the explicit
+    # case - an operator-typed `--route zai/... ` with no `-m` still fell through
+    # to the config-model branch and injected `--model opus` alongside it, the
+    # exact route+model collision (five-opus-workers defect) this field exists
+    # to prevent.
+    route_present = route_injected or explicit_route
+    # Accounts are Claude-only (cmd_spawn rejects --account on any other
+    # harness), so a configured account must not follow an explicit non-Claude
+    # harness - e.g. an autonomous Claude-to-Codex quota cutover (-H codex)
+    # would otherwise carry a Claude account into a spawn that can't use it and
+    # abort instead of cutting over.
+    if cfg_account and not _flag_present(out[1:], "--account"):
+        prov = resolved_provider()
+        if prov == "claude":
+            inject += ["--account", cfg_account]
+            from_config.append(("account", account_rung))  # type: ignore[arg-type]
+        else:
+            # AC9-UI: config-sourced routing is never invisible - a substrate/
+            # permission skip already warns here, so account must too rather than
+            # silently dropping the pin on a Claude-to-Codex cutover.
+            print(
+                f"fno agents spawn: account skipped (accounts are claude-only, "
+                f"resolved provider {prov!r}); {account_rung}.account "
+                f"{cfg_account!r} ignored",
+                file=err,
+            )
 
-        home = cfg_provider or "claude"
-        try:
-            if explicit_provider and explicit_provider.strip():
-                target: Optional[str] = explicit_provider.strip()
-            elif cfg_provider:
-                target = cfg_provider
-            else:
-                target = resolve_dispatch_provider(None, env=env)[0]
-        except Exception:
-            # Degrade open (AC5-FR): a resolution raise must never brick a spawn
-            # that would otherwise work. No target => no basis to inject.
+    if cfg_model and not has_model:
+        # The config model is suppressed when something else already owns the
+        # model: an injected route (route carries vendor/model), or a --role that
+        # resolves to a real route (the route owns the model via env). Either
+        # would collide with a config --model. An explicit -m already won via
+        # has_model, which short-circuited this whole branch.
+        if route_present:
             print(
-                "fno agents spawn: provider resolution failed; "
-                "leaving model to the harness",
+                f"fno agents spawn: --route owns the model; not injecting "
+                f"{model_rung}.model {cfg_model!r}",
                 file=err,
             )
-            target = None
-        if target and target == home:
-            inject += ["--model", cfg_model]
-            from_config.append(("model", model_rung))  # type: ignore[arg-type]
-        elif target:
+        elif explicit_vendor_present:
+            # A bare explicit -P/--provider (vendor, no -m) already names the
+            # vendor half of a route; cmd_spawn pairs it with whatever --model
+            # reaches it. Injecting the config model here would pair a DIFFERENT
+            # vendor's model behind the explicit vendor (e.g. -P zai + injected
+            # --model opus -> route "zai/opus", an anthropic model at a zai
+            # endpoint) - the same invisible-billing shape the route/vendor
+            # collision guards above exist to kill, just on the model path
+            # instead of the route path.
             print(
-                f"fno agents spawn: config model {cfg_model!r} is scoped to "
-                f"{home}; spawn resolves {target}, leaving model to the harness "
-                f"(bind {model_rung}.provider to apply it cross-harness)",
+                f"fno agents spawn: --provider {explicit_vendor!r} names a "
+                f"vendor; not injecting {model_rung}.model {cfg_model!r} "
+                "(add --model yourself to complete the route)",
                 file=err,
             )
+        elif role and _role_resolves(role, settings, env):
+            # resolve_route is fail-SAFE: a protected role, a disabled block, an
+            # unconfigured lane, or a missing key all return None (spawn falls
+            # back to the primary model, where the config default still applies).
+            # Only a REAL route owns the model, so only then do we skip.
+            print(
+                f"fno agents spawn: --role {role!r} resolves to a route; leaving "
+                f"model to the route (not injecting {model_rung}.model "
+                f"{cfg_model!r})",
+                file=err,
+            )
+        else:
+            # A provider-less config model is scoped to the harness it was written
+            # for, but nothing on disk records which harness that was. Scope it to
+            # the HOME provider - the config provider, else the builtin default
+            # (claude, the same fallback resolve_dispatch_provider uses) - NOT the
+            # ambient harness. Inject only when the spawn's resolved TARGET equals
+            # that home: a codex spawn (explicit `-p codex` OR a codex-ambient
+            # session) must not inherit a claude model (it 400s after the round-trip);
+            # an explicit --model stays the supported cross-harness override. This
+            # never maps a model value to a provider (no catalog); it only scopes an
+            # UNqualified default the way the rest of dispatch scopes one.
+            from fno.dispatch_flags import resolve_dispatch_provider
+
+            home = cfg_provider or "claude"
+            try:
+                if explicit_provider and explicit_provider.strip():
+                    target: Optional[str] = explicit_provider.strip()
+                elif cfg_provider:
+                    target = cfg_provider
+                else:
+                    target = resolve_dispatch_provider(None, env=env)[0]
+            except Exception:
+                # Degrade open (AC5-FR): a resolution raise must never brick a
+                # spawn that would otherwise work. No target => no basis to inject.
+                print(
+                    "fno agents spawn: provider resolution failed; "
+                    "leaving model to the harness",
+                    file=err,
+                )
+                target = None
+            if target and target == home:
+                inject += ["--model", cfg_model]
+                from_config.append(("model", model_rung))  # type: ignore[arg-type]
+            elif target:
+                print(
+                    f"fno agents spawn: config model {cfg_model!r} is scoped to "
+                    f"{home}; spawn resolves {target}, leaving model to the harness "
+                    f"(bind {model_rung}.provider to apply it cross-harness)",
+                    file=err,
+                )
 
     if cfg_effort and not has_effort:
         # Effort surface depends on the RESOLVED provider: an explicit -p flag,

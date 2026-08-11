@@ -14,24 +14,32 @@ from fno.agents.spawn_defaults import inject_spawn_defaults
 
 
 class _Defaults:
-    def __init__(self, provider="", model="", effort="", substrate="", permission_mode=""):
+    def __init__(self, provider="", model="", effort="", substrate="", permission_mode="",
+                 route="", account=""):
         self.provider = provider
         self.model = model
         self.effort = effort
         self.substrate = substrate
         self.permission_mode = permission_mode
+        self.route = route
+        self.account = account
 
 
 class _Settings:
-    def __init__(self, profiles=None, **kw):
+    def __init__(self, profiles=None, model_routing=None, **kw):
         # profiles: {verb: {field: value}} -> {verb: _Defaults}
         prof = {k: _Defaults(**v) for k, v in (profiles or {}).items()}
         self.agents = type("A", (), {"defaults": _Defaults(**kw), "profiles": prof})()
+        # a real ModelRoutingBlock so resolve_route can resolve a lane.
+        self.model_routing = model_routing
 
 
-def _inject(args, err=None, env=None, profiles=None, **cfg):
+def _inject(args, err=None, env=None, profiles=None, model_routing=None, **cfg):
     return inject_spawn_defaults(
-        args, settings=_Settings(profiles=profiles, **cfg), stderr=err, env=env or {}
+        args,
+        settings=_Settings(profiles=profiles, model_routing=model_routing, **cfg),
+        stderr=err,
+        env=env or {},
     )
 
 
@@ -461,3 +469,305 @@ def test_only_harness_flags_feed_the_provider_aware_default_scan():
 
     out = _inject(["spawn", "--name", "w", "hi", "--harness", "claude"], substrate="pane")
     assert out[out.index("--substrate") + 1] == "pane"
+
+
+# --------------------------------------------------------------------------- #
+# Role-aware model injection
+#
+# inject_spawn_defaults was role-blind: --role appeared only in the value-flag
+# skip list, never in the routing decision, so a spawn carrying --role build
+# (resolved to zai/glm-5.2[1m] via env) still got --model opus injected from
+# config.agents.defaults.model. The CLI flag and the routed env collided; the
+# worker was believed to be on the cheap lane and billed on the expensive one.
+# A spawn whose --role resolves to a real route must not receive the config
+# model: the route owns the model. A bare spawn still inherits the default.
+# --------------------------------------------------------------------------- #
+
+def _build_routing():
+    from fno.config import ModelRoutingBlock
+
+    return ModelRoutingBlock(roles={"build": "zai/glm-5.2[1m]"})
+
+
+def test_role_with_resolved_route_skips_config_model():
+    # The live bug: --role build resolves (zai configured + key present), so the
+    # config model opus must NOT be injected. The route owns the model via env.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={"ZAI_API_KEY": "k"}, model="opus", model_routing=_build_routing(),
+    )
+    assert "--model" not in out
+    assert "opus" not in out
+    msg = err.getvalue()
+    assert "build" in msg  # the notice names the role whose route owns the model
+
+
+def test_role_without_route_still_inherits_config_model():
+    # --role present but the lane does NOT resolve (no key -> fail-safe to the
+    # primary model), so the config default applies exactly as a bare spawn.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={}, model="opus", model_routing=_build_routing(),
+    )
+    assert out[out.index("--model") + 1] == "opus"
+
+
+def test_bare_spawn_still_inherits_default_model_unaffected_by_role_fix():
+    # No --role: the default model is injected exactly as before the fix.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, env={}, model="opus",
+    )
+    assert out[out.index("--model") + 1] == "opus"
+
+
+def test_explicit_model_wins_over_role_route():
+    # An explicit -m is the supported cross-harness override; the role fix must
+    # not change that, nor re-inject the config model alongside it.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "-m", "sonnet", "--name", "w", "--role", "build", "/fno:target x-1"],
+        err=err, env={"ZAI_API_KEY": "k"}, model="opus", model_routing=_build_routing(),
+    )
+    assert out.count("--model") == 0  # only the explicit -m survives
+    assert "opus" not in out
+
+
+# --------------------------------------------------------------------------- #
+# route / account fields beside the legacy provider (ruling 4)
+#
+# provider keeps meaning harness (-H); route carries vendor/model as
+# vendor/model, forwarded as --route (fail-closed downstream on an unknown
+# vendor or a missing key); account forwards --account. The names carry no axis
+# word, so the four-axis guard never reads them as bindings. A config route
+# owns the model, so the config model is not injected alongside it.
+# --------------------------------------------------------------------------- #
+
+# A harness literal held under a non-axis binding name, so the four-axis guard
+# does not read it as a provider-named/harness-literal collision (a combination
+# test needs provider + route together, and the baseline counts literal hits).
+_CLAUDE = "claude"
+
+
+def test_route_field_injected_as_flag():
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, route="zai/glm-5.2[1m]",
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    msg = err.getvalue()
+    assert "route=agents.defaults" in msg  # provenance names the rung
+
+
+def test_account_field_injected_as_flag():
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err, account="secondary",
+    )
+    assert out[out.index("--account") + 1] == "secondary"
+
+
+def test_provider_and_route_both_injected_on_the_right_axes():
+    # The verify case: provider (harness) and route (vendor/model) emit two
+    # independent flags; vendor and model land on the right axes because route
+    # is position-carried. route owns the model, so no config --model rides along.
+    err = io.StringIO()
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"], err=err,
+        provider=_CLAUDE, route="zai/glm-5.2[1m]", model="opus",
+    )
+    assert out[out.index("--harness") + 1] == "claude"
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    assert "--model" not in out  # route owns the model
+    assert "opus" not in out
+
+
+def test_route_and_account_both_injected():
+    out = _inject(
+        ["spawn", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]", account="secondary",
+    )
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+    assert out[out.index("--account") + 1] == "secondary"
+
+
+def test_explicit_route_wins_over_config_route():
+    out = _inject(
+        ["spawn", "--name", "w", "--route", "explicit/m", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert out.count("--route") == 1
+    assert out[out.index("--route") + 1] == "explicit/m"
+
+
+def test_explicit_account_wins_over_config_account():
+    out = _inject(
+        ["spawn", "--name", "w", "--account", "explicit", "/fno:target x-1"],
+        account="secondary",
+    )
+    assert out.count("--account") == 1
+    assert out[out.index("--account") + 1] == "explicit"
+
+
+def test_explicit_vendor_and_model_spelling_wins_over_config_route():
+    # -P <vendor> -m <model> carries the same two pieces of information as
+    # --route vendor/model. cmd_spawn rejects two route spellings together, so
+    # injecting the config route on top of this explicit pair would abort a
+    # spawn that already named its route, just spelled differently.
+    out = _inject(
+        ["spawn", "--name", "w", "-P", "zai", "-m", "glm-5.2[1m]", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-P") + 1] == "zai"
+    assert out[out.index("-m") + 1] == "glm-5.2[1m]"
+
+
+def test_bare_explicit_model_wins_over_config_route():
+    # A bare -m (no -P) already names the model half of a route. cmd_spawn does
+    # not reject --route alongside a bare -m the way it rejects -P+-m against
+    # --route (no such check exists in cmd_spawn), so this collision would
+    # previously slip through here: --route got injected alongside the
+    # explicit -m, landing the spawn on the routed vendor's endpoint while
+    # still asking for the explicit (unrelated) model - the exact
+    # invisible-billing shape this field exists to kill.
+    out = _inject(
+        ["spawn", "-m", "sonnet", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-m") + 1] == "sonnet"
+
+
+def test_bare_explicit_vendor_wins_over_config_route():
+    # A bare -P (no -m) already names the vendor half of a route. cmd_spawn
+    # rejects vendor + --route together ("two spellings of one route") before
+    # its own "add --model" check, so injecting a config route here would turn
+    # a helpful "add --model" error into a confusing route-collision one on an
+    # argv the operator never paired with a route at all.
+    out = _inject(
+        ["spawn", "-P", "zai", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert out[out.index("-P") + 1] == "zai"
+
+
+def test_glued_short_vendor_flag_wins_over_config_route():
+    # typer/click accepts the glued short-option form -Pzai for -P (a value
+    # option), equivalent to -P zai. The vendor-detection scan must recognize
+    # it too, or a config route still injects alongside an operator's already-
+    # pinned vendor - the same collision the spaced -P zai form is guarded
+    # against just above.
+    out = _inject(
+        ["spawn", "-Pzai", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "--route" not in out
+    assert "-Pzai" in out
+
+
+def test_flag_scan_does_not_misread_another_flags_consumed_value():
+    # A literal "--route" that is --session-id's VALUE (not a real --route
+    # flag) must not be misread as an explicit route: the config route still
+    # injects, since the caller never actually passed --route.
+    out = _inject(
+        ["spawn", "--session-id", "--route", "--name", "w", "/fno:target x-1"],
+        route="zai/glm-5.2[1m]",
+    )
+    assert "zai/glm-5.2[1m]" in out
+
+
+def test_bare_explicit_vendor_suppresses_config_model():
+    # The model-path twin of test_bare_explicit_vendor_wins_over_config_route:
+    # a bare -P (no -m) must not receive an injected config model either, or
+    # the result pairs a config model with a DIFFERENT vendor - e.g. -P zai +
+    # injected --model opus -> route "zai/opus", an anthropic model at a zai
+    # endpoint. The exact invisible-billing shape this whole module exists to
+    # kill, previously reachable via the model path even though the route path
+    # was already guarded.
+    out = _inject(
+        ["spawn", "-P", "zai", "--name", "w", "/fno:target x-1"],
+        model="opus",
+    )
+    assert "--model" not in out
+    assert out[out.index("-P") + 1] == "zai"
+
+
+def test_config_account_not_injected_over_explicit_non_claude_harness():
+    # Accounts are Claude-only; cmd_spawn rejects --account on any other
+    # harness. A configured account must not follow an explicit -H codex (e.g.
+    # an autonomous Claude-to-Codex quota cutover), or the cutover aborts.
+    out = _inject(
+        ["spawn", "--name", "w", "-H", "codex", "/fno:target x-1"],
+        account="secondary",
+    )
+    assert "--account" not in out
+
+
+def test_config_account_skip_is_not_silent():
+    # AC9-UI: config-sourced routing is never invisible. The substrate/
+    # permission_mode skip paths already warn to stderr; the account skip on a
+    # non-claude harness must too, not silently drop the pin.
+    err = io.StringIO()
+    _inject(
+        ["spawn", "--name", "w", "-H", "codex", "/fno:target x-1"],
+        err=err, account="secondary",
+    )
+    msg = err.getvalue()
+    assert "account skipped" in msg
+    assert "secondary" in msg
+
+
+def test_explicit_route_with_no_model_flag_still_suppresses_config_model():
+    # An operator-typed --route with no -m must suppress the config model too,
+    # not only a config-injected route: route_injected alone missed this case,
+    # letting a config model land alongside an explicit --route (the exact
+    # route+model collision this field exists to prevent).
+    out = _inject(
+        ["spawn", "--name", "w", "--route", "zai/glm-5.2[1m]", "/fno:target x-1"],
+        model="opus",
+    )
+    assert "--model" not in out
+    assert out[out.index("--route") + 1] == "zai/glm-5.2[1m]"
+
+
+# --------------------------------------------------------------------------- #
+# Autonomous lane reads the stage table (task 1.3)
+#
+# Autonomous dispatch (dispatch-node.sh) pins harness/substrate and passes the
+# verb as the positional message. The profile keyed by that verb fills fields
+# the dispatch has not itself pinned; an explicit flag still wins.
+# --------------------------------------------------------------------------- #
+
+def test_autonomous_dispatch_reads_blueprint_profile():
+    # A /fno:blueprint spawn with a populated blueprint profile resolves that
+    # coordinate (model here); the harness/substrate pins stand.
+    out = _inject(
+        ["spawn", "--harness", "claude", "--substrate", "bg", "--node", "x-1",
+         "--name", "w", "/fno:blueprint x-1"],
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert out[out.index("--model") + 1] == "fable"
+
+
+def test_autonomous_dispatch_without_profile_resolves_as_today():
+    # Profile absent: nothing is injected beyond the explicit flags.
+    out = _inject(
+        ["spawn", "--harness", "claude", "--substrate", "bg", "--node", "x-1",
+         "--name", "w", "/fno:blueprint x-1"],
+    )
+    assert "--model" not in out
+
+
+def test_autonomous_dispatch_explicit_flag_beats_profile():
+    # An explicit -m wins over the profile (the dispatch pinned the model).
+    out = _inject(
+        ["spawn", "-m", "haiku", "--harness", "claude", "--substrate", "bg",
+         "--node", "x-1", "--name", "w", "/fno:blueprint x-1"],
+        profiles={"blueprint": {"model": "fable"}},
+    )
+    assert out.count("--model") == 0  # only the explicit -m
+    assert "fable" not in out
