@@ -315,6 +315,8 @@ FIELD_META: dict[str, Meta] = {
     "mux.attach_digest": Meta("advanced", "Show a 'while you were gone' catch-up digest overlay on attach after an absence (default on).", default_source="default"),
     "mux.attach_digest_threshold_min": Meta("advanced", "Minutes since last detach before the catch-up digest overlay shows (default 10).", default_source="default"),
     "mux.hover_focus": Meta("advanced", "Focus-follows-mouse: hovering a coding pane makes it the keyboard focus after a short settle (default on).", default_source="default"),
+    "mux.prefix": Meta("advanced", "The mux prefix key, as C-a / Ctrl-a / ^a or a bare printable character. Unset keeps the built-in Ctrl-b."),
+    "mux.keys": Meta("advanced", "Per-action key rebinds, {action: key}, e.g. {detach: 'Q'}. Action ids are the ones prefix+? lists. An unparseable key, an unknown action, a digit (1-9 select tabs), or a collision is refused and reported rather than silently ignored.", default_source="default"),
     # --- config.dev.* (x-88b9: maintainer local-dev) ---
     "dev.source": Meta("never", "Maintainer pin: a checkout root the Rust bootstrap re-provisions from (uv tool install <path>/cli) instead of the PyPI wheel when its tool venv is wiped. Unset = PyPI self-provision (end-user default)."),
     # --- config.context.* (x-edf5: project-supplied context artifacts) ---
