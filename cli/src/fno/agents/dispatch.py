@@ -6259,6 +6259,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="durable-address",
                         name=name,
+                        msg_id=msg_id,
                         reason="missing_harness_session_id",
                     )
                     raise DispatchAskError(
@@ -6302,6 +6303,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="envelope-write",
                         name=name,
+                        msg_id=msg_id,
                     )
                     raise DispatchAskError(
                         f"durable envelope write failed: {exc}",
@@ -6410,6 +6412,7 @@ def dispatch_send(
                             "agent_send_failed",
                             stage="registry-write",
                             name=name,
+                            msg_id=msg_id,
                             delivery=delivery,
                             reason="recipient_identity_changed",
                             error="recipient identity changed after delivery",
@@ -6428,6 +6431,7 @@ def dispatch_send(
                         "agent_send_failed",
                         stage="registry-write",
                         name=name,
+                        msg_id=msg_id,
                         delivery=delivery,
                         error=str(exc),
                         error_type=type(exc).__name__,
