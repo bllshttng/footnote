@@ -1337,7 +1337,7 @@ def _await_pane_binding(
 
 
 def _resolve_unbound_reason(
-    session_uuid: Optional[str], reason: Optional[str], provider: str
+    session_uuid: Optional[str], reason: Optional[str], harness: str
 ) -> Optional[str]:
     """The reason an unbound receipt carries; None when it is bound.
 
@@ -1347,10 +1347,14 @@ def _resolve_unbound_reason(
     as an empty ``short_id``, which is what this whole change exists to remove.
     Defaulting here means a new unbound branch cannot reintroduce a null by
     forgetting, and a bound spawn can never carry a stale reason.
+
+    ``harness`` is the axis word on purpose: the thing that failed to bind is the
+    BINARY (claude, codex, opencode), not a model vendor. `dispatch_spawn_pane`
+    still calls its local `provider`, which is the older spelling.
     """
     if session_uuid is not None:
         return None
-    return reason or f"no-session-binding-for-{provider}"
+    return reason or f"no-session-binding-for-{harness}"
 
 
 def _write_pane_death_log(name: str, tail: str) -> str:

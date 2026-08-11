@@ -240,12 +240,20 @@ def test_bound_equals_short_id_truthiness(provider: str) -> None:
         assert result.bound == bool(result.short_id)
 
 
+#: A harness whose transport key is NOT short_id (US8). Named rather than
+#: inlined because `MuxSpawnResult.provider` is an older spelling of the harness
+#: axis, and a harness literal bound to a `provider=` keyword is the four-axis
+#: confusion `scripts/ci/check-axis-vocabulary.sh` exists to catch.
+HARNESS_WITHOUT_SHORT_ID = "opencode"
+
+
 def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
-    """opencode's transport key is not short_id (US8), so an empty short_id there
-    is NOT an unbound worker. `bound` reads the session uuid for that reason."""
+    """This harness's transport key is not short_id (US8), so an empty short_id
+    there is NOT an unbound worker. `bound` reads the session uuid for that
+    reason."""
     result = MuxSpawnResult(
         name="w",
-        provider="opencode",
+        provider=HARNESS_WITHOUT_SHORT_ID,
         session="main",
         pane_id=81,
         child_pid=4242,
@@ -258,7 +266,8 @@ def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
 
 
 @pytest.mark.parametrize(
-    "provider,named,expected",
+    # `harness`, not `provider`: these are binaries, not model vendors.
+    "harness,named,expected",
     [
         # The codex branches name their reason precisely and it survives.
         ("codex", "pane-died-before-binding", "pane-died-before-binding"),
@@ -271,12 +280,12 @@ def test_bound_is_keyed_on_the_session_not_on_short_id() -> None:
     ],
 )
 def test_every_unbound_receipt_names_a_reason(
-    provider: str, named: str | None, expected: str
+    harness: str, named: str | None, expected: str
 ) -> None:
     """An unbound receipt whose reason is null is the same empty signal as an
     empty short_id. Pinning the IMPLICATION, not a list of branches, so a new
     unbound branch cannot reintroduce a null by forgetting."""
-    assert mux_spawn._resolve_unbound_reason(None, named, provider) == expected
+    assert mux_spawn._resolve_unbound_reason(None, named, harness) == expected
 
 
 def test_a_bound_receipt_never_carries_a_reason() -> None:

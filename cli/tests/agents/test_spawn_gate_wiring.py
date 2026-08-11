@@ -164,6 +164,13 @@ def test_pane_spawn_gates_as_pane_and_releases_on_success(
         status = "live"
         session_uuid = None
         placement = None  # x-6928: exact-placement receipt (absent on legacy)
+        # A duck-typed stub of MuxSpawnResult drifts from the real dataclass the
+        # moment a receipt field is added, and the drift surfaces as an
+        # AttributeError inside the CLI rather than as a missing receipt field.
+        bound = True
+        pane_alive = True
+        unbound_reason = None
+        log_path = ""
 
     monkeypatch.setattr(
         mux_mod, "dispatch_spawn_pane", lambda **kw: PaneResult()
