@@ -587,8 +587,20 @@ fn default_bindings() -> Vec<KeyBinding> {
         ),
         // workspaces & tabs
         b(b'c', "new-tab", Cmd(C::NewTab), WorkspacesTabs, "new tab"),
-        b(b'n', "next-tab", Cmd(C::NextTab), WorkspacesTabs, "next tab"),
-        b(b'p', "prev-tab", Cmd(C::PrevTab), WorkspacesTabs, "prev tab"),
+        b(
+            b'n',
+            "next-tab",
+            Cmd(C::NextTab),
+            WorkspacesTabs,
+            "next tab",
+        ),
+        b(
+            b'p',
+            "prev-tab",
+            Cmd(C::PrevTab),
+            WorkspacesTabs,
+            "prev tab",
+        ),
         b(
             b'&',
             "close-tab",
@@ -596,13 +608,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             WorkspacesTabs,
             "close tab",
         ),
-        b(
-            b',',
-            "rename-tab",
-            OpenRename,
-            WorkspacesTabs,
-            "rename tab",
-        ),
+        b(b',', "rename-tab", OpenRename, WorkspacesTabs, "rename tab"),
         b(
             b'z',
             "cycle-section",
@@ -659,7 +665,13 @@ fn default_bindings() -> Vec<KeyBinding> {
         // global
         b(b'w', "selector", OpenSelector, Global, "panel selector"),
         b(b'a', "answers", OpenAnswers, Global, "answer queue"),
-        b(b'b', "toggle-sideline", TogglePanel, Global, "toggle sideline"),
+        b(
+            b'b',
+            "toggle-sideline",
+            TogglePanel,
+            Global,
+            "toggle sideline",
+        ),
         b(
             b'B',
             "cycle-density",
@@ -674,13 +686,7 @@ fn default_bindings() -> Vec<KeyBinding> {
             Global,
             "sort agents: squad/status",
         ),
-        b(
-            b's',
-            "toggle-status",
-            ToggleStatus,
-            Global,
-            "toggle status",
-        ),
+        b(b's', "toggle-status", ToggleStatus, Global, "toggle status"),
         b(b'?', "show-keys", ShowKeys, Global, "this key table"),
         b(
             b'g',
@@ -1055,7 +1061,10 @@ mod tests {
         );
         // The id is case-folded, so `SEARCH` resolves - and then collides with
         // `?`, which is already the key table.
-        assert!(warn.iter().any(|w| w.0.contains("already show-keys")), "{warn:?}");
+        assert!(
+            warn.iter().any(|w| w.0.contains("already show-keys")),
+            "{warn:?}"
+        );
         assert_eq!(map.prefix, 0x01);
         assert_eq!(map.rebinds, vec![("detach".to_string(), b'Q')]);
     }
@@ -1092,12 +1101,18 @@ mod tests {
         let (map, warn) = resolve_keymap(
             None,
             // Sorted the way the config reader hands them over.
-            &[("next-tab".into(), "N".into()), ("prev-tab".into(), "n".into())],
+            &[
+                ("next-tab".into(), "N".into()),
+                ("prev-tab".into(), "n".into()),
+            ],
         );
         assert!(warn.is_empty(), "{warn:?}");
         assert_eq!(
             map.rebinds,
-            vec![("next-tab".to_string(), b'N'), ("prev-tab".to_string(), b'n')]
+            vec![
+                ("next-tab".to_string(), b'N'),
+                ("prev-tab".to_string(), b'n')
+            ]
         );
     }
 
@@ -1127,7 +1142,11 @@ mod tests {
         // make the id undiscoverable from the help text.
         let mut seen = std::collections::HashSet::new();
         for kb in default_bindings() {
-            assert!(seen.insert(kb.action), "duplicate action id {:?}", kb.action);
+            assert!(
+                seen.insert(kb.action),
+                "duplicate action id {:?}",
+                kb.action
+            );
             assert!(
                 !kb.action.is_empty()
                     && kb

@@ -121,7 +121,8 @@ pub fn cell_colors(cell: &Cell, theme: Theme) -> ((u8, u8, u8), (u8, u8, u8)) {
     if cell.flags & cell_flags::DIM != 0 {
         fg = dim(fg, bg);
     }
-    let inverse = (cell.flags & cell_flags::INVERSE != 0) ^ (cell.flags & cell_flags::SELECTED != 0);
+    let inverse =
+        (cell.flags & cell_flags::INVERSE != 0) ^ (cell.flags & cell_flags::SELECTED != 0);
     if inverse {
         std::mem::swap(&mut fg, &mut bg);
     }
@@ -243,7 +244,11 @@ fn frame_body(frame: &Frame, theme: Theme) -> String {
                 hex(fg),
                 hex(bg),
                 if bold { ";font-weight:700" } else { "" },
-                if under { ";text-decoration:underline" } else { "" },
+                if under {
+                    ";text-decoration:underline"
+                } else {
+                    ""
+                },
                 if italic { ";font-style:italic" } else { "" },
             ));
         }
@@ -270,7 +275,10 @@ pub fn write_shot(frame: &Frame, name: &str, title: &str) -> Option<std::path::P
     std::fs::write(&path, frame_html(frame, title)).ok()?;
     // A plain-text twin beside it: the HTML is for eyes, this is for a terminal,
     // a diff, or a CI log where nobody can open a browser.
-    let _ = std::fs::write(dir.join(format!("{name}.txt")), crate::vt::frame_text(frame));
+    let _ = std::fs::write(
+        dir.join(format!("{name}.txt")),
+        crate::vt::frame_text(frame),
+    );
     Some(path)
 }
 

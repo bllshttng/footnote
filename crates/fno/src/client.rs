@@ -5235,7 +5235,10 @@ impl View {
         }
         // [squad label][tab..][+]: the label leads and the `+` trails by
         // construction, so both peel off without searching for them.
-        let Some(plus) = full.last().filter(|s| matches!(s.hit, Some(TabHit::NewTab))) else {
+        let Some(plus) = full
+            .last()
+            .filter(|s| matches!(s.hit, Some(TabHit::NewTab)))
+        else {
             return full;
         };
         let (plus, label) = (plus.clone(), full[0].clone());
@@ -5254,7 +5257,11 @@ impl View {
             let mut end = start;
             while end < tabs.len() {
                 let rest_after = tabs.len() - end - 1;
-                let reserve = if rest_after > 0 { marker_w(rest_after) } else { 0 };
+                let reserve = if rest_after > 0 {
+                    marker_w(rest_after)
+                } else {
+                    0
+                };
                 if used + span_w(&tabs[end]) + reserve > avail {
                     break;
                 }
@@ -23652,7 +23659,11 @@ mod tests {
             "fixture drift: this test's whole point is that a working agent row \
              is ALSO bold, so a bold header cannot out-weigh it"
         );
-        write_shot(&frame, "02-workspace-sections", "workspace sections (after)");
+        write_shot(
+            &frame,
+            "02-workspace-sections",
+            "workspace sections (after)",
+        );
     }
 
     /// Item 3. Twenty tabs. Every tab must be REACHABLE: the active one is
@@ -23677,8 +23688,9 @@ mod tests {
             );
             let active_name = &names[active];
             assert!(
-                window.iter().any(|s| s.text.contains(active_name.as_str())
-                    && s.text.starts_with('[')),
+                window
+                    .iter()
+                    .any(|s| s.text.contains(active_name.as_str()) && s.text.starts_with('[')),
                 "active tab {active_name} is not on the strip"
             );
             // Reachability: the hidden ends carry a counter whose click target
@@ -23701,9 +23713,7 @@ mod tests {
             // The `+` affordance is pinned: it is the only mouse route to a new
             // tab and must never scroll away.
             assert!(
-                window
-                    .iter()
-                    .any(|s| matches!(s.hit, Some(TabHit::NewTab))),
+                window.iter().any(|s| matches!(s.hit, Some(TabHit::NewTab))),
                 "the + affordance scrolled off at active={active}"
             );
             if active == 13 {
@@ -23753,6 +23763,10 @@ mod tests {
             !strip.contains("task-20"),
             "the before fixture should CLIP: the old strip could not reach tab 20"
         );
-        write_shot(&frame, "00-twenty-tabs-before", "twenty tabs (before: clipped)");
+        write_shot(
+            &frame,
+            "00-twenty-tabs-before",
+            "twenty tabs (before: clipped)",
+        );
     }
 }
