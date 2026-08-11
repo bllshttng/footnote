@@ -23459,6 +23459,31 @@ mod tests {
     }
 
     #[test]
+    fn the_key_modal_shows_exact_action_ids_on_a_narrow_terminal() {
+        // The modal advertises the id an operator types into `config.mux.keys`,
+        // so a clipped one is worse than none: `grab-…` still looks like an id.
+        // The generic row renderer clipped the whole line from the RIGHT, which
+        // is exactly where the id sits, so this only showed at the narrow end -
+        // the wide case the id was added for looked fine.
+        let modal = build_keys_modal();
+        // Tall enough that the popup does not scroll: the subject here is
+        // WIDTH, and a scrolled-off row would read as a clipped id.
+        for cols in [40u16, 60, 100] {
+            let out = modal.popup.render((80, cols));
+            let screen: Vec<String> = out.lines.iter().map(|l| l.text.clone()).collect();
+            for kb in crate::keys::key_bindings() {
+                assert!(
+                    screen.iter().any(|l| l.contains(kb.action)),
+                    "at {cols} cols the modal must show `{}` in full, not clipped; \
+                     rendered:\n{}",
+                    kb.action,
+                    screen.join("\n")
+                );
+            }
+        }
+    }
+
+    #[test]
     fn condensing_a_narrow_strip_never_shortens_an_overflow_counter() {
         // A counter carries a Tab hit so that clicking it walks the strip, which
         // is exactly why its role cannot be read off `hit`. Shortened, `‹13 `
