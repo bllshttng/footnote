@@ -208,12 +208,19 @@ pub fn contrast_ratio(cell: &Cell, theme: Theme) -> f64 {
 }
 
 /// The contrast `theme` gives its own body text - every ordinary character its
-/// user reads all day.
+/// user reads all day. THIS is the bar chrome clears, and the reason it is a
+/// relative bar rather than a number is the whole lesson of this module.
 ///
-/// This, not an absolute ratio, is the bar chrome has to clear. An absolute
-/// floor asks the modal to be MORE readable than the scheme its user chose,
-/// which can only be met by overriding their colours, which is the thing that
-/// already failed here once. Solarized Light sits at 4.1:1 on purpose.
+/// An absolute floor on a surface whose palette belongs to the user is not a
+/// strict gate, it is a gate pointed at the wrong noun. Solarized Light's body
+/// text is 4.13:1 BY DESIGN, so a 7:1 floor demands that chrome be more
+/// readable than the scheme its reader chose - and the only way to satisfy that
+/// is to override their colours. Which is exactly what was tried here, and it
+/// shipped a prompt at 4.61:1 on the reporter's Catppuccin Macchiato where
+/// inheriting would have given 9.92:1.
+///
+/// Inherit-and-invert clears a relative bar by construction on every theme. No
+/// named pair can promise an absolute one, because the palette is not ours.
 pub fn body_contrast(theme: Theme) -> f64 {
     contrast_ratio(
         &Cell {
