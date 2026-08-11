@@ -91,6 +91,48 @@ def _write_stamp(posture: str, scope: str, keys: dict[str, str]) -> None:
         typer.echo(f"posture: warning: could not write provenance stamp: {exc}", err=True)
 
 
+def _project_shadowed_keys(keys: dict[str, str]) -> list[str]:
+    """Posture keys the project-local config already defines.
+
+    A global write would be silently overridden at resolve time: project-local
+    config outranks the per-user global (config precedence, highest first, has
+    the worktree then canonical project files above ``~/.fno``). The merged
+    Settings collapse the source scope and so cannot tell a global value from a
+    project one, so this reads the raw project file instead. Returns the dotted
+    key names that are present; empty when there is no project config or it sets
+    none of the stance levers.
+    """
+    try:
+        from fno.config_io import _load_raw, _unwrap_config_dict
+        from fno.paths import resolve_repo_root
+
+        root = resolve_repo_root()
+        for name in ("config.toml", "settings.yaml"):
+            path = root / ".fno" / name
+            if path.exists():
+                raw, ok = _load_raw(path)
+                if ok and raw:
+                    data = _unwrap_config_dict(raw)
+                    break
+        else:
+            return []
+    except Exception:  # noqa: BLE001 - unreadable/absent project config is not posture's alarm
+        return []
+
+    shadowed: list[str] = []
+    for dotted in keys:
+        parts = dotted.split(".")
+        node: object = data
+        for p in parts[:-1]:
+            if not isinstance(node, dict) or p not in node:
+                node = None
+                break
+            node = node[p]
+        if isinstance(node, dict) and parts[-1] in node:
+            shadowed.append(dotted)
+    return shadowed
+
+
 @posture_app.command("apply")
 def apply_cmd(
     posture: str = typer.Argument(
@@ -125,6 +167,20 @@ def apply_cmd(
     from fno.config.writer import ConfigSetError, set_config_values
 
     scope = "project" if local else "global"
+    # A global write is silently shadowed when the project config already pins a
+    # stance lever: project-local outranks global at resolve time, so the printed
+    # success would describe a value the running fleet never sees. Warn (do not
+    # refuse) naming the keys the operator must move to --local to actually flip.
+    if not local:
+        shadowed = _project_shadowed_keys(keys)
+        if shadowed:
+            typer.echo(
+                "warning: project-local config already defines "
+                + ", ".join(sorted(shadowed))
+                + ", which override this global write at resolve time. "
+                "Re-run with --local to change the effective value.",
+                err=True,
+            )
     try:
         set_config_values(list(keys.items()), scope=scope)
     except ConfigSetError as exc:

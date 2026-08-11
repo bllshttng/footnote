@@ -72,3 +72,52 @@ def test_posture_keys_read_back_as_ordinary_config(project_scope: Path) -> None:
     s = load_settings_for_repo(project_scope)
     assert not hasattr(s, "posture")
     assert s.auto_merge.enabled is False
+
+
+def _stub_global_write(
+    project_scope: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Keep the global write out of the real ~/.fno; isolate to tmp."""
+    monkeypatch.setattr(
+        "fno.config.writer.set_config_values",
+        lambda pairs, scope="global": project_scope / "global.toml",
+    )
+    monkeypatch.setattr("fno.paths.state_dir", lambda: project_scope / ".fno")
+
+
+def test_apply_global_warns_when_project_shadows(
+    project_scope: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A global write is shadowed by project-local config (project outranks
+    global at resolve time); warn naming the keys, suggest --local."""
+    (project_scope / ".fno").mkdir(parents=True)
+    (project_scope / ".fno" / "config.toml").write_text("[auto_merge]\nenabled = true\n")
+    _stub_global_write(project_scope, monkeypatch)
+    res = runner.invoke(posture_app, ["apply", "attended"])  # global is default
+    assert res.exit_code == 0, res.output
+    combined = res.output + (res.stderr or "")
+    assert "project-local config already defines" in combined
+    assert "auto_merge.enabled" in combined
+    assert "--local" in combined
+
+
+def test_apply_global_silent_when_project_sets_no_posture_key(
+    project_scope: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A project config with no stance lever does not trip the shadow warning."""
+    (project_scope / ".fno").mkdir(parents=True)
+    (project_scope / ".fno" / "config.toml").write_text('[obsidian]\nvault = "x"\n')
+    _stub_global_write(project_scope, monkeypatch)
+    res = runner.invoke(posture_app, ["apply", "attended"])
+    assert res.exit_code == 0, res.output
+    assert "project-local config already defines" not in (res.output + (res.stderr or ""))
+
+
+def test_apply_global_silent_when_no_project_config(
+    project_scope: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No project .fno at all -> nothing can shadow -> no warning."""
+    _stub_global_write(project_scope, monkeypatch)
+    res = runner.invoke(posture_app, ["apply", "attended"])
+    assert res.exit_code == 0, res.output
+    assert "project-local config already defines" not in (res.output + (res.stderr or ""))
