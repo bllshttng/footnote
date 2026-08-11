@@ -110,6 +110,11 @@ def test_other_repo_is_skipped(monkeypatch):
     # gh reads GH_REPO as the same override, so a flag-only test judged this
     # against PR 42 in THIS checkout.
     assert git_protection._stacked_base_refusal("GH_REPO=other/repo gh pr merge 42") is None
+    # A PR URL carries its own repo, which the flag test cannot see: this parses
+    # as 42 and would otherwise be judged against PR 42 in THIS checkout.
+    assert git_protection._stacked_base_refusal(
+        "gh pr merge https://github.com/other/repo/pull/42"
+    ) is None
     assert "cmd" not in calls
 
 

@@ -576,7 +576,14 @@ def _stacked_base_refusal(command=""):
     # exactly the form that carries the value. `GH_REPO=` is the third form -
     # gh reads it as the repo override, so a flag-only test judged
     # `GH_REPO=other/repo gh pr merge 42` against PR 42 in THIS checkout.
-    if any(t.startswith(("-R", "--repo", "GH_REPO=")) for t in command.split()):
+    # A PR URL names its own repository, so it is the fourth cross-repo form and
+    # the flag test above cannot see it: `gh pr merge
+    # https://github.com/other/repo/pull/42` parses as 42 and would be judged
+    # against PR 42 in THIS checkout. Comparing owner/repo needs a slug this
+    # stdlib-only hook has no cheap way to obtain, so the URL form is treated as
+    # unanswerable and fails open like every other one here.
+    if any(t.startswith(("-R", "--repo", "GH_REPO=")) or "/pull/" in t
+           for t in command.split()):
         return None
     try:
         proc = subprocess.run(

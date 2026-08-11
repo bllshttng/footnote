@@ -12,18 +12,18 @@ reports the PR MERGED.
 
 WHY the base went stale is unexplained, so this module asserts nothing about
 GitHub's retarget behavior. It reads observable git/gh facts and refuses if
-EITHER of two independent checks fires:
+ANY of three independent checks fires:
 
   (i)  a MERGED PR whose head is the base branch exists - the base already
        landed, so nothing is left to carry these commits onward.
   (ii) the base branch tip is already an ancestor of the default branch - the
        base is fully contained in main.
-  (iii) the base branch is confirmed absent from the remote and this checkout
-       has no ``origin/<base>`` to reason from - the state a fresh clone sees
-       whenever ``delete_branch_on_merge`` removed the base, where (i) and (ii)
-       are both blind.
+  (iii) the base branch is confirmed absent from the remote - the state
+       ``delete_branch_on_merge`` leaves behind, where (i) and (ii) can both go
+       blind (a fresh clone has no ``origin/<base>`` to reason from at all, and
+       a stale one can disagree with the merged head under squash).
 
-Both are kept because they go blind in different directions. Under
+All three are kept because they go blind in different directions. Under
 ``config.auto_merge.merge_strategy = "squash"`` a landed base is NOT an ancestor
 of main (squash mints a new commit), so (ii) sees nothing and (i) still fires.
 A base that landed by a path leaving no merged PR blinds (i) while (ii) fires.
@@ -288,17 +288,20 @@ def lineage_verdict(pr_number, cwd: str) -> Tuple[str, str]:
             f"moved since ({base_tip[:8]}), so merging PR #{pr_number} into it would "
             f"report MERGED while the commits never reach '{default}'; {retarget}",
         )
-    # (iii) The branch is confirmed absent from the remote and this checkout has
-    # no `origin/<base>` to reason from, so (i) and (ii) are both blind - on a
-    # fresh clone (every CI runner, and any worktree that never fetched the
-    # branch) that is the NORMAL state for the very case this module exists to
-    # catch, since `delete_branch_on_merge` removes the base the moment it
-    # lands. Leaving it `unknown` there fails OPEN in every in-process caller,
-    # which is the whole defect. The deletion is verdict enough on its own: a
-    # base branch that does not exist carries nothing onward, whatever killed
-    # it. `base_gone` is only ever True after `git ls-remote` answered, so a
-    # network failure still lands in `unknown` below.
-    if base_gone and not base_tip:
+    # (iii) The branch is confirmed absent from the remote, so it carries
+    # nothing onward whatever killed it - `delete_branch_on_merge` removes the
+    # base the moment it lands. Both other checks can miss this: a fresh clone
+    # (every CI runner, and any worktree that never fetched the branch) has no
+    # `origin/<base>` to compare a tip against or resolve ancestry from, and a
+    # STALE local ref is just as bad - under squash the landed base is no
+    # ancestor of the default branch, and a local ref left behind the merged
+    # head fails (i)'s equality test too, so both answer "healthy" about a
+    # branch that no longer exists. Gating this on `not base_tip` therefore let
+    # a confirmed deletion return `ok`, and `unknown`/`ok` both fail OPEN in
+    # every in-process caller - the whole defect. `base_gone` is only ever True
+    # after `git ls-remote` answered, so a network failure still lands in
+    # `unknown` below.
+    if base_gone:
         landed = f" (it landed via merged PR #{merged})" if merged > 0 else ""
         return (
             "stale",

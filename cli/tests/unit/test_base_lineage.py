@@ -224,6 +224,24 @@ def test_deleted_base_with_no_local_ref_and_no_merged_pr_still_refuses(patch_run
     assert "no longer exists on the remote" in why
 
 
+def test_deleted_base_with_a_stale_local_ref_still_refuses(patch_run):
+    """A confirmed deletion is the verdict even when a local `origin/<base>` exists.
+
+    Squash mints a new commit, so a landed base is no ancestor of main and (ii)
+    is blind; a local ref left BEHIND the merged head fails (i)'s equality test
+    too. Gated on `not base_tip`, both said "healthy" about a branch that no
+    longer exists and the verdict came back `ok` - which every in-process caller
+    treats as proceed.
+    """
+    patch_run(
+        FakeRun(base_fetch_fails=True, merged_pr="789", merged_head=LANDED,
+                base_tip=MOVED, contained=False)
+    )
+    verdict, why = _base_lineage.lineage_verdict(800, "/repo")
+    assert verdict == "stale"
+    assert "no longer exists on the remote" in why
+
+
 def test_missing_local_ref_without_a_confirmed_deletion_stays_unknown(patch_run):
     """(iii) fires only on a CONFIRMED deletion. A base still on the remote that
     this checkout simply cannot resolve is an unanswered question, not a
