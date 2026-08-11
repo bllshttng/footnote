@@ -7,6 +7,8 @@ external sinks. This file covers all ACs across the six user stories; the
 """
 from __future__ import annotations
 
+import threading
+
 import pytest
 
 from fno.config import ConfigBlock, StatusFanoutConfig, StatusSinkConfig
@@ -395,6 +397,33 @@ def test_shared_journal_uses_one_fanout_lock_and_cursor(tmp_path):
     assert first.calls == [("s", "2026-07-12T00:00:05Z")]
     assert second.calls == []
     assert sf._cursor_path("s", canonical) == sf._cursor_path("s", worktree)
+
+
+def test_tick_renews_its_lock_during_a_long_dispatch(tmp_path, monkeypatch):
+    from fno import status_fanout as sf
+
+    state_dir = tmp_path / ".fno" / "status-sinks"
+    state_dir.mkdir(parents=True)
+    _seed_cursor(state_dir, "s", "2026-08-11T08:00:00Z")
+    _write_events(tmp_path, [_ev("2026-08-11T09:00:00Z", "blocked")])
+    renewed = threading.Event()
+    original_renew = sf.renew_dir_mutex
+
+    def record_renew(path, token):
+        renewed.set()
+        return original_renew(path, token)
+
+    def slow_dispatch(sink, event):
+        assert renewed.wait(1)
+        return sf.DELIVERED, ""
+
+    monkeypatch.setattr(sf, "_TICK_LEASE_RENEW_EVERY_S", 0.01)
+    monkeypatch.setattr(sf, "renew_dir_mutex", record_renew)
+
+    result = sf.run_tick(tmp_path, [_text_sink()], dispatch_fn=slow_dispatch)
+
+    assert result.sinks[0].dispatched == 1
+    assert renewed.is_set()
 
 
 def test_tick_orders_migrated_older_rows_before_the_canonical_tail(tmp_path):

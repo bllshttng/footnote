@@ -567,6 +567,41 @@ for local_path in local_dir.glob("*.cursor"):
 PY
 }
 
+reconcile_shared_events_fanout() {
+  local source="$1"
+  local target="$2"
+  local token="$3"
+  local source_fanout_dir="$(dirname "$source")/status-sinks"
+  local target_fanout_dir="$(dirname "$target")/status-sinks"
+  local first_fanout_lock="${source_fanout_dir}/.tick.lock.d"
+  local second_fanout_lock="${target_fanout_dir}/.tick.lock.d"
+  mkdir -p "$source_fanout_dir" "$target_fanout_dir"
+  if [[ "$second_fanout_lock" < "$first_fanout_lock" ]]; then
+    local swap_fanout_lock="$first_fanout_lock"
+    first_fanout_lock="$second_fanout_lock"
+    second_fanout_lock="$swap_fanout_lock"
+  fi
+  EVENTS_MIGRATION_TOKEN="$token"
+  EVENTS_MIGRATION_DIRS=()
+  if ! acquire_events_dir "$first_fanout_lock" "$token"; then
+    echo "setup-worktree: status fanout reconciliation timed out on $first_fanout_lock" >&2
+    return 1
+  fi
+  EVENTS_MIGRATION_DIRS+=("$first_fanout_lock")
+  if [[ "$second_fanout_lock" != "$first_fanout_lock" ]]; then
+    if ! acquire_events_dir "$second_fanout_lock" "$token"; then
+      cleanup_events_migration
+      echo "setup-worktree: status fanout reconciliation timed out on $second_fanout_lock" >&2
+      return 1
+    fi
+    EVENTS_MIGRATION_DIRS+=("$second_fanout_lock")
+  fi
+  local rc=0
+  reconcile_status_fanout_cursors "$source" "$target" || rc=$?
+  cleanup_events_migration
+  return "$rc"
+}
+
 append_migrated_events() {
   local source="$1"
   local local_events="$2"
@@ -774,7 +809,8 @@ link_events_journal() {
   shopt -u nullglob
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
     ln -sfn "$source" "$target"
-    return 0
+    reconcile_shared_events_fanout "$source" "$target" "$token"
+    return $?
   fi
   if [[ -L "$target" ]]; then
     recover_pending=1
@@ -900,8 +936,10 @@ link_events_journal() {
   done
   shopt -u nullglob
   if [[ -L "$target" && ${#pending_backups[@]} -eq 0 ]]; then
+    local reconcile_rc=0
+    reconcile_status_fanout_cursors "$source" "$target" || reconcile_rc=$?
     cleanup_events_migration
-    return 0
+    return "$reconcile_rc"
   fi
   if [[ -L "$target" ]]; then
     recover_pending=1

@@ -27,6 +27,7 @@ import hashlib
 import json
 import os
 import string
+import threading
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -36,7 +37,7 @@ import typer
 from fno import paths
 from fno.config import StatusFanoutConfig, StatusSinkConfig
 from fno.env_file import read_var_from_env_file
-from fno.mutex import acquire_dir_mutex, release_dir_mutex
+from fno.mutex import acquire_dir_mutex, release_dir_mutex, renew_dir_mutex
 from fno.plan._stamp import _atomic_write as _atomic_write_plan
 from fno.plan.locking import plan_doc_lock
 
@@ -397,6 +398,8 @@ class _TickLock:
     def __init__(self, project_root: Path) -> None:
         self._path = _state_dir(project_root) / ".tick.lock.d"
         self._token: Optional[str] = None
+        self._stop = threading.Event()
+        self._renewer: Optional[threading.Thread] = None
 
     def acquire(self) -> bool:
         try:
@@ -406,12 +409,27 @@ class _TickLock:
             # "cannot lock" (the tick skips as locked_out) rather than crashing.
             return False
         self._token = acquire_dir_mutex(self._path, 0)
+        if self._token is not None:
+            self._renewer = threading.Thread(target=self._renew, daemon=True)
+            self._renewer.start()
         return self._token is not None
+
+    def _renew(self) -> None:
+        while not self._stop.wait(_TICK_LEASE_RENEW_EVERY_S):
+            token = self._token
+            if token is None or not renew_dir_mutex(self._path, token):
+                return
 
     def release(self) -> None:
         if self._token is not None:
+            self._stop.set()
+            if self._renewer is not None:
+                self._renewer.join()
             release_dir_mutex(self._path, self._token)
             self._token = None
+
+
+_TICK_LEASE_RENEW_EVERY_S = 30.0
 
 
 # ── HTTP delivery (shared by the two webhook adapters) ──────────────────────

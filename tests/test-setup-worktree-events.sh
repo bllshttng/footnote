@@ -126,6 +126,16 @@ assert "migration does not replay the consumed local offer" bash -c '! tail -c +
 assert "migration leaves the pending local offer after the shared cursor" bash -c 'tail -c +"$(( $1 + 1 ))" "$2" | grep -q pending-offer' _ "$mapped_cursor" "$canonical/.fno/events.jsonl"
 assert "migrated worktree shares the mapped offer cursor" test -L "$cursor_migration/.fno/.think-offer-cursor"
 
+reconcile_retry="$TMP/reconcile-retry"
+mkdir -p "$reconcile_retry/.fno/status-sinks" "$canonical/.fno/status-sinks"
+ln -s "$canonical/.fno/events.jsonl" "$reconcile_retry/.fno/events.jsonl"
+printf '%s' '{"ts":"2026-08-11T08:00:00Z","n":1}' > "$reconcile_retry/.fno/status-sinks/retry.cursor"
+printf '%s' '{"ts":"2026-08-11T10:00:00Z","n":1}' > "$canonical/.fno/status-sinks/retry.cursor"
+CANONICAL="$canonical" WORKTREE="$reconcile_retry" bash "$SETUP" >/dev/null 2>&1
+assert "existing journal link retries fanout cursor reconciliation" \
+  bash -c 'jq -e '\''.ts == "2026-08-11T08:00:00Z" and .n == 0'\'' "$1" >/dev/null' \
+  _ "$canonical/.fno/status-sinks/retry.cursor"
+
 pending_canonical="$TMP/pending-canonical"
 mkdir -p "$pending_canonical/.fno"
 printf '%s\n' '{"type":"must_wait_for_canonical_offer"}' > "$pending_canonical/.fno/events.jsonl"
