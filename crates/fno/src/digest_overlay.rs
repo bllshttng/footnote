@@ -138,10 +138,16 @@ fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
                 .or_else(|| {
                     std::env::var_os("HOME").map(|h| Path::new(&h).join(".fno/config.toml"))
                 });
-            // Lowest precedence first: global, then project on top.
+            // Lowest precedence first: global, then canonical, then this
+            // checkout on top - `config_roots` is highest-first, so it reverses.
             global
                 .into_iter()
-                .chain(std::iter::once(project_root(cwd).join(".fno/config.toml")))
+                .chain(
+                    config_roots(cwd)
+                        .into_iter()
+                        .rev()
+                        .map(|r| r.join(".fno/config.toml")),
+                )
                 .collect()
         }
     };
@@ -214,6 +220,40 @@ fn project_root(cwd: &Path) -> PathBuf {
     }
 }
 
+/// The project config roots, HIGHEST precedence first: this checkout, then the
+/// canonical one behind it when this is a linked worktree.
+fn config_roots(cwd: &Path) -> Vec<PathBuf> {
+    let root = project_root(cwd);
+    let canonical = canonical_root(&root);
+    std::iter::once(root).chain(canonical).collect()
+}
+
+/// The main checkout behind a linked worktree, when the worktree has no config
+/// of its own. `None` from the main checkout itself, or outside a repo.
+///
+/// I first argued this candidate was unnecessary because `setup-worktree.sh`
+/// symlinks the config into every worktree. It does not always: `link_file`
+/// skips a source that does not exist yet, and several creation paths treat
+/// setup as best-effort, so a worktree made before the project config existed
+/// stays bare forever. The Python loader carries the same candidate, so without
+/// it `fno` and the mux disagree about the config in exactly that worktree.
+///
+/// Read from the `.git` FILE rather than by shelling out to git: a linked
+/// worktree's gitdir points at `<canonical>/.git/worktrees/<name>`, so the
+/// canonical root is the part before `/.git/`. Config climbs to canonical;
+/// session state deliberately does not (`fno.paths`).
+fn canonical_root(worktree: &Path) -> Option<PathBuf> {
+    // Preflight's hermetic runner drops THIS candidate only, same as Python.
+    if non_empty_env("FNO_NO_CANONICAL_CONFIG").is_some() {
+        return None;
+    }
+    let gitdir = std::fs::read_to_string(worktree.join(".git")).ok()?;
+    let path = gitdir.trim().strip_prefix("gitdir:")?.trim();
+    let root = path.split("/.git/worktrees/").next()?;
+    let root = PathBuf::from(root);
+    (root != worktree && root.is_dir()).then_some(root)
+}
+
 /// The `$FNO_REPO_ROOT`-free half of [`project_root`], so the walk is testable
 /// without an env var the whole process shares.
 ///
@@ -238,8 +278,10 @@ fn mux_str(cwd: &Path, key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         return read_mux_file(Path::new(&explicit), key);
     }
-    if let Some(v) = read_mux_file(&project_root(cwd).join(".fno/config.toml"), key) {
-        return Some(v);
+    for root in config_roots(cwd) {
+        if let Some(v) = read_mux_file(&root.join(".fno/config.toml"), key) {
+            return Some(v);
+        }
     }
     let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
         .map(|p| PathBuf::from(p).with_file_name("config.toml"))
@@ -489,6 +531,40 @@ mod tests {
 
         std::fs::remove_dir_all(&base).ok();
         std::fs::remove_dir_all(&orphan).ok();
+    }
+
+    #[test]
+    fn a_bare_worktree_still_reaches_the_canonical_config() {
+        // I had assumed setup-worktree.sh always symlinks the config in. It does
+        // not: link_file skips a source that does not exist yet, so a worktree
+        // created before the project config existed stays bare, and without this
+        // candidate the mux and the Python loader disagree about the config in
+        // exactly that worktree.
+        let base = std::env::temp_dir().join(format!("fno-canon-{}", std::process::id()));
+        let canonical = base.join("footnote");
+        let wt = canonical.join(".claude/worktrees/feature");
+        std::fs::create_dir_all(wt.join("crates/fno")).expect("worktree dirs");
+        std::fs::create_dir_all(canonical.join(".git/worktrees/feature")).expect("gitdir");
+        std::fs::write(
+            wt.join(".git"),
+            format!("gitdir: {}/.git/worktrees/feature\n", canonical.display()),
+        )
+        .expect("gitdir file");
+
+        assert_eq!(
+            canonical_root(&wt).as_deref(),
+            Some(canonical.as_path()),
+            "a linked worktree resolves the checkout behind it"
+        );
+        assert_eq!(
+            config_roots(&wt.join("crates/fno")),
+            vec![wt.clone(), canonical.clone()],
+            "this checkout outranks canonical, and canonical is still reachable"
+        );
+        // The main checkout has no checkout behind it.
+        assert_eq!(canonical_root(&canonical), None);
+
+        std::fs::remove_dir_all(&base).ok();
     }
 
     #[test]
