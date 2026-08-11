@@ -120,7 +120,9 @@ The `/pr create` dispatch declares `--role pr-create` (or omits any `model:` ove
 
 Role routing keys on *what the worker is doing* (`--role build`). The stage table keys on *which verb started it*: `config.agents.profiles.<verb>` overlays `agents.defaults` field-by-field, selected by the seed's leading slash-verb (`/fno:blueprint x-123` -> the `blueprint` profile). It is the per-stage axis coordinate.
 
-The stage table reaches **every** spawn that carries a slash-verb seed, including autonomous dispatch. `skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile. An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
+The stage table reaches **every** spawn that carries a slash-verb seed, including autonomous dispatch.
+`skills/target/scripts/dispatch-node.sh` passes the verb as the spawn's positional message, so an autonomous `/target` or `/blueprint` worker inherits any field it did not itself pin from the matching profile.
+An explicit flag always wins, and a `--role` whose lane resolves owns the model, so the role and stage layers do not collide on the model: a stage table `model` is not injected alongside a resolving role, and a stage table `route` owns the model the same way an explicit `--route` does.
 
 ```yaml
 config:
