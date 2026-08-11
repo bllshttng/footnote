@@ -233,12 +233,26 @@ def resolve_carveouts(
         ...,
         help="Carve-out id(s) to remove from the ledger (e.g. cv-ab12cd34).",
     ),
+    reason: str = typer.Option(
+        None,
+        "--reason",
+        help="Why these rows are being retired without a node. Recorded as a "
+        "`carveout_resolved` event - the only trace a row leaves when it is "
+        "removed without becoming tracked work.",
+    ),
 ) -> None:
     """Remove handled carve-out(s) from the ledger.
 
     Used by /fno:pr merged's backfill slot once a backfill is run or filed
     as a backlog node, so a later run never re-offers the same entry. Idempotent:
     an id not present is a silent no-op. Prints the count actually removed.
+
+    ``--reason`` exists for the row that should be retired WITHOUT filing
+    anything: test residue, a duplicate of work already tracked elsewhere, a
+    carve-out overtaken by events. The backlog has no delete verb, so a junk
+    node is permanent while a reasoned resolve is a cheap, recorded correction.
+    Without the reason that same removal is indistinguishable from dropping the
+    work on the floor.
     """
     from fno.carveout.core import consume_carveouts, resolve_carveout_root
 
@@ -259,4 +273,31 @@ def resolve_carveouts(
             "remainder absent or ledger unwritable",
             err=True,
         )
+    if reason:
+        # Best-effort: the rows are already gone, so a failed emit must not read
+        # as a failed resolve. It must not be silent either - an unrecorded
+        # reasoned removal is the untraceable drop the flag exists to prevent.
+        try:
+            from fno.events import _build, append_event
+
+            append_event(
+                _build(
+                    "carveout_resolved",
+                    # "backlog", not "carveout": the envelope source is a closed
+                    # enum and there is no carveout member. A wrong value fails
+                    # validation at emit time, which is how this was caught.
+                    "backlog",
+                    {
+                        "carveout_ids": ",".join(unique_ids),
+                        "reason": reason,
+                        "removed": removed,
+                    },
+                )
+            )
+        except Exception as exc:
+            typer.echo(
+                f"carveout: resolved, but the reason was NOT recorded "
+                f"({type(exc).__name__}: {exc}); re-record it by hand",
+                err=True,
+            )
     typer.echo(f"resolved {removed} carve-out(s)")
