@@ -124,13 +124,19 @@ Blockers: `--blocked-by`, `--add-blocker`, `--remove-blocker` on `update`.
 A node with an open blocker derives to `status: blocked` automatically.
 
 **Every transition here has a correction, and that is enforced.**
-`cli/tests/unit/test_lifecycle_pairs.py` fails when a verb that changes a node's state or existence ships without an inverse, or with an inverse that nothing a caller reads ever names.
-The second half matters as much as the first: `fno backlog remove` existed and worked for a long time while nothing mentioned it, so an agent ruled that no delete verb existed and another project kept 23 nodes it believed un-file-able.
+`cli/tests/unit/test_lifecycle_pairs.py` fails on a verb that changes a node's state or existence and ships without an inverse.
+It fails just as hard on an inverse that nothing a caller reads ever names.
+That second half is the one that bit us.
+`fno backlog remove` existed and worked for a long time while nothing mentioned it.
+An agent therefore ruled that no delete verb existed, and another project kept 23 nodes it believed un-file-able.
 
 Reopening is guarded rather than free.
-`reopen` refuses when a referenced PR is MERGED, which is `done`'s gate inverted: the work is in main, and clearing the completion would make the graph assert that shipped work did not ship.
-The usual remedy is to file what remains as its own node; `--force --reason` records a deliberate reopen of shipped work.
-Ancestor epics the cascade auto-closed come back with the child, while an epic closed on its own evidence is left alone and named, since reopening it would discard a judgment the verb never made.
+When a referenced PR is MERGED, `reopen` refuses.
+That is `done`'s gate inverted: the work is in main, and clearing the completion makes the graph assert that shipped work did not ship.
+The usual remedy is to file what remains as its own node.
+`--force --reason` records a deliberate reopen of shipped work.
+Ancestor epics the cascade auto-closed come back with the child.
+An epic closed on its own evidence is left alone and named, because reopening it discards a judgment the verb never made.
 
 ## Node-to-node edges
 

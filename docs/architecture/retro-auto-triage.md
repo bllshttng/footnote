@@ -43,7 +43,8 @@ fno carveout add --kind deferred|oos-bug [--need "<open question>"] [--priority 
 ```
 
 To correct a row afterwards, use `fno carveout update <cv-id>`, not `resolve` then `add`.
-The refile path mints a new id, so any id already quoted in a PR body or a mail becomes a dead pointer, and it is lossy: two writes, and a failure between them leaves the ledger holding neither row.
+The refile path mints a new id, so any id already quoted in a PR body or a mail becomes a dead pointer.
+It is also lossy: two writes, and a failure between them leaves the ledger holding neither row.
 `update` is one rewrite under the same mutex and never touches `id`, `ts`, or `session_id`.
 
 It appends one JSON line to `.fno/carveouts.jsonl` via the events.jsonl mkdir-mutex convention. `session_id` resolves from `target-state.md` then `$CLAUDECODE_SESSION_ID`; a missing session records unscoped (exit 0 + stderr warn) so capture is never lost. A failed write exits non-zero (no silent success). The instruction lives in the `using-fno` preamble so every pipeline (`/target`, `/do` (incl. waves), `/goal`, loops) emits carve-outs. Advisory, not gate-enforced — the merge-time harvest is the backstop.
@@ -75,16 +76,23 @@ It is a DRY RUN by default; `--apply` is the only path that writes.
 Bare `fno retro run` reports the pending count on every one of its callers (the SessionStart reconcile throttle, `/fno:pr check`, `/fno:pr merged`, direct CLI) but never applies, and neither does `fno backlog groom`.
 
 **The harvest is manual by design, and that is the trade, not an oversight.**
-This paragraph used to rest on "there is no `fno backlog delete`, so every filed node is permanent".
-That was false, and it is the third place the same false belief turned up: the verb is `fno backlog remove`, it has always existed, and the 23 surplus nodes another project believed un-file-able were removable the whole time.
-The name is why nobody found it, which is what [the lifecycle-pairs gate](../../cli/tests/unit/test_lifecycle_pairs.py) now exists to prevent.
+This paragraph used to rest on a false claim: "there is no `fno backlog delete`, so every filed node is permanent".
+The verb is `fno backlog remove`, and it has always existed.
+The 23 surplus nodes another project believed un-file-able were removable the whole time.
+This was the third place that belief turned up.
+Nobody found the verb because of its name, which is what [the lifecycle-pairs gate](../../cli/tests/unit/test_lifecycle_pairs.py) now exists to prevent.
 
 The trade survives the correction, on narrower grounds.
-A background SessionStart hook that mints backlog nodes unattended is still the wrong shape, because cleaning up after it is manual work an operator never asked for, and a duplicate that nobody notices is worse than one that never lands.
+A background SessionStart hook that mints backlog nodes unattended is still the wrong shape.
+Cleaning up after it is manual work an operator never asked for.
+A duplicate that nobody notices is worse than one that never lands.
 The measured consequence of the rule stands: condition D keeps refusing closes until a human runs the verb.
-What changed is the escape hatch: a bad harvest is now recoverable with `fno backlog remove`, so the cost of being wrong here is an annoyance rather than permanent graph litter.
+What changed is the escape hatch.
+A bad harvest is now recoverable with `fno backlog remove`, so being wrong here costs an annoyance rather than permanent graph litter.
 
-Dedup is the feature, not polish. Filing one node per carve-out is worse than not harvesting, because a re-filed item becomes a duplicate that someone has to notice before `fno backlog remove` can clean it up.
+Dedup is the feature, not polish.
+Filing one node per carve-out is worse than not harvesting.
+A re-filed item becomes a duplicate that someone has to notice before `fno backlog remove` can clean it up.
 Each row is matched against every node in the graph, done nodes included, by three matchers with two outcomes:
 
 | Match | Outcome |
