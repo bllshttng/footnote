@@ -141,7 +141,7 @@ fn mux_keys_table(cwd: &Path) -> Vec<(String, String)> {
             // Lowest precedence first: global, then project on top.
             global
                 .into_iter()
-                .chain(std::iter::once(cwd.join(".fno/config.toml")))
+                .chain(std::iter::once(project_root(cwd).join(".fno/config.toml")))
                 .collect()
         }
     };
@@ -193,13 +193,52 @@ fn non_empty_env(key: &str) -> Option<String> {
     std::env::var(key).ok().filter(|v| !v.is_empty())
 }
 
+/// Where the project config layer lives: the repo root, NOT the launch cwd.
+///
+/// `fno mux` is routinely launched from a subdirectory, and `<repo>/sub/.fno/`
+/// does not exist, so anchoring the project layer on cwd reads no project
+/// config at all and falls silently through to global. The Python loader
+/// anchors the same layer to the git toplevel for exactly this reason
+/// (`fno.config._settings_yaml_locations`, "not cwd, so running `fno` from a
+/// subdirectory still finds it"), and these direct Rust readers exist precisely
+/// because the interactive mux never goes through it.
+///
+/// One consequence worth knowing when a mux test behaves oddly on one machine:
+/// a test process whose cwd is inside a checkout now reaches that checkout's
+/// `.fno/config.toml`. Here `.fno/` is gitignored, so CI never has one, which
+/// also means CI cannot see this class of leak in either direction.
+fn project_root(cwd: &Path) -> PathBuf {
+    match non_empty_env("FNO_REPO_ROOT") {
+        Some(explicit) => PathBuf::from(explicit),
+        None => repo_root_from(cwd),
+    }
+}
+
+/// The `$FNO_REPO_ROOT`-free half of [`project_root`], so the walk is testable
+/// without an env var the whole process shares.
+///
+/// Falls back to `cwd` outside a repo, which is where a bare `.fno/` would be.
+fn repo_root_from(cwd: &Path) -> PathBuf {
+    let mut dir = cwd;
+    loop {
+        // A linked worktree's `.git` is a FILE, not a directory.
+        if dir.join(".git").exists() {
+            return dir.to_path_buf();
+        }
+        match dir.parent() {
+            Some(parent) => dir = parent,
+            None => return cwd.to_path_buf(),
+        }
+    }
+}
+
 /// Resolve a `config: > mux: > <key>` string with the same file precedence as
 /// `agents_config::mux_bool` ($FNO_CONFIG sole > project-local > global).
 fn mux_str(cwd: &Path, key: &str) -> Option<String> {
     if let Some(explicit) = non_empty_env("FNO_CONFIG") {
         return read_mux_file(Path::new(&explicit), key);
     }
-    if let Some(v) = read_mux_file(&cwd.join(".fno/config.toml"), key) {
+    if let Some(v) = read_mux_file(&project_root(cwd).join(".fno/config.toml"), key) {
         return Some(v);
     }
     let global = non_empty_env("FNO_GLOBAL_SETTINGS_PATH")
@@ -418,6 +457,38 @@ mod tests {
                 ("zoom".to_string(), "z".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn the_project_layer_anchors_on_the_repo_root_not_the_launch_cwd() {
+        // mux is routinely attached from a subdirectory. Anchored on cwd, the
+        // project layer reads <repo>/sub/.fno/config.toml, which does not
+        // exist, and every project key silently reads as unset.
+        let base = std::env::temp_dir().join(format!("fno-root-{}", std::process::id()));
+        let deep = base.join("crates/fno/src");
+        std::fs::create_dir_all(&deep).expect("scratch dirs");
+        std::fs::create_dir_all(base.join(".git")).expect("repo marker");
+
+        assert_eq!(repo_root_from(&deep), base, "walks up to the repo root");
+        assert_eq!(repo_root_from(&base), base, "already at the root");
+
+        // A linked worktree's `.git` is a file, not a directory.
+        let wt = base.join("wt");
+        std::fs::create_dir_all(wt.join("sub")).expect("worktree dirs");
+        std::fs::write(wt.join(".git"), "gitdir: /elsewhere\n").expect("gitdir file");
+        assert_eq!(repo_root_from(&wt.join("sub")), wt);
+
+        // Outside a repo the walk cannot invent a root, so the caller's own
+        // directory stays the place a bare `.fno/` would be.
+        let orphan = std::env::temp_dir().join(format!("fno-orphan-{}", std::process::id()));
+        std::fs::create_dir_all(&orphan).expect("orphan dir");
+        assert!(
+            orphan.starts_with(repo_root_from(&orphan)),
+            "the result is always the caller's own directory or an ancestor of it"
+        );
+
+        std::fs::remove_dir_all(&base).ok();
+        std::fs::remove_dir_all(&orphan).ok();
     }
 
     #[test]
