@@ -20,7 +20,7 @@ set -euo pipefail
 # prior preamble had 8B headroom so any meaningful contract required a raise.
 # The DoneUnreviewed terminal in the ship-vocabulary line took 45 more, since
 # the auto-loaded preamble must name every public TerminationReason.
-# Raised from 38000 to 38100 by the prescribed-verbs fix (x-e90f). AGENTS.md's
+# Raised from 38000 to 38100 by the prescribed-verbs fix. AGENTS.md's
 # search line prescribed `rg -uu` as the over-exclusion remedy, which is inert:
 # the trap has two layers (a ripgreprc `--glob=!target` and an unanchored
 # `target/` in ~/.ignore), and `-u` governs ignore files, never a `--glob`. The
