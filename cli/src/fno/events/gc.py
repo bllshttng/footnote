@@ -108,22 +108,27 @@ def gc_events(
         raise ValueError("now must be timezone-aware UTC")
     cutoff = reference - timedelta(hours=ttl_hours)
 
-    path = Path(events_path).resolve()
+    requested_path = Path(events_path)
     from fno.paths import global_events_json
 
-    if path == global_events_json().resolve():
-        raise ValueError(
-            "refusing to compact the global daemon journal while its bounded "
-            "Branch-B writer remains intentionally unlocked"
-        )
     result = {"scanned": 0, "deleted": 0, "kept": 0, "malformed": 0}
-    if not path.exists():
-        return result
+    while True:
+        path = requested_path.resolve()
+        if path == global_events_json().resolve():
+            raise ValueError(
+                "refusing to compact the global daemon journal while its bounded "
+                "Branch-B writer remains intentionally unlocked"
+            )
+        if not path.exists():
+            return result
+        gc_dir = path.with_name(path.name + ".gc.d")
+        gc_token = acquire_dir_mutex(gc_dir, 30)
+        if gc_token is None:
+            raise TimeoutError(f"events.jsonl gc lock timeout: {gc_dir}")
+        if requested_path.resolve() == path:
+            break
+        release_dir_mutex(gc_dir, gc_token)
 
-    gc_dir = path.with_name(path.name + ".gc.d")
-    gc_token = acquire_dir_mutex(gc_dir, 30)
-    if gc_token is None:
-        raise TimeoutError(f"events.jsonl gc lock timeout: {gc_dir}")
     lock_dir = path.with_name(path.name + ".lock.d")
     lock_token: str | None = None
     cursor = path.parent / ".think-offer-cursor"

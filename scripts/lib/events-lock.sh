@@ -23,13 +23,15 @@ _resolve_event_symlink() {
 
 _steal_stale_event_dir() {
     local lock_dir="${1:?event lock directory required}"
-    local modified now age owner_before owner_after reap
+    local modified now age owner_before owner_check owner_after reap
+    owner_before=$(cat "$lock_dir/owner" 2>/dev/null || true)
     modified=$(stat -c %Y "$lock_dir" 2>/dev/null || stat -f %m "$lock_dir" 2>/dev/null) || return 1
     now=$(date +%s)
     age=$((now - modified))
     (( age > EVENTS_STALE_MUTEX_SECONDS )) || return 1
 
-    owner_before=$(cat "$lock_dir/owner" 2>/dev/null || true)
+    owner_check=$(cat "$lock_dir/owner" 2>/dev/null || true)
+    [[ "$owner_check" == "$owner_before" ]] || return 1
     reap="${lock_dir}.reap.${BASHPID:-$$}.${RANDOM}"
     mv "$lock_dir" "$reap" 2>/dev/null || return 1
     owner_after=$(cat "$reap/owner" 2>/dev/null || true)

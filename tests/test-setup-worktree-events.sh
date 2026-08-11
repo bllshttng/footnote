@@ -283,6 +283,19 @@ ln -s "$canonical/.fno/events.jsonl" "$post_append/.fno/events.jsonl"
 CANONICAL="$canonical" WORKTREE="$post_append" bash "$SETUP" >/dev/null 2>&1
 assert "post-append recovery does not duplicate landed rows" test "$(grep -c 'post_append_row' "$canonical/.fno/events.jsonl" 2>/dev/null || true)" -eq 1
 
+failed_recovery="$TMP/failed-recovery"
+mkdir -p "$failed_recovery/.fno"
+printf '%s\n' '{"type":"failed_recovery_local_offer"}' > "$failed_recovery/.fno/events.jsonl.pre-share.pending.crash"
+ln -s "$canonical/.fno/events.jsonl" "$failed_recovery/.fno/events.jsonl"
+printf '%s' 7 > "$failed_recovery/.fno/.think-offer-cursor"
+canonical_cursor_before_failure=$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')
+printf '%s' "$canonical_cursor_before_failure" > "$canonical/.fno/.think-offer-cursor"
+printf '%s\n' '{"ts":"2026-08-11T12:00:00Z","type":"think_offered","source":"backlog","data":{"node_id":"canonical-pending"}}' >> "$canonical/.fno/events.jsonl"
+CANONICAL="$canonical" WORKTREE="$failed_recovery" bash "$SETUP" >/dev/null 2>&1
+assert "failed pending recovery preserves the local cursor file" test ! -L "$failed_recovery/.fno/.think-offer-cursor"
+assert "failed pending recovery preserves the local cursor offset" test "$(cat "$failed_recovery/.fno/.think-offer-cursor")" -eq 7
+printf '%s' "$(wc -c < "$canonical/.fno/events.jsonl" | tr -d ' ')" > "$canonical/.fno/.think-offer-cursor"
+
 stale_marker="$TMP/stale-marker"
 mkdir -p "$stale_marker/.fno/events.jsonl.gc.d"
 printf '%s\n' '{"type":"stale_marker_row"}' > "$stale_marker/.fno/events.jsonl"

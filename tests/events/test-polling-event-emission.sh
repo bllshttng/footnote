@@ -203,6 +203,36 @@ line=$(tail -1 "$EVENTS_FILE" 2>/dev/null)
 assert_contains "stale GC marker recovery" "$line" '"type":"stale_gc_probe"'
 [[ ! -d "${EVENTS_FILE}.gc.d" ]] || { echo "FAIL stale GC marker was not reaped"; fail=1; }
 
+# A stale marker can be replaced by a fresh holder between the age read and
+# steal attempt. The stealer must bind the old owner before observing age and
+# leave the fresh holder intact.
+identity_lock="$WORK/stale-identity.gc.d"
+mkdir "$identity_lock"
+printf '%s' old-holder > "$identity_lock/owner"
+touch -t 202001010000 "$identity_lock"
+identity_result=$(
+    (
+        # shellcheck disable=SC1090
+        source "$EVENTS_LIB"
+        old_modified=$(command stat -c %Y "$identity_lock" 2>/dev/null || command stat -f %m "$identity_lock")
+        stat() {
+            command rm -f "$identity_lock/owner"
+            rmdir "$identity_lock"
+            mkdir "$identity_lock"
+            printf '%s' fresh-holder > "$identity_lock/owner"
+            printf '%s\n' "$old_modified"
+        }
+        if _steal_stale_event_dir "$identity_lock"; then
+            printf '%s\n' STOLEN
+        else
+            printf '%s\n' PRESERVED
+        fi
+        printf 'OWNER=%s\n' "$(cat "$identity_lock/owner" 2>/dev/null || true)"
+    )
+)
+assert_contains "stale identity replacement preserved" "$identity_result" PRESERVED
+assert_contains "fresh stale-marker owner preserved" "$identity_result" OWNER=fresh-holder
+
 # Explicit paths passed by hook fallbacks must share the canonical journal's
 # GC marker and writer rendezvous when the worktree leaf is a symlink.
 canonical_events="$WORK/canonical/events.jsonl"

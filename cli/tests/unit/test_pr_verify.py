@@ -5,6 +5,7 @@ audit, bounded single remediation, record_merge frontmatter write) and
 verify --kind reviews (the qualifying-reply gate-flip that closes the
 external-review forgery hole).
 """
+
 from __future__ import annotations
 
 import json
@@ -55,7 +56,10 @@ class FakeGH:
         self.calls.append(cmd)
         if cmd[:3] == ["git", "rev-parse", "--show-toplevel"]:
             return Result(0, self.toplevel + "\n", "")
-        if cmd[:3] == ["gh", "pr", "view"] and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" in cmd:
+        if (
+            cmd[:3] == ["gh", "pr", "view"]
+            and "state,mergedAt,isDraft,reviewDecision,statusCheckRollup" in cmd
+        ):
             nxt = self.pr_states.pop(0) if self.pr_states else {}
             # A None entry means "this read fails" - the gh call itself errors, so
             # _fetch_pr_state returns None and the state is UNKNOWN, distinct from a
@@ -110,7 +114,9 @@ def test_gh_missing_degrades_open(tmp_path, monkeypatch):
 
 def test_merged_records_and_exits_0(tmp_path, gh_on, monkeypatch):
     sf = _state_file(tmp_path)
-    fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "MERGED", "mergedAt": "2026-06-13T00:00:00Z"}])
+    fake = FakeGH(
+        toplevel=str(tmp_path), pr_states=[{"state": "MERGED", "mergedAt": "2026-06-13T00:00:00Z"}]
+    )
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 0
@@ -154,6 +160,37 @@ def test_audit_writer_locks_the_canonical_symlink_target(tmp_path, monkeypatch):
     assert acquired == [canonical.with_name("events.jsonl.lock.d")]
 
 
+def test_audit_writer_retries_when_setup_retargets_leaf_while_waiting(tmp_path, monkeypatch):
+    local = tmp_path / "worktree-events.jsonl"
+    local.touch()
+    canonical = tmp_path / "canonical-events.jsonl"
+    canonical.touch()
+    acquired = []
+
+    def acquire(lock_dir, timeout, **kwargs):
+        acquired.append(lock_dir)
+        if len(acquired) == 1:
+            local.unlink()
+            local.symlink_to(canonical)
+        return f"token-{len(acquired)}"
+
+    monkeypatch.setattr(_verify, "acquire_dir_mutex", acquire)
+    monkeypatch.setattr(_verify, "release_dir_mutex", lambda lock_dir, token: None)
+
+    _verify._append_event_lenient(
+        str(local),
+        {"ts": "2026-08-11T00:00:00Z", "type": "probe", "data": {}},
+        "probe",
+    )
+
+    assert acquired == [
+        tmp_path / "worktree-events.jsonl.lock.d",
+        tmp_path / "canonical-events.jsonl.lock.d",
+    ]
+    assert local.is_symlink()
+    assert canonical.read_text(encoding="utf-8").count("\n") == 1
+
+
 def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     sf = _state_file(tmp_path)
     fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "isDraft": True}])
@@ -165,7 +202,9 @@ def test_draft_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
 
 def test_changes_requested_blocks_exit_1(tmp_path, gh_on, monkeypatch, capsys):
     sf = _state_file(tmp_path)
-    fake = FakeGH(toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "reviewDecision": "CHANGES_REQUESTED"}])
+    fake = FakeGH(
+        toplevel=str(tmp_path), pr_states=[{"state": "OPEN", "reviewDecision": "CHANGES_REQUESTED"}]
+    )
     monkeypatch.setattr(_verify, "run", fake)
     monkeypatch.setattr(_merge, "run", fake)
     assert _verify.run_verify_merged("42", sf, cwd=str(tmp_path)) == 1
@@ -283,7 +322,9 @@ def test_bounded_remediation_cleanup_split_from_merge(tmp_path, monkeypatch, del
         assert remote_deletes[0][-1] == "repos/owner/repo/git/refs/heads/feature/x"
 
 
-def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on, monkeypatch, capsys):
+def test_bounded_remediation_worktree_delete_error_records_merge(
+    tmp_path, gh_on, monkeypatch, capsys
+):
     """The worktree-recovery branch must catch git's DELETE phrasing, not only the
     checkout phrasing. ``gh pr merge --delete-branch`` lands the merge then fails
     the local delete because a worktree holds the branch; the PR is MERGED, so
@@ -310,7 +351,9 @@ def test_bounded_remediation_worktree_delete_error_records_merge(tmp_path, gh_on
     assert "verify-pr-merged" in capsys.readouterr().out
 
 
-def test_unreadable_state_after_merge_error_is_substrate_failure(tmp_path, gh_on, monkeypatch, capsys):
+def test_unreadable_state_after_merge_error_is_substrate_failure(
+    tmp_path, gh_on, monkeypatch, capsys
+):
     """Sibling of the _merge.py guard. The always-re-read fix depends on the
     re-read succeeding; when `_fetch_pr_state` returns None the merge state is
     UNKNOWN, not "not merged". The `(pr_json or {})` idiom flattens those two

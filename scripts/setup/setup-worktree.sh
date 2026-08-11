@@ -683,10 +683,13 @@ link_file ".fno/config.toml"
 # One journal per repository makes exact-HEAD gate evidence visible across
 # isolated reviewer worktrees. Real worktree journals take the migration path
 # above instead of link_file's ordinary skip-if-real-file behavior.
-if ! link_events_journal; then
+events_journal_shared=0
+if link_events_journal; then
+  events_journal_shared=1
+else
   echo "setup-worktree: events journal left worktree-local after migration failure" >&2
 fi
-if [[ -L "$WORKTREE/.fno/events.jsonl" ]]; then
+if (( events_journal_shared == 1 )) && [[ -L "$WORKTREE/.fno/events.jsonl" ]]; then
   if [[ ! -e "$CANONICAL/.fno/.think-offer-cursor" ]]; then
     canonical_events_size=$(wc -c < "$CANONICAL/.fno/events.jsonl" 2>/dev/null | tr -d ' ' || echo 0)
     (set -C; printf '%s' "${canonical_events_size:-0}" > "$CANONICAL/.fno/.think-offer-cursor") 2>/dev/null || true

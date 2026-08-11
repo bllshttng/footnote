@@ -143,6 +143,43 @@ def test_gc_preserves_symlink_and_compacts_its_target(tmp_path: Path) -> None:
     assert '"type": "node_closed"' in target.read_text(encoding="utf-8")
 
 
+def test_gc_retries_when_setup_retargets_leaf_while_waiting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    local = tmp_path / "worktree-events.jsonl"
+    local.touch()
+    canonical = tmp_path / "canonical-events.jsonl"
+    canonical.write_text(
+        _event("claim_released", "2026-07-01T00:00:00Z")
+        + "\n"
+        + _event("node_closed", "2026-07-01T00:00:00Z")
+        + "\n",
+        encoding="utf-8",
+    )
+    acquired: list[Path] = []
+
+    def acquire(lock_dir: Path, timeout_seconds: float) -> str:
+        acquired.append(lock_dir)
+        if len(acquired) == 1:
+            local.unlink()
+            local.symlink_to(canonical)
+        return f"token-{len(acquired)}"
+
+    monkeypatch.setattr(event_gc, "acquire_dir_mutex", acquire)
+    monkeypatch.setattr(event_gc, "release_dir_mutex", lambda *_: None)
+
+    event_gc.gc_events(local, now=NOW, ttl_hours=672)
+
+    gc_locks = [path for path in acquired if path.name.endswith(".gc.d")]
+    assert gc_locks == [
+        tmp_path / "worktree-events.jsonl.gc.d",
+        tmp_path / "canonical-events.jsonl.gc.d",
+    ]
+    assert local.is_symlink()
+    assert '"type": "claim_released"' not in canonical.read_text(encoding="utf-8")
+    assert '"type": "node_closed"' in canonical.read_text(encoding="utf-8")
+
+
 def test_gc_remaps_offer_cursor_without_skipping_pending_rows(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl"
     consumed = _event("node_closed", "2026-07-01T00:00:00Z") + "\n"

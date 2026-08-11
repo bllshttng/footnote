@@ -95,17 +95,21 @@ def _release_lock(lock_dir: Path) -> None:
 
 def _migrate_file(path: Path, dry_run: bool) -> tuple[int, int, int]:
     """Returns (migrated, skipped, corrupt). Acquires the file's mkdir lock."""
-    if not path.is_file():
-        return (0, 0, 0)
-    path = path.resolve()
-
-    lock_dir = path.parent / (path.name + ".lock.d")
-    if not _acquire_lock(lock_dir, DEFAULT_TIMEOUT):
-        print(
-            f"{path}: session active, refused to race (lock timeout)",
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
+    requested_path = Path(path)
+    while True:
+        if not requested_path.is_file():
+            return (0, 0, 0)
+        path = requested_path.resolve()
+        lock_dir = path.parent / (path.name + ".lock.d")
+        if not _acquire_lock(lock_dir, DEFAULT_TIMEOUT):
+            print(
+                f"{path}: session active, refused to race (lock timeout)",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        if requested_path.resolve() == path:
+            break
+        _release_lock(lock_dir)
 
     try:
         return _do_migrate(path, dry_run, lock_dir)

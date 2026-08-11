@@ -9,6 +9,7 @@ Covers:
   - lock contention aborts cleanly with rc=2 (mkdir-based mutex shared
     with fno.events.append_event so cross-language callers serialize)
 """
+
 from __future__ import annotations
 
 import json
@@ -200,9 +201,7 @@ def test_dry_run_makes_no_changes(workdir):
     ]
     _write_events(target, legacy)
     before = target.read_bytes()
-    rc = subprocess.call(
-        [sys.executable, str(SCRIPT), "--root", str(workdir), "--dry-run"]
-    )
+    rc = subprocess.call([sys.executable, str(SCRIPT), "--root", str(workdir), "--dry-run"])
     assert rc == 0
     after = target.read_bytes()
     assert before == after, "dry-run modified the file"
@@ -235,6 +234,49 @@ def test_symlinked_journal_migrates_target_without_replacing_link(tmp_path):
     assert canonical.with_suffix(".jsonl.bak").exists()
 
 
+def test_migration_retries_when_setup_retargets_leaf_while_waiting(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("migrate_events_shape_handoff", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    local = tmp_path / "worktree-events.jsonl"
+    local.touch()
+    canonical = tmp_path / "canonical-events.jsonl"
+    _write_events(
+        canonical,
+        [
+            {
+                "timestamp": "2026-05-07T09:30:42Z",
+                "source": "target",
+                "type": "phase_init",
+                "data": {"phase": "p", "nonce": "n", "session_id": "s"},
+            }
+        ],
+    )
+    acquired: list[Path] = []
+
+    def acquire(lock_dir: Path, timeout: int) -> bool:
+        acquired.append(lock_dir)
+        if len(acquired) == 1:
+            local.unlink()
+            local.symlink_to(canonical)
+        return True
+
+    monkeypatch.setattr(mod, "_acquire_lock", acquire)
+    monkeypatch.setattr(mod, "_release_lock", lambda *_: None)
+
+    assert mod._migrate_file(local, dry_run=False) == (1, 0, 0)
+
+    assert acquired == [
+        tmp_path / "worktree-events.jsonl.lock.d",
+        tmp_path / "canonical-events.jsonl.lock.d",
+    ]
+    assert local.is_symlink()
+    assert "timestamp" not in canonical.read_text(encoding="utf-8")
+
+
 def test_long_migration_renews_its_lock_lease(tmp_path, monkeypatch):
     """A migration legitimately holds the events lock far longer than the
     steal threshold, so it must keep the lease fresh.
@@ -263,8 +305,7 @@ def test_long_migration_renews_its_lock_lease(tmp_path, monkeypatch):
     events = tmp_path / "events.jsonl"
     events.write_text(
         "".join(
-            json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "t", "source": "s"})
-            + "\n"
+            json.dumps({"timestamp": "2026-01-01T00:00:00Z", "type": "t", "source": "s"}) + "\n"
             for _ in range(50)
         ),
         encoding="utf-8",
@@ -280,6 +321,5 @@ def test_long_migration_renews_its_lock_lease(tmp_path, monkeypatch):
 
     age = time.time() - lock_dir.lstat().st_mtime
     assert age < STALE_MUTEX_STEAL_S, (
-        f"lease not renewed: lock still looks {int(age)}s old and is stealable "
-        "mid-migration"
+        f"lease not renewed: lock still looks {int(age)}s old and is stealable mid-migration"
     )
