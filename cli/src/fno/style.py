@@ -131,13 +131,31 @@ def check(text: str, *, surface: str = "mail") -> list[Violation]:
     are the same unit (the repo's one-sentence-per-line convention).
     """
     del surface  # reserved; no rule scopes by surface yet
+    return _run(text, None)
+
+
+def check_lines(text: str, line_numbers: set[int]) -> list[Violation]:
+    """Check only the given 1-based lines.
+
+    The whole text is masked first, so an added line inside an existing fenced
+    block is masked as code (blanked) and skipped rather than read as prose.
+    Block type for each kept line is read off the matching raw line. Used by the
+    added-lines markdown gate, where the diff supplies only `+` lines and the
+    fence delimiters often live on unchanged lines.
+    """
+    return _run(text, set(line_numbers))
+
+
+def _run(text: str, only: set[int] | None) -> list[Violation]:
     masked = _mask(text)
     violations: list[Violation] = []
     sentence_index = 0
     raw_lines = text.split("\n")
     masked_lines = masked.split("\n")
-    for raw_line, masked_line in zip(raw_lines, masked_lines):
+    for index, (raw_line, masked_line) in enumerate(zip(raw_lines, masked_lines), 1):
         if not masked_line.strip():
+            continue
+        if only is not None and index not in only:
             continue
         is_list = bool(_LIST_MARKER_RE.match(raw_line))
         work = _LIST_MARKER_RE.sub("", masked_line, count=1) if is_list else masked_line

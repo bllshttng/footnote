@@ -473,7 +473,23 @@ fn enforce_body_cap(n: usize, warn: i64, refuse: i64) -> Option<i32> {
 /// cursor, so the cap must never fire on framed traffic.
 fn is_framed_envelope(text: &str) -> bool {
     let head = text.trim_start();
-    head.starts_with("<fno_mail") || head.starts_with("<cross-session-message")
+    // Require the opening tag to end at a delimiter (space, `>`, newline, or
+    // end-of-input), so a prefix lookalike like `<fno_mailicious prose` is NOT
+    // read as framed and cannot bypass the command-only guard.
+    opens_envelope_tag(head, "<fno_mail") || opens_envelope_tag(head, "<cross-session-message")
+}
+
+/// True if `head` starts with `tag` immediately followed by a tag delimiter
+/// (whitespace, `>`), or by nothing. A real envelope opens with attributes
+/// (`<fno_mail from="...">`) or a bare close (`<cross-session-message>`).
+fn opens_envelope_tag(head: &str, tag: &str) -> bool {
+    match head.strip_prefix(tag) {
+        Some(rest) => match rest.chars().next() {
+            Some(' ') | Some('\t') | Some('\n') | Some('\r') | Some('>') | None => true,
+            _ => false,
+        },
+        None => false,
+    }
 }
 
 /// The cap decision for an injected body: `Some(exit_code)` to refuse (caller
@@ -858,6 +874,15 @@ mod tests {
         // A framed-looking word that does not start the payload is still prose.
         assert_eq!(
             command_only_decision("see <fno_mail> mid-sentence"),
+            Some(1)
+        );
+        // A prefix lookalike is NOT a framed envelope: `<fno_mailicious` must not
+        // bypass the guard. Verified at the predicate and the decision together.
+        assert!(!is_framed_envelope("<fno_mailicious prose here"));
+        assert_eq!(command_only_decision("<fno_mailicious prose here"), Some(1));
+        assert!(!is_framed_envelope("<cross-session-messager bypass"));
+        assert_eq!(
+            command_only_decision("<cross-session-messager bypass"),
             Some(1)
         );
     }

@@ -498,30 +498,41 @@ def _style_added_lines(
         whole = full.read_text(encoding="utf-8")
         if style_mod.has_exception(whole):
             continue
-        added = _git_added_lines(rel, diff_base, repo)
-        inspected += len(added)
-        if added:
-            violations.extend(style_mod.check("\n".join(added), surface="markdown"))
+        nums = _git_added_line_nums(rel, diff_base, repo)
+        inspected += len(nums)
+        if nums:
+            # Mask the WHOLE file and check only the added lines, so an added
+            # line inside an existing fenced block is masked as code and skipped.
+            violations.extend(style_mod.check_lines(whole, nums))
     return violations, inspected, len(changed)
 
 
-def _git_added_lines(rel: str, diff_base: str, repo: Path) -> "list[str]":
-    """Return the added ('+') lines from `git diff -U0 <base>...HEAD -- <rel>`."""
+def _git_added_line_nums(rel: str, diff_base: str, repo: Path) -> "set[int]":
+    """Return 1-based line numbers (in the new file) of added ('+') lines from
+    ``git diff -U0 <base>...HEAD -- <rel>``. Position advances on context and
+    added lines, not on deleted lines, matching how the new file is laid out."""
     proc = subprocess.run(
         ["git", "diff", "-U0", f"{diff_base}...HEAD", "--", rel],
         cwd=str(repo),
         capture_output=True,
         text=True,
     )
-    lines: "list[str]" = []
+    nums: set[int] = set()
+    pos = 0
     for line in proc.stdout.splitlines():
-        if line[:3] in ("+++", "---") or line.startswith("@@"):
+        if line.startswith("@@"):
+            match = re.search(r"\+(\d+)", line)
+            pos = int(match.group(1)) if match else pos
+        elif line.startswith("+++") or line.startswith("---"):
             continue
-        if line.startswith("+"):
-            content = line[1:]
-            if content.strip():
-                lines.append(content)
-    return lines
+        elif line.startswith("+"):
+            nums.add(pos)
+            pos += 1
+        elif line.startswith("-"):
+            continue
+        else:
+            pos += 1
+    return nums
 
 
 @app.command("stale-skill-refs")

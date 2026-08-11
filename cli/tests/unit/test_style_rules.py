@@ -178,6 +178,24 @@ def test_same_line_html_comment_keeps_trailing_prose():
     assert 4 in rule_set("<!-- note --> trailing prose has don't in it.")
 
 
+def test_check_lines_skips_an_added_line_inside_an_existing_fence():
+    # The fence delimiters are unchanged lines; only the code line is "added".
+    # check_lines masks the whole file, so the added code line is blanked (code)
+    # and not flagged for its semicolon.
+    text = (
+        "intro prose here.\n\n"
+        "```\nif ready; then echo hi; fi\n```\n\n"
+        "close prose.\n"
+    )
+    assert style.check_lines(text, {4}) == []
+
+
+def test_check_lines_still_checks_added_prose():
+    # An added prose line outside any fence is checked normally.
+    text = "intro.\nthis added line uses should trip the modal rule.\noutro.\n"
+    assert 3 in {v.rule for v in style.check_lines(text, {2})}
+
+
 def test_html_comment_removed():
     body = "intro. <!-- don't should; x --> outro."
     assert not rule_set(body)
