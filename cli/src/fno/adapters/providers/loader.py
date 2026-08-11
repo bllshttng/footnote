@@ -238,6 +238,35 @@ def _strip_none(data: Any) -> Any:
     return data
 
 
+# The reserved key names AgentsBlock declares under config.agents. They share the
+# namespace with per-agent provider pins, and a reserved block may carry its own
+# `provider` field (agents.defaults does, meaning the HARNESS axis), so a
+# shape test alone reads one as the other and raises on a valid setting.
+#
+# A literal rather than `set(AgentsBlock.model_fields)` because this loader runs
+# inside the config bootstrap path and must not import fno.config at module scope
+# (the same reason _global_settings_path above is reimplemented here). Drift is
+# caught instead by a test asserting set equality against that schema; the literal
+# without that test would be the drift bug.
+_AGENTS_RESERVED_KEYS = frozenset(
+    {
+        "a2a",
+        "auto_register_sessions",
+        "codex",
+        "confirm",
+        "dead_row_grace",
+        "defaults",
+        "gemini",
+        "happy_routed_panes",
+        "max_live",
+        "min_free_gb",
+        "profiles",
+        "spawn_permission_mode",
+        "worker_qos",
+    }
+)
+
+
 def _parse_providers_block(
     block: dict[str, Any],
     agents_block: dict[str, Any] | None = None,
@@ -307,9 +336,32 @@ def _parse_providers_block(
     if agents_block is not None:
         known_ids = config_obj.by_id
         for agent_name, raw_binding in agents_block.items():
-            # config.agents is a shared namespace: provider pins sit beside
-            # unrelated agent settings (max_live, a2a, defaults, ...). Only
-            # dicts with a 'provider' key are ours; skip everything else.
+            # config.agents is a shared namespace: provider pins sit beside the
+            # reserved settings blocks. Exclude by NAME first - shape cannot tell
+            # the two apart, because a reserved block is allowed any field it
+            # likes and agents.defaults uses `provider` for the harness axis.
+            if agent_name in _AGENTS_RESERVED_KEYS:
+                # An entry that is reserved AND binding-shaped is ambiguous: the
+                # operator may have meant a pin for an agent whose name collides
+                # with a settings key. Skipping is still right (the schema owns
+                # the name), but skipping SILENTLY would route that worker to the
+                # default account with no diagnostic anywhere. `defaults` is the
+                # known-benign case - its provider field is the spawn default, so
+                # warning there would fire on every valid config.
+                if (
+                    agent_name != "defaults"
+                    and isinstance(raw_binding, dict)
+                    and "provider" in raw_binding
+                ):
+                    logger.warning(
+                        "config.agents.%s is a reserved settings key, so its "
+                        "'provider' field is NOT read as a per-agent pin; rename "
+                        "the agent if you meant to pin one",
+                        agent_name,
+                    )
+                continue
+            # Shape stays as the second filter: it skips scalars (max_live = 15)
+            # and any other non-binding entry a future key adds.
             if not isinstance(raw_binding, dict) or "provider" not in raw_binding:
                 continue
             try:
