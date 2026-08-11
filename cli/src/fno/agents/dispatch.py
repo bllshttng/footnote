@@ -960,7 +960,7 @@ def _codex_create_path(
         update_registry(lambda entries: entries + [new_entry])
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
         events.emit_spawn_failed(
-            name=name, provider="codex", reason=f"registry-write: {exc}"
+            name=name, provider=new_entry.harness, reason=f"registry-write: {exc}"
         )
         events.emit(
             "agent_ask_failed",
@@ -986,7 +986,7 @@ def _codex_create_path(
     events.emit_spawned(
         name=name,
         short_id=session_id,
-        provider="codex",
+        provider=new_entry.harness,
         spawned_by_session=_cx_session,
         spawned_by_harness=_cx_harness,
         spawned_by_cwd=_cx_cwd,
