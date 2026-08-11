@@ -1007,8 +1007,10 @@ def test_cloudevents_id_distinct_for_distinct_same_second_events():
     from fno import status_fanout as sf
 
     base = _ev("2026-07-12T00:00:05Z", "run_summary", **{"run": "R1"})
-    e1 = dict(base); e1["data"] = {"reason": "one"}
-    e2 = dict(base); e2["data"] = {"reason": "two"}
+    e1 = dict(base)
+    e1["data"] = {"reason": "one"}
+    e2 = dict(base)
+    e2["data"] = {"reason": "two"}
     # Same run+ts+type, distinct payload -> distinct id (a deduping receiver keeps
     # both), yet the prefix is unchanged.
     assert sf._cloudevents_wrap(e1)["id"] != sf._cloudevents_wrap(e2)["id"]
@@ -1020,7 +1022,8 @@ def test_cloudevents_id_distinct_for_distinct_same_second_events():
 
 def _one_event_file(tmp_path):
     import json as _json
-    fno_dir = tmp_path / ".fno"; fno_dir.mkdir(parents=True)
+    fno_dir = tmp_path / ".fno"
+    fno_dir.mkdir(parents=True)
     active = fno_dir / "events.jsonl"
     with active.open("w") as fh:
         fh.write(_json.dumps(_ev("2026-07-12T00:00:05Z", "blocked")) + "\n")
@@ -1064,7 +1067,8 @@ def test_stream_since_discards_inflated_pass_no_same_ts_overcount(tmp_path, monk
     # events next tick. The retry discards that pass and returns the consistent one.
     from fno import status_fanout as sf
 
-    active = tmp_path / "events.jsonl"; active.write_text("")
+    active = tmp_path / "events.jsonl"
+    active.write_text("")
     T = "2026-07-12T00:00:05Z"
     inflated = ([_ev(T, "blocked"), _ev(T, "blocked"), _ev(T, "blocked")], 0)
     clean = ([_ev(T, "blocked")], 0)
@@ -1100,7 +1104,8 @@ def test_integration_tick_401_holds_cursor_and_logs(tmp_path, monkeypatch):
 
     monkeypatch.setattr(sf, "_post_json", lambda u, b, t: sf._HttpResult(ok=False, status=401))
     monkeypatch.setattr(sf, "_sleep", lambda s: None)
-    ss = tmp_path / ".fno" / "status-sinks"; ss.mkdir(parents=True)
+    ss = tmp_path / ".fno" / "status-sinks"
+    ss.mkdir(parents=True)
     _seed_cursor(ss, "d", "2026-07-12T00:00:00Z")
     _write_events(tmp_path, [_ev("2026-07-12T00:00:05Z", "blocked")])
     sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
@@ -1122,8 +1127,10 @@ def _capture_post(monkeypatch, sf, posted):
 def test_text_webhook_slack_field_defangs_broadcast(monkeypatch):
     from fno import status_fanout as sf
 
-    posted = {}; _capture_post(monkeypatch, sf, posted)
-    ev = _ev("t", "blocked"); ev["data"] = {"reason": "<!channel> ship it"}
+    posted = {}
+    _capture_post(monkeypatch, sf, posted)
+    ev = _ev("t", "blocked")
+    ev["data"] = {"reason": "<!channel> ship it"}
     sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
                             url="https://slack", template="{data.reason}", field="text")
     sf._dispatch_text_webhook(sink, ev, StatusFanoutConfig())
@@ -1134,7 +1141,8 @@ def test_text_webhook_slack_field_defangs_broadcast(monkeypatch):
 def test_text_webhook_no_broadcast_token_is_byte_identical(monkeypatch):
     from fno import status_fanout as sf
 
-    posted = {}; _capture_post(monkeypatch, sf, posted)
+    posted = {}
+    _capture_post(monkeypatch, sf, posted)
     sink = StatusSinkConfig(name="s", type="text-webhook", events=["blocked"],
                             url="https://slack", template="plain reason", field="text")
     sf._dispatch_text_webhook(sink, _ev("t", "blocked"), StatusFanoutConfig())
@@ -1144,8 +1152,10 @@ def test_text_webhook_no_broadcast_token_is_byte_identical(monkeypatch):
 def test_text_webhook_discord_content_not_defanged(monkeypatch):
     from fno import status_fanout as sf
 
-    posted = {}; _capture_post(monkeypatch, sf, posted)
-    ev = _ev("t", "blocked"); ev["data"] = {"reason": "<!channel>"}
+    posted = {}
+    _capture_post(monkeypatch, sf, posted)
+    ev = _ev("t", "blocked")
+    ev["data"] = {"reason": "<!channel>"}
     sink = StatusSinkConfig(name="d", type="text-webhook", events=["blocked"],
                             url="https://discord", template="{data.reason}", field="content")
     sf._dispatch_text_webhook(sink, ev, StatusFanoutConfig())
@@ -1171,7 +1181,9 @@ def test_plan_doc_lock_serializes_concurrent_stamp_and_append(tmp_path):
         with plan_doc_lock(plan):
             content = plan.read_text()
             new = content.replace("title: t", "title: t\nstatus: shipped")
-            tmp = plan.with_suffix(".md.tmp"); tmp.write_text(new); _os.replace(tmp, plan)
+            tmp = plan.with_suffix(".md.tmp")
+            tmp.write_text(new)
+            _os.replace(tmp, plan)
 
     def append_writer():
         barrier.wait()
@@ -1196,7 +1208,8 @@ def test_append_plan_progress_preserves_file_mode(tmp_path):
     import stat as _stat
     from fno import status_fanout as sf
 
-    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    p = tmp_path / "plan.md"
+    p.write_text("# Plan\n")
     _os.chmod(p, 0o600)
     sf._append_plan_progress(str(p), "T1", tmp_path)
     assert _stat.S_IMODE(p.stat().st_mode) == 0o600  # not widened by the replace
@@ -1207,7 +1220,8 @@ def test_append_plan_progress_leaves_no_orphan_tmp(tmp_path):
     # Review finding (gemini): no ``.tmp`` sidecar left after a normal append.
     from fno import status_fanout as sf
 
-    p = tmp_path / "plan.md"; p.write_text("# Plan\n")
+    p = tmp_path / "plan.md"
+    p.write_text("# Plan\n")
     sf._append_plan_progress(str(p), "T1", tmp_path)
     assert list(tmp_path.glob("*.tmp")) == []
 
@@ -1216,7 +1230,8 @@ def test_append_plan_progress_skips_silently_on_lock_timeout(tmp_path, monkeypat
     import contextlib
     from fno import status_fanout as sf
 
-    plan = tmp_path / "plan.md"; plan.write_text("# Plan\n")
+    plan = tmp_path / "plan.md"
+    plan.write_text("# Plan\n")
 
     @contextlib.contextmanager
     def timing_out(path, timeout=2.0):
@@ -1233,7 +1248,8 @@ def test_backlog_progress_delivered_even_when_plan_lock_times_out(tmp_path, monk
     from fno import status_fanout as sf
     import fno.graph.store as gs
 
-    plan_doc = tmp_path / "plan.md"; plan_doc.write_text("# Plan\n")
+    plan_doc = tmp_path / "plan.md"
+    plan_doc.write_text("# Plan\n")
     monkeypatch.setattr(gs, "append_progress_note", lambda path, nid, note: (True, str(plan_doc)))
 
     @contextlib.contextmanager
