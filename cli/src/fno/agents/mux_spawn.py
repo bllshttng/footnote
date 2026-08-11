@@ -98,6 +98,26 @@ class MuxSpawnResult:
     # A Codex pane whose rollout has not appeared yet is created but not
     # addressable. Keep that transition explicit instead of calling it live.
     status: str = "live"
+    # Two facts that must never collapse into one field. `bound` answers "did
+    # the worker reach its provider", true only when a session id was read out
+    # of the worker's own open rollout. `pane_alive` answers "does the pane
+    # exist", probed and never assumed (None = the mux could not answer).
+    # Before these existed, a pane that would bind in 4s and one that had
+    # already died produced byte-identical receipts, so a caller could not tell
+    # a slow worker from a corpse and would re-prompt the corpse.
+    #
+    # `short_id` is a PROJECTION of `bound`, never an independent claim:
+    # `bound == bool(short_id)` is an invariant with a test on it, which is what
+    # makes an empty short_id a signal rather than a formatting detail.
+    bound: bool = True
+    pane_alive: Optional[bool] = None
+    # Why this spawn is unbound, in the receipt whenever `bound` is False. Never
+    # set when bound.
+    unbound_reason: Optional[str] = None
+    # Captured pane output for a worker that died before binding. The pane's
+    # scrollback dies with the pane (the mux drops the pane registry entry in
+    # close_pane), so this file is the only evidence the death ever leaves.
+    log_path: str = ""
     effective_message: Optional[str] = None
     # Server-authored exact-placement receipt (x-6928): anchor/direction/fallback
     # + squad/tab the split landed in. None unless `--at` pinned the origin.
@@ -697,6 +717,7 @@ def _backfill_codex_session_id(
     child_pid: Optional[int] = None,
     sleep: Optional[Callable] = None,
     psutil_mod=None,
+    attempts: Optional[int] = None,
 ) -> Optional[str]:
     """Best-effort capture of a freshly spawned codex pane's session id.
 
@@ -711,15 +732,21 @@ def _backfill_codex_session_id(
     A miss leaves the row id-less so ``_discover_from_registry`` drops it before
     name matching, which is what makes a live codex worker unreachable by truth,
     peek, and the mail name lane -- a miss costs addressability, never the spawn.
+
+    ``attempts`` overrides the retry count. The spawn passes 1 because
+    :func:`_await_pane_binding` owns the retry there and watches for the pane's
+    death between probes, which a bare retry loop cannot see. Direct callers keep
+    the default.
     """
     from fno.agents.discover import codex_session_ids_started_in
 
     naptime = sleep or time.sleep
+    tries = _CODEX_BACKFILL_ATTEMPTS if attempts is None else max(int(attempts), 1)
     if child_pid is not None:
         # Race-free primary path: the child's open rollout identifies its own
         # session. codex opens the rollout shortly after start, so retry until it
         # appears; never fall through to cwd/time guessing when we have a pid.
-        for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
+        for attempt in range(tries):
             if attempt:
                 naptime(_CODEX_BACKFILL_DELAY_S)
             sid = _codex_session_id_for_pid(child_pid, psutil_mod=psutil_mod)
@@ -732,7 +759,7 @@ def _backfill_codex_session_id(
     # the next probe -- a transiently-unique sibling then grows to an ambiguous
     # pair (-> None below) or is displaced first (Codex P1 residual, #603).
     prev: Optional[str] = None
-    for attempt in range(_CODEX_BACKFILL_ATTEMPTS):
+    for attempt in range(tries):
         if attempt:
             naptime(_CODEX_BACKFILL_DELAY_S)
         ids = codex_session_ids_started_in(cwd, since_ms, sessions_dir=sessions_dir)
@@ -1162,6 +1189,153 @@ def _mux_pane_alive(mux: dict, runner=subprocess.run) -> Optional[bool]:
     if proc.returncode in {0, 11}:
         return True
     return None
+
+
+#: How long a pane may take to bind its session before the spawn stops waiting.
+#: The codex backfill's old ceiling was 3.0s (5 probes x 0.75s), which cannot
+#: separate "codex is slow to open its rollout" from "codex died on an argv
+#: error" - the repro's pane lived about 20s. A healthy spawn pays none of this:
+#: the loop returns the instant either signal fires, so only the genuinely
+#: ambiguous case waits out the window.
+_BINDING_WINDOW_S = 20.0
+_BINDING_WINDOW_ENV = "FNO_PANE_BINDING_WINDOW_S"
+_BINDING_POLL_S = 0.75
+#: Pane scrollback retained per tick, and the slice echoed to stderr on death.
+_PANE_TAIL_LINES = 200
+_PANE_TAIL_ECHO_LINES = 10
+
+
+def _binding_window_s() -> float:
+    """The binding window (env-overridable for CI, positive only)."""
+    raw = os.environ.get(_BINDING_WINDOW_ENV)
+    if raw:
+        try:
+            v = float(raw)
+        except ValueError:
+            v = 0.0
+        if v > 0:
+            return v
+    return _BINDING_WINDOW_S
+
+
+@dataclass
+class PaneBinding:
+    """Which of three worlds a spawn is in once its binding window closes."""
+
+    #: The worker's session id; None unless it bound.
+    session_id: Optional[str]
+    #: Probed pane liveness. None means the mux could not answer.
+    pane_alive: Optional[bool]
+    #: Why it is unbound; "" when bound.
+    reason: str
+    #: Retained pane scrollback, "" when nothing was captured.
+    tail: str
+
+
+def _read_pane_tail(
+    mux: dict,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"],
+) -> str:
+    """Best-effort pane scrollback, "" on any failure.
+
+    Evidence is best-effort; binding is not. Nothing in here may raise into the
+    spawn, so the catch is deliberately broad: a spawn must never fail because
+    its flight recorder did.
+    """
+    try:
+        proc = _run_mux(
+            [
+                "mux", "pane", "read", "--session", str(mux["session"]),
+                str(mux["pane_id"]), "--lines", str(_PANE_TAIL_LINES),
+            ],
+            runner,
+        )
+    except Exception:  # noqa: BLE001 -- see docstring: evidence never fails a spawn
+        return ""
+    if getattr(proc, "returncode", 1) != 0:
+        return ""
+    return proc.stdout or ""
+
+
+def _await_pane_binding(
+    mux: dict,
+    bind_probe: Callable[[], Optional[str]],
+    *,
+    window_s: Optional[float] = None,
+    runner: Callable[..., "subprocess.CompletedProcess[str]"] = subprocess.run,
+    sleep: Optional[Callable] = None,
+) -> PaneBinding:
+    """Wait out the gap between "a pane exists" and "a worker reached its provider".
+
+    These are two different facts, and reporting the first as the second is the
+    defect this exists to end: before it, a pane that would bind in 4s and one
+    that had already died produced byte-identical receipts.
+
+    Three outcomes, and the caller must be able to tell them apart:
+
+    * bound - ``session_id`` is set; the worker named itself.
+    * died - the pane's child is CONFIRMED gone and never bound.
+    * still booting - the window expired with the pane up, or unprovable.
+
+    Ambiguity always resolves to still-booting. The asymmetry is the whole
+    reason: a false "died" kills a working worker, a false "still booting"
+    costs a retry. Anyone tightening this branch later should promote a signal
+    from unknown to confirmed, never lower the bar for calling a worker dead.
+
+    ``_mux_pane_alive`` is the death oracle because it reports a POSITIVE
+    marker: ``pane wait --timeout 0`` exits 12 to say "the child exited", not
+    merely "I did not find it". A pane missing from a ``pane ls`` would be an
+    absence, which has two explanations - the worker died, or the instrument
+    never ran - and cannot tell them apart.
+
+    Each tick also retains the pane's scrollback, because the mux drops a dead
+    pane's buffer in ``close_pane``: the capture has to happen BEFORE the death
+    or there is nothing left to capture. That is why both prior occurrences of
+    this bug left zero evidence.
+
+    Provider-agnostic by construction (``bind_probe`` is the only provider-aware
+    part), though only the codex route is wired onto it today.
+    """
+    naptime = sleep or time.sleep
+    deadline = time.monotonic() + max(window_s if window_s is not None else _binding_window_s(), 0.0)
+    tail = ""
+    while True:
+        sid = bind_probe()
+        if sid:
+            return PaneBinding(sid, True, "", tail)
+        # Keep the newest NON-EMPTY read: a TUI that has not painted yet reads
+        # empty, and a later empty read must not erase real earlier evidence.
+        fresh = _read_pane_tail(mux, runner)
+        if fresh.strip():
+            tail = fresh
+        alive = _mux_pane_alive(mux, runner)
+        if alive is False:
+            return PaneBinding(None, False, "pane-died-before-binding", tail)
+        # Checked AFTER a full probe, so a zero or negative window still buys
+        # exactly one look rather than skipping the loop entirely.
+        if time.monotonic() >= deadline:
+            return PaneBinding(None, alive, "binding-window-expired", tail)
+        naptime(_BINDING_POLL_S)
+
+
+def _write_pane_death_log(name: str, tail: str) -> str:
+    """Persist a dead pane's captured scrollback; return its path, "" on failure.
+
+    An unwritable log dir must not fail the spawn: the caller still reports the
+    death and still echoes the tail to stderr, it just cannot point at a file.
+    """
+    if not tail.strip():
+        return ""
+    try:
+        from fno import paths as _paths
+
+        log_dir = _paths.state_dir() / "logs"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        path = log_dir / f"{name}.pane.log"
+        path.write_text(tail, encoding="utf-8")
+        return str(path)
+    except Exception:  # noqa: BLE001 -- see docstring: evidence never fails a spawn
+        return ""
 
 
 #: Bounded window an id-less happy-claude pane row waits for its worker to
@@ -1610,6 +1784,19 @@ def dispatch_spawn_pane(
                 )
         spawned_by_session, spawned_by_harness, spawned_by_cwd = _capture_parent_edge()
 
+        # The receipt's two independent facts (see MuxSpawnResult.bound), plus
+        # the death-branch evidence. Only the codex route fills them in today;
+        # every other route leaves the pane unprobed, which reads as None
+        # ("not answered") rather than a fabricated True.
+        pane_alive: Optional[bool] = None
+        unbound_reason: Optional[str] = None
+        death_log_path = ""
+        death_tail = ""
+        pane_died = False
+        #: Set only when the spawn already knows the row's terminal status and
+        #: must not let the id-less heuristic below relabel it.
+        forced_row_status: Optional[AgentStatus] = None
+
         # opencode and codex ids are discovered, not minted (see the two
         # backfills). A miss leaves the row exactly as live-only as before
         # capture existed, so it is logged rather than raised - the pane is
@@ -1636,12 +1823,43 @@ def dispatch_spawn_pane(
             # pid-less row there would be kept immortal (pid_live maps None to
             # true), so never stamp one without a pid to correlate (Codex P1/P2, #603).
             if child_pid is not None:
-                session_uuid = _backfill_codex_session_id(
-                    cwd,
-                    spawn_started_ms,
-                    sessions_dir=codex_sessions_dir,
-                    child_pid=child_pid,
+                _pid = child_pid
+                binding = _await_pane_binding(
+                    {"session": session, "pane_id": pane_id},
+                    # attempts=1: the binding loop owns the retry, because it
+                    # also watches for the pane dying BETWEEN probes - which a
+                    # bare retry loop cannot see, and which is the whole bug.
+                    lambda: _backfill_codex_session_id(
+                        cwd,
+                        spawn_started_ms,
+                        sessions_dir=codex_sessions_dir,
+                        child_pid=_pid,
+                        attempts=1,
+                    ),
+                    runner=runner,
                 )
+                session_uuid = binding.session_id
+                pane_alive = binding.pane_alive
+                if session_uuid is None:
+                    unbound_reason = binding.reason
+                    if binding.pane_alive is False:
+                        # The pane is confirmed gone and never reached codex.
+                        # Write the row anyway, terminal and carrying its log:
+                        # the row plus its evidence IS the finding, and dropping
+                        # it reproduces the information loss that left this bug
+                        # unexplained for weeks.
+                        pane_died = True
+                        forced_row_status = "failed"
+                        death_log_path = _write_pane_death_log(name, binding.tail)
+                        death_tail = binding.tail
+            else:
+                # No pid means nothing to correlate the rollout against, so the
+                # row is deliberately left id-less (stamping one without a pid
+                # would make it immortal in reconcile - Codex P1/P2, #603). It
+                # is still an unbound receipt and still owes a reason: an
+                # unbound receipt whose reason is null is the same empty signal
+                # this whole change exists to remove.
+                unbound_reason = "no-child-pid-to-correlate"
             if session_uuid is None:
                 from fno.agents import events as _events
 
@@ -1766,17 +1984,27 @@ def dispatch_spawn_pane(
             # row reporting "live" is exactly the corpse that passes every
             # liveness check the tooling offers.
             row_status = (
-                "spawning"
-                if stored_session_uuid is None
-                and (provider == "codex" or (provider == "claude" and not pin_session))
-                else "live"
+                forced_row_status
+                if forced_row_status is not None
+                else (
+                    "spawning"
+                    if stored_session_uuid is None
+                    and (
+                        provider == "codex"
+                        or (provider == "claude" and not pin_session)
+                    )
+                    else "live"
+                )
             )
             rows.append(
                 AgentEntry(
                     name=name,
                     harness=provider,
                     cwd=str(cwd),
-                    log_path="",
+                    # Written in the SAME registry transaction as the status, so
+                    # a concurrent reconcile cannot land one without the other
+                    # and lose the only evidence the death left.
+                    log_path=death_log_path,
                     harness_session_id=stored_session_uuid,
                     status=row_status,
                     pid=child_pid,
@@ -1822,6 +2050,32 @@ def dispatch_spawn_pane(
                 f"session {session!r} because exact cleanup failed: {cleanup_detail}",
                 exit_code=12,
             ) from exc
+
+        if pane_died:
+            # The pane existed and the worker never reached its provider. Fail
+            # LOUD and non-zero: an exit-0 receipt here is exactly the lie -
+            # the caller cannot tell a corpse from a slow starter, and re-prompts
+            # the corpse. The row survives (status `failed`, terminal, so
+            # `fno agents rm` needs no --force) and carries the captured output.
+            where = (
+                f"captured output: {death_log_path}"
+                if death_log_path
+                else "pane output could not be persisted; the tail is above"
+            )
+            if death_tail.strip():
+                echo = "\n".join(death_tail.splitlines()[-_PANE_TAIL_ECHO_LINES:])
+                print(
+                    f"spawn: {name} pane {pane_id} died before binding; last output:\n{echo}",
+                    file=sys.stderr,
+                )
+            raise DispatchAskError(
+                f"agent {name!r} never reached codex: the pane was created and its "
+                f"child exited before a session was bound, so nothing is running. "
+                f"The registry row is `failed` (not live) and {where}. "
+                "Read that output for the cause, then retry, or spawn with "
+                "--substrate bg.",
+                exit_code=13,
+            )
 
         # A happy-hosted claude row is created id-less (`spawning`)
         # because happy owns the session id and restamps the row via the worker's
@@ -1903,6 +2157,10 @@ def dispatch_spawn_pane(
             else ""
         )
 
+    # `bound` is keyed on the session uuid, NOT on short_id: a provider whose
+    # transport key is not short_id (opencode, gemini, agy - US8) leaves
+    # short_id empty while being perfectly bound. For claude and codex, where
+    # short_id IS the handle, the two agree, and a test pins that.
     return MuxSpawnResult(
         name=name,
         provider=provider,
@@ -1912,6 +2170,10 @@ def dispatch_spawn_pane(
         session_uuid=session_uuid,
         short_id=short_id_val,
         status=row_status,
+        bound=session_uuid is not None,
+        pane_alive=pane_alive,
+        unbound_reason=unbound_reason,
+        log_path=death_log_path,
         effective_message=effective_message,
         placement=placement_receipt,
     )

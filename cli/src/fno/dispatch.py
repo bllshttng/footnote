@@ -599,9 +599,15 @@ def _dispatch_one(
     if cutover is not None:
         # Post-spawn only: a route decision is not a completed cutover.
         _emit_failover(node_id, cutover)
+    # `launched` used to be declared from pane creation alone: this return had
+    # no field capable of carrying a doubt, so a worker that never reached its
+    # provider was indistinguishable from a healthy one. A confirmed-dead pane
+    # now raises out of the spawn above (exit 13) into the `failed` return, and
+    # `bound` separates a live-but-unbound worker from a bound one.
     return {
         "outcome": "launched",
         "node": node_id,
         "slug": slug or "",
         "pane_id": result.pane_id,
+        "bound": result.bound,
     }

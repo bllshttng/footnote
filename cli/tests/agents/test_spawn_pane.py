@@ -1339,7 +1339,17 @@ def test_cmd_spawn_pane_receipt_shape(tmp_path: Path, monkeypatch) -> None:
         "mux_session": "main",
         "pane_id": 9,
         "effective_message": "$fno:target x-81ad",
+        # x-cdca: an unbound receipt says so, says whether the pane is still
+        # there, and says why. Without these, this exact receipt shape - status
+        # `spawning` with an empty short_id, exit 0 - was indistinguishable from
+        # one whose pane had already died, and callers re-prompted the corpse.
+        "bound": False,
+        "pane_alive": None,
+        "unbound_reason": "no-child-pid-to-correlate",
     }
+    # The invariant that makes an empty short_id a signal rather than a
+    # formatting detail (claude/codex, where short_id IS the handle).
+    assert receipt["bound"] == bool(receipt["short_id"])
     # AC5: no -P/--route on this spawn -> provider (vendor) and model keys are
     # ABSENT, not defaulted to the harness. A provider key holding a harness
     # literal is the four-axis defect this receipt shape corrects.
