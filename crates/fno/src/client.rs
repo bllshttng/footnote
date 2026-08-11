@@ -23562,6 +23562,12 @@ mod tests {
                 "bold on top of the inversion makes the pair the reader's \
                  terminal settings decide"
             );
+            // While the modal inherits, this holds by construction (see
+            // `inverting_the_default_pair_costs_a_scheme_nothing`), so it can
+            // only fail if someone stops inheriting - which is exactly the
+            // regression it exists to catch, and did catch when Indexed(0) on
+            // Indexed(15) was tried. Not a legibility measurement.
+            //
             // The bar is the THEME'S OWN body text, not an absolute ratio. An
             // absolute floor asks the modal to beat the scheme its reader chose
             // (Solarized Light is 4.1:1 by design), and the only way to meet it

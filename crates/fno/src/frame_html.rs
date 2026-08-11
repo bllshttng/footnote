@@ -425,11 +425,14 @@ mod tests {
             flags: cell_flags::INVERSE,
             ..inverted
         };
+        // Compared against the scheme's own body text, not against `real`:
+        // coupling the two leaves 7% of headroom and flips if either palette
+        // entry is re-transcribed, for reasons unrelated to the lesson.
         let inherited = contrast_ratio(&inverted, MACCHIATO);
         assert!(
-            inherited > real * 2.0,
-            "inheriting and inverting ({inherited:.2}) should beat naming the \
-             palette extremes ({real:.2}) on a real low-contrast scheme"
+            inherited >= body_contrast(MACCHIATO) - 0.01,
+            "inheriting and inverting ({inherited:.2}) should keep the scheme's \
+             own contrast, where naming the palette extremes gives {real:.2}"
         );
     }
 
