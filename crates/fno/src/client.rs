@@ -2962,7 +2962,7 @@ impl View {
             }
         }
         let mut c = panel_w as usize;
-        for span in self.tab_bar_spans() {
+        for span in self.tab_bar_window() {
             let w = span.text.chars().count();
             if col >= c && col < c + w {
                 return match span.hit? {
@@ -3297,7 +3297,7 @@ impl View {
                 }
             }
             let mut c = panel_w as usize;
-            for span in self.tab_bar_spans() {
+            for span in self.tab_bar_window() {
                 let w = span.text.chars().count();
                 if col >= c && col < c + w {
                     return match span.hit? {
@@ -4771,6 +4771,24 @@ impl View {
     /// centering on a mid-screen inverse-video line puts the prompt where the
     /// operator is looking and names its target. The bottom chrome row stays
     /// blanked so a stale bottom row never shows under the modal.
+    ///
+    /// Two contrast rules this modal learned the hard way, both reported as
+    /// "I can barely see the prompt":
+    ///
+    /// 1. A modal must PAINT its colours, not inherit and invert them. The old
+    ///    prompt was `INVERSE | BOLD` over `Color::Default`, which makes its
+    ///    legibility a function of the reader's theme: bold sets a brighter
+    ///    foreground and reverse then swaps the pair, so the brightening lands
+    ///    on what became the BACKGROUND. On a dark theme that happens to look
+    ///    fine, which is how it shipped; on a light one the pair collapses
+    ///    toward each other and the prompt greys out. [`MODAL_FG`]/[`MODAL_BG`]
+    ///    name the pair outright, so the contrast is ours and not the theme's.
+    ///    The amber `LATTICE_ACCENT` is deliberately NOT used: it is reserved
+    ///    for needs-attention, and a rename prompt is not an alert.
+    /// 2. Pad it into a BLOCK. A one-row strip of text that hugs its own glyphs
+    ///    disappears into busy pane content; the blank margin around it is what
+    ///    makes it read as a panel, which is the shape every other overlay
+    ///    already uses.
     fn draw_name_modal(
         &self,
         cells: &mut [Cell],
@@ -4783,24 +4801,36 @@ impl View {
         for c in 0..cols {
             cells[(rows - 1) * cols + c] = Cell::default();
         }
-        let r = rows / 2;
-        for c in 0..cols {
-            cells[r * cols + c] = Cell::default();
-        }
         let text = match hint {
-            Some(h) => format!(" {label}: {name}_  ({h})"),
-            None => format!(" {label}: {name}_"),
+            Some(h) => format!("{label}: {name}_   ({h})"),
+            None => format!("{label}: {name}_"),
         };
-        let pad = cols.saturating_sub(text.chars().count()) / 2;
-        for (i, ch) in text.chars().take(cols).enumerate() {
-            let col = (pad + i).min(cols.saturating_sub(1));
-            cells[r * cols + col] = Cell {
-                c: ch,
-                fg: Color::Default,
-                bg: Color::Default,
-                flags: cell_flags::INVERSE | cell_flags::BOLD,
-            };
-        }
+        // Two columns of inverse margin each side, clamped to the terminal.
+        let w = (text.chars().count() + 4).min(cols);
+        let c0 = cols.saturating_sub(w) / 2;
+        let r = rows / 2;
+        let put = |cells: &mut [Cell], row: usize, s: &str| {
+            if row >= rows {
+                return;
+            }
+            for (i, ch) in s.chars().take(w).enumerate() {
+                let col = c0 + i;
+                if col < cols {
+                    cells[row * cols + col] = Cell {
+                        c: ch,
+                        fg: MODAL_FG,
+                        bg: MODAL_BG,
+                        flags: 0,
+                    };
+                }
+            }
+        };
+        // Margins first, text last: on a terminal short enough for the rows to
+        // collide the prompt itself still wins the cell.
+        let blank = " ".repeat(w);
+        put(cells, r.saturating_sub(1), &blank);
+        put(cells, r + 1, &blank);
+        put(cells, r, &format!("  {text}  "));
     }
 
     fn draw_bottom_row(&self, cells: &mut [Cell], rows: usize, cols: usize) {
@@ -5170,6 +5200,112 @@ impl View {
         spans
     }
 
+    /// The span run that actually FITS the strip: a scrolling window over
+    /// [`tab_bar_spans`] anchored on the active tab, with a clickable overflow
+    /// counter at whichever edge is hiding tabs.
+    ///
+    /// Before this, `draw_tab_bar` simply stopped painting at the right edge, so
+    /// past roughly the seventh tab the work was invisible AND unclickable
+    /// (`chrome_hit` walks the same spans, so a tab that never painted could
+    /// never be hit). The three candidate fixes and why this one:
+    ///
+    /// - Condensing every label buys nothing at twenty tabs (twenty times even
+    ///   four columns is eighty columns of chrome) and degrades the four-tab
+    ///   case to pay for it.
+    /// - Paging is a second mental model plus new keys, and a page can leave the
+    ///   tab you are ON off-screen, which is the one thing that must not happen.
+    /// - An overflow indicator alone names the hidden work without reaching it.
+    ///
+    /// Anchoring on the active tab means the existing keys already drive the
+    /// viewport: `prefix+n`/`p` cycle and `prefix+<digit>` select, and the window
+    /// follows whatever they made active, so no new binding is needed to reach a
+    /// twentieth tab. The counters are clickable and select the nearest hidden
+    /// tab, which restores mouse reach. The squad label and the `+` affordance
+    /// are pinned outside the scroll region: they are identity and the only
+    /// mouse route to a new tab, so neither may scroll away.
+    ///
+    /// Below overflow this returns [`tab_bar_spans`] unchanged, so the common
+    /// few-tab strip paints exactly as it always did.
+    fn tab_bar_window(&self) -> Vec<TabSpan> {
+        let width = (self.term.1 as usize).saturating_sub(self.panel_w() as usize);
+        let span_w = |s: &TabSpan| s.text.chars().count();
+        let full = self.tab_bar_spans();
+        if full.iter().map(span_w).sum::<usize>() <= width {
+            return full;
+        }
+        // [squad label][tab..][+]: the label leads and the `+` trails by
+        // construction, so both peel off without searching for them.
+        let Some(plus) = full.last().filter(|s| matches!(s.hit, Some(TabHit::NewTab))) else {
+            return full;
+        };
+        let (plus, label) = (plus.clone(), full[0].clone());
+        let tabs: Vec<TabSpan> = full[1..full.len() - 1].to_vec();
+        let avail = width
+            .saturating_sub(span_w(&label))
+            .saturating_sub(span_w(&plus));
+        // `‹12 ` / ` 12›`: two glyph columns plus the count's digits.
+        let marker_w = |n: usize| n.to_string().chars().count() + 2;
+        // Pack forward from `start`, always reserving room for the counter that
+        // will be needed at each edge, and return one past the last span that
+        // fits. Reserving inside the loop (not after it) is what keeps the right
+        // counter from being the thing that overflows the strip.
+        let fit_end = |start: usize| -> usize {
+            let mut used = if start > 0 { marker_w(start) } else { 0 };
+            let mut end = start;
+            while end < tabs.len() {
+                let rest_after = tabs.len() - end - 1;
+                let reserve = if rest_after > 0 { marker_w(rest_after) } else { 0 };
+                if used + span_w(&tabs[end]) + reserve > avail {
+                    break;
+                }
+                used += span_w(&tabs[end]);
+                end += 1;
+            }
+            end
+        };
+        let active = self
+            .layout
+            .squads
+            .iter()
+            .find(|s| s.id == self.layout.active_squad)
+            .map(|s| s.active_tab)
+            .unwrap_or(0)
+            .min(tabs.len().saturating_sub(1));
+        // The smallest window that still contains the active tab AND one tab of
+        // lookahead past it. Minimal scrolling means stepping back with
+        // `prefix+p` does not yank a strip that already showed the target; the
+        // lookahead means stepping forward with `prefix+n` slides the strip by
+        // one instead of jumping it on every single press.
+        let target = (active + 1).min(tabs.len().saturating_sub(1));
+        let mut start = 0usize;
+        while start < active && fit_end(start) <= target {
+            start += 1;
+        }
+        let end = fit_end(start).max(start + 1).min(tabs.len());
+        let mut out = vec![label];
+        if start > 0 {
+            out.push(TabSpan {
+                text: format!("\u{2039}{start} "),
+                flags: cell_flags::DIM,
+                fg: Color::Default,
+                // Clicking the counter selects the nearest tab it is hiding, so
+                // the strip walks toward the hidden end one click at a time.
+                hit: tabs[start - 1].hit,
+            });
+        }
+        out.extend(tabs[start..end].iter().cloned());
+        if end < tabs.len() {
+            out.push(TabSpan {
+                text: format!(" {}\u{203a}", tabs.len() - end),
+                flags: cell_flags::DIM,
+                fg: Color::Default,
+                hit: tabs[end].hit,
+            });
+        }
+        out.push(plus);
+        out
+    }
+
     fn draw_tab_bar(&self, cells: &mut [Cell], cols: usize) {
         // (x-cd67 US1) The strip is scoped to the content area: it begins at
         // the content-column origin (`panel_w`) so the sideline column owns row
@@ -5184,7 +5320,7 @@ impl View {
         let break_active = self.pane_drag.map(|d| d.on_strip);
         let lifted_tab = self.tab_drag.map(|d| d.src_tab);
         let mut c = self.panel_w() as usize;
-        'spans: for span in self.tab_bar_spans() {
+        'spans: for span in self.tab_bar_window() {
             let (fg, flags) = if let Some(on_strip) = break_active {
                 let f = if on_strip {
                     cell_flags::INVERSE
@@ -6319,6 +6455,7 @@ fn agent_is_foreign(a: &AgentRow, section_base: Option<&str>) -> bool {
 
 /// One clickable span in the tab bar (label + render flags + what a click does;
 /// `None` = inert, e.g. the squad-name label).
+#[derive(Clone)]
 struct TabSpan {
     text: String,
     flags: u8,
@@ -6818,6 +6955,21 @@ enum LatticeState {
 /// rather than a hardcoded RGB that would fight light themes.
 const LATTICE_ACCENT: Color = Color::Indexed(3);
 
+/// The name-entry modal's own pair: black text on a bright-white block. Explicit
+/// rather than inherited-and-inverted, because a modal that borrows the theme's
+/// default pair inherits its contrast too, and the prompt has to be readable on
+/// every theme (see [`View::draw_name_modal`]).
+///
+/// The palette EXTREMES specifically, not a hue. An indexed colour is defined by
+/// the user's scheme, so no coloured pair can promise a contrast ratio - a blue
+/// that is near-black in one scheme is mid-tone in another, and white-on-blue
+/// measures anywhere from 3:1 to 14:1 across common schemes. Index 0 and index
+/// 15 are the two every scheme keeps at the ends by definition, which is the
+/// only way to be theme-independent without hardcoding RGB and fighting the
+/// user's colours the way [`LATTICE_ACCENT`]'s comment warns against.
+const MODAL_FG: Color = Color::Indexed(0);
+const MODAL_BG: Color = Color::Indexed(15);
+
 struct LatticeStyle {
     glyph: char,
     flags: u8,
@@ -6901,16 +7053,20 @@ fn section_rollup(states: impl Iterator<Item = LatticeState>) -> Vec<(LatticeSta
 
 /// (x-4374) The flag set for a section header, demoted from the old always-on
 /// INVERSE band: the full-width INVERSE is now the focused-row signal, not the
-/// header's, so a header carries zero standing INVERSE cells. The active squad
-/// header keeps BOLD; an inactive header renders plain (not DIM - a demoted
-/// header should read as present-but-quiet, not disabled). The rollup counts
+/// header's, so a header carries zero standing INVERSE cells. The rollup counts
 /// (`header_band_text`) are unchanged and still fill the full width.
-fn header_band_flags(active: bool) -> u8 {
-    if active {
-        cell_flags::BOLD
-    } else {
-        0
-    }
+///
+/// EVERY header is BOLD, active or not. The earlier split (BOLD when active,
+/// plain otherwise) meant an inactive workspace header painted at exactly the
+/// weight of the agent rows beneath it, so a section did not read as a section
+/// at a glance - the operator's report. A terminal cannot vary font SIZE per
+/// line (one cell grid, one font: the only vocabulary is bold / italic /
+/// underline / inverse / dim plus colour), so weight is the size knob here, and
+/// spending it on active-vs-inactive left nothing for header-vs-row. Active
+/// stays legible through the `*` marker and the accented caret, which were added
+/// for precisely this reason: to survive a theme with weak BOLD.
+fn header_band_flags(_active: bool) -> u8 {
+    cell_flags::BOLD
 }
 
 /// (x-6851 US1+US2) Compose one section header band: the label at the left, the
@@ -6922,6 +7078,27 @@ fn header_band_flags(active: bool) -> u8 {
 /// gone. Widths are measured in DISPLAY columns via `glyph_cols` (matching the
 /// painter), so a double-width char in a squad name aligns the band instead of
 /// overflowing it.
+/// The `gap` columns between a header's label and its rollup counts, drawn as a
+/// horizontal rule with a space of breathing room at each end (`gap < 3` stays
+/// blank - a one-cell dash reads as debris, not a rule).
+///
+/// This is the section separator the sideline could not get any other way. A
+/// terminal grid has ONE font at ONE size, so "make the header bigger" is not
+/// available; the styling vocabulary is bold / italic / underline / inverse /
+/// dim plus colour, and on this panel almost all of it is already spoken for:
+/// BOLD is the agent-liveness signal (`lattice_style` bolds working, blocked and
+/// done rows, so a header cannot out-weigh a busy workspace), the full-width
+/// INVERSE band is the focused-row signal, DIM means dead, and the amber
+/// accent is reserved for needs-attention. A rule spends none of them. It also
+/// costs no rows, because it fills space the header was already padding with
+/// blanks.
+fn section_rule(gap: usize) -> String {
+    match gap {
+        0..=2 => " ".repeat(gap),
+        _ => format!(" {} ", "\u{2500}".repeat(gap - 2)),
+    }
+}
+
 fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> String {
     let mut pairs: Vec<String> = rollup
         .iter()
@@ -6929,14 +7106,18 @@ fn header_band_text(label: &str, rollup: &[(LatticeState, usize)], w: usize) -> 
         .collect();
     loop {
         if pairs.is_empty() {
-            return pad_to(label, w);
+            let label_w: usize = label.chars().map(glyph_cols).sum();
+            return match w.checked_sub(label_w) {
+                Some(gap) => format!("{label}{}", section_rule(gap)),
+                None => pad_to(label, w),
+            };
         }
         let counts = pairs.join(" ");
         let label_w: usize = label.chars().map(glyph_cols).sum();
         let counts_w: usize = counts.chars().map(glyph_cols).sum();
         if label_w + 1 + counts_w <= w {
             let gap = w - label_w - counts_w;
-            return format!("{label}{}{counts}", " ".repeat(gap));
+            return format!("{label}{}{counts}", section_rule(gap));
         }
         pairs.pop(); // drop the least-severe pair and retry
     }
@@ -7309,6 +7490,22 @@ async fn attach_and_run(
     // Same idiom for the optional `~ missions` / `~ backlog` section toggles.
     view.show_missions = crate::digest_overlay::missions_section_enabled(Path::new(&cwd));
     view.show_backlog = crate::digest_overlay::backlog_section_enabled(Path::new(&cwd));
+    // The key layer (`config.mux.prefix`, `[mux.keys]`), installed BEFORE the
+    // scanner reads its first byte. A refused rebind surfaces as a notice rather
+    // than silently running the shipped default: a keyboard that quietly ignores
+    // your config is indistinguishable from one that ignored your keystroke.
+    let (keymap, key_warnings) = crate::digest_overlay::keymap(Path::new(&cwd));
+    crate::keys::install(keymap);
+    if let Some(first) = key_warnings.first() {
+        let more = key_warnings.len() - 1;
+        view.notice = Some((
+            match more {
+                0 => first.0.clone(),
+                n => format!("{} (+{n} more)", first.0),
+            },
+            Instant::now() + NOTICE_TTL,
+        ));
+    }
     let (c_rows, c_cols) = view.content_dims();
     write_msg(
         &mut sock_w,
@@ -16063,8 +16260,8 @@ mod tests {
         assert!(
             cells[mid * cols..(mid + 1) * cols]
                 .iter()
-                .any(|c| c.flags & cell_flags::INVERSE != 0),
-            "the centered modal is inverse-video, not the old plain bottom row"
+                .any(|c| c.bg == MODAL_BG && c.fg == MODAL_FG),
+            "the centered modal paints its own pair, not the old plain bottom row"
         );
         let bottom: String = cells[(rows - 1) * cols..rows * cols]
             .iter()
@@ -23216,5 +23413,346 @@ mod tests {
             .count();
         eprintln!("inverse cells = {}", lit);
         assert!(lit > 0, "bottom-rim drop zone lit NOTHING");
+    }
+
+    // ---------------------------------------------------------------------
+    // UX screenshots
+    //
+    // These compose REAL frames through the one composer the terminal is
+    // painted from, assert the property the operator reported, and (when
+    // `FNO_UX_SHOTS=<dir>` is set) write the frame out as HTML so the result
+    // can be LOOKED AT. The assertion is the gate; the HTML is the evidence.
+    //
+    //   FNO_UX_SHOTS=/tmp/shots cargo test -p fno ux_shot
+    // ---------------------------------------------------------------------
+
+    /// A squad whose tabs carry real names, so a strip fixture reads like a
+    /// working operator's rather than `1 2 3`.
+    fn named_meta(id: u64, name: &str, tabs: &[&str], active_tab: usize) -> SquadMeta {
+        SquadMeta {
+            id,
+            name: name.into(),
+            canonical_cwd: format!("/code/{name}"),
+            tabs: tabs
+                .iter()
+                .enumerate()
+                .map(|(i, t)| TabMeta {
+                    id: i as u64,
+                    name: (*t).to_string(),
+                    named: true,
+                    panes: Vec::new(),
+                })
+                .collect(),
+            active_tab,
+            panes: tabs.len(),
+        }
+    }
+
+    fn shot_view(term: (u16, u16), squads: Vec<SquadMeta>, agents: Vec<AgentRow>) -> View {
+        let (rows, cols) = term;
+        let active = squads[0].id;
+        let mut view = View::new(
+            term,
+            "main".into(),
+            LayoutView {
+                squads,
+                active_squad: active,
+                panes: vec![(
+                    10,
+                    Rect {
+                        x: 0,
+                        y: 0,
+                        rows: rows - 1,
+                        cols: cols - 28,
+                    },
+                )],
+                focus: 10,
+                area: (rows - 1, cols - 28),
+                agents,
+                focus_node: None,
+                backlog: Vec::new(),
+                backlog_lanes: Vec::new(),
+                backlog_stale: false,
+            },
+        );
+        view.frames
+            .insert(10, text_frame(rows - 1, cols - 28, '\u{b7}'));
+        view
+    }
+
+    fn shot_agent(squad: u64, name: &str, badge: Option<AgentBadge>) -> AgentRow {
+        let mut r = blocked_row(name, 0, None);
+        r.squad = Some(squad);
+        r.pane_id = None;
+        r.badge = badge;
+        r
+    }
+
+    /// Item 1. The rename prompt was `INVERSE | BOLD` over default colours, so
+    /// how legible it came out was decided by the reader's theme rather than by
+    /// us. The gate is the WORST case across themes, not the flag bits - the
+    /// flag bits looked fine, which is exactly how this shipped.
+    ///
+    /// Covers all three name modals: they share one painter, so the create and
+    /// recruit prompts are the same cells.
+    #[test]
+    fn ux_shot_rename_prompt_is_legible() {
+        use crate::frame_html::{worst_contrast, write_shot};
+        let modal_at = |view: &View| -> (Frame, usize) {
+            let frame = view.compose();
+            let row = frame.rows as usize / 2;
+            (frame, row)
+        };
+        let mut view = shot_view(
+            (34, 150),
+            vec![named_meta(1, "footnote", &["main", "review"], 0)],
+            vec![],
+        );
+        view.rename = Some((RenameTarget::Tab(0), "release-notes".into()));
+        let (frame, row) = modal_at(&view);
+        let cols = frame.cols as usize;
+        let is_modal = |c: &Cell| c.bg == MODAL_BG;
+        let prompt: Vec<&Cell> = (0..cols)
+            .map(|c| &frame.cells[row * cols + c])
+            .filter(|c| is_modal(c))
+            .collect();
+        assert!(!prompt.is_empty(), "the prompt row painted nothing");
+        for cell in &prompt {
+            let (ratio, theme) = worst_contrast(cell);
+            assert!(
+                ratio >= 7.0,
+                "prompt cell {:?} paints at {ratio:.2}:1 on the {} theme, \
+                 under the 7:1 AAA floor",
+                cell.c,
+                theme.name
+            );
+        }
+        // The block, not a text-hugging stripe: margin rows above and below.
+        for r in [row - 1, row + 1] {
+            assert!(
+                (0..cols).any(|c| is_modal(&frame.cells[r * cols + c])),
+                "row {r} carries no margin, so the prompt is a stripe not a block"
+            );
+        }
+        // The hint has to be as readable as the prompt it qualifies; it is the
+        // half the operator called out, and it shares the block by construction.
+        let text = frame_text(&frame);
+        let line = text.lines().nth(row).unwrap_or_default();
+        assert!(
+            line.contains("rename tab: release-notes_") && line.contains("(empty resets to auto)"),
+            "prompt line lost its label or hint: {line:?}"
+        );
+        // Same painter, same guarantee, for the sibling prompts.
+        let mut sib = shot_view(
+            (34, 150),
+            vec![named_meta(1, "footnote", &["main"], 0)],
+            vec![],
+        );
+        sib.create = Some("growth".into());
+        let (sib_frame, sib_row) = modal_at(&sib);
+        assert!(
+            (0..cols).any(|c| is_modal(&sib_frame.cells[sib_row * cols + c])),
+            "the new-workspace prompt does not share the modal treatment"
+        );
+        write_shot(&frame, "01-rename-prompt", "rename prompt (after)");
+    }
+
+    /// Item 2. A workspace header has to separate from its own contents.
+    ///
+    /// It cannot do it by SIZE (one cell grid, one font) and it cannot do it by
+    /// weight alone either, which is the part that is easy to get wrong: a
+    /// working, blocked or done agent row is already BOLD (`lattice_style`), so
+    /// a bold header sits at exactly the weight of a busy workspace's rows. The
+    /// rule (`section_rule`) is what actually carries the separation; the
+    /// all-headers-BOLD change only buys the idle case. Both are asserted, and
+    /// the bold-agent-row fact is asserted too, so deleting the rule in favour
+    /// of "just make headers bold" fails here rather than in a screenshot.
+    #[test]
+    fn ux_shot_workspace_headers_outweigh_their_rows() {
+        use crate::frame_html::write_shot;
+        let squads = vec![
+            named_meta(1, "main", &["1"], 0),
+            named_meta(2, "c3po", &["1"], 0),
+            named_meta(3, "fno-platform", &["1"], 0),
+            named_meta(4, "readyrule/readyrule-web", &["1"], 0),
+        ];
+        let mut view = shot_view(
+            (34, 150),
+            squads.clone(),
+            vec![
+                shot_agent(1, "archer", Some(AgentBadge::Working)),
+                shot_agent(1, "sigma", None),
+                shot_agent(2, "scribe", None),
+                shot_agent(2, "curator", Some(AgentBadge::Working)),
+                shot_agent(3, "reviewer", Some(AgentBadge::Blocked)),
+                shot_agent(4, "impeccable", Some(AgentBadge::Working)),
+                shot_agent(4, "vercel-deploy", None),
+            ],
+        );
+        // Expand every workspace: an inactive squad folds by default, and a
+        // folded section trivially "reads as a section". The reported case is
+        // the open one, where header and rows sit next to each other.
+        for s in &squads {
+            view.section_view
+                .insert(section_key(s), SectionView::Expanded);
+        }
+        let frame = view.compose();
+        let cols = frame.cols as usize;
+        let panel_w = view.panel_w() as usize;
+        // Find each squad-name row by its rendered label, then compare its
+        // weight against the row below it (an agent row of the same squad).
+        let text = frame_text(&frame);
+        let lines: Vec<&str> = text.lines().collect();
+        let head_of = |row: usize| -> String { lines[row].chars().take(panel_w).collect() };
+        let bold_in = |row: usize| -> bool {
+            (0..panel_w).any(|c| frame.cells[row * cols + c].flags & cell_flags::BOLD != 0)
+        };
+        let mut checked = 0;
+        // Every workspace header, active or not, is bold AND ruled. `main` is the
+        // active one; the other three used to render plain.
+        for name in ["main", "c3po", "fno-platform"] {
+            let Some(r) = lines
+                .iter()
+                .position(|l| l.chars().take(panel_w).collect::<String>().contains(name))
+            else {
+                panic!("workspace header {name:?} never painted");
+            };
+            assert!(bold_in(r), "header {name:?} is not bold");
+            assert!(
+                head_of(r).contains('\u{2500}'),
+                "header {name:?} carries no rule, so it does not separate: {:?}",
+                head_of(r)
+            );
+            checked += 1;
+        }
+        assert_eq!(checked, 3);
+        // A workspace whose name fills the rail keeps its width instead of
+        // squeezing in a stub rule.
+        let long = lines
+            .iter()
+            .position(|l| {
+                l.chars()
+                    .take(panel_w)
+                    .collect::<String>()
+                    .contains("readyrule/readyrule-web")
+            })
+            .expect("the long-named workspace never painted");
+        assert!(
+            !head_of(long).contains('\u{2500}'),
+            "a header with no room should stay unruled, not print a stub"
+        );
+        // The fact that makes the rule necessary: a working agent row is bold
+        // too, so weight cannot be what separates a header from its contents.
+        let working_row = lines
+            .iter()
+            .position(|l| l.contains("archer"))
+            .expect("the working agent row never painted");
+        assert!(
+            bold_in(working_row),
+            "fixture drift: this test's whole point is that a working agent row \
+             is ALSO bold, so a bold header cannot out-weigh it"
+        );
+        write_shot(&frame, "02-workspace-sections", "workspace sections (after)");
+    }
+
+    /// Item 3. Twenty tabs. Every tab must be REACHABLE: the active one is
+    /// always painted, the counters name what is hidden, and every painted span
+    /// hit-tests back to a tab (which is what makes a click work).
+    #[test]
+    fn ux_shot_twenty_tabs_stay_reachable() {
+        use crate::frame_html::write_shot;
+        let names: Vec<String> = (1..=20).map(|i| format!("task-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        for active in [0usize, 6, 13, 19] {
+            let view = shot_view(
+                (34, 150),
+                vec![named_meta(1, "footnote", &refs, active)],
+                vec![],
+            );
+            let window = view.tab_bar_window();
+            let painted: usize = window.iter().map(|s| s.text.chars().count()).sum();
+            assert!(
+                painted + view.panel_w() as usize <= view.term.1 as usize,
+                "the strip overflows at active={active}: {painted} cols of tabs"
+            );
+            let active_name = &names[active];
+            assert!(
+                window.iter().any(|s| s.text.contains(active_name.as_str())
+                    && s.text.starts_with('[')),
+                "active tab {active_name} is not on the strip"
+            );
+            // Reachability: the hidden ends carry a counter whose click target
+            // is the nearest tab it hides, so no tab is more than a few clicks
+            // away and none is unreachable.
+            let hidden_left = window.iter().any(|s| s.text.starts_with('\u{2039}'));
+            let hidden_right = window.iter().any(|s| s.text.ends_with('\u{203a}'));
+            assert!(
+                hidden_left || hidden_right,
+                "twenty tabs must not all fit; the fixture is not testing overflow"
+            );
+            for span in &window {
+                if span.text.starts_with('\u{2039}') || span.text.ends_with('\u{203a}') {
+                    assert!(
+                        matches!(span.hit, Some(TabHit::Tab(_))),
+                        "an overflow counter that cannot be clicked is decoration"
+                    );
+                }
+            }
+            // The `+` affordance is pinned: it is the only mouse route to a new
+            // tab and must never scroll away.
+            assert!(
+                window
+                    .iter()
+                    .any(|s| matches!(s.hit, Some(TabHit::NewTab))),
+                "the + affordance scrolled off at active={active}"
+            );
+            if active == 13 {
+                let frame = view.compose();
+                write_shot(&frame, "03-twenty-tabs", "twenty tabs, active 14 (after)");
+            }
+        }
+    }
+
+    /// The before/after pair the operator can compare: the same twenty tabs
+    /// under the old paint-until-the-edge rule.
+    #[test]
+    fn ux_shot_twenty_tabs_before() {
+        use crate::frame_html::write_shot;
+        let names: Vec<String> = (1..=20).map(|i| format!("task-{i:02}")).collect();
+        let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+        let view = shot_view(
+            (34, 150),
+            vec![named_meta(1, "footnote", &refs, 13)],
+            vec![],
+        );
+        // The pre-fix behaviour, reproduced from the unwindowed span list: paint
+        // left to right and stop at the edge.
+        let mut frame = view.compose();
+        let cols = frame.cols as usize;
+        for c in view.panel_w() as usize..cols {
+            frame.cells[c] = Cell::default();
+        }
+        let mut c = view.panel_w() as usize;
+        'spans: for span in view.tab_bar_spans() {
+            for ch in span.text.chars() {
+                if c >= cols {
+                    break 'spans;
+                }
+                frame.cells[c] = Cell {
+                    c: ch,
+                    fg: span.fg,
+                    bg: Color::Default,
+                    flags: span.flags,
+                };
+                c += 1;
+            }
+        }
+        let painted = frame_text(&frame);
+        let strip = painted.lines().next().unwrap_or_default();
+        assert!(
+            !strip.contains("task-20"),
+            "the before fixture should CLIP: the old strip could not reach tab 20"
+        );
+        write_shot(&frame, "00-twenty-tabs-before", "twenty tabs (before: clipped)");
     }
 }
