@@ -5105,9 +5105,23 @@ def cmd_session_add(
             if status in ("no-node", "ambiguous"):
                 cands = find_nodes_for_pr(_graph_path(), pr, repo=repo)
                 detail = f" (candidates: {', '.join(cands)})" if cands else ""
+                repair = ""
+                if status == "no-node":
+                    # Resolution matches the node's STORED pr_number, so a node
+                    # whose PR was never stamped (typical of a session killed
+                    # before ship) is invisible - the exact state the repair
+                    # path is needed in. Name the two ways out instead of
+                    # leaving the operator stuck; a branch guess would risk
+                    # stamping the wrong node, so refuse and explain.
+                    repair = (
+                        " A node whose PR was never stamped is invisible here. "
+                        "Link it with `fno backlog update <node-id> "
+                        f"--pr-number {pr}`, or pass the node id directly: "
+                        f"`fno backlog session add <node-id> --phase {phase}`."
+                    )
                 typer.echo(
                     f"session add: PR {pr} maps to {status}{detail} (phase={phase}); "
-                    "resolution is exact and never fans out. Skipped.",
+                    f"resolution is exact and never fans out.{repair} Skipped.",
                     err=True,
                 )
                 if json_out:
