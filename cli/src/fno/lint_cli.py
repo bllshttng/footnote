@@ -206,10 +206,10 @@ def provider_stderr_merge(
     root = (
         providers_dir
         if providers_dir is not None
-        else _repo_root() / "cli" / "src" / "fno" / "agents" / "providers"
+        else _repo_root() / "cli" / "src" / "fno" / "agents" / "harnesses"
     )
     if not root.is_dir():
-        typer.echo(f"provider-stderr-merge: providers dir not found: {root}", err=True)
+        typer.echo(f"provider-stderr-merge: harness dir not found: {root}", err=True)
         raise typer.Exit(2)
 
     violations: list[str] = []

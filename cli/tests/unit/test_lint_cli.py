@@ -129,8 +129,8 @@ def test_spawn_paths_lint_rejects_spawn_flag_after_other_options(tmp_path: Path)
     assert "--print" in violations[0]
 
 
-def test_spawn_paths_lint_allows_named_provider_file(tmp_path: Path) -> None:
-    source = tmp_path / "cli" / "src" / "fno" / "agents" / "providers" / "claude.py"
+def test_spawn_paths_lint_allows_named_harness_file(tmp_path: Path) -> None:
+    source = tmp_path / "cli" / "src" / "fno" / "agents" / "harnesses" / "claude.py"
     source.parent.mkdir(parents=True)
     source.write_text('cmd = ["claude", "--bg", "prompt"]\n', encoding="utf-8")
 
