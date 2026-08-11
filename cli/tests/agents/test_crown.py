@@ -16,38 +16,59 @@ import pytest
 from fno.paths_testing import use_tmpdir
 
 
-# --- --crown flag parsing ----------------------------------------------------
+# --- the stored scope encoding ----------------------------------------------
+#
+# There is no `--crown` spec parser any more. The flag takes scopes directly and
+# the rung is derived (see test_crown_level_derivation), so what remains to pin
+# here is the ENCODING: a portfolio has to reduce to one canonical string,
+# because the one-live-crown guard compares scopes by equality and would
+# otherwise miss a duplicate spelled in a different order.
 
 
-def test_parse_crown_valid_orderfree() -> None:
-    from fno.agents.cli import _parse_crown
+def test_a_portfolio_canonicalizes_regardless_of_spelling() -> None:
+    from fno.agents.crown import canonical_scope
 
-    assert _parse_crown("level=1,scope=epic-x") == (1, "epic-x")
-    # order-free
-    assert _parse_crown("scope=proj-a,level=0") == (0, "proj-a")
+    assert canonical_scope(["web", "etl"]) == canonical_scope(["etl", "web"])
+    assert canonical_scope(["etl", "web", "etl"]) == "etl,web"
+    assert canonical_scope([" etl ", "web"]) == "etl,web"
+
+
+def test_split_is_the_inverse_of_canonical() -> None:
+    from fno.agents.crown import canonical_scope, split_scope
+
+    assert split_scope(canonical_scope(["web", "etl"])) == ["etl", "web"]
+    assert split_scope("epic-x") == ["epic-x"]
+    assert split_scope(None) == []
 
 
 @pytest.mark.parametrize(
-    "spec",
+    "level,scope",
     [
-        "level=1",             # missing scope
-        "scope=x",             # missing level
-        "level=notanint,scope=x",
-        "level=-1,scope=x",    # negative
-        "level=1,scope=",      # blank scope
-        "garbage",             # no k=v
-        "level=3,scope=x",     # just over the ladder ceiling (0..2)
-        "level=99999999999,scope=x",  # absurd, and would overflow the Rust u32
+        (-1, "epic-x"),          # cannot deserialize into the Rust Option<u32>
+        (3, "epic-x"),           # over the ladder ceiling
+        (True, "epic-x"),        # bool is an int subclass; serializes as JSON true
+        (1, ""),                 # blank scope
+        (1, None),               # a crown that rules nothing
+        (None, "epic-x"),        # a scope with no rung
+        (0, "web,etl"),          # not canonical: unsorted
+        (1, "etl,web"),          # a portfolio is level 0, not 1
     ],
 )
-def test_parse_crown_rejects_malformed(spec: str) -> None:
-    import typer
+def test_the_store_gate_rejects_unstampable_pairs(level, scope) -> None:
+    """The last check before the shared registry. Values arrive here from
+    in-process callers that never touch the CLI, so this cannot live in the flag
+    layer."""
+    from fno.agents.crown import crown_validation_error
 
-    from fno.agents.cli import _parse_crown
+    assert crown_validation_error(level, scope) is not None
 
-    with pytest.raises(typer.Exit) as exc:
-        _parse_crown(spec)
-    assert exc.value.exit_code == 2
+
+def test_the_store_gate_passes_the_two_legal_shapes() -> None:
+    from fno.agents.crown import crown_validation_error
+
+    assert crown_validation_error(None, None) is None      # an uncrowned spawn
+    assert crown_validation_error(2, "epic-x") is None     # a Director
+    assert crown_validation_error(0, "etl,web") is None    # a portfolio
 
 
 # --- spawn stamps the crown, grantor is provenance not self-declared ---------
@@ -237,106 +258,6 @@ def _seed(monkeypatch, tmp_path, rows) -> None:
     write_registry(rows)
 
 
-def _crown(monkeypatch, args, *, self_env: Optional[str]):
-    from typer.testing import CliRunner
-    from fno.agents.cli import agents_app
-    if self_env is None:
-        monkeypatch.delenv("FNO_AGENT_SELF", raising=False)
-    else:
-        monkeypatch.setenv("FNO_AGENT_SELF", self_env)
-    return CliRunner().invoke(agents_app, ["crown", *args])
-
-
-def _rows_by_name():
-    from fno.agents.registry import load_registry
-    return {e.name: e for e in load_registry()}
-
-
-def test_crown_human_grant_is_the_default(tmp_path: Path, monkeypatch) -> None:
-    # A shell with no agent identity in env is an attended human. --level bypasses
-    # scope derivation (x-7685: a scope that resolves to nothing is now refused,
-    # not defaulted to 0); this test is about the grantor class, not the level.
-    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "0"], self_env=None)
-    assert r.exit_code == 0, r.output
-    row = _rows_by_name()["worker"]
-    assert (row.crown_level, row.crown_scope, row.crown_grantor) == (0, "epic-x", "human")
-
-
-def test_crown_superset_king_stamps_grantor_and_derives_level(tmp_path: Path, monkeypatch) -> None:
-    caller = _entry("king", short_id="bbbb2222", crown_level=1, crown_scope="proj-a")
-    _seed(monkeypatch, tmp_path, [caller, _entry("worker", short_id="cccc3333")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env="king")
-    assert r.exit_code == 0, r.output
-    row = _rows_by_name()["worker"]
-    assert row.crown_scope == "epic-x"
-    assert row.crown_level == 2  # grantor level 1 + 1
-    assert row.crown_grantor == "bbbb2222"  # the grantor's session id, provenance
-
-
-def test_crown_config_grant_when_knob_on(tmp_path: Path, monkeypatch) -> None:
-    _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
-    stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=True))
-    monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
-    assert r.exit_code == 0, r.output
-    assert _rows_by_name()["worker"].crown_grantor == "config-grant"
-
-
-def test_crown_refuses_self_grant(tmp_path: Path, monkeypatch) -> None:
-    _seed(monkeypatch, tmp_path, [_entry("king", short_id="bbbb2222", crown_level=1, crown_scope="proj-a")])
-    r = _crown(monkeypatch, ["king", "--scope", "epic-x"], self_env="king")
-    assert r.exit_code == 2
-    assert "self-grant" in r.output.lower()
-
-
-def test_crown_refuses_second_live_crown_over_one_scope(tmp_path: Path, monkeypatch) -> None:
-    existing = _entry("king1", short_id="bbbb2222", crown_level=1, crown_scope="epic-x", status="live")
-    _seed(monkeypatch, tmp_path, [existing, _entry("worker", short_id="cccc3333")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
-    assert r.exit_code == 2
-    assert "one live crown per scope" in r.output.lower()
-
-
-def test_crown_refuses_second_crown_when_holder_is_busy(tmp_path: Path, monkeypatch) -> None:
-    # A busy/idle king still holds its crown: the one-live-crown refusal must
-    # treat every non-terminal status as active, not just literal "live" (the
-    # P1 shape _TERMINAL_STATUSES was introduced for in --succeed + the orphan
-    # check; the grant path shares the invariant, so it shares the set).
-    existing = _entry("king1", short_id="bbbb2222", crown_level=1, crown_scope="epic-x", status="busy")
-    _seed(monkeypatch, tmp_path, [existing, _entry("worker", short_id="cccc3333")])
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x"], self_env=None)
-    assert r.exit_code == 2
-    assert "one live crown per scope" in r.output.lower()
-
-
-def test_crown_refuses_unattended_agent_without_superset_or_config(tmp_path: Path, monkeypatch) -> None:
-    _seed(monkeypatch, tmp_path, [_entry("bot", short_id="bbbb2222"), _entry("worker", short_id="cccc3333")])
-    stub = SimpleNamespace(agents=SimpleNamespace(crown_config_grant=False))
-    monkeypatch.setattr("fno.config.load_settings", lambda: stub)
-    # --level bypasses scope derivation (x-7685) so the test reaches the actual
-    # authorization refusal it targets: agent with no superset crown, no config grant.
-    r = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "1"], self_env="bot")
-    assert r.exit_code == 2
-    assert "superset" in r.output.lower() or "config" in r.output.lower()
-
-
-def test_crown_explicit_level_and_bound(tmp_path: Path, monkeypatch) -> None:
-    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    ok = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "2"], self_env=None)
-    assert ok.exit_code == 0, ok.output
-    assert _rows_by_name()["worker"].crown_level == 2  # IC, the deepest crown
-    # just over the ladder (0..2) is refused
-    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    bad = _crown(monkeypatch, ["worker", "--scope", "epic-x", "--level", "3"], self_env=None)
-    assert bad.exit_code == 2
-
-
-def test_crown_refuses_unknown_handle(tmp_path: Path, monkeypatch) -> None:
-    _seed(monkeypatch, tmp_path, [_entry("worker", short_id="aaaa1111")])
-    r = _crown(monkeypatch, ["ghost", "--scope", "epic-x"], self_env=None)
-    assert r.exit_code == 2
-    assert "no agent" in r.output.lower()
 
 
 def test_spawn_crown_declined_when_scope_already_occupied(tmp_path: Path, monkeypatch) -> None:

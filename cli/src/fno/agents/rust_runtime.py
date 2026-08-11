@@ -223,10 +223,6 @@ PYTHON_AGENT_VERBS: frozenset[str] = frozenset({
     # writes an idle roster row (register_existing_session). Pure Python, no Rust
     # client port, so it must never auto-route to the daemon.
     "register",
-    # US10: the crown promotion verb (`fno agents crown`). Pure Python
-    # (grantor-class provenance + registry RMW via update_registry); no Rust
-    # client port, so it must never auto-route to the daemon.
-    "crown",
     # x-a472: the transcript-tail supervision classifier (`fno agents truth`).
     # Read-only, pure Python (fno.agents.session_truth reads the transcript via
     # peek); no Rust client port, so it must never auto-route to the daemon.
@@ -407,22 +403,28 @@ def _is_role_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
 def _is_crown_bearing_spawn(verb: str, args: Sequence[str]) -> bool:
     """True for a ``spawn`` carrying ``--crown`` (bestow-at-spawn).
 
-    ``--crown level=N,scope=X`` is implemented only in the Python spawn path
-    (``cmd_spawn`` -> ``_parse_crown`` stamps the crown onto the spawned row).
-    The Rust client does not parse ``--crown``, so a ``spawn ... --crown ...``
-    that auto-routed to the binary would exit with ``unknown flag: --crown`` -
-    the documented grammar reachable only from the path the default route never
-    reaches. Same shape and reason as ``--role`` above. Detected here so the call
-    falls through to the Python runtime that owns the implementation.
+    ``--crown``/``-k`` is implemented only in the Python spawn path (``cmd_spawn``
+    derives the rung from the scope and stamps the crown onto the spawned row).
+    The Rust client parses neither spelling, so a crown-bearing spawn that
+    auto-routed to the binary would exit with ``unknown flag`` - the documented
+    grammar reachable only from the path the default route never reaches. Same
+    shape and reason as ``--role`` above. Detected here so the call falls through
+    to the Python runtime that owns the implementation.
+
+    BOTH spellings must be listed. The short form is not cosmetic: it is the one
+    the docs teach for a portfolio (``-k etl -k web``), so a detector that knew
+    only the long form would route exactly the multi-scope case into a binary
+    that cannot parse it.
 
     Load-bearing on ``--substrate bg``, where it is what makes the crown land at
-    all: bg spawns otherwise exec the binary, which has no crown parser. The pane
-    substrate diverts on its own via ``_is_pane_substrate_spawn``.
+    all: bg spawns otherwise exec the binary. The pane substrate diverts on its
+    own via ``_is_pane_substrate_spawn``.
     """
     if verb != "spawn":
         return False
     return any(
-        a == "--crown" or a.startswith("--crown=") for a in _args_before_argv(args)
+        a in ("--crown", "-k") or a.startswith(("--crown=", "-k="))
+        for a in _args_before_argv(args)
     )
 
 

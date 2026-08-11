@@ -90,44 +90,9 @@ KNOWN_STATUSES = frozenset(
 # so a set that forgets a status mints a second crown over one scope.
 TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
 
-# The crown ladder is exactly three altitudes: VP (0, project) -> Director
-# (1, epic) -> IC (2, node).
-MAX_CROWN_LEVEL = 2
-
-
-def crown_validation_error(level: Any, scope: Any) -> Optional[str]:
-    """Why ``(level, scope)`` is not a stampable crown, or None when it is.
-
-    Lives beside the fields it constrains because the CLI is not the only
-    writer. ``--crown`` reaches a parser that validates the spec, but
-    ``dispatch_spawn`` and ``dispatch_spawn_pane`` take ``(level, scope)``
-    directly from in-process callers, and a value that skipped this check lands
-    in the SHARED store: a negative or boolean level cannot deserialize into the
-    Rust row's ``crown_level: Option<u32>``, so one bad write breaks registry
-    reads for every reader, not just the caller that made it.
-
-    Both-None is the uncrowned spawn and passes. Anything else must name BOTH
-    halves: a level with no scope stamps a crown that rules nothing and that the
-    one-live-crown guard (which keys on scope) can never see or supersede.
-    """
-    if level is None and scope is None:
-        return None
-    if level is None or scope is None:
-        return (
-            f"a crown needs both level and scope; got level={level!r} scope={scope!r}"
-        )
-    # bool before int: `True` is an int subclass and would serialize as JSON
-    # `true`, which fails the same u32 deserialize a negative does.
-    if isinstance(level, bool) or not isinstance(level, int):
-        return f"crown level must be an int 0..{MAX_CROWN_LEVEL}; got {level!r}"
-    if not 0 <= level <= MAX_CROWN_LEVEL:
-        return (
-            f"crown level must be 0..{MAX_CROWN_LEVEL} "
-            f"(VP=0 project, Director=1 epic, IC=2 node); got {level}"
-        )
-    if not isinstance(scope, str) or not scope.strip():
-        return f"crown scope must be a nonblank id; got {scope!r}"
-    return None
+# The crown's MEANING (the ladder, scope encoding, derivation, validation) lives
+# in fno.agents.crown, not here: this module owns the three fields on the row and
+# nothing about what they signify. Storage does not get to define authority.
 
 # Valid host_mode values (interactive-drive node). A missing/null key coerces to
 # "exec" in load_registry; any other concrete value is rejected like an alien

@@ -37,14 +37,43 @@ def _clear_parent_markers(monkeypatch):
 
 @pytest.fixture
 def bg_home(tmp_path, monkeypatch):
-    """Isolated fno home with a fake claude binary on PATH."""
+    """Isolated fno home with a fake claude, a graph holding two epics, and one
+    configured project. The territory has to exist because the rung is DERIVED
+    from it: a scope naming nothing is refused, so a fixture without a graph
+    would test the refusal path in every case."""
+    import json
+
     from tests.agents._fake_claude import install_fake_claude
+    from fno import paths
+    from fno.projects import resolve as proj_resolve
 
     use_tmpdir(monkeypatch, tmp_path)
     bin_dir = tmp_path / "bin"
     install_fake_claude(bin_dir)
     monkeypatch.setenv("PATH", str(bin_dir))
-    return tmp_path
+
+    graph_path = paths.graph_json()
+    graph_path.parent.mkdir(parents=True, exist_ok=True)
+    graph_path.write_text(
+        json.dumps(
+            {
+                "entries": [
+                    {"id": "epic-x", "type": "epic", "project": "alpha"},
+                    {"id": "epic-y", "type": "epic", "project": "alpha"},
+                    {"id": "epic-z", "type": "epic", "project": "alpha"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    cfg = tmp_path / "config.toml"
+    cfg.write_text(
+        '[work.workspaces.ws1]\nprojects = [{ name = "alpha" }]\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(proj_resolve, "SETTINGS_PATH", cfg)
+    proj_resolve._clear_cache()
+    yield tmp_path
+    proj_resolve._clear_cache()
 
 
 def _spawn(*args: str):
@@ -67,26 +96,27 @@ def test_bg_spawn_stamps_the_crown(bg_home, monkeypatch) -> None:
 
     result = _spawn(
         "spawn", "--name", "king-bg", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "level=1,scope=epic-x",
+        "--substrate", "bg", "--crown", "epic-x",
     )
     assert result.exit_code == 0, result.output
 
     row = _row("king-bg")
-    assert row.crown_level == 1
+    assert row.crown_level == 2, "an epic is a Director"
     assert row.crown_scope == "epic-x"
     # Provenance, not self-declaration: the grantor is the session that spawned it.
     assert row.crown_grantor == "parent-sess-abc"
-    assert row.crown_label == "L1 epic-x"
+    assert row.crown_label == "L2 epic-x"
 
 
 def test_bg_crown_grantor_defaults_to_human(bg_home, monkeypatch) -> None:
     """No parent session env == a human's own shell, same rule as the pane path."""
     result = _spawn(
         "spawn", "--name", "king-bg-human", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "level=0,scope=proj-a",
+        "--substrate", "bg", "--crown", "alpha",
     )
     assert result.exit_code == 0, result.output
     assert _row("king-bg-human").crown_grantor == "human"
+    assert _row("king-bg-human").crown_level == 1, "a project is a project king"
 
 
 def test_bg_spawn_without_crown_leaves_the_fields_none(bg_home, monkeypatch) -> None:
@@ -109,7 +139,7 @@ def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
     bg_home, monkeypatch
 ) -> None:
     """A second crown over one scope is the unrecoverable failure; an uncrowned
-    worker is recoverable via `fno agents crown`. So the spawn SUCCEEDS and the
+    worker can still be crowned later by spawning again. So the spawn SUCCEEDS and the
     crown is declined, matching the pane path rather than refusing the launch."""
     update_registry(
         lambda rows: rows
@@ -120,7 +150,7 @@ def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
                 log_path="",
                 harness="claude",
                 status="busy",  # active, not merely the literal "live"
-                crown_level=1,
+                crown_level=2,
                 crown_scope="epic-x",
                 crown_grantor="human",
             )
@@ -129,7 +159,7 @@ def test_bg_spawn_declines_a_duplicate_crown_and_launches_uncrowned(
 
     result = _spawn(
         "spawn", "--name", "pretender", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "level=1,scope=epic-x",
+        "--substrate", "bg", "--crown", "epic-x",
     )
     assert result.exit_code == 0, result.output
 
@@ -152,7 +182,7 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
                 log_path="",
                 harness="claude",
                 status="exited",
-                crown_level=1,
+                crown_level=2,
                 crown_scope="epic-y",
                 crown_grantor="human",
             )
@@ -161,10 +191,10 @@ def test_bg_spawn_crowns_over_a_scope_whose_king_is_terminal(bg_home, monkeypatc
 
     result = _spawn(
         "spawn", "--name", "successor", "-H", "claude", "reign",
-        "--substrate", "bg", "--crown", "level=1,scope=epic-y",
+        "--substrate", "bg", "--crown", "epic-y",
     )
     assert result.exit_code == 0, result.output
-    assert _row("successor").crown_level == 1
+    assert _row("successor").crown_level == 2
 
 
 # --- headless stays refused --------------------------------------------------
@@ -176,7 +206,7 @@ def test_headless_crown_is_refused(bg_home, one_shot_args) -> None:
     the grantor's next turn. This is the ONE substrate the refusal still covers."""
     result = _spawn(
         "spawn", "--name", "one-shot-king", "-H", "claude", "reign",
-        *one_shot_args, "--crown", "level=1,scope=epic-z",
+        *one_shot_args, "--crown", "epic-z",
     )
     assert result.exit_code == 2
     assert "outlives the grant" in result.output
@@ -192,7 +222,7 @@ def test_refusal_does_not_claim_bg_is_unsupported(bg_home) -> None:
     replacement must name what DOES work and must not resurrect that phrasing."""
     result = _spawn(
         "spawn", "--name", "one-shot-king", "-H", "claude", "reign",
-        "-p", "--crown", "level=1,scope=epic-z",
+        "-p", "--crown", "epic-z",
     )
     assert "not yet supported" not in result.output
     assert "--substrate pane" in result.output and "--substrate bg" in result.output
@@ -310,7 +340,7 @@ def test_dispatch_spawn_pane_refuses_invalid_crown_values(
 def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:
     """The validator must not reject the two shapes that are legal: a real crown
     at each ladder rung, and both-None (an ordinary uncrowned spawn)."""
-    from fno.agents.registry import crown_validation_error
+    from fno.agents.crown import crown_validation_error
 
     assert crown_validation_error(None, None) is None
     for lvl in (0, 1, 2):
@@ -320,14 +350,29 @@ def test_valid_crown_pairs_and_the_uncrowned_pair_pass() -> None:
 # --- the literal copies in cli.py must not drift from registry ---------------
 
 
-def test_crown_constant_parity() -> None:
-    """cli.py keeps literal copies rather than importing registry at module scope
-    (~30ms on every `fno agents` invocation). That is only safe while the copies
-    agree: a status set that forgets a variant reads a dead king as reigning and
-    mints a second crown over one scope, and a drifted ceiling lets the CLI admit
-    a level the shared validator rejects."""
-    from fno.agents.cli import _MAX_CROWN_LEVEL, _TERMINAL_STATUSES
-    from fno.agents.registry import MAX_CROWN_LEVEL, TERMINAL_STATUSES
+@pytest.mark.parametrize("flag", ["--crown", "-k"])
+def test_both_crown_spellings_stay_on_the_python_path(flag: str) -> None:
+    """A crown-bearing bg spawn must NOT exec the Rust client, which parses
+    neither spelling and would die on an unknown flag.
 
-    assert _TERMINAL_STATUSES == TERMINAL_STATUSES
-    assert _MAX_CROWN_LEVEL == MAX_CROWN_LEVEL
+    The short form is the one that matters here and the one a detector is most
+    likely to miss: the docs teach `-k etl -k web` for a portfolio, so knowing
+    only `--crown` would route exactly the multi-scope case into the binary. The
+    pane substrate is excluded from the assertion on purpose - it diverts on its
+    own, so it would pass with or without this guard and prove nothing."""
+    from fno.agents.rust_runtime import (
+        _is_crown_bearing_spawn,
+        _is_pane_substrate_spawn,
+    )
+
+    args = ["spawn", "w", "--substrate", "bg", flag, "etl", flag, "web"]
+    assert _is_crown_bearing_spawn("spawn", args) is True
+    assert _is_pane_substrate_spawn("spawn", args) is False
+
+
+def test_a_crown_after_the_argv_break_belongs_to_the_payload() -> None:
+    """`-k` past `--argv` is the spawned command's flag, not fno's, so it must not
+    drag an otherwise-Rustable spawn onto the Python path."""
+    from fno.agents.rust_runtime import _is_crown_bearing_spawn
+
+    assert not _is_crown_bearing_spawn("spawn", ["spawn", "w", "--argv", "-k", "etl"])

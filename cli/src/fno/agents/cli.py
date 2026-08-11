@@ -354,417 +354,6 @@ def cmd_watch(
     raise typer.Exit(rc)
 
 
-# The crown ladder is exactly three altitudes: VP (0, project) -> Director
-# (1, epic) -> IC (2, node). A level outside 0..2 is not a real crown, so it is
-# refused - this both enforces the ladder and keeps crown_level far inside the
-# Rust registry row's u32 (a fat-fingered arbitrary-precision Python int can't
-# overflow it and poison the shared store). Same literal-not-import reasoning as
-# _TERMINAL_STATUSES below; pinned to registry.MAX_CROWN_LEVEL by the parity test.
-_MAX_CROWN_LEVEL = 2
-
-# Terminal (non-active) registry statuses: a worker in any OTHER state
-# (spawning/ready/idle/busy/live/restarting) is active and may still need its
-# king. Used by the crown transfer + the orphan check so they do not miss a
-# worker that is "busy" or "idle" (only checking literal "live" was a codex P1).
-# Deliberately a literal, not an import of registry.TERMINAL_STATUSES: importing
-# registry at module scope costs ~30ms on every `fno agents` invocation for one
-# frozenset. The two copies are pinned equal by test_crown_terminal_set_parity,
-# so drift is a red test rather than a duplicate crown.
-_TERMINAL_STATUSES = frozenset({"exited", "orphaned", "failed", "permanent_dead"})
-
-
-def _parse_crown(spec: str) -> tuple[int, str]:
-    """Parse a ``--crown 'level=N,scope=X'`` spec into (level, scope); exit 2 on
-    any malformed part. ``level`` must be a non-negative int, ``scope`` nonblank.
-    Order-free, both keys required. The grantor is deliberately NOT here: it is
-    stamped ambiently at spawn from the spawning session, never caller-supplied
-    (US9, the never-self-declared rule).
-
-    ponytail: splits scope on ``,`` - a scope with a literal comma is not a real
-    node/epic/project id, so the simple split holds.
-    """
-    parts: dict[str, str] = {}
-    for chunk in spec.split(","):
-        key, sep, val = chunk.partition("=")
-        if not sep:
-            print(f"--crown expects 'level=N,scope=X'; got {chunk!r}", file=sys.stderr)
-            raise typer.Exit(code=2)
-        parts[key.strip()] = val.strip()
-    missing = {"level", "scope"} - parts.keys()
-    if missing:
-        print(
-            f"--crown missing {', '.join(sorted(missing))}; need 'level=N,scope=X'",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    try:
-        level = int(parts["level"])
-    except ValueError:
-        print(f"--crown level must be an int >= 0; got {parts['level']!r}", file=sys.stderr)
-        raise typer.Exit(code=2)
-    # Range + nonblank-scope live in registry.crown_validation_error, the one
-    # rule every crown writer runs (the spawn dispatchers take (level, scope)
-    # directly and never reach this parser). Imported in-function: cli.py keeps
-    # registry off its module scope, and by here we are already doing real work.
-    from fno.agents.registry import crown_validation_error
-
-    problem = crown_validation_error(level, parts["scope"])
-    if problem is not None:
-        print(f"--crown {problem}", file=sys.stderr)
-        raise typer.Exit(code=2)
-    return level, parts["scope"]
-
-
-def _scope_is_subset(target_scope: str, grantor_scope: str | None) -> bool:
-    """Is ``target_scope`` a subset of the grantor's crown scope (US10)?
-
-    Scopes are opaque ids/names, so structural project>epic>node containment is
-    not derivable in code. The enforceable rule: a grantor may grant a DIFFERENT
-    (narrower) scope, never re-grant its own - a same-scope grant would be a peer
-    crown, already refused by the one-live-crown-per-scope rule. Deeper
-    containment is the grantor's good-faith responsibility, the same trust the
-    crown model places in a crowning brief.
-    """
-    return bool(grantor_scope) and target_scope != grantor_scope
-
-
-def _derive_crown_level_from_scope(scope: str) -> int | None:
-    """The ladder altitude is a FACT ABOUT THE SCOPE, not an operator input
-    (US10): a project is a VP (0), an epic is a Director (1), any other backlog
-    node is an IC (2). Returns the derived level, or None when the scope
-    resolves to neither a graph entry nor a known project.
-
-    None is the refusal signal: the prior behavior fell through to level 0 for
-    ANY scope, so `fno agents crown bob --scope banana` minted a VP over a scope
-    nobody could find. A scope that resolves to nothing is a typo, and stamping
-    VP-over-a-typo is worse than exiting 2. An explicit ``--level`` bypasses
-    this entirely (it sets resolved_level before this runs), as does a
-    superset-king grant (which uses the grantor's level + 1); this only fires
-    for a human or config grant with no --level.
-    """
-    from fno import paths
-    from fno.graph.store import read_graph
-
-    # Resolve the path dynamically: read_graph()'s default arg is frozen at
-    # import time, so it would ignore a redirected state_dir (tests, overrides).
-    entry = next(
-        (e for e in read_graph(paths.graph_json())
-         if isinstance(e, dict) and e.get("id") == scope),
-        None,
-    )
-    if entry is not None:
-        return 1 if entry.get("type") == "epic" else 2
-    try:
-        from fno.projects.resolve import resolve_project_name
-
-        resolve_project_name(scope)
-        return 0
-    except Exception:
-        return None
-
-
-def _caller_row_by_session():
-    """The calling session's registry row resolved by harness session id, or None.
-
-    `FNO_AGENT_SELF` identifies a SPAWNED agent. A hand-started agent (a king
-    session joined via /fno-me, not spawned) carries no `FNO_AGENT_SELF` and
-    would otherwise be indistinguishable from an attended human - so a crown it
-    grants would be stamped `grantor="human"`, weakening the provenance the
-    crown exists to provide. The registry is the crown's source of truth for who
-    is an agent, so resolve the row by harness session id the same way
-    `fno agents whoami` does (session-fallback). Returns None for a shell with no
-    row; the residual attended-human-vs-unregistered-agent ambiguity is recorded
-    in x-7685 rather than invented away.
-    """
-    from fno.agents.registry import load_registry
-    from fno.agents.whoami import _find_by_session
-    from fno.harness_identity import resolve_harness_identity
-
-    ident = resolve_harness_identity()
-    if not ident.session_id or not ident.harness:
-        return None
-    try:
-        return _find_by_session(load_registry(), ident.session_id, ident.harness)
-    except Exception:
-        return None
-
-
-def _crown_succeed(target, scope: str, level: int | None, caller_row) -> None:
-    """The ``--succeed`` transfer (US6): move the caller's live crown over
-    ``scope`` onto ``target`` in one atomic registry write.
-
-    A TRANSFER, not a grant. The two gates that refuse a same-scope grant
-    (one-live-crown, not-a-superset) are correct for grants and stay so;
-    succession is the separate primitive an abdicating king needs because it is
-    neither. The caller must hold a live crown over EXACTLY scope (nothing to
-    transfer otherwise); the one-live-crown check narrows to exclude the caller's
-    own row, since the row being vacated cannot be the reason the vacating is
-    refused; the successor must be LIVE, since transferring onto a dead row is
-    the orphaning this feature exists to prevent wearing a receipt; level
-    defaults to the caller's own altitude, not +1, so a successor inherits the
-    rung; and ``crown_grantor`` records the outgoing king so the chain stays
-    externally verifiable.
-    """
-    from fno.agents.registry import update_registry
-
-    caller_name = caller_row.name if caller_row else None
-    target_name = target.name
-    err: list[str | None] = [None]  # closure: validation failure message
-    out: list[dict | None] = [None]  # closure: receipt on success
-
-    def _transfer(rows: list) -> list:
-        # Re-resolve caller + target from the LOCKED rows, not the stale snapshots
-        # passed in: a concurrent --succeed could have changed them between the
-        # pre-read and this write. The validation that decides whether to mutate
-        # runs HERE under the registry lock, so two concurrent transfers serialize
-        # and cannot create duplicate crowns or transfer onto a reaped row.
-        live_caller = (
-            next((r for r in rows if r.name == caller_name), None)
-            if caller_name else None
-        )
-        live_target = next((r for r in rows if r.name == target_name), None)
-        # crown_level is None means "no crown"; level 0 (VP) is a real crown, so
-        # the `is None` test (not truthiness) keeps a VP transferable.
-        if live_caller is None or live_caller.crown_level is None or live_caller.crown_scope != scope:
-            err[0] = (
-                f"refusing --succeed: this session holds no live crown over scope "
-                f"{scope!r} to transfer. Succession moves an EXISTING crown; it "
-                "does not grant a new one. Hold the crown first, or drop --succeed."
-            )
-            return rows  # unchanged
-        if live_target is None or live_target.status in _TERMINAL_STATUSES:
-            status = live_target.status if live_target else "absent"
-            err[0] = (
-                f"refusing --succeed: successor {target_name!r} is not active "
-                f"(status={status!r}). A crown must transfer onto an active row; "
-                "transferring onto a terminal row is the orphaning this feature prevents."
-            )
-            return rows
-        # Narrowed one-live-crown: a row OTHER than the caller's own (being
-        # vacated) or the successor holding this scope is corrupt state.
-        for r in rows:
-            if (
-                r.name not in (caller_name, target_name)
-                and r.crown_scope == scope
-                and r.status not in _TERMINAL_STATUSES
-            ):
-                err[0] = (
-                    f"refusing --succeed: {r.name!r} already holds a live crown "
-                    f"over scope {scope!r} (one live crown per scope; the caller's "
-                    "own row is excluded as the one being vacated)."
-                )
-                return rows
-        # Validated under the lock: vacate caller + stamp successor in one pass.
-        # Two writes would open a window where the scope is uncrowned - exactly
-        # when a worker's review mail arrives and resolves to nobody.
-        resolved_level = level if level is not None else live_caller.crown_level
-        grantor = live_caller.session_id or live_caller.name
-        for r in rows:
-            if r.name == caller_name:
-                r.crown_level = None
-                r.crown_scope = None
-                r.crown_grantor = None
-            elif r.name == target_name:
-                r.crown_level = resolved_level
-                r.crown_scope = scope
-                r.crown_grantor = grantor
-        out[0] = {
-            "succeeded": target_name,
-            "from": caller_name,
-            "level": resolved_level,
-            "scope": scope,
-            "grantor": grantor,
-        }
-        return rows
-
-    update_registry(_transfer)
-    if err[0]:
-        print(err[0], file=sys.stderr)
-        raise typer.Exit(code=2)
-    print(json.dumps(out[0]))
-
-
-@agents_app.command("crown", hidden=True)
-def cmd_crown(
-    handle: str = typer.Argument(
-        ..., help="Existing agent handle (name / 8-hex / session id) to coronate in place."
-    ),
-    scope: str = typer.Option(
-        ...,
-        "--scope",
-        help="The epic / project / node id the crown rules over (e.g. --scope x-d92e).",
-    ),
-    level: int | None = typer.Option(
-        None,
-        "--level",
-        help=(
-            "Ladder altitude 0..2 (VP=0 project, Director=1 epic, IC=2 node). "
-            "Default: the grantor's level+1 (superset-king), else 0; under "
-            "--succeed, the caller's own altitude (a successor inherits the rung)."
-        ),
-    ),
-    succeed: bool = typer.Option(
-        False,
-        "--succeed",
-        help=(
-            "Transfer THIS session's crown over --scope to <handle> (succession), "
-            "not grant a new one. The caller must hold a live crown over exactly "
-            "--scope; one atomic write clears the caller and stamps the successor "
-            "at the caller's altitude. Used by an abdicating king."
-        ),
-    ),
-) -> None:
-    """Coronate an EXISTING session in place (US10): write the US9 crown fields
-    onto ``handle``'s registry row.
-
-    The crown is GRANTED, never self-declared - the grantor class is stamped as
-    provenance: a live superset-crown holder (scope validated against its own
-    row), an attended human (a shell with no agent identity in env), or a
-    standing config grant (``config.agents.crown_config_grant``, DEFAULT OFF).
-    Refuses a self-grant and a second live crown over the same scope.
-
-    ``--succeed`` is a TRANSFER, not a grant: it moves the caller's existing
-    crown over --scope onto <handle> in one atomic write. A same-scope GRANT is
-    refused twice over (one-live-crown + not-a-superset), so succession is the
-    only way an abdicating king hands a crown to a successor over the same scope.
-    """
-    from fno.agents.registry import (
-        AgentResolutionError,
-        load_registry,
-        resolve_agent,
-        update_registry,
-    )
-    from fno.config import load_settings
-
-    scope = scope.strip()
-    if not scope:
-        print("--scope must be nonblank", file=sys.stderr)
-        raise typer.Exit(code=2)
-    if level is not None and (level < 0 or level > _MAX_CROWN_LEVEL):
-        print(
-            f"--level must be between 0 and {_MAX_CROWN_LEVEL}; got {level}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    try:
-        target = resolve_agent(handle).entry
-    except AgentResolutionError as exc:
-        print(f"no agent for handle {handle!r}: {exc}", file=sys.stderr)
-        raise typer.Exit(code=2)
-
-    # The caller's own identity: a spawned agent carries FNO_AGENT_SELF; a
-    # hand-started agent (a king session joined via /fno-me, not spawned) does
-    # NOT, so FNO_AGENT_SELF alone would misclassify it as an attended human and
-    # stamp the wrong grantor. The registry is the crown's source of truth for
-    # who is an agent, so fall back to a session-id lookup (the same
-    # session-fallback `fno agents whoami` uses). Only a shell with no row reads
-    # as an attended human.
-    caller_self = (os.environ.get("FNO_AGENT_SELF") or "").strip()
-    caller_row = None
-    if caller_self:
-        try:
-            caller_row = resolve_agent(caller_self).entry
-        except AgentResolutionError:
-            caller_row = None
-    if caller_row is None:
-        caller_row = _caller_row_by_session()
-
-    # Refusal: never self-declared - a session cannot crown its own row.
-    if caller_row is not None and caller_row.name == target.name:
-        print(
-            "refusing a self-grant: a crown is bestowed, never self-declared",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    if succeed:
-        _crown_succeed(target, scope, level, caller_row)
-        return
-
-    # Refusal: one live crown per scope. Active = NOT in the terminal set: a
-    # king that is "busy"/"idle"/"restarting" still holds its crown, so a literal
-    # "live" check here would let a second grant mint over a busy king's scope
-    # (the same P1 shape _TERMINAL_STATUSES was introduced for in --succeed +
-    # the orphan check). Same set, same invariant.
-    for e in load_registry():
-        if (
-            e.name != target.name
-            and e.crown_scope == scope
-            and e.status not in _TERMINAL_STATUSES
-        ):
-            print(
-                f"refusing: {e.name!r} already holds a live crown over scope "
-                f"{scope!r} (one live crown per scope)",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-
-    # Authorize + stamp the grantor provenance (first match wins).
-    caller_has_crown = caller_row is not None and caller_row.crown_level is not None
-    resolved_level = level
-    if caller_row is not None and caller_has_crown and _scope_is_subset(scope, caller_row.crown_scope):
-        grantor = caller_row.session_id or caller_row.name  # superset-king
-        if resolved_level is None:
-            resolved_level = (caller_row.crown_level or 0) + 1
-    elif load_settings().agents.crown_config_grant:
-        grantor = "config-grant"
-    elif not caller_self and caller_row is not None:
-        # A hand-started agent (no FNO_AGENT_SELF, row via session-fallback) with
-        # no superset crown still grants; stamp ITS identity, not "human". A
-        # SPAWNED agent (caller_self set) with no crown hits the else-refuse below.
-        grantor = caller_row.session_id or caller_row.name
-    elif not caller_self:
-        grantor = "human"  # an attended human shell (no registry row, no agent identity)
-    else:
-        print(
-            f"refusing: this session holds no superset crown over {scope!r}, is "
-            "not an attended human, and config.agents.crown_config_grant is off. "
-            "Grant from a superset-king, a human shell, or enable the config grant.",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-    if resolved_level is None:
-        # No explicit --level and not a superset-king grant: the altitude is a
-        # fact about the scope (project=0, epic=1, node=2), not a default 0.
-        resolved_level = _derive_crown_level_from_scope(scope)
-        if resolved_level is None:
-            print(
-                f"refusing: --scope {scope!r} resolves to neither a backlog node "
-                "nor a known project, so it is likely a typo. A crown needs a real "
-                "scope; this path would otherwise stamp level 0 over a scope nobody "
-                "can find. Pass a project name (->0), an epic id (->1), a node id "
-                "(->2), or set --level explicitly to bypass scope derivation.",
-                file=sys.stderr,
-            )
-            raise typer.Exit(code=2)
-    if resolved_level > _MAX_CROWN_LEVEL:
-        print(
-            f"refusing: derived crown level {resolved_level} exceeds the ceiling "
-            f"{_MAX_CROWN_LEVEL}",
-            file=sys.stderr,
-        )
-        raise typer.Exit(code=2)
-
-    def _crown(rows: list) -> list:
-        for r in rows:
-            if r.name == target.name:
-                r.crown_level = resolved_level
-                r.crown_scope = scope
-                r.crown_grantor = grantor
-        return rows
-
-    update_registry(_crown)
-    print(
-        json.dumps(
-            {
-                "crowned": target.name,
-                "level": resolved_level,
-                "scope": scope,
-                "grantor": grantor,
-            }
-        )
-    )
 
 
 @agents_app.command("spawn")
@@ -1053,17 +642,20 @@ def cmd_spawn(
             "and --substrate pane."
         ),
     ),
-    crown: str | None = typer.Option(
-        None,
+    crown: list[str] = typer.Option(
+        [],
         "--crown",
+        "-k",
         help=(
-            "Bestow an orchestrator crown on the spawned worker (US9): "
-            "'level=N,scope=X'. scope = the epic / project / node id the crown "
-            "rules over (e.g. scope=x-d92e); level = the ladder altitude 0..2 "
-            "(VP=0 project, Director=1 epic, IC=2 node). Stamped on the child's "
-            "row with the grantor derived from THIS session - never self-declared. "
-            "Works on --substrate pane and bg (bg is claude-only); refused on "
-            "headless, whose one-shot exits before it can reign."
+            "Bestow an orchestrator crown on the spawned worker, over the "
+            "territory named here. Repeatable: pass ONE epic id (a Director), "
+            "ONE project name (a project king), or SEVERAL project names for a "
+            "portfolio (`-k etl -k web`). The ladder altitude is derived from "
+            "what you name - there is no --level, and a node that is not an epic "
+            "is refused, since implementers get no crowns. Stamped with the "
+            "grantor derived from THIS session, never self-declared. Works on "
+            "--substrate pane and bg (bg is claude-only); refused on headless, "
+            "whose one-shot exits before it can reign."
         ),
     ),
     node: str | None = typer.Option(
@@ -1343,8 +935,9 @@ def cmd_spawn(
             print("--at requires --split (the side to place on)", file=sys.stderr)
             raise typer.Exit(code=2)
 
-    # --crown level=N,scope=X (US9): parse + validate now; the grantor is stamped
-    # ambiently at spawn from this session, so the child's row records who
+    # --crown/-k <scope>... : the operator names the TERRITORY and the ladder
+    # altitude is derived from it (crown.derive_crown_level). The grantor is
+    # stamped ambiently at spawn from this session, so the child's row records who
     # actually bestowed the crown, never a value it could forge.
     #
     # The substrate axis the crown actually cares about is REIGN LENGTH, not pane
@@ -1364,7 +957,7 @@ def cmd_spawn(
     # king; the crown itself does not.
     crown_level: int | None = None
     crown_scope: str | None = None
-    if crown is not None:
+    if crown:
         if once or substrate == "headless":
             print(
                 "--crown needs a session that outlives the grant; headless is a "
@@ -1373,7 +966,13 @@ def cmd_spawn(
                 file=sys.stderr,
             )
             raise typer.Exit(code=2)
-        crown_level, crown_scope = _parse_crown(crown)
+        from fno.agents.crown import CrownScopeError, resolve_crown
+
+        try:
+            crown_level, crown_scope = resolve_crown(list(crown))
+        except CrownScopeError as exc:
+            print(f"--crown: {exc}", file=sys.stderr)
+            raise typer.Exit(code=2) from exc
 
     # --account names a claude account PROFILE (config_dir/settings/plugins); a
     # vendor route (-P/--route/--role) names endpoint+auth+model. They are
