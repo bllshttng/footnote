@@ -959,6 +959,9 @@ def _codex_create_path(
     try:
         update_registry(lambda entries: entries + [new_entry])
     except (AgentResolutionError, OSError, RegistryVersionError) as exc:
+        events.emit_spawn_failed(
+            name=name, provider="codex", reason=f"registry-write: {exc}"
+        )
         events.emit(
             "agent_ask_failed",
             stage="registry-write",
@@ -976,6 +979,18 @@ def _codex_create_path(
             exit_code=12,
         ) from exc
 
+    # Spawn birth (x-8cd5 Wave 6): the codex create path is the third spawn
+    # seam after _claude_create_path and mux_spawn, and was the one a death
+    # could dangle from. Emit to the daemon lifecycle log with the parent edge.
+    _cx_session, _cx_harness, _cx_cwd = _capture_parent_edge()
+    events.emit_spawned(
+        name=name,
+        short_id=session_id,
+        provider="codex",
+        spawned_by_session=_cx_session,
+        spawned_by_harness=_cx_harness,
+        spawned_by_cwd=_cx_cwd,
+    )
     _emit_ev(
         "agent_ask_done",
         stage="dispatch",
@@ -5287,7 +5302,7 @@ def _mux_pane_send(
                     confirmed=confirmed,
                     source="daemon",
                 ),
-                agents_home_dir() / "events.jsonl",
+                events.daemon_lifecycle_log(),
                 lock_timeout_seconds=2,
             )
         except Exception:
