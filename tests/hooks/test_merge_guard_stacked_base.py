@@ -97,6 +97,15 @@ def test_unparseable_pr_is_skipped(monkeypatch):
     assert "cmd" not in calls
 
 
+def test_other_repo_is_skipped(monkeypatch):
+    """`--repo`/`-R` targets another repository; the lineage check reads THIS
+    checkout, so PR 42 over there would be judged as PR 42 here."""
+    calls = _patch_run(monkeypatch, _Proc(3))
+    assert git_protection._stacked_base_refusal("gh pr merge 42 --repo other/repo") is None
+    assert git_protection._stacked_base_refusal("gh pr merge 42 -R other/repo") is None
+    assert "cmd" not in calls
+
+
 def test_veto_precedes_the_override_marker():
     """The merge-gate override must not buy past a stale base.
 

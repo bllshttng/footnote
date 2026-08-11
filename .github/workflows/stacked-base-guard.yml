@@ -17,6 +17,16 @@ name: stacked-base-guard
 # can take from code. Until an operator marks the `stacked-base-guard` context
 # required, this workflow reports but does not block: the web merge button and a
 # hand-run `gh pr merge` still ignore it.
+#
+# READ THIS BEFORE MARKING IT REQUIRED. On a `pull_request` event from a FORK,
+# GITHUB_TOKEN is read-only no matter what the `permissions:` block below says,
+# so the status POST fails and the context is never created for that PR. Mark
+# this required while fork PRs are accepted and every one of them blocks
+# forever, with no run able to produce the context it is waiting for. Marking it
+# required is therefore safe only on a repo that takes no fork PRs; covering
+# forks needs a privileged second workflow (`pull_request_target` or a
+# `workflow_run` follow-up), which is a security-relevant design decision and
+# deliberately not made here.
 
 on:
   pull_request:

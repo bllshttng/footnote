@@ -226,6 +226,18 @@ def test_cli_exit_codes(patch_run, monkeypatch):
     assert _base_lineage.run_base_lineage_check(800, "/repo") == _base_lineage.UNKNOWN
 
 
+def test_bypass_escape_survives_a_string_pr_number(monkeypatch):
+    """`fno pr verify` carries its PR as a free-form str, and `emit_gate_escape`
+    types `pr` as an int (`pr <= 0`). Passing the str through raised TypeError
+    into this function's fail-open swallow, so the bypass recorded nothing."""
+    import fno.events.gate_escape as ge
+
+    seen: list[dict] = []
+    monkeypatch.setattr(ge, "emit_gate_escape", lambda reason, **kw: seen.append(kw))
+    _base_lineage.emit_bypass_escape("805", "/repo", "base landed")
+    assert seen and seen[0]["pr"] == 805
+
+
 def test_bypass_passes_and_records_an_escape(patch_run, monkeypatch):
     """The escape hatch exists so nobody deletes the guard, and it leaves a trail."""
     patch_run(FakeRun(merged_pr="789", contained=True))

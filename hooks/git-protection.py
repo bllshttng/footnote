@@ -567,6 +567,12 @@ def _stacked_base_refusal(command=""):
     pr_number = _parse_merge_pr(command)
     if not pr_number:
         return None  # branch-name or current-branch form: nothing to check
+    # `--repo`/`-R` points gh at a DIFFERENT repository, while the lineage check
+    # reads this checkout: `gh pr merge 42 --repo other/repo` would be judged
+    # against PR 42 HERE and could deny a merge on a verdict about an unrelated
+    # PR. Fail open, like every other unanswerable case in this function.
+    if any(t in ("-R", "--repo") or t.startswith("--repo=") for t in command.split()):
+        return None
     try:
         proc = subprocess.run(
             ["fno", "pr", "base-lineage-check", pr_number],

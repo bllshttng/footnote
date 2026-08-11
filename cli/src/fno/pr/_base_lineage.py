@@ -285,14 +285,27 @@ def bypassed() -> bool:
 
 
 def emit_bypass_escape(pr_number, cwd: str, reason: str) -> None:
-    """Record a bypassed refusal as autonomy debt. Telemetry never blocks."""
+    """Record a bypassed refusal as autonomy debt. Telemetry never blocks.
+
+    ``pr`` is an int downstream (``emit_gate_escape`` does ``pr <= 0`` and
+    dedups on ``(reason, pr)``), while this module's identifier is free-form -
+    ``fno pr verify`` carries its PR as a str. Passing the str through raised
+    TypeError straight into the swallow below, so the bypass on that path
+    recorded NO escape at all: a fail-open telemetry path that reported an
+    unbypassed run. The identifier is kept in ``detail`` for the URL/branch
+    forms that cannot become an int.
+    """
     try:
         from fno.events.gate_escape import emit_gate_escape
 
+        try:
+            pr = int(str(pr_number).strip())
+        except ValueError:
+            pr = None
         emit_gate_escape(
             "other",
-            pr=pr_number,
-            detail=f"stacked-base guard bypassed via {BYPASS_ENV}: {reason}",
+            pr=pr,
+            detail=f"stacked-base guard bypassed via {BYPASS_ENV} (PR {pr_number}): {reason}",
             cwd=cwd,
         )
     except Exception:  # noqa: BLE001 - telemetry never blocks a merge
