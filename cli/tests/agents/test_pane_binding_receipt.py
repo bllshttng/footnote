@@ -329,6 +329,39 @@ def test_a_bound_receipt_never_carries_a_reason() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Name reclamation is scoped to PROVED death, not to the terminal vocabulary
+# ---------------------------------------------------------------------------
+
+
+def test_orphaned_is_not_reclaimable_because_it_means_live() -> None:
+    """`orphaned` is stamped when a message fails to route - "agent is live but
+    not currently routable" - and reconcile keeps the pid because the process is
+    still running. Reclaiming one would delete a LIVE worker's row, hiding it
+    from `agents list`, reconcile, and lane cleanup while a second pane starts
+    on the same node. A control-socket hiccup is not a death."""
+    from fno.agents.registry import TERMINAL_STATUSES
+
+    assert "orphaned" in TERMINAL_STATUSES
+    assert "orphaned" not in mux_spawn._RECLAIMABLE_STATUSES
+    assert mux_spawn._RECLAIMABLE_STATUSES <= TERMINAL_STATUSES
+    assert {"exited", "failed", "permanent_dead"} == set(mux_spawn._RECLAIMABLE_STATUSES)
+
+
+def test_the_timeout_message_names_the_timeout_that_applied() -> None:
+    """The binding probes pass 2s; naming the 30s default would be a diagnostics
+    lie in the subsystem this change exists to make truthful."""
+    from fno.agents.dispatch import DispatchAskError
+
+    def run(_argv, **_kw):
+        raise subprocess.TimeoutExpired(cmd="fno", timeout=2.0)
+
+    with pytest.raises(DispatchAskError) as exc:
+        mux_spawn._run_mux(["mux", "pane", "ls"], run, timeout=2.0)
+    assert "within 2.0s" in str(exc.value)
+    assert "30" not in str(exc.value)
+
+
+# ---------------------------------------------------------------------------
 # `bound` is TRI-state: a harness that binds no session asserts nothing
 # ---------------------------------------------------------------------------
 

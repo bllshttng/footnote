@@ -1137,8 +1137,12 @@ def _run_mux(
             exit_code=127,
         ) from exc
     except subprocess.TimeoutExpired as exc:
+        # The EFFECTIVE timeout, not the module default: the binding-loop probes
+        # pass a 2s bound, so naming 30s here would be a diagnostics lie in the
+        # one subsystem this change exists to make truthful.
+        effective = _MUX_SUBPROCESS_TIMEOUT_S if timeout is None else timeout
         raise DispatchAskError(
-            f"fno mux did not answer within {_MUX_SUBPROCESS_TIMEOUT_S}s ({' '.join(args[:3])}...)",
+            f"fno mux did not answer within {effective}s ({' '.join(args[:3])}...)",
             exit_code=1,
         ) from exc
 
@@ -1416,6 +1420,11 @@ def _await_pane_binding(
             # from a rollout fd held open by a live process in the pane's tree,
             # so a dead pane cannot produce one.
             return PaneBinding(sid, True, "", tail)
+        # Deadline before the tail read as well: evidence is best-effort, and a
+        # slow mux must not buy itself another bounded probe past the ceiling.
+        # The first pass is exempt for the same reason as below - one full look.
+        if not first_pass and time.monotonic() >= deadline:
+            return PaneBinding(None, None, "binding-window-expired", tail)
         # Keep the newest NON-EMPTY read: a TUI that has not painted yet reads
         # empty, and a later empty read must not erase real earlier evidence.
         fresh = _read_pane_tail(mux, runner)
@@ -1448,6 +1457,18 @@ def _await_pane_binding(
             )
         naptime(_BINDING_POLL_S)
 
+
+#: The statuses whose death was PROVED by a probe, and therefore the only ones
+#: whose row may be reclaimed by a same-name respawn.
+#:
+#: Deliberately NOT `TERMINAL_STATUSES`, and `orphaned` is why: that word means
+#: "live but not currently routable" (`dispatch.py` stamps it on a delivery
+#: failure with the message "agent is live but not currently routable"), and
+#: reconcile keeps the pid on an orphaned row precisely because the process is
+#: still running. Reclaiming one would delete a LIVE worker's registry row,
+#: leaving it invisible to `fno agents list`, reconcile, and lane cleanup while
+#: a second pane starts on the same node. A control-socket hiccup is not a death.
+_RECLAIMABLE_STATUSES = frozenset({"exited", "failed", "permanent_dead"})
 
 #: Harnesses whose pane spawn binds a session identity, so `bound` is a claim
 #: the spawn can actually make: claude pins one up front, codex and opencode
@@ -1843,7 +1864,7 @@ def dispatch_spawn_pane(
         #: Set to the old status when this spawn is reclaiming a dead row's name,
         #: so the append can drop the corpse in the same transaction.
         replaced_terminal: Optional[str] = None
-        # A TERMINAL row does not own the name. It will never act again, so
+        # A PROVED-DEAD row does not own the name. It will never act again, so
         # holding the name hostage only deadlocks the caller: `fno dispatch one`
         # releases its claim and lane on failure and retries under the SAME
         # deterministic worker name, so a status-blind guard turns one dead pane
@@ -1851,7 +1872,7 @@ def dispatch_spawn_pane(
         # The evidence survives the row: the captured pane output is a
         # timestamped file on disk, not a registry field.
         clash = next((e for e in entries if e.name == name), None)
-        if clash is not None and clash.status in TERMINAL_STATUSES:
+        if clash is not None and clash.status in _RECLAIMABLE_STATUSES:
             replaced_terminal = clash.status
         elif clash is not None:
             raise DispatchAskError(
@@ -2148,7 +2169,7 @@ def dispatch_spawn_pane(
                 rows = [
                     r
                     for r in rows
-                    if not (r.name == name and r.status in TERMINAL_STATUSES)
+                    if not (r.name == name and r.status in _RECLAIMABLE_STATUSES)
                 ]
             # Claim check, inside the registry write lock so it is atomic with
             # the stamp. Two panes racing in one cwd can each see the SAME lone
@@ -2169,6 +2190,17 @@ def dispatch_spawn_pane(
             # only way an abdicating king hands off, since a session that has
             # already exited cannot spawn its heir. The vacate and the stamp land
             # in this one write, so the scope is never doubly nor un-ruled.
+            # A spawn that already knows it is writing a TERMINAL row must not
+            # touch the crown at all. Succession vacates the caller's own row in
+            # this same transaction, so crowning a corpse would move the scope
+            # off a live king onto a row that will never act, leaving the scope
+            # unruled and the caller silently stripped - and the codex death
+            # path raises exit 13 immediately afterwards, so nothing would put
+            # it back.
+            if forced_row_status in TERMINAL_STATUSES:
+                crown_level = None
+                crown_scope = None
+                crown_grantor_val = None
             if crown_level is not None and crown_scope:
                 holders = [
                     r
@@ -2271,11 +2303,16 @@ def dispatch_spawn_pane(
             # the caller cannot tell a corpse from a slow starter, and re-prompts
             # the corpse. The row survives (status `failed`, terminal, so
             # `fno agents rm` needs no --force) and carries the captured output.
-            where = (
-                f"captured output: {death_log_path}"
-                if death_log_path
-                else "pane output could not be persisted; the tail is above"
-            )
+            # "" has two causes and they need different words: nothing was
+            # captured at all, or capture worked and the write failed. Telling
+            # an operator to read a tail that was never printed is worst on the
+            # exact path where they have least to go on.
+            if death_log_path:
+                where = f"captured output: {death_log_path}"
+            elif death_tail.strip():
+                where = "the captured tail could not be written to disk; it is above"
+            else:
+                where = "NO pane output was captured, so the cause is not recorded"
             if death_tail.strip():
                 echo = "\n".join(death_tail.splitlines()[-_PANE_TAIL_ECHO_LINES:])
                 print(
