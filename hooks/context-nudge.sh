@@ -49,9 +49,12 @@
 # (a pid can only prove life, never death, and the init wrapper pid died ~1s
 # after init), no read of the target manifest (a king pass has none, so keying
 # on one would deliver this to zero kings), no reconstructed session identity.
-# Every signal here is either handed to the hook in its payload (transcript_path,
-# session_id) or read from live external state (the registry, the carveout
-# ledger, config) at fire time.
+# Every GATING signal here is either handed to the hook in its payload
+# (transcript_path, session_id) or read from live external state (the registry,
+# the carveout ledger, config) at fire time. The one place that does touch ambient
+# identity is the compact-path check in 5b, which asks `--to-self` because the
+# verdict differs by recipient; it only WORDS an already-fired nudge, gates
+# nothing, and a contaminated or absent identity lands on the unmeasurable branch.
 set -uo pipefail
 
 PLUGIN_ROOT="${CLAUDE_PLUGIN_ROOT:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
@@ -247,8 +250,11 @@ REASON=""
 #
 # `--check` is the one resolver answering about itself: it injects nothing and
 # resolves through the same path the real send would, so it cannot say yes where
-# the send says no. It is asked about SESSION_ID, the id the hook was HANDED in
-# its payload, never a reconstructed identity.
+# the send says no. It is asked with `--to-self` (see the note on the function),
+# which resolves the caller from its ambient harness markers rather than from the
+# payload's SESSION_ID, because the verdict differs by recipient and the prescribed
+# command is a self-address too. A contaminated or absent ambient identity makes
+# --to-self error, which prints no verdict and lands on the unmeasurable branch.
 #
 # What it can and cannot promise: a PATH exists. No probe can see whether the
 # prompt line is idle, so a send can still come back unconfirmed even on a yes.
@@ -278,7 +284,7 @@ compact_instruction() {
     if [[ "$out" == injectable:* ]]; then
         printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session HAS an injection path (measured just now: ${out}), so fire it at your own prompt line: fno mail send '/compact <brief-path>' --to-self --raw   (the leading slash is load-bearing, and the brief path matters: a bare /compact at exhausted context has no headroom left to summarize). A path is not a landing - if the receipt comes back unconfirmed, read your own prompt before assuming either way, and never re-send."
     elif [[ "$out" == not-injectable:* ]]; then
-        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session has NO injection path: 'fno mail send /compact --to-self --raw --check' answered ${out}. That means no registry row, a non-keystroke lane, a guarded mux pane (which refuses a mid-turn recipient, and you are mid-turn), or no control socket to write into. It is NOT a claim that you are dead. You cannot fire the verb yourself, so ${_ask}. If you want a path next time, join the mesh with /fno-me."
+        printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and this session has NO injection path: 'fno mail send /compact --to-self --raw --check' answered ${out}. That means no registry row, a non-keystroke lane, a guarded mux pane (which refuses a mid-turn recipient, and you are mid-turn), or no control socket to write into. It is NOT a claim that you are dead. You cannot fire the verb yourself, so ${_ask}. On whether /fno-me would help: it adds the registry row this check needs FIRST, and nothing else - it creates no daemon roster entry and no control socket - so it flips this answer only for a session that already had those and merely lacked a row. Read the reason above rather than guessing which case you are."
     else
         printf '%s' "/compact is a REPL built-in your Skill tool cannot call, and whether you can inject it at your own prompt line could not be measured here (no fno on PATH, or the check timed out), so this nudge will not claim you have a path. Either ${_ask}, or check for yourself with 'fno mail send /compact --to-self --raw --check' and fire it if that says injectable."
     fi

@@ -1745,13 +1745,28 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     )
     from fno.agents.registry import AgentResolutionError, resolve_agent
 
-    def _refused(reason: str) -> None:
-        # Under --check every refusal is an ANSWER, not an error: "no injection
-        # path, and here is why" on stdout, so one caller reads one shape whether
-        # the miss was an unregistered session, a wrong lane, or an absent socket.
-        if check:
+    def _refused(reason: str, *, usage: bool = False) -> None:
+        # Under --check a refusal about the SESSION is an ANSWER, not an error:
+        # "no injection path, and here is why" on stdout, so one caller reads one
+        # shape whether the miss was an unregistered session, a wrong lane, or an
+        # absent socket. A refusal about the CALL (`usage`: a malformed payload) is
+        # NOT: printing it as not-injectable would state a verdict about a session
+        # this run never measured, which is the exact failure --check exists to
+        # prevent. Those stay a usage error on stderr at exit 2.
+        if check and not usage:
             print(f"not-injectable: {reason}")
             raise typer.Exit(code=1)
+        print(f"refused: {reason}", file=sys.stderr)
+        raise typer.Exit(code=2)
+
+    def _unmeasurable(reason: str) -> None:
+        # --check's THIRD answer: the evidence needed to decide could not be read.
+        # An unreadable registry says nothing about whether the session has a
+        # path, so it must not be reported as not-injectable (same reason
+        # probe-unavailable is separate). Without --check it is an ordinary refusal.
+        if check:
+            print(f"unmeasurable: {reason}")
+            raise typer.Exit(code=3)
         print(f"refused: {reason}", file=sys.stderr)
         raise typer.Exit(code=2)
 
@@ -1762,24 +1777,32 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
     if not stripped.startswith("/"):
         _refused(
             "payload must start with / (a verb invocation); free prose belongs "
-            "in an ordinary wrapped send"
+            "in an ordinary wrapped send",
+            usage=True,
         )
     if stripped == "/":
-        _refused("payload is just '/'; nothing to invoke")
+        _refused("payload is just '/'; nothing to invoke", usage=True)
 
     # 2. Single line: the transport is one bracketed paste plus one CR, so a
     #    second line would ride in as trailing content on the same turn.
     if "\n" in payload or "\r" in payload:
         _refused(
             "payload must be a single line (a second line rides in as trailing "
-            "content on the same submitted turn)"
+            "content on the same submitted turn)",
+            usage=True,
         )
 
-    # 3. Resolve name -> registry row. The lane lives on the row.
+    # 3. Resolve name -> registry row. The lane lives on the row. An UNAVAILABLE
+    #    resolution (a registry this fno cannot read) is not a miss: it is the
+    #    unmeasurable answer, kept apart from "resolved, and there is no path".
     try:
         entry = resolve_agent(name).entry
-    except (AgentResolutionError, OSError):
+    except AgentResolutionError as exc:
+        if exc.unavailable:
+            _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
         _refused(f"could not resolve {name!r} to a registered agent")
+    except OSError:
+        _unmeasurable(f"registry unreadable, so {name!r} could not be resolved")
 
     session_id = getattr(entry, "harness_session_id", None) or ""
 
@@ -1807,7 +1830,9 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
             "(`fno agents register`), or if this IS your session address it with "
             "--to-self instead of a positional id"
         )
-    if _self_recipient(name, resolved_session_id=session_id) and not (self_ok or check):
+    # Order matters: under --check the self test is decided again below, so gate on
+    # the cheap booleans first rather than resolving ambient identity twice.
+    if not (self_ok or check) and _self_recipient(name, resolved_session_id=session_id):
         _refused(
             "you addressed this session. For a plain self-note the envelope is "
             "fine:\n    fno mail send <own-id> \"text\"\n"
@@ -1853,12 +1878,34 @@ def _raw_send(name, payload, *, self_ok: bool, check: bool = False) -> None:
                     "construction; ask your operator to type the verb instead"
                 )
                 raise typer.Exit(code=1)
+            if not session_id:
+                # The self/peer split above is the whole answer on this lane, and
+                # `_self_recipient` cannot decide it from an empty id (an empty
+                # candidate has no handle tier). So this run did not establish
+                # "peer" -- report that, rather than defaulting to the yes.
+                _unmeasurable(
+                    f"the registry row for {name!r} carries no harness_session_id, "
+                    "so this run cannot tell whether the mux pane is yours (never "
+                    "injectable, guarded mid-turn) or a peer's; re-register it with "
+                    "`fno agents register`"
+                )
             # A PEER on the mux lane can be idle, so the row recording a pane IS
             # the path. Not verified against the mux server here: a pane that has
             # since exited still reads injectable, and the send answers that in
             # about a second rather than a second subprocess answering it now.
             print("injectable: mux-pane (a paste can still refuse a mid-turn pane)")
             raise typer.Exit(code=0)
+        if not session_id:
+            # Reachable only under --check, which is exempt from the
+            # no-harness_session_id guard above. Answer with the real reason: a
+            # probe on an empty id resolves nothing and would print the opaque
+            # `not-injectable: not-injectable`, hiding what a caller has to explain.
+            print(
+                f"not-injectable: the registry row for {name!r} carries no "
+                "harness_session_id, so the control.sock lane has no session to "
+                "address; re-register it with `fno agents register`"
+            )
+            raise typer.Exit(code=1)
         injectable, reason = mail_inject_probe(session_id)
         if injectable:
             print("injectable: control.sock (a paste can still refuse a busy prompt)")
@@ -2033,7 +2080,9 @@ def cmd_send(
             "nothing. Prints 'injectable: <lane>' (exit 0), 'not-injectable: "
             "<reason>' (exit 1), or 'unmeasurable: <reason>' (exit 3) when it "
             "could not resolve at all - that third answer is separate on purpose, "
-            "since an absent probe binary says nothing about the session. Gate on "
+            "since an absent probe binary or an unreadable registry says nothing "
+            "about the session. A malformed payload stays a usage error (exit 2), "
+            "never a verdict about the session. Gate on "
             "this before you TELL anyone to "
             "self-inject: a session with no registry row, a non-keystroke lane, or "
             "no control socket has no path at all, and advice naming a mechanism "

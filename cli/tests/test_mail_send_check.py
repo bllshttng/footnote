@@ -20,8 +20,6 @@ import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 REPO_CLI = Path(__file__).resolve().parents[1]
 
 
@@ -135,14 +133,33 @@ def test_check_without_raw_is_refused(tmp_path):
     assert code == 2
 
 
-@pytest.mark.parametrize("verdict_prefix", ["injectable:", "not-injectable:", "unmeasurable:"])
-def test_every_verdict_is_a_distinct_prefix(verdict_prefix):
-    """The three answers must stay prefix-distinguishable for shell callers.
+def test_malformed_payload_is_a_usage_error_not_a_verdict(tmp_path):
+    """A bad payload says nothing about the session, so it must not print a verdict.
 
-    ``not-injectable:`` does NOT match a ``injectable:*`` glob (patterns anchor at
-    the start), which is what lets the hook branch on the word rather than on an
-    exit code a wrapper could swallow.
+    Reporting ``not-injectable`` here would assert exactly the kind of unestablished
+    claim ``--check`` exists to prevent: a caller gating advice would tell a session
+    with a perfectly good path to go ask its operator.
     """
-    assert verdict_prefix.endswith(":")
-    matches_yes = verdict_prefix.startswith("injectable:")
-    assert matches_yes == (verdict_prefix == "injectable:")
+    _write_registry(tmp_path, [_row(name="me", harness_session_id=SELF_SID)])
+    out, code = _run(
+        ["me", "not-a-slash-verb", "--raw", "--check"],
+        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        tmp_path,
+    )
+    assert code == 2, out
+    assert "not-injectable" not in out, out
+
+
+def test_unreadable_registry_is_unmeasurable_not_a_no_path(tmp_path):
+    """"I could not read the evidence" is the third answer, never a measured no."""
+    (tmp_path / ".fno" / "agents").mkdir(parents=True, exist_ok=True)
+    (tmp_path / ".fno" / "agents" / "registry.json").write_text(
+        json.dumps({"schema_version": 99999, "agents": []})
+    )
+    out, code = _run(
+        ["/compact", "--to-self", "--raw", "--check"],
+        {"CLAUDE_CODE_SESSION_ID": SELF_SID},
+        tmp_path,
+    )
+    assert code == 3, out
+    assert out.startswith("unmeasurable:"), out

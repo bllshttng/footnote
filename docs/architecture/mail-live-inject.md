@@ -50,7 +50,7 @@ Provider-agnostic fallback: footnote tees each spawned agent's I/O to a per-agen
 
 ## The `mail-inject` verb
 
-`fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, `op:'reply'`-injects the text verbatim, and confirms delivery by transcript GROWTH. It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-injectable`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
+`fno-agents mail-inject --session <uuid|short>` (`crates/fno-agents/src/mail_inject.rs`) is the one-shot claude live primitive `_deliver_live` shells out to. It reads the turn text from STDIN (sidestepping the argv size limit), resolves the recipient on the daemon roster, attaches to its `control.sock`, bracketed-pastes the text verbatim as raw keystrokes plus a wire-level CR, and confirms delivery by CONTENT (the injected turn's marker appearing in the recipient transcript after the inject, not mere transcript growth, because the growth proxy false-confirmed on a busy recipient whose transcript was already moving). It prints `{"delivered": bool, "reason": str}` and exits 0 when delivered. Every not-delivered reason (`not-injectable`, `no-transcript`, `attach-failed`, `not-confirmed`, ...) is a clean signal for Python to write the durable fallback.
 
 ### `not-injectable` is not a liveness verdict
 
@@ -73,6 +73,8 @@ Both it and the real send resolve through one `resolve_target`, so the probe can
 It is claude-only: the codex lane submits a turn with no prompt line, so a slash payload never fires there and there is no keystroke path to probe.
 
 The front door is `fno mail send '<payload>' --to-self --raw --check`, which additionally checks the preconditions Python owns (a registry row, a keystroke lane) and picks the right lane before probing.
+It answers on three exits, not two: 0 `injectable: <lane>`, 1 `not-injectable: <reason>`, 3 `unmeasurable: <reason>` when the evidence could not be read (an unreadable registry, or a `fno-agents` binary absent or too old to carry `--probe`).
+`unmeasurable` is deliberately not folded into `not-injectable`: "I resolved and found no path" and "I could not resolve" are different claims, and a caller gating advice has to tell them apart.
 Gate on it before you TELL a session to self-inject anything.
 Advice naming a mechanism that cannot fire is worse than no advice: the Stop hook in `hooks/context-nudge.sh` prescribed an unconditional self-inject, and a session with no path burned its remaining context on two failed attempts and then stopped trying to compact at all.
 

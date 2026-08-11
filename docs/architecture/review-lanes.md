@@ -73,7 +73,8 @@ gh api graphql -f query='mutation($t: ID!){resolveReviewThread(input:{threadId: 
 Thread ids come from `reviewThreads` on the `pullRequest`.
 `fno pr status` prints this instruction on stderr whenever the counter is non-zero, so the fix travels with the number rather than living only here.
 
-Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) reports `injectable: <lane>` or `not-injectable: <reason>` and injects nothing.
+Before you tell anyone else to run one of those, ask whether they can: `fno mail send '<payload>' --to-self --raw --check` (or `fno mail send <peer> '<payload>' --raw --check`) injects nothing and reports one of THREE answers, never two: `injectable: <lane>` (exit 0), `not-injectable: <reason>` (exit 1), or `unmeasurable: <reason>` (exit 3) when the evidence needed to decide could not be read at all.
+Branch on all three. Collapsing `unmeasurable` into `not-injectable` states a verdict about a session the run never measured, and a deployed `fno-agents` too old to carry `--probe` answers `unmeasurable: probe-unavailable`.
 It answers whether a PATH exists, never whether the turn lands, since no probe can see whether the prompt line is idle.
 See [mail-live-inject](mail-live-inject.md) for what it resolves and why the Stop hook gates its compact advice on it.
 

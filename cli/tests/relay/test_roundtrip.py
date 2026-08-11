@@ -453,7 +453,7 @@ def test_submit_via_control_reply_unconfirmed_on_not_confirmed(monkeypatch):
 
 def test_submit_via_control_reply_not_sent_on_other_failure(monkeypatch):
     # Any other not-delivered reason means the inject never reached the session.
-    for reason in ("not-live", "no-transcript", "attach-failed", "io-error", "unsafe-text"):
+    for reason in ("not-injectable", "no-transcript", "attach-failed", "io-error", "unsafe-text"):
         monkeypatch.setattr(rt_mod, "subprocess", _fake_subprocess(
             lambda *a, _r=reason, **k: _FakeProc(f'{{"delivered": false, "reason": "{_r}"}}')))
         _patch_binary(monkeypatch)
